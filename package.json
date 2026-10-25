@@ -1,0 +1,42 @@
+{
+  "name": "artifree-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An open workspace for agent-made artifacts. Initial scaffolding.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build:packages && npm run dev --workspace @artifree/web",
+    "build:packages": "tsc -b packages/contracts packages/client packages/runtime-sdk apps/cli",
+    "build:web": "npm run build --workspace @artifree/web",
+    "build:architecture": "node scripts/build-architecture.mjs",
+    "build": "npm run build:packages && npm run build:web && npm run build:architecture",
+    "typecheck": "npm run build:packages && npm run typecheck --workspace @artifree/web && tsc -p docs/architecture/tsconfig.json",
+    "generate:contracts": "node scripts/generate-contracts.mjs",
+    "check:contracts": "node scripts/generate-contracts.mjs --check",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "check:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm run check:contracts && npm run check:boundaries && npm run typecheck && npm run check:rust",
+    "cli": "node apps/cli/dist/main.js",
+    "test:smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "^22.0.0",
+    "ajv": "^8.17.1",
+    "esbuild": "0.28.2",
+    "json-schema-to-typescript": "16.0.0",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2"
+  }
+}

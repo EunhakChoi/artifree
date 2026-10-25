@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ServiceDescription",
+  "description": "A build-time scaffold inventory, not a live server health response.",
+  "type": "object",
+  "properties": {
+    "async_runtime": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Component"
+      }
+    },
+    "contract_version": {
+      "type": "string"
+    },
+    "http_listening": {
+      "type": "boolean"
+    },
+    "name": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "server_framework": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "version",
+    "contract_version",
+    "phase",
+    "http_listening",
+    "components"
+  ],
+  "$defs": {
+    "Component": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "layer": {
+          "$ref": "#/$defs/Layer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ComponentStatus"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "layer",
+        "language",
+        "path",
+        "status",
+        "summary"
+      ]
+    },
+    "ComponentStatus": {
+      "type": "string",
+      "enum": [
+        "scaffold",
+        "planned"
+      ]
+    },
+    "Layer": {
+      "type": "string",
+      "enum": [
+        "presentation",
+        "logic",
+        "provider",
+        "shared"
+      ]
+    }
+  }
+}

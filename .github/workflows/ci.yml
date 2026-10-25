@@ -1,0 +1,35 @@
+name: Scaffold checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scaffold-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install pinned Rust and quality tools
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - name: Verify reproducible HTML
+        run: git diff --exit-code -- docs/architecture.html
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:smoke

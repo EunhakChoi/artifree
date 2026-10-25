@@ -1,0 +1,15 @@
+[package]
+name = "artifree-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+artifree-core.workspace = true
+artifree-contracts.workspace = true
+artifree-providers.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

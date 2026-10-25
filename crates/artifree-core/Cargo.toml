@@ -1,0 +1,13 @@
+[package]
+name = "artifree-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+artifree-domain.workspace = true
+artifree-ports.workspace = true
+
+[lints]
+workspace = true

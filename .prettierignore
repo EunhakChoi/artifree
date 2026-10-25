@@ -1,0 +1,8 @@
+node_modules
+target
+dist
+Cargo.lock
+package-lock.json
+packages/contracts/src/generated
+contracts/generated
+docs/architecture.html

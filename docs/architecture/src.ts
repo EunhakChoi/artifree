@@ -1,0 +1,543 @@
+import type { Component, Layer, ServiceDescription } from '@artifree/contracts';
+
+declare const INVENTORY: ServiceDescription;
+const inventory = INVENTORY;
+const repo = 'https://github.com/EunhakChoi/artifree';
+const originalDocument = `<!doctype html>\n${document.documentElement.outerHTML}`;
+
+function element(id: string): HTMLElement {
+  const result = document.getElementById(id);
+  if (!(result instanceof HTMLElement))
+    throw new Error(`Missing document element: ${id}`);
+  return result;
+}
+
+function setText(id: string, value: string): void {
+  element(id).textContent = value;
+}
+
+interface ModuleNote {
+  purpose: string;
+  exists: string;
+  next: string;
+}
+
+const notes: Record<string, ModuleNote> = {
+  web: {
+    purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
+    exists: 'React/Vite 셸과 레이어 선택, 생성된 module inventory 표시.',
+    next: '첫 HTTP 계약 이후 연결 상태·목록·파일 편집·저장 상태를 연결합니다.',
+  },
+  cli: {
+    purpose: '터미널과 외부 agent가 사용하는 작은 TypeScript client입니다.',
+    exists:
+      'help · version · describe, JSON 출력, 잘못된 인자의 실패 종료 코드.',
+    next: 'HTTP client를 통해 publish·read·edit·export를 연결합니다. 별도 저장 규칙을 만들지 않습니다.',
+  },
+  runtime: {
+    purpose: '아티팩트 내부 코드에 허용된 기능을 제공하는 브라우저 SDK입니다.',
+    exists:
+      'capability 이름과 세션 binding 타입만 있습니다. 실행·검증 코드는 없습니다.',
+    next: 'origin·송신 창·세션을 검증하는 통신과 서버의 최종 권한 검사부터 구현합니다.',
+  },
+  api: {
+    purpose:
+      'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
+    exists:
+      'Rust composition root, describe binary, HTTP/MCP 모듈 위치. network listener는 없습니다.',
+    next: '첫 수직 기능을 구현하면서 framework·async runtime을 선정합니다. Tokio/Axum은 고정하지 않았습니다.',
+  },
+  domain: {
+    purpose:
+      '제품의 핵심 개념을 외부 도구에 의존하지 않는 타입으로 표현합니다.',
+    exists:
+      '6개 ArtifactKind, SourceRevision·DocumentSequence·AppDataVersion의 별도 타입.',
+    next: '파일 경로·ID·상태 전이·오류를 실제 행동 계약에 맞춰 확장합니다.',
+  },
+  artifacts: {
+    purpose: '아티팩트의 원본 파일과 불변 revision, 게시 대상을 관리합니다.',
+    exists:
+      '책임을 문서화한 Rust module과 의존성 경계가 있습니다. 저장 로직은 없습니다.',
+    next: '검증된 파일 패키지, 조건부 저장, 멱등성 receipt, 게시 revision 고정을 구현합니다.',
+  },
+  policy: {
+    purpose: '사용자·agent·runtime이 수행할 수 있는 작업을 판정합니다.',
+    exists:
+      '권한 책임과 세션 원칙을 기록한 모듈. 인증·권한 판정은 아직 없습니다.',
+    next: 'actor·artifact·revision에 묶인 권한을 정의하고, 권한 철회와 서버 재검증을 테스트합니다.',
+  },
+  documents: {
+    purpose: '구조화된 문서 편집과 실행 중 앱 데이터를 각각 관리합니다.',
+    exists:
+      '저장 모델 분리 원칙을 기록한 모듈. 편집기와 DB는 연결되지 않았습니다.',
+    next: '문서 sequence와 앱 data version을 구분하고 타입별 편집 연산을 정의합니다.',
+  },
+  jobs: {
+    purpose: '변경 알림, 긴 작업, 재시도와 연결 복구를 조정합니다.',
+    exists: 'outbox·작업 수명·취소 의미를 기록한 모듈. 큐나 실행기는 없습니다.',
+    next: '커밋 이벤트와 worker 수명, 중복 실행 방지, 실패·재시작·취소를 함께 설계합니다.',
+  },
+  handoff: {
+    purpose:
+      '사용자가 선택한 영역과 수정 의도를 외부 agent session으로 전달합니다.',
+    exists:
+      '모듈 책임 정의. 내장 agent 실행기나 모델 계정은 필요하지 않습니다.',
+    next: 'agent별 연결 adapter보다 먼저 선택 영역·기준 revision·요청의 공통 형식을 정의합니다.',
+  },
+  storage: {
+    purpose: '메타데이터와 파일 bytes를 환경에 맞게 보관하는 adapter입니다.',
+    exists:
+      'provider 모듈 위치와 후보 설계만 있습니다. DB driver 의존성은 없습니다.',
+    next: '로컬 SQLite·files를 후보로 첫 구현을 만들고, 서버 저장소에서도 같은 행동 검사를 적용합니다.',
+  },
+  models: {
+    purpose:
+      '아티팩트가 AI 기능을 사용할 때 선택적으로 호출하는 provider입니다.',
+    exists:
+      '모듈 책임과 credential 경계 정의. 모델 SDK나 키를 요구하지 않습니다.',
+    next: '선정한 공급자의 streaming·사용량·한도·최선의 취소를 공통 결과 형식으로 연결합니다.',
+  },
+  tools: {
+    purpose: '외부 MCP 도구와 명시적으로 허용된 프로젝트 파일을 연결합니다.',
+    exists: 'outbound provider 모듈. inbound MCP server와 역할을 구분했습니다.',
+    next: '사용자 연결별 tool 권한과 파일 경계를 확인하고, 요청·취소·결과를 연결합니다.',
+  },
+  build: {
+    purpose: '원본 파일 패키지를 실행 가능한 산출물로 변환합니다.',
+    exists:
+      '격리 worker의 책임 정의. 제품용 bundler·격리 환경은 구성하지 않았습니다.',
+    next: '지원할 입력과 의존성 정책을 먼저 정하고, 작업별 자원·네트워크 제한을 적용합니다.',
+  },
+  export: {
+    purpose: '문서·이미지·슬라이드·영상 등의 다운로드 결과를 만듭니다.',
+    exists: '변환 provider 위치와 후보 범위만 정의했습니다.',
+    next: 'Playwright·LibreOffice·FFmpeg 등을 샘플 품질과 배포 비용으로 비교하고 worker 언어를 선택합니다.',
+  },
+  contracts: {
+    purpose: 'Rust와 TypeScript가 같은 전송 데이터 형식을 사용하도록 합니다.',
+    exists:
+      'Serde/Schemars DTO → JSON Schema → TypeScript 생성, inventory schema 검증과 drift 검사.',
+    next: 'HTTP·MCP·runtime 메시지를 실제 기능 구현에 맞춰 추가합니다. runtime 입력 검증은 별도입니다.',
+  },
+  client: {
+    purpose: 'Web과 CLI가 같은 HTTP 계약을 사용하는 client package입니다.',
+    exists:
+      'ClientConfiguration과 descriptor 타입 alias. 네트워크 메서드는 없습니다.',
+    next: 'HTTP 계약이 생기면 오류·인증·취소·재시도를 공유하는 client를 구현합니다.',
+  },
+};
+
+const layerConfig: {
+  layer: Layer;
+  number: string;
+  title: string;
+  location: string;
+}[] = [
+  {
+    layer: 'presentation',
+    number: '01',
+    title: 'Presentation layer',
+    location: 'TypeScript · client side',
+  },
+  {
+    layer: 'logic',
+    number: '02',
+    title: 'Logic layer',
+    location: 'Rust · server side',
+  },
+  {
+    layer: 'provider',
+    number: '03',
+    title: 'Provider layer',
+    location: 'Adapters + isolated workers',
+  },
+];
+
+function sourceUrl(component: Component): string {
+  const kind = component.path.endsWith('.rs') ? 'blob' : 'tree';
+  return `${repo}/${kind}/main/${component.path}`;
+}
+
+function nodeFor(component: Component): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.className = 'module-node';
+  button.dataset['module'] = component.id;
+  button.dataset['status'] = component.status;
+  button.setAttribute('aria-pressed', 'false');
+  const title = document.createElement('strong');
+  title.textContent = component.name;
+  const state = document.createElement('small');
+  const dot = document.createElement('span');
+  dot.className = 'module-dot';
+  state.append(
+    dot,
+    component.status === 'scaffold' ? 'Scaffold exists' : 'Planned',
+  );
+  button.append(title, state);
+  button.addEventListener('click', () => selectModule(component.id));
+  return button;
+}
+
+function renderMap(): void {
+  const map = element('layer-map');
+  for (const config of layerConfig) {
+    const block = document.createElement('div');
+    block.className = `layer-block ${config.layer}`;
+    const heading = document.createElement('div');
+    heading.className = 'layer-heading';
+    const number = document.createElement('span');
+    number.textContent = config.number;
+    const title = document.createElement('strong');
+    title.textContent = config.title;
+    const location = document.createElement('small');
+    location.textContent = config.location;
+    heading.append(number, title, location);
+    const grid = document.createElement('div');
+    grid.className = 'module-grid';
+    for (const component of inventory.components.filter(
+      (item) => item.layer === config.layer,
+    ))
+      grid.append(nodeFor(component));
+    block.append(heading, grid);
+    map.append(block);
+  }
+  for (const component of inventory.components.filter(
+    (item) => item.layer === 'shared',
+  ))
+    element('shared-modules').append(nodeFor(component));
+}
+
+function selectModule(id: string): void {
+  const index = inventory.components.findIndex(
+    (component) => component.id === id,
+  );
+  const component = inventory.components[index];
+  const note = notes[id];
+  if (component === undefined || note === undefined)
+    throw new Error(`Unknown module: ${id}`);
+  document
+    .querySelectorAll<HTMLButtonElement>('[data-module]')
+    .forEach((button) =>
+      button.setAttribute(
+        'aria-pressed',
+        String(button.dataset['module'] === id),
+      ),
+    );
+  setText(
+    'inspector-index',
+    `${String(index + 1).padStart(2, '0')} / ${inventory.components.length}`,
+  );
+  const container = element('inspector-content');
+  container.replaceChildren();
+  const symbol = document.createElement('div');
+  symbol.className = 'inspector-symbol';
+  symbol.textContent = String(index + 1).padStart(2, '0');
+  const heading = document.createElement('h3');
+  heading.textContent = component.name;
+  const description = document.createElement('p');
+  description.className = 'inspector-description';
+  description.textContent = note.purpose;
+  const status = document.createElement('span');
+  status.className = 'tag';
+  status.textContent =
+    component.status === 'scaffold'
+      ? 'SCAFFOLD EXISTS · 기능 범위는 아래 확인'
+      : 'PLANNED · 동작 구현 전';
+  container.append(symbol, heading, description, status);
+  const addField = (
+    label: string,
+    text: string,
+    className = 'inspector-text',
+  ): void => {
+    const labelNode = document.createElement('p');
+    labelNode.className = 'inspector-label';
+    labelNode.textContent = label;
+    const content = document.createElement('p');
+    content.className = className;
+    content.textContent = text;
+    container.append(labelNode, content);
+  };
+  addField('LANGUAGE / BOUNDARY', component.language);
+  addField('CURRENT SCAFFOLD', note.exists);
+  const sourceLabel = document.createElement('p');
+  sourceLabel.className = 'inspector-label';
+  sourceLabel.textContent = 'ACTUAL SOURCE PATH';
+  const link = document.createElement('a');
+  link.className = 'source-path';
+  link.href = sourceUrl(component);
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = `${component.path} ↗`;
+  container.append(sourceLabel, link);
+  addField('NEXT IMPLEMENTATION', note.next, 'inspector-next');
+}
+
+function renderTree(): void {
+  const paths = [
+    'apps/web',
+    'apps/cli',
+    'packages/contracts',
+    'packages/client',
+    'packages/runtime-sdk',
+    'crates/artifree-domain',
+    'crates/artifree-core',
+    'crates/artifree-ports',
+    'crates/artifree-providers',
+    'crates/artifree-contracts',
+    'crates/artifree-server',
+    'contracts/generated',
+    'docs/architecture',
+    'scripts',
+    '.github/workflows',
+  ];
+  for (const path of paths) {
+    const link = document.createElement('a');
+    link.className = 'tree-link';
+    link.href = `${repo}/tree/main/${path}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    const code = document.createElement('code');
+    code.textContent = path;
+    const arrow = document.createElement('span');
+    arrow.textContent = '↗';
+    link.append(code, arrow);
+    element('source-tree').append(link);
+  }
+}
+
+type Mode = 'local' | 'server' | 'hosted';
+type AccessRoute = 'direct' | 'tunnel' | 'private';
+let mode: Mode = 'local';
+let persistent = true;
+let accessRoute: AccessRoute = 'direct';
+
+function renderDeployment(): void {
+  const title: Record<Mode, string> = {
+    local: '내 PC에서, 가볍게 시작합니다.',
+    server: '내 서버에서, 계속 사용합니다.',
+    hosted: 'Web과 Rust API를 나누어 배포합니다.',
+  };
+  const descriptions: Record<Mode, string> = {
+    local:
+      '동일한 Rust core에 로컬용 저장 adapter를 연결합니다. 세션 단위 사용과 영속 보관을 선택할 수 있게 설계합니다.',
+    server:
+      'Web·API·content gateway와 worker를 운영 환경에 맞게 배치합니다. 처음에는 하나의 application core를 유지합니다.',
+    hosted:
+      'Vercel 등은 정적 Web의 배포 위치로 사용합니다. Rust API와 긴 변환 작업은 별도 서버·컨테이너에 두는 것을 기본안으로 잡습니다.',
+  };
+  setText(
+    'profile-label',
+    `${mode.toUpperCase()} / ${persistent ? 'PERSISTENT' : 'TEMPORARY'}`,
+  );
+  setText('profile-title', title[mode]);
+  setText('profile-description', descriptions[mode]);
+  setText(
+    'profile-web',
+    mode === 'hosted'
+      ? 'Vercel / static hosting'
+      : mode === 'local'
+        ? '로컬 Web assets · 별도 콘텐츠 origin 계획'
+        : '서버의 정적 Web · content gateway 분리',
+  );
+  setText(
+    'profile-api',
+    mode === 'local'
+      ? '로컬 Rust process · transport 미정'
+      : mode === 'hosted'
+        ? '외부 Rust API · 인증 / CORS 정책 필요'
+        : '상주 Rust service · framework / runtime 미정',
+  );
+  const storage =
+    mode === 'hosted'
+      ? persistent
+        ? '외부 PostgreSQL + object storage 후보'
+        : '외부 TTL session store + TTL objects'
+      : persistent
+        ? mode === 'local'
+          ? 'SQLite + local files 후보'
+          : 'PostgreSQL + files / S3 후보'
+        : 'Memory + temporary files · 동일 인스턴스 범위';
+  setText('profile-storage', storage);
+  setText(
+    'profile-workers',
+    mode === 'local'
+      ? '필요한 기능의 로컬 격리 worker'
+      : '별도 격리 worker · 긴 작업과 변환 처리',
+  );
+  const routes: Record<AccessRoute, string> = {
+    direct:
+      mode === 'local'
+        ? 'localhost / IP · bind와 인증 설정은 후속 구현'
+        : '도메인 / IP · reverse proxy와 TLS 구성',
+    tunnel: 'ngrok / Cloudflare Tunnel · UI / API / content 경로 구성',
+    private: 'Headscale 기반 사설 네트워크 · 내부 주소로 접근',
+  };
+  setText('profile-access', routes[accessRoute]);
+  setText(
+    'profile-rule',
+    mode === 'hosted'
+      ? '임시 사용도 여러 요청이 공유하는 외부 상태가 필요합니다. 함수 메모리를 영속 저장소로 사용하지 않습니다.'
+      : persistent
+        ? '보관 위치, 백업·복구와 provider별 동일 동작 검증을 함께 정합니다. 앱 데이터는 source revision과 따로 관리합니다.'
+        : '임시의 의미는 세션 수명·TTL·정리 정책으로 정의합니다. 메모리와 파일의 종료 시 정리를 명시적으로 구현해야 합니다.',
+  );
+}
+
+document
+  .querySelectorAll<HTMLButtonElement>('[data-mode]')
+  .forEach((button) => {
+    button.addEventListener('click', () => {
+      const value = button.dataset['mode'];
+      if (value !== 'local' && value !== 'server' && value !== 'hosted')
+        throw new Error('Invalid deployment mode.');
+      mode = value;
+      document
+        .querySelectorAll<HTMLButtonElement>('[data-mode]')
+        .forEach((candidate) =>
+          candidate.setAttribute('aria-pressed', String(candidate === button)),
+        );
+      renderDeployment();
+    });
+  });
+
+const persistence = element('persistent');
+if (!(persistence instanceof HTMLInputElement))
+  throw new Error('Expected persistence checkbox.');
+persistence.addEventListener('change', () => {
+  persistent = persistence.checked;
+  renderDeployment();
+});
+const accessSelect = element('access');
+if (!(accessSelect instanceof HTMLSelectElement))
+  throw new Error('Expected access selector.');
+accessSelect.addEventListener('change', () => {
+  const value = accessSelect.value;
+  if (value !== 'direct' && value !== 'tunnel' && value !== 'private')
+    throw new Error('Invalid access route.');
+  accessRoute = value;
+  renderDeployment();
+});
+
+const flowSteps = [
+  {
+    tab: '파일 전달',
+    layer: 'PRESENTATION → LOGIC',
+    title: 'agent가 원본 파일을 전달합니다.',
+    copy: 'agent가 선택한 도구로 HTML·CSS·이미지 등을 생성합니다. HTTP·MCP·CLI는 같은 명령과 결과 형식을 사용하게 만듭니다.',
+    rule: '아티팩트 생성에 특정 모델 계정이나 내장 agent 실행기를 요구하지 않습니다.',
+    code: 'PublishIntent\n  actor + artifact\n  base revision + file changes\n  idempotency key\n\n→ common application command',
+  },
+  {
+    tab: '검증·권한',
+    layer: 'LOGIC / CORE',
+    title: '권한과 변경 조건을 확인합니다.',
+    copy: '서버에서 actor의 현재 권한과 파일 경로·크기·입력 형식을 확인합니다. 수정 요청은 기준 revision과 현재 상태를 비교합니다.',
+    rule: '컴파일된 DTO나 iframe이 보내온 사용자 ID만으로 권한을 부여하지 않습니다.',
+    code: 'authorize(actor, operation)\nvalidate(package, limits)\ncheck(base_revision, current_head)\n\n→ explicit rejection or proceed',
+  },
+  {
+    tab: '원본 저장',
+    layer: 'LOGIC → STORAGE',
+    title: 'revision과 성공 결과를 기록합니다.',
+    copy: '새 원본 revision, 중복 방지 receipt와 이벤트를 일관되게 기록합니다. Blob 저장과 SQL 트랜잭션의 경계도 명시합니다.',
+    rule: '화면의 pending 표시와 저장 성공을 구분합니다. 재시도로 revision이 중복 생성되지 않게 합니다.',
+    code: 'stage immutable file bytes\nSQL transaction:\n  conditional revision commit\n  receipt + event outbox\n\n→ committed revision / conflict',
+  },
+  {
+    tab: '격리 빌드',
+    layer: 'LOGIC → BUILD PROVIDER',
+    title: '빌드는 별도 작업자가 수행합니다.',
+    copy: '커밋한 원본 revision을 고정해 빌드합니다. Worker의 입력·네트워크·시간·메모리와 결과 형식을 제한합니다.',
+    rule: '빌드 실패가 기존 공개 버전을 덮어쓰지 않게 합니다. 번들러 자체를 sandbox로 취급하지 않습니다.',
+    code: 'BuildJob\n  pinned source revision\n  toolchain + dependency policy\n  resource / network limits\n\n→ output manifest or build error',
+  },
+  {
+    tab: '실행·보기',
+    layer: 'PRESENTATION / RUNTIME',
+    title: '고정된 버전을 분리해 보여줍니다.',
+    copy: '본체 계정 UI와 분리한 콘텐츠 환경에서 특정 revision의 산출물을 제공합니다. 게시 대상 변경과 초안 편집은 별도 작업입니다.',
+    rule: '실행 환경의 origin·cookie·sandbox 정책을 함께 설계합니다. 계정 자격과 모델 키를 콘텐츠에 주지 않습니다.',
+    code: 'Workspace origin\n  ↓ scoped runtime session\nSeparate content origin\n  → pinned output files\n  → client-side rendering',
+  },
+  {
+    tab: '기능 요청',
+    layer: 'RUNTIME → CORE → PROVIDER',
+    title: '허용된 기능만 서버를 통해 요청합니다.',
+    copy: '앱 데이터·모델·파일·외부 도구는 세션에 고정된 capability를 사용합니다. 서버에서 현재 권한과 한도를 다시 검사합니다.',
+    rule: '세션 교체·로그아웃·권한 철회 후 이전 메시지를 적용하지 않습니다. 외부 작업의 취소 의미를 구분합니다.',
+    code: 'Runtime SDK request\n  → verified broker / session\n  → current authorization\n  → provider operation\n\n→ scoped result / explicit error',
+  },
+];
+
+function selectFlow(index: number): void {
+  const step = flowSteps[index];
+  if (step === undefined) throw new Error('Unknown workflow step.');
+  document
+    .querySelectorAll<HTMLButtonElement>('[data-step]')
+    .forEach((button) =>
+      button.setAttribute(
+        'aria-pressed',
+        String(Number(button.dataset['step']) === index),
+      ),
+    );
+  setText('flow-layer', step.layer);
+  setText('flow-title', step.title);
+  setText('flow-copy', step.copy);
+  setText('flow-rule', step.rule);
+  setText('flow-code', step.code);
+}
+
+function renderFlow(): void {
+  flowSteps.forEach((step, index) => {
+    const button = document.createElement('button');
+    button.dataset['step'] = String(index);
+    button.setAttribute('aria-pressed', 'false');
+    const number = document.createElement('span');
+    number.textContent = String(index + 1).padStart(2, '0');
+    const label = document.createElement('strong');
+    label.textContent = step.tab;
+    button.append(number, label);
+    button.addEventListener('click', () => selectFlow(index));
+    element('flow-tabs').append(button);
+  });
+  selectFlow(0);
+}
+
+element('print').addEventListener('click', () => window.print());
+element('download-html').addEventListener('click', () => {
+  const blob = new Blob([originalDocument], {
+    type: 'text/html;charset=utf-8',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'artifree-architecture.html';
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+const observer = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        document
+          .querySelectorAll<HTMLAnchorElement>('.sidebar nav a')
+          .forEach((link) => {
+            if (link.hash === `#${entry.target.id}`)
+              link.setAttribute('aria-current', 'location');
+            else link.removeAttribute('aria-current');
+          });
+      }
+    }
+  },
+  { rootMargin: '-10% 0px -65% 0px', threshold: 0 },
+);
+document
+  .querySelectorAll('main > section[id]')
+  .forEach((section) => observer.observe(section));
+
+renderMap();
+renderTree();
+selectModule('web');
+renderDeployment();
+renderFlow();
