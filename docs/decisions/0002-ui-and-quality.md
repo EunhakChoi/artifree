@@ -29,7 +29,9 @@ provider frameworks, or a second frontend framework.
    Public TypeScript type names remain stable when schema metadata changes.
 5. Enforce the complete CI outcome through one stable Quality gate. Pin action
    commits and downloaded tools. Pin Ubuntu 24.04 / Windows Server 2025 runner
-   labels and use Actions with a supported runtime. Run known-advisory and license checks without
+   labels and use Actions with a supported runtime. Use a digest-pinned official
+   Playwright image for browser-only CI; native Rust/CLI verification remains
+   in the general gate. Run known-advisory and license checks without
    silently succeeding when the scan or its network access fails.
 6. Keep product behavior unimplemented until its first vertical slice. Do not
    add an HTTP framework, async runtime, provider SDK, database, Python worker,

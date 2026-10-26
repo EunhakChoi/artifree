@@ -25,6 +25,24 @@ test('CLI version emits only the requested version', () => {
   assert.equal(result.stderr, '');
 });
 
+test('CLI JSON matches the live Rust descriptor and advertises no listener', () => {
+  const rust = spawnSync(
+    'cargo',
+    ['run', '--quiet', '--locked', '-p', 'artifree-server', '--', '--describe'],
+    { cwd: root, encoding: 'utf8', timeout: 120_000 },
+  );
+  if (rust.error) throw rust.error;
+  assert.equal(rust.status, 0, rust.stderr);
+  const result = cli(['describe', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  const descriptor = JSON.parse(result.stdout);
+  assert.deepEqual(descriptor, JSON.parse(rust.stdout));
+  assert.equal(descriptor.http_listening, false);
+  assert.equal(descriptor.server_framework, null);
+  assert.equal(descriptor.async_runtime, null);
+});
+
 test('CLI help identifies its scaffold limitations', () => {
   const result = cli(['--help']);
   assert.equal(result.status, 0);

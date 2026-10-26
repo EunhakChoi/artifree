@@ -67,6 +67,9 @@ jobs:
     name: Browser (${{ matrix.browser }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea
+      options: --ipc=host --init
     strategy:
       fail-fast: false
       matrix:
@@ -81,11 +84,8 @@ jobs:
         with:
           node-version: '22.22.2'
           cache: npm
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: npm ci
       - run: npm run build
-      - run: npx --no-install playwright install --with-deps ${{ matrix.browser }}
       - run: npm run test:smoke
       - name: Upload browser evidence
         if: ${{ always() }}

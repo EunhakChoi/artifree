@@ -10,6 +10,19 @@ const workflow = parse(
     'utf8',
   ),
 );
+
+test('Browser image matches the installed Playwright version and has an immutable digest', async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+  );
+  const [tag, digest] =
+    workflow.jobs.browsers.container.image.split('@sha256:');
+  assert.equal(
+    tag,
+    `mcr.microsoft.com/playwright:v${manifest.devDependencies['@playwright/test']}-noble`,
+  );
+  assert.match(digest, /^[a-f\d]{64}$/);
+});
 test('The actual CI workflow enforces every verification job', () =>
   checkWorkflow(workflow));
 test('An unpinned action is rejected', () => {

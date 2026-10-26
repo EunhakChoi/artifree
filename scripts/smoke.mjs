@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
@@ -16,47 +15,12 @@ assert.ok(
 );
 const qa = resolve(root, '.artifree/qa', browserName);
 await mkdir(qa, { recursive: true });
-const rust = JSON.parse(
-  execFileSync(
-    'cargo',
-    ['run', '--quiet', '--locked', '-p', 'artifree-server', '--', '--describe'],
-    { cwd: root, encoding: 'utf8' },
+const inventory = JSON.parse(
+  await readFile(
+    new URL('../contracts/generated/scaffold-inventory.json', import.meta.url),
+    'utf8',
   ),
 );
-const cli = JSON.parse(
-  execFileSync(
-    process.execPath,
-    ['apps/cli/dist/main.js', 'describe', '--json'],
-    { cwd: root, encoding: 'utf8' },
-  ),
-);
-assert.deepEqual(cli, rust, 'Rust and CLI inventories must match.');
-assert.equal(rust.http_listening, false);
-assert.equal(rust.server_framework, null);
-assert.equal(rust.async_runtime, null);
-for (const args of [
-  ['serve'],
-  ['describe', 'extra'],
-  ['--json'],
-  ['--unknown'],
-]) {
-  const result = spawnSync(
-    process.execPath,
-    ['apps/cli/dist/main.js', ...args],
-    { cwd: root, encoding: 'utf8' },
-  );
-  assert.equal(
-    result.status,
-    2,
-    `Invalid CLI args must fail: ${args.join(' ')}`,
-  );
-  assert.equal(
-    result.stdout,
-    '',
-    'Invalid CLI args must not emit success JSON.',
-  );
-  assert.ok(result.stderr.trim());
-}
 
 const webRoot = resolve(root, 'apps/web/dist');
 const mime = {
@@ -153,7 +117,7 @@ try {
     for (const layer of ['presentation', 'logic', 'provider', 'shared']) {
       await page.getByRole('tab', { name: layer, exact: true }).click();
       await expect(page.getByRole('tabpanel').getByRole('article')).toHaveCount(
-        rust.components.filter((item) => item.layer === layer).length,
+        inventory.components.filter((item) => item.layer === layer).length,
       );
       await checkAccessibility(`${theme}-${layer}`);
       accessibilityCases += 1;
@@ -196,9 +160,9 @@ try {
   await page.locator('[data-module="web"]').waitFor();
   assert.equal(
     await page.locator('[data-module]').count(),
-    rust.components.length,
+    inventory.components.length,
   );
-  for (const component of rust.components) {
+  for (const component of inventory.components) {
     await page.locator(`[data-module="${component.id}"]`).click();
     assert.equal(
       await page.locator('#inspector-content h3').innerText(),
@@ -277,7 +241,7 @@ try {
   await page.locator('[data-module="web"]').waitFor();
   assert.equal(
     await page.locator('[data-module]').count(),
-    rust.components.length,
+    inventory.components.length,
     'Downloaded HTML must not duplicate hydrated modules.',
   );
   assert.equal(
@@ -332,10 +296,9 @@ try {
     browser: browserName,
     accessibilityCases,
     pdf: browserName === 'chromium' ? 'passed' : 'not supported by Firefox',
-    modules: rust.components.length,
+    modules: inventory.components.length,
     deploymentCases,
     flowSteps: 6,
-    invalidCliCases: 4,
     widths: [375, 390, 768, 1440],
     downloadedHtml: 'passed',
     pageErrors,

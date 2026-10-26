@@ -57,8 +57,11 @@ with Node 22.22.2. Runner OS labels are fixed instead of following a moving
 `latest` image. GitHub actions run on their supported Node 24 runtime; that is
 separate from the application Node versions under test.
 Another job runs Cargo tests on Rust 1.85.0; regular checks use the pinned Rust
-toolchain. Browser jobs install the lockfile-pinned Playwright browsers and save
-screenshots, a JSON result, and a trace under `.artifree/qa/<browser>/`. PDF output
+toolchain. Rust/CLI JSON equivalence and all CLI rejection cases run in the
+general gate. Browser jobs use the official Playwright image, pinned by version
+and OCI digest, with browsers and system libraries already installed. They save
+screenshots, a JSON result, and a trace under `.artifree/qa/<browser>/`. The image is for trusted scaffold UI tests, not product artifact isolation. Local
+checks do not require Docker. PDF output
 is checked in Chromium; Playwright's Firefox does not implement PDF printing.
 
 Dependency and workflow checks run on pushes, pull requests, manual runs, and a
