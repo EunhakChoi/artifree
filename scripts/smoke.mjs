@@ -311,6 +311,14 @@ try {
   );
   console.log(JSON.stringify(result, null, 2));
 } catch (error) {
+  try {
+    await writeFile(
+      resolve(qa, 'failure.json'),
+      `${JSON.stringify({ status: 'failed', browser: browserName, message: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, null, 2)}\n`,
+    );
+  } catch (reportError) {
+    console.error('Could not save the browser failure report:', reportError);
+  }
   if (page)
     await page
       .screenshot({ path: resolve(qa, 'failure.png'), fullPage: true })

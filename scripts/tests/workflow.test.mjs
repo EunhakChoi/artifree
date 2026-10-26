@@ -25,6 +25,13 @@ test('Browser image matches the installed Playwright version and has an immutabl
 });
 test('The actual CI workflow enforces every verification job', () =>
   checkWorkflow(workflow));
+test('Browser container user matches the GitHub-mounted home owner', () => {
+  assert.match(
+    workflow.jobs.browsers.container.options,
+    /(?:^|\s)--user\s+1001(?:\s|$)/,
+    'Firefox requires the process user to own the mounted home directory.',
+  );
+});
 test('An unpinned action is rejected', () => {
   const invalid = structuredClone(workflow);
   invalid.jobs.checks.steps[0].uses = 'actions/checkout@v4';
