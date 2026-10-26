@@ -1,12 +1,13 @@
-//! Behavioral checks for the public descriptor's Serde boundary.
+//! Behavioral checks for the public contracts' Serde boundary.
 use artifree_contracts::ServiceDescription;
+use artifree_contracts::api::{CreateArtifactRequest, SaveRevisionRequest};
 use serde_json::Value;
 
 fn descriptor() -> Value {
     serde_json::json!({
         "name": "Artifree", "version": "0.1.0", "contract_version": "0.1.0",
-        "phase": "scaffolding", "server_framework": null, "async_runtime": null,
-        "http_listening": false,
+        "phase": "early-development", "server_framework": null, "async_runtime": null,
+        "http_api": false,
         "components": [{ "id": "web", "name": "Web", "layer": "presentation",
             "language": "TypeScript", "path": "apps/web", "status": "scaffold", "summary": "Development shell." }]
     })
@@ -50,4 +51,73 @@ fn rejects_unsupported_layer() {
     let mut invalid = descriptor();
     invalid["components"][0]["layer"] = Value::String("database".into());
     assert_rejected(invalid, "unknown variant `database`");
+}
+
+fn save_request() -> Value {
+    serde_json::json!({
+        "base_revision": 3,
+        "changes": [
+            { "op": "put", "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" },
+            { "op": "delete", "path": "old.css" }
+        ]
+    })
+}
+
+fn save_error(value: Value) -> String {
+    match serde_json::from_value::<SaveRevisionRequest>(value) {
+        Ok(parsed) => panic!("Invalid change was accepted: {parsed:?}"),
+        Err(error) => error.to_string(),
+    }
+}
+
+#[test]
+fn save_request_round_trips_tagged_changes() -> Result<(), serde_json::Error> {
+    let expected = save_request();
+    let parsed: SaveRevisionRequest = serde_json::from_value(expected.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, expected);
+    Ok(())
+}
+
+#[test]
+fn save_request_rejects_unknown_operations_and_fields() {
+    let mut unknown_op = save_request();
+    unknown_op["changes"][1]["op"] = Value::String("rename".into());
+    assert!(save_error(unknown_op).contains("unknown variant `rename`"));
+
+    let mut extra = save_request();
+    extra["changes"][1]["content"] = Value::String("ignored?".into());
+    assert!(save_error(extra).contains("unknown field `content`"));
+
+    let mut missing = save_request();
+    missing["changes"][0]
+        .as_object_mut()
+        .map(|change| change.remove("encoding"));
+    assert!(save_error(missing).contains("missing field `encoding`"));
+
+    let mut negative = save_request();
+    negative["base_revision"] = serde_json::json!(-1);
+    assert!(save_error(negative).contains("invalid value"));
+}
+
+#[test]
+fn create_request_rejects_unknown_encodings_and_fields() {
+    let request = |files: Value| serde_json::json!({ "title": "T", "files": files });
+    for (files, message) in [
+        (
+            serde_json::json!([{ "path": "index.html", "encoding": "hex", "content": "" }]),
+            "unknown variant `hex`",
+        ),
+        (
+            serde_json::json!([{ "path": "index.html", "encoding": "utf8", "content": "", "mode": 755 }]),
+            "unknown field `mode`",
+        ),
+    ] {
+        let Err(error) = serde_json::from_value::<CreateArtifactRequest>(request(files)) else {
+            panic!("Invalid upload accepted; expected {message}");
+        };
+        assert!(
+            error.to_string().contains(message),
+            "Expected {message:?}, got {error}"
+        );
+    }
 }

@@ -4,8 +4,14 @@
     "composite": true,
     "declaration": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "lib": ["ES2022", "DOM"],
+    "types": []
   },
-  "references": [{ "path": "../contracts" }],
+  "references": [
+    {
+      "path": "../contracts"
+    }
+  ],
   "include": ["src"]
 }

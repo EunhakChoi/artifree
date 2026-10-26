@@ -3,17 +3,34 @@ import { realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseSync } from 'oxc-parser';
 
+// Third-party edges are reviewed with their purpose (decision 0003):
+// sha2 fingerprints requests and addresses stored content, rusqlite is local
+// storage, getrandom creates identifiers and tokens, axum/tokio serve HTTP,
+// base64 decodes uploads, and tower drives in-process router tests.
 const rustEdges = {
   'artifree-domain': [],
   'artifree-ports': ['artifree-domain'],
-  'artifree-core': ['artifree-domain', 'artifree-ports'],
-  'artifree-providers': ['artifree-ports', 'artifree-domain'],
+  'artifree-core': ['artifree-domain', 'artifree-ports', 'sha2'],
+  'artifree-providers': [
+    'artifree-ports',
+    'artifree-domain',
+    'getrandom',
+    'rusqlite',
+    'sha2',
+  ],
   'artifree-contracts': ['serde', 'serde_json', 'schemars'],
   'artifree-server': [
     'artifree-core',
     'artifree-contracts',
+    'artifree-domain',
+    'artifree-ports',
     'artifree-providers',
+    'axum',
+    'base64',
+    'getrandom',
     'serde_json',
+    'tokio',
+    'tower',
   ],
 };
 
@@ -60,23 +77,25 @@ function inside(root, target) {
   );
 }
 
-/** Inventory paths are portable repository paths, not user artifact paths. */
-export async function checkInventory(root, inventory) {
-  assert.equal(
-    inventory.http_listening,
-    false,
-    'The scaffold has no HTTP listener.',
-  );
-  assert.equal(
-    inventory.server_framework,
-    null,
-    'HTTP framework remains undecided.',
-  );
-  assert.equal(
-    inventory.async_runtime,
-    null,
-    'Async runtime remains undecided.',
-  );
+/**
+ * The inventory may name a framework or runtime only when the server crate
+ * really depends on it, and may claim an HTTP API only with both.
+ * Inventory paths are portable repository paths, not user artifact paths.
+ */
+export async function checkInventory(root, inventory, serverDependencies) {
+  for (const field of ['server_framework', 'async_runtime']) {
+    const name = inventory[field];
+    if (name !== null)
+      assert.ok(
+        serverDependencies.includes(name),
+        `Inventory ${field} ${name} is not an artifree-server dependency.`,
+      );
+  }
+  if (inventory.http_api)
+    assert.ok(
+      inventory.server_framework !== null && inventory.async_runtime !== null,
+      'An HTTP API claim requires a selected framework and runtime.',
+    );
   assert.equal(
     new Set(inventory.components.map((component) => component.id)).size,
     inventory.components.length,

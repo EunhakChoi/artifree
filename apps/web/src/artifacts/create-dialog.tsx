@@ -1,0 +1,140 @@
+import { useState } from 'react';
+import type { FormEvent } from 'react';
+import { PlusIcon } from 'lucide-react';
+import { newIdempotencyKey } from '@artifree/client';
+import type { ArtifreeClient } from '@artifree/client';
+import type { Artifact } from '@artifree/contracts';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog';
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { describeFailure } from './use-request';
+
+const STARTER = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>New artifact</title>
+  </head>
+  <body>
+    <h1>Hello from Artifree</h1>
+  </body>
+</html>
+`;
+
+interface CreateDialogProps {
+  client: ArtifreeClient;
+  onCreated: (artifact: Artifact) => void;
+}
+
+/** Creates an artifact with a single `index.html`. */
+export function CreateDialog({ client, onCreated }: CreateDialogProps) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState('');
+  const [html, setHtml] = useState(STARTER);
+  const [pending, setPending] = useState(false);
+  const [failure, setFailure] = useState<string>();
+  // One key per draft: retrying the same draft after a lost response
+  // returns the original artifact instead of creating another.
+  const [requestKey, setRequestKey] = useState(newIdempotencyKey);
+
+  function edit(update: () => void): void {
+    update();
+    setRequestKey(newIdempotencyKey());
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setPending(true);
+    setFailure(undefined);
+    try {
+      const result = await client.createArtifact(
+        {
+          title: title.trim(),
+          files: [{ path: 'index.html', encoding: 'utf8', content: html }],
+        },
+        { idempotencyKey: requestKey },
+      );
+      setOpen(false);
+      setTitle('');
+      setHtml(STARTER);
+      setRequestKey(newIdempotencyKey());
+      onCreated(result.artifact);
+    } catch (error: unknown) {
+      setFailure(describeFailure(error));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button />}>
+        <PlusIcon data-icon="inline-start" aria-hidden="true" />
+        New artifact
+      </DialogTrigger>
+      <DialogContent>
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(event) => void submit(event)}
+        >
+          <DialogHeader>
+            <DialogTitle>New HTML artifact</DialogTitle>
+            <DialogDescription>
+              Saved as revision 1 with one <code>index.html</code>. Agents can
+              add more files through the API or CLI.
+            </DialogDescription>
+          </DialogHeader>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="new-title">Title</FieldLabel>
+              <Input
+                id="new-title"
+                required
+                maxLength={200}
+                value={title}
+                onChange={(event) => edit(() => setTitle(event.target.value))}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="new-html">index.html</FieldLabel>
+              <Textarea
+                id="new-html"
+                variant="code"
+                className="max-h-64"
+                spellCheck={false}
+                value={html}
+                onChange={(event) => edit(() => setHtml(event.target.value))}
+              />
+            </Field>
+          </FieldGroup>
+          {failure === undefined ? null : (
+            <Alert variant="destructive">
+              <AlertTitle>Not created</AlertTitle>
+              <AlertDescription>{failure}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />}>
+              Cancel
+            </DialogClose>
+            <Button type="submit" disabled={pending || title.trim() === ''}>
+              {pending ? 'Creating…' : 'Create'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}

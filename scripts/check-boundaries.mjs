@@ -26,7 +26,14 @@ const inventory = JSON.parse(
     'utf8',
   ),
 );
-await checkInventory(root, inventory);
+const server = metadata.packages.find((pkg) => pkg.name === 'artifree-server');
+await checkInventory(
+  root,
+  inventory,
+  server.dependencies
+    .filter((dependency) => dependency.kind === null)
+    .map((dependency) => dependency.name),
+);
 
 async function sources(directory) {
   const files = [];

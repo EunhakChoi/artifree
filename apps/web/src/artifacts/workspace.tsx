@@ -1,0 +1,144 @@
+import { useMemo, useState } from 'react';
+import { FileCode2Icon, LogOutIcon } from 'lucide-react';
+import { ArtifreeClient } from '@artifree/client';
+import type { Artifact } from '@artifree/contracts';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import { ArtifactDetail } from './artifact-detail';
+import { ConnectForm } from './connect-form';
+import { CreateDialog } from './create-dialog';
+import { useRequest } from './use-request';
+
+const TOKEN_KEY = 'artifree.accessToken';
+
+function storedToken(): string | undefined {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY) ?? undefined;
+  } catch {
+    // Storage can be unavailable (privacy modes); the user reconnects.
+    return undefined;
+  }
+}
+
+function storeToken(token: string | undefined): void {
+  try {
+    if (token === undefined) sessionStorage.removeItem(TOKEN_KEY);
+    else sessionStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    // Without storage the token lives only in memory for this page.
+  }
+}
+
+/** Lists, creates, previews, and edits artifacts on a connected server. */
+export function ArtifactWorkspace() {
+  const [token, setToken] = useState(storedToken);
+  function connect(next: string | undefined): void {
+    storeToken(next);
+    setToken(next);
+  }
+  if (token === undefined) return <ConnectForm onConnect={connect} />;
+  return (
+    <ConnectedWorkspace token={token} onDisconnect={() => connect(undefined)} />
+  );
+}
+
+interface ConnectedWorkspaceProps {
+  token: string;
+  onDisconnect: () => void;
+}
+
+function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
+  const client = useMemo(
+    () => new ArtifreeClient({ baseUrl: '', accessToken: token }),
+    [token],
+  );
+  const [generation, setGeneration] = useState(0);
+  const [selected, setSelected] = useState<string>();
+  // Keep the list (and the open artifact) mounted while it refreshes.
+  const artifacts = useRequest(
+    `${token}:${generation}`,
+    () => client.listArtifacts(),
+    { keepPrevious: true },
+  );
+  function refresh(artifact: Artifact): void {
+    setSelected(artifact.id);
+    setGeneration((value) => value + 1);
+  }
+  const selectedId =
+    selected ??
+    (artifacts.status === 'ready' ? artifacts.value[0]?.id : undefined);
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <CreateDialog client={client} onCreated={refresh} />
+        <Button variant="ghost" onClick={onDisconnect}>
+          <LogOutIcon data-icon="inline-start" aria-hidden="true" />
+          Disconnect
+        </Button>
+      </div>
+      {artifacts.status === 'loading' ? (
+        <output className="text-sm text-muted-foreground">
+          Loading artifacts…
+        </output>
+      ) : null}
+      {artifacts.status === 'error' ? (
+        <Alert variant="destructive">
+          <AlertTitle>Could not list artifacts</AlertTitle>
+          <AlertDescription>{artifacts.message}</AlertDescription>
+        </Alert>
+      ) : null}
+      {artifacts.status === 'ready' && artifacts.value.length === 0 ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <FileCode2Icon aria-hidden="true" />
+            </EmptyMedia>
+            <EmptyTitle>No artifacts yet</EmptyTitle>
+            <EmptyDescription>
+              Create one here, or from an agent with{' '}
+              <code>artifree artifact create</code>.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : null}
+      {artifacts.status === 'ready' && artifacts.value.length > 0 ? (
+        <div className="grid gap-5 lg:grid-cols-3">
+          <nav aria-label="Artifacts" className="flex flex-col gap-2">
+            {artifacts.value.map((artifact) => (
+              <Button
+                key={artifact.id}
+                variant={artifact.id === selectedId ? 'secondary' : 'ghost'}
+                aria-current={artifact.id === selectedId ? 'true' : undefined}
+                className="justify-between"
+                onClick={() => setSelected(artifact.id)}
+              >
+                <span className="truncate">{artifact.title}</span>
+                <span className="text-xs text-muted-foreground">
+                  r{artifact.current_revision}
+                </span>
+              </Button>
+            ))}
+          </nav>
+          <div className="min-w-0 lg:col-span-2">
+            {selectedId === undefined ? null : (
+              <ArtifactDetail
+                key={selectedId}
+                client={client}
+                artifactId={selectedId}
+                onSaved={refresh}
+              />
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}

@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { extname, resolve, sep } from 'node:path';
+import { createServer, request as httpRequest } from 'node:http';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { buildServer, startServer } from './lib/server-process.mjs';
+import { checkWorkspace } from './smoke-workspace.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const engines = { chromium, firefox };
@@ -22,6 +25,14 @@ const inventory = JSON.parse(
   ),
 );
 
+// CI browser containers have no Rust toolchain; they receive a prebuilt binary.
+const serverBinary =
+  process.env.ARTIFREE_SERVER_BIN === undefined
+    ? buildServer(root)
+    : resolve(root, process.env.ARTIFREE_SERVER_BIN);
+const dataDir = await mkdtemp(join(tmpdir(), 'artifree-smoke-'));
+const api = await startServer(serverBinary, dataDir);
+
 const webRoot = resolve(root, 'apps/web/dist');
 const mime = {
   '.html': 'text/html',
@@ -30,7 +41,30 @@ const mime = {
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
 };
+// Like the Vite dev server, forward /v1 to the API so the page stays
+// same-origin with it; previews load from the API's content origin.
+function forward(request, response) {
+  const target = new URL(request.url ?? '/', api.api_url);
+  const upstream = httpRequest(
+    target,
+    {
+      method: request.method,
+      headers: { ...request.headers, host: target.host },
+    },
+    (reply) => {
+      response.writeHead(reply.statusCode ?? 502, reply.headers);
+      reply.pipe(response);
+    },
+  );
+  upstream.on('error', () => response.writeHead(502).end());
+  request.pipe(upstream);
+}
+
 const server = createServer(async (request, response) => {
+  if ((request.url ?? '').startsWith('/v1/')) {
+    forward(request, response);
+    return;
+  }
   try {
     const pathname = decodeURIComponent(
       new URL(request.url ?? '/', 'http://localhost').pathname,
@@ -66,6 +100,8 @@ let context;
 let page;
 const pageErrors = [];
 const consoleErrors = [];
+const artifactConsole = [];
+const expectedApiFailures = [];
 const externalRequests = [];
 async function checkAccessibility(label) {
   const report = await new AxeBuilder({ page })
@@ -101,12 +137,27 @@ try {
   page.setDefaultNavigationTimeout(15_000);
   page.on('pageerror', (error) => pageErrors.push(error.message));
   page.on('console', (message) => {
-    if (message.type() === 'error' || message.type() === 'warning')
-      consoleErrors.push(message.text());
+    if (message.type() !== 'error' && message.type() !== 'warning') return;
+    // Sandbox and CSP refusals inside the preview are expected evidence.
+    const source = message.location().url;
+    if (source.startsWith(api.content_origin))
+      artifactConsole.push(message.text());
+    // Browsers log the 401 and 409 that the workspace test provokes on purpose.
+    else if (
+      source.startsWith(`${origin}/v1/`) &&
+      /status of (401|409) /.test(message.text())
+    )
+      expectedApiFailures.push(message.text().match(/status of (\d+)/)[1]);
+    else consoleErrors.push(message.text());
   });
   page.on('request', (request) => {
-    if (/^https?:/.test(request.url()) && !request.url().startsWith(origin))
-      externalRequests.push(request.url());
+    const url = request.url();
+    if (
+      /^https?:/.test(url) &&
+      !url.startsWith(origin) &&
+      !url.startsWith(api.content_origin)
+    )
+      externalRequests.push(url);
   });
   await page.goto(origin);
   await page.getByRole('heading', { name: /A place for what/ }).waitFor();
@@ -140,7 +191,7 @@ try {
   }
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await expect(
-    page.getByText('Development shell', { exact: true }),
+    page.getByText('Build-time inventory', { exact: true }),
   ).toBeVisible();
   await page.getByRole('tab', { name: 'presentation', exact: true }).click();
   await page
@@ -155,6 +206,16 @@ try {
   ).toHaveAttribute('aria-selected', 'true');
   await page.getByRole('tab', { name: 'presentation', exact: true }).click();
   await page.screenshot({ path: resolve(qa, 'web-desktop.png') });
+  const workspace = await checkWorkspace({
+    page,
+    origin,
+    server: api,
+    qa,
+    checkAccessibility,
+  });
+  await page.getByRole('button', { name: 'Toggle color theme' }).click();
+  await checkAccessibility('dark-workspace-preview');
+  await page.getByRole('button', { name: 'Toggle color theme' }).click();
 
   await page.goto(`${origin}/architecture.html`);
   await page.locator('[data-module="web"]').waitFor();
@@ -283,9 +344,20 @@ try {
     ),
     'Web shell overflow on mobile.',
   );
+  await expect(
+    page.locator('iframe[title^="Preview of"]'),
+    'A reload keeps the tab session and reopens the artifact.',
+  ).toBeVisible();
   await page.screenshot({ path: resolve(qa, 'web-mobile.png') });
   assert.deepEqual(pageErrors, [], 'Browser JavaScript errors.');
   assert.deepEqual(consoleErrors, [], 'Browser console errors or warnings.');
+  // Firefox does not log failed fetch responses; Chromium logs each one.
+  if (browserName === 'chromium')
+    assert.deepEqual(
+      expectedApiFailures.sort(),
+      ['401', '409'],
+      'Only the deliberate rejected token and stale save may fail.',
+    );
   assert.deepEqual(
     externalRequests,
     [],
@@ -301,6 +373,9 @@ try {
     flowSteps: 6,
     widths: [375, 390, 768, 1440],
     downloadedHtml: 'passed',
+    workspace,
+    artifactConsole,
+    expectedApiFailures,
     pageErrors,
     consoleErrors,
     externalRequests,
@@ -328,4 +403,6 @@ try {
   if (context) await context.tracing.stop({ path: resolve(qa, 'trace.zip') });
   if (browser) await browser.close();
   await new Promise((resolveClosed) => server.close(resolveClosed));
+  await api.stop();
+  await rm(dataDir, { recursive: true, force: true });
 }

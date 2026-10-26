@@ -1,4 +1,4 @@
-//! Build-time module definitions; these do not advertise running providers.
+//! Build-time module definitions; these do not report a running server's health.
 
 use artifree_contracts::{ComponentStatus, Layer};
 
@@ -19,8 +19,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Presentation,
         "TypeScript",
         "apps/web",
-        ComponentStatus::Scaffold,
-        "React/Vite development shell; no backend connection.",
+        ComponentStatus::Implemented,
+        "React/Vite workspace: create, edit, save, and preview HTML artifacts via the local API.",
     ),
     (
         "cli",
@@ -28,8 +28,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Presentation,
         "TypeScript",
         "apps/cli",
-        ComponentStatus::Scaffold,
-        "Help, version, and build-time scaffold inventory.",
+        ComponentStatus::Implemented,
+        "Artifact create, list, show, save, cat, and preview over HTTP; build inventory.",
     ),
     (
         "runtime",
@@ -46,8 +46,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Logic,
         "Rust",
         "crates/artifree-server",
-        ComponentStatus::Scaffold,
-        "Composition root and descriptor binary; HTTP/MCP are not implemented.",
+        ComponentStatus::Implemented,
+        "Axum/Tokio HTTP API v1 and a separate sandboxed preview origin; MCP planned.",
     ),
     (
         "domain",
@@ -55,8 +55,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Logic,
         "Rust",
         "crates/artifree-domain",
-        ComponentStatus::Scaffold,
-        "Six content kinds and separate source/document/data counters.",
+        ComponentStatus::Implemented,
+        "Validated identifiers, portable file packages, and separate version counters.",
     ),
     (
         "artifacts",
@@ -64,8 +64,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Logic,
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
-        ComponentStatus::Planned,
-        "Drafts, versioned files, conditional saves, publish, restore, and fork.",
+        ComponentStatus::Implemented,
+        "Create, conditional revisions, retry keys, pinned reads; publish/restore/fork planned.",
     ),
     (
         "policy",
@@ -73,8 +73,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Logic,
         "Rust",
         "crates/artifree-core/src/policy.rs",
-        ComponentStatus::Planned,
-        "Actors, access rules, scoped sessions, and capability checks.",
+        ComponentStatus::Implemented,
+        "Owner-only access checked on every read; sharing and capabilities planned.",
     ),
     (
         "documents",
@@ -107,10 +107,10 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "storage",
         "Storage",
         Layer::Provider,
-        "Rust adapters; backend open",
+        "Rust · SQLite",
         "crates/artifree-providers/src/storage.rs",
-        ComponentStatus::Planned,
-        "Local SQLite/files and server PostgreSQL/objects are candidates.",
+        ComponentStatus::Implemented,
+        "Local SQLite with atomic commits and shared file content; PostgreSQL planned.",
     ),
     (
         "models",
@@ -154,8 +154,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Shared,
         "Rust → JSON Schema → TypeScript",
         "crates/artifree-contracts",
-        ComponentStatus::Scaffold,
-        "Generated wire types and validated build-time inventory.",
+        ComponentStatus::Implemented,
+        "Rust DTOs → JSON Schema → TypeScript for the inventory and HTTP API v1.",
     ),
     (
         "client",
@@ -163,7 +163,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Shared,
         "TypeScript",
         "packages/client",
-        ComponentStatus::Scaffold,
-        "Connection configuration types; no HTTP methods yet.",
+        ComponentStatus::Implemented,
+        "Fetch-based HTTP API v1 client with structured errors.",
     ),
 ];

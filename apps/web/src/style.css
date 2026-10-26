@@ -48,6 +48,9 @@
 }
 
 :root {
+  /* Native controls follow the theme, and a preview document that does not
+     declare a dark scheme gets an opaque light canvas inside dark mode. */
+  color-scheme: light;
   --background: #f6f6ef;
   --foreground: #233d34;
   --card: #fffef7;
@@ -62,7 +65,9 @@
   --muted-foreground: #52634f;
   --accent: #f0e4d5;
   --accent-foreground: #80522e;
-  --destructive: oklch(0.577 0.245 27.325);
+  /* Darker than the shadcn default so destructive alert text meets WCAG AA
+     (4.5:1) on the card color. */
+  --destructive: oklch(0.53 0.22 27.325);
   --border: #d5ddce;
   --input: #d5ddce;
   --ring: #42745c;
@@ -83,6 +88,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: #15221c;
   --foreground: #edf2e6;
   --card: #1d2e24;

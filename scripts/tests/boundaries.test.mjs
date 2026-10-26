@@ -133,13 +133,14 @@ test('Inventory rejects non-portable paths, duplicate IDs, and escaping symlinks
   await mkdir(join(parent, 'outside'));
   await writeFile(join(root, 'src/file.ts'), 'export {};');
   const inventory = (components) => ({
-    http_listening: false,
+    http_api: false,
     server_framework: null,
     async_runtime: null,
     components,
   });
+  const check = (value) => checkInventory(root, value, []);
   try {
-    await checkInventory(root, inventory([{ id: 'one', path: 'src/file.ts' }]));
+    await check(inventory([{ id: 'one', path: 'src/file.ts' }]));
     for (const path of [
       '../outside',
       '/tmp',
@@ -150,14 +151,13 @@ test('Inventory rejects non-portable paths, duplicate IDs, and escaping symlinks
       '.',
     ]) {
       await assert.rejects(
-        checkInventory(root, inventory([{ id: 'one', path }])),
+        check(inventory([{ id: 'one', path }])),
         /Non-portable inventory path/,
         path,
       );
     }
     await assert.rejects(
-      checkInventory(
-        root,
+      check(
         inventory([
           { id: 'same', path: 'src' },
           { id: 'same', path: 'src/file.ts' },
@@ -167,10 +167,59 @@ test('Inventory rejects non-portable paths, duplicate IDs, and escaping symlinks
     );
     await symlink(join(parent, 'outside'), join(root, 'escape'), 'junction');
     await assert.rejects(
-      checkInventory(root, inventory([{ id: 'one', path: 'escape' }])),
+      check(inventory([{ id: 'one', path: 'escape' }])),
       /escapes the repository/,
     );
   } finally {
     await rm(parent, { recursive: true, force: true });
   }
+});
+
+test('Inventory cannot claim a framework or API the server does not use', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'artifree-inventory-'));
+  const claim = (fields) => ({
+    http_api: false,
+    server_framework: null,
+    async_runtime: null,
+    components: [],
+    ...fields,
+  });
+  try {
+    await checkInventory(
+      root,
+      claim({
+        http_api: true,
+        server_framework: 'axum',
+        async_runtime: 'tokio',
+      }),
+      ['axum', 'tokio'],
+    );
+    await assert.rejects(
+      checkInventory(root, claim({ server_framework: 'axum' }), ['tokio']),
+      /server_framework axum is not an artifree-server dependency/,
+    );
+    await assert.rejects(
+      checkInventory(root, claim({ async_runtime: 'tokio' }), ['tower']),
+      /async_runtime tokio is not/,
+    );
+    await assert.rejects(
+      checkInventory(
+        root,
+        claim({ http_api: true, server_framework: 'axum' }),
+        ['axum'],
+      ),
+      /requires a selected framework and runtime/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Rust storage provider cannot reach the HTTP framework', () => {
+  const packages = emptyPackages();
+  packages[3].dependencies.push({ name: 'axum' });
+  assert.throws(
+    () => checkRustPackages(packages),
+    /artifree-providers cannot depend on axum/,
+  );
 });

@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#244f43" />
     <meta
       name="description"
-      content="Artifree의 실제 scaffolding과 연결되는 TypeScript presentation · Rust logic · provider 설계안"
+      content="Artifree의 실제 구현과 연결되는 TypeScript presentation · Rust logic · provider 설계안"
     />
     <title>Artifree · Architecture / Foundation 0.1</title>
     <style>
@@ -89,11 +89,12 @@
         <div class="notice">
           <span class="notice-icon">i</span>
           <div>
-            <strong>지금 완성된 것은 scaffolding입니다.</strong>
+            <strong>첫 수직 기능이 동작합니다: 로컬 HTML 아티팩트.</strong>
             <p>
-              웹 개발 셸, CLI의 help·version·describe, Rust workspace, 계약
-              생성과 검증 도구가 있습니다. 저장·게시·HTTP/MCP·콘텐츠 실행·변환은
-              후속 구현입니다. 이 문서의 흐름과 배포 옵션은 설계안입니다.
+              HTTP API·CLI·웹에서 생성 → SQLite 조건부 저장 → revision 고정 읽기
+              → 별도 origin sandbox 미리보기까지 동작합니다.
+              게시·공유·MCP·runtime SDK·빌드·변환은 후속 구현이며, 배포 옵션은
+              설계안입니다.
             </p>
           </div>
           <span class="version-tag">v0.1.0</span>
@@ -111,14 +112,14 @@
             <span class="decision-num">02</span>
             <div>
               <span class="eyebrow">LOGIC</span><strong>Rust</strong
-              ><small>확정 · 프레임워크 / async runtime 미정</small>
+              ><small>확정 · Axum on Tokio · SQLite(local)</small>
             </div>
           </div>
           <div>
             <span class="decision-num">03</span>
             <div>
               <span class="eyebrow">PROVIDERS</span><strong>Replaceable</strong
-              ><small>경계만 구성 · 구현과 worker 언어 미정</small>
+              ><small>SQLite 저장 구현 · 나머지와 worker 언어 미정</small>
             </div>
           </div>
         </div>
@@ -135,6 +136,7 @@
             </p>
           </div>
           <div class="legend">
+            <span class="legend-implemented"></span> Working
             <span class="legend-scaffold"></span> Scaffold exists
             <span class="legend-planned"></span> Planned
           </div>
@@ -284,8 +286,8 @@ npm run check</pre>
             <p class="eyebrow">04 / ONE CORE, DIFFERENT HOSTS</p>
             <h2>어디서 실행할지, 얼마나 보관할지.</h2>
             <p>
-              아래 선택은 후속 구현의 배포 설계입니다. 현재 scaffold에 서버 배포
-              기능은 없습니다.
+              아래 선택은 배포 설계입니다. 현재는 로컬 영속 profile(단일 사용자,
+              loopback, SQLite)만 구현되어 있습니다.
             </p>
           </div>
           <span class="tag">Deployment plan</span>

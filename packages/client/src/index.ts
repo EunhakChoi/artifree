@@ -1,10 +1,12 @@
-import type { ServiceDescription } from '@artifree/contracts';
-
-/** Future HTTP SDK configuration. This scaffold performs no network requests. */
-export interface ClientConfiguration {
-  readonly baseUrl: string;
-  readonly accessToken?: string;
-}
-
-/** DTO alias for consumers. A scaffold description is not a health response. */
-export type ScaffoldInventory = ServiceDescription;
+/** HTTP API v1 client for browsers and Node.js. */
+export {
+  ArtifreeApiError,
+  ArtifreeClient,
+  encodeFile,
+  newIdempotencyKey,
+} from './client.js';
+export type {
+  ClientConfiguration,
+  FailureCode,
+  MutationOptions,
+} from './client.js';
