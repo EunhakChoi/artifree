@@ -1,0 +1,53 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "jsx-a11y", "import", "unicorn"],
+  "jsPlugins": ["@shadcn/lint"],
+  "env": { "browser": true, "node": true, "es2024": true },
+  "categories": { "correctness": "error" },
+  "rules": {
+    "eqeqeq": "error",
+    "no-debugger": "error",
+    "no-eval": "error",
+    "no-new-func": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "react/rules-of-hooks": "error",
+    "react/exhaustive-deps": "error",
+    "react/jsx-key": "error",
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/anchor-is-valid": "error",
+    "jsx-a11y/click-events-have-key-events": "error",
+    "jsx-a11y/no-static-element-interactions": "error",
+    "import/no-cycle": "error"
+  },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "target/**",
+    ".agents/**",
+    ".claude/**",
+    ".artifree/**",
+    "**/src/generated/**"
+  ],
+  "overrides": [
+    {
+      "files": ["apps/web/src/**/*.{ts,tsx}"],
+      "rules": {
+        "shadcn/no-restyle": ["error", { "allow": ["layout"] }],
+        "shadcn/no-raw-colors": "error",
+        "shadcn/no-arbitrary-values": ["error", { "allow": ["layout"] }],
+        "shadcn/no-inline-styles": "error",
+        "shadcn/no-unknown-classes": "error",
+        "shadcn/require-static-classes": "error"
+      }
+    },
+    {
+      "files": ["apps/web/src/components/ui/**"],
+      "rules": {
+        "shadcn/no-restyle": "off",
+        "shadcn/no-arbitrary-values": "off",
+        "shadcn/require-static-classes": "off"
+      }
+    }
+  ]
+}

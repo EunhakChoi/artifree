@@ -5,36 +5,44 @@
   "type": "object",
   "properties": {
     "async_runtime": {
+      "description": "Selected async runtime, or null while undecided.",
       "type": [
         "string",
         "null"
       ]
     },
     "components": {
+      "description": "Modules included in this build-time inventory.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Component"
       }
     },
     "contract_version": {
+      "description": "Version of this wire contract.",
       "type": "string"
     },
     "http_listening": {
+      "description": "Whether this process starts an HTTP listener; currently always false.",
       "type": "boolean"
     },
     "name": {
+      "description": "Display name of the application.",
       "type": "string"
     },
     "phase": {
+      "description": "Product implementation stage, currently scaffolding.",
       "type": "string"
     },
     "server_framework": {
+      "description": "Selected HTTP framework, or null while undecided.",
       "type": [
         "string",
         "null"
       ]
     },
     "version": {
+      "description": "Version of the compiled descriptor binary.",
       "type": "string"
     }
   },
@@ -49,27 +57,35 @@
   ],
   "$defs": {
     "Component": {
+      "description": "A repository component and an honest description of its implementation stage.",
       "type": "object",
       "properties": {
         "id": {
+          "description": "Stable inventory key, unique within the descriptor.",
           "type": "string"
         },
         "language": {
+          "description": "Implemented language or an explicitly open integration choice.",
           "type": "string"
         },
         "layer": {
+          "description": "Layer that owns the module's responsibility.",
           "$ref": "#/$defs/Layer"
         },
         "name": {
+          "description": "Human-readable module label.",
           "type": "string"
         },
         "path": {
+          "description": "Repository-relative path to the source or module boundary.",
           "type": "string"
         },
         "status": {
+          "description": "Implementation stage; this is not runtime health.",
           "$ref": "#/$defs/ComponentStatus"
         },
         "summary": {
+          "description": "Actual scaffold behavior or the proposed responsibility.",
           "type": "string"
         }
       },
@@ -85,19 +101,43 @@
       ]
     },
     "ComponentStatus": {
-      "type": "string",
-      "enum": [
-        "scaffold",
-        "planned"
+      "description": "Whether a module has scaffolding or only a proposed responsibility.",
+      "oneOf": [
+        {
+          "description": "Source scaffolding exists; the summary states its actual behavior.",
+          "type": "string",
+          "const": "scaffold"
+        },
+        {
+          "description": "The module has no implemented product behavior.",
+          "type": "string",
+          "const": "planned"
+        }
       ]
     },
     "Layer": {
-      "type": "string",
-      "enum": [
-        "presentation",
-        "logic",
-        "provider",
-        "shared"
+      "description": "Architectural ownership of a component, not its deployment location.",
+      "oneOf": [
+        {
+          "description": "User and agent facing clients.",
+          "type": "string",
+          "const": "presentation"
+        },
+        {
+          "description": "Application policy and domain logic.",
+          "type": "string",
+          "const": "logic"
+        },
+        {
+          "description": "Concrete outbound integrations and workers.",
+          "type": "string",
+          "const": "provider"
+        },
+        {
+          "description": "Contracts consumed across layers.",
+          "type": "string",
+          "const": "shared"
+        }
       ]
     }
   }

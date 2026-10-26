@@ -25,7 +25,8 @@ interface ModuleNote {
 const notes: Record<string, ModuleNote> = {
   web: {
     purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
-    exists: 'React/Vite 셸과 레이어 선택, 생성된 module inventory 표시.',
+    exists:
+      'React/Vite + Tailwind CSS 4 + shadcn/ui(Base UI) 셸, 탭·대화상자·테마, build-time module inventory.',
     next: '첫 HTTP 계약 이후 연결 상태·목록·파일 편집·저장 상태를 연결합니다.',
   },
   cli: {
@@ -116,7 +117,7 @@ const notes: Record<string, ModuleNote> = {
   contracts: {
     purpose: 'Rust와 TypeScript가 같은 전송 데이터 형식을 사용하도록 합니다.',
     exists:
-      'Serde/Schemars DTO → JSON Schema → TypeScript 생성, inventory schema 검증과 drift 검사.',
+      'Serde/Schemars DTO → JSON Schema → TypeScript 생성, 안정된 공개 타입 별칭, 잘못된 입력·drift 검증.',
     next: 'HTTP·MCP·runtime 메시지를 실제 기능 구현에 맞춰 추가합니다. runtime 입력 검증은 별도입니다.',
   },
   client: {

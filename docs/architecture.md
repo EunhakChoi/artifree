@@ -1,6 +1,6 @@
 # Artifree architecture
 
-Status: initial scaffolding, 2026-10-26.
+Status: scaffolding with UI and quality foundations, 2026-10-27.
 
 The [interactive HTML design](architecture.html) maps the design to actual source
 paths. All product workflows in that design are proposals. The UI, CLI inventory,
@@ -10,7 +10,7 @@ Rust workspace, generated contracts, and checks are the implemented scaffold.
 
 ```text
 apps/
-  web/                 TypeScript · React/Vite workspace shell
+  web/                 TypeScript · React/Vite · Tailwind 4 · shadcn/ui (Base UI)
   cli/                 TypeScript · help/version/describe
 packages/
   contracts/           generated TypeScript wire types and scaffold inventory
@@ -27,6 +27,17 @@ contracts/generated/  generated JSON Schema and inventory snapshot
 docs/architecture/    TypeScript, CSS, and HTML source for the standalone design
 scripts/              contract generation, architecture build, checks, smoke
 ```
+
+The web app owns its UI components under `apps/web/src/components/ui` and theme
+tokens in `apps/web/src/style.css`. UI call sites use component variants and
+semantic tokens. A second frontend can justify a shared UI package later.
+Generated artifacts do not inherit management UI styling restrictions.
+
+[Decision 0002](decisions/0002-ui-and-quality.md) records this stack and the
+[quality gates](quality.md). They cover both language boundaries, rejection
+contracts, source-linked design drift, zero-warning lint, Windows/MSRV, browser
+accessibility, and dependency checks. Framework/runtime and provider selection
+remain deferred.
 
 ## Layer dependency direction
 

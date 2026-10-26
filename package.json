@@ -23,20 +23,32 @@
     "generate:contracts": "node scripts/generate-contracts.mjs",
     "check:contracts": "node scripts/generate-contracts.mjs --check",
     "check:boundaries": "node scripts/check-boundaries.mjs",
-    "check:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked",
+    "check:rust": "node scripts/check-rust.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm run check:contracts && npm run check:boundaries && npm run typecheck && npm run check:rust",
+    "check": "npm run format:check && npm run lint && npm run check:contracts && npm run check:boundaries && npm run check:architecture && npm run typecheck && npm run test:tooling && npm run check:rust",
     "cli": "node apps/cli/dist/main.js",
-    "test:smoke": "node scripts/smoke.mjs"
+    "test:smoke": "node scripts/smoke.mjs",
+    "lint:code": "oxlint --deny-warnings",
+    "lint:css": "stylelint \"apps/web/src/**/*.css\" \"docs/architecture/**/*.css\" --max-warnings 0",
+    "lint": "npm run lint:code && npm run lint:css",
+    "check:architecture": "node scripts/build-architecture.mjs --check",
+    "test:tooling": "node --test scripts/tests/*.test.mjs"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@playwright/test": "1.64.1",
+    "@shadcn/lint": "0.2.3",
     "@types/node": "^22.0.0",
     "ajv": "^8.17.1",
     "esbuild": "0.28.2",
     "json-schema-to-typescript": "16.0.0",
+    "oxc-parser": "0.155.0",
+    "oxlint": "1.89.0",
     "prettier": "3.9.10",
-    "typescript": "7.0.2"
+    "stylelint": "17.16.0",
+    "typescript": "7.0.2",
+    "yaml": "2.9.1",
+    "stylelint-config-recommended": "18.0.0"
   }
 }

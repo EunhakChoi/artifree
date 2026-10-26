@@ -4,46 +4,71 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Wire schema version, independent from a future API transport version.
 pub const CONTRACT_VERSION: &str = "0.1.0";
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// Whether a module has scaffolding or only a proposed responsibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentStatus {
+    /// Source scaffolding exists; the summary states its actual behavior.
     Scaffold,
+    /// The module has no implemented product behavior.
     Planned,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// Architectural ownership of a component, not its deployment location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Layer {
+    /// User and agent facing clients.
     Presentation,
+    /// Application policy and domain logic.
     Logic,
+    /// Concrete outbound integrations and workers.
     Provider,
+    /// Contracts consumed across layers.
     Shared,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// A repository component and an honest description of its implementation stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Component {
+    /// Stable inventory key, unique within the descriptor.
     pub id: String,
+    /// Human-readable module label.
     pub name: String,
+    /// Layer that owns the module's responsibility.
     pub layer: Layer,
+    /// Implemented language or an explicitly open integration choice.
     pub language: String,
+    /// Repository-relative path to the source or module boundary.
     pub path: String,
+    /// Implementation stage; this is not runtime health.
     pub status: ComponentStatus,
+    /// Actual scaffold behavior or the proposed responsibility.
     pub summary: String,
 }
 
 /// A build-time scaffold inventory, not a live server health response.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceDescription {
+    /// Display name of the application.
     pub name: String,
+    /// Version of the compiled descriptor binary.
     pub version: String,
+    /// Version of this wire contract.
     pub contract_version: String,
+    /// Product implementation stage, currently scaffolding.
     pub phase: String,
+    /// Selected HTTP framework, or null while undecided.
     pub server_framework: Option<String>,
+    /// Selected async runtime, or null while undecided.
     pub async_runtime: Option<String>,
+    /// Whether this process starts an HTTP listener; currently always false.
     pub http_listening: bool,
+    /// Modules included in this build-time inventory.
     pub components: Vec<Component>,
 }

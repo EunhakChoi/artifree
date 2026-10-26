@@ -26,6 +26,9 @@ function main(): void {
   if (positionals.length > 1) throw new Error('Expected at most one command.');
   const command = positionals[0];
   if (values.help) {
+    if (command !== undefined || values.version || values.json) {
+      throw new Error('--help must be used on its own.');
+    }
     process.stdout.write(help);
     return;
   }

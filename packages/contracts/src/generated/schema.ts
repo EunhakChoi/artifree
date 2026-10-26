@@ -1,27 +1,72 @@
 /* Generated from artifree-contracts. Run npm run generate:contracts; do not edit. */
 
-export type Layer = 'presentation' | 'logic' | 'provider' | 'shared';
-export type ComponentStatus = 'scaffold' | 'planned';
-
 /**
  * A build-time scaffold inventory, not a live server health response.
  */
 export interface ServiceDescription {
+  /**
+   * Selected async runtime, or null while undecided.
+   */
   async_runtime?: string | null;
+  /**
+   * Modules included in this build-time inventory.
+   */
   components: Component[];
+  /**
+   * Version of this wire contract.
+   */
   contract_version: string;
+  /**
+   * Whether this process starts an HTTP listener; currently always false.
+   */
   http_listening: boolean;
+  /**
+   * Display name of the application.
+   */
   name: string;
+  /**
+   * Product implementation stage, currently scaffolding.
+   */
   phase: string;
+  /**
+   * Selected HTTP framework, or null while undecided.
+   */
   server_framework?: string | null;
+  /**
+   * Version of the compiled descriptor binary.
+   */
   version: string;
 }
+/**
+ * A repository component and an honest description of its implementation stage.
+ */
 export interface Component {
+  /**
+   * Stable inventory key, unique within the descriptor.
+   */
   id: string;
+  /**
+   * Implemented language or an explicitly open integration choice.
+   */
   language: string;
-  layer: Layer;
+  /**
+   * Layer that owns the module's responsibility.
+   */
+  layer: 'presentation' | 'logic' | 'provider' | 'shared';
+  /**
+   * Human-readable module label.
+   */
   name: string;
+  /**
+   * Repository-relative path to the source or module boundary.
+   */
   path: string;
-  status: ComponentStatus;
+  /**
+   * Implementation stage; this is not runtime health.
+   */
+  status: 'scaffold' | 'planned';
+  /**
+   * Actual scaffold behavior or the proposed responsibility.
+   */
   summary: string;
 }

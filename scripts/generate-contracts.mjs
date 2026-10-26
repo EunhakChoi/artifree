@@ -3,9 +3,15 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { compile } from 'json-schema-to-typescript';
 import Ajv2020 from 'ajv/dist/2020.js';
+import assert from 'node:assert/strict';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const checking = process.argv.includes('--check');
+const args = process.argv.slice(2);
+assert.ok(
+  args.length === 0 || (args.length === 1 && args[0] === '--check'),
+  'Usage: generate-contracts.mjs [--check]',
+);
+const checking = args.includes('--check');
 const run = (args) =>
   execFileSync('cargo', args, {
     cwd: root,
@@ -64,7 +70,7 @@ const outputs = new Map([
 for (const [path, content] of outputs) {
   const url = new URL(`../${path}`, import.meta.url);
   if (checking) {
-    const existing = await readFile(url, 'utf8').catch(() => '');
+    const existing = await readFile(url, 'utf8');
     if (existing !== content)
       throw new Error(
         `Generated contract drift: ${path}. Run npm run generate:contracts.`,
