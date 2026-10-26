@@ -104,7 +104,7 @@
             <div>
               <span class="eyebrow">PRESENTATION</span
               ><strong>TypeScript</strong
-              ><small>확정 · 현재 Web은 React / Vite</small>
+              ><small>React / Vite · Tailwind 4 · shadcn/ui(Base UI)</small>
             </div>
           </div>
           <div>
@@ -236,29 +236,31 @@ npm run check</pre>
             <div>
               <span>01</span>
               <p>
-                <strong>Strong boundaries</strong>의존성 없는 domain, provider
-                구현에 의존하지 않는 core.
+                <strong>Strong boundaries</strong>Rust crate 의존성, TypeScript
+                import·re-export·동적 import 경계와 실제 경로 검사.
               </p>
             </div>
             <div>
               <span>02</span>
               <p>
-                <strong>Strict TypeScript</strong>strict · unchecked index ·
-                exact optional 검사.
+                <strong>Strict TypeScript + UI lint</strong>라이브러리 타입까지
+                검사. Oxlint · shadcn 6개 규칙 · CSS 검사, 경고 0건 정책.
               </p>
             </div>
             <div>
               <span>03</span>
               <p>
-                <strong>Rust feedback</strong>자체 코드 unsafe 금지, 필수 결과
-                무시 차단, fmt · Clippy.
+                <strong>Rust feedback</strong>unsafe 금지, 결과 무시·panic 유발
+                unwrap 차단. pedantic Clippy · 문서 경고 차단 · CLI/Serde 행동
+                검사 · MSRV 검증.
               </p>
             </div>
             <div>
               <span>04</span>
               <p>
-                <strong>Honest scaffolding</strong>실제 경로 검사, 생성물 drift
-                검사, 웹·CLI·HTML smoke.
+                <strong>Required quality gate</strong>Linux·Windows,
+                Chromium·Firefox, 명암 대비·키보드·대화상자, 의존성
+                취약점·라이선스와 생성물 검증. 제품 동작은 후속 구현입니다.
               </p>
             </div>
           </div>

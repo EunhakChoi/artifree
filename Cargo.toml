@@ -17,11 +17,11 @@ license = "MIT"
 repository = "https://github.com/EunhakChoi/artifree"
 
 [workspace.dependencies]
-artifree-domain = { path = "crates/artifree-domain" }
-artifree-core = { path = "crates/artifree-core" }
-artifree-ports = { path = "crates/artifree-ports" }
-artifree-providers = { path = "crates/artifree-providers" }
-artifree-contracts = { path = "crates/artifree-contracts" }
+artifree-domain = { path = "crates/artifree-domain", version = "=0.1.0" }
+artifree-core = { path = "crates/artifree-core", version = "=0.1.0" }
+artifree-ports = { path = "crates/artifree-ports", version = "=0.1.0" }
+artifree-providers = { path = "crates/artifree-providers", version = "=0.1.0" }
+artifree-contracts = { path = "crates/artifree-contracts", version = "=0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
@@ -29,10 +29,19 @@ schemars = "1"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
 
 [workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 todo = "deny"
 unimplemented = "deny"
-dbg_macro = "warn"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes_without_reason = "deny"
+wildcard_imports = "deny"

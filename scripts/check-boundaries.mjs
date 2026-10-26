@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { access, readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  checkRustPackages,
+  checkInventory,
+  checkClientImport,
+  checkClientManifest,
+  moduleSpecifiers,
+} from './lib/boundaries.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const metadata = JSON.parse(
@@ -11,54 +19,57 @@ const metadata = JSON.parse(
     { cwd: root, encoding: 'utf8' },
   ),
 );
-const allowed = {
-  'artifree-domain': [],
-  'artifree-ports': ['artifree-domain'],
-  'artifree-core': ['artifree-domain', 'artifree-ports'],
-  'artifree-providers': ['artifree-ports', 'artifree-domain'],
-  'artifree-contracts': ['serde', 'serde_json', 'schemars'],
-  'artifree-server': [
-    'artifree-core',
-    'artifree-contracts',
-    'artifree-providers',
-    'serde_json',
-  ],
-};
-for (const pkg of metadata.packages) {
-  assert.ok(
-    Object.hasOwn(allowed, pkg.name),
-    `Unreviewed crate boundary: ${pkg.name}`,
-  );
-  for (const dep of pkg.dependencies)
-    assert.ok(
-      allowed[pkg.name].includes(dep.name),
-      `${pkg.name} cannot depend on ${dep.name}; review the layer boundary first.`,
-    );
-}
+checkRustPackages(metadata.packages);
 const inventory = JSON.parse(
   await readFile(
     new URL('../contracts/generated/scaffold-inventory.json', import.meta.url),
     'utf8',
   ),
 );
-assert.equal(
-  new Set(inventory.components.map((item) => item.id)).size,
-  inventory.components.length,
-  'Component IDs must be unique.',
-);
-for (const component of inventory.components) {
-  assert.ok(
-    !component.path.startsWith('/') &&
-      !component.path.split('/').includes('..'),
-    'Inventory paths must stay within the repository.',
-  );
-  await access(new URL(`../${component.path}`, import.meta.url));
+await checkInventory(root, inventory);
+
+async function sources(directory) {
+  const files = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    assert.ok(!entry.isSymbolicLink(), `Unreviewed source symlink: ${path}`);
+    if (entry.isDirectory()) files.push(...(await sources(path)));
+    else if (/\.(?:ts|tsx)$/.test(entry.name)) files.push(path);
+  }
+  return files;
 }
-assert.equal(
-  inventory.http_listening,
-  false,
-  'Do not advertise a running API in the scaffold.',
-);
+
+let clients = 0;
+let imports = 0;
+for (const workspace of ['apps', 'packages']) {
+  for (const entry of await readdir(join(root, workspace), {
+    withFileTypes: true,
+  })) {
+    if (!entry.isDirectory()) continue;
+    const directory = join(root, workspace, entry.name);
+    const manifest = JSON.parse(
+      await readFile(join(directory, 'package.json'), 'utf8'),
+    );
+    checkClientManifest(manifest);
+    clients += 1;
+    for (const filename of await sources(join(directory, 'src'))) {
+      for (const specifier of moduleSpecifiers(
+        filename,
+        await readFile(filename, 'utf8'),
+      )) {
+        checkClientImport(
+          manifest.name,
+          directory,
+          filename,
+          specifier,
+          manifest,
+        );
+        imports += 1;
+      }
+    }
+  }
+}
+assert.equal(clients, 5, 'Review added or removed TypeScript workspaces.');
 console.log(
-  `Verified ${metadata.packages.length} Rust dependency boundaries and ${inventory.components.length} source paths.`,
+  `Verified ${metadata.packages.length} Rust crates, ${clients} TypeScript packages, ${imports} imports, and ${inventory.components.length} inventory paths.`,
 );

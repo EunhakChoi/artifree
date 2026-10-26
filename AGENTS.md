@@ -33,6 +33,22 @@ behavior explicitly separate in code, UI, docs, and completion reports.
 - Run `npm run check`, `npm run build`, and relevant smoke checks. If a boundary
   legitimately changes, update the decision record and boundary checker together.
 - Commit lockfiles. Keep generated artifacts reproducible.
+- Every change must pass `npm run check` and `npm run build`; UI or standalone
+  HTML changes must also pass the browser smoke checks. `docs/quality.md` defines
+  the gates and their scope. Do not skip checks, use fail-open CI steps, or hide
+  findings to make a change pass.
+- TypeScript checks dependency declaration files too. Oxlint and CSS lint allow
+  zero warnings. Rust requires documented public APIs, pedantic Clippy, and clean
+  rustdoc. Keep CLI stdout machine-readable and diagnostics on stderr.
+- Web presentation uses React/Vite, Tailwind CSS 4, and shadcn/ui with Base UI.
+  Use semantic tokens and existing variants. Component appearance belongs in
+  `apps/web/src/components/ui`; callers control placement. Generated artifacts
+  do not inherit the management UI's design restrictions.
+- Add tests for important rejection paths and verify they fail when the guarded
+  behavior is broken. New tokens, variants, lint exceptions, dependency edges,
+  and CI changes need an explicit rationale in the change.
+- Optional local skills in `.agents/skills` can guide work. The repository's own
+  documented policies and commands must work without those local files.
 
 ## Provenance
 
@@ -40,3 +56,5 @@ Write original code and assets. Never copy vendor bundles, decompiled code,
 private captures, account data, secrets, cookies, or proprietary implementation
 snippets into this public repository. Use independently expressed requirements
 and original examples. Do not claim a formal clean-room separation has occurred.
+Open-source UI components are allowed with their license and provenance retained;
+see `THIRD_PARTY_NOTICES.md` for the shadcn/ui source attribution.

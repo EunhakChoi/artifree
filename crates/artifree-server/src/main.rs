@@ -1,3 +1,13 @@
+//! Inspection command only; no HTTP listener is started.
+#![expect(
+    clippy::print_stdout,
+    reason = "Help, version, and JSON are the CLI protocol."
+)]
+#![expect(
+    clippy::print_stderr,
+    reason = "Command failures must be reported on stderr."
+)]
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

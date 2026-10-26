@@ -6,11 +6,17 @@
 /// The family of an artifact's authoritative source model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactKind {
+    /// An interactive app backed by a file package.
     App,
+    /// A structured text document.
     Document,
+    /// An ordered slide presentation.
     Slides,
+    /// A data dashboard.
     Dashboard,
+    /// A visual design document.
     Design,
+    /// A timeline or motion composition.
     Motion,
 }
 

@@ -1,3 +1,9 @@
+//! Emits the public descriptor schema as JSON for contract generation.
+#![expect(
+    clippy::print_stdout,
+    reason = "This binary emits the JSON schema on stdout."
+)]
+
 use artifree_contracts::ServiceDescription;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

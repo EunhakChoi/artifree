@@ -4,10 +4,17 @@ import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { chromium } from '@playwright/test';
+import { chromium, firefox, expect } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const qa = resolve(root, '.artifree/qa');
+const engines = { chromium, firefox };
+const browserName = process.env.ARTIFREE_BROWSER ?? 'chromium';
+assert.ok(
+  Object.hasOwn(engines, browserName),
+  `Unsupported browser: ${browserName}`,
+);
+const qa = resolve(root, '.artifree/qa', browserName);
 await mkdir(qa, { recursive: true });
 const rust = JSON.parse(
   execFileSync(
@@ -91,32 +98,98 @@ const address = server.address();
 assert.ok(address && typeof address === 'object');
 const origin = `http://127.0.0.1:${address.port}`;
 let browser;
+let context;
+let page;
 const pageErrors = [];
+const consoleErrors = [];
 const externalRequests = [];
+async function checkAccessibility(label) {
+  const report = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+    .analyze();
+  await writeFile(
+    resolve(qa, `accessibility-${label}.json`),
+    `${JSON.stringify(report.violations, null, 2)}\n`,
+  );
+  const summary = report.violations.map((violation) => ({
+    id: violation.id,
+    targets: violation.nodes.map((node) => node.target),
+  }));
+  assert.equal(
+    report.violations.length,
+    0,
+    `Accessibility failures: ${label}: ${JSON.stringify(summary)}. See the saved accessibility report.`,
+  );
+}
 try {
-  browser = await chromium.launch();
-  const page = await browser.newPage({
+  browser = await engines[browserName].launch();
+  context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
     reducedMotion: 'reduce',
   });
+  await context.tracing.start({
+    screenshots: true,
+    snapshots: true,
+    sources: true,
+  });
+  page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.setDefaultNavigationTimeout(15_000);
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error' || message.type() === 'warning')
+      consoleErrors.push(message.text());
+  });
   page.on('request', (request) => {
     if (/^https?:/.test(request.url()) && !request.url().startsWith(origin))
       externalRequests.push(request.url());
   });
   await page.goto(origin);
   await page.getByRole('heading', { name: /A place for what/ }).waitFor();
-  for (const layer of ['presentation', 'logic', 'provider', 'shared']) {
-    await page.getByRole('button', { name: new RegExp(layer) }).click();
-    assert.equal(
-      await page.locator('article').count(),
-      rust.components.filter((item) => item.layer === layer).length,
+  let accessibilityCases = 0;
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark')
+      await page.getByRole('button', { name: 'Toggle color theme' }).click();
+    for (const layer of ['presentation', 'logic', 'provider', 'shared']) {
+      await page.getByRole('tab', { name: layer, exact: true }).click();
+      await expect(page.getByRole('tabpanel').getByRole('article')).toHaveCount(
+        rust.components.filter((item) => item.layer === layer).length,
+      );
+      await checkAccessibility(`${theme}-${layer}`);
+      accessibilityCases += 1;
+    }
+    const about = page.getByRole('button', { name: 'About this foundation' });
+    await about.click();
+    const dialog = page.getByRole('dialog', { name: 'What works today' });
+    await expect(dialog).toBeVisible();
+    assert.ok(
+      await dialog.evaluate((element) =>
+        element.contains(document.activeElement),
+      ),
+      'Dialog must receive keyboard focus.',
     );
+    await checkAccessibility(`${theme}-dialog`);
+    accessibilityCases += 1;
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(about).toBeFocused();
   }
-  assert.ok(
-    (await page.locator('.notice').innerText()).includes('Development shell'),
-  );
-  await page.getByRole('button', { name: /presentation/ }).click();
+  await page.getByRole('button', { name: 'Toggle color theme' }).click();
+  await expect(
+    page.getByText('Development shell', { exact: true }),
+  ).toBeVisible();
+  await page.getByRole('tab', { name: 'presentation', exact: true }).click();
+  await page
+    .getByRole('tab', { name: 'presentation', exact: true })
+    .press('ArrowRight');
+  await expect(
+    page.getByRole('tab', { name: 'logic', exact: true }),
+  ).toBeFocused();
+  await page.getByRole('tab', { name: 'logic', exact: true }).press('Enter');
+  await expect(
+    page.getByRole('tab', { name: 'logic', exact: true }),
+  ).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'presentation', exact: true }).click();
   await page.screenshot({ path: resolve(qa, 'web-desktop.png') });
 
   await page.goto(`${origin}/architecture.html`);
@@ -229,13 +302,15 @@ try {
     if (width === 390)
       await page.screenshot({ path: resolve(qa, 'architecture-mobile.png') });
   }
-  await page.emulateMedia({ media: 'print' });
-  await page.pdf({
-    path: resolve(qa, 'architecture.pdf'),
-    format: 'A4',
-    printBackground: true,
-  });
-  await page.emulateMedia({ media: 'screen' });
+  if (browserName === 'chromium') {
+    await page.emulateMedia({ media: 'print' });
+    await page.pdf({
+      path: resolve(qa, 'architecture.pdf'),
+      format: 'A4',
+      printBackground: true,
+    });
+    await page.emulateMedia({ media: 'screen' });
+  }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(origin);
   assert.ok(
@@ -246,6 +321,7 @@ try {
   );
   await page.screenshot({ path: resolve(qa, 'web-mobile.png') });
   assert.deepEqual(pageErrors, [], 'Browser JavaScript errors.');
+  assert.deepEqual(consoleErrors, [], 'Browser console errors or warnings.');
   assert.deepEqual(
     externalRequests,
     [],
@@ -253,6 +329,9 @@ try {
   );
   const result = {
     status: 'passed',
+    browser: browserName,
+    accessibilityCases,
+    pdf: browserName === 'chromium' ? 'passed' : 'not supported by Firefox',
     modules: rust.components.length,
     deploymentCases,
     flowSteps: 6,
@@ -260,6 +339,7 @@ try {
     widths: [375, 390, 768, 1440],
     downloadedHtml: 'passed',
     pageErrors,
+    consoleErrors,
     externalRequests,
   };
   await writeFile(
@@ -267,7 +347,14 @@ try {
     `${JSON.stringify(result, null, 2)}\n`,
   );
   console.log(JSON.stringify(result, null, 2));
+} catch (error) {
+  if (page)
+    await page
+      .screenshot({ path: resolve(qa, 'failure.png'), fullPage: true })
+      .catch(() => undefined);
+  throw error;
 } finally {
+  if (context) await context.tracing.stop({ path: resolve(qa, 'trace.zip') });
   if (browser) await browser.close();
   await new Promise((resolveClosed) => server.close(resolveClosed));
 }

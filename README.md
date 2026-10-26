@@ -43,7 +43,7 @@ node apps/cli/dist/main.js describe --json
 
 | Layer          | Location                                                     | Choice                                                                  |
 | -------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| Presentation   | `apps/web`, `apps/cli`, `packages/runtime-sdk`               | TypeScript fixed; React/Vite currently used for the web shell           |
+| Presentation   | `apps/web`, `apps/cli`, `packages/runtime-sdk`               | TypeScript; web uses React/Vite, Tailwind CSS 4, shadcn/ui with Base UI |
 | Logic          | `crates/artifree-core`, `artifree-domain`, `artifree-server` | Rust fixed; HTTP framework and async runtime undecided                  |
 | Provider       | `crates/artifree-ports`, `artifree-providers`                | Rust integration boundary; adapter tools and worker languages undecided |
 | Wire contracts | `crates/artifree-contracts`, `packages/contracts`            | Rust DTOs → JSON Schema → generated TypeScript                          |
@@ -62,15 +62,18 @@ loads no external resources. Its TypeScript source is in `docs/architecture/`.
 ```sh
 npm run check
 npm run build
-npx playwright install chromium
+npx --no-install playwright install chromium firefox
 npm run test:smoke
 ```
 
-Checks cover formatting, generated-contract drift and schema validity, allowed
-Rust crate dependencies, actual inventory source paths, strict TypeScript,
-Rust formatting, Clippy, and Cargo tests. Smoke checks exercise the Rust/CLI
-contract, invalid CLI arguments, the built web shell, and HTML interactions at
-desktop and mobile widths. They do not establish product feature parity.
+Checks cover zero-warning code/design/CSS lint, strict TypeScript including
+dependency declarations, generated-contract drift and rejection, both language
+dependency boundaries, actual inventory paths, Rust formatting/pedantic Clippy,
+rustdoc, and behavioral tests. Browser checks exercise keyboard and dialog focus,
+light/dark accessibility, desktop/mobile layouts, and standalone HTML interactions.
+CI also checks Windows, Rust's minimum version, known dependency vulnerabilities,
+licenses, and workflow syntax. See [the quality policy](docs/quality.md) and
+[contributor instructions](CONTRIBUTING.md) for commands and limits.
 
 After changing wire DTOs or the scaffold inventory:
 
@@ -95,8 +98,10 @@ do not replace the API, storage, authentication, or worker lifecycle.
 
 ## Scope and provenance
 
-All code, names, UI, schemas, and sample content in this repository are written
-for Artifree. No third-party product bundle, decompiled source, captured account
+Application code, names, schemas, and sample content are written for Artifree.
+UI components are adapted from MIT-licensed shadcn/ui; their source attribution
+is retained in [third-party notices](THIRD_PARTY_NOTICES.md).
+No proprietary product bundle, decompiled source, captured account
 data, cookies, private URLs, or credentials belong here. An independent
 implementation does not by itself establish a formally separated clean-room
 process. This scaffold makes no claim of compatibility with a proprietary
