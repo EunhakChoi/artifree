@@ -52,7 +52,10 @@ schema rejection tests do not assume whether an enum is emitted as `enum` or
 type checking, tooling tests, and the Rust gate. `npm run build` builds packages,
 CLI, web assets, and the standalone architecture document.
 
-CI runs the gate/build on Linux with Node 22.12.0 and Windows with Node 22.22.2.
+CI runs the gate/build on Ubuntu 24.04 with Node 22.12.0 and Windows Server 2025
+with Node 22.22.2. Runner OS labels are fixed instead of following a moving
+`latest` image. GitHub actions run on their supported Node 24 runtime; that is
+separate from the application Node versions under test.
 Another job runs Cargo tests on Rust 1.85.0; regular checks use the pinned Rust
 toolchain. Browser jobs install the lockfile-pinned Playwright browsers and save
 screenshots, a JSON result, and a trace under `.artifree/qa/<browser>/`. PDF output
