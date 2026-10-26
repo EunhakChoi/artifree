@@ -10,8 +10,28 @@ const workflow = parse(
     'utf8',
   ),
 );
+
+test('Browser image matches the installed Playwright version and has an immutable digest', async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+  );
+  const [tag, digest] =
+    workflow.jobs.browsers.container.image.split('@sha256:');
+  assert.equal(
+    tag,
+    `mcr.microsoft.com/playwright:v${manifest.devDependencies['@playwright/test']}-noble`,
+  );
+  assert.match(digest, /^[a-f\d]{64}$/);
+});
 test('The actual CI workflow enforces every verification job', () =>
   checkWorkflow(workflow));
+test('Browser container user matches the GitHub-mounted home owner', () => {
+  assert.match(
+    workflow.jobs.browsers.container.options,
+    /(?:^|\s)--user\s+1001(?:\s|$)/,
+    'Firefox requires the process user to own the mounted home directory.',
+  );
+});
 test('An unpinned action is rejected', () => {
   const invalid = structuredClone(workflow);
   invalid.jobs.checks.steps[0].uses = 'actions/checkout@v4';
