@@ -177,12 +177,17 @@ try {
     await about.click();
     const dialog = page.getByRole('dialog', { name: 'What works today' });
     await expect(dialog).toBeVisible();
-    assert.ok(
-      await dialog.evaluate((element) =>
-        element.contains(document.activeElement),
-      ),
-      'Dialog must receive keyboard focus.',
-    );
+    // Focus moves in after the dialog opens. Wait for it instead of sampling
+    // once: a single sample raced the move on a slower CI runner.
+    await expect
+      .poll(
+        () =>
+          dialog.evaluate((element) =>
+            element.contains(document.activeElement),
+          ),
+        { message: 'Dialog must receive keyboard focus.' },
+      )
+      .toBe(true);
     await checkAccessibility(`${theme}-dialog`);
     accessibilityCases += 1;
     await page.keyboard.press('Escape');
