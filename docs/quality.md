@@ -105,7 +105,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   receives the commit made while it was away; a cursor of another database
   is reset although that database is past it; a commit by a second process
   on the same database arrives within the poll interval; shutdown ends open
-  streams; and an invalid `--change-streams` stops the server.
+  streams (on Unix: Node cannot send a graceful stop signal to a child on
+  Windows); and an invalid `--change-streams` stops the server.
 - `scripts/tests/limits.test.mjs`: the server binary with small limits. The
   official MCP client and the CLI share the budget, a refused create commits
   nothing and its key works after the delay, a CLI retry of a committed

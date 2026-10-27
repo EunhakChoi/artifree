@@ -320,25 +320,36 @@ test("Another process's commit to the same database arrives within the poll inte
   }
 });
 
-test('Shutdown ends open streams instead of waiting for them', async () => {
-  const server = await startServer(binary, join(scratch, 'shutdown'));
-  const watching = follower(clientOf(server));
-  try {
-    await watching.next(isType('ready'), 'ready');
-    const code = await Promise.race([
-      server.stop(),
-      delay(5000).then(() => 'still running'),
-    ]);
-    assert.equal(
-      code,
-      0,
-      `shutdown waited for the open stream ${server.stderr()}`,
-    );
-  } finally {
-    await watching.stop();
-    await server.kill();
-  }
-});
+// Node can send a graceful stop signal to a child only on Unix; on Windows
+// `kill` terminates it. Closing streams is also tested in process by
+// crates/artifree-server/tests/change_feed.rs on every platform.
+test(
+  'Shutdown ends open streams instead of waiting for them',
+  {
+    skip:
+      process.platform === 'win32' &&
+      'Windows cannot send a child process a graceful stop signal',
+  },
+  async () => {
+    const server = await startServer(binary, join(scratch, 'shutdown'));
+    const watching = follower(clientOf(server));
+    try {
+      await watching.next(isType('ready'), 'ready');
+      const code = await Promise.race([
+        server.stop(),
+        delay(5000).then(() => 'still running'),
+      ]);
+      assert.equal(
+        code,
+        0,
+        `shutdown waited for the open stream ${server.stderr()}`,
+      );
+    } finally {
+      await watching.stop();
+      await server.kill();
+    }
+  },
+);
 
 test('An invalid stream limit stops the server before it listens', () => {
   const result = spawnSync(
