@@ -83,8 +83,10 @@ Artifact behavior is tested at the boundary that owns it:
   separate actors; zero limits rejected; HTTP and MCP drawing on one budget;
   unauthenticated requests refused first without spending it; `429
 rate_limited` with `Retry-After`; a refused create whose key later commits
-  with `replayed: false`; and a request abandoned after admission that keeps
-  its slot until its work ends and still commits.
+  with `replayed: false`; a request abandoned after admission that keeps
+  its slot until its work ends and still commits; and refused requests
+  cancelled while their body is read, which release their place among the
+  bodies being read.
 - `scripts/tests/limits.test.mjs`: the server binary with small limits. The
   official MCP client and the CLI share the budget, a refused create commits
   nothing and its key works after the delay, the CLI says nothing was done, a

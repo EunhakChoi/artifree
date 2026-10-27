@@ -45,7 +45,9 @@ The analyzed hosted product also answered some writes with `429` rate caps
    a reset connection. Refused requests hold no permit, so this reading is
    bounded: it stops at the API body limit or after 2 seconds, and when 32
    refused bodies are already being read, a new refusal is sent at once. A
-   slow or endless sender therefore still gets its `429`.
+   slow or endless sender therefore still gets its `429`. A refusal cancelled
+   while its body is read, for example when its connection is dropped, gives
+   up its place among the 32.
 4. **Authentication first.** Requests without a valid token are answered
    `401` before the limiter and spend nothing, so they cannot exhaust the
    owner's budget.

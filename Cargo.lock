@@ -63,6 +63,7 @@ dependencies = [
  "axum",
  "base64",
  "getrandom",
+ "http-body",
  "rmcp",
  "serde",
  "serde_json",

@@ -216,21 +216,39 @@ pub const MAX_DRAINING: usize = 32;
 /// [`MAX_DRAIN_TIME`], or at once when [`MAX_DRAINING`] bodies are already
 /// being read; a slow or endless sender then gets the refusal regardless.
 async fn discard(state: &AppState, mut body: Body) {
-    let draining = &state.shared.draining;
-    if draining.fetch_add(1, Ordering::AcqRel) < MAX_DRAINING {
-        let drain = async {
-            let mut read = 0;
-            while read <= MAX_BODY_BYTES {
-                match poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
-                    Some(Ok(frame)) => read += frame.data_ref().map_or(0, Bytes::len),
-                    _ => break,
-                }
+    let Some(_reading) = Draining::start(&state.shared.draining) else {
+        return;
+    };
+    let drain = async {
+        let mut read = 0;
+        while read <= MAX_BODY_BYTES {
+            match poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
+                Some(Ok(frame)) => read += frame.data_ref().map_or(0, Bytes::len),
+                _ => break,
             }
-        };
-        // A timeout stops reading; the refusal is sent either way.
-        let _finished_in_time: bool = tokio::time::timeout(MAX_DRAIN_TIME, drain).await.is_ok();
+        }
+    };
+    // A timeout stops reading; the refusal is sent either way.
+    let _finished_in_time: bool = tokio::time::timeout(MAX_DRAIN_TIME, drain).await.is_ok();
+}
+
+/// One refused body counted against [`MAX_DRAINING`]. The count is released
+/// on drop, so a request cancelled mid-read, such as when its connection is
+/// dropped, does not keep it.
+struct Draining<'count>(&'count AtomicUsize);
+
+impl<'count> Draining<'count> {
+    /// Counts one more body, or returns `None` when the limit is reached.
+    fn start(count: &'count AtomicUsize) -> Option<Self> {
+        let reading = Self(count);
+        (count.fetch_add(1, Ordering::AcqRel) < MAX_DRAINING).then_some(reading)
     }
-    draining.fetch_sub(1, Ordering::AcqRel);
+}
+
+impl Drop for Draining<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn refused(refusal: Refusal) -> Response {

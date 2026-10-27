@@ -1,17 +1,21 @@
 //! Per-actor request limits through the real router: HTTP and MCP share one
 //! budget, refusals come after authentication and before any processing, and
 //! a refused request leaves its idempotency key unused.
+use std::convert::Infallible;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use artifree_providers::storage::SqliteStore;
 use artifree_server::auth::AccessToken;
 use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::http::{Request, StatusCode, header};
+use http_body::Frame;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -94,6 +98,29 @@ fn create(key: &str) -> Result<Request<Body>, axum::http::Error> {
         .header(header::CONTENT_TYPE, "application/json")
         .header("idempotency-key", key)
         .body(Body::from(body.to_string()))
+}
+
+/// A request body whose next frame never arrives: an upload stalled mid-body.
+struct Stalled;
+
+impl http_body::Body for Stalled {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        Poll::Pending
+    }
+}
+
+fn stalled_create(key: &str) -> Result<Request<Body>, axum::http::Error> {
+    Request::post("/v1/artifacts")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", key)
+        .body(Body::new(Stalled))
 }
 
 fn mcp_list() -> Result<Request<Body>, axum::http::Error> {
@@ -218,6 +245,41 @@ async fn an_abandoned_request_keeps_its_slot_until_its_work_ends() -> TestResult
         listed["artifacts"].as_array().map(Vec::len),
         Some(1),
         "{listed}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn refusals_cancelled_mid_body_release_their_reading() -> TestResult {
+    let harness = Harness::new(RequestLimits {
+        burst: 1,
+        per_minute: 60,
+        concurrent: 16,
+    });
+    assert_eq!(harness.send(list(TOKEN)?).await?.0, StatusCode::OK);
+    // More refused uploads than may be read at once, each dropped while its
+    // body is being read, as when the server drops the connection.
+    for index in 0..=http::MAX_DRAINING {
+        let cancelled = harness
+            .api
+            .clone()
+            .oneshot(stalled_create(&format!("stalled-key-{index}"))?);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, cancelled)
+                .await
+                .is_err(),
+            "the refused body must still be read"
+        );
+    }
+    // Their reading was released, so the next refused body is read again and
+    // its refusal waits for the drain time instead of being sent at once.
+    let started = Instant::now();
+    let (status, _, body) = harness.send(stalled_create("stalled-key-last")?).await?;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(
+        started.elapsed() >= http::MAX_DRAIN_TIME,
+        "refused after {:?}, without reading the body",
+        started.elapsed()
     );
     Ok(())
 }
