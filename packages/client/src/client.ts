@@ -269,8 +269,22 @@ export class ArtifreeClient {
 }
 
 async function readJson(response: Response): Promise<unknown> {
+  let text: string;
   try {
-    const value: unknown = await response.json();
+    text = await response.text();
+  } catch (error: unknown) {
+    // The connection ended mid-body: the outcome of a mutation is unknown.
+    throw new ArtifreeApiError(
+      'The connection ended while reading a response.',
+      {
+        status: response.status,
+        code: 'network_error',
+        cause: error,
+      },
+    );
+  }
+  try {
+    const value: unknown = JSON.parse(text);
     return value;
   } catch {
     // A non-JSON body fails the caller's contract check instead.

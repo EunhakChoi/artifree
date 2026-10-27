@@ -57,14 +57,19 @@ Artifact behavior is tested at the boundary that owns it:
   owner-only data directory, refusing one other users can access.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
-  the body limit, refused dot segments, a missing base revision as an API
-  error, and a SIGKILL after commit followed by a restart and a replayed
-  retry.
+  the body limit, refused dot segments, a base newer than current reported as
+  the same conflict for every save form, every JSON response validated against
+  the API schema root with its expected status, and a SIGKILL after commit
+  followed by a restart and a replayed retry.
+- `scripts/tests/client.test.mjs`: the API client with an injected `fetch`: a
+  body cut off mid-stream is a network error, a complete foreign body is an
+  invalid response, and uploads pick the smaller exact encoding.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
   read the parent page, use storage, open a popup, or reach the API; create,
   save, and reload requests held in flight keep the forms read-only and the
   dialog open; a response lost after commit is retried with the same key and
-  replays; a failed load offers a retry; unsaved changes lock navigation;
+  replays; a failed load offers a retry; a failed list refresh keeps the open
+  draft; unsaved changes lock navigation;
   non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
   line breaks.
 

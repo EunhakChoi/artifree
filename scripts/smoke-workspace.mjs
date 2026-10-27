@@ -186,10 +186,33 @@ fetch('${origin}/v1/artifacts').then(
   await expect(workspace.getByText('Not saved', { exact: true })).toBeVisible();
   await restoreSave();
   await typeAndUndo(editor);
+  // The list refresh that follows this save fails. The open artifact, and
+  // any draft in it, must stay mounted while the list offers a retry.
+  let listFailed = false;
+  const failList = (route) => {
+    if (listFailed || route.request().method() !== 'GET')
+      return route.fallback();
+    listFailed = true;
+    return route.fulfill({
+      status: 503,
+      json: { error: { code: 'unavailable', message: 'List is busy.' } },
+    });
+  };
+  await page.route('**/v1/artifacts', failList);
   await workspace.getByRole('button', { name: 'Save revision' }).click();
   await expect(
     workspace.getByText('Revision 5', { exact: true }),
   ).toBeVisible();
+  await expect(workspace.getByText('Could not list artifacts')).toBeVisible();
+  await page.unroute('**/v1/artifacts', failList);
+  await editor.fill(probe('Draft kept while the list fails'));
+  await workspace
+    .getByRole('navigation', { name: 'Artifacts' })
+    .getByRole('button', { name: 'Try again' })
+    .click();
+  await expect(workspace.getByText('Could not list artifacts')).toBeHidden();
+  await expect(editor).toHaveValue(/Draft kept while the list fails/);
+  await workspace.getByRole('button', { name: 'Discard changes' }).click();
 
   // Saving must write back exactly the bytes the user did not change. A file
   // that is not UTF-8 cannot round-trip through a textarea and is read-only;

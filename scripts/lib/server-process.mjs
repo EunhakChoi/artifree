@@ -59,43 +59,57 @@ export async function startServer(binary, dataDir, extraArgs = []) {
     stderr += chunk;
   });
   const exited = new Promise((resolve) => child.once('exit', resolve));
-  const ready = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+  // Any failure before the handle is returned must not leave the server
+  // running: its pipes would keep the caller's event loop alive.
+  try {
+    return await connect();
+  } catch (error) {
+    if (child.exitCode === null) {
       child.kill('SIGKILL');
-      reject(new Error(`Server was not ready within 30s. ${stderr}`));
-    }, 30_000);
-    const lines = createInterface({ input: child.stdout });
-    lines.once('line', (line) => {
-      clearTimeout(timer);
-      try {
-        resolve(JSON.parse(line));
-      } catch (error) {
-        reject(
-          new Error(`Unexpected readiness line: ${line}`, { cause: error }),
-        );
-      }
+      await exited;
+    }
+    throw error;
+  }
+
+  async function connect() {
+    const ready = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`Server was not ready within 30s. ${stderr}`));
+      }, 30_000);
+      const lines = createInterface({ input: child.stdout });
+      lines.once('line', (line) => {
+        clearTimeout(timer);
+        try {
+          resolve(JSON.parse(line));
+        } catch (error) {
+          reject(
+            new Error(`Unexpected readiness line: ${line}`, { cause: error }),
+          );
+        }
+      });
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`Server exited with ${code} before ready. ${stderr}`));
+      });
     });
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`Server exited with ${code} before ready. ${stderr}`));
-    });
-  });
-  if (ready.event !== 'ready')
-    throw new Error(`Unexpected readiness event: ${JSON.stringify(ready)}`);
-  const token = (await readFile(ready.token_file, 'utf8')).trim();
-  return {
-    ...ready,
-    token,
-    stderr: () => stderr,
-    async stop() {
-      if (child.exitCode !== null) return child.exitCode;
-      child.kill('SIGTERM');
-      return exited;
-    },
-    async kill() {
-      if (child.exitCode !== null) return child.exitCode;
-      child.kill('SIGKILL');
-      return exited;
-    },
-  };
+    if (ready.event !== 'ready')
+      throw new Error(`Unexpected readiness event: ${JSON.stringify(ready)}`);
+    const token = (await readFile(ready.token_file, 'utf8')).trim();
+    return {
+      ...ready,
+      token,
+      stderr: () => stderr,
+      async stop() {
+        if (child.exitCode !== null) return child.exitCode;
+        child.kill('SIGTERM');
+        return exited;
+      },
+      async kill() {
+        if (child.exitCode !== null) return child.exitCode;
+        child.kill('SIGKILL');
+        return exited;
+      },
+    };
+  }
 }

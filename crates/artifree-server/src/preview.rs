@@ -7,8 +7,10 @@
 //! `allow-same-origin`, so content runs in an opaque origin even when opened
 //! directly, and may load only files of its own package.
 //!
-//! This is not a capability runtime: there is no SDK bridge, no network
-//! egress, and no data or model access for artifact content.
+//! This isolates content from the workspace, not from the network: loads and
+//! connections are limited to the content origin, but a script can still
+//! navigate its own frame to another site (decision 0003). It is not a
+//! capability runtime: there is no SDK bridge and no data or model access.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

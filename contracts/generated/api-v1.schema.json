@@ -10,7 +10,7 @@
           "type": "integer"
         },
         "current_revision": {
-          "description": "Latest committed revision.",
+          "description": "Latest committed revision when this metadata was produced; see\n[`CommitResponse::artifact`] for replays.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -101,7 +101,7 @@
       "properties": {
         "artifact": {
           "$ref": "#/$defs/Artifact",
-          "description": "Artifact metadata at the time of this response."
+          "description": "Artifact metadata as of the commit this request identifies. On a\nreplay it can be older than the artifact's current state; read the\nartifact for that before choosing the next base revision."
         },
         "replayed": {
           "description": "True when an earlier request with the same key already committed it.",

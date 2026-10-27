@@ -355,7 +355,7 @@ try {
   if (browserName === 'chromium')
     assert.deepEqual(
       expectedApiFailures.sort(),
-      ['401', '409', '503', '503', '503'],
+      ['401', '409', '503', '503', '503', '503'],
       'Only the deliberate rejected token, stale save, lost responses, and failed load may fail.',
     );
   assert.deepEqual(
@@ -400,9 +400,22 @@ try {
       .catch(() => undefined);
   throw error;
 } finally {
-  if (context) await context.tracing.stop({ path: resolve(qa, 'trace.zip') });
-  if (browser) await browser.close();
-  await new Promise((resolveClosed) => server.close(resolveClosed));
-  await api.stop();
-  await rm(dataDir, { recursive: true, force: true });
+  // Run every cleanup step even if an earlier one fails, so no browser or
+  // server outlives the run. Report failures without masking the run's own
+  // error, and still fail the run.
+  const cleanup = [
+    () => context?.tracing.stop({ path: resolve(qa, 'trace.zip') }),
+    () => browser?.close(),
+    () => new Promise((resolveClosed) => server.close(resolveClosed)),
+    () => api.stop(),
+    () => rm(dataDir, { recursive: true, force: true }),
+  ];
+  for (const step of cleanup) {
+    try {
+      await step();
+    } catch (error) {
+      console.error('Smoke cleanup step failed:', error);
+      process.exitCode = 1;
+    }
+  }
 }

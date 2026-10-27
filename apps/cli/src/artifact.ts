@@ -242,12 +242,19 @@ async function save(args: string[]): Promise<void> {
     const present = new Set(files.map((file) => file.path));
     const revisions = await client.listRevisions(id);
     const baseRevision = revisions.find((item) => item.revision === base);
-    // A missing base is server state, not a usage mistake: exit as an API error.
-    if (baseRevision === undefined)
-      throw new ArtifreeApiError(`Revision ${base} of ${id} does not exist.`, {
-        status: 0,
-        code: 'not_found',
-      });
+    // Revisions are numbered 1..current, so a missing base is newer than the
+    // current revision: report it as the server does for --put/--delete.
+    if (baseRevision === undefined) {
+      const current = revisions[0]?.revision;
+      throw new ArtifreeApiError(
+        `Revision ${base} is not current; the current revision is ${current ?? 'unknown'}.`,
+        {
+          status: 0,
+          code: 'revision_conflict',
+          ...(current === undefined ? {} : { currentRevision: current }),
+        },
+      );
+    }
     for (const file of files)
       changes.push({ op: 'put', ...encodeFile(file.path, file.bytes) });
     for (const file of baseRevision.files)

@@ -30,8 +30,13 @@ const rustEdges = {
     'getrandom',
     'serde_json',
     'tokio',
-    'tower',
   ],
+};
+
+// Edges allowed only as dev-dependencies, so test tooling cannot become part
+// of a shipped binary unreviewed.
+const rustDevEdges = {
+  'artifree-server': ['tower'],
 };
 
 const clientEdges = {
@@ -59,9 +64,13 @@ export function checkRustPackages(packages) {
       `Unreviewed crate: ${pkg.name}`,
     );
     for (const dependency of pkg.dependencies) {
+      const devOnly = rustDevEdges[pkg.name]?.includes(dependency.name);
       assert.ok(
-        rustEdges[pkg.name].includes(dependency.name),
-        `${pkg.name} cannot depend on ${dependency.name}; review the layer boundary first.`,
+        rustEdges[pkg.name].includes(dependency.name) ||
+          (devOnly === true && dependency.kind === 'dev'),
+        devOnly === true
+          ? `${pkg.name} may use ${dependency.name} only as a dev-dependency.`
+          : `${pkg.name} cannot depend on ${dependency.name}; review the layer boundary first.`,
       );
     }
   }

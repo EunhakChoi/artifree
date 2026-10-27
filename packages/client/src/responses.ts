@@ -157,7 +157,9 @@ export function parseError(value: unknown): ErrorBody | undefined {
   const code = errorCode(value.error.code);
   const { message, current_revision } = value.error;
   if (code === undefined || typeof message !== 'string') return undefined;
-  if (current_revision === undefined) return { code, message };
+  // The schema allows null as well as absence; both mean "not a conflict".
+  if (current_revision === undefined || current_revision === null)
+    return { code, message };
   if (!isCount(current_revision)) return undefined;
   return { code, message, current_revision };
 }

@@ -109,11 +109,18 @@ test('CLI creates, saves, reads pinned revisions, and rejects stale saves', asyn
     assert.match(stale.stderr, /^error\[revision_conflict\]/);
     assert.match(stale.stderr, /current_revision=2/);
 
-    // A missing base revision is server state: an API error, not usage.
-    const missing = cli(server, ['save', id, '--base', '99', '--dir', site]);
-    assert.equal(missing.status, 1);
-    assert.equal(missing.stdout, '');
-    assert.match(missing.stderr, /^error\[not_found\]/);
+    // A base newer than current is the same conflict for --dir as for
+    // --put/--delete, so agents can handle both the same way.
+    for (const change of [
+      ['--dir', site],
+      ['--delete', 'notes.txt'],
+    ]) {
+      const ahead = cli(server, ['save', id, '--base', '99', ...change]);
+      assert.equal(ahead.status, 1, change[0]);
+      assert.equal(ahead.stdout, '', change[0]);
+      assert.match(ahead.stderr, /^error\[revision_conflict\]/, change[0]);
+      assert.match(ahead.stderr, /current_revision=2/, change[0]);
+    }
 
     const first = cli(server, ['cat', id, 'index.html', '--revision', '1']);
     assert.equal(first.stdout, '<h1>v1</h1>');
@@ -153,7 +160,9 @@ test('Every JSON body the server sends matches the API schema root', async () =>
   const validate = createAjv().compile(schema);
   const server = await startServer(binary, dataDirectory('schema-data'));
   try {
-    const request = async (method, path, body) => {
+    // Each call states the expected status, so an error body (which the
+    // schema root also accepts) cannot stand in for the success shape.
+    const request = async (status, method, path, body) => {
       const init = {
         method,
         headers: { authorization: `Bearer ${server.token}` },
@@ -165,18 +174,19 @@ test('Every JSON body the server sends matches the API schema root', async () =>
       }
       const response = await fetch(`${server.api_url}${path}`, init);
       const value = await response.json();
+      assert.equal(response.status, status, `${method} ${path}`);
       assert.ok(
         validate(value),
         `${method} ${path} (${response.status}) does not match: ${JSON.stringify(validate.errors?.slice(0, 3))}`,
       );
       return value;
     };
-    const created = await request('POST', '/v1/artifacts', {
+    const created = await request(201, 'POST', '/v1/artifacts', {
       title: 'Schema',
       files: [{ path: 'index.html', encoding: 'utf8', content: '<p>1</p>' }],
     });
     const id = created.artifact.id;
-    await request('POST', `/v1/artifacts/${id}/revisions`, {
+    await request(201, 'POST', `/v1/artifacts/${id}/revisions`, {
       base_revision: 1,
       changes: [
         {
@@ -187,13 +197,17 @@ test('Every JSON body the server sends matches the API schema root', async () =>
         },
       ],
     });
-    await request('GET', '/v1/artifacts');
-    await request('GET', `/v1/artifacts/${id}`);
-    await request('GET', `/v1/artifacts/${id}/revisions`);
-    await request('GET', `/v1/artifacts/${id}/revisions/1`);
-    await request('POST', `/v1/artifacts/${id}/revisions/1/previews`);
-    await request('GET', '/v1/artifacts/art_00000000000000000000000000000000');
-    await request('DELETE', '/v1/artifacts');
+    await request(200, 'GET', '/v1/artifacts');
+    await request(200, 'GET', `/v1/artifacts/${id}`);
+    await request(200, 'GET', `/v1/artifacts/${id}/revisions`);
+    await request(200, 'GET', `/v1/artifacts/${id}/revisions/1`);
+    await request(201, 'POST', `/v1/artifacts/${id}/revisions/1/previews`);
+    await request(
+      404,
+      'GET',
+      '/v1/artifacts/art_00000000000000000000000000000000',
+    );
+    await request(405, 'DELETE', '/v1/artifacts');
   } finally {
     await server.stop();
   }

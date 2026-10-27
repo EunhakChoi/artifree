@@ -74,9 +74,29 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     setSelected(artifact.id);
     setGeneration((value) => value + 1);
   }
-  const selectedId =
-    selected ??
-    (artifacts.status === 'ready' ? artifacts.value[0]?.id : undefined);
+  const listed = artifacts.status === 'ready' ? artifacts.value : undefined;
+  const selectedId = selected ?? listed?.[0]?.id;
+  // Once an artifact is open, a failed or retried list load must not unmount
+  // it and any draft in it; the failure is shown in place of the list.
+  const showGrid = selectedId !== undefined && listed?.length !== 0;
+  const listFailure =
+    artifacts.status === 'error' ? (
+      <Alert variant="destructive">
+        <AlertTitle>Could not list artifacts</AlertTitle>
+        <AlertDescription>
+          <p>{artifacts.message}</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setGeneration((value) => value + 1)}
+          >
+            <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+            Try again
+          </Button>
+        </AlertDescription>
+      </Alert>
+    ) : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -92,41 +112,11 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
           Loading artifacts…
         </output>
       ) : null}
-      {artifacts.status === 'error' ? (
-        <Alert variant="destructive">
-          <AlertTitle>Could not list artifacts</AlertTitle>
-          <AlertDescription>
-            <p>{artifacts.message}</p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setGeneration((value) => value + 1)}
-            >
-              <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
-              Try again
-            </Button>
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      {artifacts.status === 'ready' && artifacts.value.length === 0 ? (
-        <Empty>
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <FileCode2Icon aria-hidden="true" />
-            </EmptyMedia>
-            <EmptyTitle>No artifacts yet</EmptyTitle>
-            <EmptyDescription>
-              Create one here, or from an agent with{' '}
-              <code>artifree artifact create</code>.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      ) : null}
-      {artifacts.status === 'ready' && artifacts.value.length > 0 ? (
+      {showGrid ? (
         <div className="grid gap-5 lg:grid-cols-3">
           <nav aria-label="Artifacts" className="flex flex-col gap-2">
-            {artifacts.value.map((artifact) => (
+            {listFailure}
+            {listed?.map((artifact) => (
               <Button
                 key={artifact.id}
                 variant={artifact.id === selectedId ? 'secondary' : 'ghost'}
@@ -143,18 +133,32 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
             ))}
           </nav>
           <div className="min-w-0 lg:col-span-2">
-            {selectedId === undefined ? null : (
-              <ArtifactDetail
-                key={selectedId}
-                client={client}
-                artifactId={selectedId}
-                onSaved={refresh}
-                unsaved={unsaved}
-                onUnsavedChange={setUnsaved}
-              />
-            )}
+            <ArtifactDetail
+              key={selectedId}
+              client={client}
+              artifactId={selectedId}
+              onSaved={refresh}
+              unsaved={unsaved}
+              onUnsavedChange={setUnsaved}
+            />
           </div>
         </div>
+      ) : (
+        listFailure
+      )}
+      {listed?.length === 0 ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <FileCode2Icon aria-hidden="true" />
+            </EmptyMedia>
+            <EmptyTitle>No artifacts yet</EmptyTitle>
+            <EmptyDescription>
+              Create one here, or from an agent with{' '}
+              <code>artifree artifact create</code>.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       ) : null}
     </div>
   );

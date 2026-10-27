@@ -35,6 +35,19 @@ test('Rust core rejects a concrete provider even when renamed or dev-only', () =
   );
 });
 
+test('Rust server may use test tooling only as a dev-dependency', () => {
+  const packages = emptyPackages();
+  packages[5].dependencies.push({ name: 'tower', kind: 'dev' });
+  checkRustPackages(packages);
+  for (const kind of [null, 'build']) {
+    packages[5].dependencies = [{ name: 'tower', kind }];
+    assert.throws(
+      () => checkRustPackages(packages),
+      /artifree-server may use tower only as a dev-dependency/,
+    );
+  }
+});
+
 test('Rust policy rejects an unreviewed workspace member', () => {
   assert.throws(
     () =>

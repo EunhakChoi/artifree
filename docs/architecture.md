@@ -39,8 +39,9 @@ Generated artifacts do not inherit management UI styling restrictions.
 [Decision 0002](decisions/0002-ui-and-quality.md) records this stack and the
 [quality gates](quality.md). They cover both language boundaries, rejection
 contracts, source-linked design drift, zero-warning lint, Windows/MSRV, browser
-accessibility, and dependency checks. Framework/runtime and provider selection
-remain deferred.
+accessibility, and dependency checks. [Decision 0003](decisions/0003-local-html-artifact-slice.md)
+selects Axum on Tokio for HTTP and SQLite through `rusqlite` for local
+storage; other providers remain candidates.
 
 ## Layer dependency direction
 
@@ -114,7 +115,7 @@ in the Rust core.
 | `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin |
 
 Errors use `{ "error": { "code", "message", "current_revision"? } }` with
-`invalid_request` (400/422), `unauthenticated` (401), `not_found` (404),
+`invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
 `revision_conflict` (409), `request_key_reused` (422), `payload_too_large`
 (413), `unavailable` (503, retry with the same key), and `internal` (500).
 Bodies are defined in `crates/artifree-contracts/src/api.rs`.

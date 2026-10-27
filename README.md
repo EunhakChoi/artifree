@@ -10,7 +10,7 @@ server and use it from a browser, CLI, HTTP API, or MCP-capable agent.
 file-package artifacts are created, saved as immutable revisions with conflict
 detection and safe retries, and previewed in a sandbox on a separate origin —
 through the HTTP API, the CLI, and the web workspace, stored in a local SQLite
-file. It is single-user and listens on loopback. Publishing, sharing, MCP,
+file. It is single-user and listens on loopback by default. Publishing, sharing, MCP,
 the runtime SDK bridge, build and conversion workers, and multi-user
 authentication are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.

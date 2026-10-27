@@ -120,7 +120,8 @@ export interface Artifact {
    */
   created_at_ms: number;
   /**
-   * Latest committed revision.
+   * Latest committed revision when this metadata was produced; see
+   * [`CommitResponse::artifact`] for replays.
    */
   current_revision: number;
   /**

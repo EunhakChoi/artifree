@@ -103,7 +103,8 @@ pub struct Artifact {
     pub kind: ArtifactKind,
     /// Display title.
     pub title: String,
-    /// Latest committed revision.
+    /// Latest committed revision when this metadata was produced; see
+    /// [`CommitResponse::artifact`] for replays.
     pub current_revision: u64,
     /// Creation time in Unix milliseconds.
     pub created_at_ms: i64,
@@ -141,7 +142,9 @@ pub struct Revision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommitResponse {
-    /// Artifact metadata at the time of this response.
+    /// Artifact metadata as of the commit this request identifies. On a
+    /// replay it can be older than the artifact's current state; read the
+    /// artifact for that before choosing the next base revision.
     pub artifact: Artifact,
     /// The revision the request committed.
     pub revision: Revision,
