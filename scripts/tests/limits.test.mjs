@@ -132,8 +132,53 @@ test('The CLI reports a refused save as not done, with its key unused', async ()
     assert.equal(refused.status, 1);
     assert.match(
       refused.stderr,
-      /Nothing was done\. Retry after 3s; --idempotency-key cli-limited-1 is still unused\./,
+      /This attempt was not processed\. Retry after 3s with --idempotency-key cli-limited-1\./,
     );
+    assert.doesNotMatch(refused.stderr, /unused|Nothing was done/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('A refused retry of a committed create replays it after the delay', async () => {
+  const server = await startServer(binary, join(scratch, 'retry-commit'), [
+    '--request-burst',
+    '1',
+    '--requests-per-minute',
+    '20',
+  ]);
+  try {
+    const site = join(scratch, 'retry-commit-site');
+    await mkdir(site, { recursive: true });
+    await writeFile(join(site, 'index.html'), '<p>once</p>');
+    const args = [
+      'create',
+      '--title',
+      'Retry',
+      '--dir',
+      site,
+      '--idempotency-key',
+      'cli-committed-1',
+    ];
+    const first = cli(server, args);
+    assert.equal(first.status, 0, first.stderr);
+    const created = JSON.parse(first.stdout);
+    assert.equal(created.replayed, false);
+    // The same key again, refused: the key was used by the first attempt,
+    // so the CLI must not call it unused.
+    const refused = cli(server, args);
+    assert.equal(refused.status, 1);
+    assert.match(
+      refused.stderr,
+      /This attempt was not processed\. Retry after 3s with --idempotency-key cli-committed-1\./,
+    );
+    assert.doesNotMatch(refused.stderr, /unused/);
+    await delay(3100);
+    const retried = cli(server, args);
+    assert.equal(retried.status, 0, retried.stderr);
+    const replayed = JSON.parse(retried.stdout);
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.artifact.id, created.artifact.id);
   } finally {
     await server.stop();
   }

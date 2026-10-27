@@ -45,8 +45,8 @@ const notes: Record<string, ModuleNote> = {
     purpose:
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
-      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
-    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 웹 자동 갱신과 handoff는 별도 기능입니다.',
+      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 커밋 변경 알림 stream(GET /v1/changes, SSE, cursor 재개·reset, 사용자별 stream 수 제한), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
+    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 변경 알림을 쓰는 웹 자동 갱신(A02)과 handoff는 별도 기능입니다.',
   },
   domain: {
     purpose:
@@ -446,9 +446,9 @@ const flowSteps = [
     tab: '원본 저장',
     layer: 'WORKING (LOCAL SQLITE) · LOGIC → STORAGE',
     title: 'revision과 성공 결과를 기록합니다.',
-    copy: '새 원본 revision, 중복 방지 receipt와 이벤트를 일관되게 기록합니다. Blob 저장과 SQL 트랜잭션의 경계도 명시합니다.',
+    copy: '새 원본 revision, 중복 방지 receipt와 변경 알림 기록을 한 트랜잭션에 남깁니다. replay와 실패한 commit은 알림을 만들지 않습니다. Blob 저장과 SQL 트랜잭션의 경계도 명시합니다.',
     rule: '화면의 pending 표시와 저장 성공을 구분합니다. 재시도로 revision이 중복 생성되지 않게 합니다.',
-    code: 'SQLite transaction (local profile):\n  replay or reject request key\n  conditional revision commit\n  files + receipt\n\n→ committed revision / conflict\n(event outbox: planned)',
+    code: 'SQLite transaction (local profile):\n  replay or reject request key\n  conditional revision commit\n  files + receipt + change record\n\n→ committed revision / conflict\n→ GET /v1/changes (cursor)',
   },
   {
     tab: '격리 빌드',

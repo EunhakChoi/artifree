@@ -1,6 +1,6 @@
 # Artifree architecture
 
-Status: early development, 2026-10-27. Local HTML artifacts work end to end;
+Status: early development, 2026-10-28. Local HTML artifacts work end to end;
 see [decision 0003](decisions/0003-local-html-artifact-slice.md).
 
 The [interactive HTML design](architecture.html) maps the design to actual source
@@ -9,7 +9,8 @@ Working today: creating HTML file-package artifacts, conditional revision
 commits with retry keys, revision-pinned reads, and sandboxed previews, through
 the HTTP API, MCP tools for agents
 ([decision 0004](decisions/0004-inbound-mcp-adapter.md)), the CLI, and the web
-workspace, stored in local SQLite.
+workspace, stored in local SQLite. Clients can follow committed changes as a
+server-sent event stream ([decision 0006](decisions/0006-change-feed.md)).
 
 ## Repository map
 
@@ -71,7 +72,8 @@ web (proxy) ───┘                       └─ content listener /p/<ticke
          ArtifactService (owner check, fingerprint, apply changes)
                      │
                      ▼
-         SqliteStore: one transaction per commit (revision CAS + files + request key)
+         SqliteStore: one transaction per commit
+                      (revision CAS + files + request key + change record)
 ```
 
 ## State and authority
@@ -116,6 +118,7 @@ in the Rust core.
 | `GET /v1/artifacts/{id}/revisions/{n}`              | One revision manifest                         |
 | `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file (attachment)       |
 | `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin |
+| `GET /v1/changes`                                   | Committed changes as server-sent events       |
 
 Errors use `{ "error": { "code", "message", "current_revision"? } }` with
 `invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
@@ -127,6 +130,14 @@ Every request is authenticated first and then admitted under one per-actor
 budget shared with MCP: a burst, a sustained rate, and a cap on concurrent
 requests ([decision 0005](decisions/0005-request-limits.md)).
 Bodies are defined in `crates/artifree-contracts/src/api.rs`.
+
+`GET /v1/changes` streams `ready`, `change`, and `reset` events whose `id` is
+a durable feed cursor. Each commit records its change in its own
+transaction, so replays and failed commits send nothing, and a client that
+reconnects with `Last-Event-ID` receives every commit it missed, also after
+a restart. Events name the artifact and revision to read again; they carry
+no content. An open stream takes one of the actor's `--change-streams`
+slots, not a request slot.
 
 ## MCP
 
@@ -144,10 +155,13 @@ Pi configuration. These are agent tools, not page capabilities.
 
 ## Next implementation slices
 
-- Publishing a pinned revision, restore, and fork, kept separate from app data
-  and access policy.
-- Multi-user authentication, sharing, and revocation tests.
-- Build workers before running untrusted toolchains; then the runtime SDK
-  bridge with server-checked capabilities.
-- PostgreSQL/object storage held to the same store contract tests.
-- Structured document types and optional AI capabilities.
+The [PR roadmap](roadmap.md) is the implementation plan. A01 (committed
+change notifications and the deferred CLI retry diagnostic) is implemented;
+the next slice is A02 (safe web updates after an external agent saves).
+
+The roadmap separately covers artifact management, local/server deployment,
+isolated builds, the runtime SDK and app data, optional providers, structured
+artifact types and conversions, and multi-user sharing/publication. Publishing
+must choose and document whether its address follows the head or a pinned
+revision. PostgreSQL and external object storage are conditional extensions;
+single-owner hosting can keep SQLite.

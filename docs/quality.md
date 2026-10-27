@@ -1,27 +1,27 @@
 # Quality gates
 
-Status: early development, 2026-10-27. The checks below protect the local HTML
+Status: early development, 2026-10-28. The checks below protect the local HTML
 artifact slice ([decision 0003](decisions/0003-local-html-artifact-slice.md))
 and the foundation around it. Passing them implies nothing about planned
 features.
 
 ## Enforced checks
 
-| Area         | Enforcement                                                                                                                                                                                                                                              |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| TypeScript   | Strict types, checked dependency declarations, exact optional properties, unchecked indexes, side-effect imports, missing returns, fallthrough, unreachable code                                                                                         |
-| Code lint    | Oxlint correctness, hooks, JSX accessibility, import cycles, explicit `any`, non-null assertions; zero warnings                                                                                                                                          |
-| UI design    | Six `@shadcn/lint` rules: component styling, semantic colors, arbitrary values, inline styles, unknown classes, readable static classes                                                                                                                  |
-| CSS          | Stylelint recommended validity checks, duplicate selectors/properties, unknown values/properties, Tailwind-aware at-rules; zero warnings                                                                                                                 |
-| Rust         | Unsafe forbidden, unused results denied, public documentation required, documented stdout/stderr exceptions only in CLI binaries, pedantic Clippy, rustfmt, rustdoc warnings denied                                                                      |
-| Architecture | Exact Rust workspace membership and allowed dependencies, including build/dev edges; TypeScript package/import/re-export/type/lazy-import boundaries; no computed imports or source symlinks                                                             |
-| Contracts    | Rust DTO generation, JSON Schema validity, unknown-field/type/value rejection, stable public TypeScript aliases, byte-for-byte generated drift; MCP tool schemas self-contained, standard-format, closed                                                 |
-| Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                             |
-| Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits |
-| CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                       |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                                  |
-| Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                     |
-| CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                              |
+| Area         | Enforcement                                                                                                                                                                                                                                                                                   |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TypeScript   | Strict types, checked dependency declarations, exact optional properties, unchecked indexes, side-effect imports, missing returns, fallthrough, unreachable code                                                                                                                              |
+| Code lint    | Oxlint correctness, hooks, JSX accessibility, import cycles, explicit `any`, non-null assertions; zero warnings                                                                                                                                                                               |
+| UI design    | Six `@shadcn/lint` rules: component styling, semantic colors, arbitrary values, inline styles, unknown classes, readable static classes                                                                                                                                                       |
+| CSS          | Stylelint recommended validity checks, duplicate selectors/properties, unknown values/properties, Tailwind-aware at-rules; zero warnings                                                                                                                                                      |
+| Rust         | Unsafe forbidden, unused results denied, public documentation required, documented stdout/stderr exceptions only in CLI binaries, pedantic Clippy, rustfmt, rustdoc warnings denied                                                                                                           |
+| Architecture | Exact Rust workspace membership and allowed dependencies, including build/dev edges; TypeScript package/import/re-export/type/lazy-import boundaries; no computed imports or source symlinks                                                                                                  |
+| Contracts    | Rust DTO generation, JSON Schema validity, unknown-field/type/value rejection, stable public TypeScript aliases, byte-for-byte generated drift; MCP tool schemas self-contained, standard-format, closed                                                                                      |
+| Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                  |
+| Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery and resumption |
+| CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                            |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                                                                       |
+| Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                          |
+| CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                   |
 
 The formatter owns formatting. CSS lint uses the recommended correctness preset
 rather than imposing a second formatting convention. Tailwind's `@apply` needs a
@@ -49,7 +49,10 @@ Artifact behavior is tested at the boundary that owns it:
 - `crates/artifree-providers/tests/sqlite_store.rs`: the store contract on a
   real database — reopen durability, replay, key reuse, conflicts, eight
   concurrent writers, a trigger-injected failure that must leave no partial
-  revision, content sharing, and newer-schema refusal.
+  revision, content sharing, and newer-schema refusal; one change record per
+  commit and none for replays, conflicts, or a commit that fails at its
+  change record; the owner's changes with the global head; and the upgrade
+  of a version 1 database.
 - `crates/artifree-server/tests/`: HTTP status and error codes, including
   unsupported methods; the bearer token on every route and unmatched path, with
   a case-insensitive scheme; unsafe paths, body limits, pinned reads, preview
@@ -87,10 +90,23 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   its slot until its work ends and still commits; and refused requests
   cancelled while their body is read, which release their place among the
   bodies being read.
+- `crates/artifree-server/tests/change_feed.rs`: the change feed through the
+  router: `ready` at the head, one event per commit in order and none for
+  retries or conflicts, resumption after a cursor, `reset` for a cursor
+  beyond the head, the bearer header required and a token in the URL
+  refused, malformed cursors, the per-actor stream cap apart from the
+  request slots and its release on close, and streams ended for shutdown.
+- `scripts/tests/changes.test.mjs`: the TypeScript client against the server
+  binary: an MCP agent's saves reach a follower once and validate against the
+  schema, a follower crosses a crash and restart and receives the commit made
+  while it waited, a later follower receives a commit made while nobody
+  followed, a cursor from another database is reset, shutdown with an open
+  stream finishes, and an invalid stream limit stops the server.
 - `scripts/tests/limits.test.mjs`: the server binary with small limits. The
   official MCP client and the CLI share the budget, a refused create commits
-  nothing and its key works after the delay, the CLI says nothing was done, a
-  refused 30 MiB upload still receives the `429`, a refused body that never
+  nothing and its key works after the delay, the CLI says the attempt was
+  not processed, a refused retry of a committed create replays it after the
+  delay, a refused 30 MiB upload still receives the `429`, a refused body that never
   ends is answered within the drain bound and immediately once 32 are being
   read, a request held mid-body
   keeps its concurrency slot until it finishes, and invalid limit flags stop

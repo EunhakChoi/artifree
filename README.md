@@ -88,6 +88,10 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
+The [PR roadmap](docs/roadmap.md) records the remaining work, dependencies,
+acceptance checks, and evidence requirements. The next slices are a committed
+change feed and safe web updates after agent edits.
+
 ## Verification
 
 ```sh

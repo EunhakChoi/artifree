@@ -58,8 +58,10 @@ The analyzed hosted product also answered some writes with `429` rate caps
 6. **Clients.** `rate_limited` is a contract error code (contract 0.4.0). The
    TypeScript client exposes `retryAfterSeconds`, and its list of known codes
    is now a record typed by the contract, so a new code fails type checking
-   instead of becoming `invalid_response`. The CLI says that nothing was done
-   and that the key is still unused.
+   instead of becoming `invalid_response`. The CLI says that this attempt was
+   not processed and to retry with the same key. (Corrected in
+   [0006](0006-change-feed.md): it first said the key was still unused,
+   which is false when an earlier attempt with that key committed.)
 7. **Fail closed.** If the limiter's lock is poisoned, requests are refused
    with `503 unavailable` rather than admitted.
 

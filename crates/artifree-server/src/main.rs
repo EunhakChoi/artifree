@@ -107,6 +107,7 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             "--request-burst" => limits.burst = limit(flag, &value()?)?,
             "--requests-per-minute" => limits.per_minute = limit(flag, &value()?)?,
             "--concurrent-requests" => limits.concurrent = limit(flag, &value()?)?,
+            "--change-streams" => limits.streams = limit(flag, &value()?)?,
             other => {
                 return Err(format!(
                     "Unknown arguments. Unrecognized serve option {other}; use --help."
@@ -163,6 +164,7 @@ Options:
   --request-burst <n>           Requests accepted at once [default: {burst}]
   --requests-per-minute <n>     Sustained request rate [default: {rate}]
   --concurrent-requests <n>     Requests running at once [default: {concurrent}]
+  --change-streams <n>          Open GET /v1/changes streams [default: {streams}]
 
 Request limits apply per actor to HTTP and MCP together; a refused request
 gets 429 rate_limited with Retry-After and is not processed.
@@ -175,5 +177,6 @@ running server.",
         burst = RequestLimits::default().burst,
         rate = RequestLimits::default().per_minute,
         concurrent = RequestLimits::default().concurrent,
+        streams = RequestLimits::default().streams,
     );
 }

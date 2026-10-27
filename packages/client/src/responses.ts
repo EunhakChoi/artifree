@@ -1,6 +1,8 @@
 import type {
   Artifact,
+  ArtifactChange,
   ArtifactKind,
+  ChangeKind,
   CommitResponse,
   ErrorBody,
   ErrorCode,
@@ -51,6 +53,8 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   unavailable: true,
   internal: true,
 };
+
+const CHANGE_KINDS: readonly ChangeKind[] = ['created', 'revised'];
 
 function artifactKind(value: unknown): ArtifactKind | undefined {
   return ARTIFACT_KINDS.find((kind) => kind === value);
@@ -156,6 +160,29 @@ export function parsePreview(value: unknown): Preview | undefined {
   if (typeof url !== 'string' || !isCount(number) || !isTime(expires_at_ms))
     return undefined;
   return { url, revision: number, expires_at_ms };
+}
+
+/** Parses the data of a `change` event. */
+export function parseArtifactChange(
+  value: unknown,
+): ArtifactChange | undefined {
+  if (!isRecord(value)) return undefined;
+  const { cursor, artifact_id, change, revision, committed_at_ms } = value;
+  const kind = CHANGE_KINDS.find((known) => known === change);
+  if (
+    !isCount(cursor) ||
+    typeof artifact_id !== 'string' ||
+    kind === undefined ||
+    !isCount(revision) ||
+    !isTime(committed_at_ms)
+  )
+    return undefined;
+  return { cursor, artifact_id, change: kind, revision, committed_at_ms };
+}
+
+/** Parses the cursor of a `ready` or `reset` event. */
+export function parseFeedPosition(value: unknown): number | undefined {
+  return isRecord(value) && isCount(value.cursor) ? value.cursor : undefined;
 }
 
 /** Parses a non-2xx JSON body. */

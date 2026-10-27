@@ -180,6 +180,46 @@ pub struct Preview {
     pub expires_at_ms: i64,
 }
 
+/// What a committed change did to an artifact. Clients should treat a kind
+/// they do not know as a reason to read the artifact again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    /// The artifact was created with revision 1.
+    Created,
+    /// A new source revision was committed.
+    Revised,
+}
+
+/// Data of a `change` event on `GET /v1/changes`: one commit that wrote a
+/// revision. Replayed retries and failed commits produce no event. The event
+/// says what to read again; it carries no content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactChange {
+    /// Feed position of this change, also sent as the event `id`.
+    pub cursor: u64,
+    /// The changed artifact.
+    pub artifact_id: String,
+    /// What changed.
+    pub change: ChangeKind,
+    /// The artifact's revision after the change.
+    pub revision: u64,
+    /// Commit time in Unix milliseconds.
+    pub committed_at_ms: i64,
+}
+
+/// Data of the `ready` and `reset` events on `GET /v1/changes`. `ready`
+/// starts a stream opened without a cursor; `reset` replaces a cursor the
+/// server cannot continue from, after which the client must read its state
+/// again. Either way, later events follow this cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedPosition {
+    /// The feed position to resume from, also sent as the event `id`.
+    pub cursor: u64,
+}
+
 /// Machine-readable error category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -197,8 +237,9 @@ pub enum ErrorCode {
     RequestKeyReused,
     /// The request body exceeds the size limit.
     PayloadTooLarge,
-    /// Too many requests from this caller. Nothing was done; retry after the
-    /// `Retry-After` delay with the same idempotency key.
+    /// Too many requests from this caller. This request was not processed;
+    /// retry after the `Retry-After` delay with the same idempotency key,
+    /// which returns the original result if an earlier attempt committed.
     RateLimited,
     /// Storage or capacity is temporarily unavailable; retry with the same key.
     Unavailable,

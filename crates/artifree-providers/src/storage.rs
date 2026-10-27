@@ -10,23 +10,28 @@
 //! its file lock, and `BEGIN IMMEDIATE` makes the conditional revision check
 //! and the write one atomic step across threads and processes.
 //!
-//! Request keys are retained indefinitely. Server profiles with `PostgreSQL`
-//! and object storage remain planned.
+//! Every commit also appends a row to the `changes` table in the same
+//! transaction; its `AUTOINCREMENT` key is the feed cursor. Writers are
+//! serialized, so cursors become visible in increasing order and a rolled
+//! back commit leaves no row. Replays return before writing anything.
+//!
+//! Request keys and change rows are retained indefinitely. Server profiles
+//! with `PostgreSQL` and object storage remain planned.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_domain::identity::{ActorId, ArtifactId, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, ChangeCursor, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, ArtifactStore, CommitReceipt, Delivery, FileEntry, NewArtifact,
-    RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord, CommitReceipt, Delivery,
+    FileEntry, NewArtifact, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SCHEMA: &str = "
@@ -72,6 +77,18 @@ CREATE TABLE request_keys (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// Version 2: the feed of committed changes. Commits made under version 1
+/// have no rows; feed readers start from the head, so none are missed.
+const CHANGES: &str = "
+CREATE TABLE changes (
+    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('created', 'revised')),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision)
+) STRICT;
+";
+
 /// Artifact storage in one local `SQLite` database file.
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -102,10 +119,9 @@ impl SqliteStore {
         match version {
             0 => {
                 transaction.execute_batch(SCHEMA).map_err(unavailable)?;
-                transaction
-                    .pragma_update(None, "user_version", SCHEMA_VERSION)
-                    .map_err(unavailable)?;
+                transaction.execute_batch(CHANGES).map_err(unavailable)?;
             }
+            1 => transaction.execute_batch(CHANGES).map_err(unavailable)?,
             SCHEMA_VERSION => {}
             other => {
                 return Err(StoreError::Unavailable(format!(
@@ -113,6 +129,9 @@ impl SqliteStore {
                 )));
             }
         }
+        transaction
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(unavailable)?;
         transaction.commit().map_err(unavailable)?;
         Ok(store)
     }
@@ -229,6 +248,69 @@ impl ArtifactStore for SqliteStore {
             records.push(row.map_err(unavailable)?.into_record()?);
         }
         Ok(records)
+    }
+
+    fn changes(
+        &self,
+        owner: &ActorId,
+        after: ChangeCursor,
+        limit: usize,
+    ) -> Result<ChangePage, StoreError> {
+        let mut connection = self.connect()?;
+        // One read transaction, so the head and the page are one snapshot.
+        let transaction = connection.transaction().map_err(unavailable)?;
+        let head: i64 = transaction
+            .query_row("SELECT coalesce(max(cursor), 0) FROM changes", [], |row| {
+                row.get(0)
+            })
+            .map_err(unavailable)?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT c.cursor, c.artifact_id, c.kind, c.revision, r.created_at
+                 FROM changes c
+                 JOIN artifacts a ON a.id = c.artifact_id
+                 JOIN revisions r ON r.artifact_id = c.artifact_id AND r.revision = c.revision
+                 WHERE a.owner = ?1 AND c.cursor > ?2
+                 ORDER BY c.cursor LIMIT ?3",
+            )
+            .map_err(unavailable)?;
+        let rows = statement
+            .query_map(
+                params![
+                    owner.as_str(),
+                    i64::try_from(after.0).unwrap_or(i64::MAX),
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .map_err(unavailable)?;
+        let mut changes = Vec::new();
+        for row in rows {
+            let (cursor, artifact, kind, revision, committed_at) = row.map_err(unavailable)?;
+            changes.push(ChangeRecord {
+                cursor: stored_cursor(cursor)?,
+                artifact: artifact.parse().map_err(corrupt)?,
+                kind: match kind.as_str() {
+                    "created" => ChangeKind::Created,
+                    "revised" => ChangeKind::Revised,
+                    other => return Err(corrupt(format!("unknown change kind {other}"))),
+                },
+                revision: stored_revision(revision)?,
+                committed_at: UnixMillis(committed_at),
+            });
+        }
+        Ok(ChangePage {
+            changes,
+            head: stored_cursor(head)?,
+        })
     }
 
     fn revisions(&self, id: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {
@@ -374,6 +456,17 @@ fn insert_revision(
             ],
         )
         .map_err(unavailable)?;
+    let kind = if revision == SourceRevision(1) {
+        "created"
+    } else {
+        "revised"
+    };
+    transaction
+        .execute(
+            "INSERT INTO changes (artifact_id, revision, kind) VALUES (?1, ?2, ?3)",
+            params![id.as_str(), number, kind],
+        )
+        .map_err(unavailable)?;
     Ok(())
 }
 
@@ -503,6 +596,10 @@ fn stored_path(value: &str) -> Result<PackagePath, StoreError> {
 
 fn stored_revision(value: i64) -> Result<SourceRevision, StoreError> {
     u64::try_from(value).map(SourceRevision).map_err(corrupt)
+}
+
+fn stored_cursor(value: i64) -> Result<ChangeCursor, StoreError> {
+    u64::try_from(value).map(ChangeCursor).map_err(corrupt)
 }
 
 fn sql_revision(revision: SourceRevision) -> Result<i64, StoreError> {

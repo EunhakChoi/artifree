@@ -99,8 +99,13 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
             content_origin,
             token_file,
         });
+        let streams = state.clone();
         let api_server =
-            axum::serve(api, http::router(state.clone())).with_graceful_shutdown(shutdown_signal());
+            axum::serve(api, http::router(state.clone())).with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                // Open change streams would otherwise hold shutdown forever.
+                streams.close_streams();
+            });
         let content_server =
             axum::serve(content, preview::router(state)).with_graceful_shutdown(shutdown_signal());
         tokio::try_join!(

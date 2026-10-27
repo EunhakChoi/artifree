@@ -156,7 +156,7 @@ pub(crate) async fn create(
     let receipt = state
         .run(move |artifacts| artifacts.create(&actor, &key, &title, &package))
         .await?;
-    Ok(commit_response(receipt))
+    Ok(commit_response(state, receipt))
 }
 
 pub(crate) async fn save(
@@ -188,7 +188,7 @@ pub(crate) async fn save(
     let receipt = state
         .run(move |artifacts| artifacts.save(&actor, &key, &id, base, changes))
         .await?;
-    Ok(commit_response(receipt))
+    Ok(commit_response(state, receipt))
 }
 
 pub(crate) async fn revisions(
@@ -324,7 +324,12 @@ fn too_many(what: &str, count: usize, limit: usize) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn commit_response(receipt: CommitReceipt) -> CommitResponse {
+/// The response to a commit. A commit that wrote something also wakes open
+/// change streams; a replay wrote nothing and wakes none.
+fn commit_response(state: &AppState, receipt: CommitReceipt) -> CommitResponse {
+    if receipt.delivery == Delivery::Committed {
+        state.feed().committed();
+    }
     CommitResponse {
         artifact: artifact_dto(&receipt.artifact),
         revision: revision_dto(receipt.revision),

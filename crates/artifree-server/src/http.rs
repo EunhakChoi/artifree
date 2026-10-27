@@ -5,7 +5,8 @@
 //! Every route requires `Authorization: Bearer <token>`. Mutating routes
 //! require an `Idempotency-Key` header. Storage work runs on Tokio's blocking
 //! pool because the core and store are synchronous. The router also mounts
-//! the MCP endpoint (`crate::mcp`) behind the same token.
+//! the MCP endpoint (`crate::mcp`) and the change feed (`crate::changes`)
+//! behind the same token.
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -32,6 +33,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::auth::AccessToken;
+use crate::changes::{self, Feed};
 use crate::limits::{Limiter, Refusal, RequestLimits};
 use crate::mcp;
 use crate::operations::{self, ApiError};
@@ -70,6 +72,7 @@ struct Shared {
     previews: PreviewTickets,
     limiter: Limiter,
     draining: AtomicUsize,
+    feed: Feed,
     settings: Settings,
     content_policy: HeaderValue,
 }
@@ -94,6 +97,7 @@ impl AppState {
                 previews: PreviewTickets::new(settings.preview_ttl),
                 limiter: Limiter::new(settings.limits.validate()?),
                 draining: AtomicUsize::new(0),
+                feed: Feed::new(),
                 settings,
                 content_policy,
             }),
@@ -110,6 +114,20 @@ impl AppState {
 
     pub(crate) fn content_policy(&self) -> &HeaderValue {
         &self.shared.content_policy
+    }
+
+    pub(crate) fn limiter(&self) -> &Limiter {
+        &self.shared.limiter
+    }
+
+    pub(crate) fn feed(&self) -> &Feed {
+        &self.shared.feed
+    }
+
+    /// Ends open change streams. Call it when the server starts shutting
+    /// down: graceful shutdown waits for every open response to finish.
+    pub fn close_streams(&self) {
+        self.shared.feed.close();
     }
 
     /// The actor whose bearer token is in `headers`. Every HTTP route and
@@ -145,6 +163,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(mcp::routes(state.clone()))
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
+        .route("/v1/changes", get(changes::stream))
         .route("/v1/artifacts/{id}", get(show_artifact))
         .route(
             "/v1/artifacts/{id}/revisions",
@@ -178,7 +197,7 @@ async fn admit(State(state): State<AppState>, mut request: Request, next: Next) 
         Ok(actor) => actor,
         Err(error) => return error.into_response(),
     };
-    let permit = match state.shared.limiter.admit(&actor) {
+    let permit = match state.limiter().admit(&actor) {
         Ok(permit) => permit,
         Err(refusal) => {
             discard(&state, request.into_body()).await;
@@ -251,10 +270,13 @@ impl Drop for Draining<'_> {
     }
 }
 
-fn refused(refusal: Refusal) -> Response {
+/// The `429` (or `503`) answer to a refused request or change stream.
+pub(crate) fn refused(refusal: Refusal) -> Response {
     let wait = match refusal {
         Refusal::Rate(wait) => wait,
         Refusal::Busy => Duration::from_secs(1),
+        // An open stream ends only when its client leaves.
+        Refusal::Streams => Duration::from_secs(5),
         Refusal::Unavailable => {
             return ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,

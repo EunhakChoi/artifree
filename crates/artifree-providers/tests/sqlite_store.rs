@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use artifree_domain::identity::{ActorId, RequestKey, Title};
 use artifree_domain::package::{FilePackage, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, ChangeCursor, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactStore, CommitReceipt, Delivery, NewArtifact, RequestFingerprint, RequestIdentity,
-    RevisionCommit, StoreError,
+    ArtifactStore, ChangeKind, ChangePage, CommitReceipt, Delivery, NewArtifact,
+    RequestFingerprint, RequestIdentity, RevisionCommit, StoreError,
 };
 use artifree_providers::storage::SqliteStore;
 use sha2::{Digest, Sha256};
@@ -384,6 +384,141 @@ fn refuses_a_newer_schema_version() -> TestResult {
     assert!(
         matches!(&error, StoreError::Unavailable(reason) if reason.contains("version 99")),
         "{error}"
+    );
+    Ok(())
+}
+
+/// One owner's feed after a cursor: `(cursor, revision, kind)` per change,
+/// and the head.
+type Feed = (Vec<(u64, u64, ChangeKind)>, u64);
+
+fn feed(store: &SqliteStore, owner: &ActorId, after: u64) -> Result<Feed, StoreError> {
+    let ChangePage { changes, head } = store.changes(owner, ChangeCursor(after), 100)?;
+    let triples = changes
+        .iter()
+        .map(|change| (change.cursor.0, change.revision.0, change.kind))
+        .collect();
+    Ok((triples, head.0))
+}
+
+#[test]
+fn every_commit_records_one_change_and_replays_record_none() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    assert_eq!(
+        feed(&store, &owner, 0)?,
+        (vec![], 0),
+        "an empty feed has head 0"
+    );
+    let created = create(&store, &owner, &key("create"), 1)?;
+    commit(&store, &created, &key("save"), 1, "<h1>v2</h1>")?;
+    // Retries of both, and a stale save, write nothing.
+    create(&store, &owner, &key("create"), 1)?;
+    commit(&store, &created, &key("save"), 1, "<h1>v2</h1>")?;
+    let stale = commit(&store, &created, &key("stale"), 1, "<h1>stale</h1>");
+    assert!(matches!(stale, Err(StoreError::RevisionConflict { .. })));
+    assert_eq!(
+        feed(&store, &owner, 0)?,
+        (
+            vec![(1, 1, ChangeKind::Created), (2, 2, ChangeKind::Revised)],
+            2
+        )
+    );
+    let page = store.changes(&owner, ChangeCursor(0), 1)?;
+    assert_eq!(page.changes.len(), 1, "the limit bounds a page");
+    assert_eq!(page.changes[0].artifact, created.artifact.id);
+    assert_eq!(page.changes[0].committed_at, created.artifact.updated_at);
+    assert_eq!(
+        feed(&store, &owner, 1)?.0,
+        vec![(2, 2, ChangeKind::Revised)]
+    );
+    assert_eq!(feed(&store, &owner, 2)?, (vec![], 2));
+    Ok(())
+}
+
+#[test]
+fn the_feed_shows_only_the_owners_changes_but_the_global_head() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let (one, two) = (actor("one"), actor("two"));
+    create(&store, &one, &key("one"), 1)?;
+    create(&store, &two, &key("two"), 1)?;
+    assert_eq!(
+        feed(&store, &one, 0)?,
+        (vec![(1, 1, ChangeKind::Created)], 2)
+    );
+    assert_eq!(
+        feed(&store, &two, 0)?,
+        (vec![(2, 1, ChangeKind::Created)], 2)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_rolled_back_commit_records_no_change() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("a"), 1)?;
+    // Fail the change record itself, the last write of the commit.
+    let connection = rusqlite::Connection::open(db.path())?;
+    connection.execute_batch(
+        "CREATE TRIGGER fail_change BEFORE INSERT ON changes BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )?;
+    let failed = commit(&store, &created, &key("b"), 1, "<h1>lost</h1>");
+    assert!(
+        matches!(failed, Err(StoreError::Unavailable(ref reason)) if reason.contains("injected")),
+        "{failed:?}"
+    );
+    assert_eq!(store.revisions(&created.artifact.id)?.len(), 1);
+    assert_eq!(
+        feed(&store, &owner, 0)?,
+        (vec![(1, 1, ChangeKind::Created)], 1)
+    );
+
+    connection.execute_batch("DROP TRIGGER fail_change;")?;
+    let retried = commit(&store, &created, &key("b"), 1, "<h1>lost</h1>")?;
+    assert_eq!(
+        retried.delivery,
+        Delivery::Committed,
+        "the key was not used"
+    );
+    assert_eq!(
+        feed(&store, &owner, 1)?.0,
+        vec![(2, 2, ChangeKind::Revised)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_version_one_database_gains_the_feed_and_keeps_its_data() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("a"), 1)?;
+    // Recreate the version 1 layout: no changes table.
+    let connection = rusqlite::Connection::open(db.path())?;
+    connection.execute_batch("DROP TABLE changes; PRAGMA user_version = 1;")?;
+    drop(connection);
+
+    let store = SqliteStore::open(&db.path())?;
+    let version: i64 =
+        rusqlite::Connection::open(db.path())?
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    assert_eq!(version, 2);
+    assert_eq!(entry(&store, &created, 1)?, Some(b"<h1>v1</h1>".to_vec()));
+    assert_eq!(
+        create(&store, &owner, &key("a"), 1)?.delivery,
+        Delivery::Replayed,
+        "request keys survive the upgrade"
+    );
+    // Earlier commits have no rows; new ones do.
+    assert_eq!(feed(&store, &owner, 0)?, (vec![], 0));
+    commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    assert_eq!(
+        feed(&store, &owner, 0)?,
+        (vec![(1, 2, ChangeKind::Revised)], 1)
     );
     Ok(())
 }

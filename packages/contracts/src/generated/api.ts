@@ -12,7 +12,9 @@ export type ApiBody =
   | Revision
   | RevisionList
   | Preview
-  | ErrorResponse;
+  | ErrorResponse
+  | ArtifactChange
+  | FeedPosition;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -58,6 +60,11 @@ export type ErrorCode =
   | 'rate_limited'
   | 'unavailable'
   | 'internal';
+/**
+ * What a committed change did to an artifact. Clients should treat a kind
+ * they do not know as a reason to read the artifact again.
+ */
+export type ChangeKind = 'created' | 'revised';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -231,4 +238,40 @@ export interface ErrorBody {
    * Human-readable explanation; not a stable contract.
    */
   message: string;
+}
+/**
+ * Data of a `change` event on `GET /v1/changes`: one commit that wrote a
+ * revision. Replayed retries and failed commits produce no event. The event
+ * says what to read again; it carries no content.
+ */
+export interface ArtifactChange {
+  /**
+   * The changed artifact.
+   */
+  artifact_id: string;
+  change: ChangeKind;
+  /**
+   * Commit time in Unix milliseconds.
+   */
+  committed_at_ms: number;
+  /**
+   * Feed position of this change, also sent as the event `id`.
+   */
+  cursor: number;
+  /**
+   * The artifact's revision after the change.
+   */
+  revision: number;
+}
+/**
+ * Data of the `ready` and `reset` events on `GET /v1/changes`. `ready`
+ * starts a stream opened without a cursor; `reset` replaces a cursor the
+ * server cannot continue from, after which the client must read its state
+ * again. Either way, later events follow this cursor.
+ */
+export interface FeedPosition {
+  /**
+   * The feed position to resume from, also sent as the event `id`.
+   */
+  cursor: number;
 }

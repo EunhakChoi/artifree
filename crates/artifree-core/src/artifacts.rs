@@ -10,10 +10,10 @@ use std::fmt;
 
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, ChangeCursor, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, ArtifactStore, CommitReceipt, NewArtifact, RequestFingerprint, RequestIdentity,
-    RevisionCommit, RevisionRecord, StoreError,
+    ArtifactRecord, ArtifactStore, ChangePage, CommitReceipt, NewArtifact, RequestFingerprint,
+    RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
 };
 use sha2::{Digest, Sha256};
 
@@ -216,6 +216,22 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// [`ArtifactError::Unavailable`].
     pub fn list(&self, actor: &ActorId) -> Result<Vec<ArtifactRecord>, ArtifactError> {
         Ok(self.store.artifacts_owned_by(actor)?)
+    }
+
+    /// Committed changes to artifacts the actor owns, after `after` and at
+    /// most `limit`, with the feed's head. Only commits that wrote something
+    /// appear; replays and failed commits do not.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn changes(
+        &self,
+        actor: &ActorId,
+        after: ChangeCursor,
+        limit: usize,
+    ) -> Result<ChangePage, ArtifactError> {
+        Ok(self.store.changes(actor, after, limit)?)
     }
 
     /// Revision history of an accessible artifact, newest first.

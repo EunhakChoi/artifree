@@ -6,10 +6,11 @@ import { parseSync } from 'oxc-parser';
 // Third-party edges are reviewed with their purpose (decision 0003):
 // sha2 fingerprints requests and addresses stored content, rusqlite is local
 // storage, getrandom creates identifiers and tokens, axum/tokio serve HTTP,
-// base64 decodes uploads, and tower drives in-process router tests; http-body
-// builds request bodies that never finish for cancellation tests. rmcp is
+// base64 decodes uploads, and tower drives in-process router tests. rmcp is
 // the official MCP SDK serving the inbound MCP adapter, and serde parses its
-// tool arguments into contract DTOs (decision 0004).
+// tool arguments into contract DTOs (decision 0004). http-body, already part
+// of Axum, implements the change feed's streaming response body (decision
+// 0006) and the never-ending request bodies of cancellation tests.
 const rustEdges = {
   'artifree-domain': [],
   'artifree-ports': ['artifree-domain'],
@@ -31,6 +32,7 @@ const rustEdges = {
     'axum',
     'base64',
     'getrandom',
+    'http-body',
     'rmcp',
     'serde',
     'serde_json',
@@ -41,7 +43,7 @@ const rustEdges = {
 // Edges allowed only as dev-dependencies, so test tooling cannot become part
 // of a shipped binary unreviewed.
 const rustDevEdges = {
-  'artifree-server': ['http-body', 'tower'],
+  'artifree-server': ['tower'],
 };
 
 const clientEdges = {

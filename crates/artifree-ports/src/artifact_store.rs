@@ -1,15 +1,16 @@
-//! Durable storage for artifact metadata, immutable source revisions, and
-//! request-key results.
+//! Durable storage for artifact metadata, immutable source revisions,
+//! request-key results, and the feed of committed changes.
 //!
 //! An implementation must make each commit atomic: the conditional revision
-//! check, revision files, metadata update, and request-key record either all
-//! become durable or none do. A returned commit is durable.
+//! check, revision files, metadata update, request-key record, and change
+//! record either all become durable or none do. A returned commit is durable.
+//! A replayed request records no change.
 
 use std::fmt;
 
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, ChangeCursor, SourceRevision};
 
 /// Stored metadata of an artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +114,42 @@ pub struct CommitReceipt {
     pub delivery: Delivery,
 }
 
+/// What a committed change did to an artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChangeKind {
+    /// The artifact was created with revision 1.
+    Created,
+    /// A new source revision was committed.
+    Revised,
+}
+
+/// One committed change, recorded in the same transaction as the commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeRecord {
+    /// Position in the feed; later commits have larger cursors.
+    pub cursor: ChangeCursor,
+    /// The changed artifact.
+    pub artifact: ArtifactId,
+    /// What changed.
+    pub kind: ChangeKind,
+    /// The artifact's revision after the change.
+    pub revision: SourceRevision,
+    /// Commit time.
+    pub committed_at: UnixMillis,
+}
+
+/// Changes after a cursor, and the newest cursor at the time of the read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangePage {
+    /// Changes in cursor order.
+    pub changes: Vec<ChangeRecord>,
+    /// The newest cursor of any committed change, visible to the reader or
+    /// not; [`ChangeCursor`]`(0)` when nothing was committed yet. The page
+    /// is complete up to `head` when it holds fewer changes than requested.
+    pub head: ChangeCursor,
+}
+
 /// A storage failure or a rejected conditional write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -184,6 +221,21 @@ pub trait ArtifactStore {
     ///
     /// [`StoreError::Unavailable`].
     fn artifacts_owned_by(&self, owner: &ActorId) -> Result<Vec<ArtifactRecord>, StoreError>;
+
+    /// Changes to artifacts owned by `owner` with a cursor greater than
+    /// `after`, oldest first, at most `limit` of them, read as one consistent
+    /// snapshot. Cursors become visible in increasing order: once a reader
+    /// sees a cursor, no smaller cursor can appear later.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Unavailable`].
+    fn changes(
+        &self,
+        owner: &ActorId,
+        after: ChangeCursor,
+        limit: usize,
+    ) -> Result<ChangePage, StoreError>;
 
     /// Revision metadata, newest first.
     ///

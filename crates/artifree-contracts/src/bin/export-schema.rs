@@ -1,18 +1,18 @@
 //! Emits the public JSON Schemas for contract generation.
 //!
 //! Output: `{ "service_description": <schema>, "api": <schema>, "mcp": <tools> }`.
-//! The API schema's root accepts any v1 JSON request or response body; each
-//! body and its parts are `$defs` entries. The MCP entry is the tool catalog
-//! that `tools/list` returns, with the server instructions and the schema of
-//! an error result.
+//! The API schema's root accepts any v1 JSON request or response body,
+//! including the data of change feed events; each body and its parts are
+//! `$defs` entries. The MCP entry is the tool catalog that `tools/list`
+//! returns, with the server instructions and the schema of an error result.
 #![expect(
     clippy::print_stdout,
     reason = "This binary emits the JSON schemas on stdout."
 )]
 
 use artifree_contracts::api::{
-    Artifact, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse, Preview,
-    Revision, RevisionList, SaveRevisionRequest,
+    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse,
+    FeedPosition, Preview, Revision, RevisionList, SaveRevisionRequest,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -29,6 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<RevisionList>(),
         generator.subschema_for::<Preview>(),
         generator.subschema_for::<ErrorResponse>(),
+        generator.subschema_for::<ArtifactChange>(),
+        generator.subschema_for::<FeedPosition>(),
     ];
     let api = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",

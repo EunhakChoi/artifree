@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1, MCP tools over Streamable HTTP at /mcp, and a sandboxed preview origin.",
+        "Axum/Tokio HTTP API v1 with a committed change feed (server-sent events), MCP tools over Streamable HTTP at /mcp, and a sandboxed preview origin.",
     ),
     (
         "domain",
@@ -110,7 +110,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust · SQLite",
         "crates/artifree-providers/src/storage.rs",
         ComponentStatus::Implemented,
-        "Local SQLite with atomic commits and shared file content; PostgreSQL planned.",
+        "Local SQLite with atomic commits, a change record per commit, and shared file content; PostgreSQL planned.",
     ),
     (
         "models",
@@ -164,6 +164,6 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/client",
         ComponentStatus::Implemented,
-        "Fetch-based HTTP API v1 client with structured errors.",
+        "Fetch-based HTTP API v1 client with structured errors and a reconnecting change feed reader.",
     ),
 ];

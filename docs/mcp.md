@@ -157,9 +157,10 @@ then 1200 per minute (20 per second), with at most 16 running at the same time
 ([decision 0005](decisions/0005-request-limits.md)). Beyond that the server
 answers HTTP `429` with `Retry-After` and
 `{ "error": { "code": "rate_limited", ... } }` before the MCP layer, so the
-agent sees a transport error rather than a tool result. Nothing was done:
-wait for the delay and resend the identical call with the same
-`idempotency_key`. Change the limits with `--request-burst`,
+agent sees a transport error rather than a tool result. That call was not
+processed: wait for the delay and resend the identical call with the same
+`idempotency_key`, which returns the original result if an earlier attempt
+committed. Change the limits with `--request-burst`,
 `--requests-per-minute`, and `--concurrent-requests` on
 `artifree-server serve`.
 
@@ -167,6 +168,8 @@ wait for the delay and resend the identical call with the same
 
 Previews are sandboxed pages with no data, model, or file capabilities, and a
 preview URL works for anyone who holds it until it expires. The web workspace
-does not refresh by itself after an agent saves; reload it. Sharing,
+does not refresh by itself after an agent saves yet; reload it. Programs can
+follow committed changes over HTTP at `GET /v1/changes`
+([decision 0006](decisions/0006-change-feed.md)); MCP has no event stream. Sharing,
 publishing, structured documents, and builds are not available through MCP or
 any other interface yet.

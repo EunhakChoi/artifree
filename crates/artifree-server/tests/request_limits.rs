@@ -145,6 +145,7 @@ async fn http_and_mcp_share_one_budget_that_recovers() -> TestResult {
         burst: 2,
         per_minute: 60,
         concurrent: 16,
+        ..RequestLimits::default()
     });
     // Requests without the token are refused first and spend nothing.
     for _ in 0..5 {
@@ -176,6 +177,7 @@ async fn a_refused_request_leaves_its_key_unused() -> TestResult {
         burst: 1,
         per_minute: 60,
         concurrent: 16,
+        ..RequestLimits::default()
     });
     assert_eq!(harness.send(list(TOKEN)?).await?.0, StatusCode::OK);
     let (status, _, _) = harness.send(create("limited-key-1")?).await?;
@@ -196,6 +198,7 @@ async fn finished_requests_free_their_concurrency_slot() -> TestResult {
         burst: 50,
         per_minute: 3000,
         concurrent: 1,
+        ..RequestLimits::default()
     });
     for request in 0..20 {
         let next = if request % 2 == 0 {
@@ -218,6 +221,7 @@ async fn an_abandoned_request_keeps_its_slot_until_its_work_ends() -> TestResult
         burst: 100,
         per_minute: 6000,
         concurrent: 1,
+        ..RequestLimits::default()
     });
     // Poll the create once, past admission, then drop it as a client that
     // disconnects would. Its work must keep the actor's only slot.
@@ -255,6 +259,7 @@ async fn refusals_cancelled_mid_body_release_their_reading() -> TestResult {
         burst: 1,
         per_minute: 60,
         concurrent: 16,
+        ..RequestLimits::default()
     });
     assert_eq!(harness.send(list(TOKEN)?).await?.0, StatusCode::OK);
     // More refused uploads than may be read at once, each dropped while its

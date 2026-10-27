@@ -70,3 +70,8 @@ pub struct DocumentSequence(pub u64);
 /// The version of a running application's data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AppDataVersion(pub u64);
+
+/// A position in the feed of committed changes. It orders commits across
+/// artifacts and is unrelated to any one artifact's source revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChangeCursor(pub u64);

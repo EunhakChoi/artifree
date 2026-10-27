@@ -2,12 +2,18 @@ import type {
   Artifact,
   CommitResponse,
   CreateArtifactRequest,
-  ErrorCode,
   FileUpload,
   Preview,
   Revision,
   SaveRevisionRequest,
 } from '@artifree/contracts';
+import {
+  type ChangeFeedEvent,
+  type FollowOptions,
+  follow,
+  readChangeEvents,
+} from './change-stream.js';
+import { ArtifreeApiError } from './errors.js';
 import {
   parseArtifact,
   parseArtifactList,
@@ -28,38 +34,6 @@ export interface ClientConfiguration {
   readonly accessToken: string;
   /** Fetch implementation; defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
-}
-
-/** Why a request failed: a server error code or a client-side failure. */
-export type FailureCode = ErrorCode | 'network_error' | 'invalid_response';
-
-/** A failed API request. */
-export class ArtifreeApiError extends Error {
-  /** HTTP status, or 0 when no response arrived. */
-  readonly status: number;
-  readonly code: FailureCode;
-  /** The current revision when `code` is `revision_conflict`. */
-  readonly currentRevision: number | undefined;
-  /** Seconds to wait before retrying, from `Retry-After`, when given. */
-  readonly retryAfterSeconds: number | undefined;
-
-  constructor(
-    message: string,
-    details: {
-      status: number;
-      code: FailureCode;
-      currentRevision?: number;
-      retryAfterSeconds?: number;
-      cause?: unknown;
-    },
-  ) {
-    super(message, { cause: details.cause });
-    this.name = 'ArtifreeApiError';
-    this.status = details.status;
-    this.code = details.code;
-    this.currentRevision = details.currentRevision;
-    this.retryAfterSeconds = details.retryAfterSeconds;
-  }
 }
 
 /** Options for requests that change state. */
@@ -207,6 +181,38 @@ export class ArtifreeClient {
     }
   }
 
+  /**
+   * Opens the committed change feed once and yields its events until the
+   * server ends the stream or `signal` aborts. Without `after` it starts at
+   * the current head with a `ready` event. Use `followChanges` to reconnect
+   * automatically.
+   */
+  async *openChanges(
+    options: { readonly after?: number; readonly signal?: AbortSignal } = {},
+  ): AsyncGenerator<ChangeFeedEvent> {
+    const headers: Record<string, string> = { accept: 'text/event-stream' };
+    if (options.after !== undefined)
+      headers['last-event-id'] = String(options.after);
+    const response = await this.send('GET', '/v1/changes', undefined, {
+      headers,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    if (response.body !== null) yield* readChangeEvents(response.body);
+  }
+
+  /**
+   * Follows the change feed across reconnections from the last cursor until
+   * `options.signal` aborts. Rejects on failures a retry cannot fix, such as
+   * a refused token.
+   */
+  followChanges(options: FollowOptions): Promise<void> {
+    return follow(
+      (after, signal) =>
+        this.openChanges(after === undefined ? { signal } : { after, signal }),
+      options,
+    );
+  }
+
   /** A short-lived URL rendering a pinned revision on the content origin. */
   async createPreview(id: string, revision: number): Promise<Preview> {
     return this.json(
@@ -236,11 +242,14 @@ export class ArtifreeClient {
     method: string,
     path: string,
     mutation?: { body: unknown; idempotencyKey: string },
+    extra: { headers?: Record<string, string>; signal?: AbortSignal } = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
+      ...extra.headers,
       authorization: `Bearer ${this.accessToken}`,
     };
     const init: RequestInit = { method, headers };
+    if (extra.signal !== undefined) init.signal = extra.signal;
     if (mutation !== undefined) {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;

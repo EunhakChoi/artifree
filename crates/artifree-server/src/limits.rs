@@ -4,9 +4,10 @@
 //! per actor, so an agent cannot avoid the limit by switching interfaces. The
 //! rate follows the generic cell rate algorithm: a burst of `burst` requests,
 //! then `per_minute` requests per minute, evenly spaced. Separately, at most `concurrent`
-//! requests of one actor run at a time. A refused request is answered before
-//! its body is read and never reaches the application, so it consumes no
-//! idempotency key.
+//! requests of one actor run at a time, and at most `streams` change feed
+//! streams of one actor stay open (decision 0006). A refused request is
+//! answered before its body is read and never reaches the application, so it
+//! consumes no idempotency key.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -24,17 +25,22 @@ pub struct RequestLimits {
     pub per_minute: u32,
     /// Requests that may run at the same time.
     pub concurrent: u32,
+    /// Change feed streams that may be open at the same time. An open stream
+    /// does not count as a running request.
+    pub streams: u32,
 }
 
 impl Default for RequestLimits {
     /// Generous for one person's web workspace and agents, but bounded for
     /// an agent stuck in a loop: 120 at once, then 1200 per minute (20 per
-    /// second), 16 at a time.
+    /// second), 16 at a time, and 16 open change streams (browser tabs and
+    /// watching agents).
     fn default() -> Self {
         Self {
             burst: 120,
             per_minute: 1200,
             concurrent: 16,
+            streams: 16,
         }
     }
 }
@@ -46,7 +52,7 @@ impl RequestLimits {
     ///
     /// When a limit is zero.
     pub fn validate(self) -> Result<Self, String> {
-        if self.burst == 0 || self.per_minute == 0 || self.concurrent == 0 {
+        if self.burst == 0 || self.per_minute == 0 || self.concurrent == 0 || self.streams == 0 {
             return Err("request limits must be at least 1".into());
         }
         Ok(self)
@@ -72,6 +78,8 @@ pub(crate) enum Refusal {
     Rate(Duration),
     /// Too many of the actor's requests are running.
     Busy,
+    /// Too many of the actor's change streams are open.
+    Streams,
     /// The limiter's state is unusable, so it fails closed.
     Unavailable,
 }
@@ -81,6 +89,9 @@ impl fmt::Display for Refusal {
         match self {
             Self::Rate(_) => formatter.write_str("too many requests; retry after the given delay"),
             Self::Busy => formatter.write_str("too many requests are running; retry shortly"),
+            Self::Streams => {
+                formatter.write_str("too many change streams are open; close one or retry later")
+            }
             Self::Unavailable => formatter.write_str("request limits are unavailable"),
         }
     }
@@ -91,6 +102,14 @@ struct Budget {
     /// Theoretical arrival time of the next request at the sustained rate.
     next: Option<Instant>,
     in_flight: u32,
+    streams: u32,
+}
+
+/// What a [`Permit`] holds.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    Request,
+    Stream,
 }
 
 /// Admits or refuses requests per actor. The map holds one small entry per
@@ -135,15 +154,35 @@ impl Limiter {
         Ok(Permit {
             budgets: Arc::clone(&self.budgets),
             actor: actor.clone(),
+            slot: Slot::Request,
+        })
+    }
+
+    /// Opens one change stream of `actor`, which an admitted request then
+    /// keeps after its response started, or refuses when the actor has
+    /// `streams` open.
+    pub(crate) fn open_stream(&self, actor: &ActorId) -> Result<Permit, Refusal> {
+        let mut budgets = self.budgets.lock().map_err(|_| Refusal::Unavailable)?;
+        let budget = budgets.entry(actor.clone()).or_default();
+        if budget.streams >= self.limits.streams {
+            return Err(Refusal::Streams);
+        }
+        budget.streams += 1;
+        Ok(Permit {
+            budgets: Arc::clone(&self.budgets),
+            actor: actor.clone(),
+            slot: Slot::Stream,
         })
     }
 }
 
-/// One running request. Dropping it frees the actor's concurrency slot.
+/// One running request or open change stream. Dropping it frees the
+/// actor's slot.
 #[derive(Debug)]
 pub(crate) struct Permit {
     budgets: Arc<Mutex<HashMap<ActorId, Budget>>>,
     actor: ActorId,
+    slot: Slot,
 }
 
 impl Drop for Permit {
@@ -153,7 +192,11 @@ impl Drop for Permit {
         if let Ok(mut budgets) = self.budgets.lock()
             && let Some(budget) = budgets.get_mut(&self.actor)
         {
-            budget.in_flight = budget.in_flight.saturating_sub(1);
+            let count = match self.slot {
+                Slot::Request => &mut budget.in_flight,
+                Slot::Stream => &mut budget.streams,
+            };
+            *count = count.saturating_sub(1);
         }
     }
 }
@@ -172,6 +215,7 @@ mod tests {
             burst,
             per_minute,
             concurrent,
+            streams: 2,
         })
     }
 
@@ -222,6 +266,23 @@ mod tests {
     }
 
     #[test]
+    fn open_streams_are_capped_apart_from_running_requests() {
+        let limiter = limiter(100, 6000, 1);
+        let agent = actor("agent");
+        let first = limiter.open_stream(&agent);
+        let second = limiter.open_stream(&agent);
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(limiter.open_stream(&agent).err(), Some(Refusal::Streams));
+        assert!(
+            limiter.admit(&agent).is_ok(),
+            "open streams must not take the request slot"
+        );
+        drop(first);
+        assert!(limiter.open_stream(&agent).is_ok());
+        assert!(limiter.open_stream(&actor("other")).is_ok());
+    }
+
+    #[test]
     fn actors_have_separate_budgets() {
         let limiter = limiter(1, 1, 1);
         let now = Instant::now();
@@ -244,6 +305,10 @@ mod tests {
             },
             RequestLimits {
                 concurrent: 0,
+                ..RequestLimits::default()
+            },
+            RequestLimits {
+                streams: 0,
                 ..RequestLimits::default()
             },
         ] {
