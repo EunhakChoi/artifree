@@ -7,7 +7,9 @@ The [interactive HTML design](architecture.html) maps the design to actual sourc
 paths and marks each module and flow step as working, scaffold, or planned.
 Working today: creating HTML file-package artifacts, conditional revision
 commits with retry keys, revision-pinned reads, and sandboxed previews, through
-the HTTP API, the CLI, and the web workspace, stored in local SQLite.
+the HTTP API, MCP tools for agents
+([decision 0004](decisions/0004-inbound-mcp-adapter.md)), the CLI, and the web
+workspace, stored in local SQLite.
 
 ## Repository map
 
@@ -25,8 +27,8 @@ crates/
   artifree-ports/      artifact store contract; other families planned
   artifree-providers/  SQLite artifact store; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
-  artifree-server/     composition root, Axum HTTP API, preview origin; MCP planned
-contracts/generated/  generated JSON Schemas (descriptor, API v1) and inventory snapshot
+  artifree-server/     composition root, Axum HTTP API, MCP endpoint, preview origin
+contracts/generated/  generated JSON Schemas (descriptor, API v1), MCP tool catalog, inventory snapshot
 docs/architecture/    TypeScript, CSS, and HTML source for the standalone design
 scripts/              contract generation, architecture build, checks, smoke
 ```
@@ -55,14 +57,15 @@ Rust server composition root wires the adapters, core, and providers together.
 
 `ArtifactService` in the core is synchronous and generic over the
 `ArtifactStore` port. The Axum server runs its commands on Tokio's blocking
-pool; the core and the store have no async-runtime dependency. A future MCP
-adapter must call the same service. Keep runtime dependencies out of domain
+pool; the core and the store have no async-runtime dependency. The MCP
+adapter calls the same server operations as HTTP, and through them the same
+service. Keep runtime dependencies out of domain
 types rather than creating a generic runtime wrapper.
 
 ```text
-agent / CLI ─┐                       ┌─ API listener   /v1/...  (bearer token)
-web (proxy) ─┴─► artifree-server ────┤
-                                     └─ content listener /p/<ticket>/...  (sandbox CSP)
+CLI / scripts ─┐                       ┌─ API listener   /v1/...  (bearer token)
+MCP agents ────┼─► artifree-server ────┤                 /mcp     (same token, MCP)
+web (proxy) ───┘                       └─ content listener /p/<ticket>/...  (sandbox CSP)
                      │
                      ▼
          ArtifactService (owner check, fingerprint, apply changes)
@@ -120,9 +123,21 @@ Errors use `{ "error": { "code", "message", "current_revision"? } }` with
 (413), `unavailable` (503, retry with the same key), and `internal` (500).
 Bodies are defined in `crates/artifree-contracts/src/api.rs`.
 
+## MCP
+
+`POST /mcp` serves MCP Streamable HTTP through the official Rust SDK, `rmcp`,
+statelessly and with JSON responses, for protocol versions up to 2026-07-28.
+It requires the same bearer token, accepts only loopback `Host` names, and
+refuses requests carrying an `Origin`. Eight tools mirror the HTTP routes:
+`list_artifacts`, `get_artifact`, `create_artifact`, `save_revision`,
+`list_revisions`, `get_revision`, `read_file`, and `create_preview`. Results
+are the HTTP API v1 bodies; failures are those error bodies with
+`isError: true`. The generated catalog is
+`contracts/generated/mcp-tools.json`; [the MCP guide](mcp.md) shows Codex and
+Pi configuration. These are agent tools, not page capabilities.
+
 ## Next implementation slices
 
-- MCP adapter over the same `ArtifactService`.
 - Publishing a pinned revision, restore, and fork, kept separate from app data
   and access policy.
 - Multi-user authentication, sharing, and revocation tests.

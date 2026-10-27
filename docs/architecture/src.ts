@@ -45,8 +45,8 @@ const notes: Record<string, ModuleNote> = {
     purpose:
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
-      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류)과 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
-    next: 'MCP adapter가 같은 ArtifactService를 호출하게 합니다. 다중 사용자 인증은 별도 결정입니다.',
+      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
+    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 웹 자동 갱신과 handoff는 별도 기능입니다.',
   },
   domain: {
     purpose:
@@ -117,8 +117,8 @@ const notes: Record<string, ModuleNote> = {
   contracts: {
     purpose: 'Rust와 TypeScript가 같은 전송 데이터 형식을 사용하도록 합니다.',
     exists:
-      'descriptor와 HTTP API v1 요청·응답 DTO → JSON Schema → TypeScript 생성, 잘못된 입력·drift 검증.',
-    next: 'MCP·runtime 메시지를 실제 기능 구현에 맞춰 추가합니다. 서버 입력 검증은 계약과 별도로 유지합니다.',
+      'descriptor와 HTTP API v1 요청·응답 DTO → JSON Schema → TypeScript 생성, MCP 도구 catalog(인자·결과 schema) 생성, 잘못된 입력·drift 검증.',
+    next: 'runtime 메시지를 실제 기능 구현에 맞춰 추가합니다. 서버 입력 검증은 계약과 별도로 유지합니다.',
   },
   client: {
     purpose: 'Web과 CLI가 같은 HTTP 계약을 사용하는 client package입니다.',
@@ -430,7 +430,7 @@ const flowSteps = [
     tab: '파일 전달',
     layer: 'WORKING · PRESENTATION → LOGIC',
     title: 'agent가 원본 파일을 전달합니다.',
-    copy: 'agent가 선택한 도구로 HTML·CSS·이미지 등을 생성합니다. HTTP·MCP·CLI는 같은 명령과 결과 형식을 사용하게 만듭니다.',
+    copy: 'agent가 선택한 도구로 HTML·CSS·이미지 등을 생성합니다. HTTP·MCP·CLI는 같은 명령과 결과 형식을 사용합니다.',
     rule: '아티팩트 생성에 특정 모델 계정이나 내장 agent 실행기를 요구하지 않습니다.',
     code: 'PublishIntent\n  actor + artifact\n  base revision + file changes\n  idempotency key\n\n→ common application command',
   },

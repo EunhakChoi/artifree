@@ -39,6 +39,7 @@ test('CLI JSON matches the live Rust descriptor', () => {
   const descriptor = JSON.parse(result.stdout);
   assert.deepEqual(descriptor, JSON.parse(rust.stdout));
   assert.equal(descriptor.http_api, true);
+  assert.equal(descriptor.mcp_api, true);
   assert.equal(descriptor.server_framework, 'axum');
   assert.equal(descriptor.async_runtime, 'tokio');
 });

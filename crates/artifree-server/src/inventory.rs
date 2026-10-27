@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1 and a separate sandboxed preview origin; MCP planned.",
+        "Axum/Tokio HTTP API v1, MCP tools over Streamable HTTP at /mcp, and a sandboxed preview origin.",
     ),
     (
         "domain",

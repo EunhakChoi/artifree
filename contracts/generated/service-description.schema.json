@@ -116,6 +116,10 @@
       "description": "Whether this build can serve the HTTP API (`artifree-server serve`).\nThe inventory itself is static and does not probe a running server.",
       "type": "boolean"
     },
+    "mcp_api": {
+      "description": "Whether `artifree-server serve` also answers MCP over Streamable HTTP\nat `/mcp` on the API listener.",
+      "type": "boolean"
+    },
     "name": {
       "description": "Display name of the application.",
       "type": "string"
@@ -142,6 +146,7 @@
     "contract_version",
     "phase",
     "http_api",
+    "mcp_api",
     "components"
   ],
   "title": "ServiceDescription",

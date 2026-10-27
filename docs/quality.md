@@ -15,7 +15,7 @@ features.
 | CSS          | Stylelint recommended validity checks, duplicate selectors/properties, unknown values/properties, Tailwind-aware at-rules; zero warnings                                                                  |
 | Rust         | Unsafe forbidden, unused results denied, public documentation required, documented stdout/stderr exceptions only in CLI binaries, pedantic Clippy, rustfmt, rustdoc warnings denied                       |
 | Architecture | Exact Rust workspace membership and allowed dependencies, including build/dev edges; TypeScript package/import/re-export/type/lazy-import boundaries; no computed imports or source symlinks              |
-| Contracts    | Rust DTO generation, JSON Schema validity, unknown-field/type/value rejection, stable public TypeScript aliases, byte-for-byte generated drift                                                            |
+| Contracts    | Rust DTO generation, JSON Schema validity, unknown-field/type/value rejection, stable public TypeScript aliases, byte-for-byte generated drift; MCP tool schemas self-contained, standard-format, closed  |
 | Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                              |
 | Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox |
 | CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                        |
@@ -61,6 +61,22 @@ Artifact behavior is tested at the boundary that owns it:
   the same conflict for every save form, every JSON response validated against
   the API schema root with its expected status, and a SIGKILL after commit
   followed by a restart and a replayed retry.
+- `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
+  authenticates before anything else, refuses a request with an `Origin` or a
+  foreign `Host` and a server stream, reports another owner's artifact as not
+  found through every tool without leaking content, scopes retry keys to the
+  actor, and answers an unknown tool with a protocol error.
+- `scripts/tests/mcp.test.mjs`: the official MCP TypeScript SDK against a
+  spawned server: the 2.x client in the legacy and 2026-07-28 protocol eras,
+  and the 1.x client, which validates error results against output schemas. `tools/list`
+  equals the generated catalog; an agent creates, reads, saves, lists history,
+  reads exact pinned bytes (BOM, CRLF, binary), and opens a sandboxed preview;
+  results validate against the API schema; retries replay, reordered changes
+  are the same request, a reused key is refused, and keys are shared with
+  HTTP; stale bases conflict without partial writes; invalid arguments are
+  readable tool errors that do not reserve their key; missing or wrong tokens
+  and page origins are refused; the largest file fits and an oversized body is
+  refused.
 - `scripts/tests/client.test.mjs`: the API client with an injected `fetch`: a
   body cut off mid-stream is a network error, a complete foreign body is an
   invalid response, and uploads pick the smaller exact encoding.
@@ -89,7 +105,7 @@ CI runs the gate/build on Ubuntu 24.04 with Node 22.12.0 and Windows Server 2025
 with Node 22.22.2. Runner OS labels are fixed instead of following a moving
 `latest` image. GitHub actions run on their supported Node 24 runtime; that is
 separate from the application Node versions under test.
-Another job runs Cargo tests on Rust 1.85.0; regular checks use the pinned Rust
+Another job runs Cargo tests on Rust 1.88.0; regular checks use the pinned Rust
 toolchain. Rust/CLI JSON equivalence and all CLI rejection cases run in the
 general gate. Browser jobs use the official Playwright image, pinned by version
 and OCI digest, with browsers and system libraries already installed. They save
@@ -108,7 +124,7 @@ Actions. Minor and patch updates are grouped per ecosystem; majors arrive one
 at a time. Every update must pass the full gate before it is merged.
 `@types/node` majors are ignored because Node types must match the oldest
 supported runtime in `engines`; nothing else would catch code that uses APIs
-missing from Node 22. Rust needs no such rule: the Rust 1.85.0 job rejects
+missing from Node 22. Rust needs no such rule: the Rust 1.88.0 job rejects
 crates that raise the minimum version.
 
 ## Limits and the next implementation
@@ -119,7 +135,8 @@ requirement. Npm/Cargo advisory scans detect known reports, not all vulnerabilit
 
 Not yet covered, because the behavior does not exist: multi-user roles and
 revocation, runtime capabilities, publishing, and resource limits for artifact
-scripts. The single-owner token is not a multi-user authentication test. The
+scripts. Agent runs with Codex and Pi are manual checks, not CI: they need an
+agent account and model calls. The single-owner token is not a multi-user authentication test. The
 crash test kills the process after a commit; it does not simulate power loss
 or a storage device that ignores flushes.
 

@@ -1,18 +1,20 @@
 //! Emits the public JSON Schemas for contract generation.
 //!
-//! Output: `{ "service_description": <schema>, "api": <schema> }`. The API
-//! schema's root accepts any v1 JSON request or response body; each body and
-//! its parts are `$defs` entries.
+//! Output: `{ "service_description": <schema>, "api": <schema>, "mcp": <tools> }`.
+//! The API schema's root accepts any v1 JSON request or response body; each
+//! body and its parts are `$defs` entries. The MCP entry is the tool catalog
+//! that `tools/list` returns, with the server instructions and the schema of
+//! an error result.
 #![expect(
     clippy::print_stdout,
     reason = "This binary emits the JSON schemas on stdout."
 )]
 
-use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     Artifact, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse, Preview,
     Revision, RevisionList, SaveRevisionRequest,
 };
+use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,6 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = serde_json::json!({
         "service_description": schemars::schema_for!(ServiceDescription),
         "api": api,
+        "mcp": {
+            "instructions": mcp::SERVER_INSTRUCTIONS,
+            "tools": mcp::tools(),
+            "error_result": mcp::error_schema(),
+        },
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())

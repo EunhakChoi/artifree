@@ -6,7 +6,9 @@ import { parseSync } from 'oxc-parser';
 // Third-party edges are reviewed with their purpose (decision 0003):
 // sha2 fingerprints requests and addresses stored content, rusqlite is local
 // storage, getrandom creates identifiers and tokens, axum/tokio serve HTTP,
-// base64 decodes uploads, and tower drives in-process router tests.
+// base64 decodes uploads, and tower drives in-process router tests. rmcp is
+// the official MCP SDK serving the inbound MCP adapter, and serde parses its
+// tool arguments into contract DTOs (decision 0004).
 const rustEdges = {
   'artifree-domain': [],
   'artifree-ports': ['artifree-domain'],
@@ -28,6 +30,8 @@ const rustEdges = {
     'axum',
     'base64',
     'getrandom',
+    'rmcp',
+    'serde',
     'serde_json',
     'tokio',
   ],
@@ -88,7 +92,8 @@ function inside(root, target) {
 
 /**
  * The inventory may name a framework or runtime only when the server crate
- * really depends on it, and may claim an HTTP API only with both.
+ * really depends on it, and may claim an HTTP API only with both. An MCP
+ * claim also requires the HTTP API and the MCP SDK.
  * Inventory paths are portable repository paths, not user artifact paths.
  */
 export async function checkInventory(root, inventory, serverDependencies) {
@@ -104,6 +109,11 @@ export async function checkInventory(root, inventory, serverDependencies) {
     assert.ok(
       inventory.server_framework !== null && inventory.async_runtime !== null,
       'An HTTP API claim requires a selected framework and runtime.',
+    );
+  if (inventory.mcp_api)
+    assert.ok(
+      inventory.http_api && serverDependencies.includes('rmcp'),
+      'An MCP claim requires the HTTP API and the rmcp server dependency.',
     );
   assert.equal(
     new Set(inventory.components.map((component) => component.id)).size,

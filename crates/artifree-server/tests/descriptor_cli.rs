@@ -21,6 +21,7 @@ fn descriptor_is_machine_readable_and_exits_without_serving() -> Result<(), Box<
     assert_eq!(actual["name"], "Artifree");
     assert_eq!(actual["phase"], "early-development");
     assert_eq!(actual["http_api"], true);
+    assert_eq!(actual["mcp_api"], true);
     assert_eq!(actual["server_framework"], "axum");
     assert_eq!(actual["async_runtime"], "tokio");
     Ok(())

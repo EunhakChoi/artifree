@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { compile } from 'json-schema-to-typescript';
-import { createAjv } from './lib/schema.mjs';
+import { checkMcpCatalog, createAjv } from './lib/schema.mjs';
 import assert from 'node:assert/strict';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -31,6 +31,7 @@ const schemas = JSON.parse(
 );
 const schema = schemas.service_description;
 const apiSchema = schemas.api;
+const mcpCatalog = schemas.mcp;
 const inventory = JSON.parse(
   run([
     'run',
@@ -45,6 +46,7 @@ const inventory = JSON.parse(
 const ajv = createAjv();
 const validate = ajv.compile(schema);
 ajv.compile(apiSchema);
+checkMcpCatalog(mcpCatalog);
 if (!validate(inventory))
   throw new Error(
     `Rust inventory violates its schema: ${ajv.errorsText(validate.errors)}`,
@@ -87,6 +89,10 @@ const outputs = new Map([
   [
     'contracts/generated/api-v1.schema.json',
     `${JSON.stringify(apiSchema, null, 2)}\n`,
+  ],
+  [
+    'contracts/generated/mcp-tools.json',
+    `${JSON.stringify(mcpCatalog, null, 2)}\n`,
   ],
   [
     'contracts/generated/scaffold-inventory.json',

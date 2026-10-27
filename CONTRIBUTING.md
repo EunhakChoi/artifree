@@ -50,7 +50,7 @@ Avoid unnecessary interfaces and provider dependencies before the first working
 behavior requires them. Keep application behavior shared across HTTP, MCP, web,
 and CLI.
 
-Rust 1.85.0 is the supported minimum; the pinned toolchain also runs formatting,
+Rust 1.88.0 is the supported minimum; the pinned toolchain also runs formatting,
 Clippy, and rustdoc. Test new dependencies against both rather than assuming a
 newer compiler proves minimum-version compatibility.
 

@@ -1,7 +1,8 @@
 # Working on Artifree
 
 Artifree is in early development: local HTML artifacts work end to end
-(decision 0003); everything else is proposed. Keep implemented behavior and
+(decision 0003), including MCP tools for agents (decision 0004); everything
+else is proposed. Keep implemented behavior and
 proposed behavior explicitly separate in code, UI, docs, and completion reports.
 
 ## Decisions and boundaries

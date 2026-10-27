@@ -22,6 +22,11 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
+# syn 2 is still used by proc macros of tracing (through rmcp, the MCP SDK)
+# and of the Windows time-zone bindings (through chrono). Proc macros run at
+# build time only; no syn code ships in the server. Remove when they move to
+# syn 3.
+skip = [{ crate = "syn@2", reason = "build-time proc macros of tracing and windows-core still use syn 2" }]
 
 [sources]
 unknown-registry = "deny"
