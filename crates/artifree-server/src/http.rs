@@ -134,12 +134,26 @@ pub fn router(state: AppState) -> Router {
             "/v1/artifacts/{id}/revisions/{revision}/previews",
             axum::routing::post(create_preview),
         )
-        .fallback(|| async {
-            ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "no such route")
-        })
+        .method_not_allowed_fallback(method_not_allowed)
+        .fallback(no_such_route)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::map_response(no_store))
         .with_state(state)
+}
+
+// Unmatched requests authenticate first, like every route, so that callers
+// without the token cannot probe which routes and methods exist.
+async fn no_such_route(_: Authenticated) -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "no such route")
+}
+
+// Axum adds the `Allow` header listing the route's methods.
+async fn method_not_allowed(_: Authenticated) -> ApiError {
+    ApiError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        ErrorCode::InvalidRequest,
+        "this route does not support the request method",
+    )
 }
 
 async fn no_store(mut response: Response) -> Response {
@@ -262,7 +276,7 @@ impl FromRequestParts<AppState> for Authenticated {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
+            .and_then(bearer_token);
         match presented {
             Some(token) if state.shared.token.matches(token) => {
                 Ok(Self(state.shared.owner.clone()))
@@ -274,6 +288,16 @@ impl FromRequestParts<AppState> for Authenticated {
             )),
         }
     }
+}
+
+/// The credentials of a `Bearer` authorization value. The scheme is
+/// case-insensitive and separated from the token by one or more spaces
+/// (RFC 9110 section 11.4).
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim_start_matches(' '))
 }
 
 /// The required `Idempotency-Key` header.

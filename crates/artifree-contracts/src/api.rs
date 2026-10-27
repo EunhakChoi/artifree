@@ -180,7 +180,8 @@ pub struct Preview {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// Malformed body, header, path, or value.
+    /// Malformed body, header, path, or value, or a method the route does not
+    /// support.
     InvalidRequest,
     /// Missing or unknown access token.
     Unauthenticated,

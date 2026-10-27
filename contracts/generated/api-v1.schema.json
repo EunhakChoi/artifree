@@ -189,7 +189,7 @@
       "oneOf": [
         {
           "const": "invalid_request",
-          "description": "Malformed body, header, path, or value.",
+          "description": "Malformed body, header, path, or value, or a method the route does not\nsupport.",
           "type": "string"
         },
         {

@@ -182,6 +182,8 @@ async fn every_api_route_requires_the_bearer_token() -> TestResult {
             format!("/v1/artifacts/{id}/revisions/1/files/index.html"),
         ),
         ("POST", format!("/v1/artifacts/{id}/revisions/1/previews")),
+        ("DELETE", "/v1/artifacts".to_owned()),
+        ("GET", "/v1/no-such-route".to_owned()),
     ] {
         for token in [
             None,
@@ -202,6 +204,71 @@ async fn every_api_route_requires_the_bearer_token() -> TestResult {
             assert_eq!(reply.header(header::WWW_AUTHENTICATE), "Bearer");
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive() -> TestResult {
+    let harness = Harness::new();
+    for value in [
+        format!("bearer {TOKEN}"),
+        format!("BEARER {TOKEN}"),
+        format!("Bearer   {TOKEN}"),
+    ] {
+        let request = Request::get("/v1/artifacts")
+            .header(header::AUTHORIZATION, &value)
+            .body(Body::empty())?;
+        let reply = harness.send(request).await?;
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{value}: {}",
+            error_code(&reply)
+        );
+    }
+    for value in [format!("Bearer{TOKEN}"), format!("Bearer {TOKEN}x")] {
+        let request = Request::get("/v1/artifacts")
+            .header(header::AUTHORIZATION, &value)
+            .body(Body::empty())?;
+        let reply = harness.send(request).await?;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{value}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_methods_and_routes_return_contract_errors() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    for (method, path, allow) in [
+        ("DELETE", "/v1/artifacts".to_owned(), "GET,HEAD,POST"),
+        ("PUT", format!("/v1/artifacts/{id}"), "GET,HEAD"),
+        (
+            "GET",
+            format!("/v1/artifacts/{id}/revisions/1/previews"),
+            "POST",
+        ),
+    ] {
+        let request =
+            authorized(Request::builder().method(method).uri(&path)).body(Body::empty())?;
+        let reply = harness.send(request).await?;
+        assert_eq!(
+            reply.status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {path}"
+        );
+        assert_eq!(error_code(&reply), "invalid_request", "{method} {path}");
+        assert_eq!(reply.header(header::ALLOW), allow, "{method} {path}");
+    }
+    let reply = harness.send(get("/v1/no-such-route")?).await?;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&reply), "not_found");
+    let artifact = harness.send(get(&format!("/v1/artifacts/{id}"))?).await?;
+    assert_eq!(
+        artifact.json()?["current_revision"],
+        1,
+        "nothing was changed"
+    );
     Ok(())
 }
 

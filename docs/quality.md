@@ -50,9 +50,11 @@ Artifact behavior is tested at the boundary that owns it:
   real database — reopen durability, replay, key reuse, conflicts, eight
   concurrent writers, a trigger-injected failure that must leave no partial
   revision, content sharing, and newer-schema refusal.
-- `crates/artifree-server/tests/`: HTTP status and error codes, bearer token on
-  every route, unsafe paths, body limits, pinned reads, preview tickets and CSP,
-  expiry, and owner-only access in the core.
+- `crates/artifree-server/tests/`: HTTP status and error codes, including
+  unsupported methods; the bearer token on every route and unmatched path, with
+  a case-insensitive scheme; unsafe paths, body limits, pinned reads, preview
+  tickets and CSP, expiry, owner-only access in the core, and (on Unix) an
+  owner-only data directory, refusing one other users can access.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, and a
   SIGKILL after commit followed by a restart and a replayed retry.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to

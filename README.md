@@ -28,7 +28,9 @@ cargo run -p artifree-server -- serve --data-dir .artifree/data
 
 The server prints one JSON readiness line with the API URL (default
 `http://127.0.0.1:7410`), the preview origin (`http://127.0.0.1:7411`), and the
-token file. Keep it running and, in another terminal:
+token file. On Unix the server creates the data directory readable only by
+you and refuses an existing one that other users can access. Keep it running
+and, in another terminal:
 
 ```sh
 npm run dev

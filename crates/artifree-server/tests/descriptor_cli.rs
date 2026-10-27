@@ -67,3 +67,104 @@ fn serve_requires_a_data_directory() -> Result<(), Box<dyn Error>> {
     assert!(String::from_utf8(output.stderr)?.contains("--data-dir"));
     Ok(())
 }
+
+#[cfg(unix)]
+mod data_directory {
+    use std::error::Error;
+    use std::fs;
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("artifree-cli-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Kills the server even when an assertion fails first.
+    struct Server(Child);
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn serve(data_dir: &Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_artifree-server"));
+        command.arg("serve").arg("--data-dir").arg(data_dir).args([
+            "--api-listen",
+            "127.0.0.1:0",
+            "--content-listen",
+            "127.0.0.1:0",
+        ]);
+        command
+    }
+
+    #[test]
+    fn serve_creates_the_data_directory_for_the_owner_only() -> Result<(), Box<dyn Error>> {
+        let scratch = Scratch::new("private");
+        let data_dir = scratch.0.join("nested").join("data");
+        let mut server = Server(serve(&data_dir).stdout(Stdio::piped()).spawn()?);
+        let stdout = server.0.stdout.take().ok_or("no stdout")?;
+        let mut ready = String::new();
+        BufReader::new(stdout).read_line(&mut ready)?;
+        assert!(ready.contains("\"event\":\"ready\""), "{ready:?}");
+        let mode = fs::metadata(&data_dir)?.permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "data directory mode is {mode:03o}");
+        Ok(())
+    }
+
+    #[test]
+    fn serve_refuses_a_data_directory_other_users_can_read() -> Result<(), Box<dyn Error>> {
+        let scratch = Scratch::new("shared");
+        fs::create_dir_all(&scratch.0)?;
+        fs::set_permissions(&scratch.0, fs::Permissions::from_mode(0o755))?;
+        // Read stdout instead of waiting for exit: a server that wrongly
+        // starts prints its readiness line, fails here, and is killed on drop.
+        let mut server = Server(
+            serve(&scratch.0)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+        );
+        let mut first_line = String::new();
+        BufReader::new(server.0.stdout.take().ok_or("no stdout")?).read_line(&mut first_line)?;
+        assert_eq!(first_line, "", "no readiness line may be printed");
+        let status = server.0.wait()?;
+        assert_eq!(status.code(), Some(1));
+        let mut message = String::new();
+        server
+            .0
+            .stderr
+            .take()
+            .ok_or("no stderr")?
+            .read_to_string(&mut message)?;
+        assert!(message.contains("accessible to other users"), "{message:?}");
+        assert_eq!(
+            fs::read_dir(&scratch.0)?.count(),
+            0,
+            "nothing may be written into a refused directory"
+        );
+        assert_eq!(
+            fs::metadata(&scratch.0)?.permissions().mode() & 0o777,
+            0o755,
+            "the existing mode is reported, not changed"
+        );
+        Ok(())
+    }
+}

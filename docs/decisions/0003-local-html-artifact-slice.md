@@ -33,6 +33,14 @@ server, and keep the core independent of the framework and the store.
    now.
 4. **Authorization.** One local bearer token, created with owner-only file
    permissions on Unix in the data directory, maps to the single local owner.
+   The bearer scheme is matched case-insensitively. On Unix the data directory
+   is created with mode 700, and the server refuses to start on an existing
+   directory that group or other users can access, because the database and
+   its WAL in it would be readable without the token. It reports the mode
+   rather than changing it. On Windows the directory inherits its parent's
+   access control. Unmatched routes and methods also authenticate first and
+   answer with contract-shaped errors (`404 not_found`,
+   `405 invalid_request` with `Allow`).
    The core still checks the actor against the artifact owner on every read and
    write, and reports inaccessible artifacts as not found. This is not
    multi-user authentication.

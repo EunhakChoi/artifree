@@ -131,7 +131,9 @@ SIGTERM. When both listeners are ready it prints one JSON line on stdout:
 Clients authenticate with the bearer token stored in token_file.
 
 Options:
-  --data-dir <dir>              SQLite database and access token (required)
+  --data-dir <dir>              SQLite database and access token (required).
+                                On Unix it is created with mode 700, and a
+                                directory other users can access is refused.
   --api-listen <addr:port>      API address [default: {api}]
   --content-listen <addr:port>  Preview address [default: {content}]
   --content-origin <origin>     Public preview origin, if proxied

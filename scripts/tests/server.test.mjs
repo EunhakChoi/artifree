@@ -26,6 +26,11 @@ async function freshDirectory(name) {
   return directory;
 }
 
+/** A data directory path that the server creates, owner-only, on first start. */
+function dataDirectory(name) {
+  return join(scratch, name);
+}
+
 function cli(server, args, token = server.token) {
   const env = {
     ...process.env,
@@ -54,7 +59,7 @@ function json(result) {
 }
 
 test('CLI creates, saves, reads pinned revisions, and rejects stale saves', async () => {
-  const data = await freshDirectory('cli-data');
+  const data = dataDirectory('cli-data');
   const site = await freshDirectory('cli-site');
   await mkdir(join(site, 'assets'));
   await writeFile(join(site, 'index.html'), '<h1>v1</h1>');
@@ -116,7 +121,7 @@ test('CLI creates, saves, reads pinned revisions, and rejects stale saves', asyn
 });
 
 test('CLI reports authentication and usage failures without stdout', async () => {
-  const server = await startServer(binary, await freshDirectory('auth-data'));
+  const server = await startServer(binary, dataDirectory('auth-data'));
   try {
     const denied = cli(server, ['list'], 'f'.repeat(64));
     assert.equal(denied.status, 1);
@@ -139,7 +144,7 @@ test('CLI reports authentication and usage failures without stdout', async () =>
 });
 
 test('A crash after commit loses nothing and a retry replays the result', async () => {
-  const data = await freshDirectory('crash-data');
+  const data = dataDirectory('crash-data');
   const site = await freshDirectory('crash-site');
   await writeFile(join(site, 'index.html'), '<p>durable</p>');
   const create = ['create', '--title', 'Durable', '--dir', site];
