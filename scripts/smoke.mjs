@@ -57,7 +57,15 @@ function forward(request, response) {
       reply.pipe(response);
     },
   );
-  upstream.on('error', () => response.writeHead(502).end());
+  upstream.on('error', () => {
+    if (!response.headersSent) response.writeHead(502);
+    response.end();
+  });
+  // A client that leaves ends the upstream request, as a real proxy does;
+  // otherwise the API keeps every abandoned change stream and its slot.
+  response.on('close', () => {
+    if (!response.writableFinished) upstream.destroy();
+  });
   request.pipe(upstream);
 }
 

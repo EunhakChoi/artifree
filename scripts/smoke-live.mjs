@@ -123,7 +123,7 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await workspace.getByRole('tab', { name: 'Preview' }).click();
 
     // W1: an artifact an agent creates appears; the open one stays open.
-    await api(server, 'POST', '/v1/artifacts', {
+    const { artifact: agent } = await api(server, 'POST', '/v1/artifacts', {
       title: 'Agent artifact',
       files: [file('Agent')],
     });
@@ -379,6 +379,27 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await background.page.waitForTimeout(3000);
     assert.equal(background.reads.mark(), 0, 'A background page read.');
     assert.equal(background.streams.count(), 0, 'A background page streamed.');
+
+    // Decision 7: an artifact opened because it was listed first stays open
+    // when a commit elsewhere moves another one ahead of it.
+    const implicit = await opened();
+    await connect(implicit, server);
+    const implicitNav = implicit.workspace.getByRole('navigation', {
+      name: 'Artifacts',
+    });
+    await expect(
+      implicitNav.getByRole('button', { name: /Live artifact/ }),
+    ).toHaveAttribute('aria-current', 'true');
+    await commit(server, agent.id, 'Agent 2');
+    await expect(implicitNav.getByRole('button').first()).toHaveAccessibleName(
+      /Agent artifact/,
+    );
+    await expect(
+      implicitNav.getByRole('button', { name: /Live artifact/ }),
+    ).toHaveAttribute('aria-current', 'true');
+    await expect(
+      implicit.workspace.getByText('Revision 19', { exact: true }),
+    ).toBeVisible();
 
     // Disconnecting ends the stream.
     await workspace.getByRole('button', { name: 'Disconnect' }).click();

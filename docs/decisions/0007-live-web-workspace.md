@@ -94,9 +94,9 @@ unpublished trace maps each to its evidence.
 7. **The open artifact stays while selected.** Selection changes only when
    the user chooses another artifact, which is disabled while a draft
    exists, or, without a draft, when a list answered for the current request
-   no longer contains it; then the first listed artifact opens. A draft
-   pins the artifact it was written in, also one opened only because it was
-   listed first.
+   no longer contains it; then the first listed artifact opens. An artifact
+   opened because it was listed first stays open in the same way, also when
+   a later list puts another artifact first.
 8. **Drafts.** While the editor holds unsaved changes it keeps the revision
    the draft was written against, with its file list, even when that
    revision is no longer listed. When a newer revision arrives, the editor

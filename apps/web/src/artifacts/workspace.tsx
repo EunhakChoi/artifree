@@ -126,12 +126,9 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       fresh === undefined ||
       fresh.list.some(({ id }) => id === selected));
   const selectedId = keepSelected ? selected : (fresh?.list ?? listed)?.[0]?.id;
-  function changeUnsaved(next: boolean): void {
-    // A draft pins the artifact it was written in, also one opened only
-    // because it was listed first.
-    if (next) setSelected(selectedId);
-    setUnsaved(next);
-  }
+  // An artifact opened because it was listed first stays open like a chosen
+  // one, also when a later list puts another first.
+  if (selectedId !== selected) setSelected(selectedId);
   function saved(artifact: Artifact): void {
     // This page's own save is not news when its notice arrives.
     learn(epoch, [{ id: artifact.id, revision: artifact.current_revision }]);
@@ -207,7 +204,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
               unknownChanges={live.unknown[selectedId] ?? 0}
               onSaved={saved}
               unsaved={unsaved}
-              onUnsavedChange={changeUnsaved}
+              onUnsavedChange={setUnsaved}
             />
           </div>
         </div>
