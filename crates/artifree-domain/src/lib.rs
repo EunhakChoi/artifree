@@ -3,6 +3,9 @@
 //! These counters deliberately have different types. A source revision, document
 //! sequence, and running application's data version have independent lifecycles.
 
+pub mod identity;
+pub mod package;
+
 /// The family of an artifact's authoritative source model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactKind {
@@ -18,6 +21,42 @@ pub enum ArtifactKind {
     Design,
     /// A timeline or motion composition.
     Motion,
+}
+
+impl ArtifactKind {
+    /// Stable lowercase name used in storage and wire contracts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Document => "document",
+            Self::Slides => "slides",
+            Self::Dashboard => "dashboard",
+            Self::Design => "design",
+            Self::Motion => "motion",
+        }
+    }
+}
+
+impl std::str::FromStr for ArtifactKind {
+    type Err = identity::InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        [
+            Self::App,
+            Self::Document,
+            Self::Slides,
+            Self::Dashboard,
+            Self::Design,
+            Self::Motion,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == value)
+        .ok_or(identity::InvalidValue {
+            what: "artifact kind",
+            rule: "expected app, document, slides, dashboard, design, or motion",
+        })
+    }
 }
 
 /// A source history position; it does not version running application data.

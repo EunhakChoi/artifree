@@ -7,6 +7,7 @@
     "artifree": "./dist/main.js"
   },
   "dependencies": {
+    "@artifree/client": "0.1.0",
     "@artifree/contracts": "0.1.0"
   }
 }

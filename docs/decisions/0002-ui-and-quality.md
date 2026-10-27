@@ -1,6 +1,7 @@
 # 0002: UI foundation and mandatory quality feedback
 
-Date: 2026-10-27. Status: accepted.
+Date: 2026-10-27. Status: accepted. Item 6 was fulfilled by the first vertical
+slice; see [0003](0003-local-html-artifact-slice.md) for the dependencies it added.
 
 ## Context
 

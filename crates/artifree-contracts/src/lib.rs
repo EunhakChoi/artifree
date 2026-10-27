@@ -1,16 +1,20 @@
 //! Versioned wire contracts. Generate JSON Schema and TypeScript from these DTOs.
 //! Domain models remain independent; transport DTOs do not grant authorization.
 
+pub mod api;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version, independent from a future API transport version.
-pub const CONTRACT_VERSION: &str = "0.1.0";
+pub const CONTRACT_VERSION: &str = "0.2.0";
 
-/// Whether a module has scaffolding or only a proposed responsibility.
+/// How much of a module's responsibility exists in this build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentStatus {
+    /// Some product behavior works; the summary states its scope and limits.
+    Implemented,
     /// Source scaffolding exists; the summary states its actual behavior.
     Scaffold,
     /// The module has no implemented product behavior.
@@ -51,7 +55,7 @@ pub struct Component {
     pub summary: String,
 }
 
-/// A build-time scaffold inventory, not a live server health response.
+/// A build-time module inventory, not a live server health response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceDescription {
@@ -61,14 +65,15 @@ pub struct ServiceDescription {
     pub version: String,
     /// Version of this wire contract.
     pub contract_version: String,
-    /// Product implementation stage, currently scaffolding.
+    /// Product implementation stage.
     pub phase: String,
     /// Selected HTTP framework, or null while undecided.
     pub server_framework: Option<String>,
     /// Selected async runtime, or null while undecided.
     pub async_runtime: Option<String>,
-    /// Whether this process starts an HTTP listener; currently always false.
-    pub http_listening: bool,
+    /// Whether this build can serve the HTTP API (`artifree-server serve`).
+    /// The inventory itself is static and does not probe a running server.
+    pub http_api: bool,
     /// Modules included in this build-time inventory.
     pub components: Vec<Component>,
 }

@@ -1,15 +1,17 @@
 # Working on Artifree
 
-Artifree is at the scaffolding stage. Keep implemented behavior and proposed
-behavior explicitly separate in code, UI, docs, and completion reports.
+Artifree is in early development: local HTML artifacts work end to end
+(decision 0003); everything else is proposed. Keep implemented behavior and
+proposed behavior explicitly separate in code, UI, docs, and completion reports.
 
 ## Decisions and boundaries
 
 - Presentation code is TypeScript. Logic code is Rust.
-- The HTTP framework and async runtime are intentionally undecided. Tokio and
-  Axum are candidates, not requirements.
-- Provider tools, databases, queues, editors, bundlers, and worker languages are
-  candidates until their first implemented behavior and decision record.
+- HTTP uses Axum on Tokio, only inside `artifree-server`; the core and store
+  stay synchronous. Local storage is SQLite through `rusqlite` (decision 0003).
+- Other provider tools, server databases, queues, editors, bundlers, and worker
+  languages are candidates until their first implemented behavior and decision
+  record.
 - Keep `artifree-domain` independent of I/O and wire contracts. Keep
   `artifree-core` independent of concrete providers and server frameworks.
 - HTTP, MCP, web, and CLI must share application behavior rather than invent
@@ -18,8 +20,13 @@ behavior explicitly separate in code, UI, docs, and completion reports.
   `contracts/generated` or `packages/contracts/src/generated`.
 - JSON Schema and generated TypeScript do not replace runtime input validation
   or authorization. The current inventory is not a live health response.
-- The runtime SDK currently contains types only. Do not advertise a sandbox,
-  capability enforcement, or a working iframe bridge until it is implemented.
+- Previews run in a CSP/iframe sandbox on a separate origin with no
+  capabilities. They are isolated from the workspace, not from the network:
+  content can navigate its own frame elsewhere (decision 0003). Do not claim
+  network isolation, capability enforcement, or an iframe bridge until they
+  are implemented. The runtime SDK contains types only.
+- Mutations go through `ArtifactService` with a base revision and an
+  idempotency key. Do not add a write path that bypasses either.
 
 ## Quality
 

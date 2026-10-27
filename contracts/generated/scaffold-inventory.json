@@ -1,11 +1,11 @@
 {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.1.0",
-  "phase": "scaffolding",
-  "server_framework": null,
-  "async_runtime": null,
-  "http_listening": false,
+  "contract_version": "0.2.0",
+  "phase": "early-development",
+  "server_framework": "axum",
+  "async_runtime": "tokio",
+  "http_api": true,
   "components": [
     {
       "id": "web",
@@ -13,8 +13,8 @@
       "layer": "presentation",
       "language": "TypeScript",
       "path": "apps/web",
-      "status": "scaffold",
-      "summary": "React/Vite development shell; no backend connection."
+      "status": "implemented",
+      "summary": "React/Vite workspace: create, edit, save, and preview HTML artifacts via the local API."
     },
     {
       "id": "cli",
@@ -22,8 +22,8 @@
       "layer": "presentation",
       "language": "TypeScript",
       "path": "apps/cli",
-      "status": "scaffold",
-      "summary": "Help, version, and build-time scaffold inventory."
+      "status": "implemented",
+      "summary": "Artifact create, list, show, save, cat, and preview over HTTP; build inventory."
     },
     {
       "id": "runtime",
@@ -40,8 +40,8 @@
       "layer": "logic",
       "language": "Rust",
       "path": "crates/artifree-server",
-      "status": "scaffold",
-      "summary": "Composition root and descriptor binary; HTTP/MCP are not implemented."
+      "status": "implemented",
+      "summary": "Axum/Tokio HTTP API v1 and a separate sandboxed preview origin; MCP planned."
     },
     {
       "id": "domain",
@@ -49,8 +49,8 @@
       "layer": "logic",
       "language": "Rust",
       "path": "crates/artifree-domain",
-      "status": "scaffold",
-      "summary": "Six content kinds and separate source/document/data counters."
+      "status": "implemented",
+      "summary": "Validated identifiers, portable file packages, and separate version counters."
     },
     {
       "id": "artifacts",
@@ -58,8 +58,8 @@
       "layer": "logic",
       "language": "Rust",
       "path": "crates/artifree-core/src/artifacts.rs",
-      "status": "planned",
-      "summary": "Drafts, versioned files, conditional saves, publish, restore, and fork."
+      "status": "implemented",
+      "summary": "Create, conditional revisions, retry keys, pinned reads; publish/restore/fork planned."
     },
     {
       "id": "policy",
@@ -67,8 +67,8 @@
       "layer": "logic",
       "language": "Rust",
       "path": "crates/artifree-core/src/policy.rs",
-      "status": "planned",
-      "summary": "Actors, access rules, scoped sessions, and capability checks."
+      "status": "implemented",
+      "summary": "Owner-only access checked on every read; sharing and capabilities planned."
     },
     {
       "id": "documents",
@@ -101,10 +101,10 @@
       "id": "storage",
       "name": "Storage",
       "layer": "provider",
-      "language": "Rust adapters; backend open",
+      "language": "Rust · SQLite",
       "path": "crates/artifree-providers/src/storage.rs",
-      "status": "planned",
-      "summary": "Local SQLite/files and server PostgreSQL/objects are candidates."
+      "status": "implemented",
+      "summary": "Local SQLite with atomic commits and shared file content; PostgreSQL planned."
     },
     {
       "id": "models",
@@ -148,8 +148,8 @@
       "layer": "shared",
       "language": "Rust → JSON Schema → TypeScript",
       "path": "crates/artifree-contracts",
-      "status": "scaffold",
-      "summary": "Generated wire types and validated build-time inventory."
+      "status": "implemented",
+      "summary": "Rust DTOs → JSON Schema → TypeScript for the inventory and HTTP API v1."
     },
     {
       "id": "client",
@@ -157,8 +157,8 @@
       "layer": "shared",
       "language": "TypeScript",
       "path": "packages/client",
-      "status": "scaffold",
-      "summary": "Connection configuration types; no HTTP methods yet."
+      "status": "implemented",
+      "summary": "Fetch-based HTTP API v1 client with structured errors."
     }
   ]
 }

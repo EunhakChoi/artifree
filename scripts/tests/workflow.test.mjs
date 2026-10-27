@@ -51,3 +51,20 @@ test('A step cannot silently ignore failure', () => {
   invalid.jobs.checks.steps[0]['continue-on-error'] = true;
   assert.throws(() => checkWorkflow(invalid), /Fail-open step/);
 });
+test('Browser jobs test the server binary built for them', () => {
+  const browsers = workflow.jobs.browsers;
+  assert.ok(
+    browsers.needs.includes('server-binary'),
+    'Browser tests must wait for the server binary.',
+  );
+  assert.equal(
+    browsers.env.ARTIFREE_SERVER_BIN,
+    '.artifree/bin/artifree-server',
+  );
+  assert.ok(
+    browsers.steps.some((step) =>
+      step.uses?.startsWith('actions/download-artifact@'),
+    ),
+    'Browser tests must download the binary instead of skipping the server.',
+  );
+});

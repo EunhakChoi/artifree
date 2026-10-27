@@ -1,7 +1,7 @@
 /* Generated from artifree-contracts. Run npm run generate:contracts; do not edit. */
 
 /**
- * A build-time scaffold inventory, not a live server health response.
+ * A build-time module inventory, not a live server health response.
  */
 export interface ServiceDescription {
   /**
@@ -17,15 +17,16 @@ export interface ServiceDescription {
    */
   contract_version: string;
   /**
-   * Whether this process starts an HTTP listener; currently always false.
+   * Whether this build can serve the HTTP API (`artifree-server serve`).
+   * The inventory itself is static and does not probe a running server.
    */
-  http_listening: boolean;
+  http_api: boolean;
   /**
    * Display name of the application.
    */
   name: string;
   /**
-   * Product implementation stage, currently scaffolding.
+   * Product implementation stage.
    */
   phase: string;
   /**
@@ -64,7 +65,7 @@ export interface Component {
   /**
    * Implementation stage; this is not runtime health.
    */
-  status: 'scaffold' | 'planned';
+  status: 'implemented' | 'scaffold' | 'planned';
   /**
    * Actual scaffold behavior or the proposed responsibility.
    */

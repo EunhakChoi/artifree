@@ -413,6 +413,7 @@ h2 {
   white-space: nowrap;
   padding-bottom: 3px;
 }
+.legend-implemented,
 .legend-scaffold,
 .legend-planned {
   display: block;
@@ -420,8 +421,12 @@ h2 {
   height: 5px;
   border-radius: 50%;
 }
+.legend-implemented {
+  background: #2f5e3f;
+}
 .legend-scaffold {
   background: #6c8c55;
+  margin-left: 9px;
 }
 .legend-planned {
   background: #c6b17e;
@@ -542,6 +547,9 @@ h2 {
   border-radius: 50%;
   background: #91a07a;
   margin-right: 4px;
+}
+.module-node[data-status='implemented'] .module-dot {
+  background: #2f5e3f;
 }
 .module-node[data-status='planned'] .module-dot {
   background: #c4ae79;

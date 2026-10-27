@@ -33,7 +33,7 @@
     "lint:css": "stylelint \"apps/web/src/**/*.css\" \"docs/architecture/**/*.css\" --max-warnings 0",
     "lint": "npm run lint:code && npm run lint:css",
     "check:architecture": "node scripts/build-architecture.mjs --check",
-    "test:tooling": "node --test scripts/tests/*.test.mjs"
+    "test:tooling": "node --test --test-timeout=180000 scripts/tests/*.test.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",

@@ -1,0 +1,486 @@
+{
+  "$defs": {
+    "Artifact": {
+      "additionalProperties": false,
+      "description": "Artifact metadata.",
+      "properties": {
+        "created_at_ms": {
+          "description": "Creation time in Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "current_revision": {
+          "description": "Latest committed revision when this metadata was produced; see\n[`CommitResponse::artifact`] for replays.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "Opaque identifier.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind",
+          "description": "Source model family."
+        },
+        "title": {
+          "description": "Display title.",
+          "type": "string"
+        },
+        "updated_at_ms": {
+          "description": "Time of the latest revision in Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "current_revision",
+        "created_at_ms",
+        "updated_at_ms"
+      ],
+      "type": "object"
+    },
+    "ArtifactKind": {
+      "description": "Source model family of an artifact. Only `app` can be created by this\nversion; the other families are reserved for planned source models.",
+      "oneOf": [
+        {
+          "const": "app",
+          "description": "A file package with an `index.html` entry document.",
+          "type": "string"
+        },
+        {
+          "const": "document",
+          "description": "A structured text document.",
+          "type": "string"
+        },
+        {
+          "const": "slides",
+          "description": "An ordered slide presentation.",
+          "type": "string"
+        },
+        {
+          "const": "dashboard",
+          "description": "A data dashboard.",
+          "type": "string"
+        },
+        {
+          "const": "design",
+          "description": "A visual design document.",
+          "type": "string"
+        },
+        {
+          "const": "motion",
+          "description": "A timeline or motion composition.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactList": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts`.",
+      "properties": {
+        "artifacts": {
+          "description": "Accessible artifacts, most recently updated first.",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "artifacts"
+      ],
+      "type": "object"
+    },
+    "CommitResponse": {
+      "additionalProperties": false,
+      "description": "Response of a create or revision commit.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/Artifact",
+          "description": "Artifact metadata as of the commit this request identifies. On a\nreplay it can be older than the artifact's current state; read the\nartifact for that before choosing the next base revision."
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key already committed it.",
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "The revision the request committed."
+        }
+      },
+      "required": [
+        "artifact",
+        "revision",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "ContentEncoding": {
+      "description": "Byte encoding of a file's `content` string.",
+      "oneOf": [
+        {
+          "const": "utf8",
+          "description": "The string's UTF-8 bytes are the file content.",
+          "type": "string"
+        },
+        {
+          "const": "base64",
+          "description": "Standard padded base64 of the file content.",
+          "type": "string"
+        }
+      ]
+    },
+    "CreateArtifactRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/artifacts`.",
+      "properties": {
+        "files": {
+          "description": "Initial files; `index.html` is required.",
+          "items": {
+            "$ref": "#/$defs/FileUpload"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Display title, 1-200 characters.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "files"
+      ],
+      "type": "object"
+    },
+    "ErrorBody": {
+      "additionalProperties": false,
+      "description": "Error details.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode",
+          "description": "Category for programmatic handling."
+        },
+        "current_revision": {
+          "description": "The current revision, present for `revision_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable explanation; not a stable contract.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "Machine-readable error category.",
+      "oneOf": [
+        {
+          "const": "invalid_request",
+          "description": "Malformed body, header, path, or value, or a method the route does not\nsupport.",
+          "type": "string"
+        },
+        {
+          "const": "unauthenticated",
+          "description": "Missing or unknown access token.",
+          "type": "string"
+        },
+        {
+          "const": "not_found",
+          "description": "The resource does not exist or is not accessible.",
+          "type": "string"
+        },
+        {
+          "const": "revision_conflict",
+          "description": "The base revision is not current; reload and reapply the change.",
+          "type": "string"
+        },
+        {
+          "const": "request_key_reused",
+          "description": "The idempotency key was already used for a different request.",
+          "type": "string"
+        },
+        {
+          "const": "payload_too_large",
+          "description": "The request body exceeds the size limit.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "Storage or capacity is temporarily unavailable; retry with the same key.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Unexpected server failure. A mutating request may have been committed;\nretry with the same key to learn its outcome.",
+          "type": "string"
+        }
+      ]
+    },
+    "ErrorResponse": {
+      "additionalProperties": false,
+      "description": "Body of every non-2xx JSON response.",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorBody",
+          "description": "Error details."
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "type": "object"
+    },
+    "FileChange": {
+      "description": "One change in a revision commit.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Create or replace a file.",
+          "properties": {
+            "content": {
+              "description": "Complete new content.",
+              "type": "string"
+            },
+            "encoding": {
+              "$ref": "#/$defs/ContentEncoding",
+              "description": "How `content` encodes the bytes."
+            },
+            "op": {
+              "const": "put",
+              "type": "string"
+            },
+            "path": {
+              "description": "Portable relative path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "encoding",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Remove an existing file.",
+          "properties": {
+            "op": {
+              "const": "delete",
+              "type": "string"
+            },
+            "path": {
+              "description": "Portable relative path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FileUpload": {
+      "additionalProperties": false,
+      "description": "One file of a new artifact.",
+      "properties": {
+        "content": {
+          "description": "Complete file content.",
+          "type": "string"
+        },
+        "encoding": {
+          "$ref": "#/$defs/ContentEncoding",
+          "description": "How `content` encodes the bytes."
+        },
+        "path": {
+          "description": "Portable relative path such as `index.html` or `assets/app.js`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "encoding",
+        "content"
+      ],
+      "type": "object"
+    },
+    "Preview": {
+      "additionalProperties": false,
+      "description": "A short-lived link that renders one pinned revision on the content origin.",
+      "properties": {
+        "expires_at_ms": {
+          "description": "Expiry time in Unix milliseconds. Access is also rechecked per request.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision": {
+          "description": "The pinned revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "url": {
+          "description": "URL of the revision's `index.html`; relative links resolve inside it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "revision",
+        "expires_at_ms"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "additionalProperties": false,
+      "description": "An immutable source revision.",
+      "properties": {
+        "created_at_ms": {
+          "description": "Commit time in Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "created_by": {
+          "description": "Actor that committed it.",
+          "type": "string"
+        },
+        "files": {
+          "description": "Files in path order.",
+          "items": {
+            "$ref": "#/$defs/RevisionFile"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "Revision number, starting at 1.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "created_by",
+        "created_at_ms",
+        "files"
+      ],
+      "type": "object"
+    },
+    "RevisionFile": {
+      "additionalProperties": false,
+      "description": "A file in a revision manifest.",
+      "properties": {
+        "media_type": {
+          "description": "`Content-Type` used when the file is served.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Package path.",
+          "type": "string"
+        },
+        "size": {
+          "description": "Size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "media_type"
+      ],
+      "type": "object"
+    },
+    "RevisionList": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/revisions`.",
+      "properties": {
+        "revisions": {
+          "description": "Revisions, newest first.",
+          "items": {
+            "$ref": "#/$defs/Revision"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revisions"
+      ],
+      "type": "object"
+    },
+    "SaveRevisionRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/artifacts/{id}/revisions`.",
+      "properties": {
+        "base_revision": {
+          "description": "The revision these changes were prepared against. The commit fails\nwith `revision_conflict` unless it is still current.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changes": {
+          "description": "Changes applied to the base revision; unchanged files carry over. At\nmost 512 changes, each to a different path.",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "base_revision",
+        "changes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://artifree.invalid/schemas/api-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/CreateArtifactRequest"
+    },
+    {
+      "$ref": "#/$defs/SaveRevisionRequest"
+    },
+    {
+      "$ref": "#/$defs/CommitResponse"
+    },
+    {
+      "$ref": "#/$defs/Artifact"
+    },
+    {
+      "$ref": "#/$defs/ArtifactList"
+    },
+    {
+      "$ref": "#/$defs/Revision"
+    },
+    {
+      "$ref": "#/$defs/RevisionList"
+    },
+    {
+      "$ref": "#/$defs/Preview"
+    },
+    {
+      "$ref": "#/$defs/ErrorResponse"
+    }
+  ],
+  "description": "Any JSON request or response body of HTTP API v1.",
+  "title": "ApiBody"
+}

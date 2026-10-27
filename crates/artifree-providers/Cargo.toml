@@ -6,7 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+artifree-domain.workspace = true
 artifree-ports.workspace = true
+getrandom.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

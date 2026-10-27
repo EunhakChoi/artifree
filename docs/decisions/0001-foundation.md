@@ -1,6 +1,7 @@
 # 0001: TypeScript presentation, Rust logic, replaceable providers
 
-Date: 2026-10-26. Status: accepted foundation; integration libraries deferred.
+Date: 2026-10-26. Status: accepted foundation. The HTTP framework, async
+runtime, and local storage were chosen in [0003](0003-local-html-artifact-slice.md).
 
 ## Context
 

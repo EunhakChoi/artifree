@@ -23,7 +23,9 @@ jobs:
   checks:
     name: Checks (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Cold Windows builds now compile bundled SQLite, Tokio, and Axum, and the
+    # tooling tests build and spawn the server.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -63,10 +65,33 @@ jobs:
           key: msrv
       - run: cargo +1.85.0 test --workspace --all-features --locked
 
+  server-binary:
+    name: Server binary for browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: server-binary
+      - run: cargo build --locked -p artifree-server --bin artifree-server
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifree-server-linux
+          path: target/debug/artifree-server
+          if-no-files-found: error
+          retention-days: 1
+
   browsers:
     name: Browser (${{ matrix.browser }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The Playwright image has no Rust toolchain. Ubuntu 24.04 runner and the
+    # noble image share glibc, so the runner-built binary runs in the container.
+    needs: [server-binary]
     container:
       image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea
       options: --user 1001 --ipc=host --init
@@ -76,6 +101,8 @@ jobs:
         browser: [chromium, firefox]
     env:
       ARTIFREE_BROWSER: ${{ matrix.browser }}
+      # Relative to the checkout; github.workspace is a host path in containers.
+      ARTIFREE_SERVER_BIN: .artifree/bin/artifree-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,6 +111,11 @@ jobs:
         with:
           node-version: '22.22.2'
           cache: npm
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: artifree-server-linux
+          path: .artifree/bin
+      - run: chmod +x .artifree/bin/artifree-server
       - run: npm ci
       - run: npm run build
       - run: npm run test:smoke
@@ -120,7 +152,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [checks, msrv, browsers, dependencies]
+    needs: [checks, msrv, server-binary, browsers, dependencies]
     steps:
       - name: Require every verification job to succeed
         env:

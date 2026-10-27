@@ -4,7 +4,9 @@ Artifree's application code and assets are independently authored. The component
 in `apps/web/src/components/ui/` are adapted from
 [shadcn/ui](https://github.com/shadcn-ui/ui) through the official shadcn CLI,
 using the `base-nova` registry style. Local changes include semantic overlay
-colors, theme-driven color states, and contrast-corrected tab text. The implementation is unrelated to any
+colors, theme-driven color states, contrast-corrected tab text, a darker
+destructive color for AA contrast, a monospaced `code` textarea variant, an
+explicit `htmlFor` on `Label`, and no unnamed `role="group"` on `Field`. The implementation is unrelated to any
 proprietary artifact product's source.
 
 ## shadcn/ui — MIT

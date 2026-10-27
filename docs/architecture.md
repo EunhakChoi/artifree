@@ -1,29 +1,32 @@
 # Artifree architecture
 
-Status: scaffolding with UI and quality foundations, 2026-10-27.
+Status: early development, 2026-10-27. Local HTML artifacts work end to end;
+see [decision 0003](decisions/0003-local-html-artifact-slice.md).
 
 The [interactive HTML design](architecture.html) maps the design to actual source
-paths. All product workflows in that design are proposals. The UI, CLI inventory,
-Rust workspace, generated contracts, and checks are the implemented scaffold.
+paths and marks each module and flow step as working, scaffold, or planned.
+Working today: creating HTML file-package artifacts, conditional revision
+commits with retry keys, revision-pinned reads, and sandboxed previews, through
+the HTTP API, the CLI, and the web workspace, stored in local SQLite.
 
 ## Repository map
 
 ```text
 apps/
-  web/                 TypeScript · React/Vite · Tailwind 4 · shadcn/ui (Base UI)
-  cli/                 TypeScript · help/version/describe
+  web/                 TypeScript · React/Vite · Tailwind 4 · shadcn/ui (Base UI) workspace
+  cli/                 TypeScript · artifact commands and describe
 packages/
-  contracts/           generated TypeScript wire types and scaffold inventory
-  client/              future HTTP SDK configuration types
+  contracts/           generated TypeScript wire types and build inventory
+  client/              HTTP API v1 client with runtime response checks
   runtime-sdk/         proposed capability and session-binding types
 crates/
-  artifree-domain/     source vocabulary; no dependencies
-  artifree-core/       artifacts, policy, documents, jobs, agent handoff boundaries
-  artifree-ports/      outbound boundary vocabulary
-  artifree-providers/  storage, models, tools, build, export module locations
+  artifree-domain/     identifiers, portable file packages, version counters; no dependencies
+  artifree-core/       artifact service and owner policy; documents, jobs, handoff planned
+  artifree-ports/      artifact store contract; other families planned
+  artifree-providers/  SQLite artifact store; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
-  artifree-server/     composition root, descriptor, future HTTP/MCP adapters
-contracts/generated/  generated JSON Schema and inventory snapshot
+  artifree-server/     composition root, Axum HTTP API, preview origin; MCP planned
+contracts/generated/  generated JSON Schemas (descriptor, API v1) and inventory snapshot
 docs/architecture/    TypeScript, CSS, and HTML source for the standalone design
 scripts/              contract generation, architecture build, checks, smoke
 ```
@@ -36,8 +39,9 @@ Generated artifacts do not inherit management UI styling restrictions.
 [Decision 0002](decisions/0002-ui-and-quality.md) records this stack and the
 [quality gates](quality.md). They cover both language boundaries, rejection
 contracts, source-linked design drift, zero-warning lint, Windows/MSRV, browser
-accessibility, and dependency checks. Framework/runtime and provider selection
-remain deferred.
+accessibility, and dependency checks. [Decision 0003](decisions/0003-local-html-artifact-slice.md)
+selects Axum on Tokio for HTTP and SQLite through `rusqlite` for local
+storage; other providers remain candidates.
 
 ## Layer dependency direction
 
@@ -49,10 +53,23 @@ TypeScript clients → inbound HTTP/MCP → Rust application core → outbound p
 Rust server composition root wires the adapters, core, and providers together.
 ```
 
-There are no HTTP listeners, MCP transports, provider operation implementations,
-or async-runtime dependencies yet. The first working slice will define narrow
-operation signatures and choose suitable integration libraries. Keep runtime
-dependencies out of domain types rather than creating a generic runtime wrapper.
+`ArtifactService` in the core is synchronous and generic over the
+`ArtifactStore` port. The Axum server runs its commands on Tokio's blocking
+pool; the core and the store have no async-runtime dependency. A future MCP
+adapter must call the same service. Keep runtime dependencies out of domain
+types rather than creating a generic runtime wrapper.
+
+```text
+agent / CLI ─┐                       ┌─ API listener   /v1/...  (bearer token)
+web (proxy) ─┴─► artifree-server ────┤
+                                     └─ content listener /p/<ticket>/...  (sandbox CSP)
+                     │
+                     ▼
+         ArtifactService (owner check, fingerprint, apply changes)
+                     │
+                     ▼
+         SqliteStore: one transaction per commit (revision CAS + files + request key)
+```
 
 ## State and authority
 
@@ -84,12 +101,32 @@ frontend can connect to the Rust API and isolated workers hosted elsewhere.
 Tunnels and private networks control reachability; application permissions stay
 in the Rust core.
 
-## Next implementation slice
+## HTTP API v1
 
-Choose HTTP/runtime libraries and implement one local HTML artifact end to end:
-validated file package → conditional durable source save → pinned revision read
-→ isolated preview → the same operation from CLI. Include meaningful tests for
-authorization, traversal rejection, concurrent writes, duplicate request keys,
-and recovery. Introduce build and conversion workers before running untrusted
-toolchains. Expand to structured document types and optional AI capabilities in
-subsequent slices.
+| Method and path                                     | Purpose                                       |
+| --------------------------------------------------- | --------------------------------------------- |
+| `GET /v1/artifacts`                                 | Owned artifacts, most recently updated first  |
+| `POST /v1/artifacts`                                | Create revision 1 (`Idempotency-Key`)         |
+| `GET /v1/artifacts/{id}`                            | Metadata and current revision                 |
+| `GET /v1/artifacts/{id}/revisions`                  | History, newest first                         |
+| `POST /v1/artifacts/{id}/revisions`                 | Conditional commit (`Idempotency-Key`)        |
+| `GET /v1/artifacts/{id}/revisions/{n}`              | One revision manifest                         |
+| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file (attachment)       |
+| `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin |
+
+Errors use `{ "error": { "code", "message", "current_revision"? } }` with
+`invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
+`revision_conflict` (409), `request_key_reused` (422), `payload_too_large`
+(413), `unavailable` (503, retry with the same key), and `internal` (500).
+Bodies are defined in `crates/artifree-contracts/src/api.rs`.
+
+## Next implementation slices
+
+- MCP adapter over the same `ArtifactService`.
+- Publishing a pinned revision, restore, and fork, kept separate from app data
+  and access policy.
+- Multi-user authentication, sharing, and revocation tests.
+- Build workers before running untrusted toolchains; then the runtime SDK
+  bridge with server-checked capabilities.
+- PostgreSQL/object storage held to the same store contract tests.
+- Structured document types and optional AI capabilities.

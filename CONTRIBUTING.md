@@ -1,6 +1,7 @@
 # Contributing
 
-Artifree is a scaffold. Keep actual behavior and future plans distinguishable.
+Artifree is in early development. Keep actual behavior and future plans
+distinguishable.
 Read [AGENTS.md](AGENTS.md), [the architecture](docs/architecture.md), and
 [the quality policy](docs/quality.md) before changing module boundaries.
 

@@ -26,14 +26,14 @@ const notes: Record<string, ModuleNote> = {
   web: {
     purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
     exists:
-      'React/Vite + Tailwind CSS 4 + shadcn/ui(Base UI) 셸, 탭·대화상자·테마, build-time module inventory.',
-    next: '첫 HTTP 계약 이후 연결 상태·목록·파일 편집·저장 상태를 연결합니다.',
+      'access token 연결, 아티팩트 목록·생성, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. build-time module inventory.',
+    next: '파일 추가·삭제와 revision 비교, 게시 상태 표시를 같은 HTTP client로 연결합니다.',
   },
   cli: {
     purpose: '터미널과 외부 agent가 사용하는 작은 TypeScript client입니다.',
     exists:
-      'help · version · describe, JSON 출력, 잘못된 인자의 실패 종료 코드.',
-    next: 'HTTP client를 통해 publish·read·edit·export를 연결합니다. 별도 저장 규칙을 만들지 않습니다.',
+      'artifact create·list·show·history·save·cat·preview. stdout JSON, 재시도용 idempotency key, 충돌·인증·사용법 오류의 종료 코드 구분.',
+    next: 'publish·export 명령을 같은 HTTP client에 추가합니다. 별도 저장 규칙을 만들지 않습니다.',
   },
   runtime: {
     purpose: '아티팩트 내부 코드에 허용된 기능을 제공하는 브라우저 SDK입니다.',
@@ -45,27 +45,27 @@ const notes: Record<string, ModuleNote> = {
     purpose:
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
-      'Rust composition root, describe binary, HTTP/MCP 모듈 위치. network listener는 없습니다.',
-    next: '첫 수직 기능을 구현하면서 framework·async runtime을 선정합니다. Tokio/Axum은 고정하지 않았습니다.',
+      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류)과 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
+    next: 'MCP adapter가 같은 ArtifactService를 호출하게 합니다. 다중 사용자 인증은 별도 결정입니다.',
   },
   domain: {
     purpose:
       '제품의 핵심 개념을 외부 도구에 의존하지 않는 타입으로 표현합니다.',
     exists:
-      '6개 ArtifactKind, SourceRevision·DocumentSequence·AppDataVersion의 별도 타입.',
-    next: '파일 경로·ID·상태 전이·오류를 실제 행동 계약에 맞춰 확장합니다.',
+      '검증된 ID·title·request key, 이식 가능한 package path(탈출·대소문자 충돌·예약 이름 거절), 크기·개수 제한, 별도 version counter.',
+    next: '구조화된 문서의 node·operation 타입을 파일 패키지와 별도로 정의합니다.',
   },
   artifacts: {
     purpose: '아티팩트의 원본 파일과 불변 revision, 게시 대상을 관리합니다.',
     exists:
-      '책임을 문서화한 Rust module과 의존성 경계가 있습니다. 저장 로직은 없습니다.',
-    next: '검증된 파일 패키지, 조건부 저장, 멱등성 receipt, 게시 revision 고정을 구현합니다.',
+      '생성, 기준 revision 조건부 commit, 같은 key 재시도 replay와 다른 요청 거절, revision 고정 읽기.',
+    next: '게시 대상 revision 고정, 복원·복제를 앱 데이터·권한과 분리해 구현합니다.',
   },
   policy: {
     purpose: '사용자·agent·runtime이 수행할 수 있는 작업을 판정합니다.',
     exists:
-      '권한 책임과 세션 원칙을 기록한 모듈. 인증·권한 판정은 아직 없습니다.',
-    next: 'actor·artifact·revision에 묶인 권한을 정의하고, 권한 철회와 서버 재검증을 테스트합니다.',
+      '소유자만 접근하는 판정을 모든 읽기·쓰기와 미리보기 요청마다 적용합니다. 접근할 수 없는 대상은 존재 여부를 숨깁니다.',
+    next: '공유·역할·권한 철회와 runtime capability를 정의하고 철회 후 거절을 테스트합니다.',
   },
   documents: {
     purpose: '구조화된 문서 편집과 실행 중 앱 데이터를 각각 관리합니다.',
@@ -88,8 +88,8 @@ const notes: Record<string, ModuleNote> = {
   storage: {
     purpose: '메타데이터와 파일 bytes를 환경에 맞게 보관하는 adapter입니다.',
     exists:
-      'provider 모듈 위치와 후보 설계만 있습니다. DB driver 의존성은 없습니다.',
-    next: '로컬 SQLite·files를 후보로 첫 구현을 만들고, 서버 저장소에서도 같은 행동 검사를 적용합니다.',
+      '로컬 SQLite 한 파일: WAL·synchronous=FULL, BEGIN IMMEDIATE 조건부 commit, 동일 내용 공유 저장, schema version 확인.',
+    next: 'PostgreSQL·object storage adapter에 같은 계약 테스트를 적용합니다. blob과 SQL commit 경계를 명시합니다.',
   },
   models: {
     purpose:
@@ -117,14 +117,14 @@ const notes: Record<string, ModuleNote> = {
   contracts: {
     purpose: 'Rust와 TypeScript가 같은 전송 데이터 형식을 사용하도록 합니다.',
     exists:
-      'Serde/Schemars DTO → JSON Schema → TypeScript 생성, 안정된 공개 타입 별칭, 잘못된 입력·drift 검증.',
-    next: 'HTTP·MCP·runtime 메시지를 실제 기능 구현에 맞춰 추가합니다. runtime 입력 검증은 별도입니다.',
+      'descriptor와 HTTP API v1 요청·응답 DTO → JSON Schema → TypeScript 생성, 잘못된 입력·drift 검증.',
+    next: 'MCP·runtime 메시지를 실제 기능 구현에 맞춰 추가합니다. 서버 입력 검증은 계약과 별도로 유지합니다.',
   },
   client: {
     purpose: 'Web과 CLI가 같은 HTTP 계약을 사용하는 client package입니다.',
     exists:
-      'ClientConfiguration과 descriptor 타입 alias. 네트워크 메서드는 없습니다.',
-    next: 'HTTP 계약이 생기면 오류·인증·취소·재시도를 공유하는 client를 구현합니다.',
+      'fetch 기반 HTTP API v1 client. 응답을 runtime에 검증하고 오류를 code·HTTP status·current revision으로 구분합니다.',
+    next: '취소(AbortSignal)와 재시도 정책을 web·CLI가 공유하도록 추가합니다.',
   },
 };
 
@@ -154,6 +154,18 @@ const layerConfig: {
   },
 ];
 
+const statusLabels: Record<Component['status'], string> = {
+  implemented: 'Working',
+  scaffold: 'Scaffold exists',
+  planned: 'Planned',
+};
+
+const statusTags: Record<Component['status'], string> = {
+  implemented: 'WORKING · 범위와 한계는 아래 확인',
+  scaffold: 'SCAFFOLD EXISTS · 기능 범위는 아래 확인',
+  planned: 'PLANNED · 동작 구현 전',
+};
+
 function sourceUrl(component: Component): string {
   const kind = component.path.endsWith('.rs') ? 'blob' : 'tree';
   return `${repo}/${kind}/main/${component.path}`;
@@ -170,10 +182,7 @@ function nodeFor(component: Component): HTMLButtonElement {
   const state = document.createElement('small');
   const dot = document.createElement('span');
   dot.className = 'module-dot';
-  state.append(
-    dot,
-    component.status === 'scaffold' ? 'Scaffold exists' : 'Planned',
-  );
+  state.append(dot, statusLabels[component.status]);
   button.append(title, state);
   button.addEventListener('click', () => selectModule(component.id));
   return button;
@@ -240,10 +249,7 @@ function selectModule(id: string): void {
   description.textContent = note.purpose;
   const status = document.createElement('span');
   status.className = 'tag';
-  status.textContent =
-    component.status === 'scaffold'
-      ? 'SCAFFOLD EXISTS · 기능 범위는 아래 확인'
-      : 'PLANNED · 동작 구현 전';
+  status.textContent = statusTags[component.status];
   container.append(symbol, heading, description, status);
   const addField = (
     label: string,
@@ -259,7 +265,7 @@ function selectModule(id: string): void {
     container.append(labelNode, content);
   };
   addField('LANGUAGE / BOUNDARY', component.language);
-  addField('CURRENT SCAFFOLD', note.exists);
+  addField('CURRENT STATE', note.exists);
   const sourceLabel = document.createElement('p');
   sourceLabel.className = 'inspector-label';
   sourceLabel.textContent = 'ACTUAL SOURCE PATH';
@@ -422,7 +428,7 @@ accessSelect.addEventListener('change', () => {
 const flowSteps = [
   {
     tab: '파일 전달',
-    layer: 'PRESENTATION → LOGIC',
+    layer: 'WORKING · PRESENTATION → LOGIC',
     title: 'agent가 원본 파일을 전달합니다.',
     copy: 'agent가 선택한 도구로 HTML·CSS·이미지 등을 생성합니다. HTTP·MCP·CLI는 같은 명령과 결과 형식을 사용하게 만듭니다.',
     rule: '아티팩트 생성에 특정 모델 계정이나 내장 agent 실행기를 요구하지 않습니다.',
@@ -430,7 +436,7 @@ const flowSteps = [
   },
   {
     tab: '검증·권한',
-    layer: 'LOGIC / CORE',
+    layer: 'WORKING · LOGIC / CORE',
     title: '권한과 변경 조건을 확인합니다.',
     copy: '서버에서 actor의 현재 권한과 파일 경로·크기·입력 형식을 확인합니다. 수정 요청은 기준 revision과 현재 상태를 비교합니다.',
     rule: '컴파일된 DTO나 iframe이 보내온 사용자 ID만으로 권한을 부여하지 않습니다.',
@@ -438,15 +444,15 @@ const flowSteps = [
   },
   {
     tab: '원본 저장',
-    layer: 'LOGIC → STORAGE',
+    layer: 'WORKING (LOCAL SQLITE) · LOGIC → STORAGE',
     title: 'revision과 성공 결과를 기록합니다.',
     copy: '새 원본 revision, 중복 방지 receipt와 이벤트를 일관되게 기록합니다. Blob 저장과 SQL 트랜잭션의 경계도 명시합니다.',
     rule: '화면의 pending 표시와 저장 성공을 구분합니다. 재시도로 revision이 중복 생성되지 않게 합니다.',
-    code: 'stage immutable file bytes\nSQL transaction:\n  conditional revision commit\n  receipt + event outbox\n\n→ committed revision / conflict',
+    code: 'SQLite transaction (local profile):\n  replay or reject request key\n  conditional revision commit\n  files + receipt\n\n→ committed revision / conflict\n(event outbox: planned)',
   },
   {
     tab: '격리 빌드',
-    layer: 'LOGIC → BUILD PROVIDER',
+    layer: 'PLANNED · LOGIC → BUILD PROVIDER',
     title: '빌드는 별도 작업자가 수행합니다.',
     copy: '커밋한 원본 revision을 고정해 빌드합니다. Worker의 입력·네트워크·시간·메모리와 결과 형식을 제한합니다.',
     rule: '빌드 실패가 기존 공개 버전을 덮어쓰지 않게 합니다. 번들러 자체를 sandbox로 취급하지 않습니다.',
@@ -454,7 +460,7 @@ const flowSteps = [
   },
   {
     tab: '실행·보기',
-    layer: 'PRESENTATION / RUNTIME',
+    layer: 'WORKING (STATIC HTML) · PRESENTATION / RUNTIME',
     title: '고정된 버전을 분리해 보여줍니다.',
     copy: '본체 계정 UI와 분리한 콘텐츠 환경에서 특정 revision의 산출물을 제공합니다. 게시 대상 변경과 초안 편집은 별도 작업입니다.',
     rule: '실행 환경의 origin·cookie·sandbox 정책을 함께 설계합니다. 계정 자격과 모델 키를 콘텐츠에 주지 않습니다.',
@@ -462,7 +468,7 @@ const flowSteps = [
   },
   {
     tab: '기능 요청',
-    layer: 'RUNTIME → CORE → PROVIDER',
+    layer: 'PLANNED · RUNTIME → CORE → PROVIDER',
     title: '허용된 기능만 서버를 통해 요청합니다.',
     copy: '앱 데이터·모델·파일·외부 도구는 세션에 고정된 capability를 사용합니다. 서버에서 현재 권한과 한도를 다시 검사합니다.',
     rule: '세션 교체·로그아웃·권한 철회 후 이전 메시지를 적용하지 않습니다. 외부 작업의 취소 의미를 구분합니다.',

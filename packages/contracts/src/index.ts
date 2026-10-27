@@ -2,6 +2,7 @@
 import type { Component } from './generated/schema.js';
 
 export type * from './generated/schema.js';
+export type * from './generated/api.js';
 export { scaffoldDescription } from './generated/inventory.js';
 
 /** Stable public names even when schema documentation changes emitted unions. */

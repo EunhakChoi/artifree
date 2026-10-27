@@ -1,11 +1,22 @@
 [graph]
 all-features = true
+# The server ships native binaries only. Wasm-only dependencies of SQLite
+# bindings are not built, so they are excluded from duplicate/license checks.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
 
 [advisories]
 yanked = "deny"
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# Zlib: foldhash, the default hasher of hashbrown (SQLite bindings).
+# BSD-3-Clause: part of matchit, the Axum router (MIT AND BSD-3-Clause).
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib", "BSD-3-Clause"]
 confidence-threshold = 0.9
 
 [bans]

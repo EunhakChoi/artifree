@@ -1,8 +1,98 @@
 {
+  "$defs": {
+    "Component": {
+      "additionalProperties": false,
+      "description": "A repository component and an honest description of its implementation stage.",
+      "properties": {
+        "id": {
+          "description": "Stable inventory key, unique within the descriptor.",
+          "type": "string"
+        },
+        "language": {
+          "description": "Implemented language or an explicitly open integration choice.",
+          "type": "string"
+        },
+        "layer": {
+          "$ref": "#/$defs/Layer",
+          "description": "Layer that owns the module's responsibility."
+        },
+        "name": {
+          "description": "Human-readable module label.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Repository-relative path to the source or module boundary.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ComponentStatus",
+          "description": "Implementation stage; this is not runtime health."
+        },
+        "summary": {
+          "description": "Actual scaffold behavior or the proposed responsibility.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "layer",
+        "language",
+        "path",
+        "status",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "ComponentStatus": {
+      "description": "How much of a module's responsibility exists in this build.",
+      "oneOf": [
+        {
+          "const": "implemented",
+          "description": "Some product behavior works; the summary states its scope and limits.",
+          "type": "string"
+        },
+        {
+          "const": "scaffold",
+          "description": "Source scaffolding exists; the summary states its actual behavior.",
+          "type": "string"
+        },
+        {
+          "const": "planned",
+          "description": "The module has no implemented product behavior.",
+          "type": "string"
+        }
+      ]
+    },
+    "Layer": {
+      "description": "Architectural ownership of a component, not its deployment location.",
+      "oneOf": [
+        {
+          "const": "presentation",
+          "description": "User and agent facing clients.",
+          "type": "string"
+        },
+        {
+          "const": "logic",
+          "description": "Application policy and domain logic.",
+          "type": "string"
+        },
+        {
+          "const": "provider",
+          "description": "Concrete outbound integrations and workers.",
+          "type": "string"
+        },
+        {
+          "const": "shared",
+          "description": "Contracts consumed across layers.",
+          "type": "string"
+        }
+      ]
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ServiceDescription",
-  "description": "A build-time scaffold inventory, not a live server health response.",
-  "type": "object",
+  "additionalProperties": false,
+  "description": "A build-time module inventory, not a live server health response.",
   "properties": {
     "async_runtime": {
       "description": "Selected async runtime, or null while undecided.",
@@ -13,17 +103,17 @@
     },
     "components": {
       "description": "Modules included in this build-time inventory.",
-      "type": "array",
       "items": {
         "$ref": "#/$defs/Component"
-      }
+      },
+      "type": "array"
     },
     "contract_version": {
       "description": "Version of this wire contract.",
       "type": "string"
     },
-    "http_listening": {
-      "description": "Whether this process starts an HTTP listener; currently always false.",
+    "http_api": {
+      "description": "Whether this build can serve the HTTP API (`artifree-server serve`).\nThe inventory itself is static and does not probe a running server.",
       "type": "boolean"
     },
     "name": {
@@ -31,7 +121,7 @@
       "type": "string"
     },
     "phase": {
-      "description": "Product implementation stage, currently scaffolding.",
+      "description": "Product implementation stage.",
       "type": "string"
     },
     "server_framework": {
@@ -46,99 +136,14 @@
       "type": "string"
     }
   },
-  "additionalProperties": false,
   "required": [
     "name",
     "version",
     "contract_version",
     "phase",
-    "http_listening",
+    "http_api",
     "components"
   ],
-  "$defs": {
-    "Component": {
-      "description": "A repository component and an honest description of its implementation stage.",
-      "type": "object",
-      "properties": {
-        "id": {
-          "description": "Stable inventory key, unique within the descriptor.",
-          "type": "string"
-        },
-        "language": {
-          "description": "Implemented language or an explicitly open integration choice.",
-          "type": "string"
-        },
-        "layer": {
-          "description": "Layer that owns the module's responsibility.",
-          "$ref": "#/$defs/Layer"
-        },
-        "name": {
-          "description": "Human-readable module label.",
-          "type": "string"
-        },
-        "path": {
-          "description": "Repository-relative path to the source or module boundary.",
-          "type": "string"
-        },
-        "status": {
-          "description": "Implementation stage; this is not runtime health.",
-          "$ref": "#/$defs/ComponentStatus"
-        },
-        "summary": {
-          "description": "Actual scaffold behavior or the proposed responsibility.",
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "name",
-        "layer",
-        "language",
-        "path",
-        "status",
-        "summary"
-      ]
-    },
-    "ComponentStatus": {
-      "description": "Whether a module has scaffolding or only a proposed responsibility.",
-      "oneOf": [
-        {
-          "description": "Source scaffolding exists; the summary states its actual behavior.",
-          "type": "string",
-          "const": "scaffold"
-        },
-        {
-          "description": "The module has no implemented product behavior.",
-          "type": "string",
-          "const": "planned"
-        }
-      ]
-    },
-    "Layer": {
-      "description": "Architectural ownership of a component, not its deployment location.",
-      "oneOf": [
-        {
-          "description": "User and agent facing clients.",
-          "type": "string",
-          "const": "presentation"
-        },
-        {
-          "description": "Application policy and domain logic.",
-          "type": "string",
-          "const": "logic"
-        },
-        {
-          "description": "Concrete outbound integrations and workers.",
-          "type": "string",
-          "const": "provider"
-        },
-        {
-          "description": "Contracts consumed across layers.",
-          "type": "string",
-          "const": "shared"
-        }
-      ]
-    }
-  }
+  "title": "ServiceDescription",
+  "type": "object"
 }
