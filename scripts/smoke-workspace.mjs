@@ -196,8 +196,9 @@ fetch('${origin}/v1/artifacts').then(
   ).toBeHidden();
   await restoreSave();
   await typeAndUndo(editor);
-  // The list refresh that follows this save fails. The open artifact, and
-  // any draft in it, must stay mounted while the list offers a retry.
+  // The list refresh that follows this save fails. The open artifact, any
+  // draft in it, and the list read before stay while the list offers a
+  // retry.
   let listFailed = false;
   const failList = (route) => {
     if (listFailed || route.request().method() !== 'GET')
@@ -214,6 +215,11 @@ fetch('${origin}/v1/artifacts').then(
     workspace.getByText('Revision 5', { exact: true }),
   ).toBeVisible();
   await expect(workspace.getByText('Could not list artifacts')).toBeVisible();
+  await expect(
+    workspace
+      .getByRole('navigation', { name: 'Artifacts' })
+      .getByRole('button', { name: /Smoke artifact/ }),
+  ).toBeVisible();
   await page.unroute('**/v1/artifacts', failList);
   await editor.fill(probe('Draft kept while the list fails'));
   await workspace

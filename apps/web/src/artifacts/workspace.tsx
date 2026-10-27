@@ -150,7 +150,13 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     () => client.listArtifacts(),
     { keepPrevious: true },
   );
-  const listed = artifacts.status === 'ready' ? artifacts.value : undefined;
+  // A failed refresh keeps the list read before; the failure shows above it.
+  const listed =
+    artifacts.status === 'ready'
+      ? artifacts.value
+      : artifacts.status === 'error'
+        ? artifacts.previous
+        : undefined;
   if (listed !== undefined && withListed(announced, listed) !== announced)
     setAnnounced((value) => withListed(value, listed));
   function refresh(artifact: Artifact): void {
