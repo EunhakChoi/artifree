@@ -168,6 +168,7 @@ committed. Change the limits with `--request-burst`,
 
 Previews are sandboxed pages with no data, model, or file capabilities, and a
 preview URL works for anyone who holds it until it expires. The web workspace
-does not refresh by itself after an agent saves; reload it. Sharing,
+shows an agent's saves on its own, but an unsaved draft there is not merged
+with them. Sharing,
 publishing, structured documents, and builds are not available through MCP or
 any other interface yet.

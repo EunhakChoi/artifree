@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { FileCode2Icon, LogOutIcon, RotateCwIcon } from 'lucide-react';
 import { ArtifreeClient } from '@artifree/client';
+import type { ChangeFeedEvent } from '@artifree/client';
 import type { Artifact } from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -14,6 +15,7 @@ import {
 import { ArtifactDetail } from './artifact-detail';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
+import { type FeedStatus, useChangeFeed } from './use-change-feed';
 import { useRequest } from './use-request';
 
 const TOKEN_KEY = 'artifree.accessToken';
@@ -54,6 +56,50 @@ interface ConnectedWorkspaceProps {
   onDisconnect: () => void;
 }
 
+/** How long the first read waits for the change stream to start. */
+const FIRST_READ_WAIT_MS = 2000;
+
+/**
+ * What the change feed has announced. `epoch` advances when everything must
+ * be read again: when a stream starts at the head or is reset. `latest`
+ * holds the newest revision per artifact that this page announced, saved,
+ * or read in the list, and `news` advances for each newer one, so a
+ * duplicate or older event changes nothing.
+ */
+interface Announced {
+  readonly epoch: number;
+  readonly news: number;
+  readonly latest: Readonly<Record<string, number>>;
+}
+
+function withLatest(
+  announced: Announced,
+  id: string,
+  revision: number,
+): Announced {
+  if (revision <= (announced.latest[id] ?? 0)) return announced;
+  return {
+    ...announced,
+    news: announced.news + 1,
+    latest: { ...announced.latest, [id]: revision },
+  };
+}
+
+/** `announced` with the revisions a list read showed; they are not news. */
+function withListed(
+  announced: Announced,
+  artifacts: readonly Artifact[],
+): Announced {
+  const newer = artifacts.filter(
+    (artifact) =>
+      artifact.current_revision > (announced.latest[artifact.id] ?? 0),
+  );
+  if (newer.length === 0) return announced;
+  const latest = { ...announced.latest };
+  for (const artifact of newer) latest[artifact.id] = artifact.current_revision;
+  return { ...announced, latest };
+}
+
 function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   const client = useMemo(
     () => new ArtifreeClient({ baseUrl: '', accessToken: token }),
@@ -61,20 +107,64 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   );
   const [generation, setGeneration] = useState(0);
   const [selected, setSelected] = useState<string>();
+  const [announced, setAnnounced] = useState<Announced>({
+    epoch: 0,
+    news: 0,
+    latest: {},
+  });
   // While the editor holds unsaved changes, actions that would replace it are
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
+  const feed = useChangeFeed(client, (event: ChangeFeedEvent) => {
+    if (event.type !== 'change') {
+      // Read everything (again): changes before this position are unknown,
+      // and after a reset to another database revisions may start lower.
+      setAnnounced((value) => ({
+        ...value,
+        epoch: value.epoch + 1,
+        latest: {},
+      }));
+      return;
+    }
+    const { artifact_id: id, revision } = event.change;
+    setAnnounced((value) => withLatest(value, id, revision));
+  });
+  // Subscribe first, then read: the first read waits for the stream's
+  // `ready`, so no commit falls between them. If the stream does not start
+  // soon, as when the browser holds the request back, the page reads anyway
+  // and reads again once it starts.
+  const [patient, setPatient] = useState(true);
+  useEffect(() => {
+    const timer = setTimeout(() => setPatient(false), FIRST_READ_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, []);
+  const waiting =
+    announced.epoch === 0 &&
+    patient &&
+    (feed.state === 'connecting' || feed.state === 'live');
   // Keep the list (and the open artifact) mounted while it refreshes.
   const artifacts = useRequest(
-    `${token}:${generation}`,
+    waiting
+      ? undefined
+      : `${token}:${generation}:${announced.epoch}:${announced.news}`,
     () => client.listArtifacts(),
     { keepPrevious: true },
   );
+  const listed = artifacts.status === 'ready' ? artifacts.value : undefined;
+  if (listed !== undefined && withListed(announced, listed) !== announced)
+    setAnnounced((value) => withListed(value, listed));
   function refresh(artifact: Artifact): void {
     setSelected(artifact.id);
     setGeneration((value) => value + 1);
+    // This page's own commit; its feed event is then not news.
+    setAnnounced((value) =>
+      withLatest(value, artifact.id, artifact.current_revision),
+    );
   }
-  const listed = artifacts.status === 'ready' ? artifacts.value : undefined;
+  // Keep the artifact that is shown first open when the list reorders after
+  // a commit elsewhere.
+  if (selected === undefined && listed?.[0] !== undefined)
+    setSelected(listed[0].id);
   const selectedId = selected ?? listed?.[0]?.id;
   // Once an artifact is open, a failed or retried list load must not unmount
   // it and any draft in it; the failure is shown in place of the list.
@@ -102,10 +192,15 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <CreateDialog client={client} disabled={unsaved} onCreated={refresh} />
-        <Button variant="ghost" disabled={unsaved} onClick={onDisconnect}>
-          <LogOutIcon data-icon="inline-start" aria-hidden="true" />
-          Disconnect
-        </Button>
+        <div className="flex flex-wrap items-center gap-3">
+          <output className="text-sm text-muted-foreground">
+            {feedMessage(feed)}
+          </output>
+          <Button variant="ghost" disabled={unsaved} onClick={onDisconnect}>
+            <LogOutIcon data-icon="inline-start" aria-hidden="true" />
+            Disconnect
+          </Button>
+        </div>
       </div>
       {artifacts.status === 'loading' ? (
         <output className="text-sm text-muted-foreground">
@@ -137,6 +232,8 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
               key={selectedId}
               client={client}
               artifactId={selectedId}
+              epoch={announced.epoch}
+              announcedRevision={announced.latest[selectedId] ?? 0}
               onSaved={refresh}
               unsaved={unsaved}
               onUnsavedChange={setUnsaved}
@@ -162,4 +259,19 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       ) : null}
     </div>
   );
+}
+
+function feedMessage(feed: FeedStatus): string {
+  switch (feed.state) {
+    case 'connecting':
+      return 'Connecting to live updates…';
+    case 'live':
+      return 'Live updates on';
+    case 'reconnecting':
+      return 'Reconnecting live updates; changes made meanwhile will follow.';
+    case 'paused':
+      return 'Live updates paused while this tab is hidden.';
+    case 'stopped':
+      return 'Live updates stopped; reconnect to try again.';
+  }
 }

@@ -19,7 +19,7 @@ features.
 | Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                          |
 | Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset |
 | CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                    |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                                                                               |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, saves from a second browser context and an agent; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                             |
 | Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                  |
 | CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                           |
 
@@ -139,7 +139,21 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   replays; a failed load offers a retry; a failed list refresh keeps the open
   draft; unsaved changes lock navigation;
   non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
-  line breaks.
+  line breaks; a rejected token also stops live updates.
+- `scripts/smoke-live.mjs`: a second browser context and the API as an agent
+  save while the workspace is open. After a reload the page reads the list
+  and the artifact once each; a save elsewhere updates the revision, the
+  list, and a preview that follows the latest, while a pinned preview stays,
+  also across tabs; an unsaved draft stays editable with a notice and is
+  replaced only by "Load latest", also when reading the newer revision
+  fails first; an artifact created elsewhere appears without closing the
+  open one; a hidden page closes its stream and, shown again, resumes from
+  its cursor with the commit made meanwhile; disconnecting closes the old
+  stream; forged streams show that a page reads without a stream that is
+  held back, a duplicate or older notice reads nothing, a stream start or
+  reset reads the list and the artifact again once, and every reconnection
+  resumes after the last cursor and receives the commit made while it
+  waited.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

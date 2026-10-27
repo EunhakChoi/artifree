@@ -26,7 +26,7 @@ const notes: Record<string, ModuleNote> = {
   web: {
     purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
     exists:
-      'access token 연결, 아티팩트 목록·생성, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. build-time module inventory.',
+      'access token 연결, 아티팩트 목록·생성, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기, 변경 피드로 다른 곳의 저장을 자동 반영(고정 미리보기와 미저장 초안은 유지). build-time module inventory.',
     next: '파일 추가·삭제와 revision 비교, 게시 상태 표시를 같은 HTTP client로 연결합니다.',
   },
   cli: {
