@@ -43,6 +43,14 @@ export const ReadSchedulerContext = createContext<ReadScheduler | undefined>(
   undefined,
 );
 
+/** The page's read scheduler. */
+export function useReadScheduler(): ReadScheduler {
+  const scheduler = useContext(ReadSchedulerContext);
+  if (scheduler === undefined)
+    throw new Error('Reads need a ReadSchedulerContext provider.');
+  return scheduler;
+}
+
 interface Settled<T> {
   readonly key: string;
   readonly result: RequestState<T>;
@@ -63,9 +71,7 @@ export function useRequest<T>(
   load: () => Promise<T>,
   options: { readonly keepPrevious?: boolean } = {},
 ): RequestState<T> {
-  const scheduler = useContext(ReadSchedulerContext);
-  if (scheduler === undefined)
-    throw new Error('useRequest needs a ReadSchedulerContext provider.');
+  const scheduler = useReadScheduler();
   const [settled, setSettled] = useState<Settled<T>>();
   const start = useEffectEvent(load);
   useEffect(() => {

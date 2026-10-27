@@ -36,9 +36,9 @@ unpublished trace maps each to its evidence.
    conditions hold, and it checks them at the moment the read would start,
    not when it was asked for:
    - the page is visible;
-   - no `Retry-After` delay is pending. A `429` on any read holds every read
-     of the page, because the limits of 0005 apply to the actor, and the
-     refused read is sent again afterwards;
+   - no `Retry-After` delay is pending. A `429` on any read, or on the
+     stream, holds every read of the page, because the limits of 0005 apply
+     to the actor; a refused read is sent again afterwards;
    - no other read is running, unless that one has run for ten seconds, so a
      read that never answers cannot stop the page. This bound never ends a
      `Retry-After` delay or starts a read on a hidden page.
@@ -47,7 +47,9 @@ unpublished trace maps each to its evidence.
    longer wants it, because its inputs changed or the view went away, is
    cancelled and never starts; one that started runs to its end and its
    result is ignored. Saves do not pass through the scheduler: the user
-   starts each one and sees its outcome.
+   starts each one and sees its outcome. Nor does the stream: it is one
+   long request, not a read, and the client reconnects it on its own
+   schedule, waiting out the `Retry-After` of each refusal it receives.
 
 2. **When the page may read first.** The first list read waits until the
    stream starts with `ready`, so that no commit falls between the read and

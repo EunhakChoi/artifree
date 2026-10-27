@@ -1,7 +1,8 @@
 import { useEffect, useEffectEvent, useReducer, useRef, useState } from 'react';
-import { cursorOf } from '@artifree/client';
+import { ArtifreeApiError, cursorOf } from '@artifree/client';
 import type { ArtifreeClient, ChangeFeedEvent } from '@artifree/client';
 import { usePageVisible } from './page-visibility';
+import { useReadScheduler } from './use-request';
 
 /** Whether commits made elsewhere reach this page. */
 export type FeedState =
@@ -113,14 +114,20 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
  * is visible it follows the change feed, resuming from its last cursor; a
  * hidden page gives up its stream. The first read waits for the stream's
  * `ready`, at most two seconds of visibility, and not at all once the
- * stream has failed.
+ * stream has failed. A stream refused with `429` holds the page's reads for
+ * its `Retry-After`, as a refused read does: the limit is the actor's.
  */
 export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
   const visible = usePageVisible();
+  const scheduler = useReadScheduler();
   const [state, learn] = useReducer(learnFrom, START);
   const feed = useChangeFeed(client, visible, {
     onEvent: (event) => learn({ type: 'event', event }),
-    onTrouble: () => learn({ type: 'read anyway' }),
+    onTrouble: (error) => {
+      if (error?.code === 'rate_limited')
+        scheduler.holdFor(error.retryAfterSeconds ?? 1);
+      learn({ type: 'read anyway' });
+    },
   });
   // Counts visible time only: a background page has no reason to read.
   const { canRead } = state;
@@ -144,8 +151,11 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
 
 interface FeedHandlers {
   readonly onEvent: (event: ChangeFeedEvent) => void;
-  /** The stream was lost or refused; it may or may not come back. */
-  readonly onTrouble: () => void;
+  /**
+   * The stream was lost or refused, with the server's answer if it gave
+   * one; it may or may not come back.
+   */
+  readonly onTrouble: (error: ArtifreeApiError | undefined) => void;
 }
 
 /**
@@ -195,16 +205,16 @@ function useChangeFeed(
           resumeAfter.current = { client, cursor: cursorOf(event) };
           onEvent(event);
         },
-        onDisconnect() {
+        onDisconnect(error) {
           if (signal.aborted) return;
           setConnection('reconnecting');
-          onTrouble();
+          onTrouble(error);
         },
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (signal.aborted) return;
         setConnection('stopped');
-        onTrouble();
+        onTrouble(error instanceof ArtifreeApiError ? error : undefined);
       });
     return () => controller.abort();
   }, [client, active, stopped]);

@@ -313,6 +313,33 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await restream(main, server, ['reset']);
     await expect(badge(17)).toBeVisible();
 
+    // W7: a stream refused with 429 holds the page's reads for its
+    // Retry-After, as a refused read does: the limit is the actor's.
+    const limited = await opened();
+    let streamLimitedAt;
+    limited.routes.once(stream(), (route) => {
+      streamLimitedAt = Date.now();
+      return route.fulfill({
+        status: 429,
+        headers: { 'retry-after': '3' },
+        json: { error: { code: 'rate_limited', message: 'Slow down.' } },
+      });
+    });
+    await connect(limited, server);
+    await expect(
+      limited.workspace.getByText('Revision 17', { exact: true }),
+    ).toBeVisible();
+    assert.ok(streamLimitedAt !== undefined, 'The stream must be refused.');
+    const early = limited.reads
+      .since(0)
+      .filter((entry) => entry.start - streamLimitedAt < 2_900)
+      .map((entry) => `${entry.path} at +${entry.start - streamLimitedAt} ms`);
+    assert.deepEqual(
+      early,
+      [],
+      "No read may start before the stream's Retry-After has passed.",
+    );
+
     // W5: a stream that starts only after the page has read: the reads are
     // not tied to the feed, so a draft written meanwhile is marked as
     // possibly replaced.
