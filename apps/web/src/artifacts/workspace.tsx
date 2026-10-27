@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FileCode2Icon, LogOutIcon, RotateCwIcon } from 'lucide-react';
 import { ArtifreeClient } from '@artifree/client';
 import type { Artifact } from '@artifree/contracts';
@@ -14,6 +14,10 @@ import {
 import { ArtifactDetail } from './artifact-detail';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
+import { pageVisibility } from './page-visibility';
+import { RequestGate } from './request-gate';
+import { useLiveWorkspace } from './use-live-workspace';
+import type { FeedState } from './use-live-workspace';
 import { useRequest } from './use-request';
 
 const TOKEN_KEY = 'artifree.accessToken';
@@ -45,7 +49,11 @@ export function ArtifactWorkspace() {
   }
   if (token === undefined) return <ConnectForm onConnect={connect} />;
   return (
-    <ConnectedWorkspace token={token} onDisconnect={() => connect(undefined)} />
+    <ConnectedWorkspace
+      key={token}
+      token={token}
+      onDisconnect={() => connect(undefined)}
+    />
   );
 }
 
@@ -54,31 +62,79 @@ interface ConnectedWorkspaceProps {
   onDisconnect: () => void;
 }
 
+const FEED_MESSAGES: Record<FeedState, string> = {
+  connecting: 'Connecting to live updates…',
+  live: 'Live updates on.',
+  reconnecting:
+    'Reconnecting live updates; changes made meanwhile will follow.',
+  paused: 'Live updates paused while this tab is hidden.',
+  stopped: 'Live updates stopped; reconnect to try again.',
+};
+
 function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
-  const client = useMemo(
-    () => new ArtifreeClient({ baseUrl: '', accessToken: token }),
-    [token],
+  // One gate per connection, under the client: every request this page
+  // sends, whichever view asks for it, passes through it.
+  const [client] = useState(
+    () =>
+      new ArtifreeClient({
+        baseUrl: '',
+        accessToken: token,
+        fetch: new RequestGate(pageVisibility).fetch,
+      }),
   );
+  const live = useLiveWorkspace(client);
   const [generation, setGeneration] = useState(0);
   const [selected, setSelected] = useState<string>();
   // While the editor holds unsaved changes, actions that would replace it are
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
-  // Keep the list (and the open artifact) mounted while it refreshes.
+  const { epoch } = live;
   const artifacts = useRequest(
-    `${token}:${generation}`,
-    () => client.listArtifacts(),
+    live.canRead ? `${generation}:${epoch}:${live.news}` : undefined,
+    async (signal) => ({ list: await client.listArtifacts({ signal }), epoch }),
+    // Keep the list and the open artifact mounted while it refreshes.
     { keepPrevious: true },
   );
-  function refresh(artifact: Artifact): void {
+  // A list answered for the current request; only it may close or open an
+  // artifact, or vouch for revisions.
+  const fresh =
+    artifacts.status === 'ready' && !artifacts.refreshing
+      ? artifacts.value
+      : undefined;
+  const { learn } = live;
+  useEffect(() => {
+    if (fresh !== undefined)
+      learn(
+        fresh.epoch,
+        fresh.list.map(({ id, current_revision }) => ({
+          id,
+          revision: current_revision,
+        })),
+      );
+  }, [fresh, learn]);
+  const listed =
+    artifacts.status === 'ready'
+      ? artifacts.value.list
+      : artifacts.status === 'error'
+        ? artifacts.previous?.list
+        : undefined;
+  // A draft keeps its artifact open; otherwise the open artifact follows
+  // the fresh list: when it is no longer listed, the first one opens.
+  const keepSelected =
+    selected !== undefined &&
+    (unsaved ||
+      fresh === undefined ||
+      fresh.list.some(({ id }) => id === selected));
+  const selectedId = keepSelected ? selected : (fresh?.list ?? listed)?.[0]?.id;
+  // An artifact opened because it was listed first stays open like a chosen
+  // one, also when a later list puts another first.
+  if (selectedId !== selected) setSelected(selectedId);
+  function saved(artifact: Artifact): void {
+    // This page's own save is not news when its notice arrives.
+    learn(epoch, [{ id: artifact.id, revision: artifact.current_revision }]);
     setSelected(artifact.id);
     setGeneration((value) => value + 1);
   }
-  const listed = artifacts.status === 'ready' ? artifacts.value : undefined;
-  const selectedId = selected ?? listed?.[0]?.id;
-  // Once an artifact is open, a failed or retried list load must not unmount
-  // it and any draft in it; the failure is shown in place of the list.
-  const showGrid = selectedId !== undefined && listed?.length !== 0;
   const listFailure =
     artifacts.status === 'error' ? (
       <Alert variant="destructive">
@@ -101,18 +157,23 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <CreateDialog client={client} disabled={unsaved} onCreated={refresh} />
+        <CreateDialog client={client} disabled={unsaved} onCreated={saved} />
         <Button variant="ghost" disabled={unsaved} onClick={onDisconnect}>
           <LogOutIcon data-icon="inline-start" aria-hidden="true" />
           Disconnect
         </Button>
       </div>
+      <output aria-live="polite" className="text-sm text-muted-foreground">
+        {FEED_MESSAGES[live.feed]}
+      </output>
       {artifacts.status === 'loading' ? (
         <output className="text-sm text-muted-foreground">
           Loading artifacts…
         </output>
       ) : null}
-      {showGrid ? (
+      {selectedId === undefined ? (
+        listFailure
+      ) : (
         <div className="grid gap-5 lg:grid-cols-3">
           <nav aria-label="Artifacts" className="flex flex-col gap-2">
             {listFailure}
@@ -137,14 +198,16 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
               key={selectedId}
               client={client}
               artifactId={selectedId}
-              onSaved={refresh}
+              epoch={epoch}
+              resets={live.resets}
+              knownRevision={live.known[selectedId]}
+              unknownChanges={live.unknown[selectedId] ?? 0}
+              onSaved={saved}
               unsaved={unsaved}
               onUnsavedChange={setUnsaved}
             />
           </div>
         </div>
-      ) : (
-        listFailure
       )}
       {listed?.length === 0 ? (
         <Empty>

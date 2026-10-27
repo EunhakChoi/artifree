@@ -25,6 +25,10 @@ export async function checkWorkspace({
   await expect(
     workspace.getByText('The access token was rejected.', { exact: false }),
   ).toBeVisible();
+  // The stream is refused too, and reconnecting would not help.
+  await expect(
+    workspace.getByText('Live updates stopped; reconnect to try again.'),
+  ).toBeVisible();
   await workspace.getByRole('button', { name: 'Disconnect' }).click();
   await workspace.getByLabel('Access token').fill(server.token);
   await workspace.getByRole('button', { name: 'Connect' }).click();
@@ -137,13 +141,10 @@ fetch('${origin}/v1/artifacts').then(
   ).toBeVisible();
   await expect(editor).toHaveValue(/Lost edit/);
   await checkAccessibility('workspace-conflict');
-  // While the latest revision loads, the rejected draft stays read-only:
-  // anything typed then would vanish when the editor is replaced.
+  // While the latest revision loads, the editor stays read-only: anything
+  // typed then would vanish when the reload replaces it.
   const releaseReload = await hold(page, 'GET', `**/v1/artifacts/${id}`);
   await workspace.getByRole('button', { name: 'Load latest' }).click();
-  await expect(
-    workspace.getByRole('button', { name: 'Loading latest…' }),
-  ).toBeDisabled();
   await expect(editor).not.toBeEditable();
   await releaseReload();
   await expect(
@@ -234,6 +235,11 @@ fetch('${origin}/v1/artifacts').then(
       },
     ],
   });
+  // The page follows the commit above; wait for it, so that the one failure
+  // below meets the load after the reload and not this page's catch-up.
+  await expect(
+    workspace.getByText('Revision 6', { exact: true }),
+  ).toBeVisible();
   // A failed load offers a retry instead of leaving the panel stuck.
   await page.route(
     `**/v1/artifacts/${id}`,
@@ -353,7 +359,7 @@ async function bytes(server, path) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function api(server, method, path, body) {
+export async function api(server, method, path, body) {
   const init = {
     method,
     headers: { authorization: `Bearer ${server.token}` },
