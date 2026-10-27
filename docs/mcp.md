@@ -96,6 +96,13 @@ A file is `{ "path", "encoding": "utf8" | "base64", "content" }`. A change is
 `{ "op": "put", "path", "encoding", "content" }` or
 `{ "op": "delete", "path" }`; unchanged files carry over.
 
+Limits: 256 files, 5 MiB per file, 25 MiB per package, and 36 MiB for the
+whole JSON request. Send binary data, or text with many control characters,
+as base64: JSON escapes each control character to as many as six bytes, so
+such text can exceed the request limit as `utf8` while any package within the
+file limits fits as `base64`. A request over the limit is refused with HTTP
+`413` before any tool runs.
+
 A typical sequence of `tools/call` parameters:
 
 ```text

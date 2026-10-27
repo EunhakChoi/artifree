@@ -168,6 +168,12 @@ instructions. create_preview returns a short-lived URL that renders one \
 revision in a browser sandbox; it is a bearer link, and pages cannot use \
 data, model, or file capabilities.";
 
+// The request limit fits a full package in base64 (decision 0003). JSON
+// escapes a control character to six bytes, so text can outgrow base64.
+const SIZE_RULE: &str = "The whole request must fit in 36 MiB of JSON. Use utf8 for ordinary text and \
+base64 for binary data or text with many control characters, which JSON escaping enlarges; a \
+package within the file limits always fits as base64.";
+
 const KEY_RULE: &str = "idempotency_key is required: use a new unique value (for example a UUID) for \
 each intended change and resend the same value only to retry that change.";
 
@@ -197,7 +203,7 @@ pub fn tools() -> Vec<ToolDefinition> {
                  index.html. Send each file's complete content as utf8 text or as base64 bytes. \
                  Paths are portable relative names (letters, digits, '-', '_', '.'; no hidden \
                  or '..' segments). Limits: 256 files, 5 MiB per file, 25 MiB per package. \
-                 {KEY_RULE}"
+                 {SIZE_RULE} {KEY_RULE}"
             ),
             ToolEffect::Commit,
         ),
@@ -209,7 +215,7 @@ pub fn tools() -> Vec<ToolDefinition> {
                  complete content or deletes a file; unchanged files carry over, and earlier \
                  revisions are kept. The save is all or nothing and succeeds only if \
                  base_revision is still current; otherwise it fails with revision_conflict and \
-                 the current revision. {KEY_RULE}"
+                 the current revision. {SIZE_RULE} {KEY_RULE}"
             ),
             ToolEffect::Commit,
         ),

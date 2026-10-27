@@ -66,7 +66,12 @@ reports and raw evidence it rests on.
    not use MCP. Both answer `403`, after authentication. The request body limit
    equals the API's (36 MiB), so the largest package fits; the SDK default of
    4 MiB would not. An oversized body gets the SDK's plain-text `413`, not
-   the API's `payload_too_large` JSON body.
+   the API's `payload_too_large` JSON body. As over HTTP, a package within
+   the file limits always fits as base64, but text with many control
+   characters can exceed the limit as `utf8`; the tool descriptions tell
+   agents to choose base64 for such content. Raising the limit to the
+   worst-case escaped size (about 150 MiB, buffered per request) was
+   rejected.
 5. **Shared operations.** HTTP handlers and MCP tools call the same server
    functions (`crates/artifree-server/src/operations.rs`), which convert wire
    values, run one `ArtifactService` command, and map errors. Validation,

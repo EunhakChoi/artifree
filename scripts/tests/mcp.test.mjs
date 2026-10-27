@@ -638,6 +638,45 @@ test('Clients without the token cannot connect, and pages cannot call the endpoi
   assert.equal((await unauthenticated.json()).error.code, 'unauthenticated');
 });
 
+test('Escape-heavy text over the request limit is refused; the same bytes fit as base64', async () => {
+  // About 6.2 MiB of NUL bytes: within the file limits, but JSON escapes each
+  // NUL to six bytes, so the utf8 form exceeds the 36 MiB request limit.
+  const nul = new Uint8Array(3.1 * 1024 * 1024);
+  const files = (encode) => [
+    utf8('index.html', '<p>escaped</p>'),
+    encode('a.txt', nul),
+    encode('b.txt', nul),
+  ];
+  const asText = (path, bytes) =>
+    utf8(path, Buffer.from(bytes).toString('utf8'));
+  await withClient(async (client) => {
+    await assert.rejects(
+      client.callTool({
+        name: 'create_artifact',
+        arguments: {
+          title: 'Escaped',
+          files: files(asText),
+          idempotency_key: freshKey(),
+        },
+      }),
+      /413|too large/i,
+    );
+    const created = await ok(client, 'create_artifact', {
+      title: 'Escaped',
+      files: files(base64),
+      idempotency_key: freshKey(),
+    });
+    const read = await ok(client, 'read_file', {
+      artifact_id: created.artifact.id,
+      revision: 1,
+      path: 'a.txt',
+    });
+    // Valid UTF-8 comes back as text, exact.
+    assert.equal(read.encoding, 'utf8');
+    assert.ok(Buffer.from(read.content, 'utf8').equals(Buffer.from(nul)));
+  });
+});
+
 test('A largest file fits, and a body over the API limit is refused', async () => {
   // 5 MiB is the per-file limit; its base64 form exceeds the MCP SDK's
   // default 4 MiB body limit, which the endpoint raises to the API's.
