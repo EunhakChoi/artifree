@@ -274,9 +274,47 @@ export async function checkLiveUpdates({
     await expect.poll(() => resumedFrom.length).toBe(2);
     assert.equal(reloads, 2, 'A duplicate or older event reloaded the page.');
     // A reset means changes may have been missed: the page reads again.
+    // Here it stands for a server whose data was replaced by an older copy,
+    // where the artifact reads at revision 1. A draft open meanwhile stays
+    // editable, with its file list, and says that another revision is
+    // current.
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    await editor.fill(page_('Draft across a reset'));
+    const olderCopy = async (route) => {
+      const { pathname } = new URL(route.request().url());
+      const artifactPath = `/v1/artifacts/${id}`;
+      const read = route.request().method() === 'GET';
+      if (
+        !read ||
+        ![artifactPath, `${artifactPath}/revisions`, '/v1/artifacts'].includes(
+          pathname,
+        )
+      )
+        return route.fallback();
+      const response = await route.fetch();
+      const body = await response.json();
+      if (pathname === artifactPath) body.current_revision = 1;
+      else if (pathname === '/v1/artifacts') {
+        for (const item of body.artifacts)
+          if (item.id === id) item.current_revision = 1;
+      } else
+        body.revisions = body.revisions.filter((item) => item.revision === 1);
+      return route.fulfill({ response, json: body });
+    };
+    await page.route('**/v1/artifacts**', olderCopy);
     sendReset();
     await expect.poll(() => resumedFrom.length).toBe(3);
     await expect.poll(() => reloads).toBe(4);
+    await expect(
+      workspace.getByText('Revision 1 is now current'),
+    ).toBeVisible();
+    await expect(badge(1)).toBeVisible();
+    await expect(editor).toHaveValue(/Draft across a reset/);
+    await expect(editor).toBeEditable();
+    await page.unroute('**/v1/artifacts**', olderCopy);
+    await workspace.getByRole('button', { name: 'Load latest' }).click();
+    await expect(editor).toHaveValue(/Saved while hidden/);
+    await expect(badge(latest)).toBeVisible();
     assert.deepEqual(
       resumedFrom,
       [at(head), at(head), at(head)],
@@ -286,11 +324,89 @@ export async function checkLiveUpdates({
     releaseResume();
     await expect(badge(latest + 1)).toBeVisible();
     await expect(workspace.getByText('Live updates on')).toBeVisible();
+
+    // A burst of commits elsewhere shares the request budget: each view
+    // sends one read at a time and skips reads a newer one replaced, and a
+    // rate-limited read waits for its Retry-After and reads again.
+    const inFlight = { list: 0, artifact: 0 };
+    const most = { list: 0, artifact: 0 };
+    // Armed for one list read: the one after the last save, which no newer
+    // read replaces.
+    let limitNext = false;
+    let limited = false;
+    const pace = async (route) => {
+      const { pathname } = new URL(route.request().url());
+      const view =
+        pathname === '/v1/artifacts'
+          ? 'list'
+          : pathname === `/v1/artifacts/${id}`
+            ? 'artifact'
+            : undefined;
+      if (view === undefined || route.request().method() !== 'GET')
+        return route.fallback();
+      if (view === 'list' && limitNext) {
+        limitNext = false;
+        limited = true;
+        return route.fulfill({
+          status: 429,
+          headers: { 'retry-after': '1' },
+          json: { error: { code: 'rate_limited', message: 'Slow down.' } },
+        });
+      }
+      inFlight[view] += 1;
+      most[view] = Math.max(most[view], inFlight[view]);
+      try {
+        await new Promise((resolveLater) => setTimeout(resolveLater, 300));
+        return await route.fulfill({ response: await route.fetch() });
+      } finally {
+        inFlight[view] -= 1;
+      }
+    };
+    await page.route('**/v1/artifacts**', pace);
+    let revision = latest + 1;
+    for (const text of ['Burst one', 'Burst two', 'Burst three']) {
+      await api(server, 'POST', `/v1/artifacts/${id}/revisions`, {
+        base_revision: revision,
+        changes: [
+          {
+            op: 'put',
+            path: 'index.html',
+            encoding: 'utf8',
+            content: page_(text),
+          },
+        ],
+      });
+      revision += 1;
+    }
+    await expect(badge(revision)).toBeVisible();
+    await expect(nav.getByText(`r${revision}`)).toBeVisible();
+    assert.deepEqual(
+      most,
+      { list: 1, artifact: 1 },
+      'Reads of one view overlapped.',
+    );
+    limitNext = true;
+    await api(server, 'POST', `/v1/artifacts/${id}/revisions`, {
+      base_revision: revision,
+      changes: [
+        {
+          op: 'put',
+          path: 'index.html',
+          encoding: 'utf8',
+          content: page_('Limited'),
+        },
+      ],
+    });
+    revision += 1;
+    await expect(nav.getByText(`r${revision}`)).toBeVisible();
+    assert.ok(limited, 'No list read was rate limited.');
+    await expect(workspace.getByText('Could not list artifacts')).toBeHidden();
+    await page.unroute('**/v1/artifacts**', pace);
     page.off('request', countReloads);
     page.off('request', recordStream);
     await page.unroute('**/v1/changes', feedRoute);
     assert.deepEqual(otherErrors, [], 'Second page JavaScript errors.');
-    return { pages: 2, revisions: latest + 1 };
+    return { pages: 2, revisions: revision };
   } finally {
     await otherContext.close();
   }

@@ -151,9 +151,11 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   its cursor with the commit made meanwhile; disconnecting closes the old
   stream; forged streams show that a page reads without a stream that is
   held back, a duplicate or older notice reads nothing, a stream start or
-  reset reads the list and the artifact again once, and every reconnection
-  resumes after the last cursor and receives the commit made while it
-  waited.
+  reset reads the list and the artifact again once, a draft survives a
+  reset to older data, and every reconnection resumes after the last cursor
+  and receives the commit made while it waited. A burst of commits reads
+  one request at a time per view, and a `429` is retried after its
+  `Retry-After`.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

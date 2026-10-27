@@ -51,7 +51,8 @@ unpublished trace maps each to its evidence.
    revisions known so far are forgotten, since after a reset to another
    database they may start lower. A `change` counts only if its revision is
    newer than what this page knows for that artifact, from a notice, its own
-   save, or a list read; it then reloads the list, and the open artifact if
+   save, or a list read for the current request (an earlier read shown
+   meanwhile may predate a reset); it then reloads the list, and the open artifact if
    the revision is newer than the one it shows. Duplicate and older notices
    read nothing. A kind unknown to the client counts as a change. If reading
    the newer revision fails, the page keeps showing what it had, including a
@@ -61,13 +62,22 @@ unpublished trace maps each to its evidence.
    preview to it until the user chooses again, also across a visit to the
    source tab.
 5. **Drafts.** While the editor holds unsaved changes it keeps the revision
-   the draft was written against. When a newer revision arrives, the editor
-   says "Revision N was saved elsewhere", explains that saving will be
-   refused, and offers "Load latest", which discards the draft. Navigation
+   the draft was written against, with its file list, also when a reset
+   brings data where that revision no longer exists. When another revision
+   becomes current, the editor says "Revision N was saved elsewhere" (or
+   "Revision N is now current" when N is older), explains that saving will
+   be refused, and offers "Load latest", which discards the draft. Navigation
    that would replace the editor stays disabled, as before. While this
    page's own save is in flight, or after it failed without an answer, a
    newer revision may be that save, so no notice is shown then.
-6. **Status.** A status line says whether live updates are connecting, on,
+6. **Request budget.** Each view (the list, the open artifact, the preview,
+   the editor's file) sends one read at a time: a read asked for while one
+   is in flight waits for it, at most ten seconds, and reads replaced
+   meanwhile are never sent, so a burst of notices or a resumed backlog
+   costs one read per view. A read answered `429` was not processed; the
+   view sends it again after the `Retry-After` delay and keeps showing what
+   it had.
+7. **Status.** A status line says whether live updates are connecting, on,
    reconnecting (changes made meanwhile follow), paused while the tab is
    hidden, or stopped (reconnect to try again). Following stops only on failures that retrying cannot fix
    (0006, decision 10), such as a rejected token, which the page also
@@ -83,8 +93,9 @@ unpublished trace maps each to its evidence.
   the local server speaks HTTP/1.1.
 - A page that becomes visible again resumes from its cursor, which reads
   only what changed; after a long time hidden that can be many events.
-- Forgetting known revisions on `reset` is not exercised end to end: the
-  smoke check forges a reset of the same database, whose revisions do not
-  start lower.
+- The smoke check stands in for a replaced database by rewriting read
+  responses after a forged `reset`; no real backup is restored.
+- A rate-limited read is retried until it succeeds or the view changes; a
+  server that keeps refusing keeps the page on what it showed.
 - The draft notice does not merge or compare the draft with the newer
   revision; revision comparison is roadmap A04.

@@ -157,8 +157,14 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       : artifacts.status === 'error'
         ? artifacts.previous
         : undefined;
-  if (listed !== undefined && withListed(announced, listed) !== announced)
-    setAnnounced((value) => withListed(value, listed));
+  // Only a read for the current request tells what is known now; an earlier
+  // one may predate a reset.
+  const fresh =
+    artifacts.status === 'ready' && artifacts.refreshing !== true
+      ? artifacts.value
+      : undefined;
+  if (fresh !== undefined && withListed(announced, fresh) !== announced)
+    setAnnounced((value) => withListed(value, fresh));
   function refresh(artifact: Artifact): void {
     setSelected(artifact.id);
     setGeneration((value) => value + 1);

@@ -149,10 +149,11 @@ try {
     const source = message.location().url;
     if (source.startsWith(api.content_origin))
       artifactConsole.push(message.text());
-    // Browsers log the 401, 409, and 503 the workspace test provokes on purpose.
+    // Browsers log the 401, 409, 429, and 503 the workspace and live tests
+    // provoke on purpose.
     else if (
       source.startsWith(`${origin}/v1/`) &&
-      /status of (401|409|503) /.test(message.text())
+      /status of (401|409|429|503) /.test(message.text())
     )
       expectedApiFailures.push(message.text().match(/status of (\d+)/)[1]);
     else consoleErrors.push(message.text());
@@ -376,8 +377,8 @@ try {
     // The rejected token fails twice: the list and the change stream.
     assert.deepEqual(
       expectedApiFailures.sort(),
-      ['401', '401', '409', '503', '503', '503', '503', '503'],
-      'Only the deliberate rejected token, stale save, lost responses, and failed loads may fail.',
+      ['401', '401', '409', '429', '503', '503', '503', '503', '503'],
+      'Only the deliberate rejected token, stale save, rate limit, lost responses, and failed loads may fail.',
     );
   assert.deepEqual(
     externalRequests,

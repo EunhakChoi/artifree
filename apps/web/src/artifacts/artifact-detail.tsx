@@ -302,15 +302,18 @@ function SourcePanel({
   onUnsavedChange,
   reloading,
 }: SourcePanelProps) {
-  // A draft keeps the revision it was written against while newer ones
-  // arrive; without a draft the editor follows the latest revision.
-  const [heldBase, setHeldBase] = useState<number>();
-  const base = heldBase ?? artifact.current_revision;
+  // A draft keeps the revision it was written against, with its manifest,
+  // while others arrive, also when a reset makes that revision disappear;
+  // without a draft the editor follows the latest revision.
+  const [held, setHeld] = useState<Revision>();
+  const current =
+    held ??
+    revisions.find((item) => item.revision === artifact.current_revision);
+  const base = current?.revision ?? artifact.current_revision;
   function reportUnsaved(next: boolean): void {
-    setHeldBase((held) => (next ? (held ?? base) : undefined));
+    setHeld((value) => (next ? (value ?? current) : undefined));
     onUnsavedChange(next);
   }
-  const current = revisions.find((item) => item.revision === base);
   const textFiles = (current?.files ?? []).filter((file) =>
     TEXT_TYPES.test(file.media_type),
   );
@@ -358,11 +361,11 @@ function SourcePanel({
         path={path}
         onSaved={(saved) => {
           // The draft is committed: follow the latest revision again.
-          setHeldBase(undefined);
+          setHeld(undefined);
           onSaved(saved);
         }}
         onReload={() => {
-          setHeldBase(undefined);
+          setHeld(undefined);
           onReload();
         }}
         onUnsavedChange={reportUnsaved}
@@ -454,12 +457,13 @@ function FileEditor({
   const value = draft ?? text;
   const changed = value !== text;
   const saving = save.status === 'saving';
-  // A newer revision was saved elsewhere while this draft was open. While
-  // this page's own save is in flight, or after its outcome was lost, that
-  // revision may be its own; the failure notice then says to retry, which
-  // either replays the save or reports the conflict.
+  // Another revision became current while this draft was open: one saved
+  // elsewhere, or an older one after the server's data was replaced. While
+  // this page's own save is in flight, or after its outcome was lost, a
+  // newer revision may be its own; the failure notice then says to retry,
+  // which either replays the save or reports the conflict.
   const stale =
-    artifact.current_revision > base &&
+    artifact.current_revision !== base &&
     save.status !== 'saving' &&
     save.status !== 'failed';
   // Read-only while a request will replace this editor: a save in flight
@@ -535,7 +539,9 @@ function FileEditor({
       {stale && save.status !== 'conflict' ? (
         <Alert>
           <AlertTitle>
-            Revision {artifact.current_revision} was saved elsewhere
+            {artifact.current_revision > base
+              ? `Revision ${artifact.current_revision} was saved elsewhere`
+              : `Revision ${artifact.current_revision} is now current`}
           </AlertTitle>
           <AlertDescription>
             Your changes are based on revision {base}, so saving them will be
