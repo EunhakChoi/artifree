@@ -10,6 +10,7 @@
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
@@ -68,6 +69,7 @@ struct Shared {
     owner: ActorId,
     previews: PreviewTickets,
     limiter: Limiter,
+    draining: AtomicUsize,
     settings: Settings,
     content_policy: HeaderValue,
 }
@@ -91,6 +93,7 @@ impl AppState {
                 owner,
                 previews: PreviewTickets::new(settings.preview_ttl),
                 limiter: Limiter::new(settings.limits.validate()?),
+                draining: AtomicUsize::new(0),
                 settings,
                 content_policy,
             }),
@@ -178,7 +181,7 @@ async fn admit(State(state): State<AppState>, mut request: Request, next: Next) 
     let permit = match state.shared.limiter.admit(&actor) {
         Ok(permit) => permit,
         Err(refusal) => {
-            discard(request.into_body()).await;
+            discard(&state, request.into_body()).await;
             return refused(refusal);
         }
     };
@@ -201,17 +204,33 @@ async fn admit(State(state): State<AppState>, mut request: Request, next: Next) 
     })
 }
 
-/// Reads and drops a refused request's body, up to the API body limit, so a
-/// client that is still sending it reads the refusal rather than a reset
-/// connection. Nothing is kept in memory.
-async fn discard(mut body: Body) {
-    let mut read = 0;
-    while read <= MAX_BODY_BYTES {
-        match poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
-            Some(Ok(frame)) => read += frame.data_ref().map_or(0, Bytes::len),
-            _ => break,
-        }
+/// How long a refused request's body is read before the refusal is sent.
+pub const MAX_DRAIN_TIME: Duration = Duration::from_secs(2);
+/// Refused bodies read at the same time, across all actors. Refused requests
+/// hold no permit, so this bounds the connections and tasks they can occupy.
+pub const MAX_DRAINING: usize = 32;
+
+/// Reads and drops a refused request's body so that a client still sending
+/// it reads the refusal rather than a reset connection. Nothing is kept in
+/// memory, and the reading stops at the API body limit, after
+/// [`MAX_DRAIN_TIME`], or at once when [`MAX_DRAINING`] bodies are already
+/// being read; a slow or endless sender then gets the refusal regardless.
+async fn discard(state: &AppState, mut body: Body) {
+    let draining = &state.shared.draining;
+    if draining.fetch_add(1, Ordering::AcqRel) < MAX_DRAINING {
+        let drain = async {
+            let mut read = 0;
+            while read <= MAX_BODY_BYTES {
+                match poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
+                    Some(Ok(frame)) => read += frame.data_ref().map_or(0, Bytes::len),
+                    _ => break,
+                }
+            }
+        };
+        // A timeout stops reading; the refusal is sent either way.
+        let _finished_in_time: bool = tokio::time::timeout(MAX_DRAIN_TIME, drain).await.is_ok();
     }
+    draining.fetch_sub(1, Ordering::AcqRel);
 }
 
 fn refused(refusal: Refusal) -> Response {

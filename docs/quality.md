@@ -88,7 +88,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
 - `scripts/tests/limits.test.mjs`: the server binary with small limits. The
   official MCP client and the CLI share the budget, a refused create commits
   nothing and its key works after the delay, the CLI says nothing was done, a
-  refused 30 MiB upload still receives the `429`, a request held mid-body
+  refused 30 MiB upload still receives the `429`, a refused body that never
+  ends is answered within the drain bound and immediately once 32 are being
+  read, a request held mid-body
   keeps its concurrency slot until it finishes, and invalid limit flags stop
   the server before it listens.
 - `scripts/tests/client.test.mjs`: the API client with an injected `fetch`: a

@@ -207,6 +207,76 @@ test('A refused large upload still receives the 429', async () => {
   }
 });
 
+/**
+ * Sends a create whose body never finishes and resolves with the response's
+ * status line and how long it took to arrive.
+ */
+function endlessUpload(server, key) {
+  const url = new URL(server.api_url);
+  const started = performance.now();
+  return new Promise((resolve, reject) => {
+    const socket = connectTcp(Number(url.port), url.hostname, () => {
+      socket.write(
+        [
+          'POST /v1/artifacts HTTP/1.1',
+          `Host: ${url.host}`,
+          `Authorization: Bearer ${server.token}`,
+          'Content-Type: application/json',
+          `Idempotency-Key: ${key}`,
+          'Content-Length: 1000000',
+          '',
+          '{"title":',
+        ].join('\r\n'),
+      );
+    });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`no response to ${key} within 6 s`));
+    }, 6000);
+    let reply = '';
+    socket.on('data', (chunk) => {
+      reply += chunk;
+      if (reply.includes('\r\n')) {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve({
+          status: reply.split('\r\n')[0],
+          elapsed: performance.now() - started,
+        });
+      }
+    });
+    socket.once('error', reject);
+  });
+}
+
+test('A refused body that never ends cannot hold the refusal back', async () => {
+  const server = await startServer(binary, join(scratch, 'endless'), [
+    '--request-burst',
+    '1',
+    '--requests-per-minute',
+    '20',
+  ]);
+  try {
+    assert.equal(cli(server, ['list']).status, 0);
+    // One endless sender is read for at most two seconds, then refused.
+    const one = await endlessUpload(server, 'endless-0001');
+    assert.equal(one.status, 'HTTP/1.1 429 Too Many Requests');
+    assert.ok(one.elapsed < 4000, `refused after ${one.elapsed} ms`);
+    // Senders beyond the 32 bodies being read are refused at once.
+    const reading = Array.from({ length: 32 }, (_, index) =>
+      endlessUpload(server, `endless-${String(index + 2).padStart(4, '0')}`),
+    );
+    await delay(300);
+    const extra = await endlessUpload(server, 'endless-0099');
+    assert.equal(extra.status, 'HTTP/1.1 429 Too Many Requests');
+    assert.ok(extra.elapsed < 1000, `refused after ${extra.elapsed} ms`);
+    for (const result of await Promise.all(reading))
+      assert.equal(result.status, 'HTTP/1.1 429 Too Many Requests');
+  } finally {
+    await server.stop();
+  }
+});
+
 test('A request holds its concurrency slot until it finishes', async () => {
   const server = await startServer(binary, join(scratch, 'concurrent'), [
     '--concurrent-requests',

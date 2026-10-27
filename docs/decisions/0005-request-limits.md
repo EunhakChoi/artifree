@@ -40,9 +40,12 @@ The analyzed hosted product also answered some writes with `429` rate caps
    contract error `rate_limited` and `Retry-After` in whole seconds, rounded
    up. It never reaches the application, so it commits nothing and its
    idempotency key stays unused: the same request with the same key succeeds
-   after the delay with `replayed: false`. Its body, up to the API body limit,
-   is read and dropped without being kept, so a client still uploading reads
-   the `429` instead of a reset connection.
+   after the delay with `replayed: false`. Its body is read and dropped
+   without being kept, so a client still uploading reads the `429` instead of
+   a reset connection. Refused requests hold no permit, so this reading is
+   bounded: it stops at the API body limit or after 2 seconds, and when 32
+   refused bodies are already being read, a new refusal is sent at once. A
+   slow or endless sender therefore still gets its `429`.
 4. **Authentication first.** Requests without a valid token are answered
    `401` before the limiter and spend nothing, so they cannot exhaust the
    owner's budget.
