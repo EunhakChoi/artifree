@@ -83,7 +83,8 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 ([0001](docs/decisions/0001-foundation.md),
 [0002](docs/decisions/0002-ui-and-quality.md),
 [0003](docs/decisions/0003-local-html-artifact-slice.md),
-[0004](docs/decisions/0004-inbound-mcp-adapter.md)).
+[0004](docs/decisions/0004-inbound-mcp-adapter.md),
+[0005](docs/decisions/0005-request-limits.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

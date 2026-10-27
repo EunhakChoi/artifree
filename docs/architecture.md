@@ -120,7 +120,12 @@ in the Rust core.
 Errors use `{ "error": { "code", "message", "current_revision"? } }` with
 `invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
 `revision_conflict` (409), `request_key_reused` (422), `payload_too_large`
-(413), `unavailable` (503, retry with the same key), and `internal` (500).
+(413), `rate_limited` (429 with `Retry-After`; nothing was done),
+`unavailable` (503, retry with the same key), and `internal` (500).
+
+Every request is authenticated first and then admitted under one per-actor
+budget shared with MCP: a burst, a sustained rate, and a cap on concurrent
+requests ([decision 0005](decisions/0005-request-limits.md)).
 Bodies are defined in `crates/artifree-contracts/src/api.rs`.
 
 ## MCP
@@ -132,7 +137,8 @@ refuses requests carrying an `Origin`. Eight tools mirror the HTTP routes:
 `list_artifacts`, `get_artifact`, `create_artifact`, `save_revision`,
 `list_revisions`, `get_revision`, `read_file`, and `create_preview`. Results
 are the HTTP API v1 bodies; failures are those error bodies with
-`isError: true`. The generated catalog is
+`isError: true`. MCP requests share the per-actor request limits with HTTP;
+a refused call is an HTTP `429`. The generated catalog is
 `contracts/generated/mcp-tools.json`; [the MCP guide](mcp.md) shows Codex and
 Pi configuration. These are agent tools, not page capabilities.
 

@@ -7,6 +7,7 @@ use std::time::Duration;
 use artifree_providers::storage::SqliteStore;
 use artifree_server::auth::AccessToken;
 use artifree_server::http::{self, AppState, Settings};
+use artifree_server::limits::RequestLimits;
 use artifree_server::preview;
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -50,6 +51,7 @@ impl Harness {
                 content_origin: CONTENT_ORIGIN.into(),
                 preview_ttl,
                 frame_ancestors: "http://127.0.0.1:*".into(),
+                limits: RequestLimits::default(),
             },
         )
         .unwrap_or_else(|error| panic!("cannot build state: {error}"));

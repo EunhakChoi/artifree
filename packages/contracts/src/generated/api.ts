@@ -55,6 +55,7 @@ export type ErrorCode =
   | 'revision_conflict'
   | 'request_key_reused'
   | 'payload_too_large'
+  | 'rate_limited'
   | 'unavailable'
   | 'internal';
 

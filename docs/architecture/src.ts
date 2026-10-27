@@ -45,7 +45,7 @@ const notes: Record<string, ModuleNote> = {
     purpose:
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
-      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
+      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
     next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 웹 자동 갱신과 handoff는 별도 기능입니다.',
   },
   domain: {

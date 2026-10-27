@@ -40,6 +40,8 @@ export class ArtifreeApiError extends Error {
   readonly code: FailureCode;
   /** The current revision when `code` is `revision_conflict`. */
   readonly currentRevision: number | undefined;
+  /** Seconds to wait before retrying, from `Retry-After`, when given. */
+  readonly retryAfterSeconds: number | undefined;
 
   constructor(
     message: string,
@@ -47,6 +49,7 @@ export class ArtifreeApiError extends Error {
       status: number;
       code: FailureCode;
       currentRevision?: number;
+      retryAfterSeconds?: number;
       cause?: unknown;
     },
   ) {
@@ -55,6 +58,7 @@ export class ArtifreeApiError extends Error {
     this.status = details.status;
     this.code = details.code;
     this.currentRevision = details.currentRevision;
+    this.retryAfterSeconds = details.retryAfterSeconds;
   }
 }
 
@@ -258,14 +262,22 @@ export class ArtifreeClient {
         `${method} ${path} failed with HTTP ${response.status}.`,
         { status: response.status, code: 'invalid_response' },
       );
+    const retryAfter = retryAfterSeconds(response.headers.get('retry-after'));
     throw new ArtifreeApiError(failure.message, {
       status: response.status,
       code: failure.code,
       ...(typeof failure.current_revision === 'number'
         ? { currentRevision: failure.current_revision }
         : {}),
+      ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });
   }
+}
+
+/** Whole seconds of a `Retry-After` header; HTTP dates are not used here. */
+function retryAfterSeconds(value: string | null): number | undefined {
+  if (value === null || !/^\d{1,6}$/.test(value)) return undefined;
+  return Number(value);
 }
 
 async function readJson(response: Response): Promise<unknown> {

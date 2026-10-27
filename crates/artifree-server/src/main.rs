@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use artifree_server::limits::RequestLimits;
 use artifree_server::serve::{self, ServeOptions};
 
 fn main() -> ExitCode {
@@ -75,6 +76,7 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     let mut content_origin = None;
     let mut frame_ancestors = serve::DEFAULT_FRAME_ANCESTORS.to_owned();
     let mut preview_ttl = serve::DEFAULT_PREVIEW_TTL;
+    let mut limits = RequestLimits::default();
     let mut remaining = arguments.iter();
     while let Some(flag) = remaining.next() {
         let mut value = || {
@@ -102,6 +104,9 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
                     return Err(range());
                 }
             }
+            "--request-burst" => limits.burst = limit(flag, &value()?)?,
+            "--requests-per-minute" => limits.per_minute = limit(flag, &value()?)?,
+            "--concurrent-requests" => limits.concurrent = limit(flag, &value()?)?,
             other => {
                 return Err(format!(
                     "Unknown arguments. Unrecognized serve option {other}; use --help."
@@ -121,7 +126,16 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         content_origin,
         frame_ancestors,
         preview_ttl,
+        limits,
     })
+}
+
+/// A request limit: a whole number from 1 to 100000.
+fn limit(flag: &str, value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(number @ 1..=100_000) => Ok(number),
+        _ => Err(format!("{flag} must be a whole number from 1 to 100000.")),
+    }
 }
 
 fn print_help() {
@@ -146,11 +160,20 @@ Options:
   --content-origin <origin>     Public preview origin, if proxied
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
   --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
+  --request-burst <n>           Requests accepted at once [default: {burst}]
+  --requests-per-minute <n>     Sustained request rate [default: {rate}]
+  --concurrent-requests <n>     Requests running at once [default: {concurrent}]
+
+Request limits apply per actor to HTTP and MCP together; a refused request
+gets 429 rate_limited with Retry-After and is not processed.
 
 --describe emits the build-time module inventory as JSON; it does not probe a
 running server.",
         api = serve::DEFAULT_API_ADDRESS,
         content = serve::DEFAULT_CONTENT_ADDRESS,
         ancestors = serve::DEFAULT_FRAME_ANCESTORS,
+        burst = RequestLimits::default().burst,
+        rate = RequestLimits::default().per_minute,
+        concurrent = RequestLimits::default().concurrent,
     );
 }

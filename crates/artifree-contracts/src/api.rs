@@ -197,6 +197,9 @@ pub enum ErrorCode {
     RequestKeyReused,
     /// The request body exceeds the size limit.
     PayloadTooLarge,
+    /// Too many requests from this caller. Nothing was done; retry after the
+    /// `Retry-After` delay with the same idempotency key.
+    RateLimited,
     /// Storage or capacity is temporarily unavailable; retry with the same key.
     Unavailable,
     /// Unexpected server failure. A mutating request may have been committed;

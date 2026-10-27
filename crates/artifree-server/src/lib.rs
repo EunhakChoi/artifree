@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod http;
 mod inventory;
+pub mod limits;
 pub mod mcp;
 mod operations;
 pub mod preview;

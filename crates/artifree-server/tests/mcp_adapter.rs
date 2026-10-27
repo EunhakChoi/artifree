@@ -13,6 +13,7 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_providers::storage::SqliteStore;
 use artifree_server::auth::AccessToken;
 use artifree_server::http::{self, AppState, Settings};
+use artifree_server::limits::RequestLimits;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
@@ -61,6 +62,7 @@ impl Harness {
                 content_origin: "http://127.0.0.1:7411".into(),
                 preview_ttl: Duration::from_secs(60),
                 frame_ancestors: "http://127.0.0.1:*".into(),
+                limits: RequestLimits::default(),
             },
         )
         .unwrap_or_else(|error| panic!("cannot build state: {error}"));

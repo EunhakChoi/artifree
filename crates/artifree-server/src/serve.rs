@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
+use crate::limits::RequestLimits;
 use crate::preview;
 
 /// Default API address; loopback only.
@@ -41,6 +42,8 @@ pub struct ServeOptions {
     pub frame_ancestors: String,
     /// Preview link lifetime.
     pub preview_ttl: Duration,
+    /// Per-actor request budget for the API and MCP.
+    pub limits: RequestLimits,
 }
 
 /// Addresses reported once both listeners accept connections.
@@ -88,6 +91,7 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
                 content_origin: content_origin.clone(),
                 preview_ttl: options.preview_ttl,
                 frame_ancestors: options.frame_ancestors,
+                limits: options.limits,
             },
         )?;
         on_ready(&Ready {
