@@ -44,6 +44,8 @@ pub struct ServeOptions {
     pub preview_ttl: Duration,
     /// Per-actor request budget for the API and MCP.
     pub limits: RequestLimits,
+    /// Change streams one actor may keep open.
+    pub change_streams: u32,
 }
 
 /// Addresses reported once both listeners accept connections.
@@ -92,6 +94,7 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
                 preview_ttl: options.preview_ttl,
                 frame_ancestors: options.frame_ancestors,
                 limits: options.limits,
+                change_streams: options.change_streams,
             },
         )?;
         on_ready(&Ready {
@@ -99,8 +102,13 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
             content_origin,
             token_file,
         });
+        let streams = state.clone();
         let api_server =
-            axum::serve(api, http::router(state.clone())).with_graceful_shutdown(shutdown_signal());
+            axum::serve(api, http::router(state.clone())).with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                // Open change streams would otherwise keep the server running.
+                streams.close_streams();
+            });
         let content_server =
             axum::serve(content, preview::router(state)).with_graceful_shutdown(shutdown_signal());
         tokio::try_join!(

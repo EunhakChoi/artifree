@@ -1,13 +1,16 @@
 import type {
   Artifact,
   ArtifactKind,
+  ChangeKind,
   CommitResponse,
   ErrorBody,
   ErrorCode,
+  FeedPosition,
   Preview,
   Revision,
   RevisionFile,
 } from '@artifree/contracts';
+import type { FeedChange } from './change-feed.js';
 
 /**
  * Runtime checks for API responses. Generated types describe the contract;
@@ -51,6 +54,22 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   unavailable: true,
   internal: true,
 };
+
+// A record for the same reason; a kind added later still reaches callers,
+// as 'unknown'.
+const CHANGE_KINDS: Record<ChangeKind, true> = { created: true, revised: true };
+
+/**
+ * An opaque feed cursor. It is sent back in `Last-Event-ID`, so it must be
+ * a visible ASCII header value.
+ */
+function isCursor(value: unknown): value is string {
+  return typeof value === 'string' && /^[\x21-\x7e]{1,256}$/.test(value);
+}
+
+function isChangeKind(value: string): value is ChangeKind {
+  return Object.hasOwn(CHANGE_KINDS, value);
+}
 
 function artifactKind(value: unknown): ArtifactKind | undefined {
   return ARTIFACT_KINDS.find((kind) => kind === value);
@@ -156,6 +175,40 @@ export function parsePreview(value: unknown): Preview | undefined {
   if (typeof url !== 'string' || !isCount(number) || !isTime(expires_at_ms))
     return undefined;
   return { url, revision: number, expires_at_ms };
+}
+
+/** Parses the data of a `ready` or `reset` feed event. */
+export function parseFeedPosition(value: unknown): FeedPosition | undefined {
+  return isRecord(value) && isCursor(value.cursor)
+    ? { cursor: value.cursor }
+    : undefined;
+}
+
+/** Parses the data of a `change` feed event. */
+export function parseFeedChange(value: unknown): FeedChange | undefined {
+  if (!isRecord(value)) return undefined;
+  const {
+    cursor,
+    artifact_id,
+    change,
+    revision: number,
+    committed_at_ms,
+  } = value;
+  if (
+    !isCursor(cursor) ||
+    typeof artifact_id !== 'string' ||
+    typeof change !== 'string' ||
+    !isCount(number) ||
+    !isTime(committed_at_ms)
+  )
+    return undefined;
+  return {
+    cursor,
+    artifact_id,
+    change: isChangeKind(change) ? change : 'unknown',
+    revision: number,
+    committed_at_ms,
+  };
 }
 
 /** Parses a non-2xx JSON body. */

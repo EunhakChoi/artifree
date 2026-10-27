@@ -2,12 +2,18 @@ import type {
   Artifact,
   CommitResponse,
   CreateArtifactRequest,
-  ErrorCode,
   FileUpload,
   Preview,
   Revision,
   SaveRevisionRequest,
 } from '@artifree/contracts';
+import {
+  type ChangeFeedEvent,
+  type FollowOptions,
+  changeFeedEvents,
+  follow,
+} from './change-feed.js';
+import { ArtifreeApiError } from './errors.js';
 import {
   parseArtifact,
   parseArtifactList,
@@ -28,38 +34,6 @@ export interface ClientConfiguration {
   readonly accessToken: string;
   /** Fetch implementation; defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
-}
-
-/** Why a request failed: a server error code or a client-side failure. */
-export type FailureCode = ErrorCode | 'network_error' | 'invalid_response';
-
-/** A failed API request. */
-export class ArtifreeApiError extends Error {
-  /** HTTP status, or 0 when no response arrived. */
-  readonly status: number;
-  readonly code: FailureCode;
-  /** The current revision when `code` is `revision_conflict`. */
-  readonly currentRevision: number | undefined;
-  /** Seconds to wait before retrying, from `Retry-After`, when given. */
-  readonly retryAfterSeconds: number | undefined;
-
-  constructor(
-    message: string,
-    details: {
-      status: number;
-      code: FailureCode;
-      currentRevision?: number;
-      retryAfterSeconds?: number;
-      cause?: unknown;
-    },
-  ) {
-    super(message, { cause: details.cause });
-    this.name = 'ArtifreeApiError';
-    this.status = details.status;
-    this.code = details.code;
-    this.currentRevision = details.currentRevision;
-    this.retryAfterSeconds = details.retryAfterSeconds;
-  }
 }
 
 /** Options for requests that change state. */
@@ -207,6 +181,55 @@ export class ArtifreeClient {
     }
   }
 
+  /**
+   * Opens the change feed once. Resolves when the server accepted the
+   * stream, with its events until the server ends it or `signal` aborts.
+   * Without `after` the stream starts at the head with `ready`. Rejects with
+   * `invalid_response` when a successful response is not an event stream.
+   * Use {@link followChanges} to reconnect automatically.
+   */
+  async openChanges(
+    options: { readonly after?: string; readonly signal?: AbortSignal } = {},
+  ): Promise<AsyncGenerator<ChangeFeedEvent>> {
+    const headers: Record<string, string> = { accept: 'text/event-stream' };
+    if (options.after !== undefined) headers['last-event-id'] = options.after;
+    const response = await this.send('GET', '/v1/changes', undefined, {
+      headers,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    const mediaType = response.headers
+      .get('content-type')
+      ?.split(';')[0]
+      ?.trim()
+      .toLowerCase();
+    if (mediaType !== 'text/event-stream' || response.body === null) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ArtifreeApiError(
+        `GET /v1/changes answered HTTP ${response.status} with ${mediaType ?? 'no content type'}, not an event stream.`,
+        { status: response.status, code: 'invalid_response' },
+      );
+    }
+    return changeFeedEvents(
+      decodeText(response.body, options.signal),
+      options.signal,
+    );
+  }
+
+  /**
+   * Follows the change feed until `options.signal` aborts, reconnecting
+   * from the last cursor after a lost connection, a 429, or a 5xx, so no
+   * committed change is skipped. Rejects on a failure that reconnecting
+   * cannot fix, such as a rejected token or a response that is not the
+   * feed.
+   */
+  async followChanges(options: FollowOptions): Promise<void> {
+    return follow(
+      (after, signal) =>
+        this.openChanges(after === undefined ? { signal } : { after, signal }),
+      options,
+    );
+  }
+
   /** A short-lived URL rendering a pinned revision on the content origin. */
   async createPreview(id: string, revision: number): Promise<Preview> {
     return this.json(
@@ -236,11 +259,14 @@ export class ArtifreeClient {
     method: string,
     path: string,
     mutation?: { body: unknown; idempotencyKey: string },
+    extra: { headers?: Record<string, string>; signal?: AbortSignal } = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
+      ...extra.headers,
       authorization: `Bearer ${this.accessToken}`,
     };
     const init: RequestInit = { method, headers };
+    if (extra.signal !== undefined) init.signal = extra.signal;
     if (mutation !== undefined) {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;
@@ -256,13 +282,20 @@ export class ArtifreeClient {
       );
     }
     if (response.ok) return response;
+    // Also a proxy's error page may say when to retry.
+    const retryAfter = retryAfterSeconds(response.headers.get('retry-after'));
     const failure = parseError(await readJson(response));
     if (failure === undefined)
       throw new ArtifreeApiError(
         `${method} ${path} failed with HTTP ${response.status}.`,
-        { status: response.status, code: 'invalid_response' },
+        {
+          status: response.status,
+          code: 'invalid_response',
+          ...(retryAfter === undefined
+            ? {}
+            : { retryAfterSeconds: retryAfter }),
+        },
       );
-    const retryAfter = retryAfterSeconds(response.headers.get('retry-after'));
     throw new ArtifreeApiError(failure.message, {
       status: response.status,
       code: failure.code,
@@ -271,6 +304,49 @@ export class ArtifreeClient {
         : {}),
       ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });
+  }
+}
+
+/**
+ * The text of a streamed body. A failure while reading, such as a lost
+ * connection, is a `network_error`. Stopping early or aborting `signal`
+ * cancels the body, which closes its connection, also with a `fetch` that
+ * ignores the signal once the response has arrived.
+ */
+async function* decodeText(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<string> {
+  const reader = body.getReader();
+  const cancel = (): void => {
+    reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', cancel);
+  // Reading starts on the first iteration, possibly after an abort.
+  if (signal?.aborted === true) cancel();
+  // Removes a leading byte order mark, as event streams require.
+  const decoder = new TextDecoder();
+  try {
+    for (;;) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error: unknown) {
+        throw new ArtifreeApiError('The change feed connection was lost.', {
+          status: 0,
+          code: 'network_error',
+          cause: error,
+        });
+      }
+      if (chunk.done) {
+        yield decoder.decode();
+        return;
+      }
+      yield decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    await reader.cancel().catch(() => undefined);
   }
 }
 

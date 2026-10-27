@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.4.0",
+  "contract_version": "0.5.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -45,7 +45,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1, MCP tools over Streamable HTTP at /mcp, and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, and a sandboxed preview origin."
     },
     {
       "id": "domain",
@@ -54,7 +54,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-domain",
       "status": "implemented",
-      "summary": "Validated identifiers, portable file packages, and separate version counters."
+      "summary": "Validated identifiers, portable file packages, separate version counters, and feed cursors."
     },
     {
       "id": "artifacts",
@@ -108,7 +108,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust · SQLite",
       "path": "crates/artifree-providers/src/storage.rs",
       "status": "implemented",
-      "summary": "Local SQLite with atomic commits and shared file content; PostgreSQL planned."
+      "summary": "Local SQLite with atomic commits, a change feed in the same transactions, and shared file content; PostgreSQL planned."
     },
     {
       "id": "models",
@@ -162,7 +162,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/client",
       "status": "implemented",
-      "summary": "Fetch-based HTTP API v1 client with structured errors."
+      "summary": "Fetch-based HTTP API v1 client with structured errors and change feed following."
     }
   ]
 };

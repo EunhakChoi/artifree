@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use artifree_server::changes;
 use artifree_server::limits::RequestLimits;
 use artifree_server::serve::{self, ServeOptions};
 
@@ -77,6 +78,7 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     let mut frame_ancestors = serve::DEFAULT_FRAME_ANCESTORS.to_owned();
     let mut preview_ttl = serve::DEFAULT_PREVIEW_TTL;
     let mut limits = RequestLimits::default();
+    let mut change_streams = changes::DEFAULT_STREAMS_PER_ACTOR;
     let mut remaining = arguments.iter();
     while let Some(flag) = remaining.next() {
         let mut value = || {
@@ -107,6 +109,7 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             "--request-burst" => limits.burst = limit(flag, &value()?)?,
             "--requests-per-minute" => limits.per_minute = limit(flag, &value()?)?,
             "--concurrent-requests" => limits.concurrent = limit(flag, &value()?)?,
+            "--change-streams" => change_streams = limit(flag, &value()?)?,
             other => {
                 return Err(format!(
                     "Unknown arguments. Unrecognized serve option {other}; use --help."
@@ -127,6 +130,7 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         frame_ancestors,
         preview_ttl,
         limits,
+        change_streams,
     })
 }
 
@@ -163,9 +167,12 @@ Options:
   --request-burst <n>           Requests accepted at once [default: {burst}]
   --requests-per-minute <n>     Sustained request rate [default: {rate}]
   --concurrent-requests <n>     Requests running at once [default: {concurrent}]
+  --change-streams <n>          Open change streams [default: {streams}]
 
 Request limits apply per actor to HTTP and MCP together; a refused request
-gets 429 rate_limited with Retry-After and is not processed.
+gets 429 rate_limited with Retry-After and is not processed. Opening a change
+stream counts as one request; an open stream holds one of the actor's
+change stream slots instead of a running request.
 
 --describe emits the build-time module inventory as JSON; it does not probe a
 running server.",
@@ -175,5 +182,6 @@ running server.",
         burst = RequestLimits::default().burst,
         rate = RequestLimits::default().per_minute,
         concurrent = RequestLimits::default().concurrent,
+        streams = changes::DEFAULT_STREAMS_PER_ACTOR,
     );
 }

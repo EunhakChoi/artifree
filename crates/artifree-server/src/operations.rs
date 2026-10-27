@@ -156,7 +156,7 @@ pub(crate) async fn create(
     let receipt = state
         .run(move |artifacts| artifacts.create(&actor, &key, &title, &package))
         .await?;
-    Ok(commit_response(receipt))
+    Ok(announce(state, receipt))
 }
 
 pub(crate) async fn save(
@@ -188,7 +188,16 @@ pub(crate) async fn save(
     let receipt = state
         .run(move |artifacts| artifacts.save(&actor, &key, &id, base, changes))
         .await?;
-    Ok(commit_response(receipt))
+    Ok(announce(state, receipt))
+}
+
+/// Wakes change streams when the commit wrote something, and converts the
+/// receipt.
+fn announce(state: &AppState, receipt: CommitReceipt) -> CommitResponse {
+    if receipt.delivery == Delivery::Committed {
+        state.feed().committed();
+    }
+    commit_response(receipt)
 }
 
 pub(crate) async fn revisions(

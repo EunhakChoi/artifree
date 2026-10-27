@@ -1,8 +1,10 @@
 //! Framework-independent domain vocabulary. No I/O, transport DTOs, or providers.
 //!
 //! These counters deliberately have different types. A source revision, document
-//! sequence, and running application's data version have independent lifecycles.
+//! sequence, running application's data version, and change feed sequence have
+//! independent lifecycles.
 
+pub mod change;
 pub mod identity;
 pub mod package;
 

@@ -42,7 +42,7 @@
               },
               {
                 "const": "rate_limited",
-                "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                 "type": "string"
               },
               {
@@ -226,7 +226,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {
@@ -409,7 +409,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {
@@ -708,7 +708,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {
@@ -1042,7 +1042,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {
@@ -1223,7 +1223,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {
@@ -1396,7 +1396,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {
@@ -1571,7 +1571,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {
@@ -1714,7 +1714,7 @@
                       },
                       {
                         "const": "rate_limited",
-                        "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+                        "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
                         "type": "string"
                       },
                       {

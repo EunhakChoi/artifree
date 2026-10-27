@@ -2,7 +2,9 @@
 //! the actor; an iframe-supplied actor or workspace identifier cannot.
 //!
 //! Only owner access exists today. Sharing, roles, runtime sessions, and
-//! capability grants are planned and must be checked here when added.
+//! capability grants are planned and must be checked here when added. The
+//! change feed applies the owner rule in its storage query
+//! (`ArtifactService::changes`), so sharing must extend that query too.
 
 use artifree_domain::identity::ActorId;
 use artifree_ports::artifact_store::ArtifactRecord;

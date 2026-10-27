@@ -180,6 +180,46 @@ pub struct Preview {
     pub expires_at_ms: i64,
 }
 
+/// What a commit did to an artifact. A kind that a client does not know
+/// still means the artifact changed: read it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    /// The artifact was created at revision 1.
+    Created,
+    /// A revision was committed.
+    Revised,
+}
+
+/// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
+/// revision. Retries that replay a commit, and failed commits, have none.
+/// It names what to read again and carries no content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactChange {
+    /// Opaque feed position of this change, also the event's `id`.
+    pub cursor: String,
+    /// The changed artifact.
+    pub artifact_id: String,
+    /// What the commit did.
+    pub change: ChangeKind,
+    /// The revision the commit created.
+    pub revision: u64,
+    /// Commit time in Unix milliseconds.
+    pub committed_at_ms: i64,
+}
+
+/// Data of the `ready` and `reset` events of `GET /v1/changes`. `ready`
+/// starts a stream opened without a cursor. `reset` answers a cursor this
+/// feed cannot continue from: changes may have been missed, so read the
+/// state again. Later events follow this position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedPosition {
+    /// Opaque feed position, also the event's `id`.
+    pub cursor: String,
+}
+
 /// Machine-readable error category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -197,8 +237,9 @@ pub enum ErrorCode {
     RequestKeyReused,
     /// The request body exceeds the size limit.
     PayloadTooLarge,
-    /// Too many requests from this caller. Nothing was done; retry after the
-    /// `Retry-After` delay with the same idempotency key.
+    /// Too many requests from this caller. This attempt was not processed;
+    /// retry after the `Retry-After` delay with the same idempotency key,
+    /// which returns the original result if an earlier attempt committed.
     RateLimited,
     /// Storage or capacity is temporarily unavailable; retry with the same key.
     Unavailable,

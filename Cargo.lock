@@ -62,6 +62,7 @@ dependencies = [
  "artifree-providers",
  "axum",
  "base64",
+ "futures-core",
  "getrandom",
  "http-body",
  "rmcp",

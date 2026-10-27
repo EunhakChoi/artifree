@@ -9,7 +9,9 @@ import { parseSync } from 'oxc-parser';
 // base64 decodes uploads, and tower drives in-process router tests; http-body
 // builds request bodies that never finish for cancellation tests. rmcp is
 // the official MCP SDK serving the inbound MCP adapter, and serde parses its
-// tool arguments into contract DTOs (decision 0004).
+// tool arguments into contract DTOs (decision 0004). futures-core provides
+// only the Stream trait that Axum's server-sent events response consumes; it
+// is already in the dependency tree through Axum (decision 0006).
 const rustEdges = {
   'artifree-domain': [],
   'artifree-ports': ['artifree-domain'],
@@ -30,6 +32,7 @@ const rustEdges = {
     'artifree-providers',
     'axum',
     'base64',
+    'futures-core',
     'getrandom',
     'rmcp',
     'serde',

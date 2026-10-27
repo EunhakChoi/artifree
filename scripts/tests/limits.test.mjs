@@ -107,7 +107,7 @@ test('MCP and the CLI share a budget; a refusal does nothing and the budget reco
   }
 });
 
-test('The CLI reports a refused save as not done, with its key unused', async () => {
+test('A refused CLI retry of a committed create says to retry, and the retry replays it', async () => {
   const server = await startServer(binary, join(scratch, 'cli'), [
     '--request-burst',
     '1',
@@ -115,25 +115,36 @@ test('The CLI reports a refused save as not done, with its key unused', async ()
     '20',
   ]);
   try {
-    const listed = cli(server, ['list']);
-    assert.equal(listed.status, 0, listed.stderr);
     const site = join(scratch, 'cli-site');
     await mkdir(site, { recursive: true });
     await writeFile(join(site, 'index.html'), '<p>x</p>');
-    const refused = cli(server, [
-      'create',
-      '--title',
-      'T',
-      '--dir',
-      site,
-      '--idempotency-key',
-      'cli-limited-1',
-    ]);
+    const create = () =>
+      cli(server, [
+        'create',
+        '--title',
+        'T',
+        '--dir',
+        site,
+        '--idempotency-key',
+        'cli-limited-1',
+      ]);
+    const first = create();
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(JSON.parse(first.stdout).replayed, false);
+    // The same key again at once: this attempt is refused, but the key is
+    // not unused, since the first attempt committed.
+    const refused = create();
     assert.equal(refused.status, 1);
     assert.match(
       refused.stderr,
-      /Nothing was done\. Retry after 3s; --idempotency-key cli-limited-1 is still unused\./,
+      /This attempt was not processed\. Retry after 3s with --idempotency-key cli-limited-1\./,
     );
+    await delay(3100);
+    const retried = create();
+    assert.equal(retried.status, 0, retried.stderr);
+    const replayed = JSON.parse(retried.stdout);
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.artifact.id, JSON.parse(first.stdout).artifact.id);
   } finally {
     await server.stop();
   }
