@@ -4,7 +4,15 @@
  * Any JSON request or response body of HTTP API v1.
  */
 export type ApiBody =
-  CreateArtifactRequest | SaveRevisionRequest | CommitResponse | ArtifactList | RevisionList | Preview | ErrorResponse;
+  | CreateArtifactRequest
+  | SaveRevisionRequest
+  | CommitResponse
+  | Artifact
+  | ArtifactList
+  | Revision
+  | RevisionList
+  | Preview
+  | ErrorResponse;
 /**
  * Byte encoding of a file's `content` string.
  */

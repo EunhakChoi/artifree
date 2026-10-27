@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { createAjv } from '../lib/schema.mjs';
 import { buildServer, startServer } from '../lib/server-process.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -135,6 +136,64 @@ test('CLI creates, saves, reads pinned revisions, and rejects stale saves', asyn
     const policy = response.headers.get('content-security-policy') ?? '';
     assert.match(policy, /^sandbox allow-scripts /);
     assert.doesNotMatch(policy, /allow-same-origin|allow-popups/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('Every JSON body the server sends matches the API schema root', async () => {
+  // The generated schema's root claims to accept any v1 body; check it
+  // against real responses from each JSON route, including errors.
+  const schema = JSON.parse(
+    await readFile(
+      new URL('../../contracts/generated/api-v1.schema.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const validate = createAjv().compile(schema);
+  const server = await startServer(binary, dataDirectory('schema-data'));
+  try {
+    const request = async (method, path, body) => {
+      const init = {
+        method,
+        headers: { authorization: `Bearer ${server.token}` },
+      };
+      if (body !== undefined) {
+        init.headers['content-type'] = 'application/json';
+        init.headers['idempotency-key'] = `schema-${method}-${path.length}`;
+        init.body = JSON.stringify(body);
+      }
+      const response = await fetch(`${server.api_url}${path}`, init);
+      const value = await response.json();
+      assert.ok(
+        validate(value),
+        `${method} ${path} (${response.status}) does not match: ${JSON.stringify(validate.errors?.slice(0, 3))}`,
+      );
+      return value;
+    };
+    const created = await request('POST', '/v1/artifacts', {
+      title: 'Schema',
+      files: [{ path: 'index.html', encoding: 'utf8', content: '<p>1</p>' }],
+    });
+    const id = created.artifact.id;
+    await request('POST', `/v1/artifacts/${id}/revisions`, {
+      base_revision: 1,
+      changes: [
+        {
+          op: 'put',
+          path: 'index.html',
+          encoding: 'utf8',
+          content: '<p>2</p>',
+        },
+      ],
+    });
+    await request('GET', '/v1/artifacts');
+    await request('GET', `/v1/artifacts/${id}`);
+    await request('GET', `/v1/artifacts/${id}/revisions`);
+    await request('GET', `/v1/artifacts/${id}/revisions/1`);
+    await request('POST', `/v1/artifacts/${id}/revisions/1/previews`);
+    await request('GET', '/v1/artifacts/art_00000000000000000000000000000000');
+    await request('DELETE', '/v1/artifacts');
   } finally {
     await server.stop();
   }

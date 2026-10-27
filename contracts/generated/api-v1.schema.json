@@ -463,7 +463,13 @@
       "$ref": "#/$defs/CommitResponse"
     },
     {
+      "$ref": "#/$defs/Artifact"
+    },
+    {
       "$ref": "#/$defs/ArtifactList"
+    },
+    {
+      "$ref": "#/$defs/Revision"
     },
     {
       "$ref": "#/$defs/RevisionList"

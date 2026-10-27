@@ -10,8 +10,8 @@
 
 use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
-    ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse, Preview, RevisionList,
-    SaveRevisionRequest,
+    Artifact, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse, Preview,
+    Revision, RevisionList, SaveRevisionRequest,
 };
 use schemars::generate::SchemaSettings;
 
@@ -21,7 +21,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<CreateArtifactRequest>(),
         generator.subschema_for::<SaveRevisionRequest>(),
         generator.subschema_for::<CommitResponse>(),
+        generator.subschema_for::<Artifact>(),
         generator.subschema_for::<ArtifactList>(),
+        generator.subschema_for::<Revision>(),
         generator.subschema_for::<RevisionList>(),
         generator.subschema_for::<Preview>(),
         generator.subschema_for::<ErrorResponse>(),
