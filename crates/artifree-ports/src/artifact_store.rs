@@ -4,14 +4,14 @@
 //! An implementation must make each commit atomic: the conditional revision
 //! check, revision files, metadata update, request-key record, and change
 //! feed entry either all become durable or none do. A returned commit is
-//! durable.
+//! durable. The same holds for a metadata update and its conditional check.
 
 use std::fmt;
 
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 
 /// Stored metadata of an artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,11 +24,16 @@ pub struct ArtifactRecord {
     pub kind: ArtifactKind,
     /// Display title.
     pub title: Title,
+    /// Whether the owner pinned the artifact.
+    pub pinned: bool,
     /// Latest committed source revision.
     pub current_revision: SourceRevision,
+    /// Latest metadata revision: the version of the title and pin.
+    pub metadata_revision: MetadataRevision,
     /// Creation time.
     pub created_at: UnixMillis,
-    /// Time of the latest committed revision.
+    /// Time of the latest committed source revision; metadata updates do
+    /// not change it.
     pub updated_at: UnixMillis,
 }
 
@@ -95,6 +100,22 @@ pub struct RevisionCommit<'a> {
     pub package: &'a FilePackage,
 }
 
+/// A request to change an artifact's title or pin when its metadata is still
+/// at `base`. A field that is `None` stays as it is.
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataUpdate<'a> {
+    /// Retry identity of the updating actor.
+    pub request: RequestIdentity<'a>,
+    /// Artifact to change.
+    pub artifact: &'a ArtifactId,
+    /// Metadata revision the change was prepared against.
+    pub base: MetadataRevision,
+    /// New title.
+    pub title: Option<&'a Title>,
+    /// New pin.
+    pub pinned: Option<bool>,
+}
+
 /// Whether a commit was performed now or is the stored result of a retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -115,6 +136,52 @@ pub struct CommitReceipt {
     pub delivery: Delivery,
 }
 
+/// The durable result of a metadata update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataReceipt {
+    /// Artifact metadata as of the update the request identifies. An update
+    /// that changed nothing reports the metadata it found.
+    pub artifact: ArtifactRecord,
+    /// Whether this call handled the request or replayed an earlier one.
+    pub delivery: Delivery,
+}
+
+/// The order of an artifact list. Ties are broken by identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListOrder {
+    /// The most recently updated source first.
+    Updated,
+    /// The most recently created first.
+    Created,
+}
+
+/// Where a list page continues: after the artifact with this sort time and
+/// identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListPosition {
+    /// The sort time of the last artifact already listed.
+    pub at: UnixMillis,
+    /// Its identifier.
+    pub id: ArtifactId,
+}
+
+/// One page of an owner's artifacts.
+#[derive(Debug, Clone, Copy)]
+pub struct ArtifactListing<'a> {
+    /// The owner whose artifacts are listed.
+    pub owner: &'a ActorId,
+    /// Only titles containing this text, ignoring ASCII case.
+    pub search: Option<&'a str>,
+    /// Only artifacts with this pin.
+    pub pinned: Option<bool>,
+    /// The order.
+    pub order: ListOrder,
+    /// Continue after this position.
+    pub after: Option<&'a ListPosition>,
+    /// At most this many artifacts.
+    pub limit: usize,
+}
+
 /// What a commit did to its artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -123,6 +190,8 @@ pub enum ChangeKind {
     Created,
     /// A revision was appended.
     Revised,
+    /// The title or pin changed; no source revision was written.
+    MetadataUpdated,
 }
 
 /// One commit as recorded in the change feed.
@@ -134,8 +203,11 @@ pub struct ChangeRecord {
     pub artifact: ArtifactId,
     /// What the commit did.
     pub kind: ChangeKind,
-    /// The revision the commit created.
+    /// The source revision the commit created, or that was current when the
+    /// metadata changed.
     pub revision: SourceRevision,
+    /// The metadata revision after the commit.
+    pub metadata_revision: MetadataRevision,
     /// Commit time.
     pub committed_at: UnixMillis,
 }
@@ -163,6 +235,11 @@ pub enum StoreError {
         /// The revision that is current now.
         current: SourceRevision,
     },
+    /// The artifact's current metadata revision is not the requested base.
+    MetadataConflict {
+        /// The metadata revision that is current now.
+        current: MetadataRevision,
+    },
     /// The actor already used the key for a request with different content.
     RequestKeyReused,
     /// Storage could not complete the operation; the outcome is not committed
@@ -176,6 +253,9 @@ impl fmt::Display for StoreError {
             Self::NotFound => formatter.write_str("artifact not found"),
             Self::RevisionConflict { current } => {
                 write!(formatter, "artifact is at revision {}", current.0)
+            }
+            Self::MetadataConflict { current } => {
+                write!(formatter, "artifact metadata is at revision {}", current.0)
             }
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
@@ -210,6 +290,17 @@ pub trait ArtifactStore {
     /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
     fn commit_revision(&self, request: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError>;
 
+    /// Changes the title or pin if the metadata is still at `base`, or
+    /// returns the stored receipt of an identical earlier request. A change
+    /// to the values already stored writes no metadata revision and no
+    /// change feed entry, but its key is recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NotFound`], [`StoreError::MetadataConflict`],
+    /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
+    fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError>;
+
     /// Metadata of one artifact.
     ///
     /// # Errors
@@ -217,12 +308,16 @@ pub trait ArtifactStore {
     /// [`StoreError::Unavailable`].
     fn artifact(&self, id: &ArtifactId) -> Result<Option<ArtifactRecord>, StoreError>;
 
-    /// Artifacts owned by an actor, most recently updated first.
+    /// Up to `listing.limit` of an owner's artifacts that match the listing,
+    /// in its order, after its position.
     ///
     /// # Errors
     ///
     /// [`StoreError::Unavailable`].
-    fn artifacts_owned_by(&self, owner: &ActorId) -> Result<Vec<ArtifactRecord>, StoreError>;
+    fn list_artifacts(
+        &self,
+        listing: ArtifactListing<'_>,
+    ) -> Result<Vec<ArtifactRecord>, StoreError>;
 
     /// Revision metadata, newest first.
     ///

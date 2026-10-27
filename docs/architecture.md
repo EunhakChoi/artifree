@@ -111,21 +111,22 @@ in the Rust core.
 
 ## HTTP API v1
 
-| Method and path                                     | Purpose                                       |
-| --------------------------------------------------- | --------------------------------------------- |
-| `GET /v1/artifacts`                                 | Owned artifacts, most recently updated first  |
-| `POST /v1/artifacts`                                | Create revision 1 (`Idempotency-Key`)         |
-| `GET /v1/artifacts/{id}`                            | Metadata and current revision                 |
-| `GET /v1/artifacts/{id}/revisions`                  | History, newest first                         |
-| `POST /v1/artifacts/{id}/revisions`                 | Conditional commit (`Idempotency-Key`)        |
-| `GET /v1/artifacts/{id}/revisions/{n}`              | One revision manifest                         |
-| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file (attachment)       |
-| `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin |
-| `GET /v1/changes`                                   | Committed changes as server-sent events       |
+| Method and path                                     | Purpose                                           |
+| --------------------------------------------------- | ------------------------------------------------- |
+| `GET /v1/artifacts`                                 | Owned artifacts: search, pin filter, order, pages |
+| `POST /v1/artifacts`                                | Create revision 1 (`Idempotency-Key`)             |
+| `GET /v1/artifacts/{id}`                            | Metadata and current revision                     |
+| `PATCH /v1/artifacts/{id}`                          | Conditional rename or pin (`Idempotency-Key`)     |
+| `GET /v1/artifacts/{id}/revisions`                  | History, newest first                             |
+| `POST /v1/artifacts/{id}/revisions`                 | Conditional commit (`Idempotency-Key`)            |
+| `GET /v1/artifacts/{id}/revisions/{n}`              | One revision manifest                             |
+| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file (attachment)           |
+| `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin     |
+| `GET /v1/changes`                                   | Committed changes as server-sent events           |
 
-Errors use `{ "error": { "code", "message", "current_revision"? } }` with
+Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
 `invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
-`revision_conflict` (409), `request_key_reused` (422), `payload_too_large`
+`revision_conflict` and `metadata_conflict` (409), `request_key_reused` (422), `payload_too_large`
 (413), `rate_limited` (429 with `Retry-After`; this attempt was not processed),
 `unavailable` (503, retry with the same key), and `internal` (500).
 
@@ -163,8 +164,10 @@ Pi configuration. These are agent tools, not page capabilities.
 
 The [PR roadmap](roadmap.md) is the implementation plan. A01 (committed
 change notifications and the deferred CLI retry diagnostic) and A02 (the web
-workspace following committed changes) are implemented; the next slice is A03
-(renaming, pins, search, order, and pages for artifacts).
+workspace following committed changes) are implemented, and A03a adds renaming,
+pins, search, order, and pages to the API, MCP, client, and CLI
+([0008](decisions/0008-artifact-metadata-and-lists.md)). The next slice is A03b,
+the same operations in the web workspace.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

@@ -31,6 +31,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { fromEditable, toEditable } from './editable-text';
+import { isNewer, versionOf } from './use-live-workspace';
+import type { Version } from './use-live-workspace';
 import { describeFailure, useRequest } from './use-request';
 
 /**
@@ -62,8 +64,8 @@ interface ArtifactDetailProps {
   epoch: number;
   /** How often the server's data may have been replaced so far. */
   resets: number;
-  /** The newest revision the page knows this artifact has, if any. */
-  knownRevision: number | undefined;
+  /** The newest version the page knows this artifact has, if any. */
+  known: Version | undefined;
   /** Changes of a kind the client does not know; each reads again. */
   unknownChanges: number;
   /** Called after a revision is committed so lists can refresh. */
@@ -80,24 +82,24 @@ export function ArtifactDetail({
   artifactId,
   epoch,
   resets,
-  knownRevision,
+  known,
   unknownChanges,
   onSaved,
   unsaved,
   onUnsavedChange,
 }: ArtifactDetailProps) {
   const [generation, setGeneration] = useState(0);
-  // The revision this view reads for, in the epoch it was known in. It
-  // follows a newer known revision only after its own read settled, since a
-  // pending read may bring it. A new epoch forgets it, like the revisions
+  // The version this view reads for, in the epoch it was known in. It
+  // follows a newer known version only after its own read settled, since a
+  // pending read may bring it. A new epoch forgets it, like the versions
   // known before.
-  const [target, setTarget] = useState({ epoch, revision: knownRevision ?? 0 });
-  const targetRevision = target.epoch === epoch ? target.revision : 0;
+  const [target, setTarget] = useState({ epoch, version: known });
+  const targetVersion = target.epoch === epoch ? target.version : undefined;
   // A revision chosen for the preview, kept across tabs; none follows the
   // latest.
   const [pinned, setPinned] = useState<number>();
   const details = useRequest<Loaded>(
-    `${artifactId}:${generation}:${epoch}:${targetRevision}:${unknownChanges}`,
+    `${artifactId}:${generation}:${epoch}:${targetVersion?.revision}:${targetVersion?.metadata}:${unknownChanges}`,
     async (signal) => {
       const asked = { generation, epoch, resets };
       // Revisions are listed after the artifact is read, so the list always
@@ -123,12 +125,12 @@ export function ArtifactDetail({
   if (
     settled &&
     shown !== undefined &&
-    knownRevision !== undefined &&
-    knownRevision > targetRevision &&
+    known !== undefined &&
+    isNewer(known, targetVersion) &&
     // What was read in an earlier epoch is behind whatever this one knows.
-    (shown.epoch !== epoch || knownRevision > shown.artifact.current_revision)
+    (shown.epoch !== epoch || isNewer(known, versionOf(shown.artifact)))
   )
-    setTarget({ epoch, revision: knownRevision });
+    setTarget({ epoch, version: known });
   function reload(): void {
     setGeneration((value) => value + 1);
   }

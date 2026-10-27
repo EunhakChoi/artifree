@@ -6,14 +6,18 @@
 
 use artifree_contracts::api::{
     Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse, ContentEncoding,
-    CreateArtifactRequest, ErrorBody, ErrorCode, FileChange as WireChange, FileUpload, Preview,
-    Revision, RevisionFile, RevisionList, SaveRevisionRequest,
+    CreateArtifactRequest, ErrorBody, ErrorCode, FileChange as WireChange, FileUpload,
+    ListArtifactsQuery, ListSort, Preview, Revision, RevisionFile, RevisionList,
+    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
-use artifree_core::artifacts::{ArtifactError, Missing};
+use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing};
+use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
-use artifree_ports::artifact_store::{ArtifactRecord, CommitReceipt, Delivery, RevisionRecord};
+use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+use artifree_ports::artifact_store::{
+    ArtifactRecord, CommitReceipt, Delivery, ListOrder, RevisionRecord,
+};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -36,6 +40,7 @@ impl ApiError {
                 code,
                 message: message.into(),
                 current_revision: None,
+                current_metadata_revision: None,
             },
         }
     }
@@ -75,6 +80,13 @@ impl From<ArtifactError> for ApiError {
                 conflict.body.current_revision = Some(current.0);
                 conflict
             }
+            ArtifactError::MetadataConflict { current } => {
+                let mut conflict =
+                    Self::new(StatusCode::CONFLICT, ErrorCode::MetadataConflict, message);
+                conflict.body.current_metadata_revision = Some(current.0);
+                conflict
+            }
+            ArtifactError::InvalidPageToken => Self::invalid(format!("page_token: {message}")),
             ArtifactError::RequestKeyReused => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::RequestKeyReused,
@@ -109,10 +121,42 @@ pub(crate) fn request_key(field: &str, value: &str) -> Result<RequestKey, ApiErr
         .map_err(|error| ApiError::invalid(format!("{field}: {error}")))
 }
 
-pub(crate) async fn list(state: &AppState, actor: ActorId) -> Result<ArtifactList, ApiError> {
-    let records = state.run(move |artifacts| artifacts.list(&actor)).await?;
+pub(crate) async fn list(
+    state: &AppState,
+    actor: ActorId,
+    query: ListArtifactsQuery,
+) -> Result<ArtifactList, ApiError> {
+    let ListArtifactsQuery {
+        q,
+        sort,
+        pinned,
+        limit,
+        page_token,
+    } = query;
+    let search: Option<SearchText> = q
+        .map(|text| text.parse())
+        .transpose()
+        .map_err(|error| ApiError::invalid(format!("q: {error}")))?;
+    let limit = limit
+        .map(PageSize::try_from)
+        .transpose()
+        .map_err(|error| ApiError::invalid(format!("limit: {error}")))?
+        .unwrap_or_default();
+    let query = ListQuery {
+        search,
+        pinned,
+        order: match sort.unwrap_or(ListSort::Updated) {
+            ListSort::Updated => ListOrder::Updated,
+            ListSort::Created => ListOrder::Created,
+        },
+        limit,
+    };
+    let page = state
+        .run(move |artifacts| artifacts.list(&actor, &query, page_token.as_deref()))
+        .await?;
     Ok(ArtifactList {
-        artifacts: records.iter().map(artifact_dto).collect(),
+        artifacts: page.artifacts.iter().map(artifact_dto).collect(),
+        next_page_token: page.next_page_token,
     })
 }
 
@@ -189,6 +233,34 @@ pub(crate) async fn save(
         .run(move |artifacts| artifacts.save(&actor, &key, &id, base, changes))
         .await?;
     Ok(announce(state, receipt))
+}
+
+pub(crate) async fn update(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: UpdateArtifactRequest,
+) -> Result<UpdateArtifactResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let base = MetadataRevision(request.base_metadata_revision);
+    let title: Option<Title> = request
+        .title
+        .map(|title| title.parse())
+        .transpose()
+        .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
+    let change = MetadataChange::new(title, request.pinned)
+        .ok_or_else(|| ApiError::unprocessable("give a title, pinned, or both"))?;
+    let receipt = state
+        .run(move |artifacts| artifacts.update(&actor, &key, &id, base, &change))
+        .await?;
+    if receipt.delivery == Delivery::Committed {
+        state.feed().committed();
+    }
+    Ok(UpdateArtifactResponse {
+        artifact: artifact_dto(&receipt.artifact),
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
 }
 
 /// Wakes change streams when the commit wrote something, and converts the
@@ -353,7 +425,9 @@ fn artifact_dto(record: &ArtifactRecord) -> Artifact {
             ArtifactKind::Motion => WireKind::Motion,
         },
         title: record.title.as_str().to_owned(),
+        pinned: record.pinned,
         current_revision: record.current_revision.0,
+        metadata_revision: record.metadata_revision.0,
         created_at_ms: record.created_at.0,
         updated_at_ms: record.updated_at.0,
     }

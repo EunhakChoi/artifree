@@ -27,7 +27,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "apps/cli",
       "status": "implemented",
-      "summary": "Artifact create, list, show, save, cat, and preview over HTTP; build inventory."
+      "summary": "Artifact create, list (search, order, pages), show, rename, pin, save, cat, and preview over HTTP; build inventory."
     },
     {
       "id": "runtime",
@@ -63,7 +63,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/artifacts.rs",
       "status": "implemented",
-      "summary": "Create, conditional revisions, retry keys, pinned reads; publish/restore/fork planned."
+      "summary": "Create, conditional revisions and metadata updates, retry keys, pinned reads, list queries; publish/restore/fork planned."
     },
     {
       "id": "policy",

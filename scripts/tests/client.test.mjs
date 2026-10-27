@@ -8,9 +8,11 @@ import {
 
 const artifact = {
   id: `art_${'0'.repeat(32)}`,
-  kind: 'html',
+  kind: 'app',
   title: 'Demo',
+  pinned: false,
   current_revision: 1,
+  metadata_revision: 1,
   created_at_ms: 1,
   updated_at_ms: 1,
 };
@@ -147,6 +149,69 @@ test('A read is cancelled through its signal', async () => {
   assert.equal(error.code, 'network_error');
 });
 
+test('Lists send only the given query and return the next page token', async () => {
+  const requests = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url) => {
+      requests.push(new URL(url));
+      return Response.json({ artifacts: [artifact], next_page_token: 'next' });
+    },
+  });
+  assert.deepEqual(await client.listArtifacts(), {
+    artifacts: [artifact],
+    next_page_token: 'next',
+  });
+  await client.listArtifacts({
+    q: 'a plan & more',
+    sort: 'created',
+    pinned: false,
+    limit: 2,
+    page_token: 'next',
+  });
+  assert.equal(requests[0].search, '');
+  assert.deepEqual(Object.fromEntries(requests[1].searchParams), {
+    q: 'a plan & more',
+    sort: 'created',
+    pinned: 'false',
+    limit: '2',
+    page_token: 'next',
+  });
+  const missingFields = clientWith(() =>
+    Response.json({ artifacts: [{ ...artifact, pinned: undefined }] }),
+  );
+  assert.equal(
+    (await failure(missingFields.listArtifacts())).code,
+    'invalid_response',
+  );
+});
+
+test('A metadata conflict reports the current metadata revision', async () => {
+  const client = clientWith(() =>
+    Response.json(
+      {
+        error: {
+          code: 'metadata_conflict',
+          message: 'artifact metadata changed',
+          current_metadata_revision: 4,
+        },
+      },
+      { status: 409 },
+    ),
+  );
+  const error = await failure(
+    client.updateArtifact(
+      artifact.id,
+      { base_metadata_revision: 3, title: 'New' },
+      { idempotencyKey: 'test-key-1' },
+    ),
+  );
+  assert.equal(error.code, 'metadata_conflict');
+  assert.equal(error.currentMetadataRevision, 4);
+  assert.equal(error.currentRevision, undefined);
+});
+
 // The change feed. Each rule below is one way an earlier version failed:
 // a split line end, an unknown kind or event, an aborted wait, a proxy
 // error, and a successful response that is not the feed.
@@ -159,6 +224,7 @@ const changeData = (sequence, change = 'revised') =>
     artifact_id: artifact.id,
     change,
     revision: sequence,
+    metadata_revision: 1,
     committed_at_ms: 1,
   });
 const changeEvent = (sequence, change = 'revised') => ({
@@ -168,6 +234,7 @@ const changeEvent = (sequence, change = 'revised') => ({
     artifact_id: artifact.id,
     change,
     revision: sequence,
+    metadata_revision: 1,
     committed_at_ms: 1,
   },
 });
@@ -219,7 +286,7 @@ test('The feed parser follows the event stream rules', async () => {
   // A byte order mark and a character split across chunks; comments, unknown
   // fields and events, an event without data, and joined data lines.
   const bytes = new TextEncoder().encode(
-    `event: change\ndata: {"cursor":"${cursor(5)}","artifact_id":"${artifact.id}",\ndata: "change":"created","revision":5,"committed_at_ms":1}\n\n`,
+    `event: change\ndata: {"cursor":"${cursor(5)}","artifact_id":"${artifact.id}",\ndata: "change":"created","revision":5,"metadata_revision":1,"committed_at_ms":1}\n\n`,
   );
   const split = bytes.indexOf(0x22, 20) + 1;
   assert.deepEqual(

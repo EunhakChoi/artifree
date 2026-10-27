@@ -74,6 +74,22 @@ pub struct SaveRevisionRequest {
     pub changes: Vec<FileChange>,
 }
 
+/// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
+/// revisions are not touched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateArtifactRequest {
+    /// The metadata revision this change was prepared against. The update
+    /// fails with `metadata_conflict` unless it is still current.
+    pub base_metadata_revision: u64,
+    /// New display title, 1-200 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Whether the artifact is pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+}
+
 /// Source model family of an artifact. Only `app` can be created by this
 /// version; the other families are reserved for planned source models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -103,12 +119,18 @@ pub struct Artifact {
     pub kind: ArtifactKind,
     /// Display title.
     pub title: String,
+    /// Whether the owner pinned the artifact.
+    pub pinned: bool,
     /// Latest committed revision when this metadata was produced; see
     /// [`CommitResponse::artifact`] for replays.
     pub current_revision: u64,
+    /// Version of the title and pin, starting at 1. It changes only when
+    /// they change, independently of `current_revision`.
+    pub metadata_revision: u64,
     /// Creation time in Unix milliseconds.
     pub created_at_ms: i64,
-    /// Time of the latest revision in Unix milliseconds.
+    /// Time of the latest source revision in Unix milliseconds; metadata
+    /// updates do not change it.
     pub updated_at_ms: i64,
 }
 
@@ -152,12 +174,63 @@ pub struct CommitResponse {
     pub replayed: bool,
 }
 
+/// Response of `PATCH /v1/artifacts/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateArtifactResponse {
+    /// Artifact metadata as of the update this request identifies. On a
+    /// replay it can be older than the artifact's current state. An update
+    /// to the values already stored returns them unchanged.
+    pub artifact: Artifact,
+    /// True when an earlier request with the same key already applied it.
+    pub replayed: bool,
+}
+
+/// Order of `GET /v1/artifacts`. Ties are broken by identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListSort {
+    /// The most recently updated source first, the default.
+    Updated,
+    /// The most recently created first.
+    Created,
+}
+
+/// Query parameters of `GET /v1/artifacts`, all optional. Without any, the
+/// response lists up to 500 artifacts, most recently updated first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListArtifactsQuery {
+    /// Only artifacts whose title contains this text, 1-200 characters.
+    /// ASCII letters match regardless of case; other characters exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// The order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ListSort>,
+    /// Only pinned (`true`) or only unpinned (`false`) artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    /// Page size, 1-500; 500 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// `next_page_token` of the previous page, with the same `q`, `sort`,
+    /// and `pinned`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+}
+
 /// Response of `GET /v1/artifacts`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactList {
-    /// Accessible artifacts, most recently updated first.
+    /// Accessible artifacts that match the query, in its order.
     pub artifacts: Vec<Artifact>,
+    /// Pass as `page_token` to read the next page; absent on the last page.
+    /// Artifacts updated while a caller pages by update time can appear
+    /// twice or be missed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
 }
 
 /// Response of `GET /v1/artifacts/{id}/revisions`.
@@ -189,10 +262,13 @@ pub enum ChangeKind {
     Created,
     /// A revision was committed.
     Revised,
+    /// The title or pin changed; no source revision was committed.
+    MetadataUpdated,
 }
 
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
-/// revision. Retries that replay a commit, and failed commits, have none.
+/// revision or changed metadata. Retries that replay a commit, failed
+/// commits, and updates that changed nothing have none.
 /// It names what to read again and carries no content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -203,8 +279,11 @@ pub struct ArtifactChange {
     pub artifact_id: String,
     /// What the commit did.
     pub change: ChangeKind,
-    /// The revision the commit created.
+    /// The revision the commit created, or the current one for
+    /// `metadata_updated`.
     pub revision: u64,
+    /// The metadata revision after the commit.
+    pub metadata_revision: u64,
     /// Commit time in Unix milliseconds.
     pub committed_at_ms: i64,
 }
@@ -233,6 +312,9 @@ pub enum ErrorCode {
     NotFound,
     /// The base revision is not current; reload and reapply the change.
     RevisionConflict,
+    /// The base metadata revision is not current; reload and reapply the
+    /// change.
+    MetadataConflict,
     /// The idempotency key was already used for a different request.
     RequestKeyReused,
     /// The request body exceeds the size limit.
@@ -259,6 +341,9 @@ pub struct ErrorBody {
     /// The current revision, present for `revision_conflict`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_revision: Option<u64>,
+    /// The current metadata revision, present for `metadata_conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_metadata_revision: Option<u64>,
 }
 
 /// Body of every non-2xx JSON response.

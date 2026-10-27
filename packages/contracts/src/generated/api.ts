@@ -6,8 +6,11 @@
 export type ApiBody =
   | CreateArtifactRequest
   | SaveRevisionRequest
+  | UpdateArtifactRequest
   | CommitResponse
+  | UpdateArtifactResponse
   | Artifact
+  | ListArtifactsQuery
   | ArtifactList
   | Revision
   | RevisionList
@@ -48,6 +51,10 @@ export type FileChange =
  */
 export type ArtifactKind = 'app' | 'document' | 'slides' | 'dashboard' | 'design' | 'motion';
 /**
+ * Order of `GET /v1/artifacts`. Ties are broken by identifier.
+ */
+export type ListSort = 'updated' | 'created';
+/**
  * Machine-readable error category.
  */
 export type ErrorCode =
@@ -55,6 +62,7 @@ export type ErrorCode =
   | 'unauthenticated'
   | 'not_found'
   | 'revision_conflict'
+  | 'metadata_conflict'
   | 'request_key_reused'
   | 'payload_too_large'
   | 'rate_limited'
@@ -64,7 +72,7 @@ export type ErrorCode =
  * What a commit did to an artifact. A kind that a client does not know
  * still means the artifact changed: read it again.
  */
-export type ChangeKind = 'created' | 'revised';
+export type ChangeKind = 'created' | 'revised' | 'metadata_updated';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -109,6 +117,25 @@ export interface SaveRevisionRequest {
   changes: FileChange[];
 }
 /**
+ * Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
+ * revisions are not touched.
+ */
+export interface UpdateArtifactRequest {
+  /**
+   * The metadata revision this change was prepared against. The update
+   * fails with `metadata_conflict` unless it is still current.
+   */
+  base_metadata_revision: number;
+  /**
+   * Whether the artifact is pinned.
+   */
+  pinned?: boolean | null;
+  /**
+   * New display title, 1-200 characters.
+   */
+  title?: string | null;
+}
+/**
  * Response of a create or revision commit.
  */
 export interface CommitResponse {
@@ -138,11 +165,21 @@ export interface Artifact {
   id: string;
   kind: ArtifactKind;
   /**
+   * Version of the title and pin, starting at 1. It changes only when
+   * they change, independently of `current_revision`.
+   */
+  metadata_revision: number;
+  /**
+   * Whether the owner pinned the artifact.
+   */
+  pinned: boolean;
+  /**
    * Display title.
    */
   title: string;
   /**
-   * Time of the latest revision in Unix milliseconds.
+   * Time of the latest source revision in Unix milliseconds; metadata
+   * updates do not change it.
    */
   updated_at_ms: number;
 }
@@ -185,13 +222,57 @@ export interface RevisionFile {
   size: number;
 }
 /**
+ * Response of `PATCH /v1/artifacts/{id}`.
+ */
+export interface UpdateArtifactResponse {
+  artifact: Artifact;
+  /**
+   * True when an earlier request with the same key already applied it.
+   */
+  replayed: boolean;
+}
+/**
+ * Query parameters of `GET /v1/artifacts`, all optional. Without any, the
+ * response lists up to 500 artifacts, most recently updated first.
+ */
+export interface ListArtifactsQuery {
+  /**
+   * Page size, 1-500; 500 when absent.
+   */
+  limit?: number | null;
+  /**
+   * `next_page_token` of the previous page, with the same `q`, `sort`,
+   * and `pinned`.
+   */
+  page_token?: string | null;
+  /**
+   * Only pinned (`true`) or only unpinned (`false`) artifacts.
+   */
+  pinned?: boolean | null;
+  /**
+   * Only artifacts whose title contains this text, 1-200 characters.
+   * ASCII letters match regardless of case; other characters exactly.
+   */
+  q?: string | null;
+  /**
+   * The order.
+   */
+  sort?: ListSort | null;
+}
+/**
  * Response of `GET /v1/artifacts`.
  */
 export interface ArtifactList {
   /**
-   * Accessible artifacts, most recently updated first.
+   * Accessible artifacts that match the query, in its order.
    */
   artifacts: Artifact[];
+  /**
+   * Pass as `page_token` to read the next page; absent on the last page.
+   * Artifacts updated while a caller pages by update time can appear
+   * twice or be missed.
+   */
+  next_page_token?: string | null;
 }
 /**
  * Response of `GET /v1/artifacts/{id}/revisions`.
@@ -231,6 +312,10 @@ export interface ErrorResponse {
 export interface ErrorBody {
   code: ErrorCode;
   /**
+   * The current metadata revision, present for `metadata_conflict`.
+   */
+  current_metadata_revision?: number | null;
+  /**
    * The current revision, present for `revision_conflict`.
    */
   current_revision?: number | null;
@@ -241,7 +326,8 @@ export interface ErrorBody {
 }
 /**
  * Data of a `change` event of `GET /v1/changes`: one commit that wrote a
- * revision. Retries that replay a commit, and failed commits, have none.
+ * revision or changed metadata. Retries that replay a commit, failed
+ * commits, and updates that changed nothing have none.
  * It names what to read again and carries no content.
  */
 export interface ArtifactChange {
@@ -259,7 +345,12 @@ export interface ArtifactChange {
    */
   cursor: string;
   /**
-   * The revision the commit created.
+   * The metadata revision after the commit.
+   */
+  metadata_revision: number;
+  /**
+   * The revision the commit created, or the current one for
+   * `metadata_updated`.
    */
   revision: number;
 }

@@ -8,11 +8,12 @@ use std::thread;
 use std::time::Duration;
 
 use artifree_domain::change::ChangeSequence;
-use artifree_domain::identity::{ActorId, RequestKey, Title};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactStore, ChangeKind, ChangePage, CommitReceipt, Delivery, NewArtifact,
+    ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, CommitReceipt,
+    Delivery, ListOrder, ListPosition, MetadataReceipt, MetadataUpdate, NewArtifact,
     RequestFingerprint, RequestIdentity, RevisionCommit, StoreError,
 };
 use artifree_providers::storage::SqliteStore;
@@ -182,7 +183,7 @@ fn retry_with_same_key_and_fingerprint_replays_without_writing() -> TestResult {
     assert_eq!(retry.delivery, Delivery::Replayed);
     assert_eq!(retry.artifact.id, first.artifact.id);
     assert_eq!(
-        store.artifacts_owned_by(&owner)?.len(),
+        listed(&store, &owner, None, None, ListOrder::Updated, None, 500)?.len(),
         1,
         "a replay must not create a second artifact"
     );
@@ -232,7 +233,10 @@ fn reusing_a_key_for_different_content_is_rejected() -> TestResult {
         commit(&store, &created, &key("shared"), 1, "<h1>other</h1>"),
         Err(StoreError::RequestKeyReused)
     );
-    assert_eq!(store.artifacts_owned_by(&owner)?.len(), 1);
+    assert_eq!(
+        listed(&store, &owner, None, None, ListOrder::Updated, None, 500)?.len(),
+        1
+    );
 
     let other = actor("other");
     let separate = create(&store, &other, &key("shared"), 2)?;
@@ -533,31 +537,521 @@ fn a_feed_keeps_its_identity_and_another_database_has_another() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn a_version_1_database_gains_the_feed_and_keeps_its_data() -> TestResult {
-    let db = TempDb::new();
-    let owner = actor("owner");
-    let created = create(&SqliteStore::open(&db.path())?, &owner, &key("a"), 1)?;
-    // Version 1 is the current schema without the feed tables.
-    rusqlite::Connection::open(db.path())?.execute_batch(
-        "DROP TABLE changes; DROP TABLE feed; DELETE FROM sqlite_sequence; PRAGMA user_version = 1;",
-    )?;
+/// The schema of version 1, as released, for upgrade tests.
+const VERSION_1: &str = "
+CREATE TABLE artifacts (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    current_revision INTEGER NOT NULL CHECK (current_revision >= 1),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX artifacts_by_owner ON artifacts (owner, updated_at DESC, id);
+CREATE TABLE revisions (
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, revision)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE blobs (
+    digest BLOB PRIMARY KEY CHECK (length(digest) = 32),
+    content BLOB NOT NULL
+) STRICT;
+CREATE TABLE revision_files (
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL CHECK (size >= 0),
+    digest BLOB NOT NULL REFERENCES blobs (digest),
+    PRIMARY KEY (artifact_id, revision, path),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE request_keys (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision)
+) STRICT, WITHOUT ROWID;
+";
 
+/// The tables version 2 added, as released.
+const VERSION_2: &str = "
+CREATE TABLE feed (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    id BLOB NOT NULL CHECK (length(id) = 16)
+) STRICT;
+CREATE TABLE changes (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('created', 'revised')),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision)
+) STRICT;
+";
+
+const OLD_ID: &str = "art_0123456789abcdef0123456789abcdef";
+
+/// A database of `version` holding one artifact, "Old", at revision 2,
+/// created by the request key "test-key-old" with fingerprint 7s.
+fn old_database(db: &TempDb, version: i64) -> Result<(), rusqlite::Error> {
+    let connection = rusqlite::Connection::open(db.path())?;
+    connection.execute_batch(VERSION_1)?;
+    connection.execute_batch(&format!(
+        "INSERT INTO artifacts VALUES ('{OLD_ID}', 'owner', 'app', 'Old', 2, 100, 200);
+         INSERT INTO revisions VALUES ('{OLD_ID}', 1, 'owner', 100), ('{OLD_ID}', 2, 'owner', 200);
+         INSERT INTO blobs VALUES (zeroblob(32), CAST('<h1>old</h1>' AS BLOB));
+         INSERT INTO revision_files VALUES
+             ('{OLD_ID}', 1, 'index.html', 12, zeroblob(32)),
+             ('{OLD_ID}', 2, 'index.html', 12, zeroblob(32));
+         INSERT INTO request_keys VALUES
+             ('owner', 'test-key-old', zeroblob(32), '{OLD_ID}', 1, 100);"
+    ))?;
+    if version >= 2 {
+        connection.execute_batch(VERSION_2)?;
+        connection.execute_batch(&format!(
+            "INSERT INTO feed VALUES (1, zeroblob(16));
+             INSERT INTO changes (sequence, artifact_id, revision, kind) VALUES
+                 (1, '{OLD_ID}', 1, 'created'), (2, '{OLD_ID}', 2, 'revised');
+             UPDATE sqlite_sequence SET seq = 5 WHERE name = 'changes';"
+        ))?;
+    }
+    connection.pragma_update(None, "user_version", version)
+}
+
+fn old_artifact() -> ArtifactId {
+    parsed(OLD_ID)
+}
+
+fn user_version(db: &TempDb) -> Result<i64, rusqlite::Error> {
+    rusqlite::Connection::open(db.path())?
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+}
+
+#[test]
+fn a_version_1_database_gains_the_feed_and_metadata_and_keeps_its_data() -> TestResult {
+    let db = TempDb::new();
+    old_database(&db, 1)?;
     let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
     assert_eq!(
         feed(&store, &owner, 0, 100)?,
         (vec![], 0),
         "earlier commits have no entries"
     );
-    assert_eq!(entry(&store, &created, 1)?, Some(b"<h1>v1</h1>".to_vec()));
-    commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    let old = store.artifact(&old_artifact())?.ok_or("artifact kept")?;
+    assert_eq!(
+        (old.title.as_str(), old.pinned, old.metadata_revision),
+        ("Old", false, MetadataRevision(1))
+    );
+    let receipt = store.update_metadata(MetadataUpdate {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("rename"),
+            fingerprint: RequestFingerprint([1; 32]),
+        },
+        artifact: &old_artifact(),
+        base: MetadataRevision(1),
+        title: Some(&parsed("New")),
+        pinned: None,
+    })?;
+    assert_eq!(receipt.artifact.metadata_revision, MetadataRevision(2));
     assert_eq!(
         feed(&store, &owner, 0, 100)?,
-        (vec![(1, ChangeKind::Revised, 2)], 1)
+        (vec![(1, ChangeKind::MetadataUpdated, 2)], 1)
     );
-    let version: i64 =
-        rusqlite::Connection::open(db.path())?
-            .pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 2);
+    assert_eq!(user_version(&db)?, 3);
+    Ok(())
+}
+
+#[test]
+fn a_version_2_database_keeps_its_feed_head_and_its_request_keys() -> TestResult {
+    let db = TempDb::new();
+    old_database(&db, 2)?;
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let page = store.changes(&owner, ChangeSequence(0), 100)?;
+    assert_eq!(
+        page.head,
+        ChangeSequence(5),
+        "the head survives the rebuild"
+    );
+    let kept: Vec<_> = page
+        .changes
+        .iter()
+        .map(|change| {
+            (
+                change.sequence.0,
+                change.kind,
+                change.revision.0,
+                change.metadata_revision,
+                change.committed_at,
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (
+                1,
+                ChangeKind::Created,
+                1,
+                MetadataRevision(1),
+                UnixMillis(100)
+            ),
+            (
+                2,
+                ChangeKind::Revised,
+                2,
+                MetadataRevision(1),
+                UnixMillis(200)
+            ),
+        ]
+    );
+    // An old key still replays, as of its request.
+    let replayed = store.create_artifact(NewArtifact {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("old"),
+            fingerprint: RequestFingerprint([0; 32]),
+        },
+        kind: ArtifactKind::App,
+        title: &parsed("Old"),
+        package: &package(&[("index.html", "<h1>old</h1>")]),
+    })?;
+    assert_eq!(replayed.delivery, Delivery::Replayed);
+    assert_eq!(replayed.artifact.current_revision, SourceRevision(1));
+    assert_eq!(replayed.artifact.updated_at, UnixMillis(100));
+    assert_eq!(replayed.artifact.title.as_str(), "Old");
+    // New commits continue after the head, not after the last row.
+    let old = store.artifact(&old_artifact())?.ok_or("artifact kept")?;
+    store.commit_revision(RevisionCommit {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("new"),
+            fingerprint: RequestFingerprint([2; 32]),
+        },
+        artifact: &old.id,
+        base: SourceRevision(2),
+        package: &package(&[("index.html", "<h1>new</h1>")]),
+    })?;
+    assert_eq!(
+        feed(&store, &owner, 2, 100)?,
+        (vec![(6, ChangeKind::Revised, 3)], 6)
+    );
+    assert_eq!(user_version(&db)?, 3);
+    Ok(())
+}
+
+fn update(
+    store: &SqliteStore,
+    created: &CommitReceipt,
+    request_key: &RequestKey,
+    base: u64,
+    title: Option<&str>,
+    pinned: Option<bool>,
+) -> Result<MetadataReceipt, StoreError> {
+    let title: Option<Title> = title.map(parsed);
+    store.update_metadata(MetadataUpdate {
+        request: RequestIdentity {
+            actor: &created.artifact.owner,
+            key: request_key,
+            fingerprint: RequestFingerprint(fingerprint_of(&format!("{title:?} {pinned:?}"))),
+        },
+        artifact: &created.artifact.id,
+        base: MetadataRevision(base),
+        title: title.as_ref(),
+        pinned,
+    })
+}
+
+fn metadata(record: &ArtifactRecord) -> (&str, bool, u64, u64) {
+    (
+        record.title.as_str(),
+        record.pinned,
+        record.metadata_revision.0,
+        record.current_revision.0,
+    )
+}
+
+#[test]
+fn metadata_updates_change_title_and_pin_without_a_revision() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("a"), 1)?;
+    assert_eq!(metadata(&created.artifact), ("Demo", false, 1, 1));
+
+    let renamed = update(&store, &created, &key("b"), 1, Some("Renamed"), None)?;
+    assert_eq!(renamed.delivery, Delivery::Committed);
+    assert_eq!(metadata(&renamed.artifact), ("Renamed", false, 2, 1));
+    let pinned = update(&store, &created, &key("c"), 2, None, Some(true))?;
+    assert_eq!(metadata(&pinned.artifact), ("Renamed", true, 3, 1));
+    let current = store.artifact(&created.artifact.id)?.ok_or("artifact")?;
+    assert_eq!(metadata(&current), ("Renamed", true, 3, 1));
+    assert_eq!(
+        current.updated_at, created.artifact.updated_at,
+        "metadata does not change the source update time"
+    );
+    assert_eq!(store.revisions(&created.artifact.id)?.len(), 1);
+
+    // A stale base conflicts and leaves the key unused.
+    assert_eq!(
+        update(&store, &created, &key("d"), 2, Some("Lost"), None),
+        Err(StoreError::MetadataConflict {
+            current: MetadataRevision(3)
+        })
+    );
+    // Values already stored change nothing but record the key.
+    let unchanged = update(&store, &created, &key("d"), 3, Some("Renamed"), Some(true))?;
+    assert_eq!(unchanged.delivery, Delivery::Committed);
+    assert_eq!(metadata(&unchanged.artifact), ("Renamed", true, 3, 1));
+    assert_eq!(
+        update(&store, &created, &key("d"), 3, Some("Renamed"), Some(true))?.delivery,
+        Delivery::Replayed
+    );
+
+    let page = store.changes(&owner, ChangeSequence(0), 100)?;
+    let entries: Vec<_> = page
+        .changes
+        .iter()
+        .map(|change| (change.kind, change.revision.0, change.metadata_revision.0))
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            (ChangeKind::Created, 1, 1),
+            (ChangeKind::MetadataUpdated, 1, 2),
+            (ChangeKind::MetadataUpdated, 1, 3),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn replays_report_the_artifact_as_of_their_request() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("a"), 1)?;
+    commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    update(&store, &created, &key("c"), 1, Some("Second"), None)?;
+    commit(&store, &created, &key("d"), 2, "<h1>v3</h1>")?;
+    update(&store, &created, &key("e"), 2, Some("Third"), Some(true))?;
+
+    let save = commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    assert_eq!(save.delivery, Delivery::Replayed);
+    assert_eq!(metadata(&save.artifact), ("Demo", false, 1, 2));
+    let rename = update(&store, &created, &key("c"), 1, Some("Second"), None)?;
+    assert_eq!(rename.delivery, Delivery::Replayed);
+    assert_eq!(metadata(&rename.artifact), ("Second", false, 2, 2));
+    let later = commit(&store, &created, &key("d"), 2, "<h1>v3</h1>")?;
+    assert_eq!(metadata(&later.artifact), ("Second", false, 2, 3));
+
+    // A key belongs to one request, whatever its kind.
+    assert_eq!(
+        update(&store, &created, &key("b"), 3, Some("Other"), None),
+        Err(StoreError::RequestKeyReused)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_metadata_update_commits_with_its_feed_entry_or_not_at_all() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("a"), 1)?;
+    let connection = rusqlite::Connection::open(db.path())?;
+    connection.execute_batch(
+        "CREATE TRIGGER fail BEFORE INSERT ON changes BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )?;
+    assert!(update(&store, &created, &key("b"), 1, Some("Renamed"), None).is_err());
+    let current = store.artifact(&created.artifact.id)?.ok_or("artifact")?;
+    assert_eq!(metadata(&current), ("Demo", false, 1, 1));
+    connection.execute_batch("DROP TRIGGER fail;")?;
+    let retried = update(&store, &created, &key("b"), 1, Some("Renamed"), None)?;
+    assert_eq!(
+        retried.delivery,
+        Delivery::Committed,
+        "the key was not used"
+    );
+    assert_eq!(metadata(&retried.artifact), ("Renamed", false, 2, 1));
+    Ok(())
+}
+
+fn listed(
+    store: &SqliteStore,
+    owner: &ActorId,
+    search: Option<&str>,
+    pinned: Option<bool>,
+    order: ListOrder,
+    after: Option<&ListPosition>,
+    limit: usize,
+) -> Result<Vec<String>, StoreError> {
+    Ok(store
+        .list_artifacts(ArtifactListing {
+            owner,
+            search,
+            pinned,
+            order,
+            after,
+            limit,
+        })?
+        .into_iter()
+        .map(|record| record.title.as_str().to_owned())
+        .collect())
+}
+
+/// Five artifacts of one owner with fixed times: creation follows the
+/// order of the titles, and "beta" and "ALPHA notes" were updated at the
+/// same time, last. "Gamma ä" is pinned. Another owner has one artifact.
+/// Returns the store and the titles in update order.
+fn listing_fixture(
+    db: &TempDb,
+) -> Result<(SqliteStore, [&'static str; 5]), Box<dyn std::error::Error>> {
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let mut ids = Vec::new();
+    for (index, title) in ["Alpha plan", "beta", "ALPHA notes", "Gamma ä", "Ä upper"]
+        .into_iter()
+        .enumerate()
+    {
+        let receipt = store.create_artifact(NewArtifact {
+            request: RequestIdentity {
+                actor: &owner,
+                key: &key(&format!("list-{index}")),
+                fingerprint: RequestFingerprint([1; 32]),
+            },
+            kind: ArtifactKind::App,
+            title: &parsed(title),
+            package: &package(&[("index.html", "<h1>x</h1>")]),
+        })?;
+        ids.push(receipt.artifact.id);
+    }
+    create(&store, &actor("other"), &key("theirs"), 1)?;
+    let connection = rusqlite::Connection::open(db.path())?;
+    for (index, id) in ids.iter().enumerate() {
+        let created = i64::try_from(index)? * 10;
+        let updated = if index == 1 || index == 2 {
+            100
+        } else {
+            created
+        };
+        connection.execute(
+            "UPDATE artifacts SET created_at = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id.as_str(), created, updated],
+        )?;
+    }
+    connection.execute(
+        "UPDATE artifacts SET pinned = 1 WHERE id = ?1",
+        [ids[3].as_str()],
+    )?;
+    // Equal times are ordered by identifier.
+    let tied = if ids[1].as_str() < ids[2].as_str() {
+        ["beta", "ALPHA notes"]
+    } else {
+        ["ALPHA notes", "beta"]
+    };
+    Ok((
+        store,
+        [tied[0], tied[1], "Ä upper", "Gamma ä", "Alpha plan"],
+    ))
+}
+
+#[test]
+fn lists_filter_by_title_and_pin_in_either_order() -> TestResult {
+    let db = TempDb::new();
+    let (store, by_update) = listing_fixture(&db)?;
+    let owner = actor("owner");
+    let all = |order| listed(&store, &owner, None, None, order, None, 10);
+    assert_eq!(all(ListOrder::Updated)?, by_update);
+    assert_eq!(
+        all(ListOrder::Created)?,
+        ["Ä upper", "Gamma ä", "ALPHA notes", "beta", "Alpha plan"]
+    );
+    // ASCII letters match regardless of case; other characters exactly.
+    assert_eq!(
+        listed(
+            &store,
+            &owner,
+            Some("alpha"),
+            None,
+            ListOrder::Created,
+            None,
+            10
+        )?,
+        ["ALPHA notes", "Alpha plan"]
+    );
+    assert_eq!(
+        listed(
+            &store,
+            &owner,
+            Some("ä"),
+            None,
+            ListOrder::Created,
+            None,
+            10
+        )?,
+        ["Gamma ä"]
+    );
+    assert_eq!(
+        listed(
+            &store,
+            &owner,
+            None,
+            Some(true),
+            ListOrder::Created,
+            None,
+            10
+        )?,
+        ["Gamma ä"]
+    );
+    assert_eq!(
+        listed(
+            &store,
+            &owner,
+            None,
+            Some(false),
+            ListOrder::Created,
+            None,
+            10
+        )?
+        .len(),
+        4
+    );
+    Ok(())
+}
+
+#[test]
+fn list_pages_continue_after_the_last_position_through_a_tie() -> TestResult {
+    let db = TempDb::new();
+    let (store, by_update) = listing_fixture(&db)?;
+    let owner = actor("owner");
+    let mut paged = Vec::new();
+    let mut after: Option<ListPosition> = None;
+    loop {
+        let page = store.list_artifacts(ArtifactListing {
+            owner: &owner,
+            search: None,
+            pinned: None,
+            order: ListOrder::Updated,
+            after: after.as_ref(),
+            limit: 1,
+        })?;
+        let Some(last) = page.last() else { break };
+        paged.push(last.title.as_str().to_owned());
+        after = Some(ListPosition {
+            at: last.updated_at,
+            id: last.id.clone(),
+        });
+    }
+    assert_eq!(paged, by_update);
     Ok(())
 }

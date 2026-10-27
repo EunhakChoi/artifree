@@ -16,7 +16,7 @@ import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
 import { pageVisibility } from './page-visibility';
 import { RequestGate } from './request-gate';
-import { useLiveWorkspace } from './use-live-workspace';
+import { useLiveWorkspace, versionOf } from './use-live-workspace';
 import type { FeedState } from './use-live-workspace';
 import { useRequest } from './use-request';
 
@@ -91,7 +91,11 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   const { epoch } = live;
   const artifacts = useRequest(
     live.canRead ? `${generation}:${epoch}:${live.news}` : undefined,
-    async (signal) => ({ list: await client.listArtifacts({ signal }), epoch }),
+    async (signal) => {
+      // The first page only; paging the list is roadmap A03b.
+      const page = await client.listArtifacts({}, { signal });
+      return { list: page.artifacts, epoch };
+    },
     // Keep the list and the open artifact mounted while it refreshes.
     { keepPrevious: true },
   );
@@ -106,9 +110,9 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     if (fresh !== undefined)
       learn(
         fresh.epoch,
-        fresh.list.map(({ id, current_revision }) => ({
-          id,
-          revision: current_revision,
+        fresh.list.map((artifact) => ({
+          id: artifact.id,
+          version: versionOf(artifact),
         })),
       );
   }, [fresh, learn]);
@@ -131,7 +135,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   if (selectedId !== selected) setSelected(selectedId);
   function saved(artifact: Artifact): void {
     // This page's own save is not news when its notice arrives.
-    learn(epoch, [{ id: artifact.id, revision: artifact.current_revision }]);
+    learn(epoch, [{ id: artifact.id, version: versionOf(artifact) }]);
     setSelected(artifact.id);
     setGeneration((value) => value + 1);
   }
@@ -200,7 +204,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
               artifactId={selectedId}
               epoch={epoch}
               resets={live.resets}
-              knownRevision={live.known[selectedId]}
+              known={live.known[selectedId]}
               unknownChanges={live.unknown[selectedId] ?? 0}
               onSaved={saved}
               unsaved={unsaved}

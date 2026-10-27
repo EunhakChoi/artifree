@@ -1,8 +1,8 @@
 //! Framework-independent domain vocabulary. No I/O, transport DTOs, or providers.
 //!
-//! These counters deliberately have different types. A source revision, document
-//! sequence, running application's data version, and change feed sequence have
-//! independent lifecycles.
+//! These counters deliberately have different types. A source revision,
+//! metadata revision, document sequence, running application's data version,
+//! and change feed sequence have independent lifecycles.
 
 pub mod change;
 pub mod identity;
@@ -64,6 +64,12 @@ impl std::str::FromStr for ArtifactKind {
 /// A source history position; it does not version running application data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SourceRevision(pub u64);
+
+/// A position in an artifact's metadata history: its title and pin. It
+/// advances when they change, independently of the source revision, so a
+/// rename never conflicts with a source edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MetadataRevision(pub u64);
 
 /// A structured document's edit sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

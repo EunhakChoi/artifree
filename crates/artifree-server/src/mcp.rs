@@ -13,11 +13,12 @@
 use std::sync::Arc;
 
 use artifree_contracts::api::{
-    ContentEncoding, CreateArtifactRequest, ErrorResponse, SaveRevisionRequest,
+    ContentEncoding, CreateArtifactRequest, ErrorResponse, ListArtifactsQuery, SaveRevisionRequest,
+    UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::{
-    self, ArtifactArguments, CreateArtifactArguments, FileArguments, FileContent, NoArguments,
-    RevisionArguments, SaveRevisionArguments, ToolDefinition,
+    self, ArtifactArguments, CreateArtifactArguments, FileArguments, FileContent,
+    RevisionArguments, SaveRevisionArguments, ToolDefinition, UpdateArtifactArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_domain::identity::ActorId;
@@ -138,8 +139,8 @@ async fn dispatch(
     let outcome = match name {
         "list_artifacts" => {
             json(async {
-                let NoArguments {} = parse(arguments)?;
-                operations::list(state, actor).await
+                let query: ListArtifactsQuery = parse(arguments)?;
+                operations::list(state, actor, query).await
             })
             .await
         }
@@ -176,6 +177,25 @@ async fn dispatch(
                     changes,
                 };
                 operations::save(state, actor, key, &artifact_id, request).await
+            })
+            .await
+        }
+        "update_artifact" => {
+            json(async {
+                let UpdateArtifactArguments {
+                    artifact_id,
+                    base_metadata_revision,
+                    title,
+                    pinned,
+                    idempotency_key,
+                } = parse(arguments)?;
+                let key = operations::request_key("idempotency_key", &idempotency_key)?;
+                let request = UpdateArtifactRequest {
+                    base_metadata_revision,
+                    title,
+                    pinned,
+                };
+                operations::update(state, actor, key, &artifact_id, request).await
             })
             .await
         }

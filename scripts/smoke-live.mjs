@@ -154,6 +154,53 @@ export async function checkLiveUpdates({ browser, origin, server }) {
       nav.getByRole('button', { name: /Live artifact/ }),
     ).toHaveAttribute('aria-current', 'true');
 
+    // Decision 0008: a metadata change elsewhere reads the list and the open
+    // artifact once, although no revision was committed; the same notice
+    // again reads nothing.
+    await reads.quiet();
+    mark = reads.mark();
+    const { metadata_revision: metadataRevision } = await api(
+      server,
+      'GET',
+      `/v1/artifacts/${id}`,
+    );
+    await api(server, 'PATCH', `/v1/artifacts/${id}`, {
+      base_metadata_revision: metadataRevision,
+      title: 'Live artifact, renamed',
+    });
+    await expect(
+      workspace.getByRole('heading', { name: 'Live artifact, renamed' }),
+    ).toBeVisible();
+    await expect(
+      nav.getByRole('button', { name: /Live artifact, renamed/ }),
+    ).toHaveAttribute('aria-current', 'true');
+    await reads.quiet();
+    assert.deepEqual(
+      reads.counts(mark),
+      { list: 1, artifact: 1, revisions: 1 },
+      'A metadata change reads the list and the open artifact once.',
+    );
+    mark = reads.mark();
+    await restream(main, server, [
+      { ...change(id, 5, metadataRevision + 1), change: 'metadata_updated' },
+    ]);
+    await main.page.waitForTimeout(1000);
+    assert.deepEqual(reads.counts(mark), {}, 'A known metadata change read.');
+    // After a reset, a list read vouches for the metadata revision, so the
+    // notice a resumed stream repeats reads nothing either.
+    await restream(main, server, ['reset']);
+    await reads.quiet();
+    mark = reads.mark();
+    await restream(main, server, [
+      { ...change(id, 5, metadataRevision + 1), change: 'metadata_updated' },
+    ]);
+    await main.page.waitForTimeout(1000);
+    assert.deepEqual(
+      reads.counts(mark),
+      {},
+      'A metadata change already listed read.',
+    );
+
     // Decision 7: an artifact this page creates opens, and the list read
     // before it, still shown while the new one loads, cannot close it.
     await reads.quiet();
@@ -332,7 +379,7 @@ export async function checkLiveUpdates({ browser, origin, server }) {
 
     // Decision 4: revisions known before a reset are forgotten, so the
     // revision the page saw before it is news again.
-    await restream(main, server, [change(id, 19)]);
+    await restream(main, server, [change(id, 19, 2)]);
     await expect(badge(19)).toBeVisible();
     await expect(label).toHaveText('Live 19');
 
@@ -853,11 +900,12 @@ function sse(type, data) {
   return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function change(id, revision) {
+function change(id, revision, metadataRevision = 1) {
   return {
     artifact_id: id,
     change: 'revised',
     revision,
+    metadata_revision: metadataRevision,
     committed_at_ms: Date.now(),
   };
 }

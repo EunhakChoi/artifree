@@ -208,6 +208,13 @@ async fn another_owners_artifact_is_not_found_through_every_tool() -> TestResult
         ("read_file", file),
         ("create_preview", pinned),
         (
+            "update_artifact",
+            json!({
+                "artifact_id": id, "base_metadata_revision": 1, "title": "Mine now",
+                "idempotency_key": "mine-key-2"
+            }),
+        ),
+        (
             "save_revision",
             json!({
                 "artifact_id": id, "base_revision": 1, "idempotency_key": "mine-key-1",
@@ -254,5 +261,76 @@ async fn an_unknown_tool_is_a_protocol_error() -> TestResult {
     let reply: Value = serde_json::from_slice(&body)?;
     assert_eq!(reply["error"]["code"], -32602, "{reply}");
     assert!(reply.get("result").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn agents_rename_pin_and_page_through_artifacts() -> TestResult {
+    let harness = Harness::new();
+    let mut ids = Vec::new();
+    for (index, title) in ["First", "Second", "Third"].into_iter().enumerate() {
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        let created = harness
+            .call(
+                "create_artifact",
+                json!({
+                    "title": title, "idempotency_key": format!("agent-create-{index}"),
+                    "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+                }),
+            )
+            .await?;
+        assert_eq!(created["isError"], false, "{created}");
+        ids.push(created["structuredContent"]["artifact"]["id"].clone());
+    }
+    let update = json!({
+        "artifact_id": ids[0], "base_metadata_revision": 1, "title": "First, renamed",
+        "pinned": true, "idempotency_key": "agent-update-1"
+    });
+    let updated = harness.call("update_artifact", update.clone()).await?;
+    assert_eq!(updated["isError"], false, "{updated}");
+    let artifact = &updated["structuredContent"]["artifact"];
+    assert_eq!(
+        (artifact["title"].clone(), artifact["pinned"].clone()),
+        (json!("First, renamed"), json!(true))
+    );
+    assert_eq!(artifact["current_revision"], 1, "no revision is committed");
+    let replayed = harness.call("update_artifact", update).await?;
+    assert_eq!(replayed["structuredContent"]["replayed"], true);
+    let stale = harness
+        .call(
+            "update_artifact",
+            json!({
+                "artifact_id": ids[0], "base_metadata_revision": 1, "pinned": false,
+                "idempotency_key": "agent-update-2"
+            }),
+        )
+        .await?;
+    assert_eq!(error_code(&stale), "metadata_conflict");
+    assert_eq!(
+        stale["structuredContent"]["error"]["current_metadata_revision"],
+        2
+    );
+
+    let first = harness
+        .call("list_artifacts", json!({ "limit": 2 }))
+        .await?;
+    let page = &first["structuredContent"];
+    assert_eq!(page["artifacts"].as_array().map(Vec::len), Some(2));
+    let rest = harness
+        .call(
+            "list_artifacts",
+            json!({ "limit": 2, "page_token": page["next_page_token"] }),
+        )
+        .await?;
+    assert_eq!(rest["structuredContent"]["artifacts"][0]["id"], ids[0]);
+    assert_eq!(rest["structuredContent"].get("next_page_token"), None);
+    let pinned = harness
+        .call("list_artifacts", json!({ "pinned": true, "q": "renamed" }))
+        .await?;
+    assert_eq!(pinned["structuredContent"]["artifacts"][0]["id"], ids[0]);
+    let invalid = harness
+        .call("list_artifacts", json!({ "limit": 0 }))
+        .await?;
+    assert_eq!(error_code(&invalid), "invalid_request");
     Ok(())
 }

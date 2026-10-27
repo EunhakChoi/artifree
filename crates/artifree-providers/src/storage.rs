@@ -14,6 +14,11 @@
 //! row's `AUTOINCREMENT` key is the feed sequence. The feed's random identity
 //! is created with the database.
 //!
+//! Titles and pins are kept per metadata revision, apart from source
+//! revisions, and every request key records the source and metadata revision
+//! its request produced. A replay therefore reports the artifact as of that
+//! request, also after later renames.
+//!
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
@@ -23,15 +28,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord, CommitReceipt, Delivery,
-    FileEntry, NewArtifact, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord,
+    CommitReceipt, Delivery, FileEntry, ListOrder, MetadataReceipt, MetadataUpdate, NewArtifact,
+    RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SCHEMA: &str = "
@@ -93,6 +99,62 @@ CREATE TABLE changes (
 ) STRICT;
 ";
 
+/// Added in schema version 3: titles and pins per metadata revision, and the
+/// metadata revision of each request key and change. Existing artifacts get
+/// metadata revision 1 with their current title, unpinned. Tables whose
+/// constraints change are rebuilt; `sqlite_sequence` keeps the feed's head.
+const METADATA_SCHEMA: &str = "
+ALTER TABLE artifacts ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1));
+ALTER TABLE artifacts ADD COLUMN metadata_revision INTEGER NOT NULL DEFAULT 1
+    CHECK (metadata_revision >= 1);
+CREATE INDEX artifacts_by_owner_created ON artifacts (owner, created_at DESC, id);
+CREATE TABLE metadata_revisions (
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    metadata_revision INTEGER NOT NULL CHECK (metadata_revision >= 1),
+    title TEXT NOT NULL,
+    pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, metadata_revision)
+) STRICT, WITHOUT ROWID;
+INSERT INTO metadata_revisions (artifact_id, metadata_revision, title, pinned, created_by, created_at)
+    SELECT id, 1, title, 0, owner, created_at FROM artifacts;
+CREATE TABLE request_keys_v3 (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision)
+) STRICT, WITHOUT ROWID;
+INSERT INTO request_keys_v3
+    SELECT actor, request_key, fingerprint, artifact_id, revision, 1, created_at FROM request_keys;
+DROP TABLE request_keys;
+ALTER TABLE request_keys_v3 RENAME TO request_keys;
+CREATE TABLE changes_v3 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('created', 'revised', 'metadata_updated')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    committed_at INTEGER NOT NULL,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision)
+) STRICT;
+INSERT INTO changes_v3 (sequence, artifact_id, kind, revision, metadata_revision, committed_at)
+    SELECT c.sequence, c.artifact_id, c.kind, c.revision, 1, r.created_at
+    FROM changes c
+    JOIN revisions r ON r.artifact_id = c.artifact_id AND r.revision = c.revision;
+DROP TABLE changes;
+ALTER TABLE changes_v3 RENAME TO changes;
+";
+
 /// Artifact storage in one local `SQLite` database file.
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -102,7 +164,7 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Opens or creates the database at `path` and applies the schema. A
     /// version 1 database gains the change feed; its earlier commits have no
-    /// feed entries.
+    /// feed entries. A version 1 or 2 database gains metadata revisions.
     ///
     /// # Errors
     ///
@@ -123,19 +185,22 @@ impl SqliteStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(unavailable)?;
         match version {
-            0 | 1 => {
-                if version == 0 {
+            0..=2 => {
+                if version < 1 {
                     transaction.execute_batch(SCHEMA).map_err(unavailable)?;
                 }
-                transaction
-                    .execute_batch(FEED_SCHEMA)
-                    .map_err(unavailable)?;
-                transaction
-                    .execute(
-                        "INSERT INTO feed (singleton, id) VALUES (1, ?1)",
-                        [random_bytes()?.as_slice()],
-                    )
-                    .map_err(unavailable)?;
+                if version < 2 {
+                    transaction
+                        .execute_batch(FEED_SCHEMA)
+                        .map_err(unavailable)?;
+                    transaction
+                        .execute(
+                            "INSERT INTO feed (singleton, id) VALUES (1, ?1)",
+                            [random_bytes()?.as_slice()],
+                        )
+                        .map_err(unavailable)?;
+                }
+                add_metadata_revisions(&transaction)?;
                 transaction
                     .pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(unavailable)?;
@@ -187,23 +252,43 @@ impl ArtifactStore for SqliteStore {
             let id = ArtifactId::from_random(random_bytes()?);
             let now = now()?;
             let revision = SourceRevision(1);
+            let metadata = MetadataRevision(1);
             transaction
                 .execute(
-                    "INSERT INTO artifacts (id, owner, kind, title, current_revision, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    "INSERT INTO artifacts (id, owner, kind, title, pinned, current_revision,
+                         metadata_revision, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?7)",
                     params![
                         id.as_str(),
                         request.request.actor.as_str(),
                         request.kind.as_str(),
                         request.title.as_str(),
                         sql_revision(revision)?,
+                        sql_metadata(metadata)?,
                         now.0
                     ],
                 )
                 .map_err(unavailable)?;
-            insert_revision(transaction, &id, revision, request.request, request.package, now)?;
-            record_change(transaction, &id, revision, ChangeKind::Created)?;
-            committed(transaction, &id, revision)
+            insert_metadata(
+                transaction,
+                &id,
+                metadata,
+                (request.title, false),
+                request.request.actor,
+                now,
+            )?;
+            insert_revision(
+                transaction,
+                &id,
+                revision,
+                request.request,
+                request.package,
+                now,
+            )?;
+            let position = (revision, metadata);
+            record_key(transaction, request.request, &id, position, now)?;
+            record_change(transaction, &id, ChangeKind::Created, position, now)?;
+            committed(transaction, &id, position)
         })
     }
 
@@ -212,19 +297,14 @@ impl ArtifactStore for SqliteStore {
             if let Some(receipt) = replay(transaction, request.request)? {
                 return Ok(receipt);
             }
-            let current: Option<i64> = transaction
-                .query_row(
-                    "SELECT current_revision FROM artifacts WHERE id = ?1",
-                    [request.artifact.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(unavailable)?;
-            let current = stored_revision(current.ok_or(StoreError::NotFound)?)?;
-            if current != request.base {
-                return Err(StoreError::RevisionConflict { current });
+            let current =
+                artifact_record(transaction, request.artifact)?.ok_or(StoreError::NotFound)?;
+            if current.current_revision != request.base {
+                return Err(StoreError::RevisionConflict {
+                    current: current.current_revision,
+                });
             }
-            let next = SourceRevision(current.0 + 1);
+            let next = SourceRevision(current.current_revision.0 + 1);
             let now = now()?;
             transaction
                 .execute(
@@ -240,8 +320,88 @@ impl ArtifactStore for SqliteStore {
                 request.package,
                 now,
             )?;
-            record_change(transaction, request.artifact, next, ChangeKind::Revised)?;
-            committed(transaction, request.artifact, next)
+            let position = (next, current.metadata_revision);
+            record_key(
+                transaction,
+                request.request,
+                request.artifact,
+                position,
+                now,
+            )?;
+            record_change(
+                transaction,
+                request.artifact,
+                ChangeKind::Revised,
+                position,
+                now,
+            )?;
+            committed(transaction, request.artifact, position)
+        })
+    }
+
+    fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
+        self.write(|transaction| {
+            if let Some((id, position)) = stored_request(transaction, request.request)? {
+                return Ok(MetadataReceipt {
+                    artifact: snapshot(transaction, &id, position)?,
+                    delivery: Delivery::Replayed,
+                });
+            }
+            let current =
+                artifact_record(transaction, request.artifact)?.ok_or(StoreError::NotFound)?;
+            if current.metadata_revision != request.base {
+                return Err(StoreError::MetadataConflict {
+                    current: current.metadata_revision,
+                });
+            }
+            let title = request.title.unwrap_or(&current.title);
+            let pinned = request.pinned.unwrap_or(current.pinned);
+            let now = now()?;
+            let metadata = if *title == current.title && pinned == current.pinned {
+                current.metadata_revision
+            } else {
+                let next = MetadataRevision(current.metadata_revision.0 + 1);
+                transaction
+                    .execute(
+                        "UPDATE artifacts SET title = ?2, pinned = ?3, metadata_revision = ?4
+                         WHERE id = ?1",
+                        params![
+                            request.artifact.as_str(),
+                            title.as_str(),
+                            pinned,
+                            sql_metadata(next)?
+                        ],
+                    )
+                    .map_err(unavailable)?;
+                insert_metadata(
+                    transaction,
+                    request.artifact,
+                    next,
+                    (title, pinned),
+                    request.request.actor,
+                    now,
+                )?;
+                record_change(
+                    transaction,
+                    request.artifact,
+                    ChangeKind::MetadataUpdated,
+                    (current.current_revision, next),
+                    now,
+                )?;
+                next
+            };
+            let position = (current.current_revision, metadata);
+            record_key(
+                transaction,
+                request.request,
+                request.artifact,
+                position,
+                now,
+            )?;
+            Ok(MetadataReceipt {
+                artifact: snapshot(transaction, request.artifact, position)?,
+                delivery: Delivery::Committed,
+            })
         })
     }
 
@@ -249,16 +409,29 @@ impl ArtifactStore for SqliteStore {
         artifact_record(&self.connect()?, id)
     }
 
-    fn artifacts_owned_by(&self, owner: &ActorId) -> Result<Vec<ArtifactRecord>, StoreError> {
+    fn list_artifacts(
+        &self,
+        listing: ArtifactListing<'_>,
+    ) -> Result<Vec<ArtifactRecord>, StoreError> {
         let connection = self.connect()?;
         let mut statement = connection
-            .prepare(
-                "SELECT id, owner, kind, title, current_revision, created_at, updated_at
-                 FROM artifacts WHERE owner = ?1 ORDER BY updated_at DESC, id",
-            )
+            .prepare(match listing.order {
+                ListOrder::Updated => LIST_BY_UPDATE,
+                ListOrder::Created => LIST_BY_CREATION,
+            })
             .map_err(unavailable)?;
         let rows = statement
-            .query_map([owner.as_str()], RawArtifact::from_row)
+            .query_map(
+                params![
+                    listing.owner.as_str(),
+                    listing.search,
+                    listing.pinned,
+                    listing.after.map(|position| position.at.0),
+                    listing.after.map(|position| position.id.as_str()),
+                    i64::try_from(listing.limit).unwrap_or(i64::MAX)
+                ],
+                RawArtifact::from_row,
+            )
             .map_err(unavailable)?;
         let mut records = Vec::new();
         for row in rows {
@@ -356,10 +529,10 @@ impl ArtifactStore for SqliteStore {
             .map_err(unavailable)?;
         let mut statement = snapshot
             .prepare(
-                "SELECT c.sequence, c.artifact_id, c.kind, c.revision, r.created_at
+                "SELECT c.sequence, c.artifact_id, c.kind, c.revision, c.metadata_revision,
+                     c.committed_at
                  FROM changes c
                  JOIN artifacts a ON a.id = c.artifact_id
-                 JOIN revisions r ON r.artifact_id = c.artifact_id AND r.revision = c.revision
                  WHERE c.sequence > ?1 AND a.owner = ?2
                  ORDER BY c.sequence LIMIT ?3",
             )
@@ -378,22 +551,26 @@ impl ArtifactStore for SqliteStore {
                         row.get::<_, String>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 },
             )
             .map_err(unavailable)?;
         let mut changes = Vec::new();
         for row in rows {
-            let (sequence, artifact, kind, revision, committed_at) = row.map_err(unavailable)?;
+            let (sequence, artifact, kind, revision, metadata, committed_at) =
+                row.map_err(unavailable)?;
             changes.push(ChangeRecord {
                 sequence: stored_sequence(sequence)?,
                 artifact: artifact.parse().map_err(corrupt)?,
                 kind: match kind.as_str() {
                     "created" => ChangeKind::Created,
                     "revised" => ChangeKind::Revised,
+                    "metadata_updated" => ChangeKind::MetadataUpdated,
                     other => return Err(corrupt(format!("change kind {other}"))),
                 },
                 revision: stored_revision(revision)?,
+                metadata_revision: stored_metadata(metadata)?,
                 committed_at: UnixMillis(committed_at),
             });
         }
@@ -405,27 +582,47 @@ impl ArtifactStore for SqliteStore {
     }
 }
 
+/// A source revision and the metadata revision that went with it.
+type Position = (SourceRevision, MetadataRevision);
+
+/// The artifact and position an earlier request with this key produced, or
+/// `None` for a new key.
+fn stored_request(
+    transaction: &Transaction<'_>,
+    request: RequestIdentity<'_>,
+) -> Result<Option<(ArtifactId, Position)>, StoreError> {
+    let stored: Option<(Vec<u8>, String, i64, i64)> = transaction
+        .query_row(
+            "SELECT fingerprint, artifact_id, revision, metadata_revision FROM request_keys
+             WHERE actor = ?1 AND request_key = ?2",
+            params![request.actor.as_str(), request.key.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let Some((fingerprint, artifact_id, revision, metadata)) = stored else {
+        return Ok(None);
+    };
+    // The fingerprint covers the operation, so a key used by one kind of
+    // request never replays as another.
+    if fingerprint.as_slice() != request.fingerprint.0.as_slice() {
+        return Err(StoreError::RequestKeyReused);
+    }
+    Ok(Some((
+        artifact_id.parse().map_err(corrupt)?,
+        (stored_revision(revision)?, stored_metadata(metadata)?),
+    )))
+}
+
+/// The stored receipt of an earlier create or revision commit.
 fn replay(
     transaction: &Transaction<'_>,
     request: RequestIdentity<'_>,
 ) -> Result<Option<CommitReceipt>, StoreError> {
-    let stored: Option<(Vec<u8>, String, i64)> = transaction
-        .query_row(
-            "SELECT fingerprint, artifact_id, revision FROM request_keys
-             WHERE actor = ?1 AND request_key = ?2",
-            params![request.actor.as_str(), request.key.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(unavailable)?;
-    let Some((fingerprint, artifact_id, revision)) = stored else {
+    let Some((id, position)) = stored_request(transaction, request)? else {
         return Ok(None);
     };
-    if fingerprint.as_slice() != request.fingerprint.0.as_slice() {
-        return Err(StoreError::RequestKeyReused);
-    }
-    let id: ArtifactId = artifact_id.parse().map_err(corrupt)?;
-    let mut receipt = committed(transaction, &id, stored_revision(revision)?)?;
+    let mut receipt = committed(transaction, &id, position)?;
     receipt.delivery = Delivery::Replayed;
     Ok(Some(receipt))
 }
@@ -467,16 +664,29 @@ fn insert_revision(
         ])
         .map_err(unavailable)?;
     }
+    Ok(())
+}
+
+/// Records a title and pin as `metadata` of the artifact.
+fn insert_metadata(
+    transaction: &Transaction<'_>,
+    id: &ArtifactId,
+    metadata: MetadataRevision,
+    (title, pinned): (&Title, bool),
+    actor: &ActorId,
+    now: UnixMillis,
+) -> Result<(), StoreError> {
     transaction
         .execute(
-            "INSERT INTO request_keys (actor, request_key, fingerprint, artifact_id, revision, created_at)
+            "INSERT INTO metadata_revisions
+                 (artifact_id, metadata_revision, title, pinned, created_by, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
-                request.actor.as_str(),
-                request.key.as_str(),
-                request.fingerprint.0.as_slice(),
                 id.as_str(),
-                number,
+                sql_metadata(metadata)?,
+                title.as_str(),
+                pinned,
+                actor.as_str(),
                 now.0
             ],
         )
@@ -484,16 +694,45 @@ fn insert_revision(
     Ok(())
 }
 
-/// Appends the commit of `revision` to the change feed.
+/// Records that the request's key produced `position` of the artifact.
+fn record_key(
+    transaction: &Transaction<'_>,
+    request: RequestIdentity<'_>,
+    id: &ArtifactId,
+    (revision, metadata): Position,
+    now: UnixMillis,
+) -> Result<(), StoreError> {
+    transaction
+        .execute(
+            "INSERT INTO request_keys
+                 (actor, request_key, fingerprint, artifact_id, revision, metadata_revision, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                request.actor.as_str(),
+                request.key.as_str(),
+                request.fingerprint.0.as_slice(),
+                id.as_str(),
+                sql_revision(revision)?,
+                sql_metadata(metadata)?,
+                now.0
+            ],
+        )
+        .map_err(unavailable)?;
+    Ok(())
+}
+
+/// Appends a commit that left the artifact at `position` to the change feed.
 fn record_change(
     transaction: &Transaction<'_>,
     id: &ArtifactId,
-    revision: SourceRevision,
     kind: ChangeKind,
+    (revision, metadata): Position,
+    now: UnixMillis,
 ) -> Result<(), StoreError> {
     let kind = match kind {
         ChangeKind::Created => "created",
         ChangeKind::Revised => "revised",
+        ChangeKind::MetadataUpdated => "metadata_updated",
         _ => {
             return Err(StoreError::Unavailable(
                 "this store cannot record that change".into(),
@@ -502,33 +741,63 @@ fn record_change(
     };
     transaction
         .execute(
-            "INSERT INTO changes (artifact_id, revision, kind) VALUES (?1, ?2, ?3)",
-            params![id.as_str(), sql_revision(revision)?, kind],
+            "INSERT INTO changes (artifact_id, kind, revision, metadata_revision, committed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id.as_str(),
+                kind,
+                sql_revision(revision)?,
+                sql_metadata(metadata)?,
+                now.0
+            ],
         )
         .map_err(unavailable)?;
     Ok(())
 }
 
-/// The receipt as of the commit that created `revision`, also when later
-/// commits followed it. Owner, kind, title, and creation time never change
-/// after creation, so they come from the artifact row; the current revision
-/// and update time are those of `revision`. A future rename must keep this
-/// true by recording the title per revision.
+/// The receipt of the commit that created the source revision of
+/// `position`, also when later commits followed it.
 fn committed(
     connection: &Connection,
     id: &ArtifactId,
-    revision: SourceRevision,
+    position: Position,
 ) -> Result<CommitReceipt, StoreError> {
-    let missing = || StoreError::Unavailable("committed revision is missing".into());
-    let revision = revision_record(connection, id, revision)?.ok_or_else(missing)?;
-    let mut artifact = artifact_record(connection, id)?.ok_or_else(missing)?;
-    artifact.current_revision = revision.revision;
-    artifact.updated_at = revision.created_at;
+    let revision = revision_record(connection, id, position.0)?
+        .ok_or_else(|| StoreError::Unavailable("committed revision is missing".into()))?;
     Ok(CommitReceipt {
-        artifact,
+        artifact: snapshot(connection, id, position)?,
         revision,
         delivery: Delivery::Committed,
     })
+}
+
+/// The artifact as it was at `position`: owner, kind, and creation time
+/// never change; title and pin are those of the metadata revision, and the
+/// update time is that of the source revision.
+fn snapshot(
+    connection: &Connection,
+    id: &ArtifactId,
+    (revision, metadata): Position,
+) -> Result<ArtifactRecord, StoreError> {
+    connection
+        .query_row(
+            "SELECT a.id, a.owner, a.kind, m.title, m.pinned, r.revision, m.metadata_revision,
+                 a.created_at, r.created_at
+             FROM artifacts a
+             JOIN revisions r ON r.artifact_id = a.id AND r.revision = ?2
+             JOIN metadata_revisions m ON m.artifact_id = a.id AND m.metadata_revision = ?3
+             WHERE a.id = ?1",
+            params![
+                id.as_str(),
+                sql_revision(revision)?,
+                sql_metadata(metadata)?
+            ],
+            RawArtifact::from_row,
+        )
+        .optional()
+        .map_err(unavailable)?
+        .ok_or_else(|| StoreError::Unavailable("committed state is missing".into()))?
+        .into_record()
 }
 
 fn artifact_record(
@@ -537,7 +806,8 @@ fn artifact_record(
 ) -> Result<Option<ArtifactRecord>, StoreError> {
     connection
         .query_row(
-            "SELECT id, owner, kind, title, current_revision, created_at, updated_at
+            "SELECT id, owner, kind, title, pinned, current_revision, metadata_revision,
+                 created_at, updated_at
              FROM artifacts WHERE id = ?1",
             [id.as_str()],
             RawArtifact::from_row,
@@ -546,6 +816,63 @@ fn artifact_record(
         .map_err(unavailable)?
         .map(RawArtifact::into_record)
         .transpose()
+}
+
+/// An owner's artifacts by update time. `?2` is the search text, `?3` the
+/// pin, `?4` and `?5` the position to continue after, and `?6` the limit.
+/// `lower` folds ASCII letters only.
+const LIST_BY_UPDATE: &str = "
+SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at
+FROM artifacts
+WHERE owner = ?1
+  AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
+  AND (?3 IS NULL OR pinned = ?3)
+  AND (?4 IS NULL OR updated_at < ?4 OR (updated_at = ?4 AND id > ?5))
+ORDER BY updated_at DESC, id
+LIMIT ?6";
+
+/// As [`LIST_BY_UPDATE`], by creation time.
+const LIST_BY_CREATION: &str = "
+SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at
+FROM artifacts
+WHERE owner = ?1
+  AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
+  AND (?3 IS NULL OR pinned = ?3)
+  AND (?4 IS NULL OR created_at < ?4 OR (created_at = ?4 AND id > ?5))
+ORDER BY created_at DESC, id
+LIMIT ?6";
+
+/// Applies [`METADATA_SCHEMA`] and keeps the change feed's head, which the
+/// rebuilt `changes` table would otherwise take from its largest row.
+fn add_metadata_revisions(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let head: Option<i64> = transaction
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'changes'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    transaction
+        .execute_batch(METADATA_SCHEMA)
+        .map_err(unavailable)?;
+    if let Some(head) = head {
+        let updated = transaction
+            .execute(
+                "UPDATE sqlite_sequence SET seq = max(seq, ?1) WHERE name = 'changes'",
+                [head],
+            )
+            .map_err(unavailable)?;
+        if updated == 0 {
+            transaction
+                .execute(
+                    "INSERT INTO sqlite_sequence (name, seq) VALUES ('changes', ?1)",
+                    [head],
+                )
+                .map_err(unavailable)?;
+        }
+    }
+    Ok(())
 }
 
 fn revision_record(
@@ -596,7 +923,9 @@ struct RawArtifact {
     owner: String,
     kind: String,
     title: String,
+    pinned: bool,
     current_revision: i64,
+    metadata_revision: i64,
     created_at: i64,
     updated_at: i64,
 }
@@ -608,9 +937,11 @@ impl RawArtifact {
             owner: row.get(1)?,
             kind: row.get(2)?,
             title: row.get(3)?,
-            current_revision: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            pinned: row.get(4)?,
+            current_revision: row.get(5)?,
+            metadata_revision: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     }
 
@@ -622,7 +953,9 @@ impl RawArtifact {
             owner: self.owner.parse().map_err(corrupt)?,
             kind,
             title,
+            pinned: self.pinned,
             current_revision: stored_revision(self.current_revision)?,
+            metadata_revision: stored_metadata(self.metadata_revision)?,
             created_at: UnixMillis(self.created_at),
             updated_at: UnixMillis(self.updated_at),
         })
@@ -635,6 +968,14 @@ fn stored_path(value: &str) -> Result<PackagePath, StoreError> {
 
 fn stored_revision(value: i64) -> Result<SourceRevision, StoreError> {
     u64::try_from(value).map(SourceRevision).map_err(corrupt)
+}
+
+fn stored_metadata(value: i64) -> Result<MetadataRevision, StoreError> {
+    u64::try_from(value).map(MetadataRevision).map_err(corrupt)
+}
+
+fn sql_metadata(metadata: MetadataRevision) -> Result<i64, StoreError> {
+    i64::try_from(metadata.0).map_err(corrupt)
 }
 
 fn stored_sequence(value: i64) -> Result<ChangeSequence, StoreError> {

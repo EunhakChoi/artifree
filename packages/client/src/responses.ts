@@ -1,6 +1,7 @@
 import type {
   Artifact,
   ArtifactKind,
+  ArtifactList,
   ChangeKind,
   CommitResponse,
   ErrorBody,
@@ -9,6 +10,7 @@ import type {
   Preview,
   Revision,
   RevisionFile,
+  UpdateArtifactResponse,
 } from '@artifree/contracts';
 import type { FeedChange } from './change-feed.js';
 
@@ -48,6 +50,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   unauthenticated: true,
   not_found: true,
   revision_conflict: true,
+  metadata_conflict: true,
   request_key_reused: true,
   payload_too_large: true,
   rate_limited: true,
@@ -57,7 +60,11 @@ const ERROR_CODES: Record<ErrorCode, true> = {
 
 // A record for the same reason; a kind added later still reaches callers,
 // as 'unknown'.
-const CHANGE_KINDS: Record<ChangeKind, true> = { created: true, revised: true };
+const CHANGE_KINDS: Record<ChangeKind, true> = {
+  created: true,
+  revised: true,
+  metadata_updated: true,
+};
 
 /**
  * An opaque feed cursor. It is sent back in `Last-Event-ID`, so it must be
@@ -86,17 +93,36 @@ function errorCode(value: unknown): ErrorCode | undefined {
 function artifact(value: unknown): Artifact | undefined {
   if (!isRecord(value)) return undefined;
   const kind = artifactKind(value.kind);
-  const { id, title, current_revision, created_at_ms, updated_at_ms } = value;
+  const {
+    id,
+    title,
+    pinned,
+    current_revision,
+    metadata_revision,
+    created_at_ms,
+    updated_at_ms,
+  } = value;
   if (
     typeof id !== 'string' ||
     kind === undefined ||
     typeof title !== 'string' ||
+    typeof pinned !== 'boolean' ||
     !isCount(current_revision) ||
+    !isCount(metadata_revision) ||
     !isTime(created_at_ms) ||
     !isTime(updated_at_ms)
   )
     return undefined;
-  return { id, kind, title, current_revision, created_at_ms, updated_at_ms };
+  return {
+    id,
+    kind,
+    title,
+    pinned,
+    current_revision,
+    metadata_revision,
+    created_at_ms,
+    updated_at_ms,
+  };
 }
 
 function revisionFile(value: unknown): RevisionFile | undefined {
@@ -145,8 +171,16 @@ export function parseArtifact(value: unknown): Artifact | undefined {
 }
 
 /** Parses `GET /v1/artifacts`. */
-export function parseArtifactList(value: unknown): Artifact[] | undefined {
-  return isRecord(value) ? list(value.artifacts, artifact) : undefined;
+export function parseArtifactList(value: unknown): ArtifactList | undefined {
+  if (!isRecord(value)) return undefined;
+  const artifacts = list(value.artifacts, artifact);
+  const { next_page_token } = value;
+  if (artifacts === undefined) return undefined;
+  if (next_page_token === undefined || next_page_token === null)
+    return { artifacts };
+  return typeof next_page_token === 'string'
+    ? { artifacts, next_page_token }
+    : undefined;
 }
 
 /** Parses `GET /v1/artifacts/{id}/revisions`. */
@@ -166,6 +200,17 @@ export function parseCommit(value: unknown): CommitResponse | undefined {
     revision: parsedRevision,
     replayed: value.replayed,
   };
+}
+
+/** Parses the response of a metadata update. */
+export function parseUpdate(
+  value: unknown,
+): UpdateArtifactResponse | undefined {
+  if (!isRecord(value) || typeof value.replayed !== 'boolean') return undefined;
+  const parsed = artifact(value.artifact);
+  return parsed === undefined
+    ? undefined
+    : { artifact: parsed, replayed: value.replayed };
 }
 
 /** Parses the response of a preview request. */
@@ -192,6 +237,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     artifact_id,
     change,
     revision: number,
+    metadata_revision,
     committed_at_ms,
   } = value;
   if (
@@ -199,6 +245,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     typeof artifact_id !== 'string' ||
     typeof change !== 'string' ||
     !isCount(number) ||
+    !isCount(metadata_revision) ||
     !isTime(committed_at_ms)
   )
     return undefined;
@@ -207,6 +254,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     artifact_id,
     change: isChangeKind(change) ? change : 'unknown',
     revision: number,
+    metadata_revision,
     committed_at_ms,
   };
 }
@@ -215,11 +263,17 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
 export function parseError(value: unknown): ErrorBody | undefined {
   if (!isRecord(value) || !isRecord(value.error)) return undefined;
   const code = errorCode(value.error.code);
-  const { message, current_revision } = value.error;
+  const { message, current_revision, current_metadata_revision } = value.error;
   if (code === undefined || typeof message !== 'string') return undefined;
+  const body: ErrorBody = { code, message };
   // The schema allows null as well as absence; both mean "not a conflict".
-  if (current_revision === undefined || current_revision === null)
-    return { code, message };
-  if (!isCount(current_revision)) return undefined;
-  return { code, message, current_revision };
+  for (const [name, count] of [
+    ['current_revision', current_revision],
+    ['current_metadata_revision', current_metadata_revision],
+  ] as const) {
+    if (count === undefined || count === null) continue;
+    if (!isCount(count)) return undefined;
+    body[name] = count;
+  }
+  return body;
 }

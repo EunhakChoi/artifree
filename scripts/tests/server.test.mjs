@@ -162,14 +162,16 @@ test('Every JSON body the server sends matches the API schema root', async () =>
   try {
     // Each call states the expected status, so an error body (which the
     // schema root also accepts) cannot stand in for the success shape.
+    let requests = 0;
     const request = async (status, method, path, body) => {
       const init = {
         method,
         headers: { authorization: `Bearer ${server.token}` },
       };
+      requests += 1;
       if (body !== undefined) {
         init.headers['content-type'] = 'application/json';
-        init.headers['idempotency-key'] = `schema-${method}-${path.length}`;
+        init.headers['idempotency-key'] = `schema-key-${requests}`;
         init.body = JSON.stringify(body);
       }
       const response = await fetch(`${server.api_url}${path}`, init);
@@ -197,7 +199,23 @@ test('Every JSON body the server sends matches the API schema root', async () =>
         },
       ],
     });
+    await request(200, 'PATCH', `/v1/artifacts/${id}`, {
+      base_metadata_revision: 1,
+      title: 'Renamed',
+      pinned: true,
+    });
+    await request(409, 'PATCH', `/v1/artifacts/${id}`, {
+      base_metadata_revision: 1,
+      pinned: false,
+    });
     await request(200, 'GET', '/v1/artifacts');
+    await request(201, 'POST', '/v1/artifacts', {
+      title: 'Second',
+      files: [{ path: 'index.html', encoding: 'utf8', content: '<p>1</p>' }],
+    });
+    const page = await request(200, 'GET', '/v1/artifacts?limit=1');
+    assert.ok(page.next_page_token, 'A full page names the next one.');
+    await request(400, 'GET', '/v1/artifacts?page_token=x');
     await request(200, 'GET', `/v1/artifacts/${id}`);
     await request(200, 'GET', `/v1/artifacts/${id}/revisions`);
     await request(200, 'GET', `/v1/artifacts/${id}/revisions/1`);
@@ -208,6 +226,76 @@ test('Every JSON body the server sends matches the API schema root', async () =>
       '/v1/artifacts/art_00000000000000000000000000000000',
     );
     await request(405, 'DELETE', '/v1/artifacts');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CLI renames, pins, and lists by filter and page', async () => {
+  const server = await startServer(binary, dataDirectory('cli-metadata'));
+  try {
+    const site = await freshDirectory('cli-metadata-site');
+    await writeFile(join(site, 'index.html'), '<h1>x</h1>');
+    const ids = [];
+    for (const title of ['Alpha', 'Beta', 'Gamma'])
+      ids.push(
+        json(cli(server, ['create', '--title', title, '--dir', site])).artifact
+          .id,
+      );
+    const renamed = json(
+      cli(server, ['rename', ids[0], 'Alpha plan', '--base-metadata', '1']),
+    );
+    assert.equal(renamed.artifact.title, 'Alpha plan');
+    assert.equal(renamed.artifact.metadata_revision, 2);
+    assert.equal(renamed.artifact.current_revision, 1);
+    const pinned = json(cli(server, ['pin', ids[0], '--base-metadata', '2']));
+    assert.equal(pinned.artifact.pinned, true);
+    const stale = cli(server, ['unpin', ids[0], '--base-metadata', '2']);
+    assert.equal(stale.status, 1);
+    assert.equal(stale.stdout, '');
+    assert.match(stale.stderr, /^error\[metadata_conflict\]/);
+    assert.match(stale.stderr, /current_metadata_revision=3/);
+
+    const titles = (result) =>
+      json(result).artifacts.map((artifact) => artifact.title);
+    assert.deepEqual(titles(cli(server, ['list', '--search', 'PLAN'])), [
+      'Alpha plan',
+    ]);
+    assert.deepEqual(titles(cli(server, ['list', '--pinned'])), ['Alpha plan']);
+    assert.equal(titles(cli(server, ['list', '--unpinned'])).length, 2);
+    const all = titles(cli(server, ['list', '--sort', 'created']));
+    assert.deepEqual(all, ['Gamma', 'Beta', 'Alpha plan']);
+    const first = json(
+      cli(server, ['list', '--sort', 'created', '--limit', '2']),
+    );
+    assert.equal(first.artifacts.length, 2);
+    const rest = json(
+      cli(server, [
+        'list',
+        '--sort',
+        'created',
+        '--limit',
+        '2',
+        '--page-token',
+        first.next_page_token,
+      ]),
+    );
+    assert.deepEqual(
+      [...first.artifacts, ...rest.artifacts].map((artifact) => artifact.title),
+      all,
+    );
+    assert.equal(rest.next_page_token, undefined);
+    for (const args of [
+      ['list', '--pinned', '--unpinned'],
+      ['list', '--sort', 'title'],
+      ['list', '--limit', '0'],
+      ['rename', ids[1], 'Missing base'],
+      ['pin', ids[1], 'extra', '--base-metadata', '1'],
+    ]) {
+      const refused = cli(server, args);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stdout, '', args.join(' '));
+    }
   } finally {
     await server.stop();
   }

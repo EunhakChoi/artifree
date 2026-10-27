@@ -1,5 +1,5 @@
-//! HTML file-package artifacts: create, conditional revision commits, and
-//! revision-pinned reads.
+//! HTML file-package artifacts: create, conditional revision commits,
+//! conditional metadata updates, lists, and revision-pinned reads.
 //!
 //! Every operation checks the actor's authority against current stored
 //! metadata. Commit success means durable acceptance. Source history is kept
@@ -11,13 +11,15 @@ use std::fmt;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
-use artifree_domain::{ArtifactKind, SourceRevision};
+use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, ArtifactStore, ChangePage, CommitReceipt, NewArtifact, RequestFingerprint,
-    RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CommitReceipt, MetadataReceipt,
+    MetadataUpdate, NewArtifact, RequestFingerprint, RequestIdentity, RevisionCommit,
+    RevisionRecord, StoreError,
 };
 use sha2::{Digest, Sha256};
 
+use crate::listing::{self, ArtifactPage, ListQuery};
 use crate::policy;
 
 /// What could not be found. Inaccessible artifacts are reported as missing so
@@ -45,6 +47,14 @@ pub enum ArtifactError {
         /// The current revision.
         current: SourceRevision,
     },
+    /// The metadata change was prepared against an older metadata revision;
+    /// nothing was written.
+    MetadataConflict {
+        /// The current metadata revision.
+        current: MetadataRevision,
+    },
+    /// The page token is malformed or belongs to another order or filters.
+    InvalidPageToken,
     /// The actor already used this request key for different content.
     RequestKeyReused,
     /// Storage failed. The request may be retried with the same key.
@@ -63,6 +73,13 @@ impl fmt::Display for ArtifactError {
                 "artifact changed; current revision is {}",
                 current.0
             ),
+            Self::MetadataConflict { current } => write!(
+                formatter,
+                "artifact metadata changed; current metadata revision is {}",
+                current.0
+            ),
+            Self::InvalidPageToken => formatter
+                .write_str("page token is malformed or belongs to another order or filters"),
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -78,10 +95,26 @@ impl From<StoreError> for ArtifactError {
         match error {
             StoreError::NotFound => Self::NotFound(Missing::Artifact),
             StoreError::RevisionConflict { current } => Self::RevisionConflict { current },
+            StoreError::MetadataConflict { current } => Self::MetadataConflict { current },
             StoreError::RequestKeyReused => Self::RequestKeyReused,
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
             other => Self::Unavailable(other.to_string()),
         }
+    }
+}
+
+/// A change to an artifact's title, pin, or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataChange {
+    title: Option<Title>,
+    pinned: Option<bool>,
+}
+
+impl MetadataChange {
+    /// A change of the given fields, or `None` when it names neither.
+    #[must_use]
+    pub fn new(title: Option<Title>, pinned: Option<bool>) -> Option<Self> {
+        (title.is_some() || pinned.is_some()).then_some(Self { title, pinned })
     }
 }
 
@@ -197,6 +230,56 @@ impl<S: ArtifactStore> ArtifactService<S> {
         Ok(receipt)
     }
 
+    /// Changes the title or pin of an accessible artifact, only if its
+    /// metadata is still at `base`. Source revisions are not touched. A
+    /// change to the values already stored writes nothing but the key.
+    ///
+    /// Retrying with the same key and content returns the original receipt
+    /// even after later changes.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact,
+    /// [`ArtifactError::MetadataConflict`] when `base` is not current,
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
+    pub fn update(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        base: MetadataRevision,
+        change: &MetadataChange,
+    ) -> Result<MetadataReceipt, ArtifactError> {
+        self.authorized(actor, id)?;
+        let mut hasher = Fingerprint::new("update");
+        hasher.field(id.as_str().as_bytes());
+        hasher.field(&base.0.to_be_bytes());
+        match &change.title {
+            Some(title) => {
+                hasher.field(b"title");
+                hasher.field(title.as_str().as_bytes());
+            }
+            None => hasher.field(b"keep title"),
+        }
+        hasher.field(match change.pinned {
+            Some(true) => b"pin",
+            Some(false) => b"unpin",
+            None => b"keep pin",
+        });
+        let receipt = self.store.update_metadata(MetadataUpdate {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
+            },
+            artifact: id,
+            base,
+            title: change.title.as_ref(),
+            pinned: change.pinned,
+        })?;
+        Ok(receipt)
+    }
+
     /// Current metadata of an accessible artifact.
     ///
     /// # Errors
@@ -210,13 +293,47 @@ impl<S: ArtifactStore> ArtifactService<S> {
         self.authorized(actor, id)
     }
 
-    /// Artifacts the actor owns, most recently updated first.
+    /// One page of the artifacts the actor owns that match `query`, after
+    /// the position `page_token` names, if any.
+    ///
+    /// A list follows its order as artifacts change: one updated while a
+    /// caller pages through the list by update time can appear twice or
+    /// not at all.
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::Unavailable`].
-    pub fn list(&self, actor: &ActorId) -> Result<Vec<ArtifactRecord>, ArtifactError> {
-        Ok(self.store.artifacts_owned_by(actor)?)
+    /// [`ArtifactError::InvalidPageToken`] or [`ArtifactError::Unavailable`].
+    pub fn list(
+        &self,
+        actor: &ActorId,
+        query: &ListQuery,
+        page_token: Option<&str>,
+    ) -> Result<ArtifactPage, ArtifactError> {
+        let after = page_token
+            .map(|token| listing::position(token, query).ok_or(ArtifactError::InvalidPageToken))
+            .transpose()?;
+        let limit = query.limit.get();
+        // One more than a page tells whether another page follows.
+        let mut artifacts = self.store.list_artifacts(ArtifactListing {
+            owner: actor,
+            search: query.search.as_ref().map(listing::SearchText::as_str),
+            pinned: query.pinned,
+            order: query.order,
+            after: after.as_ref(),
+            limit: limit + 1,
+        })?;
+        let next_page_token = if artifacts.len() > limit {
+            artifacts.truncate(limit);
+            artifacts
+                .last()
+                .map(|last| listing::page_token(query, last))
+        } else {
+            None
+        };
+        Ok(ArtifactPage {
+            artifacts,
+            next_page_token,
+        })
     }
 
     /// Up to `limit` committed changes to the actor's artifacts after

@@ -95,7 +95,16 @@ impl Harness {
     }
 
     async fn commit(&self, uri: &str, key: &str, body: Value) -> Result<Value, TestError> {
-        let request = Request::post(uri)
+        self.send(Request::post(uri), key, body).await
+    }
+
+    async fn send(
+        &self,
+        request: axum::http::request::Builder,
+        key: &str,
+        body: Value,
+    ) -> Result<Value, TestError> {
+        let request = request
             .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
             .header(header::CONTENT_TYPE, "application/json")
             .header("idempotency-key", key)
@@ -120,6 +129,18 @@ impl Harness {
             "changes": [{ "op": "put", "path": "index.html", "encoding": "utf8", "content": key }]
         });
         self.commit(&format!("/v1/artifacts/{id}/revisions"), key, changes)
+            .await
+    }
+
+    async fn rename(
+        &self,
+        id: &str,
+        key: &str,
+        base: u64,
+        title: &str,
+    ) -> Result<Value, TestError> {
+        let change = json!({ "base_metadata_revision": base, "title": title });
+        self.send(Request::patch(format!("/v1/artifacts/{id}")), key, change)
             .await
     }
 }
@@ -226,6 +247,7 @@ async fn a_stream_starts_at_the_head_and_sends_each_commit_once() -> TestResult 
             "artifact_id": id,
             "change": "created",
             "revision": 1,
+            "metadata_revision": 1,
             "committed_at_ms": created["revision"]["created_at_ms"],
         })
     );
@@ -245,6 +267,23 @@ async fn a_stream_starts_at_the_head_and_sends_each_commit_once() -> TestResult 
         (2, json!("revised"))
     );
     assert_eq!(revised.data["revision"], 2);
+
+    // A metadata change is announced with both revisions; one that changes
+    // nothing, and a stale one, are not.
+    harness.rename(id, "feed-rename-1", 1, "Renamed").await?;
+    let renamed = events.expect("change").await?;
+    assert_eq!(renamed.data["change"], "metadata_updated");
+    assert_eq!(renamed.data["revision"], 2);
+    assert_eq!(renamed.data["metadata_revision"], 2);
+    harness.rename(id, "feed-rename-2", 2, "Renamed").await?;
+    assert_eq!(
+        harness.rename(id, "feed-rename-3", 1, "Stale").await?["error"]["code"],
+        "metadata_conflict"
+    );
+    assert!(
+        events.quiet().await,
+        "an update without effect was announced"
+    );
     Ok(())
 }
 

@@ -274,11 +274,13 @@ impl Producer {
             artifact_id: record.artifact.to_string(),
             change: match record.kind {
                 ChangeKind::Created => WireKind::Created,
+                ChangeKind::MetadataUpdated => WireKind::MetadataUpdated,
                 // A kind added later is a revision to clients of this
                 // contract: they read the artifact again.
                 _ => WireKind::Revised,
             },
             revision: record.revision.0,
+            metadata_revision: record.metadata_revision.0,
             committed_at_ms: record.committed_at.0,
         }
     }

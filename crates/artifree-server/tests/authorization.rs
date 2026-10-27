@@ -3,10 +3,11 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use artifree_core::artifacts::{ArtifactError, ArtifactService, Missing};
-use artifree_domain::SourceRevision;
+use artifree_core::artifacts::{ArtifactError, ArtifactService, MetadataChange, Missing};
+use artifree_core::listing::ListQuery;
 use artifree_domain::identity::{ActorId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, PackagePath};
+use artifree_domain::{MetadataRevision, SourceRevision};
 use artifree_providers::storage::SqliteStore;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -70,8 +71,25 @@ fn another_actor_can_neither_see_nor_change_an_artifact() -> TestResult {
             .map(|_| ()),
         hidden
     );
+    let rename =
+        MetadataChange::new(Some(parsed("Defaced")), Some(true)).ok_or("a change with fields")?;
+    assert_eq!(
+        service
+            .update(
+                &intruder,
+                &parsed::<RequestKey>("intruder-key-2"),
+                &id,
+                MetadataRevision(1),
+                &rename
+            )
+            .map(|_| ()),
+        hidden
+    );
     assert!(
-        service.list(&intruder)?.is_empty(),
+        service
+            .list(&intruder, &ListQuery::default(), None)?
+            .artifacts
+            .is_empty(),
         "listing must only include owned artifacts"
     );
 
@@ -80,6 +98,15 @@ fn another_actor_can_neither_see_nor_change_an_artifact() -> TestResult {
         current.current_revision,
         SourceRevision(1),
         "a rejected actor must not write"
+    );
+    assert_eq!(
+        (
+            current.title.as_str(),
+            current.pinned,
+            current.metadata_revision
+        ),
+        ("Private", false, MetadataRevision(1)),
+        "a rejected actor must not change metadata"
     );
     assert_eq!(
         service.read_file(&owner, &id, SourceRevision(1), &PackagePath::entry())?,

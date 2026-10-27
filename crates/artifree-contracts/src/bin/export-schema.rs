@@ -1,9 +1,9 @@
 //! Emits the public JSON Schemas for contract generation.
 //!
 //! Output: `{ "service_description": <schema>, "api": <schema>, "mcp": <tools> }`.
-//! The API schema's root accepts any v1 JSON request or response body, and
-//! the data of each change feed event; each body and its parts are `$defs`
-//! entries. The MCP entry is the tool catalog
+//! The API schema's root accepts any v1 JSON request or response body, the
+//! query of the artifact list, and the data of each change feed event; each
+//! body and its parts are `$defs` entries. The MCP entry is the tool catalog
 //! that `tools/list` returns, with the server instructions and the schema of
 //! an error result.
 #![expect(
@@ -13,7 +13,8 @@
 
 use artifree_contracts::api::{
     Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse,
-    FeedPosition, Preview, Revision, RevisionList, SaveRevisionRequest,
+    FeedPosition, ListArtifactsQuery, Preview, Revision, RevisionList, SaveRevisionRequest,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -23,8 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bodies = [
         generator.subschema_for::<CreateArtifactRequest>(),
         generator.subschema_for::<SaveRevisionRequest>(),
+        generator.subschema_for::<UpdateArtifactRequest>(),
         generator.subschema_for::<CommitResponse>(),
+        generator.subschema_for::<UpdateArtifactResponse>(),
         generator.subschema_for::<Artifact>(),
+        generator.subschema_for::<ListArtifactsQuery>(),
         generator.subschema_for::<ArtifactList>(),
         generator.subschema_for::<Revision>(),
         generator.subschema_for::<RevisionList>(),

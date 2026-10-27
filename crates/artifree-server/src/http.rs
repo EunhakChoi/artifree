@@ -15,15 +15,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    Artifact, ArtifactList, CreateArtifactRequest, ErrorCode, ErrorResponse, Revision,
-    RevisionList, SaveRevisionRequest,
+    Artifact, ArtifactList, CreateArtifactRequest, ErrorCode, ErrorResponse, ListArtifactsQuery,
+    Revision, RevisionList, SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_domain::identity::{ActorId, RequestKey};
 use artifree_providers::storage::SqliteStore;
 use axum::body::{Body, Bytes, HttpBody};
-use axum::extract::rejection::{JsonRejection, PathRejection};
-use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Request, State};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
@@ -165,7 +165,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(mcp::routes(state.clone()))
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
-        .route("/v1/artifacts/{id}", get(show_artifact))
+        .route(
+            "/v1/artifacts/{id}",
+            get(show_artifact).patch(update_artifact),
+        )
         .route(
             "/v1/artifacts/{id}/revisions",
             get(list_revisions).post(save_revision),
@@ -352,6 +355,12 @@ impl From<JsonRejection> for ApiError {
     }
 }
 
+impl From<QueryRejection> for ApiError {
+    fn from(rejection: QueryRejection) -> Self {
+        Self::invalid(rejection.body_text())
+    }
+}
+
 impl From<PathRejection> for ApiError {
     fn from(rejection: PathRejection) -> Self {
         Self::invalid(rejection.body_text())
@@ -436,8 +445,26 @@ async fn save_revision(
 async fn list_artifacts(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
+    query: Result<Query<ListArtifactsQuery>, QueryRejection>,
 ) -> Result<Json<ArtifactList>, ApiError> {
-    Ok(Json(operations::list(&state, actor).await?))
+    let Query(query) = query?;
+    Ok(Json(operations::list(&state, actor, query).await?))
+}
+
+async fn update_artifact(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<UpdateArtifactRequest>, JsonRejection>,
+) -> Result<Json<UpdateArtifactResponse>, ApiError> {
+    let Path(id) = path?;
+    // An unknown artifact is reported before a malformed body.
+    operations::artifact_id(&id)?;
+    let Json(request) = body?;
+    Ok(Json(
+        operations::update(&state, actor, key, &id, request).await?,
+    ))
 }
 
 async fn show_artifact(
