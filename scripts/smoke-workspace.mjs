@@ -40,6 +40,7 @@ export async function checkWorkspace({
 const out = [];
 try { void parent.document.title; out.push('parent:open'); } catch { out.push('parent:blocked'); }
 try { localStorage.setItem('k', '1'); out.push('storage:open'); } catch { out.push('storage:blocked'); }
+try { out.push(window.open('about:blank') ? 'popup:open' : 'popup:blocked'); } catch { out.push('popup:blocked'); }
 fetch('${origin}/v1/artifacts').then(
   () => out.push('api:open'),
   () => out.push('api:blocked'),
@@ -52,13 +53,28 @@ fetch('${origin}/v1/artifacts').then(
   await checkAccessibility('workspace-create-dialog');
   await dialog.getByLabel('Title').fill('Smoke artifact');
   await dialog.getByLabel('index.html').fill(probe('Revision one'));
-  // The form is read-only while the request is in flight, so nothing typed
-  // meanwhile is lost when it resets after success.
-  const releaseCreate = await holdPosts(page, '**/v1/artifacts');
+  // The server commits but the response is lost. Retrying the same content,
+  // even after an edit that was undone, must return that artifact rather
+  // than create a second one.
+  const restoreCreate = await loseResponse(page, '**/v1/artifacts');
+  await dialog.getByRole('button', { name: 'Create' }).click();
+  await expect(dialog.getByText('Not created')).toBeVisible();
+  await restoreCreate();
+  await typeAndUndo(dialog.getByLabel('Title'));
+  await expect(dialog.getByText('Not created')).toBeHidden();
+  // The form is read-only and stays open while the request is in flight, so
+  // nothing typed meanwhile is lost and the result is not missed.
+  const releaseCreate = await hold(page, 'POST', '**/v1/artifacts');
   await dialog.getByRole('button', { name: 'Create' }).click();
   await expect(dialog.getByRole('button', { name: 'Creating…' })).toBeVisible();
   await expect(dialog.getByLabel('index.html')).not.toBeEditable();
   await expect(dialog.getByLabel('Title')).not.toBeEditable();
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  // A closing dialog stays visible while it animates out, so wait past the
+  // 100 ms animation and check its open state instead of visibility.
+  await page.waitForTimeout(300);
+  await expect(dialog).toHaveAttribute('data-open');
   await releaseCreate();
   await expect(dialog).toBeHidden();
 
@@ -72,13 +88,15 @@ fetch('${origin}/v1/artifacts').then(
   );
   const sandbox = (await frameElement.getAttribute('sandbox')) ?? '';
   assert.ok(
-    sandbox.includes('allow-scripts') && !sandbox.includes('allow-same-origin'),
+    sandbox.includes('allow-scripts') &&
+      !sandbox.includes('allow-same-origin') &&
+      !sandbox.includes('allow-popups'),
     `Preview sandbox must keep content opaque: ${sandbox}`,
   );
   const frame = page.frameLocator('iframe[title^="Preview of"]');
   await expect(frame.locator('#label')).toHaveText('Revision one');
   await expect(frame.locator('#probe')).toHaveText(
-    'parent:blocked storage:blocked api:blocked',
+    'parent:blocked storage:blocked popup:blocked api:blocked',
   );
   await checkAccessibility('workspace-preview');
 
@@ -95,9 +113,11 @@ fetch('${origin}/v1/artifacts').then(
   await expect(frame.locator('#label')).toHaveText('Revision two');
 
   // Another client commits revision 3 while this page still edits revision 2.
-  const [{ id }] = await api(server, 'GET', '/v1/artifacts').then(
+  const listed = await api(server, 'GET', '/v1/artifacts').then(
     (body) => body.artifacts,
   );
+  assert.equal(listed.length, 1, 'A retried create must not duplicate.');
+  const [{ id }] = listed;
   await workspace.getByRole('tab', { name: 'Source' }).click();
   await editor.fill(probe('Lost edit'));
   await api(server, 'POST', `/v1/artifacts/${id}/revisions`, {
@@ -117,10 +137,19 @@ fetch('${origin}/v1/artifacts').then(
   ).toBeVisible();
   await expect(editor).toHaveValue(/Lost edit/);
   await checkAccessibility('workspace-conflict');
+  // While the latest revision loads, the rejected draft stays read-only:
+  // anything typed then would vanish when the editor is replaced.
+  const releaseReload = await hold(page, 'GET', `**/v1/artifacts/${id}`);
   await workspace.getByRole('button', { name: 'Load latest' }).click();
+  await expect(
+    workspace.getByRole('button', { name: 'Loading latest…' }),
+  ).toBeDisabled();
+  await expect(editor).not.toBeEditable();
+  await releaseReload();
   await expect(
     workspace.getByText('Revision 3', { exact: true }),
   ).toBeVisible();
+  await expect(editor).toBeEditable();
   await expect(workspace.getByLabel('index.html')).toHaveValue(
     /Revision three/,
   );
@@ -134,7 +163,7 @@ fetch('${origin}/v1/artifacts').then(
   await expect(
     workspace.getByRole('button', { name: 'Disconnect' }),
   ).toBeDisabled();
-  const releaseSave = await holdPosts(page, '**/v1/artifacts/*/revisions');
+  const releaseSave = await hold(page, 'POST', '**/v1/artifacts/*/revisions');
   await workspace.getByRole('button', { name: 'Save revision' }).click();
   await expect(
     workspace.getByRole('button', { name: 'Saving…' }),
@@ -148,11 +177,25 @@ fetch('${origin}/v1/artifacts').then(
   await expect(editor).toHaveValue(/Revision four/);
   await expect(fileSelect).toBeEnabled();
 
+  // A save whose response is lost after the commit: retrying the same text,
+  // even after an edit that was undone, replays revision 5 instead of
+  // reporting a conflict with itself.
+  const restoreSave = await loseResponse(page, '**/v1/artifacts/*/revisions');
+  await editor.fill(probe('Revision five'));
+  await workspace.getByRole('button', { name: 'Save revision' }).click();
+  await expect(workspace.getByText('Not saved', { exact: true })).toBeVisible();
+  await restoreSave();
+  await typeAndUndo(editor);
+  await workspace.getByRole('button', { name: 'Save revision' }).click();
+  await expect(
+    workspace.getByText('Revision 5', { exact: true }),
+  ).toBeVisible();
+
   // Saving must write back exactly the bytes the user did not change. A file
   // that is not UTF-8 cannot round-trip through a textarea and is read-only;
   // a byte order mark and CRLF line breaks survive an edit.
   await api(server, 'POST', `/v1/artifacts/${id}/revisions`, {
-    base_revision: 4,
+    base_revision: 5,
     changes: [
       {
         op: 'put',
@@ -168,10 +211,27 @@ fetch('${origin}/v1/artifacts').then(
       },
     ],
   });
+  // A failed load offers a retry instead of leaving the panel stuck.
+  await page.route(
+    `**/v1/artifacts/${id}`,
+    (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: { code: 'unavailable', message: 'Storage is busy.' },
+        }),
+      }),
+    { times: 1 },
+  );
   await page.reload();
   await workspace.scrollIntoViewIfNeeded();
   await expect(
-    workspace.getByText('Revision 5', { exact: true }),
+    workspace.getByText('Could not load the artifact'),
+  ).toBeVisible();
+  await workspace.getByRole('button', { name: 'Try again' }).click();
+  await expect(
+    workspace.getByText('Revision 6', { exact: true }),
   ).toBeVisible();
   await workspace.getByRole('tab', { name: 'Source' }).click();
   await fileSelect.selectOption('legacy.html');
@@ -187,11 +247,11 @@ fetch('${origin}/v1/artifacts').then(
   await notes.pressSequentially('line three');
   await workspace.getByRole('button', { name: 'Save revision' }).click();
   await expect(
-    workspace.getByText('Revision 6', { exact: true }),
+    workspace.getByText('Revision 7', { exact: true }),
   ).toBeVisible();
   await expect(fileSelect).toHaveValue('notes.txt');
   assert.deepEqual(
-    await bytes(server, `/v1/artifacts/${id}/revisions/6/files/notes.txt`),
+    await bytes(server, `/v1/artifacts/${id}/revisions/7/files/notes.txt`),
     Buffer.from('\uFEFFline one\r\nline two\r\nline three'),
     'An edit must keep the byte order mark and CRLF line breaks.',
   );
@@ -204,23 +264,23 @@ fetch('${origin}/v1/artifacts').then(
   const history = await api(server, 'GET', `/v1/artifacts/${id}/revisions`);
   assert.deepEqual(
     history.revisions.map((revision) => revision.revision),
-    [6, 5, 4, 3, 2, 1],
+    [7, 6, 5, 4, 3, 2, 1],
     'The conflicting save must not create a revision.',
   );
-  return { revisions: 6, conflict: 'rejected', sandbox: 'opaque' };
+  return { revisions: 7, conflict: 'rejected', sandbox: 'opaque' };
 }
 
 /**
- * Holds POST requests matching `pattern` until the returned function is
+ * Holds `method` requests matching `pattern` until the returned function is
  * called, which lets them proceed and removes the hold.
  */
-async function holdPosts(page, pattern) {
+async function hold(page, method, pattern) {
   let release = () => {};
   const held = new Promise((resolve) => {
     release = resolve;
   });
   const handler = async (route) => {
-    if (route.request().method() === 'POST') await held;
+    if (route.request().method() === method) await held;
     await route.fallback();
   };
   await page.route(pattern, handler);
@@ -228,6 +288,38 @@ async function holdPosts(page, pattern) {
     release();
     await page.unroute(pattern, handler);
   };
+}
+
+/**
+ * Lets the next POST matching `pattern` reach the server, then answers the
+ * page with 503 as if the response were lost. Returns a function that
+ * removes the interception.
+ */
+async function loseResponse(page, pattern) {
+  let lost = false;
+  const handler = async (route) => {
+    if (lost || route.request().method() !== 'POST') return route.fallback();
+    lost = true;
+    await route.fetch();
+    return route.fulfill({
+      status: 503,
+      json: { error: { code: 'unavailable', message: 'Response lost.' } },
+    });
+  };
+  await page.route(pattern, handler);
+  return () => page.unroute(pattern, handler);
+}
+
+/**
+ * Types a character at the start of a field and deletes it again. The start
+ * avoids scrolling a long textarea, which makes Firefox log scroll-anchoring
+ * warnings at automated typing speed.
+ */
+async function typeAndUndo(field) {
+  await field.focus();
+  await field.press('ControlOrMeta+Home');
+  await field.pressSequentially('x');
+  await field.press('Backspace');
 }
 
 async function bytes(server, path) {

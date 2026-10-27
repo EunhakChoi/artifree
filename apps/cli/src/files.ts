@@ -18,7 +18,10 @@ export async function readDirectory(directory: string): Promise<LocalFile[]> {
   const files: LocalFile[] = [];
   async function visit(absolute: string, prefix: string): Promise<void> {
     const entries = await readdir(absolute, { withFileTypes: true });
-    entries.sort((left, right) => left.name.localeCompare(right.name));
+    // Code-unit order, independent of the locale, keeps output stable.
+    entries.sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    );
     for (const entry of entries) {
       if (entry.name.startsWith('.')) continue;
       const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;

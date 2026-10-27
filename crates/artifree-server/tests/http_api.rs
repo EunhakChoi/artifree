@@ -308,6 +308,29 @@ async fn retried_create_replays_and_reused_key_is_rejected() -> TestResult {
 }
 
 #[tokio::test]
+async fn retried_save_replays_regardless_of_change_order() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let path = format!("/v1/artifacts/{id}/revisions");
+    let put = |name: &str| json!({ "op": "put", "path": name, "encoding": "utf8", "content": "x" });
+    let delete = json!({ "op": "delete", "path": "assets/logo.png" });
+    let first =
+        json!({ "base_revision": 1, "changes": [put("a.txt"), put("b.txt"), delete.clone()] });
+    let reordered = json!({ "base_revision": 1, "changes": [delete, put("b.txt"), put("a.txt")] });
+    let saved = harness
+        .send(post(&path, Some("order-key"), &first)?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let retry = harness
+        .send(post(&path, Some("order-key"), &reordered)?)
+        .await?;
+    assert_eq!(retry.status, StatusCode::CREATED, "{}", error_code(&retry));
+    assert_eq!(retry.json()?["replayed"], true);
+    assert_eq!(retry.json()?["revision"], saved.json()?["revision"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn stale_base_revision_conflicts_with_current_revision() -> TestResult {
     let harness = Harness::new();
     let id = created_id(&harness).await?;
@@ -347,6 +370,15 @@ async fn stale_base_revision_conflicts_with_current_revision() -> TestResult {
         StatusCode::CONFLICT,
         "a base newer than current must not be accepted"
     );
+    let zero = harness
+        .send(post(
+            &path,
+            Some("save-key-4"),
+            &put_index(0, "<h1>x</h1>"),
+        )?)
+        .await?;
+    assert_eq!(zero.status, StatusCode::CONFLICT, "{}", error_code(&zero));
+    assert_eq!(zero.json()?["error"]["current_revision"], 2);
 
     let artifact = harness
         .send(get(&format!("/v1/artifacts/{id}"))?)
@@ -579,6 +611,14 @@ async fn preview_serves_a_pinned_revision_in_an_opaque_sandbox() -> TestResult {
     assert!(
         !policy.contains("allow-same-origin"),
         "content must run in an opaque origin: {policy}"
+    );
+    assert!(
+        !policy.contains("allow-popups"),
+        "a popup would escape the content policy: {policy}"
+    );
+    assert!(
+        policy.contains("form-action 'none'"),
+        "forms must not submit anywhere: {policy}"
     );
     assert!(
         policy.contains(&format!("connect-src {CONTENT_ORIGIN};")),

@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { PlusIcon } from 'lucide-react';
 import { newIdempotencyKey } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
-import type { Artifact } from '@artifree/contracts';
+import type { Artifact, CreateArtifactRequest } from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
@@ -51,31 +51,35 @@ export function CreateDialog({
   const [html, setHtml] = useState(STARTER);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string>();
-  // One key per draft: retrying the same draft after a lost response
-  // returns the original artifact instead of creating another.
-  const [requestKey, setRequestKey] = useState(newIdempotencyKey);
+  // The last request sent and its key. Sending the same content again reuses
+  // the key, so a retry after a lost response returns the original artifact
+  // instead of creating another, even if the text was edited and restored.
+  const [attempt, setAttempt] = useState<{ body: string; key: string }>();
 
   function edit(update: () => void): void {
     update();
-    setRequestKey(newIdempotencyKey());
+    setFailure(undefined);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    const request: CreateArtifactRequest = {
+      title: title.trim(),
+      files: [{ path: 'index.html', encoding: 'utf8', content: html }],
+    };
+    const body = JSON.stringify(request);
+    const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
+    setAttempt({ body, key });
     setPending(true);
     setFailure(undefined);
     try {
-      const result = await client.createArtifact(
-        {
-          title: title.trim(),
-          files: [{ path: 'index.html', encoding: 'utf8', content: html }],
-        },
-        { idempotencyKey: requestKey },
-      );
+      const result = await client.createArtifact(request, {
+        idempotencyKey: key,
+      });
       setOpen(false);
       setTitle('');
       setHtml(STARTER);
-      setRequestKey(newIdempotencyKey());
+      setAttempt(undefined);
       onCreated(result.artifact);
     } catch (error: unknown) {
       setFailure(describeFailure(error));
@@ -85,7 +89,16 @@ export function CreateDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // Stay open until the request settles: its result changes the
+        // selection, and the form shows its outcome.
+        if (pending) return;
+        if (next) setFailure(undefined);
+        setOpen(next);
+      }}
+    >
       <DialogTrigger render={<Button disabled={disabled} />}>
         <PlusIcon data-icon="inline-start" aria-hidden="true" />
         New artifact
@@ -137,7 +150,9 @@ export function CreateDialog({
             </Alert>
           )}
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>
+            <DialogClose
+              render={<Button variant="outline" disabled={pending} />}
+            >
               Cancel
             </DialogClose>
             <Button type="submit" disabled={pending || title.trim() === ''}>

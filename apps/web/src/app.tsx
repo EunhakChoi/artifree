@@ -220,7 +220,7 @@ export function App() {
           </h1>
           <p className="max-w-lg text-sm leading-relaxed text-muted-foreground">
             A workspace you run on your own machine. Agents and people create
-            HTML artifacts, save revisions, and preview them in isolation.
+            HTML artifacts, save revisions, and preview them in a sandbox.
           </p>
           <FoundationDialog />
         </section>

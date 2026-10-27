@@ -21,6 +21,9 @@ pub const DEFAULT_CONTENT_ADDRESS: &str = "127.0.0.1:7411";
 pub const DEFAULT_FRAME_ANCESTORS: &str = "http://127.0.0.1:* http://localhost:*";
 /// Default preview link lifetime.
 pub const DEFAULT_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
+/// Longest accepted preview link lifetime. Links are bearer credentials, and
+/// the bound keeps expiry arithmetic far from overflow.
+pub const MAX_PREVIEW_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Options of `artifree-server serve`.
 #[derive(Debug, Clone)]

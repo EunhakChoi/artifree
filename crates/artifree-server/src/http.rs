@@ -33,7 +33,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use crate::auth::AccessToken;
 use crate::preview::{self, PreviewTickets};
 
-/// Largest accepted request body: a maximum package in base64 plus JSON framing.
+/// Largest accepted request body: a maximum package in base64 plus JSON
+/// framing. Clients send a file as UTF-8 text only when its JSON escaping is
+/// no larger than base64, so this bound holds for either encoding.
 pub const MAX_BODY_BYTES: usize = 36 * 1024 * 1024;
 
 /// Server settings that adapters need at request time.

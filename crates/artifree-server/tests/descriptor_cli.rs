@@ -68,6 +68,35 @@ fn serve_requires_a_data_directory() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn serve_rejects_a_preview_lifetime_out_of_range() -> Result<(), Box<dyn Error>> {
+    // An unbounded lifetime overflowed expiry arithmetic while issuing a
+    // ticket; it must fail at startup instead. The invalid listen address
+    // makes a wrongly accepted lifetime fail on that message rather than
+    // start a server that never exits.
+    for seconds in ["0", "86401", "18446744073709551615"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_artifree-server"))
+            .args([
+                "serve",
+                "--data-dir",
+                "unused",
+                "--preview-ttl-seconds",
+                seconds,
+                "--api-listen",
+                "not-an-address",
+            ])
+            .output()?;
+        assert_eq!(output.status.code(), Some(1), "{seconds}");
+        assert!(output.stdout.is_empty(), "no readiness line may be printed");
+        let message = String::from_utf8(output.stderr)?;
+        assert!(
+            message.contains("from 1 to 86400"),
+            "{seconds}: {message:?}"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 mod data_directory {
     use std::error::Error;

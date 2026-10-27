@@ -1,8 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useEffectEvent, useState } from 'react';
 import { RotateCwIcon, SaveIcon, Undo2Icon } from 'lucide-react';
 import { ArtifreeApiError, newIdempotencyKey } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
-import type { Artifact, Revision } from '@artifree/contracts';
+import type {
+  Artifact,
+  Revision,
+  SaveRevisionRequest,
+} from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -29,9 +33,13 @@ import { Textarea } from '@/components/ui/textarea';
 import { fromEditable, toEditable } from './editable-text';
 import { describeFailure, useRequest } from './use-request';
 
-/** Sandbox flags for previews; without allow-same-origin the content is opaque. */
+/**
+ * Sandbox flags for previews, matching the content server's CSP: without
+ * allow-same-origin the content is opaque, and without allow-popups it cannot
+ * open windows that escape the content policy.
+ */
 const PREVIEW_SANDBOX =
-  'allow-scripts allow-forms allow-modals allow-popups allow-downloads';
+  'allow-scripts allow-forms allow-modals allow-downloads';
 
 const TEXT_TYPES = /^(text\/|application\/json|application\/xml|image\/svg)/;
 
@@ -58,15 +66,18 @@ export function ArtifactDetail({
   const details = useRequest(
     `${artifactId}:${generation}`,
     async () => {
-      const [artifact, revisions] = await Promise.all([
-        client.getArtifact(artifactId),
-        client.listRevisions(artifactId),
-      ]);
-      return { artifact, revisions };
-      // After a save, keep showing the card until the new revision arrives.
+      // Revisions are listed after the artifact is read, so the list always
+      // contains its current revision.
+      const artifact = await client.getArtifact(artifactId);
+      const revisions = await client.listRevisions(artifactId);
+      return { artifact, revisions, generation };
     },
+    // After a save, keep showing the card until the new revision arrives.
     { keepPrevious: true },
   );
+  function reload(): void {
+    setGeneration((value) => value + 1);
+  }
   if (details.status === 'loading')
     return (
       <output className="text-sm text-muted-foreground">
@@ -77,13 +88,18 @@ export function ArtifactDetail({
     return (
       <Alert variant="destructive">
         <AlertTitle>Could not load the artifact</AlertTitle>
-        <AlertDescription>{details.message}</AlertDescription>
+        <AlertDescription>
+          <p>{details.message}</p>
+          <Button type="button" variant="outline" size="sm" onClick={reload}>
+            <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+            Try again
+          </Button>
+        </AlertDescription>
       </Alert>
     );
   const { artifact, revisions } = details.value;
-  function reload(): void {
-    setGeneration((value) => value + 1);
-  }
+  // The shown revision is being replaced; editing it now would be discarded.
+  const reloading = details.value.generation !== generation;
   return (
     <Card>
       <CardHeader>
@@ -130,6 +146,7 @@ export function ArtifactDetail({
               }}
               unsaved={unsaved}
               onUnsavedChange={onUnsavedChange}
+              reloading={reloading}
             />
           </TabsContent>
         </Tabs>
@@ -190,9 +207,11 @@ function PreviewPanel({ client, artifact, revisions }: PreviewPanelProps) {
         />
       ) : null}
       <p className="text-xs text-muted-foreground">
-        Content runs in a sandboxed frame on a separate origin. It cannot reach
-        this page, the API, or the network; data, model, and file capabilities
-        are not available yet.
+        Content runs in a sandboxed frame on a separate origin. It cannot read
+        this page, the API, or other artifacts, and loads and connects only to
+        its own origin. Scripts can still navigate the frame to another site, so
+        treat what you type into an untrusted artifact as visible to its author.
+        Data, model, and file capabilities are not available yet.
       </p>
     </div>
   );
@@ -206,6 +225,8 @@ interface SourcePanelProps {
   onReload: () => void;
   unsaved: boolean;
   onUnsavedChange: (unsaved: boolean) => void;
+  /** A newer revision is loading and will replace the editor. */
+  reloading: boolean;
 }
 
 function SourcePanel({
@@ -216,6 +237,7 @@ function SourcePanel({
   onReload,
   unsaved,
   onUnsavedChange,
+  reloading,
 }: SourcePanelProps) {
   const current = revisions.find(
     (item) => item.revision === artifact.current_revision,
@@ -242,7 +264,7 @@ function SourcePanel({
           <NativeSelect
             id="source-file"
             value={path}
-            disabled={unsaved}
+            disabled={unsaved || reloading}
             aria-describedby={unsaved ? 'source-file-locked' : undefined}
             onChange={(event) => setChosen(event.target.value)}
           >
@@ -267,6 +289,7 @@ function SourcePanel({
         onSaved={onSaved}
         onReload={onReload}
         onUnsavedChange={onUnsavedChange}
+        reloading={reloading}
       />
     </div>
   );
@@ -279,6 +302,7 @@ interface FileEditorProps {
   onSaved: (artifact: Artifact) => void;
   onReload: () => void;
   onUnsavedChange: (unsaved: boolean) => void;
+  reloading: boolean;
 }
 
 type SaveState =
@@ -294,15 +318,23 @@ function FileEditor({
   onSaved,
   onReload,
   onUnsavedChange,
+  reloading,
 }: FileEditorProps) {
   const base = artifact.current_revision;
-  const loaded = useRequest(`${artifact.id}:${base}:${path}`, async () =>
-    toEditable(await client.readFile(artifact.id, base, path)),
+  const [readAttempt, setReadAttempt] = useState(0);
+  const loaded = useRequest(
+    `${artifact.id}:${base}:${path}:${readAttempt}`,
+    async () => toEditable(await client.readFile(artifact.id, base, path)),
   );
   const [draft, setDraft] = useState<string>();
   const [save, setSave] = useState<SaveState>({ status: 'idle' });
-  // One key per draft, so retrying after a lost response cannot commit twice.
-  const [requestKey, setRequestKey] = useState(newIdempotencyKey);
+  // The last request sent and its key. Sending the same content again reuses
+  // the key, so a retry after a lost response cannot commit twice.
+  const [attempt, setAttempt] = useState<{ body: string; key: string }>();
+  // Whatever replaces this editor discards its draft, so it must not leave
+  // the workspace locked.
+  const releaseLock = useEffectEvent(() => onUnsavedChange(false));
+  useEffect(() => () => releaseLock(), []);
 
   if (loaded.status === 'loading')
     return (
@@ -312,7 +344,18 @@ function FileEditor({
     return (
       <Alert variant="destructive">
         <AlertTitle>Could not read {path}</AlertTitle>
-        <AlertDescription>{loaded.message}</AlertDescription>
+        <AlertDescription>
+          <p>{loaded.message}</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setReadAttempt((value) => value + 1)}
+          >
+            <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+            Try again
+          </Button>
+        </AlertDescription>
       </Alert>
     );
   const file = loaded.value;
@@ -331,32 +374,36 @@ function FileEditor({
   const value = draft ?? text;
   const changed = value !== text;
   const saving = save.status === 'saving';
+  // Read-only while a request will replace this editor: a save in flight
+  // carries the text as sent, and a reload remounts it with a new revision.
+  const locked = saving || reloading;
 
   function edit(next: string | undefined): void {
     setDraft(next);
-    setRequestKey(newIdempotencyKey());
     setSave({ status: 'idle' });
     onUnsavedChange(next !== undefined && next !== text);
   }
 
   async function commit(): Promise<void> {
+    const request: SaveRevisionRequest = {
+      base_revision: base,
+      changes: [
+        {
+          op: 'put',
+          path,
+          encoding: 'utf8',
+          content: fromEditable(value, crlf),
+        },
+      ],
+    };
+    const body = JSON.stringify(request);
+    const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
+    setAttempt({ body, key });
     setSave({ status: 'saving' });
     try {
-      const result = await client.saveRevision(
-        artifact.id,
-        {
-          base_revision: base,
-          changes: [
-            {
-              op: 'put',
-              path,
-              encoding: 'utf8',
-              content: fromEditable(value, crlf),
-            },
-          ],
-        },
-        { idempotencyKey: requestKey },
-      );
+      const result = await client.saveRevision(artifact.id, request, {
+        idempotencyKey: key,
+      });
       onSaved(result.artifact);
     } catch (error: unknown) {
       if (
@@ -378,10 +425,8 @@ function FileEditor({
           className="max-h-128 min-h-64"
           spellCheck={false}
           value={value}
-          // Read-only while saving: the request carries this text, and the
-          // editor reloads with the committed revision when it succeeds.
-          readOnly={saving}
-          aria-busy={saving}
+          readOnly={locked}
+          aria-busy={locked}
           onChange={(event) => edit(event.target.value)}
         />
         <FieldDescription>
@@ -408,13 +453,13 @@ function FileEditor({
       <Field orientation="horizontal">
         <Button
           type="button"
-          disabled={!changed || saving}
+          disabled={!changed || locked}
           onClick={() => void commit()}
         >
           <SaveIcon data-icon="inline-start" aria-hidden="true" />
           {saving ? 'Saving…' : 'Save revision'}
         </Button>
-        {changed && !saving && save.status !== 'conflict' ? (
+        {changed && !locked && save.status !== 'conflict' ? (
           <Button
             type="button"
             variant="outline"
@@ -425,9 +470,14 @@ function FileEditor({
           </Button>
         ) : null}
         {save.status === 'conflict' ? (
-          <Button type="button" variant="outline" onClick={onReload}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={reloading}
+            onClick={onReload}
+          >
             <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
-            Load latest
+            {reloading ? 'Loading latest…' : 'Load latest'}
           </Button>
         ) : null}
       </Field>

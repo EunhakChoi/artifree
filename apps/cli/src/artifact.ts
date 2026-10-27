@@ -242,8 +242,12 @@ async function save(args: string[]): Promise<void> {
     const present = new Set(files.map((file) => file.path));
     const revisions = await client.listRevisions(id);
     const baseRevision = revisions.find((item) => item.revision === base);
+    // A missing base is server state, not a usage mistake: exit as an API error.
     if (baseRevision === undefined)
-      throw new UsageError(`Revision ${base} of ${id} does not exist.`);
+      throw new ArtifreeApiError(`Revision ${base} of ${id} does not exist.`, {
+        status: 0,
+        code: 'not_found',
+      });
     for (const file of files)
       changes.push({ op: 'put', ...encodeFile(file.path, file.bytes) });
     for (const file of baseRevision.files)

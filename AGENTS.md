@@ -20,9 +20,11 @@ proposed behavior explicitly separate in code, UI, docs, and completion reports.
   `contracts/generated` or `packages/contracts/src/generated`.
 - JSON Schema and generated TypeScript do not replace runtime input validation
   or authorization. The current inventory is not a live health response.
-- Previews run in a CSP/iframe sandbox on a separate origin with no network
-  or capabilities. The runtime SDK contains types only; do not advertise
-  capability enforcement or an iframe bridge until it is implemented.
+- Previews run in a CSP/iframe sandbox on a separate origin with no
+  capabilities. They are isolated from the workspace, not from the network:
+  content can navigate its own frame elsewhere (decision 0003). Do not claim
+  network isolation, capability enforcement, or an iframe bridge until they
+  are implemented. The runtime SDK contains types only.
 - Mutations go through `ArtifactService` with a base revision and an
   idempotency key. Do not add a write path that bypasses either.
 

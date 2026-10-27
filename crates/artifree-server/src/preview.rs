@@ -31,9 +31,13 @@ use crate::http::AppState;
 /// Upper bound on live tickets, which limits memory held by unused links.
 pub const MAX_LIVE_TICKETS: usize = 4096;
 
-/// Sandbox flags for previewed content. `allow-same-origin` is deliberately
-/// absent so content cannot use the content origin's storage or cookies.
-pub const SANDBOX: &str = "allow-scripts allow-forms allow-modals allow-popups allow-downloads";
+/// Sandbox flags for previewed content. `allow-same-origin` is absent so
+/// content cannot use the content origin's storage or cookies, and
+/// `allow-popups` is absent because a new window is not bound by this CSP and
+/// could load any URL. Forms work for scripts, but `form-action 'none'`
+/// blocks submission. Content can still navigate its own frame; see
+/// decision 0003.
+pub const SANDBOX: &str = "allow-scripts allow-forms allow-modals allow-downloads";
 
 /// A newly issued preview link.
 #[derive(Debug)]
@@ -81,7 +85,15 @@ impl PreviewTickets {
         let mut bytes = [0; 32];
         getrandom::fill(&mut bytes).ok()?;
         let secret = hex(&bytes);
+        // Compute every expiry before taking the lock, so an unrepresentable
+        // lifetime fails here instead of leaving a ticket nobody was given.
         let now = Instant::now();
+        let expires = now.checked_add(self.ttl)?;
+        let expires_at_ms = SystemTime::now()
+            .checked_add(self.ttl)?
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
         let mut live = self.live.lock().ok()?;
         live.retain(|_, ticket| ticket.expires > now);
         if live.len() >= MAX_LIVE_TICKETS {
@@ -93,14 +105,9 @@ impl PreviewTickets {
                 actor,
                 artifact,
                 revision,
-                expires: now + self.ttl,
+                expires,
             },
         );
-        let expires_at = SystemTime::now() + self.ttl;
-        let expires_at_ms = expires_at
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
         Some(IssuedTicket {
             secret,
             expires_at_ms,

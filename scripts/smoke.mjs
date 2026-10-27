@@ -142,10 +142,10 @@ try {
     const source = message.location().url;
     if (source.startsWith(api.content_origin))
       artifactConsole.push(message.text());
-    // Browsers log the 401 and 409 that the workspace test provokes on purpose.
+    // Browsers log the 401, 409, and 503 the workspace test provokes on purpose.
     else if (
       source.startsWith(`${origin}/v1/`) &&
-      /status of (401|409) /.test(message.text())
+      /status of (401|409|503) /.test(message.text())
     )
       expectedApiFailures.push(message.text().match(/status of (\d+)/)[1]);
     else consoleErrors.push(message.text());
@@ -355,8 +355,8 @@ try {
   if (browserName === 'chromium')
     assert.deepEqual(
       expectedApiFailures.sort(),
-      ['401', '409'],
-      'Only the deliberate rejected token and stale save may fail.',
+      ['401', '409', '503', '503', '503'],
+      'Only the deliberate rejected token, stale save, lost responses, and failed load may fail.',
     );
   assert.deepEqual(
     externalRequests,

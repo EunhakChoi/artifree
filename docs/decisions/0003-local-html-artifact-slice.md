@@ -25,14 +25,16 @@ server, and keep the core independent of the framework and the store.
    Each operation opens its own connection; SQLite's file lock serializes
    writers across threads and processes, so no in-process lock is needed.
 3. **Revisions and retries.** A save names its base revision and is rejected
-   with `revision_conflict` unless the base is current. Mutating requests carry
-   an `Idempotency-Key`, scoped to the actor. The same key and request content
-   (a length-prefixed SHA-256 fingerprint) replays the original result even
-   after later commits: the artifact's current revision and update time in a
-   replayed receipt are those of the keyed commit. The same key with different
-   content is rejected.
-   Rejected requests do not reserve their key. Keys are kept indefinitely for
-   now.
+   with `revision_conflict` unless the base is current (revision 0 included).
+   Mutating requests carry an `Idempotency-Key`, scoped to the actor. The same
+   key and request content (a length-prefixed SHA-256 fingerprint over files
+   and changes in path order, so listing order does not matter) replays the
+   original result even after later commits: the artifact's current revision
+   and update time in a replayed receipt are those of the keyed commit. The
+   same key with different content is rejected. Rejected requests do not
+   reserve their key. Keys are kept indefinitely for now. Clients reuse a key
+   for as long as they resend the same content, so a retry after a lost
+   response replays rather than duplicating or conflicting.
 4. **Authorization.** One local bearer token, created with owner-only file
    permissions on Unix in the data directory, maps to the single local owner.
    The bearer scheme is matched case-insensitively. On Unix the data directory
@@ -48,17 +50,27 @@ server, and keep the core independent of the framework and the store.
    multi-user authentication.
 5. **Isolated preview.** Artifact files are served by a second listener on a
    separate origin under a 256-bit ticket bound to actor, artifact, and
-   revision, expiring after 15 minutes by default. Each request rechecks access
-   through the core. Responses carry CSP `sandbox` without `allow-same-origin`,
-   restrict loads and connections to the content origin, set `nosniff` and
-   `no-referrer`, and limit `frame-ancestors`. The web UI embeds previews in a
-   sandboxed iframe. Content has no network egress, data, model, or file
-   capability; the runtime SDK remains types only.
+   revision, expiring after 15 minutes by default (configurable from 1 second
+   to 24 hours). Each request rechecks access
+   through the core. Responses carry CSP `sandbox` without `allow-same-origin`
+   or `allow-popups`, restrict subresource loads and connections to the
+   content origin, block form submission (`form-action 'none'`), set
+   `nosniff` and `no-referrer`, and limit `frame-ancestors`. The web UI embeds
+   previews in an iframe with the same sandbox flags. Content therefore cannot
+   read the workspace page, its storage, the API, the token, or other
+   artifacts. This is isolation from the workspace, not from the network: no
+   CSP directive stops a script from navigating its own frame to another
+   site, which can carry data the artifact holds or the user typed into it.
+   Network isolation needs a different mechanism and is not implemented. The
+   preview has no data, model, or file capability; the runtime SDK remains
+   types only.
 6. **Paths and limits.** Package paths are portable relative names: ASCII
    letters, digits, `-`, `_`, `.`; no hidden, `.`/`..`, empty, or reserved
    device segments; supported media type by extension; no case-insensitive
    collision or file/directory conflict. Limits: 256 files, 5 MiB per file,
-   25 MiB per package, 36 MiB per request body. A save may carry up to 512
+   25 MiB per package, 36 MiB per request body. The body limit fits a full
+   package in base64; clients send a file as UTF-8 text only when its JSON
+   escaping is no larger than base64. A save may carry up to 512
    changes (replacing every file of a full package); the resulting package
    must meet the file limits.
 7. **Wire contracts.** HTTP API v1 bodies are Rust DTOs exported as one JSON
@@ -97,5 +109,6 @@ Web: shadcn/ui `field`, `input`, `label`, `textarea`, `native-select`, and
 - Request keys and unreferenced content are not garbage-collected yet.
 - PostgreSQL/object storage, publishing, sharing, restore, fork, MCP, build
   workers, and runtime capabilities are not implemented.
-- Sandboxed previews prevent access to the workspace origin and the network,
-  but do not limit CPU or memory use by artifact scripts.
+- Sandboxed previews prevent access to the workspace, but not top-level
+  navigation of their own frame to another site, and do not limit CPU or
+  memory use by artifact scripts.

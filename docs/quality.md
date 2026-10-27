@@ -56,13 +56,17 @@ Artifact behavior is tested at the boundary that owns it:
   tickets and CSP, expiry, owner-only access in the core, and (on Unix) an
   owner-only data directory, refusing one other users can access.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
-  bytes through upload and `cat`, refused dot segments, and a SIGKILL after
-  commit followed by a restart and a replayed retry.
+  bytes through upload and `cat`, uploads that JSON escaping would inflate past
+  the body limit, refused dot segments, a missing base revision as an API
+  error, and a SIGKILL after commit followed by a restart and a replayed
+  retry.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
-  read the parent page, use storage, or reach the API; create and save
-  requests held in flight keep the forms read-only; unsaved changes lock
-  navigation; non-UTF-8 files are not editable; an edit keeps a byte order
-  mark and CRLF line breaks.
+  read the parent page, use storage, open a popup, or reach the API; create,
+  save, and reload requests held in flight keep the forms read-only and the
+  dialog open; a response lost after commit is retried with the same key and
+  replays; a failed load offers a retry; unsaved changes lock navigation;
+  non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
+  line breaks.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

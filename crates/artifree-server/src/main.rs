@@ -90,10 +90,17 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             "--content-origin" => content_origin = Some(value()?),
             "--frame-ancestors" => frame_ancestors = value()?,
             "--preview-ttl-seconds" => {
-                let seconds: u64 = value()?
-                    .parse()
-                    .map_err(|_| "--preview-ttl-seconds must be a whole number.".to_owned())?;
+                let range = || {
+                    format!(
+                        "--preview-ttl-seconds must be a whole number from 1 to {}.",
+                        serve::MAX_PREVIEW_TTL.as_secs()
+                    )
+                };
+                let seconds: u64 = value()?.parse().map_err(|_| range())?;
                 preview_ttl = Duration::from_secs(seconds);
+                if seconds == 0 || preview_ttl > serve::MAX_PREVIEW_TTL {
+                    return Err(range());
+                }
             }
             other => {
                 return Err(format!(
@@ -138,7 +145,7 @@ Options:
   --content-listen <addr:port>  Preview address [default: {content}]
   --content-origin <origin>     Public preview origin, if proxied
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
-  --preview-ttl-seconds <n>     Preview link lifetime [default: 900]
+  --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
 
 --describe emits the build-time module inventory as JSON; it does not probe a
 running server.",

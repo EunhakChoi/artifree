@@ -152,7 +152,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
         changes: Vec<FileChange>,
     ) -> Result<CommitReceipt, ArtifactError> {
         let record = self.authorized(actor, id)?;
-        if base > record.current_revision {
+        // Revision 0 never exists; like a future base, it cannot be current.
+        if base.0 == 0 || base > record.current_revision {
             return Err(ArtifactError::RevisionConflict {
                 current: record.current_revision,
             });
@@ -160,7 +161,12 @@ impl<S: ArtifactStore> ArtifactService<S> {
         let mut hasher = Fingerprint::new("save");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
-        for change in &changes {
+        // Hash in path order: a retry that lists the same changes in another
+        // order is the same request. Paths must be distinct, so the order is
+        // total for every change set that can commit.
+        let mut ordered: Vec<&FileChange> = changes.iter().collect();
+        ordered.sort_by(|left, right| left.path().cmp(right.path()));
+        for change in ordered {
             match change {
                 FileChange::Put { path, content } => hasher.put(path, content),
                 FileChange::Delete { path } => {

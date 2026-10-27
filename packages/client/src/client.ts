@@ -73,20 +73,29 @@ export function newIdempotencyKey(): string {
 }
 
 /**
- * Encodes file bytes for upload, as UTF-8 text when the bytes allow it. The
+ * Encodes file bytes for upload in whichever form is smaller on the wire:
+ * UTF-8 text when the bytes are valid UTF-8 and their JSON escaping does not
+ * outgrow base64, otherwise base64. The server's body limit assumes base64
+ * sizes, so quote- or control-heavy text must not be sent escaped. The
  * server stores exactly these bytes, so a byte order mark is kept as text.
  */
 export function encodeFile(path: string, bytes: Uint8Array): FileUpload {
+  const base64 = (): FileUpload => ({
+    path,
+    encoding: 'base64',
+    content: toBase64(bytes),
+  });
+  let text: string;
   try {
-    const text = new TextDecoder('utf-8', {
-      fatal: true,
-      ignoreBOM: true,
-    }).decode(bytes);
-    return { path, encoding: 'utf8', content: text };
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
   } catch {
-    // Not valid UTF-8: send the exact bytes as base64 instead.
-    return { path, encoding: 'base64', content: toBase64(bytes) };
+    return base64();
   }
+  const escaped = new TextEncoder().encode(JSON.stringify(text)).length - 2;
+  if (escaped > Math.ceil(bytes.length / 3) * 4) return base64();
+  return { path, encoding: 'utf8', content: text };
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -184,7 +193,14 @@ export class ArtifreeClient {
       'GET',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/files/${filePath(path)}`,
     );
-    return new Uint8Array(await response.arrayBuffer());
+    try {
+      return new Uint8Array(await response.arrayBuffer());
+    } catch (error: unknown) {
+      throw new ArtifreeApiError(
+        `The connection to ${this.baseUrl || 'this origin'} ended while reading ${path}.`,
+        { status: response.status, code: 'network_error', cause: error },
+      );
+    }
   }
 
   /** A short-lived URL rendering a pinned revision on the content origin. */

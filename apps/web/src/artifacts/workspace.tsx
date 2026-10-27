@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { FileCode2Icon, LogOutIcon } from 'lucide-react';
+import { FileCode2Icon, LogOutIcon, RotateCwIcon } from 'lucide-react';
 import { ArtifreeClient } from '@artifree/client';
 import type { Artifact } from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -95,7 +95,18 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       {artifacts.status === 'error' ? (
         <Alert variant="destructive">
           <AlertTitle>Could not list artifacts</AlertTitle>
-          <AlertDescription>{artifacts.message}</AlertDescription>
+          <AlertDescription>
+            <p>{artifacts.message}</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setGeneration((value) => value + 1)}
+            >
+              <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+              Try again
+            </Button>
+          </AlertDescription>
         </Alert>
       ) : null}
       {artifacts.status === 'ready' && artifacts.value.length === 0 ? (
