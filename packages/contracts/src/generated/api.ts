@@ -1,7 +1,7 @@
 /* Generated from artifree-contracts. Run npm run generate:contracts; do not edit. */
 
 /**
- * Any JSON request or response body of HTTP API v1.
+ * Any JSON request or response body of HTTP API v1, or the data of a change feed event.
  */
 export type ApiBody =
   | CreateArtifactRequest
@@ -12,7 +12,9 @@ export type ApiBody =
   | Revision
   | RevisionList
   | Preview
-  | ErrorResponse;
+  | ErrorResponse
+  | ArtifactChange
+  | FeedPosition;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -58,6 +60,11 @@ export type ErrorCode =
   | 'rate_limited'
   | 'unavailable'
   | 'internal';
+/**
+ * What a commit did to an artifact. A kind that a client does not know
+ * still means the artifact changed: read it again.
+ */
+export type ChangeKind = 'created' | 'revised';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -231,4 +238,40 @@ export interface ErrorBody {
    * Human-readable explanation; not a stable contract.
    */
   message: string;
+}
+/**
+ * Data of a `change` event of `GET /v1/changes`: one commit that wrote a
+ * revision. Retries that replay a commit, and failed commits, have none.
+ * It names what to read again and carries no content.
+ */
+export interface ArtifactChange {
+  /**
+   * The changed artifact.
+   */
+  artifact_id: string;
+  change: ChangeKind;
+  /**
+   * Commit time in Unix milliseconds.
+   */
+  committed_at_ms: number;
+  /**
+   * Opaque feed position of this change, also the event's `id`.
+   */
+  cursor: string;
+  /**
+   * The revision the commit created.
+   */
+  revision: number;
+}
+/**
+ * Data of the `ready` and `reset` events of `GET /v1/changes`. `ready`
+ * starts a stream opened without a cursor. `reset` answers a cursor this
+ * feed cannot continue from: changes may have been missed, so read the
+ * state again. Later events follow this position.
+ */
+export interface FeedPosition {
+  /**
+   * Opaque feed position, also the event's `id`.
+   */
+  cursor: string;
 }

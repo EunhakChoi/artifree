@@ -45,14 +45,14 @@ const notes: Record<string, ModuleNote> = {
     purpose:
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
-      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
-    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 웹 자동 갱신과 handoff는 별도 기능입니다.',
+      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 커밋 변경 피드(GET /v1/changes SSE: cursor 재개·reset·사용자별 stream 수 제한), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
+    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 웹 작업공간의 변경 피드 사용(A02)과 handoff는 별도 기능입니다.',
   },
   domain: {
     purpose:
       '제품의 핵심 개념을 외부 도구에 의존하지 않는 타입으로 표현합니다.',
     exists:
-      '검증된 ID·title·request key, 이식 가능한 package path(탈출·대소문자 충돌·예약 이름 거절), 크기·개수 제한, 별도 version counter.',
+      '검증된 ID·title·request key, 이식 가능한 package path(탈출·대소문자 충돌·예약 이름 거절), 크기·개수 제한, 별도 version counter, DB 식별자를 포함한 변경 피드 cursor.',
     next: '구조화된 문서의 node·operation 타입을 파일 패키지와 별도로 정의합니다.',
   },
   artifacts: {
@@ -88,7 +88,7 @@ const notes: Record<string, ModuleNote> = {
   storage: {
     purpose: '메타데이터와 파일 bytes를 환경에 맞게 보관하는 adapter입니다.',
     exists:
-      '로컬 SQLite 한 파일: WAL·synchronous=FULL, BEGIN IMMEDIATE 조건부 commit, 동일 내용 공유 저장, schema version 확인.',
+      '로컬 SQLite 한 파일: WAL·synchronous=FULL, BEGIN IMMEDIATE 조건부 commit, 같은 transaction의 변경 피드 기록, 동일 내용 공유 저장, schema version 확인과 v1→v2 migration.',
     next: 'PostgreSQL·object storage adapter에 같은 계약 테스트를 적용합니다. blob과 SQL commit 경계를 명시합니다.',
   },
   models: {
@@ -123,8 +123,8 @@ const notes: Record<string, ModuleNote> = {
   client: {
     purpose: 'Web과 CLI가 같은 HTTP 계약을 사용하는 client package입니다.',
     exists:
-      'fetch 기반 HTTP API v1 client. 응답을 runtime에 검증하고 오류를 code·HTTP status·current revision으로 구분합니다.',
-    next: '취소(AbortSignal)와 재시도 정책을 web·CLI가 공유하도록 추가합니다.',
+      'fetch 기반 HTTP API v1 client. 응답을 runtime에 검증하고 오류를 code·HTTP status·current revision으로 구분합니다. 변경 피드를 WHATWG 규칙으로 해석하고, 연결 실패·429·5xx에서만 마지막 cursor부터 재연결하며 AbortSignal로 즉시 중단합니다.',
+    next: '일반 요청의 취소와 재시도 정책을 web·CLI가 공유하도록 추가합니다.',
   },
 };
 

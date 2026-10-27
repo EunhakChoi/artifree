@@ -10,23 +10,28 @@
 //! its file lock, and `BEGIN IMMEDIATE` makes the conditional revision check
 //! and the write one atomic step across threads and processes.
 //!
-//! Request keys are retained indefinitely. Server profiles with `PostgreSQL`
-//! and object storage remain planned.
+//! Each commit appends one row to the change feed in its transaction; the
+//! row's `AUTOINCREMENT` key is the feed sequence. The feed's random identity
+//! is created with the database.
+//!
+//! Request keys and feed rows are retained indefinitely. Server profiles with
+//! `PostgreSQL` and object storage remain planned.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, ArtifactStore, CommitReceipt, Delivery, FileEntry, NewArtifact,
-    RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord, CommitReceipt, Delivery,
+    FileEntry, NewArtifact, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SCHEMA: &str = "
@@ -72,6 +77,22 @@ CREATE TABLE request_keys (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// Added in schema version 2. `sqlite_sequence` keeps the largest sequence
+/// ever issued, so the head survives future pruning of old rows.
+const FEED_SCHEMA: &str = "
+CREATE TABLE feed (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    id BLOB NOT NULL CHECK (length(id) = 16)
+) STRICT;
+CREATE TABLE changes (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('created', 'revised')),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision)
+) STRICT;
+";
+
 /// Artifact storage in one local `SQLite` database file.
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -79,7 +100,9 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    /// Opens or creates the database at `path` and applies the schema.
+    /// Opens or creates the database at `path` and applies the schema. A
+    /// version 1 database gains the change feed; its earlier commits have no
+    /// feed entries.
     ///
     /// # Errors
     ///
@@ -100,8 +123,19 @@ impl SqliteStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(unavailable)?;
         match version {
-            0 => {
-                transaction.execute_batch(SCHEMA).map_err(unavailable)?;
+            0 | 1 => {
+                if version == 0 {
+                    transaction.execute_batch(SCHEMA).map_err(unavailable)?;
+                }
+                transaction
+                    .execute_batch(FEED_SCHEMA)
+                    .map_err(unavailable)?;
+                transaction
+                    .execute(
+                        "INSERT INTO feed (singleton, id) VALUES (1, ?1)",
+                        [random_bytes()?.as_slice()],
+                    )
+                    .map_err(unavailable)?;
                 transaction
                     .pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(unavailable)?;
@@ -168,6 +202,7 @@ impl ArtifactStore for SqliteStore {
                 )
                 .map_err(unavailable)?;
             insert_revision(transaction, &id, revision, request.request, request.package, now)?;
+            record_change(transaction, &id, revision, ChangeKind::Created)?;
             committed(transaction, &id, revision)
         })
     }
@@ -205,6 +240,7 @@ impl ArtifactStore for SqliteStore {
                 request.package,
                 now,
             )?;
+            record_change(transaction, request.artifact, next, ChangeKind::Revised)?;
             committed(transaction, request.artifact, next)
         })
     }
@@ -296,6 +332,77 @@ impl ArtifactStore for SqliteStore {
             .optional()
             .map_err(unavailable)
     }
+
+    fn changes(
+        &self,
+        owner: &ActorId,
+        after: ChangeSequence,
+        limit: usize,
+    ) -> Result<ChangePage, StoreError> {
+        let mut connection = self.connect()?;
+        // One read transaction: the page and the head come from one snapshot.
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        let feed: Vec<u8> = snapshot
+            .query_row("SELECT id FROM feed", [], |row| row.get(0))
+            .map_err(unavailable)?;
+        let feed = FeedId::from_random(feed.try_into().map_err(|_| corrupt("feed id length"))?);
+        let head: Option<i64> = snapshot
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'changes'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?;
+        let mut statement = snapshot
+            .prepare(
+                "SELECT c.sequence, c.artifact_id, c.kind, c.revision, r.created_at
+                 FROM changes c
+                 JOIN artifacts a ON a.id = c.artifact_id
+                 JOIN revisions r ON r.artifact_id = c.artifact_id AND r.revision = c.revision
+                 WHERE c.sequence > ?1 AND a.owner = ?2
+                 ORDER BY c.sequence LIMIT ?3",
+            )
+            .map_err(unavailable)?;
+        let rows = statement
+            .query_map(
+                params![
+                    i64::try_from(after.0).map_err(corrupt)?,
+                    owner.as_str(),
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .map_err(unavailable)?;
+        let mut changes = Vec::new();
+        for row in rows {
+            let (sequence, artifact, kind, revision, committed_at) = row.map_err(unavailable)?;
+            changes.push(ChangeRecord {
+                sequence: stored_sequence(sequence)?,
+                artifact: artifact.parse().map_err(corrupt)?,
+                kind: match kind.as_str() {
+                    "created" => ChangeKind::Created,
+                    "revised" => ChangeKind::Revised,
+                    other => return Err(corrupt(format!("change kind {other}"))),
+                },
+                revision: stored_revision(revision)?,
+                committed_at: UnixMillis(committed_at),
+            });
+        }
+        Ok(ChangePage {
+            feed,
+            changes,
+            head: stored_sequence(head.unwrap_or(0))?,
+        })
+    }
 }
 
 fn replay(
@@ -372,6 +479,31 @@ fn insert_revision(
                 number,
                 now.0
             ],
+        )
+        .map_err(unavailable)?;
+    Ok(())
+}
+
+/// Appends the commit of `revision` to the change feed.
+fn record_change(
+    transaction: &Transaction<'_>,
+    id: &ArtifactId,
+    revision: SourceRevision,
+    kind: ChangeKind,
+) -> Result<(), StoreError> {
+    let kind = match kind {
+        ChangeKind::Created => "created",
+        ChangeKind::Revised => "revised",
+        _ => {
+            return Err(StoreError::Unavailable(
+                "this store cannot record that change".into(),
+            ));
+        }
+    };
+    transaction
+        .execute(
+            "INSERT INTO changes (artifact_id, revision, kind) VALUES (?1, ?2, ?3)",
+            params![id.as_str(), sql_revision(revision)?, kind],
         )
         .map_err(unavailable)?;
     Ok(())
@@ -503,6 +635,10 @@ fn stored_path(value: &str) -> Result<PackagePath, StoreError> {
 
 fn stored_revision(value: i64) -> Result<SourceRevision, StoreError> {
     u64::try_from(value).map(SourceRevision).map_err(corrupt)
+}
+
+fn stored_sequence(value: i64) -> Result<ChangeSequence, StoreError> {
+    u64::try_from(value).map(ChangeSequence).map_err(corrupt)
 }
 
 fn sql_revision(revision: SourceRevision) -> Result<i64, StoreError> {

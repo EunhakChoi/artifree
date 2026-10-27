@@ -2,11 +2,13 @@
 //! request-key results.
 //!
 //! An implementation must make each commit atomic: the conditional revision
-//! check, revision files, metadata update, and request-key record either all
-//! become durable or none do. A returned commit is durable.
+//! check, revision files, metadata update, request-key record, and change
+//! feed entry either all become durable or none do. A returned commit is
+//! durable.
 
 use std::fmt;
 
+use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, SourceRevision};
@@ -113,6 +115,43 @@ pub struct CommitReceipt {
     pub delivery: Delivery,
 }
 
+/// What a commit did to its artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChangeKind {
+    /// The artifact was created at revision 1.
+    Created,
+    /// A revision was appended.
+    Revised,
+}
+
+/// One commit as recorded in the change feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeRecord {
+    /// Position of the commit in the feed.
+    pub sequence: ChangeSequence,
+    /// The changed artifact.
+    pub artifact: ArtifactId,
+    /// What the commit did.
+    pub kind: ChangeKind,
+    /// The revision the commit created.
+    pub revision: SourceRevision,
+    /// Commit time.
+    pub committed_at: UnixMillis,
+}
+
+/// Part of an owner's changes and the feed's state, read at one point in
+/// time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangePage {
+    /// The feed's identity.
+    pub feed: FeedId,
+    /// The owner's changes after the requested position, in feed order.
+    pub changes: Vec<ChangeRecord>,
+    /// The newest position in the feed, across all owners.
+    pub head: ChangeSequence,
+}
+
 /// A storage failure or a rejected conditional write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -215,4 +254,21 @@ pub trait ArtifactStore {
         revision: SourceRevision,
         path: &PackagePath,
     ) -> Result<Option<Vec<u8>>, StoreError>;
+
+    /// Up to `limit` changes to artifacts `owner` owns, after `after`.
+    ///
+    /// A commit's change becomes visible with the commit, and changes become
+    /// visible in sequence order: once a reader has seen a sequence, no
+    /// smaller one appears later. When fewer than `limit` changes are
+    /// returned, the owner has none between them and `head`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Unavailable`].
+    fn changes(
+        &self,
+        owner: &ActorId,
+        after: ChangeSequence,
+        limit: usize,
+    ) -> Result<ChangePage, StoreError>;
 }

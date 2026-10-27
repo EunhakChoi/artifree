@@ -5,7 +5,8 @@
 //! Every route requires `Authorization: Bearer <token>`. Mutating routes
 //! require an `Idempotency-Key` header. Storage work runs on Tokio's blocking
 //! pool because the core and store are synchronous. The router also mounts
-//! the MCP endpoint (`crate::mcp`) behind the same token.
+//! the MCP endpoint (`crate::mcp`) and the change feed (`crate::changes`)
+//! behind the same token.
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -32,6 +33,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::auth::AccessToken;
+use crate::changes::{self, Feed};
 use crate::limits::{Limiter, Refusal, RequestLimits};
 use crate::mcp;
 use crate::operations::{self, ApiError};
@@ -54,6 +56,8 @@ pub struct Settings {
     pub frame_ancestors: String,
     /// Per-actor request budget shared by HTTP and MCP.
     pub limits: RequestLimits,
+    /// Change streams one actor may keep open, at least 1.
+    pub change_streams: u32,
 }
 
 /// Shared request state for the API and content routers.
@@ -69,6 +73,7 @@ struct Shared {
     owner: ActorId,
     previews: PreviewTickets,
     limiter: Limiter,
+    feed: Feed,
     draining: AtomicUsize,
     settings: Settings,
     content_policy: HeaderValue,
@@ -79,13 +84,17 @@ impl AppState {
     ///
     /// # Errors
     ///
-    /// When the content origin or frame ancestors cannot form a header.
+    /// When the content origin or frame ancestors cannot form a header, or
+    /// a limit is zero.
     pub fn new(store: SqliteStore, token: AccessToken, settings: Settings) -> Result<Self, String> {
         let owner: ActorId = "local"
             .parse()
             .map_err(|error| format!("built-in owner actor: {error}"))?;
         let content_policy =
             preview::content_policy(&settings.content_origin, &settings.frame_ancestors)?;
+        if settings.change_streams == 0 {
+            return Err("change streams per actor must be at least 1".into());
+        }
         Ok(Self {
             shared: Arc::new(Shared {
                 artifacts: ArtifactService::new(store),
@@ -93,11 +102,22 @@ impl AppState {
                 owner,
                 previews: PreviewTickets::new(settings.preview_ttl),
                 limiter: Limiter::new(settings.limits.validate()?),
+                feed: Feed::new(settings.change_streams),
                 draining: AtomicUsize::new(0),
                 settings,
                 content_policy,
             }),
         })
+    }
+
+    /// Ends open change streams so that a graceful shutdown need not wait
+    /// for their readers. Streams opened afterwards end at once.
+    pub fn close_streams(&self) {
+        self.shared.feed.close();
+    }
+
+    pub(crate) fn feed(&self) -> &Feed {
+        &self.shared.feed
     }
 
     pub(crate) fn previews(&self) -> &PreviewTickets {
@@ -162,6 +182,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/artifacts/{id}/revisions/{revision}/previews",
             axum::routing::post(create_preview),
         )
+        .route("/v1/changes", get(changes::stream))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(no_such_route)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -171,8 +192,8 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Authenticates the request, then admits it under the actor's limits. A
-/// refused request never reaches the application, so it commits nothing and
-/// its idempotency key stays unused.
+/// refused request never reaches the application, so this attempt commits
+/// nothing; its idempotency key is free unless an earlier attempt used it.
 async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     let actor = match state.authenticate(request.headers()) {
         Ok(actor) => actor,

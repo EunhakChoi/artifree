@@ -8,12 +8,13 @@
 
 use std::fmt;
 
+use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, ArtifactStore, CommitReceipt, NewArtifact, RequestFingerprint, RequestIdentity,
-    RevisionCommit, RevisionRecord, StoreError,
+    ArtifactRecord, ArtifactStore, ChangePage, CommitReceipt, NewArtifact, RequestFingerprint,
+    RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
 };
 use sha2::{Digest, Sha256};
 
@@ -216,6 +217,22 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// [`ArtifactError::Unavailable`].
     pub fn list(&self, actor: &ActorId) -> Result<Vec<ArtifactRecord>, ArtifactError> {
         Ok(self.store.artifacts_owned_by(actor)?)
+    }
+
+    /// Up to `limit` committed changes to the actor's artifacts after
+    /// `after`, with the feed's identity and head. Only an artifact's owner
+    /// learns of its changes; the head counts every actor's commits.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn changes(
+        &self,
+        actor: &ActorId,
+        after: ChangeSequence,
+        limit: usize,
+    ) -> Result<ChangePage, ArtifactError> {
+        Ok(self.store.changes(actor, after, limit)?)
     }
 
     /// Revision history of an accessible artifact, newest first.

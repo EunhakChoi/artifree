@@ -43,6 +43,43 @@
       ],
       "type": "object"
     },
+    "ArtifactChange": {
+      "additionalProperties": false,
+      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision. Retries that replay a commit, and failed commits, have none.\nIt names what to read again and carries no content.",
+      "properties": {
+        "artifact_id": {
+          "description": "The changed artifact.",
+          "type": "string"
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeKind",
+          "description": "What the commit did."
+        },
+        "committed_at_ms": {
+          "description": "Commit time in Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cursor": {
+          "description": "Opaque feed position of this change, also the event's `id`.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The revision the commit created.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cursor",
+        "artifact_id",
+        "change",
+        "revision",
+        "committed_at_ms"
+      ],
+      "type": "object"
+    },
     "ArtifactKind": {
       "description": "Source model family of an artifact. Only `app` can be created by this\nversion; the other families are reserved for planned source models.",
       "oneOf": [
@@ -94,6 +131,21 @@
         "artifacts"
       ],
       "type": "object"
+    },
+    "ChangeKind": {
+      "description": "What a commit did to an artifact. A kind that a client does not know\nstill means the artifact changed: read it again.",
+      "oneOf": [
+        {
+          "const": "created",
+          "description": "The artifact was created at revision 1.",
+          "type": "string"
+        },
+        {
+          "const": "revised",
+          "description": "A revision was committed.",
+          "type": "string"
+        }
+      ]
     },
     "CommitResponse": {
       "additionalProperties": false,
@@ -219,7 +271,7 @@
         },
         {
           "const": "rate_limited",
-          "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+          "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
           "type": "string"
         },
         {
@@ -245,6 +297,20 @@
       },
       "required": [
         "error"
+      ],
+      "type": "object"
+    },
+    "FeedPosition": {
+      "additionalProperties": false,
+      "description": "Data of the `ready` and `reset` events of `GET /v1/changes`. `ready`\nstarts a stream opened without a cursor. `reset` answers a cursor this\nfeed cannot continue from: changes may have been missed, so read the\nstate again. Later events follow this position.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque feed position, also the event's `id`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cursor"
       ],
       "type": "object"
     },
@@ -484,8 +550,14 @@
     },
     {
       "$ref": "#/$defs/ErrorResponse"
+    },
+    {
+      "$ref": "#/$defs/ArtifactChange"
+    },
+    {
+      "$ref": "#/$defs/FeedPosition"
     }
   ],
-  "description": "Any JSON request or response body of HTTP API v1.",
+  "description": "Any JSON request or response body of HTTP API v1, or the data of a change feed event.",
   "title": "ApiBody"
 }

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use artifree_providers::storage::SqliteStore;
 use artifree_server::auth::AccessToken;
+use artifree_server::changes;
 use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
 use artifree_server::preview;
@@ -52,6 +53,7 @@ impl Harness {
                 preview_ttl,
                 frame_ancestors: "http://127.0.0.1:*".into(),
                 limits: RequestLimits::default(),
+                change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
             },
         )
         .unwrap_or_else(|error| panic!("cannot build state: {error}"));

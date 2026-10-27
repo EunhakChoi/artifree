@@ -2,6 +2,7 @@
 //! Axum HTTP adapters, and the MCP adapter.
 
 pub mod auth;
+pub mod changes;
 pub mod http;
 mod inventory;
 pub mod limits;

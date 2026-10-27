@@ -152,8 +152,10 @@ async function mutate<T>(
         `The outcome is unknown. Retry with --idempotency-key ${key} to receive the original result.\n`,
       );
     else if (error instanceof ArtifreeApiError && error.code === 'rate_limited')
+      // Only this attempt was refused. An earlier attempt with the same key
+      // may have committed; retrying with the key then returns its result.
       process.stderr.write(
-        `Nothing was done. Retry after ${error.retryAfterSeconds ?? 1}s; --idempotency-key ${key} is still unused.\n`,
+        `This attempt was not processed. Retry after ${error.retryAfterSeconds ?? 1}s with --idempotency-key ${key}.\n`,
       );
     throw error;
   }

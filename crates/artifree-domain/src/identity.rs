@@ -47,7 +47,8 @@ impl ArtifactId {
     }
 }
 
-fn hex_digit(nibble: u8) -> char {
+/// The lowercase hexadecimal digit of the low four bits of `nibble`.
+pub(crate) fn hex_digit(nibble: u8) -> char {
     char::from(b"0123456789abcdef"[usize::from(nibble & 0x0f)])
 }
 

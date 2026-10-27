@@ -7,12 +7,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, RequestKey, Title};
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactStore, CommitReceipt, Delivery, NewArtifact, RequestFingerprint, RequestIdentity,
-    RevisionCommit, StoreError,
+    ArtifactStore, ChangeKind, ChangePage, CommitReceipt, Delivery, NewArtifact,
+    RequestFingerprint, RequestIdentity, RevisionCommit, StoreError,
 };
 use artifree_providers::storage::SqliteStore;
 use sha2::{Digest, Sha256};
@@ -385,5 +386,178 @@ fn refuses_a_newer_schema_version() -> TestResult {
         matches!(&error, StoreError::Unavailable(reason) if reason.contains("version 99")),
         "{error}"
     );
+    Ok(())
+}
+
+/// A change as (sequence, kind, revision).
+type Entry = (u64, ChangeKind, u64);
+
+/// The owner's changes after `after`, and the head.
+fn feed(
+    store: &SqliteStore,
+    owner: &ActorId,
+    after: u64,
+    limit: usize,
+) -> Result<(Vec<Entry>, u64), StoreError> {
+    let ChangePage { changes, head, .. } = store.changes(owner, ChangeSequence(after), limit)?;
+    let changes = changes
+        .iter()
+        .map(|change| (change.sequence.0, change.kind, change.revision.0))
+        .collect();
+    Ok((changes, head.0))
+}
+
+#[test]
+fn each_commit_is_recorded_once_in_feed_order() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    assert_eq!(feed(&store, &owner, 0, 100)?, (vec![], 0));
+    let created = create(&store, &owner, &key("a"), 1)?;
+    let saved = commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    // A replay, a conflict, and a reused key write nothing.
+    assert_eq!(
+        create(&store, &owner, &key("a"), 1)?.delivery,
+        Delivery::Replayed
+    );
+    assert_eq!(
+        commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?.delivery,
+        Delivery::Replayed
+    );
+    assert!(commit(&store, &created, &key("c"), 1, "<h1>stale</h1>").is_err());
+    assert!(commit(&store, &created, &key("b"), 2, "<h1>other</h1>").is_err());
+
+    assert_eq!(
+        feed(&store, &owner, 0, 100)?,
+        (
+            vec![(1, ChangeKind::Created, 1), (2, ChangeKind::Revised, 2)],
+            2
+        )
+    );
+    let page = store.changes(&owner, ChangeSequence(0), 100)?;
+    assert!(
+        page.changes
+            .iter()
+            .all(|change| change.artifact == created.artifact.id)
+    );
+    assert_eq!(page.changes[0].committed_at, created.revision.created_at);
+    assert_eq!(page.changes[1].committed_at, saved.revision.created_at);
+    Ok(())
+}
+
+#[test]
+fn a_feed_entry_commits_with_its_revision_or_not_at_all() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("a"), 1)?;
+    let connection = rusqlite::Connection::open(db.path())?;
+    let fail = |table: &str| {
+        connection.execute_batch(&format!(
+            "CREATE TRIGGER fail BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+        ))
+    };
+
+    // The feed entry fails: the revision is not committed either.
+    fail("changes")?;
+    assert!(commit(&store, &created, &key("b"), 1, "<h1>v2</h1>").is_err());
+    assert_eq!(store.revisions(&created.artifact.id)?.len(), 1);
+    connection.execute_batch("DROP TRIGGER fail;")?;
+
+    // Another statement of the commit fails: no entry is recorded.
+    fail("request_keys")?;
+    assert!(commit(&store, &created, &key("b"), 1, "<h1>v2</h1>").is_err());
+    assert_eq!(
+        feed(&store, &owner, 0, 100)?,
+        (vec![(1, ChangeKind::Created, 1)], 1)
+    );
+    connection.execute_batch("DROP TRIGGER fail;")?;
+
+    commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    assert_eq!(
+        feed(&store, &owner, 1, 100)?,
+        (vec![(2, ChangeKind::Revised, 2)], 2),
+        "a rolled-back commit leaves no gap and no entry"
+    );
+    Ok(())
+}
+
+#[test]
+fn owners_read_only_their_changes_and_a_short_page_reaches_the_head() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let (alice, bob) = (actor("alice"), actor("bob"));
+    let first = create(&store, &alice, &key("a"), 1)?;
+    create(&store, &bob, &key("b"), 2)?;
+    commit(&store, &first, &key("c"), 1, "<h1>v2</h1>")?;
+
+    assert_eq!(
+        feed(&store, &alice, 0, 100)?,
+        (
+            vec![(1, ChangeKind::Created, 1), (3, ChangeKind::Revised, 2)],
+            3
+        )
+    );
+    assert_eq!(
+        feed(&store, &bob, 0, 100)?,
+        (vec![(2, ChangeKind::Created, 1)], 3)
+    );
+    // A full page may be followed by more; a short one ends at the head.
+    assert_eq!(
+        feed(&store, &alice, 0, 1)?,
+        (vec![(1, ChangeKind::Created, 1)], 3)
+    );
+    assert_eq!(
+        feed(&store, &alice, 1, 1)?,
+        (vec![(3, ChangeKind::Revised, 2)], 3)
+    );
+    assert_eq!(feed(&store, &alice, 3, 100)?, (vec![], 3));
+    Ok(())
+}
+
+#[test]
+fn a_feed_keeps_its_identity_and_another_database_has_another() -> TestResult {
+    let (first, second) = (TempDb::new(), TempDb::new());
+    let owner = actor("owner");
+    let identity = SqliteStore::open(&first.path())?
+        .changes(&owner, ChangeSequence(0), 0)?
+        .feed;
+    let reopened = SqliteStore::open(&first.path())?
+        .changes(&owner, ChangeSequence(0), 0)?
+        .feed;
+    let other = SqliteStore::open(&second.path())?
+        .changes(&owner, ChangeSequence(0), 0)?
+        .feed;
+    assert_eq!(identity, reopened);
+    assert_ne!(identity, other);
+    Ok(())
+}
+
+#[test]
+fn a_version_1_database_gains_the_feed_and_keeps_its_data() -> TestResult {
+    let db = TempDb::new();
+    let owner = actor("owner");
+    let created = create(&SqliteStore::open(&db.path())?, &owner, &key("a"), 1)?;
+    // Version 1 is the current schema without the feed tables.
+    rusqlite::Connection::open(db.path())?.execute_batch(
+        "DROP TABLE changes; DROP TABLE feed; DELETE FROM sqlite_sequence; PRAGMA user_version = 1;",
+    )?;
+
+    let store = SqliteStore::open(&db.path())?;
+    assert_eq!(
+        feed(&store, &owner, 0, 100)?,
+        (vec![], 0),
+        "earlier commits have no entries"
+    );
+    assert_eq!(entry(&store, &created, 1)?, Some(b"<h1>v1</h1>".to_vec()));
+    commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    assert_eq!(
+        feed(&store, &owner, 0, 100)?,
+        (vec![(1, ChangeKind::Revised, 2)], 1)
+    );
+    let version: i64 =
+        rusqlite::Connection::open(db.path())?
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+    assert_eq!(version, 2);
     Ok(())
 }

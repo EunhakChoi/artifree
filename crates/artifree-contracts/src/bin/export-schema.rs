@@ -1,8 +1,9 @@
 //! Emits the public JSON Schemas for contract generation.
 //!
 //! Output: `{ "service_description": <schema>, "api": <schema>, "mcp": <tools> }`.
-//! The API schema's root accepts any v1 JSON request or response body; each
-//! body and its parts are `$defs` entries. The MCP entry is the tool catalog
+//! The API schema's root accepts any v1 JSON request or response body, and
+//! the data of each change feed event; each body and its parts are `$defs`
+//! entries. The MCP entry is the tool catalog
 //! that `tools/list` returns, with the server instructions and the schema of
 //! an error result.
 #![expect(
@@ -11,8 +12,8 @@
 )]
 
 use artifree_contracts::api::{
-    Artifact, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse, Preview,
-    Revision, RevisionList, SaveRevisionRequest,
+    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse,
+    FeedPosition, Preview, Revision, RevisionList, SaveRevisionRequest,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -29,12 +30,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<RevisionList>(),
         generator.subschema_for::<Preview>(),
         generator.subschema_for::<ErrorResponse>(),
+        generator.subschema_for::<ArtifactChange>(),
+        generator.subschema_for::<FeedPosition>(),
     ];
     let api = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://artifree.invalid/schemas/api-v1.json",
         "title": "ApiBody",
-        "description": "Any JSON request or response body of HTTP API v1.",
+        "description": "Any JSON request or response body of HTTP API v1, or the data of a change feed event.",
         "anyOf": bodies,
         "$defs": generator.take_definitions(true),
     });

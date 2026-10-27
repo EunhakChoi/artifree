@@ -5,6 +5,10 @@ Artifree is in early development: local HTML artifacts work end to end
 else is proposed. Keep implemented behavior and
 proposed behavior explicitly separate in code, UI, docs, and completion reports.
 
+Read `docs/roadmap.md` before starting the next feature. It records PR-sized
+scope, dependencies, acceptance checks, and the requirement to trace relevant
+analysis back to original evidence. Keep private evidence outside public files.
+
 ## Decisions and boundaries
 
 - Presentation code is TypeScript. Logic code is Rust.
