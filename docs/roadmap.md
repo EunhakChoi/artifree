@@ -20,7 +20,7 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | 호출 제한     | HTTP·MCP의 actor별 공유 빈도/동시 실행 제한, `429 rate_limited`와 `Retry-After`, 거절 body의 제한된 정리                                                                   |
 | 변경 알림     | A01: 커밋 트랜잭션의 변경 기록, DB 식별자를 포함한 cursor, `GET /v1/changes` SSE의 재개·reset·stream 수 제한, 표준 SSE 해석과 상태 기반 재연결 client, CLI P3 수정         |
 | 웹 자동 반영  | A02: 웹이 변경 알림을 따라 목록·열린 아티팩트·최신 preview를 갱신. client 아래 request gate가 모든 요청의 가시성·`429` 지연·한 번에 한 읽기를 결정. 고정 preview·초안 유지 |
-| 검증          | 기준 코드에서 Node 112개·Rust 78개 테스트 및 빌드 통과. Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한 CI 8개 작업 통과                                                 |
+| 검증          | 기준 코드에서 Node 114개·Rust 78개 테스트 및 빌드 통과. Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한 CI 8개 작업 통과                                                 |
 
 구현 결정은 [0001](decisions/0001-foundation.md)부터
 [0007](decisions/0007-live-web-workspace.md)까지가 기준이다. Axum/Tokio와 SQLite는

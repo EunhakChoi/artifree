@@ -101,6 +101,25 @@ export async function checkLiveUpdates({ browser, origin, server }) {
       workspace.getByText('Revision 4 was saved elsewhere'),
     ).toBeVisible();
     await expect(editor).toHaveValue(html('Draft A'));
+    // Decision 8: a save the server refused committed nothing, so the
+    // notice stays.
+    main.routes.once(
+      (request) =>
+        request.method() === 'POST' &&
+        new URL(request.url()).pathname.endsWith('/revisions'),
+      (route) =>
+        route.fulfill({
+          status: 400,
+          json: { error: { code: 'invalid_request', message: 'Refused.' } },
+        }),
+    );
+    await workspace.getByRole('button', { name: 'Save revision' }).click();
+    await expect(
+      workspace.getByText('Refused.', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      workspace.getByText('Revision 4 was saved elsewhere'),
+    ).toBeVisible();
     main.routes.once(read('artifact'), (route) =>
       route.fulfill({
         status: 503,
@@ -317,6 +336,23 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await expect(badge(19)).toBeVisible();
     await expect(label).toHaveText('Live 19');
 
+    // Decision 4: what the open artifact showed before a reset is behind
+    // what a list read after it reports, also when its own first read after
+    // the reset failed.
+    main.routes.once(read('artifact'), (route) =>
+      route.fulfill({
+        status: 503,
+        json: { error: { code: 'unavailable', message: 'Storage is busy.' } },
+      }),
+    );
+    restore = replaceData(main, id, { upTo: 18 });
+    await restream(main, server, ['reset']);
+    await expect(badge(18)).toBeVisible();
+    await expect(label).toHaveText('Live 18');
+    restore();
+    await restream(main, server, [change(id, 19)]);
+    await expect(badge(19)).toBeVisible();
+
     // W4: a reset to older data keeps a draft, marks it as possibly
     // replaced, and disables saving.
     await workspace.getByRole('tab', { name: 'Source' }).click();
@@ -400,6 +436,31 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await expect(
       implicit.workspace.getByText('Revision 19', { exact: true }),
     ).toBeVisible();
+
+    // Decision 8: while a save's answer is lost, a newer revision may be
+    // that save, so no notice is shown; saving again replays it.
+    await nav.getByRole('button', { name: /Agent artifact/ }).click();
+    await expect(badge(2)).toBeVisible();
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    await editor.fill(html('Draft E'));
+    main.routes.once(
+      (request) =>
+        request.method() === 'POST' &&
+        new URL(request.url()).pathname.endsWith('/revisions'),
+      async (route) => {
+        await route.fetch();
+        await route.abort('connectionreset');
+      },
+    );
+    await workspace.getByRole('button', { name: 'Save revision' }).click();
+    await expect(
+      nav.getByRole('button', { name: /Agent artifact\s*r3/ }),
+    ).toBeVisible();
+    await main.page.waitForTimeout(500);
+    await expect(workspace.getByText(/was saved elsewhere/)).toBeHidden();
+    await workspace.getByRole('button', { name: 'Save revision' }).click();
+    await expect(badge(3)).toBeVisible();
+    await expect(editor).toHaveValue(html('Draft E'));
 
     // Disconnecting ends the stream.
     await workspace.getByRole('button', { name: 'Disconnect' }).click();

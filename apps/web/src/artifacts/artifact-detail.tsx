@@ -125,7 +125,8 @@ export function ArtifactDetail({
     shown !== undefined &&
     knownRevision !== undefined &&
     knownRevision > targetRevision &&
-    knownRevision > shown.artifact.current_revision
+    // What was read in an earlier epoch is behind whatever this one knows.
+    (shown.epoch !== epoch || knownRevision > shown.artifact.current_revision)
   )
     setTarget({ epoch, revision: knownRevision });
   function reload(): void {
@@ -443,7 +444,12 @@ type SaveState =
   | { readonly status: 'idle' }
   | { readonly status: 'saving' }
   | { readonly status: 'conflict'; readonly current: number | undefined }
-  | { readonly status: 'failed'; readonly message: string };
+  | {
+      readonly status: 'failed';
+      readonly message: string;
+      /** Whether the save may have been committed although it failed. */
+      readonly unknown: boolean;
+    };
 
 function FileEditor({
   client,
@@ -520,7 +526,8 @@ function FileEditor({
   const newer =
     !replaced &&
     latest > base &&
-    (save.status === 'idle' || save.status === 'conflict');
+    save.status !== 'saving' &&
+    !(save.status === 'failed' && save.unknown);
   const outdated = replaced || newer || save.status === 'conflict';
 
   function edit(next: string | undefined): void {
@@ -556,7 +563,12 @@ function FileEditor({
         error.code === 'revision_conflict'
       )
         setSave({ status: 'conflict', current: error.currentRevision });
-      else setSave({ status: 'failed', message: describeFailure(error) });
+      else
+        setSave({
+          status: 'failed',
+          message: describeFailure(error),
+          unknown: mayHaveCommitted(error),
+        });
     }
   }
 
@@ -648,5 +660,19 @@ function FileEditor({
         ) : null}
       </Field>
     </FieldGroup>
+  );
+}
+
+/**
+ * Whether a failed save may still have been committed: its answer was lost
+ * or unreadable, or the server or a proxy failed after the request reached
+ * it. A refusal (4xx, including a rate limit) committed nothing.
+ */
+function mayHaveCommitted(error: unknown): boolean {
+  if (!(error instanceof ArtifreeApiError)) return true;
+  return (
+    error.code === 'network_error' ||
+    error.code === 'invalid_response' ||
+    error.status >= 500
   );
 }

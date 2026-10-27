@@ -44,8 +44,8 @@ interface Waiter {
  * - Writes are sent at once: the user started each one and sees its result.
  *
  * Any `429` answer, whatever its body and whichever kind of request it
- * answered, delays every read for its `Retry-After` (one second without
- * one), because request limits apply to the actor. A refused read was not
+ * answered, delays every read for its `Retry-After`, at least one second,
+ * because request limits apply to the actor. A refused read was not
  * processed, so the gate sends it again after the delay; the caller sees
  * only its final answer. Aborting a read's signal withdraws it if it has
  * not been sent; a sent read is not cancelled, since the server is working
@@ -81,6 +81,12 @@ export class RequestGate {
     let retry = false;
     for (;;) {
       const release = await this.#turn(request.signal, retry);
+      // The caller may have stopped waiting while its turn came; then the
+      // read has not been sent and is withdrawn.
+      if (request.signal?.aborted === true) {
+        release();
+        request.signal.throwIfAborted();
+      }
       // A sent read is not cancelled: the server is working on it. It keeps
       // its slot until its answer has been read or cancelled, also when its
       // caller stops waiting.
@@ -107,8 +113,12 @@ export class RequestGate {
   }
 
   #observe(response: Response): Response {
+    // At least one second, also for `Retry-After: 0`: a refused read keeps
+    // its place, and a proxy that refuses at once is not asked again at once.
     if (response.status === 429)
-      this.holdFor(parseRetryAfter(response.headers.get('retry-after')) ?? 1);
+      this.holdFor(
+        Math.max(1, parseRetryAfter(response.headers.get('retry-after')) ?? 1),
+      );
     return response;
   }
 

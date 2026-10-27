@@ -51,10 +51,11 @@ unpublished trace maps each to its evidence.
 
    Any `429`, whatever its body (a proxy's included) and whichever kind of
    request it answered, delays every read of the page for its
-   `Retry-After`, one second without one, because the limits of 0005 apply
+   `Retry-After`, at least one second, because the limits of 0005 apply
    to the actor. A refused read was not processed, so the gate sends it
    again, first, after the delay; its caller sees only the final answer. A
-   read whose view no longer wants it is withdrawn if it has not been sent;
+   read whose view no longer wants it is withdrawn if it has not been sent,
+   also when its turn has just come;
    a sent read is not cancelled, since the server is working on it, and
    keeps its turn until it ends while its caller stops waiting. The API
    client reports every `429` as `rate_limited`, also without an API body.
@@ -79,7 +80,9 @@ unpublished trace maps each to its evidence.
    artifact if it is newer than shown; the open artifact does not read
    again while its own read is pending, since that read may bring the
    revision. A new epoch also forgets the revision the open artifact last
-   read for, so after a reset to older data the same number is news again.
+   read for, so after a reset to older data the same number is news again,
+   and what it read in an earlier epoch is behind whatever the new one
+   knows, also when its first read after a reset failed.
    A change of a kind the client does not know counts whatever its
    revision: the list and, if it is open, the artifact are read again.
 5. **Content follows its metadata.** A revision number read before a reset
@@ -106,8 +109,10 @@ unpublished trace maps each to its evidence.
    (a `reset`, or a `ready` after the page read without a stream), it says
    so and disables saving: a save against a revision of the same number
    would succeed and overwrite content the user never saw. While this
-   page's own save is in flight, or after its answer was lost, a newer
-   revision may be that save, so no notice is shown then.
+   page's own save is in flight, or after it failed in a way that may have
+   committed it (its answer was lost or unreadable, or the server failed), a
+   newer revision may be that save, so no notice is shown then. A refused
+   save committed nothing, so the notice stays.
 9. **Previews and status.** The preview menu's default entry, "Latest (N)",
    follows each new revision; a numbered revision stays chosen until the
    user chooses again, also across the source tab. A status line says

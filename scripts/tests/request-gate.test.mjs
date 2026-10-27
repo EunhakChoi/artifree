@@ -326,3 +326,34 @@ test('The gate listens to visibility only while reads wait', async () => {
   assert.equal(view.listening(), 0, 'a read that started no longer waits');
   api.answer(0);
 });
+
+test('A read cancelled as its turn comes is not sent', async () => {
+  const { api, gate } = setup();
+  const controller = new AbortController();
+  // The gate is idle, so the turn comes at once; the caller stops waiting
+  // before the read could be sent, as an effect cleaned up right away does.
+  const withdrawn = gate.fetch('/v1/artifacts', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(withdrawn, { name: 'AbortError' });
+  const next = gate.fetch('/v1/artifacts/a');
+  await settle();
+  assert.deepEqual(api.paths(), ['GET /v1/artifacts/a']);
+  api.answer(0);
+  await next;
+});
+
+test('A refusal without delay still holds reads and keeps the refused read first', async () => {
+  const { api, gate } = setup();
+  const refused = gate.fetch('/v1/artifacts');
+  gate.fetch('/v1/artifacts/b');
+  await settle();
+  api.answer(0, limited(0));
+  await settle();
+  assert.deepEqual(api.paths(), ['GET /v1/artifacts'], 'held for a second');
+  await advance(999);
+  assert.equal(api.sent.length, 1);
+  await advance(1);
+  assert.deepEqual(api.paths(), ['GET /v1/artifacts', 'GET /v1/artifacts']);
+  api.answer(1);
+  await refused;
+});
