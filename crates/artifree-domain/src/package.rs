@@ -11,6 +11,12 @@ use std::str::FromStr;
 
 /// Maximum number of files in one package.
 pub const MAX_FILES: usize = 256;
+/// Upper bound on the size of a change set. Paths in a change set are
+/// distinct, so a valid one holds at most [`MAX_FILES`] puts and
+/// [`MAX_FILES`] deletes; a larger one always deletes a missing file or
+/// exceeds [`MAX_FILES`]. Adapters use it to reject such a set before
+/// decoding it.
+pub const MAX_CHANGES: usize = 2 * MAX_FILES;
 /// Maximum size of one file in bytes.
 pub const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
 /// Maximum combined size of every file in a package in bytes.

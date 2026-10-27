@@ -61,6 +61,9 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   );
   const [generation, setGeneration] = useState(0);
   const [selected, setSelected] = useState<string>();
+  // While the editor holds unsaved changes, actions that would replace it are
+  // disabled so the draft is never dropped silently.
+  const [unsaved, setUnsaved] = useState(false);
   // Keep the list (and the open artifact) mounted while it refreshes.
   const artifacts = useRequest(
     `${token}:${generation}`,
@@ -78,8 +81,8 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <CreateDialog client={client} onCreated={refresh} />
-        <Button variant="ghost" onClick={onDisconnect}>
+        <CreateDialog client={client} disabled={unsaved} onCreated={refresh} />
+        <Button variant="ghost" disabled={unsaved} onClick={onDisconnect}>
           <LogOutIcon data-icon="inline-start" aria-hidden="true" />
           Disconnect
         </Button>
@@ -118,6 +121,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 variant={artifact.id === selectedId ? 'secondary' : 'ghost'}
                 aria-current={artifact.id === selectedId ? 'true' : undefined}
                 className="justify-between"
+                disabled={unsaved && artifact.id !== selectedId}
                 onClick={() => setSelected(artifact.id)}
               >
                 <span className="truncate">{artifact.title}</span>
@@ -134,6 +138,8 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 client={client}
                 artifactId={selectedId}
                 onSaved={refresh}
+                unsaved={unsaved}
+                onUnsavedChange={setUnsaved}
               />
             )}
           </div>

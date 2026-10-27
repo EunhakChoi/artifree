@@ -87,7 +87,8 @@ export interface SaveRevisionRequest {
    */
   base_revision: number;
   /**
-   * Changes applied to the base revision; unchanged files carry over.
+   * Changes applied to the base revision; unchanged files carry over. At
+   * most 512 changes, each to a different path.
    */
   changes: FileChange[];
 }

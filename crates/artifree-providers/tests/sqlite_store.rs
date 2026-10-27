@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use artifree_domain::identity::{ActorId, RequestKey, Title};
 use artifree_domain::package::{FilePackage, PackagePath};
@@ -186,14 +187,27 @@ fn retry_with_same_key_and_fingerprint_replays_without_writing() -> TestResult {
     );
 
     let saved = commit(&store, &first, &key("save"), 1, "<h1>v2</h1>")?;
+    // Later commits must not leak into the replayed receipts; the timestamp
+    // tick makes a leaked update time observable.
+    thread::sleep(Duration::from_millis(5));
     commit(&store, &first, &key("save-later"), 2, "<h1>v3</h1>")?;
     let replayed = commit(&store, &first, &key("save"), 1, "<h1>v2</h1>")?;
     assert_eq!(
-        replayed.delivery,
-        Delivery::Replayed,
-        "a lost response must be recoverable after later commits"
+        replayed,
+        CommitReceipt {
+            delivery: Delivery::Replayed,
+            ..saved
+        },
+        "a lost response must be recoverable, unchanged, after later commits"
     );
-    assert_eq!(replayed.revision, saved.revision);
+    assert_eq!(
+        create(&store, &owner, &key("create"), 1)?,
+        CommitReceipt {
+            delivery: Delivery::Replayed,
+            ..first.clone()
+        },
+        "a replayed create still reports revision 1"
+    );
     assert_eq!(
         store
             .artifact(&first.artifact.id)?

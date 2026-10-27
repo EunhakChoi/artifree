@@ -66,6 +66,9 @@ test('CLI creates, saves, reads pinned revisions, and rejects stale saves', asyn
   await writeFile(join(site, 'assets/app.css'), 'h1 { color: teal; }');
   await writeFile(join(site, '.DS_Store'), 'ignored');
   await writeFile(join(site, 'v2.html'), '<h1>v2</h1>');
+  // Uploads must keep exact bytes, including a byte order mark.
+  const notes = '\uFEFFline one\r\nline two\r\n';
+  await writeFile(join(site, 'notes.txt'), notes);
   const server = await startServer(binary, data);
   try {
     const created = json(
@@ -74,7 +77,7 @@ test('CLI creates, saves, reads pinned revisions, and rejects stale saves', asyn
     const id = created.artifact.id;
     assert.deepEqual(
       created.revision.files.map((file) => file.path),
-      ['assets/app.css', 'index.html', 'v2.html'],
+      ['assets/app.css', 'index.html', 'notes.txt', 'v2.html'],
       'Hidden entries are skipped.',
     );
     const saved = json(
@@ -107,6 +110,16 @@ test('CLI creates, saves, reads pinned revisions, and rejects stale saves', asyn
     const first = cli(server, ['cat', id, 'index.html', '--revision', '1']);
     assert.equal(first.stdout, '<h1>v1</h1>');
     assert.equal(cli(server, ['cat', id, 'index.html']).stdout, '<h1>v2</h1>');
+    assert.equal(cli(server, ['cat', id, 'notes.txt']).stdout, notes);
+
+    // URL parsing would resolve dot segments to another route, such as the
+    // artifact's metadata; the client refuses them instead.
+    for (const path of ['../../..', 'assets/./app.css', '%2e%2e']) {
+      const dotted = cli(server, ['cat', id, path]);
+      assert.equal(dotted.status, 1, path);
+      assert.equal(dotted.stdout, '', path);
+      assert.match(dotted.stderr, /^error\[invalid_request\]/, path);
+    }
 
     const preview = json(cli(server, ['preview', id, '--revision', '1']));
     assert.ok(preview.url.startsWith(`${server.content_origin}/p/`));

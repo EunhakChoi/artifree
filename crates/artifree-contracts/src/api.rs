@@ -69,7 +69,8 @@ pub struct SaveRevisionRequest {
     /// The revision these changes were prepared against. The commit fails
     /// with `revision_conflict` unless it is still current.
     pub base_revision: u64,
-    /// Changes applied to the base revision; unchanged files carry over.
+    /// Changes applied to the base revision; unchanged files carry over. At
+    /// most 512 changes, each to a different path.
     pub changes: Vec<FileChange>,
 }
 

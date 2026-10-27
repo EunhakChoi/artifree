@@ -377,15 +377,24 @@ fn insert_revision(
     Ok(())
 }
 
+/// The receipt as of the commit that created `revision`, also when later
+/// commits followed it. Owner, kind, title, and creation time never change
+/// after creation, so they come from the artifact row; the current revision
+/// and update time are those of `revision`. A future rename must keep this
+/// true by recording the title per revision.
 fn committed(
     connection: &Connection,
     id: &ArtifactId,
     revision: SourceRevision,
 ) -> Result<CommitReceipt, StoreError> {
     let missing = || StoreError::Unavailable("committed revision is missing".into());
+    let revision = revision_record(connection, id, revision)?.ok_or_else(missing)?;
+    let mut artifact = artifact_record(connection, id)?.ok_or_else(missing)?;
+    artifact.current_revision = revision.revision;
+    artifact.updated_at = revision.created_at;
     Ok(CommitReceipt {
-        artifact: artifact_record(connection, id)?.ok_or_else(missing)?,
-        revision: revision_record(connection, id, revision)?.ok_or_else(missing)?,
+        artifact,
+        revision,
         delivery: Delivery::Committed,
     })
 }

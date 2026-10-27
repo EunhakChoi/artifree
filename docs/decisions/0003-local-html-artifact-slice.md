@@ -28,7 +28,9 @@ server, and keep the core independent of the framework and the store.
    with `revision_conflict` unless the base is current. Mutating requests carry
    an `Idempotency-Key`, scoped to the actor. The same key and request content
    (a length-prefixed SHA-256 fingerprint) replays the original result even
-   after later commits; the same key with different content is rejected.
+   after later commits: the artifact's current revision and update time in a
+   replayed receipt are those of the keyed commit. The same key with different
+   content is rejected.
    Rejected requests do not reserve their key. Keys are kept indefinitely for
    now.
 4. **Authorization.** One local bearer token, created with owner-only file
@@ -56,11 +58,23 @@ server, and keep the core independent of the framework and the store.
    letters, digits, `-`, `_`, `.`; no hidden, `.`/`..`, empty, or reserved
    device segments; supported media type by extension; no case-insensitive
    collision or file/directory conflict. Limits: 256 files, 5 MiB per file,
-   25 MiB per package, 36 MiB per request body.
+   25 MiB per package, 36 MiB per request body. A save may carry up to 512
+   changes (replacing every file of a full package); the resulting package
+   must meet the file limits.
 7. **Wire contracts.** HTTP API v1 bodies are Rust DTOs exported as one JSON
    Schema (`contracts/generated/api-v1.schema.json`) and generated TypeScript.
    The TypeScript client validates responses at runtime; the server validates
-   and converts every request into domain types.
+   and converts every request into domain types. The client refuses package
+   paths with empty, `.`, or `..` segments, because URL parsing would resolve
+   them to another route.
+8. **Exact bytes.** Files are bytes; the server never re-encodes them. Clients
+   upload valid UTF-8 as text (keeping a byte order mark) and anything else as
+   base64. The web editor edits a text file only when saving can reproduce the
+   bytes the user did not change: valid UTF-8 with LF line breaks, or CRLF
+   throughout (restored on save). Other files are shown as not editable there
+   and are replaced through the CLI or API. The editor is read-only while a
+   save is in flight, and unsaved changes disable switching files or
+   artifacts until they are saved or discarded.
 
 ## Dependencies added
 

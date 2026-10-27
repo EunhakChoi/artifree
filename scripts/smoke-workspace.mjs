@@ -52,7 +52,14 @@ fetch('${origin}/v1/artifacts').then(
   await checkAccessibility('workspace-create-dialog');
   await dialog.getByLabel('Title').fill('Smoke artifact');
   await dialog.getByLabel('index.html').fill(probe('Revision one'));
+  // The form is read-only while the request is in flight, so nothing typed
+  // meanwhile is lost when it resets after success.
+  const releaseCreate = await holdPosts(page, '**/v1/artifacts');
   await dialog.getByRole('button', { name: 'Create' }).click();
+  await expect(dialog.getByRole('button', { name: 'Creating…' })).toBeVisible();
+  await expect(dialog.getByLabel('index.html')).not.toBeEditable();
+  await expect(dialog.getByLabel('Title')).not.toBeEditable();
+  await releaseCreate();
   await expect(dialog).toBeHidden();
 
   await expect(
@@ -118,6 +125,77 @@ fetch('${origin}/v1/artifacts').then(
     /Revision three/,
   );
 
+  // Unsaved changes lock navigation that would replace the editor, and a save
+  // in flight keeps it read-only: text typed meanwhile would be missing from
+  // the request and dropped when the editor reloads the committed revision.
+  const fileSelect = workspace.getByLabel('File', { exact: true });
+  await editor.fill(probe('Revision four'));
+  await expect(fileSelect).toBeDisabled();
+  await expect(
+    workspace.getByRole('button', { name: 'Disconnect' }),
+  ).toBeDisabled();
+  const releaseSave = await holdPosts(page, '**/v1/artifacts/*/revisions');
+  await workspace.getByRole('button', { name: 'Save revision' }).click();
+  await expect(
+    workspace.getByRole('button', { name: 'Saving…' }),
+  ).toBeVisible();
+  await expect(editor).not.toBeEditable();
+  await releaseSave();
+  await expect(
+    workspace.getByText('Revision 4', { exact: true }),
+  ).toBeVisible();
+  await expect(editor).toBeEditable();
+  await expect(editor).toHaveValue(/Revision four/);
+  await expect(fileSelect).toBeEnabled();
+
+  // Saving must write back exactly the bytes the user did not change. A file
+  // that is not UTF-8 cannot round-trip through a textarea and is read-only;
+  // a byte order mark and CRLF line breaks survive an edit.
+  await api(server, 'POST', `/v1/artifacts/${id}/revisions`, {
+    base_revision: 4,
+    changes: [
+      {
+        op: 'put',
+        path: 'legacy.html',
+        encoding: 'base64',
+        content: Buffer.from('<p>\xff</p>', 'latin1').toString('base64'),
+      },
+      {
+        op: 'put',
+        path: 'notes.txt',
+        encoding: 'utf8',
+        content: '\uFEFFline one\r\nline two\r\n',
+      },
+    ],
+  });
+  await page.reload();
+  await workspace.scrollIntoViewIfNeeded();
+  await expect(
+    workspace.getByText('Revision 5', { exact: true }),
+  ).toBeVisible();
+  await workspace.getByRole('tab', { name: 'Source' }).click();
+  await fileSelect.selectOption('legacy.html');
+  await expect(
+    workspace.getByText('legacy.html cannot be edited here'),
+  ).toBeVisible();
+  await checkAccessibility('workspace-not-editable');
+  await fileSelect.selectOption('notes.txt');
+  const notes = workspace.getByLabel('notes.txt');
+  await expect(notes).toHaveValue('\uFEFFline one\nline two\n');
+  await notes.focus();
+  await notes.press('ControlOrMeta+End');
+  await notes.pressSequentially('line three');
+  await workspace.getByRole('button', { name: 'Save revision' }).click();
+  await expect(
+    workspace.getByText('Revision 6', { exact: true }),
+  ).toBeVisible();
+  await expect(fileSelect).toHaveValue('notes.txt');
+  assert.deepEqual(
+    await bytes(server, `/v1/artifacts/${id}/revisions/6/files/notes.txt`),
+    Buffer.from('\uFEFFline one\r\nline two\r\nline three'),
+    'An edit must keep the byte order mark and CRLF line breaks.',
+  );
+
   await workspace.getByRole('tab', { name: 'Preview' }).click();
   await workspace.getByLabel('Revision', { exact: true }).selectOption('1');
   await expect(frame.locator('#label')).toHaveText('Revision one');
@@ -126,10 +204,38 @@ fetch('${origin}/v1/artifacts').then(
   const history = await api(server, 'GET', `/v1/artifacts/${id}/revisions`);
   assert.deepEqual(
     history.revisions.map((revision) => revision.revision),
-    [3, 2, 1],
+    [6, 5, 4, 3, 2, 1],
     'The conflicting save must not create a revision.',
   );
-  return { revisions: 3, conflict: 'rejected', sandbox: 'opaque' };
+  return { revisions: 6, conflict: 'rejected', sandbox: 'opaque' };
+}
+
+/**
+ * Holds POST requests matching `pattern` until the returned function is
+ * called, which lets them proceed and removes the hold.
+ */
+async function holdPosts(page, pattern) {
+  let release = () => {};
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const handler = async (route) => {
+    if (route.request().method() === 'POST') await held;
+    await route.fallback();
+  };
+  await page.route(pattern, handler);
+  return async () => {
+    release();
+    await page.unroute(pattern, handler);
+  };
+}
+
+async function bytes(server, path) {
+  const response = await fetch(`${server.api_url}${path}`, {
+    headers: { authorization: `Bearer ${server.token}` },
+  });
+  assert.ok(response.ok, `GET ${path} failed: ${response.status}`);
+  return Buffer.from(await response.arrayBuffer());
 }
 
 async function api(server, method, path, body) {

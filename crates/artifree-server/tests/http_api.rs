@@ -406,6 +406,58 @@ async fn revision_reads_are_pinned() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_full_package_can_be_replaced_in_one_save() -> TestResult {
+    let harness = Harness::new();
+    let file = |name: String| json!({ "path": name, "encoding": "utf8", "content": "x" });
+    let mut files =
+        vec![json!({ "path": "index.html", "encoding": "utf8", "content": "<p>1</p>" })];
+    files.extend((1..256).map(|n| file(format!("data/{n}.txt"))));
+    let reply = harness
+        .create("full-package", &json!({ "title": "Full", "files": files }))
+        .await?;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", error_code(&reply));
+    let id = reply.json()?["artifact"]["id"]
+        .as_str()
+        .ok_or("missing artifact id")?
+        .to_owned();
+    let path = format!("/v1/artifacts/{id}/revisions");
+    let put =
+        |name: String| json!({ "op": "put", "path": name, "encoding": "utf8", "content": "y" });
+    let delete = |name: String| json!({ "op": "delete", "path": name });
+
+    // What `artifree artifact save --dir` sends to swap one file of a full
+    // package: a put for every desired file and a delete for the dropped one.
+    let mut swap: Vec<Value> = (2..256).map(|n| put(format!("data/{n}.txt"))).collect();
+    swap.push(put("index.html".into()));
+    swap.push(put("data/new.txt".into()));
+    swap.push(delete("data/1.txt".into()));
+    assert_eq!(swap.len(), 257);
+    let body = json!({ "base_revision": 1, "changes": swap });
+    let reply = harness.send(post(&path, Some("swap-one"), &body)?).await?;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", error_code(&reply));
+
+    // Replacing every file: delete all but the required index.html, rewrite
+    // it, and put a new set. This is the largest valid change set.
+    let mut replace: Vec<Value> = (2..256).map(|n| delete(format!("data/{n}.txt"))).collect();
+    replace.push(delete("data/new.txt".into()));
+    replace.push(put("index.html".into()));
+    replace.extend((0..255).map(|n| put(format!("other/{n}.txt"))));
+    assert_eq!(replace.len(), 511);
+    let body = json!({ "base_revision": 2, "changes": replace });
+    let reply = harness
+        .send(post(&path, Some("replace-all"), &body)?)
+        .await?;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", error_code(&reply));
+
+    let too_many: Vec<Value> = (0..513).map(|n| put(format!("more/{n}.txt"))).collect();
+    let body = json!({ "base_revision": 3, "changes": too_many });
+    let reply = harness.send(post(&path, Some("too-many"), &body)?).await?;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&reply), "invalid_request");
+    Ok(())
+}
+
+#[tokio::test]
 async fn unsafe_paths_and_unknown_fields_are_rejected_without_writing() -> TestResult {
     let harness = Harness::new();
     for (index, path) in [

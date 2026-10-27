@@ -72,10 +72,16 @@ export function newIdempotencyKey(): string {
   return `key-${crypto.randomUUID()}`;
 }
 
-/** Encodes file bytes for upload, as UTF-8 text when the bytes allow it. */
+/**
+ * Encodes file bytes for upload, as UTF-8 text when the bytes allow it. The
+ * server stores exactly these bytes, so a byte order mark is kept as text.
+ */
 export function encodeFile(path: string, bytes: Uint8Array): FileUpload {
   try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    const text = new TextDecoder('utf-8', {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(bytes);
     return { path, encoding: 'utf8', content: text };
   } catch {
     // Not valid UTF-8: send the exact bytes as base64 instead.
@@ -92,8 +98,19 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/**
+ * Encodes a package path for a URL. URL parsing resolves `.` and `..`
+ * segments (also when percent-encoded), which would request another route,
+ * so such paths are rejected here; the server validates every other rule.
+ */
 function filePath(path: string): string {
-  return path.split('/').map(encodeURIComponent).join('/');
+  const segments = path.split('/');
+  if (segments.some((segment) => ['', '.', '..'].includes(segment)))
+    throw new ArtifreeApiError(
+      `Invalid package path ${JSON.stringify(path)}: empty, '.', and '..' segments are not allowed.`,
+      { status: 0, code: 'invalid_request' },
+    );
+  return segments.map(encodeURIComponent).join('/');
 }
 
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */

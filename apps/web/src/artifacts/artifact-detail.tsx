@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { RotateCwIcon, SaveIcon } from 'lucide-react';
+import { RotateCwIcon, SaveIcon, Undo2Icon } from 'lucide-react';
 import { ArtifreeApiError, newIdempotencyKey } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Artifact, Revision } from '@artifree/contracts';
@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/native-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
+import { fromEditable, toEditable } from './editable-text';
 import { describeFailure, useRequest } from './use-request';
 
 /** Sandbox flags for previews; without allow-same-origin the content is opaque. */
@@ -39,6 +40,10 @@ interface ArtifactDetailProps {
   artifactId: string;
   /** Called after a revision is committed so lists can refresh. */
   onSaved: (artifact: Artifact) => void;
+  /** Whether the editor holds changes that are not saved. */
+  unsaved: boolean;
+  /** Reports when the editor gains or loses unsaved changes. */
+  onUnsavedChange: (unsaved: boolean) => void;
 }
 
 /** Preview and source editing for one artifact. */
@@ -46,6 +51,8 @@ export function ArtifactDetail({
   client,
   artifactId,
   onSaved,
+  unsaved,
+  onUnsavedChange,
 }: ArtifactDetailProps) {
   const [generation, setGeneration] = useState(0);
   const details = useRequest(
@@ -108,15 +115,21 @@ export function ArtifactDetail({
           </TabsContent>
           <TabsContent value="source" keepMounted className="mt-4">
             <SourcePanel
-              key={artifact.current_revision}
               client={client}
               artifact={artifact}
               revisions={revisions}
               onSaved={(saved) => {
+                onUnsavedChange(false);
                 reload();
                 onSaved(saved);
               }}
-              onReload={reload}
+              onReload={() => {
+                // Loading the latest revision replaces the rejected draft.
+                onUnsavedChange(false);
+                reload();
+              }}
+              unsaved={unsaved}
+              onUnsavedChange={onUnsavedChange}
             />
           </TabsContent>
         </Tabs>
@@ -191,6 +204,8 @@ interface SourcePanelProps {
   revisions: Revision[];
   onSaved: (artifact: Artifact) => void;
   onReload: () => void;
+  unsaved: boolean;
+  onUnsavedChange: (unsaved: boolean) => void;
 }
 
 function SourcePanel({
@@ -199,6 +214,8 @@ function SourcePanel({
   revisions,
   onSaved,
   onReload,
+  unsaved,
+  onUnsavedChange,
 }: SourcePanelProps) {
   const current = revisions.find(
     (item) => item.revision === artifact.current_revision,
@@ -206,7 +223,11 @@ function SourcePanel({
   const textFiles = (current?.files ?? []).filter((file) =>
     TEXT_TYPES.test(file.media_type),
   );
-  const [path, setPath] = useState('index.html');
+  const [chosen, setChosen] = useState('index.html');
+  // The chosen file may be gone after loading a revision saved elsewhere.
+  const path = textFiles.some((file) => file.path === chosen)
+    ? chosen
+    : 'index.html';
   if (textFiles.length === 0)
     return (
       <p className="text-sm text-muted-foreground">
@@ -221,7 +242,9 @@ function SourcePanel({
           <NativeSelect
             id="source-file"
             value={path}
-            onChange={(event) => setPath(event.target.value)}
+            disabled={unsaved}
+            aria-describedby={unsaved ? 'source-file-locked' : undefined}
+            onChange={(event) => setChosen(event.target.value)}
           >
             {textFiles.map((file) => (
               <NativeSelectOption key={file.path} value={file.path}>
@@ -230,14 +253,20 @@ function SourcePanel({
             ))}
           </NativeSelect>
         </Field>
+        {unsaved ? (
+          <FieldDescription id="source-file-locked">
+            Save or discard your changes to switch files or artifacts.
+          </FieldDescription>
+        ) : null}
       </FieldGroup>
       <FileEditor
-        key={path}
+        key={`${artifact.current_revision}:${path}`}
         client={client}
         artifact={artifact}
         path={path}
         onSaved={onSaved}
         onReload={onReload}
+        onUnsavedChange={onUnsavedChange}
       />
     </div>
   );
@@ -249,6 +278,7 @@ interface FileEditorProps {
   path: string;
   onSaved: (artifact: Artifact) => void;
   onReload: () => void;
+  onUnsavedChange: (unsaved: boolean) => void;
 }
 
 type SaveState =
@@ -263,10 +293,11 @@ function FileEditor({
   path,
   onSaved,
   onReload,
+  onUnsavedChange,
 }: FileEditorProps) {
   const base = artifact.current_revision;
   const loaded = useRequest(`${artifact.id}:${base}:${path}`, async () =>
-    new TextDecoder().decode(await client.readFile(artifact.id, base, path)),
+    toEditable(await client.readFile(artifact.id, base, path)),
   );
   const [draft, setDraft] = useState<string>();
   const [save, setSave] = useState<SaveState>({ status: 'idle' });
@@ -284,8 +315,29 @@ function FileEditor({
         <AlertDescription>{loaded.message}</AlertDescription>
       </Alert>
     );
-  const value = draft ?? loaded.value;
-  const changed = value !== loaded.value;
+  const file = loaded.value;
+  if (!file.editable)
+    return (
+      <Alert>
+        <AlertTitle>{path} cannot be edited here</AlertTitle>
+        <AlertDescription>
+          The file {file.reason}. Editing it as text would change bytes you did
+          not touch; replace it with <code>artifree artifact save</code>{' '}
+          instead.
+        </AlertDescription>
+      </Alert>
+    );
+  const { text, crlf } = file;
+  const value = draft ?? text;
+  const changed = value !== text;
+  const saving = save.status === 'saving';
+
+  function edit(next: string | undefined): void {
+    setDraft(next);
+    setRequestKey(newIdempotencyKey());
+    setSave({ status: 'idle' });
+    onUnsavedChange(next !== undefined && next !== text);
+  }
 
   async function commit(): Promise<void> {
     setSave({ status: 'saving' });
@@ -294,7 +346,14 @@ function FileEditor({
         artifact.id,
         {
           base_revision: base,
-          changes: [{ op: 'put', path, encoding: 'utf8', content: value }],
+          changes: [
+            {
+              op: 'put',
+              path,
+              encoding: 'utf8',
+              content: fromEditable(value, crlf),
+            },
+          ],
         },
         { idempotencyKey: requestKey },
       );
@@ -319,11 +378,11 @@ function FileEditor({
           className="max-h-128 min-h-64"
           spellCheck={false}
           value={value}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setRequestKey(newIdempotencyKey());
-            if (save.status !== 'saving') setSave({ status: 'idle' });
-          }}
+          // Read-only while saving: the request carries this text, and the
+          // editor reloads with the committed revision when it succeeds.
+          readOnly={saving}
+          aria-busy={saving}
+          onChange={(event) => edit(event.target.value)}
         />
         <FieldDescription>
           Saving commits revision {base + 1} only if revision {base} is still
@@ -349,12 +408,22 @@ function FileEditor({
       <Field orientation="horizontal">
         <Button
           type="button"
-          disabled={!changed || save.status === 'saving'}
+          disabled={!changed || saving}
           onClick={() => void commit()}
         >
           <SaveIcon data-icon="inline-start" aria-hidden="true" />
-          {save.status === 'saving' ? 'Saving…' : 'Save revision'}
+          {saving ? 'Saving…' : 'Save revision'}
         </Button>
+        {changed && !saving && save.status !== 'conflict' ? (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => edit(undefined)}
+          >
+            <Undo2Icon data-icon="inline-start" aria-hidden="true" />
+            Discard changes
+          </Button>
+        ) : null}
         {save.status === 'conflict' ? (
           <Button type="button" variant="outline" onClick={onReload}>
             <RotateCwIcon data-icon="inline-start" aria-hidden="true" />

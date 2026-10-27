@@ -35,11 +35,17 @@ const STARTER = `<!doctype html>
 
 interface CreateDialogProps {
   client: ArtifreeClient;
+  /** Prevents opening the dialog, for example while a draft is unsaved. */
+  disabled: boolean;
   onCreated: (artifact: Artifact) => void;
 }
 
 /** Creates an artifact with a single `index.html`. */
-export function CreateDialog({ client, onCreated }: CreateDialogProps) {
+export function CreateDialog({
+  client,
+  disabled,
+  onCreated,
+}: CreateDialogProps) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [html, setHtml] = useState(STARTER);
@@ -80,7 +86,7 @@ export function CreateDialog({ client, onCreated }: CreateDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button />}>
+      <DialogTrigger render={<Button disabled={disabled} />}>
         <PlusIcon data-icon="inline-start" aria-hidden="true" />
         New artifact
       </DialogTrigger>
@@ -103,6 +109,9 @@ export function CreateDialog({ client, onCreated }: CreateDialogProps) {
                 id="new-title"
                 required
                 maxLength={200}
+                // Read-only while creating: the request carries these values,
+                // and the form resets when it succeeds.
+                readOnly={pending}
                 value={title}
                 onChange={(event) => edit(() => setTitle(event.target.value))}
               />
@@ -114,6 +123,8 @@ export function CreateDialog({ client, onCreated }: CreateDialogProps) {
                 variant="code"
                 className="max-h-64"
                 spellCheck={false}
+                readOnly={pending}
+                aria-busy={pending}
                 value={html}
                 onChange={(event) => edit(() => setHtml(event.target.value))}
               />

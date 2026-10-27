@@ -55,10 +55,14 @@ Artifact behavior is tested at the boundary that owns it:
   a case-insensitive scheme; unsafe paths, body limits, pinned reads, preview
   tickets and CSP, expiry, owner-only access in the core, and (on Unix) an
   owner-only data directory, refusing one other users can access.
-- `scripts/tests/server.test.mjs`: the CLI against a spawned server, and a
-  SIGKILL after commit followed by a restart and a replayed retry.
+- `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
+  bytes through upload and `cat`, refused dot segments, and a SIGKILL after
+  commit followed by a restart and a replayed retry.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
-  read the parent page, use storage, or reach the API.
+  read the parent page, use storage, or reach the API; create and save
+  requests held in flight keep the forms read-only; unsaved changes lock
+  navigation; non-UTF-8 files are not editable; an edit keeps a byte order
+  mark and CRLF line breaks.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

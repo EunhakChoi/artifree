@@ -15,7 +15,7 @@ use artifree_contracts::api::{
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService, Missing};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
-use artifree_domain::package::{FileChange, FilePackage, MAX_FILES, PackagePath};
+use artifree_domain::package::{FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath};
 use artifree_domain::{ArtifactKind, SourceRevision};
 use artifree_ports::artifact_store::{ArtifactRecord, CommitReceipt, Delivery, RevisionRecord};
 use artifree_providers::storage::SqliteStore;
@@ -356,10 +356,13 @@ fn decode(field: &str, encoding: ContentEncoding, content: String) -> Result<Vec
     }
 }
 
-fn too_many_files(count: usize) -> Result<(), ApiError> {
-    if count > MAX_FILES {
+/// Rejects an oversized list before its entries are decoded. `limit` is
+/// [`MAX_FILES`] for a new package and [`MAX_CHANGES`] for a change set; the
+/// domain validates the resulting package either way.
+fn too_many(what: &str, count: usize, limit: usize) -> Result<(), ApiError> {
+    if count > limit {
         return Err(ApiError::unprocessable(format!(
-            "at most {MAX_FILES} files or changes are allowed"
+            "at most {limit} {what} are allowed"
         )));
     }
     Ok(())
@@ -376,7 +379,7 @@ async fn create_artifact(
         .title
         .parse()
         .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
-    too_many_files(request.files.len())?;
+    too_many("files", request.files.len(), MAX_FILES)?;
     let mut files = Vec::with_capacity(request.files.len());
     for (
         index,
@@ -413,7 +416,7 @@ async fn save_revision(
     let id = artifact_id(&id)?;
     let Json(request) = body?;
     let base = SourceRevision(request.base_revision);
-    too_many_files(request.changes.len())?;
+    too_many("changes", request.changes.len(), MAX_CHANGES)?;
     let mut changes = Vec::with_capacity(request.changes.len());
     for (index, change) in request.changes.into_iter().enumerate() {
         changes.push(match change {

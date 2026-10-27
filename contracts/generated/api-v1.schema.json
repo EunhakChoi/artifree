@@ -436,7 +436,7 @@
           "type": "integer"
         },
         "changes": {
-          "description": "Changes applied to the base revision; unchanged files carry over.",
+          "description": "Changes applied to the base revision; unchanged files carry over. At\nmost 512 changes, each to a different path.",
           "items": {
             "$ref": "#/$defs/FileChange"
           },
