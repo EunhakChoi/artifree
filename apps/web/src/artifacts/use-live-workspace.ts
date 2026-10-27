@@ -23,8 +23,18 @@ export interface LiveWorkspace {
   readonly feed: FeedState;
   /** False until the page may read for the first time. */
   readonly canRead: boolean;
-  /** Advances whenever everything must be read again. */
+  /**
+   * Advances whenever everything must be read again, file content and
+   * previews included.
+   */
   readonly epoch: number;
+  /**
+   * Advances when the server's data may have been replaced since the page
+   * read it, so a revision number read before may now name other content:
+   * on `reset`, and on a stream that starts with `ready` after the page
+   * already read without one.
+   */
+  readonly resets: number;
   /** Advances for each revision newer than the page knew. */
   readonly news: number;
   /** The newest revision known per artifact id. */
@@ -41,6 +51,7 @@ const FIRST_READ_WAIT_MS = 2000;
 
 interface Announced {
   readonly epoch: number;
+  readonly resets: number;
   readonly news: number;
   readonly known: Readonly<Record<string, number>>;
 }
@@ -75,15 +86,21 @@ function pageVisible(): boolean {
  * hidden page gives up its stream and starts no reads. The first read waits
  * for the stream's `ready`, at most two seconds of visibility, unless the
  * stream already failed. `ready` and `reset` advance `epoch` and forget
- * known revisions; a change newer than known advances `news`.
+ * known revisions, and either can advance `resets`; a change newer than
+ * known advances `news`.
  */
 export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
   const visible = useSyncExternalStore(subscribeVisibility, pageVisible);
   const [announced, setAnnounced] = useState<Announced>({
     epoch: 0,
+    resets: 0,
     news: 0,
     known: {},
   });
+  // Once the page may read it keeps reading; later reads follow notices,
+  // which stop while it is hidden. A hidden page's feed is paused and its
+  // wait does not run, so it cannot start reading.
+  const [canRead, setCanRead] = useState(false);
   const feed = useChangeFeed(client, visible, (event) => {
     if (event.type === 'change') {
       const { artifact_id: id, revision } = event.change;
@@ -91,6 +108,8 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
     } else
       setAnnounced((value) => ({
         epoch: value.epoch + 1,
+        // Nothing ties reads made before this stream to its position.
+        resets: value.resets + (event.type === 'reset' || canRead ? 1 : 0),
         news: value.news,
         known: {},
       }));
@@ -102,10 +121,6 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
     const timer = setTimeout(() => setWaited(true), FIRST_READ_WAIT_MS);
     return () => clearTimeout(timer);
   }, [visible, waited]);
-  // Once the page may read it keeps reading; later reads follow notices,
-  // which stop while it is hidden. A hidden page's feed is paused and its
-  // wait does not run, so it cannot start reading.
-  const [canRead, setCanRead] = useState(false);
   if (
     !canRead &&
     (announced.epoch > 0 ||

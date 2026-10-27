@@ -68,14 +68,21 @@ unpublished trace maps each to its evidence.
    while a draft exists, or, without a draft, when a list read for the
    current request no longer contains the selected artifact; then the first
    listed artifact opens.
-7. **Drafts.** While the editor holds unsaved changes it keeps the revision
-   the draft was written against, with its file list, even when that
-   revision no longer exists after a reset. When another revision becomes
-   current, the editor says "Revision N was saved elsewhere", or "Revision N
-   is now current" when N is older, explains that saving will be refused,
-   and offers "Load latest", which discards the draft. While this page's own
-   save is in flight, or after its response was lost, a newer revision may
-   be that save, so no notice is shown then.
+7. **Content and drafts.** A revision number read before a reset may name
+   other content afterwards, for example in a restored database, so file
+   content and previews are read again in each epoch. While the editor
+   holds unsaved changes it keeps the revision the draft was written
+   against, with its file list, even when that revision no longer exists.
+   When a newer revision arrives, the editor says "Revision N was saved
+   elsewhere", explains that saving will be refused, and offers "Load
+   latest", which discards the draft. After a reset, or after a stream
+   that starts with `ready` only when the page had already read without
+   one (nothing ties those reads to the feed), it says that the server's
+   data may have been replaced and disables saving, because a save against
+   a revision of the same number would succeed and overwrite content the
+   user never saw. While this page's own save is in flight, or after its
+   response was lost, a newer revision may be that save, so no notice is
+   shown then.
 8. **Previews.** The revision menu has a "Latest (N)" entry, the default,
    which follows each new revision. Choosing a numbered revision pins the
    preview until the user chooses again, also across the source tab.
@@ -95,7 +102,9 @@ page opened in the background still read. Two rules were implicit:
 whether a draft survived depended on what the list and history happened
 to contain, and when the page read was decided in several places.
 Decisions 1, 4, and 6 state those rules, and the code keeps each in one
-place.
+place. The rewrite's first review found that file content and previews were
+still reused after a reset; decision 7 now reads them again and disables
+saving a draft written before the reset.
 
 ## Costs and limits
 

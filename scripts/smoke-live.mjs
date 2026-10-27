@@ -192,11 +192,13 @@ export async function checkLiveUpdates({
 /**
  * Connects again with every stream forged in turn, then follows the real
  * server: the first stream is held back, so the page reads without it; it
- * then starts at the head, which reads again; the next brings a duplicate
- * and an older change, which read nothing; two resets stand for a server
- * whose data was replaced by an older copy and by an empty one, while a
- * draft is open; the last reconnection waits while a commit lands
- * elsewhere and, resuming from its cursor, brings it.
+ * then starts at the head, which reads again and marks a draft written
+ * meanwhile as unsaveable; the next brings a duplicate
+ * and an older change, which read nothing; three resets stand for a
+ * server whose data was replaced: by an older copy while a draft is open,
+ * by a restored copy with the same revision and other content, and by an
+ * empty one while a draft is open; the last reconnection waits while a
+ * commit lands elsewhere and, resuming from its cursor, brings it.
  */
 async function checkForgedStreams({
   page,
@@ -221,6 +223,7 @@ async function checkForgedStreams({
     change(`${feed}.${head - 1}`, id, latest - 1) + change(cursor, id, latest),
     position('reset'),
     position('reset'),
+    position('reset'),
     undefined,
   ]);
   await page.route('**/v1/changes', streams.handler);
@@ -231,34 +234,66 @@ async function checkForgedStreams({
   assert.equal(streams.opened(), 1, 'The first stream was not held back.');
   reads.take();
 
+  // A draft written before the stream started: nothing ties what the page
+  // read to the stream's position, so the draft cannot be saved.
+  await workspace.getByRole('tab', { name: 'Source' }).click();
+  await editor.fill(htmlPage('Draft before the stream'));
   streams.release(0);
   await expect.poll(() => reads.peek()).toEqual({ list: 1, artifact: 1 });
+  await expect(
+    workspace.getByText("The server's data may have been replaced"),
+  ).toBeVisible();
+  await workspace.getByRole('button', { name: 'Discard changes' }).click();
   streams.release(1);
   await expect.poll(() => streams.opened()).toBe(3);
   assert.deepEqual(reads.take(), { list: 1, artifact: 1 }, 'Duplicates read.');
 
   // Reset to an older copy, where the artifact is at revision 1: the draft
-  // keeps its revision and files and says that revision 1 is current.
+  // keeps its revision and files, says that the data was replaced, and
+  // cannot be saved.
   await workspace.getByRole('tab', { name: 'Source' }).click();
   await editor.fill(htmlPage('Draft across a reset'));
   const older = replaceData(id, 'older');
   await page.route('**/v1/artifacts**', older);
   streams.release(2);
   await expect.poll(() => reads.peek()).toEqual({ list: 1, artifact: 1 });
-  await expect(workspace.getByText('Revision 1 is now current')).toBeVisible();
+  await expect(
+    workspace.getByText("The server's data may have been replaced"),
+  ).toBeVisible();
   await expect(badge(1)).toBeVisible();
   await expect(editor).toHaveValue(/Draft across a reset/);
   await expect(editor).toBeEditable();
+  await expect(
+    workspace.getByRole('button', { name: 'Save revision' }),
+  ).toBeDisabled();
   await page.unroute('**/v1/artifacts**', older);
   await workspace.getByRole('button', { name: 'Load latest' }).click();
   await expect(badge(latest)).toBeVisible();
+  await expect(editor).toHaveValue(/Saved while hidden/);
+
+  // Reset to a restored copy with the same revision and other content:
+  // without a draft, the preview and the editor read it again.
+  await workspace.getByRole('tab', { name: 'Preview' }).click();
+  await expect(
+    page.frameLocator('iframe[title^="Preview of"]').locator('#label'),
+  ).toBeVisible();
+  const previews = countPreviews(page, id);
+  const restored = restoredFile(id, latest);
+  await page.route('**/v1/artifacts/**', restored);
+  streams.release(3);
+  await expect.poll(() => previews.count()).toBeGreaterThan(0);
+  await workspace.getByRole('tab', { name: 'Source' }).click();
+  await expect(editor).toHaveValue(/Restored copy/);
+  await page.unroute('**/v1/artifacts/**', restored);
+  previews.stop();
 
   // Reset to empty data: the list is empty and the artifact is gone, yet the
-  // open draft stays until the user acts.
+  // open draft stays until the user discards it; then the open artifact
+  // follows the list and closes.
   await editor.fill(htmlPage('Draft across an empty reset'));
   const empty = replaceData(id, 'empty');
   await page.route('**/v1/artifacts**', empty);
-  streams.release(3);
+  streams.release(4);
   await expect(nav.getByText('No artifacts yet')).toBeVisible();
   await expect(
     workspace.getByText('Could not refresh the artifact'),
@@ -266,20 +301,20 @@ async function checkForgedStreams({
   await expect(editor).toHaveValue(/Draft across an empty reset/);
   await expect(editor).toBeEditable();
   await page.unroute('**/v1/artifacts**', empty);
-  await workspace.getByRole('button', { name: 'Try again' }).click();
-  await expect(
-    workspace.getByText('Could not refresh the artifact'),
-  ).toBeHidden();
   await workspace.getByRole('button', { name: 'Discard changes' }).click();
+  await expect(editor).toBeHidden();
+  await expect(workspace.getByText('No artifacts yet')).toBeVisible();
 
-  await expect.poll(() => streams.opened()).toBe(5);
+  // The last reconnection resumes from its cursor with the commit made
+  // while it waited, which brings the artifact back.
+  await expect.poll(() => streams.opened()).toBe(6);
   await saveElsewhere('Missed while away');
-  streams.release(4);
+  streams.release(5);
   await expect(badge(latest + 1)).toBeVisible();
   await expect(workspace.getByText('Live updates on')).toBeVisible();
   assert.deepEqual(
     streams.resumedFrom,
-    [cursor, cursor, cursor, cursor],
+    [cursor, cursor, cursor, cursor, cursor],
     'Each reconnection must resume after the last cursor.',
   );
   await page.unroute('**/v1/changes', streams.handler);
@@ -442,6 +477,37 @@ function replaceData(id, data) {
       body.revisions = body.revisions.filter((item) => item.revision === 1);
     return route.fulfill({ response, json: body });
   };
+}
+
+/**
+ * A route handler that answers index.html of revision `revision` of
+ * artifact `id` with other content, as a restored copy would hold.
+ */
+function restoredFile(id, revision) {
+  const path = `/v1/artifacts/${id}/revisions/${revision}/files/index.html`;
+  return (route) =>
+    route.request().method() === 'GET' &&
+    new URL(route.request().url()).pathname === path
+      ? route.fulfill({
+          contentType: 'text/html; charset=utf-8',
+          body: htmlPage('Restored copy'),
+        })
+      : route.fallback();
+}
+
+/** Counts preview links this page asks for artifact `id`. */
+function countPreviews(page, id) {
+  let count = 0;
+  const pattern = new RegExp(`^/v1/artifacts/${id}/revisions/\\d+/previews$`);
+  const listener = (request) => {
+    if (
+      request.method() === 'POST' &&
+      pattern.test(new URL(request.url()).pathname)
+    )
+      count += 1;
+  };
+  page.on('request', listener);
+  return { count: () => count, stop: () => page.off('request', listener) };
 }
 
 /** A route handler that fails the next GET of `path` with 503. */

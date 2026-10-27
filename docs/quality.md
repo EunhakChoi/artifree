@@ -153,8 +153,10 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   shown; disconnecting closes the old stream. Forged streams show that a
   stream held back does not keep the page empty, a stream start reads again,
   duplicate and older changes read nothing, a draft survives resets to
-  older and to empty data, and every reconnection resumes after the last
-  cursor with the commit made meanwhile. A burst of commits reads one
+  older and to empty data but cannot be saved after them, a restored copy
+  with the same revision and other content is read again by the editor and
+  the preview, and every reconnection resumes after the last cursor with the
+  commit made meanwhile. A burst of commits reads one
   request at a time per view, and a `429` is retried after `Retry-After`.
 
 Important new behavior needs rejection and boundary tests and an observed

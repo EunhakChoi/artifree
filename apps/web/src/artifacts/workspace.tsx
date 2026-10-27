@@ -192,6 +192,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
               client={client}
               artifactId={selected}
               epoch={live.epoch}
+              resets={live.resets}
               knownRevision={live.known[selected] ?? 0}
               onSaved={refresh}
               unsaved={unsaved}
