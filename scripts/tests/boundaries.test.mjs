@@ -147,6 +147,7 @@ test('Inventory rejects non-portable paths, duplicate IDs, and escaping symlinks
   await writeFile(join(root, 'src/file.ts'), 'export {};');
   const inventory = (components) => ({
     http_api: false,
+    mcp_api: false,
     server_framework: null,
     async_runtime: null,
     components,
@@ -192,6 +193,7 @@ test('Inventory cannot claim a framework or API the server does not use', async 
   const root = await mkdtemp(join(tmpdir(), 'artifree-inventory-'));
   const claim = (fields) => ({
     http_api: false,
+    mcp_api: false,
     server_framework: null,
     async_runtime: null,
     components: [],
@@ -223,6 +225,32 @@ test('Inventory cannot claim a framework or API the server does not use', async 
       ),
       /requires a selected framework and runtime/,
     );
+    await checkInventory(
+      root,
+      claim({
+        http_api: true,
+        mcp_api: true,
+        server_framework: 'axum',
+        async_runtime: 'tokio',
+      }),
+      ['axum', 'tokio', 'rmcp'],
+    );
+    for (const [fields, dependencies] of [
+      [{ mcp_api: true }, ['rmcp']],
+      [
+        {
+          http_api: true,
+          mcp_api: true,
+          server_framework: 'axum',
+          async_runtime: 'tokio',
+        },
+        ['axum', 'tokio'],
+      ],
+    ])
+      await assert.rejects(
+        checkInventory(root, claim(fields), dependencies),
+        /MCP claim requires the HTTP API and the rmcp/,
+      );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

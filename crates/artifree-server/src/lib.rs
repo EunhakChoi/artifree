@@ -1,10 +1,11 @@
-//! Composition root: wires the application core to `SQLite` storage and the
-//! Axum HTTP adapters. The MCP adapter is planned.
+//! Composition root: wires the application core to `SQLite` storage, the
+//! Axum HTTP adapters, and the MCP adapter.
 
 pub mod auth;
 pub mod http;
 mod inventory;
 pub mod mcp;
+mod operations;
 pub mod preview;
 pub mod serve;
 
@@ -21,6 +22,7 @@ pub fn describe() -> ServiceDescription {
         server_framework: Some("axum".into()),
         async_runtime: Some("tokio".into()),
         http_api: true,
+        mcp_api: true,
         components: inventory::COMPONENTS
             .into_iter()
             .map(

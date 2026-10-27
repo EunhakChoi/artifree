@@ -7,7 +7,7 @@ fn descriptor() -> Value {
     serde_json::json!({
         "name": "Artifree", "version": "0.1.0", "contract_version": "0.1.0",
         "phase": "early-development", "server_framework": null, "async_runtime": null,
-        "http_api": false,
+        "http_api": false, "mcp_api": false,
         "components": [{ "id": "web", "name": "Web", "layer": "presentation",
             "language": "TypeScript", "path": "apps/web", "status": "scaffold", "summary": "Development shell." }]
     })

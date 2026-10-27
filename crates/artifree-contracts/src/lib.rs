@@ -2,12 +2,13 @@
 //! Domain models remain independent; transport DTOs do not grant authorization.
 
 pub mod api;
+pub mod mcp;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version, independent from a future API transport version.
-pub const CONTRACT_VERSION: &str = "0.2.0";
+pub const CONTRACT_VERSION: &str = "0.3.0";
 
 /// How much of a module's responsibility exists in this build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -74,6 +75,9 @@ pub struct ServiceDescription {
     /// Whether this build can serve the HTTP API (`artifree-server serve`).
     /// The inventory itself is static and does not probe a running server.
     pub http_api: bool,
+    /// Whether `artifree-server serve` also answers MCP over Streamable HTTP
+    /// at `/mcp` on the API listener.
+    pub mcp_api: bool,
     /// Modules included in this build-time inventory.
     pub components: Vec<Component>,
 }

@@ -22,6 +22,11 @@ export interface ServiceDescription {
    */
   http_api: boolean;
   /**
+   * Whether `artifree-server serve` also answers MCP over Streamable HTTP
+   * at `/mcp` on the API listener.
+   */
+  mcp_api: boolean;
+  /**
    * Display name of the application.
    */
   name: string;

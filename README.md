@@ -9,10 +9,10 @@ server and use it from a browser, CLI, HTTP API, or MCP-capable agent.
 **Current stage: early development.** One vertical slice works: HTML
 file-package artifacts are created, saved as immutable revisions with conflict
 detection and safe retries, and previewed in a sandbox on a separate origin —
-through the HTTP API, the CLI, and the web workspace, stored in a local SQLite
-file. It is single-user and listens on loopback by default. Publishing, sharing, MCP,
-the runtime SDK bridge, build and conversion workers, and multi-user
-authentication are not implemented. The module inventory shown by the UI and
+through the HTTP API, MCP tools for agents, the CLI, and the web workspace,
+stored in a local SQLite file. It is single-user and listens on loopback by
+default. Publishing, sharing, the runtime SDK bridge, build and conversion
+workers, and multi-user authentication are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
 
 ## Quick start
@@ -54,6 +54,17 @@ another save won. Retrying with the same `--idempotency-key` returns the
 original result instead of committing twice. The HTTP API is summarized in the
 [architecture document](docs/architecture.md#http-api-v1).
 
+MCP agents such as Codex and Pi connect to `http://127.0.0.1:7410/mcp` with the
+same token:
+
+```sh
+export ARTIFREE_TOKEN="$(cat .artifree/data/access-token)"
+codex mcp add artifree --url http://127.0.0.1:7410/mcp --bearer-token-env-var ARTIFREE_TOKEN
+```
+
+[Using Artifree from MCP agents](docs/mcp.md) covers the tools, Pi's
+configuration, examples, and retry rules.
+
 ## Architecture
 
 | Layer          | Location                                                     | Choice                                                                  |
@@ -65,13 +76,14 @@ original result instead of committing twice. The HTTP API is summarized in the
 
 The application core depends on domain types and outbound ports. Concrete
 providers implement those ports and are wired by the server composition root.
-Inbound HTTP and MCP adapters will call the same application commands.
+Inbound HTTP and MCP adapters call the same application commands.
 
 See the [architecture document](docs/architecture.md), the interactive Korean
 [HTML design](docs/architecture.html), and the decision records
 ([0001](docs/decisions/0001-foundation.md),
 [0002](docs/decisions/0002-ui-and-quality.md),
-[0003](docs/decisions/0003-local-html-artifact-slice.md)).
+[0003](docs/decisions/0003-local-html-artifact-slice.md),
+[0004](docs/decisions/0004-inbound-mcp-adapter.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
