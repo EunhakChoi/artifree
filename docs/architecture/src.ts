@@ -26,8 +26,8 @@ const notes: Record<string, ModuleNote> = {
   web: {
     purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
     exists:
-      'access token 연결, 아티팩트 목록·생성, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. build-time module inventory.',
-    next: '파일 추가·삭제와 revision 비교, 게시 상태 표시를 같은 HTTP client로 연결합니다.',
+      'access token 연결, 아티팩트 목록·생성, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. 변경 피드를 따라 목록·열린 아티팩트·최신 preview를 갱신하고, 고정 preview와 미저장 초안은 유지합니다. client 아래 request gate가 모든 요청의 가시성·429 지연·한 번에 한 읽기를 결정합니다. build-time module inventory.',
+    next: '이름 변경·pin·검색·정렬·페이지, 파일 추가·삭제와 revision 비교를 같은 HTTP client로 연결합니다.',
   },
   cli: {
     purpose: '터미널과 외부 agent가 사용하는 작은 TypeScript client입니다.',
@@ -123,8 +123,8 @@ const notes: Record<string, ModuleNote> = {
   client: {
     purpose: 'Web과 CLI가 같은 HTTP 계약을 사용하는 client package입니다.',
     exists:
-      'fetch 기반 HTTP API v1 client. 응답을 runtime에 검증하고 오류를 code·HTTP status·current revision으로 구분합니다. 변경 피드를 WHATWG 규칙으로 해석하고, 연결 실패·429·5xx에서만 마지막 cursor부터 재연결하며 AbortSignal로 즉시 중단합니다.',
-    next: '일반 요청의 취소와 재시도 정책을 web·CLI가 공유하도록 추가합니다.',
+      'fetch 기반 HTTP API v1 client. 응답을 runtime에 검증하고 오류를 code·HTTP status·current revision으로 구분하며, 본문과 무관하게 HTTP 429는 rate_limited입니다. 읽기 요청은 AbortSignal로 취소할 수 있습니다. 변경 피드를 WHATWG 규칙으로 해석하고, 연결 실패·429·5xx에서만 마지막 cursor부터 재연결하며 AbortSignal로 즉시 중단합니다.',
+    next: '목록 query·pagination과 메타데이터 수정 요청을 추가합니다.',
   },
 };
 

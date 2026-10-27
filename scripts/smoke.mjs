@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
+import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -218,6 +219,7 @@ try {
     qa,
     checkAccessibility,
   });
+  const live = await checkLiveUpdates({ browser, origin, server: api });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -360,7 +362,8 @@ try {
   if (browserName === 'chromium')
     assert.deepEqual(
       expectedApiFailures.sort(),
-      ['401', '409', '503', '503', '503', '503'],
+      // The rejected token is refused twice: by the list and by the stream.
+      ['401', '401', '409', '503', '503', '503', '503'],
       'Only the deliberate rejected token, stale save, lost responses, and failed load may fail.',
     );
   assert.deepEqual(
@@ -379,6 +382,7 @@ try {
     widths: [375, 390, 768, 1440],
     downloadedHtml: 'passed',
     workspace,
+    live,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

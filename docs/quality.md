@@ -19,7 +19,7 @@ features.
 | Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                          |
 | Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset |
 | CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                    |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                                                                               |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                                                  |
 | Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                  |
 | CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                           |
 
@@ -131,7 +131,19 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   `Retry-After` honored with a non-API body; a handler error that ends
   following instead of a retry; and an abort that ends a retry wait at once,
   cancels an open stream, and stops events already received in the same
-  chunk.
+  chunk. A proxy's `429` without an API body is still `rate_limited`, and a
+  read's signal reaches `fetch`.
+- `scripts/tests/request-gate.test.mjs`: bundles the web workspace's request
+  gate with esbuild and drives it with mock timers, a fake visibility source,
+  and a server the test answers by hand: reads go one at a time in order
+  while writes are not held; a read keeps its turn until its answer's body
+  was read, and an abandoned read keeps it until it ends without being
+  cancelled; a withdrawn read is never sent; a hidden page sends nothing,
+  also a read asked for before it was hidden; a `429` on a read, the stream,
+  or a write, with or without an API body or `Retry-After`, delays every
+  read, and the refused read is sent again first; a delay is never shortened,
+  ended by the stall bound, or ended while hidden; a stalled read frees its
+  turn once; and the gate listens to visibility only while reads wait.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
   read the parent page, use storage, open a popup, or reach the API; create,
   save, and reload requests held in flight keep the forms read-only and the
@@ -139,7 +151,20 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   replays; a failed load offers a retry; a failed list refresh keeps the open
   draft; unsaved changes lock navigation;
   non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
-  line breaks.
+  line breaks; a rejected token also stops live updates.
+- `scripts/smoke-live.mjs`: pages in separate browser contexts follow commits
+  made through the API. Exact read counts on load, on a commit elsewhere, on
+  a change of unknown kind, and on each kind of reset; a pinned preview
+  across tabs; duplicate and older changes read nothing; a draft survives a
+  newer revision, a failed refresh, a reset to older data (saving disabled),
+  and a reset to an empty server; a hidden page holds no stream, sends no
+  read (also the second request of a view's load, or one queued before
+  hiding), and resumes after its cursor; reads coalesce during a read; a
+  `429` with `Retry-After: 12`, a proxy's HTML `429`, and a `429` on the
+  stream each hold every read for the delay; a stream that starts late marks
+  a draft as possibly replaced; a background page neither reads nor
+  subscribes. An observer installed in each page records any read started
+  while another was outstanding.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

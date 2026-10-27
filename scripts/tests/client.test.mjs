@@ -114,6 +114,39 @@ test('A rate-limited response keeps its code and retry delay', async () => {
   assert.equal(error.retryAfterSeconds, 3);
 });
 
+test("A proxy's 429 is a rate limit although its body is not an API error", async () => {
+  const client = clientWith(
+    () =>
+      new Response('<h1>Too Many Requests</h1>', {
+        status: 429,
+        headers: { 'retry-after': '4', 'content-type': 'text/html' },
+      }),
+  );
+  const error = await failure(client.listArtifacts());
+  assert.equal(error.code, 'rate_limited');
+  assert.equal(error.retryAfterSeconds, 4);
+});
+
+test('A read is cancelled through its signal', async () => {
+  let received;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      received = init.signal;
+      init.signal.throwIfAborted();
+      return Response.json(artifact);
+    },
+  });
+  const controller = new AbortController();
+  controller.abort();
+  const error = await failure(
+    client.getArtifact(artifact.id, { signal: controller.signal }),
+  );
+  assert.equal(received, controller.signal);
+  assert.equal(error.code, 'network_error');
+});
+
 // The change feed. Each rule below is one way an earlier version failed:
 // a split line end, an unknown kind or event, an aborted wait, a proxy
 // error, and a successful response that is not the feed.

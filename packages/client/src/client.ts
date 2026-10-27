@@ -36,6 +36,12 @@ export interface ClientConfiguration {
   readonly fetch?: typeof fetch;
 }
 
+/** Options for requests that only read. */
+export interface ReadOptions {
+  /** Cancels the request, also while a `fetch` wrapper holds it back. */
+  readonly signal?: AbortSignal;
+}
+
 /** Options for requests that change state. */
 export interface MutationOptions {
   /**
@@ -100,6 +106,12 @@ function filePath(path: string): string {
   return segments.map(encodeURIComponent).join('/');
 }
 
+interface SendOptions {
+  readonly mutation?: { body: unknown; idempotencyKey: string } | undefined;
+  readonly headers?: Record<string, string>;
+  readonly signal?: AbortSignal | undefined;
+}
+
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
 export class ArtifreeClient {
   private readonly baseUrl: string;
@@ -113,24 +125,31 @@ export class ArtifreeClient {
       configuration.fetch ?? ((input, init) => fetch(input, init));
   }
 
-  async listArtifacts(): Promise<Artifact[]> {
-    return this.json('GET', '/v1/artifacts', parseArtifactList);
+  async listArtifacts(options: ReadOptions = {}): Promise<Artifact[]> {
+    return this.json('GET', '/v1/artifacts', parseArtifactList, {
+      signal: options.signal,
+    });
   }
 
-  async getArtifact(id: string): Promise<Artifact> {
+  async getArtifact(id: string, options: ReadOptions = {}): Promise<Artifact> {
     return this.json(
       'GET',
       `/v1/artifacts/${encodeURIComponent(id)}`,
       parseArtifact,
+      { signal: options.signal },
     );
   }
 
   /** Revision history, newest first. */
-  async listRevisions(id: string): Promise<Revision[]> {
+  async listRevisions(
+    id: string,
+    options: ReadOptions = {},
+  ): Promise<Revision[]> {
     return this.json(
       'GET',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions`,
       parseRevisionList,
+      { signal: options.signal },
     );
   }
 
@@ -139,8 +158,7 @@ export class ArtifreeClient {
     options: MutationOptions,
   ): Promise<CommitResponse> {
     return this.json('POST', '/v1/artifacts', parseCommit, {
-      body: request,
-      idempotencyKey: options.idempotencyKey,
+      mutation: { body: request, idempotencyKey: options.idempotencyKey },
     });
   }
 
@@ -157,7 +175,9 @@ export class ArtifreeClient {
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions`,
       parseCommit,
-      { body: request, idempotencyKey: options.idempotencyKey },
+      {
+        mutation: { body: request, idempotencyKey: options.idempotencyKey },
+      },
     );
   }
 
@@ -166,10 +186,12 @@ export class ArtifreeClient {
     id: string,
     revision: number,
     path: string,
+    options: ReadOptions = {},
   ): Promise<Uint8Array> {
     const response = await this.send(
       'GET',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/files/${filePath(path)}`,
+      { signal: options.signal },
     );
     try {
       return new Uint8Array(await response.arrayBuffer());
@@ -193,9 +215,9 @@ export class ArtifreeClient {
   ): Promise<AsyncGenerator<ChangeFeedEvent>> {
     const headers: Record<string, string> = { accept: 'text/event-stream' };
     if (options.after !== undefined) headers['last-event-id'] = options.after;
-    const response = await this.send('GET', '/v1/changes', undefined, {
+    const response = await this.send('GET', '/v1/changes', {
       headers,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      signal: options.signal,
     });
     const mediaType = response.headers
       .get('content-type')
@@ -230,12 +252,20 @@ export class ArtifreeClient {
     );
   }
 
-  /** A short-lived URL rendering a pinned revision on the content origin. */
-  async createPreview(id: string, revision: number): Promise<Preview> {
+  /**
+   * A short-lived URL rendering a pinned revision on the content origin.
+   * Issuing one changes nothing else, so it is cancellable like a read.
+   */
+  async createPreview(
+    id: string,
+    revision: number,
+    options: ReadOptions = {},
+  ): Promise<Preview> {
     return this.json(
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/previews`,
       parsePreview,
+      { signal: options.signal },
     );
   }
 
@@ -243,9 +273,9 @@ export class ArtifreeClient {
     method: string,
     path: string,
     parse: (value: unknown) => T | undefined,
-    mutation?: { body: unknown; idempotencyKey: string },
+    request: Omit<SendOptions, 'headers'> = {},
   ): Promise<T> {
-    const response = await this.send(method, path, mutation);
+    const response = await this.send(method, path, request);
     const parsed = parse(await readJson(response));
     if (parsed === undefined)
       throw new ArtifreeApiError(
@@ -258,15 +288,14 @@ export class ArtifreeClient {
   private async send(
     method: string,
     path: string,
-    mutation?: { body: unknown; idempotencyKey: string },
-    extra: { headers?: Record<string, string>; signal?: AbortSignal } = {},
+    { mutation, headers: extraHeaders, signal }: SendOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
-      ...extra.headers,
+      ...extraHeaders,
       authorization: `Bearer ${this.accessToken}`,
     };
     const init: RequestInit = { method, headers };
-    if (extra.signal !== undefined) init.signal = extra.signal;
+    if (signal !== undefined) init.signal = signal;
     if (mutation !== undefined) {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;
@@ -283,14 +312,17 @@ export class ArtifreeClient {
     }
     if (response.ok) return response;
     // Also a proxy's error page may say when to retry.
-    const retryAfter = retryAfterSeconds(response.headers.get('retry-after'));
+    const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
     const failure = parseError(await readJson(response));
+    // HTTP 429 means too many requests whoever answered it, so a proxy's
+    // refusal without an API body is a rate limit too.
+    const limited = response.status === 429;
     if (failure === undefined)
       throw new ArtifreeApiError(
         `${method} ${path} failed with HTTP ${response.status}.`,
         {
           status: response.status,
-          code: 'invalid_response',
+          code: limited ? 'rate_limited' : 'invalid_response',
           ...(retryAfter === undefined
             ? {}
             : { retryAfterSeconds: retryAfter }),
@@ -298,7 +330,7 @@ export class ArtifreeClient {
       );
     throw new ArtifreeApiError(failure.message, {
       status: response.status,
-      code: failure.code,
+      code: limited ? 'rate_limited' : failure.code,
       ...(typeof failure.current_revision === 'number'
         ? { currentRevision: failure.current_revision }
         : {}),
@@ -351,7 +383,11 @@ async function* decodeText(
 }
 
 /** Whole seconds of a `Retry-After` header; HTTP dates are not used here. */
-function retryAfterSeconds(value: string | null): number | undefined {
+/**
+ * The delay a `Retry-After` header asks for, in whole seconds, or undefined
+ * when it is absent or not a number of seconds.
+ */
+export function parseRetryAfter(value: string | null): number | undefined {
   if (value === null || !/^\d{1,6}$/.test(value)) return undefined;
   return Number(value);
 }
