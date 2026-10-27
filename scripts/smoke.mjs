@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
+import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -56,7 +57,13 @@ function forward(request, response) {
       reply.pipe(response);
     },
   );
-  upstream.on('error', () => response.writeHead(502).end());
+  upstream.on('error', () => {
+    if (!response.headersSent) response.writeHead(502);
+    response.end();
+  });
+  // When the page stops reading, as when it closes a change stream, the
+  // API request must end too, or the server keeps the stream open.
+  response.on('close', () => upstream.destroy());
   request.pipe(upstream);
 }
 
@@ -142,10 +149,11 @@ try {
     const source = message.location().url;
     if (source.startsWith(api.content_origin))
       artifactConsole.push(message.text());
-    // Browsers log the 401, 409, and 503 the workspace test provokes on purpose.
+    // Browsers log the 401, 404, 409, 429, and 503 the workspace and live
+    // checks provoke on purpose.
     else if (
       source.startsWith(`${origin}/v1/`) &&
-      /status of (401|409|503) /.test(message.text())
+      /status of (401|404|409|429|503) /.test(message.text())
     )
       expectedApiFailures.push(message.text().match(/status of (\d+)/)[1]);
     else consoleErrors.push(message.text());
@@ -221,6 +229,14 @@ try {
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
+  const live = await checkLiveUpdates({
+    browser,
+    page,
+    origin,
+    server: api,
+    qa,
+    checkAccessibility,
+  });
 
   await page.goto(`${origin}/architecture.html`);
   await page.locator('[data-module="web"]').waitFor();
@@ -358,10 +374,12 @@ try {
   assert.deepEqual(consoleErrors, [], 'Browser console errors or warnings.');
   // Firefox does not log failed fetch responses; Chromium logs each one.
   if (browserName === 'chromium')
+    // The rejected token fails the list and the change stream; the live
+    // check forges a missing artifact, a rate limit, and a failed refresh.
     assert.deepEqual(
       expectedApiFailures.sort(),
-      ['401', '409', '503', '503', '503', '503'],
-      'Only the deliberate rejected token, stale save, lost responses, and failed load may fail.',
+      ['401', '401', '404', '409', '429', '503', '503', '503', '503', '503'],
+      'Only the deliberate rejected token, missing artifact, stale save, rate limit, lost responses, and failed loads may fail.',
     );
   assert.deepEqual(
     externalRequests,
@@ -379,6 +397,7 @@ try {
     widths: [375, 390, 768, 1440],
     downloadedHtml: 'passed',
     workspace,
+    live,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

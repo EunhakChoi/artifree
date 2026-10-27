@@ -25,6 +25,10 @@ export async function checkWorkspace({
   await expect(
     workspace.getByText('The access token was rejected.', { exact: false }),
   ).toBeVisible();
+  // Retrying cannot fix a rejected token, so live updates stop too.
+  await expect(
+    workspace.getByText('Live updates stopped; reconnect to try again.'),
+  ).toBeVisible();
   await workspace.getByRole('button', { name: 'Disconnect' }).click();
   await workspace.getByLabel('Access token').fill(server.token);
   await workspace.getByRole('button', { name: 'Connect' }).click();
@@ -137,13 +141,11 @@ fetch('${origin}/v1/artifacts').then(
   ).toBeVisible();
   await expect(editor).toHaveValue(/Lost edit/);
   await checkAccessibility('workspace-conflict');
-  // While the latest revision loads, the rejected draft stays read-only:
-  // anything typed then would vanish when the editor is replaced.
+  // The change feed already brought revision 3, so loading it replaces the
+  // draft at once; until the reload this asks for completes, the editor is
+  // read-only, since anything typed then would vanish when it is replaced.
   const releaseReload = await hold(page, 'GET', `**/v1/artifacts/${id}`);
   await workspace.getByRole('button', { name: 'Load latest' }).click();
-  await expect(
-    workspace.getByRole('button', { name: 'Loading latest…' }),
-  ).toBeDisabled();
   await expect(editor).not.toBeEditable();
   await releaseReload();
   await expect(
@@ -184,10 +186,19 @@ fetch('${origin}/v1/artifacts').then(
   await editor.fill(probe('Revision five'));
   await workspace.getByRole('button', { name: 'Save revision' }).click();
   await expect(workspace.getByText('Not saved', { exact: true })).toBeVisible();
+  // The lost save committed, and the change feed brings it; the page must
+  // not say that it was saved elsewhere.
+  await expect(
+    workspace.getByText('Revision 5', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    workspace.getByText('Revision 5 was saved elsewhere'),
+  ).toBeHidden();
   await restoreSave();
   await typeAndUndo(editor);
-  // The list refresh that follows this save fails. The open artifact, and
-  // any draft in it, must stay mounted while the list offers a retry.
+  // The list refresh that follows this save fails. The list read before,
+  // the open artifact, and any draft in it stay while the list offers a
+  // retry.
   let listFailed = false;
   const failList = (route) => {
     if (listFailed || route.request().method() !== 'GET')
@@ -204,6 +215,11 @@ fetch('${origin}/v1/artifacts').then(
     workspace.getByText('Revision 5', { exact: true }),
   ).toBeVisible();
   await expect(workspace.getByText('Could not list artifacts')).toBeVisible();
+  await expect(
+    workspace
+      .getByRole('navigation', { name: 'Artifacts' })
+      .getByRole('button', { name: /Smoke artifact/ }),
+  ).toBeVisible();
   await page.unroute('**/v1/artifacts', failList);
   await editor.fill(probe('Draft kept while the list fails'));
   await workspace
@@ -234,7 +250,11 @@ fetch('${origin}/v1/artifacts').then(
       },
     ],
   });
-  // A failed load offers a retry instead of leaving the panel stuck.
+  // The change feed brings revision 6 first; then a failed load on opening
+  // the page offers a retry instead of leaving the panel stuck.
+  await expect(
+    workspace.getByText('Revision 6', { exact: true }),
+  ).toBeVisible();
   await page.route(
     `**/v1/artifacts/${id}`,
     (route) =>
@@ -353,7 +373,7 @@ async function bytes(server, path) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function api(server, method, path, body) {
+export async function api(server, method, path, body) {
   const init = {
     method,
     headers: { authorization: `Bearer ${server.token}` },

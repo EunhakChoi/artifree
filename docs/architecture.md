@@ -160,8 +160,9 @@ Pi configuration. These are agent tools, not page capabilities.
 ## Next implementation slices
 
 The [PR roadmap](roadmap.md) is the implementation plan. A01 (committed
-change notifications and the deferred CLI retry diagnostic) is implemented;
-the next slice is A02 (safe web updates after an external agent saves).
+change notifications and the deferred CLI retry diagnostic) and A02 (the web
+workspace follows committed changes without dropping drafts, decision 0007)
+are implemented; the next slice is A03 (list and metadata management).
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

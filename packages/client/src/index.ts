@@ -6,5 +6,6 @@ export type {
   FeedChange,
   FollowOptions,
 } from './change-feed.js';
+export { cursorOf } from './change-feed.js';
 export { ArtifreeApiError } from './errors.js';
 export type { FailureCode } from './errors.js';

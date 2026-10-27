@@ -167,7 +167,8 @@ committed. Change the limits with `--request-burst`,
 ## What the tools do not do
 
 Previews are sandboxed pages with no data, model, or file capabilities, and a
-preview URL works for anyone who holds it until it expires. The web workspace
-does not refresh by itself after an agent saves; reload it. Sharing,
+preview URL works for anyone who holds it until it expires. An open web
+workspace shows an agent's saves as they are committed; a draft open there is
+kept and marked as based on an older revision (decision 0007). Sharing,
 publishing, structured documents, and builds are not available through MCP or
 any other interface yet.

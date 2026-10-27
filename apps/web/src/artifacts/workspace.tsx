@@ -14,6 +14,7 @@ import {
 import { ArtifactDetail } from './artifact-detail';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
+import { type FeedState, useLiveWorkspace } from './use-live-workspace';
 import { useRequest } from './use-request';
 
 const TOKEN_KEY = 'artifree.accessToken';
@@ -59,26 +60,51 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     () => new ArtifreeClient({ baseUrl: '', accessToken: token }),
     [token],
   );
+  const live = useLiveWorkspace(client);
   const [generation, setGeneration] = useState(0);
   const [selected, setSelected] = useState<string>();
   // While the editor holds unsaved changes, actions that would replace it are
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
-  // Keep the list (and the open artifact) mounted while it refreshes.
   const artifacts = useRequest(
-    `${token}:${generation}`,
+    live.canRead
+      ? `${token}:${generation}:${live.epoch}:${live.news}`
+      : undefined,
     () => client.listArtifacts(),
     { keepPrevious: true },
   );
+  // A failed refresh keeps the list read before; the failure shows above it.
+  const listed =
+    artifacts.status === 'ready'
+      ? artifacts.value
+      : artifacts.status === 'error'
+        ? artifacts.previous
+        : undefined;
+  // Only a read answered for the current request says what exists now; a
+  // list kept while a newer read is pending may predate a reset.
+  const fresh =
+    artifacts.status === 'ready' && artifacts.refreshing !== true
+      ? artifacts.value
+      : undefined;
+  if (fresh !== undefined) {
+    live.learn(
+      fresh.map((artifact) => ({
+        id: artifact.id,
+        revision: artifact.current_revision,
+      })),
+    );
+    // Without a draft the open artifact follows the list; with one it stays
+    // open until the user saves or discards it.
+    if (!unsaved && !fresh.some((artifact) => artifact.id === selected)) {
+      const first = fresh[0]?.id;
+      if (first !== selected) setSelected(first);
+    }
+  }
   function refresh(artifact: Artifact): void {
     setSelected(artifact.id);
     setGeneration((value) => value + 1);
+    live.learn([{ id: artifact.id, revision: artifact.current_revision }]);
   }
-  const listed = artifacts.status === 'ready' ? artifacts.value : undefined;
-  const selectedId = selected ?? listed?.[0]?.id;
-  // Once an artifact is open, a failed or retried list load must not unmount
-  // it and any draft in it; the failure is shown in place of the list.
-  const showGrid = selectedId !== undefined && listed?.length !== 0;
   const listFailure =
     artifacts.status === 'error' ? (
       <Alert variant="destructive">
@@ -97,32 +123,60 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
         </AlertDescription>
       </Alert>
     ) : null;
+  const empty =
+    listed?.length === 0 ? (
+      <Empty>
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <FileCode2Icon aria-hidden="true" />
+          </EmptyMedia>
+          <EmptyTitle>No artifacts yet</EmptyTitle>
+          <EmptyDescription>
+            Create one here, or from an agent with{' '}
+            <code>artifree artifact create</code>.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    ) : null;
 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <CreateDialog client={client} disabled={unsaved} onCreated={refresh} />
-        <Button variant="ghost" disabled={unsaved} onClick={onDisconnect}>
-          <LogOutIcon data-icon="inline-start" aria-hidden="true" />
-          Disconnect
-        </Button>
+        <div className="flex flex-wrap items-center gap-3">
+          <output className="text-sm text-muted-foreground">
+            {feedMessage(live.feed)}
+          </output>
+          <Button variant="ghost" disabled={unsaved} onClick={onDisconnect}>
+            <LogOutIcon data-icon="inline-start" aria-hidden="true" />
+            Disconnect
+          </Button>
+        </div>
       </div>
       {artifacts.status === 'loading' ? (
         <output className="text-sm text-muted-foreground">
           Loading artifacts…
         </output>
       ) : null}
-      {showGrid ? (
+      {selected === undefined ? (
+        <>
+          {listFailure}
+          {empty}
+        </>
+      ) : (
+        // The open artifact stays mounted, with any draft in it, whatever
+        // the list holds.
         <div className="grid gap-5 lg:grid-cols-3">
           <nav aria-label="Artifacts" className="flex flex-col gap-2">
             {listFailure}
+            {empty}
             {listed?.map((artifact) => (
               <Button
                 key={artifact.id}
-                variant={artifact.id === selectedId ? 'secondary' : 'ghost'}
-                aria-current={artifact.id === selectedId ? 'true' : undefined}
+                variant={artifact.id === selected ? 'secondary' : 'ghost'}
+                aria-current={artifact.id === selected ? 'true' : undefined}
                 className="justify-between"
-                disabled={unsaved && artifact.id !== selectedId}
+                disabled={unsaved && artifact.id !== selected}
                 onClick={() => setSelected(artifact.id)}
               >
                 <span className="truncate">{artifact.title}</span>
@@ -134,32 +188,33 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
           </nav>
           <div className="min-w-0 lg:col-span-2">
             <ArtifactDetail
-              key={selectedId}
+              key={selected}
               client={client}
-              artifactId={selectedId}
+              artifactId={selected}
+              epoch={live.epoch}
+              knownRevision={live.known[selected] ?? 0}
               onSaved={refresh}
               unsaved={unsaved}
               onUnsavedChange={setUnsaved}
             />
           </div>
         </div>
-      ) : (
-        listFailure
       )}
-      {listed?.length === 0 ? (
-        <Empty>
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <FileCode2Icon aria-hidden="true" />
-            </EmptyMedia>
-            <EmptyTitle>No artifacts yet</EmptyTitle>
-            <EmptyDescription>
-              Create one here, or from an agent with{' '}
-              <code>artifree artifact create</code>.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      ) : null}
     </div>
   );
+}
+
+function feedMessage(feed: FeedState): string {
+  switch (feed) {
+    case 'connecting':
+      return 'Connecting to live updates…';
+    case 'live':
+      return 'Live updates on';
+    case 'reconnecting':
+      return 'Reconnecting live updates; changes made meanwhile will follow.';
+    case 'paused':
+      return 'Live updates paused while this tab is hidden.';
+    case 'stopped':
+      return 'Live updates stopped; reconnect to try again.';
+  }
 }

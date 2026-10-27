@@ -7,21 +7,21 @@ features.
 
 ## Enforced checks
 
-| Area         | Enforcement                                                                                                                                                                                                                                                                                           |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| TypeScript   | Strict types, checked dependency declarations, exact optional properties, unchecked indexes, side-effect imports, missing returns, fallthrough, unreachable code                                                                                                                                      |
-| Code lint    | Oxlint correctness, hooks, JSX accessibility, import cycles, explicit `any`, non-null assertions; zero warnings                                                                                                                                                                                       |
-| UI design    | Six `@shadcn/lint` rules: component styling, semantic colors, arbitrary values, inline styles, unknown classes, readable static classes                                                                                                                                                               |
-| CSS          | Stylelint recommended validity checks, duplicate selectors/properties, unknown values/properties, Tailwind-aware at-rules; zero warnings                                                                                                                                                              |
-| Rust         | Unsafe forbidden, unused results denied, public documentation required, documented stdout/stderr exceptions only in CLI binaries, pedantic Clippy, rustfmt, rustdoc warnings denied                                                                                                                   |
-| Architecture | Exact Rust workspace membership and allowed dependencies, including build/dev edges; TypeScript package/import/re-export/type/lazy-import boundaries; no computed imports or source symlinks                                                                                                          |
-| Contracts    | Rust DTO generation, JSON Schema validity, unknown-field/type/value rejection, stable public TypeScript aliases, byte-for-byte generated drift; MCP tool schemas self-contained, standard-format, closed                                                                                              |
-| Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                          |
-| Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset |
-| CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                    |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                                                                               |
-| Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                  |
-| CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                           |
+| Area         | Enforcement                                                                                                                                                                                                                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| TypeScript   | Strict types, checked dependency declarations, exact optional properties, unchecked indexes, side-effect imports, missing returns, fallthrough, unreachable code                                                                                                                                             |
+| Code lint    | Oxlint correctness, hooks, JSX accessibility, import cycles, explicit `any`, non-null assertions; zero warnings                                                                                                                                                                                              |
+| UI design    | Six `@shadcn/lint` rules: component styling, semantic colors, arbitrary values, inline styles, unknown classes, readable static classes                                                                                                                                                                      |
+| CSS          | Stylelint recommended validity checks, duplicate selectors/properties, unknown values/properties, Tailwind-aware at-rules; zero warnings                                                                                                                                                                     |
+| Rust         | Unsafe forbidden, unused results denied, public documentation required, documented stdout/stderr exceptions only in CLI binaries, pedantic Clippy, rustfmt, rustdoc warnings denied                                                                                                                          |
+| Architecture | Exact Rust workspace membership and allowed dependencies, including build/dev edges; TypeScript package/import/re-export/type/lazy-import boundaries; no computed imports or source symlinks                                                                                                                 |
+| Contracts    | Rust DTO generation, JSON Schema validity, unknown-field/type/value rejection, stable public TypeScript aliases, byte-for-byte generated drift; MCP tool schemas self-contained, standard-format, closed                                                                                                     |
+| Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                                 |
+| Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset        |
+| CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                           |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, commits from a second browser context and an agent, hidden and background tabs, forged feed streams; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML |
+| Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                         |
+| CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                                  |
 
 The formatter owns formatting. CSS lint uses the recommended correctness preset
 rather than imposing a second formatting convention. Tailwind's `@apply` needs a
@@ -136,10 +136,26 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   read the parent page, use storage, open a popup, or reach the API; create,
   save, and reload requests held in flight keep the forms read-only and the
   dialog open; a response lost after commit is retried with the same key and
-  replays; a failed load offers a retry; a failed list refresh keeps the open
-  draft; unsaved changes lock navigation;
-  non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
-  line breaks.
+  replays without claiming that it was saved elsewhere; a failed load offers
+  a retry; a failed list refresh keeps the list and the open draft; unsaved
+  changes lock navigation; non-UTF-8 files are not editable; an edit keeps a
+  byte order mark and CRLF line breaks; a rejected token also stops live
+  updates.
+- `scripts/smoke-live.mjs`: a second browser context and the API, standing in
+  for an agent, commit while the workspace is open. A reload reads the list
+  and the artifact once each. A commit elsewhere updates the badge, the list,
+  and a preview that follows the latest, while a preview pinned to a
+  revision stays, also across tabs. An unsaved draft stays editable with a
+  notice, also when reading the newer revision fails first, and is replaced
+  only by "Load latest". An agent's new artifact appears without closing the
+  open one. A hidden page closes its stream and reads nothing, then resumes
+  from its cursor; a page connected in the background reads nothing until
+  shown; disconnecting closes the old stream. Forged streams show that a
+  stream held back does not keep the page empty, a stream start reads again,
+  duplicate and older changes read nothing, a draft survives resets to
+  older and to empty data, and every reconnection resumes after the last
+  cursor with the commit made meanwhile. A burst of commits reads one
+  request at a time per view, and a `429` is retried after `Retry-After`.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation
