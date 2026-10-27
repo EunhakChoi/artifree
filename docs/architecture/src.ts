@@ -26,7 +26,7 @@ const notes: Record<string, ModuleNote> = {
   web: {
     purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
     exists:
-      'access token 연결, 아티팩트 목록·생성, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. build-time module inventory.',
+      'access token 연결, 아티팩트 목록·생성, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. 변경 피드를 따라 목록·열린 아티팩트·최신 미리보기를 갱신하고, 고정 미리보기와 미저장 초안은 유지합니다. 페이지의 읽기는 한 scheduler가 한 번에 하나씩, 보이는 동안만, Retry-After 뒤에 시작합니다. build-time module inventory.',
     next: '파일 추가·삭제와 revision 비교, 게시 상태 표시를 같은 HTTP client로 연결합니다.',
   },
   cli: {
@@ -46,7 +46,7 @@ const notes: Record<string, ModuleNote> = {
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
       'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 커밋 변경 피드(GET /v1/changes SSE: cursor 재개·reset·사용자별 stream 수 제한), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
-    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 웹 작업공간의 변경 피드 사용(A02)과 handoff는 별도 기능입니다.',
+    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. handoff는 별도 기능입니다.',
   },
   domain: {
     purpose:

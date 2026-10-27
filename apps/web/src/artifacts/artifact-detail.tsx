@@ -46,6 +46,12 @@ const TEXT_TYPES = /^(text\/|application\/json|application\/xml|image\/svg)/;
 interface ArtifactDetailProps {
   client: ArtifreeClient;
   artifactId: string;
+  /** Advances when everything must be read again. */
+  epoch: number;
+  /** Advances when data read before may have been replaced. */
+  resets: number;
+  /** The newest revision announced for this artifact in this epoch. */
+  knownRevision: number;
   /** Called after a revision is committed so lists can refresh. */
   onSaved: (artifact: Artifact) => void;
   /** Whether the editor holds changes that are not saved. */
@@ -54,52 +60,89 @@ interface ArtifactDetailProps {
   onUnsavedChange: (unsaved: boolean) => void;
 }
 
+/** What one read of the artifact returned, and in which epoch. */
+interface Loaded {
+  readonly artifact: Artifact;
+  readonly revisions: Revision[];
+  readonly generation: number;
+  readonly epoch: number;
+  readonly resets: number;
+}
+
 /** Preview and source editing for one artifact. */
 export function ArtifactDetail({
   client,
   artifactId,
+  epoch,
+  resets,
+  knownRevision,
   onSaved,
   unsaved,
   onUnsavedChange,
 }: ArtifactDetailProps) {
   const [generation, setGeneration] = useState(0);
+  // The newest announced revision this view has asked for, per epoch.
+  const [caughtUp, setCaughtUp] = useState({ epoch, revision: 0 });
+  const target = caughtUp.epoch === epoch ? caughtUp.revision : 0;
   const details = useRequest(
-    `${artifactId}:${generation}`,
-    async () => {
+    `${artifactId}:${generation}:${epoch}:${target}`,
+    async (): Promise<Loaded> => {
       // Revisions are listed after the artifact is read, so the list always
       // contains its current revision.
       const artifact = await client.getArtifact(artifactId);
       const revisions = await client.listRevisions(artifactId);
-      return { artifact, revisions, generation };
+      return { artifact, revisions, generation, epoch, resets };
     },
-    // After a save, keep showing the card until the new revision arrives.
+    // Keep the card, and any draft in it, while a newer read is pending.
     { keepPrevious: true },
   );
+  const loaded =
+    details.status === 'ready'
+      ? details.value
+      : details.status === 'error'
+        ? details.previous
+        : undefined;
+  // Read again for an announced revision only once the current read has
+  // settled: a read still pending may already bring it.
+  const settled =
+    details.status === 'error' ||
+    (details.status === 'ready' && !details.refreshing);
+  if (
+    settled &&
+    loaded !== undefined &&
+    knownRevision > loaded.artifact.current_revision &&
+    knownRevision > target
+  )
+    setCaughtUp({ epoch, revision: knownRevision });
+  // A numbered revision chosen in the preview; it stays across tabs.
+  const [pinned, setPinned] = useState<number>();
   function reload(): void {
     setGeneration((value) => value + 1);
   }
-  if (details.status === 'loading')
+  if (loaded === undefined) {
+    if (details.status === 'error')
+      return (
+        <Alert variant="destructive">
+          <AlertTitle>Could not load the artifact</AlertTitle>
+          <AlertDescription>
+            <p>{details.message}</p>
+            <Button type="button" variant="outline" size="sm" onClick={reload}>
+              <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+              Try again
+            </Button>
+          </AlertDescription>
+        </Alert>
+      );
     return (
       <output className="text-sm text-muted-foreground">
         Loading artifact…
       </output>
     );
-  if (details.status === 'error')
-    return (
-      <Alert variant="destructive">
-        <AlertTitle>Could not load the artifact</AlertTitle>
-        <AlertDescription>
-          <p>{details.message}</p>
-          <Button type="button" variant="outline" size="sm" onClick={reload}>
-            <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
-            Try again
-          </Button>
-        </AlertDescription>
-      </Alert>
-    );
-  const { artifact, revisions } = details.value;
-  // The shown revision is being replaced; editing it now would be discarded.
-  const reloading = details.value.generation !== generation;
+  }
+  const { artifact, revisions } = loaded;
+  // This page asked for the shown revision to be replaced, after its own
+  // save or "Load latest"; editing it now would be discarded.
+  const reloading = loaded.generation !== generation;
   return (
     <Card>
       <CardHeader>
@@ -116,6 +159,23 @@ export function ArtifactDetail({
         </CardAction>
       </CardHeader>
       <CardContent>
+        {details.status === 'error' ? (
+          <Alert variant="destructive" className="mb-4">
+            <AlertTitle>Could not refresh the artifact</AlertTitle>
+            <AlertDescription>
+              <p>{details.message}</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={reload}
+              >
+                <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+                Try again
+              </Button>
+            </AlertDescription>
+          </Alert>
+        ) : null}
         <Tabs defaultValue="preview">
           <TabsList aria-label="Artifact views">
             <TabsTrigger value="preview">Preview</TabsTrigger>
@@ -123,24 +183,26 @@ export function ArtifactDetail({
           </TabsList>
           <TabsContent value="preview" className="mt-4">
             <PreviewPanel
-              key={artifact.current_revision}
               client={client}
               artifact={artifact}
               revisions={revisions}
+              epoch={loaded.epoch}
+              pinned={pinned}
+              onPin={setPinned}
             />
           </TabsContent>
           <TabsContent value="source" keepMounted className="mt-4">
             <SourcePanel
               client={client}
-              artifact={artifact}
-              revisions={revisions}
+              loaded={loaded}
+              resets={resets}
               onSaved={(saved) => {
                 onUnsavedChange(false);
                 reload();
                 onSaved(saved);
               }}
               onReload={() => {
-                // Loading the latest revision replaces the rejected draft.
+                // Loading the latest revision replaces the draft.
                 onUnsavedChange(false);
                 reload();
               }}
@@ -155,15 +217,35 @@ export function ArtifactDetail({
   );
 }
 
+/** The preview menu's entry that follows each new revision. */
+const LATEST = 'latest';
+
 interface PreviewPanelProps {
   client: ArtifreeClient;
   artifact: Artifact;
   revisions: Revision[];
+  /** The epoch of the metadata that names these revisions. */
+  epoch: number;
+  /** The chosen revision, or undefined to follow the latest. */
+  pinned: number | undefined;
+  onPin: (revision: number | undefined) => void;
 }
 
-function PreviewPanel({ client, artifact, revisions }: PreviewPanelProps) {
-  const [revision, setRevision] = useState(artifact.current_revision);
-  const preview = useRequest(`${artifact.id}:${revision}`, () =>
+function PreviewPanel({
+  client,
+  artifact,
+  revisions,
+  epoch,
+  pinned,
+  onPin,
+}: PreviewPanelProps) {
+  // A pinned revision that this history no longer has shows the latest.
+  const shown = revisions.some((item) => item.revision === pinned)
+    ? pinned
+    : undefined;
+  const revision = shown ?? artifact.current_revision;
+  // After a reset the same number may name other content: read it again.
+  const preview = useRequest(`${artifact.id}:${revision}:${epoch}`, () =>
     client.createPreview(artifact.id, revision),
   );
   return (
@@ -173,14 +255,21 @@ function PreviewPanel({ client, artifact, revisions }: PreviewPanelProps) {
           <FieldLabel htmlFor="preview-revision">Revision</FieldLabel>
           <NativeSelect
             id="preview-revision"
-            value={String(revision)}
-            onChange={(event) => setRevision(Number(event.target.value))}
+            value={shown === undefined ? LATEST : String(shown)}
+            onChange={(event) =>
+              onPin(
+                event.target.value === LATEST
+                  ? undefined
+                  : Number(event.target.value),
+              )
+            }
           >
+            <NativeSelectOption value={LATEST}>
+              Latest ({artifact.current_revision})
+            </NativeSelectOption>
             {revisions.map((item) => (
               <NativeSelectOption key={item.revision} value={item.revision}>
-                {item.revision === artifact.current_revision
-                  ? `${item.revision} (current)`
-                  : String(item.revision)}
+                {String(item.revision)}
               </NativeSelectOption>
             ))}
           </NativeSelect>
@@ -219,8 +308,9 @@ function PreviewPanel({ client, artifact, revisions }: PreviewPanelProps) {
 
 interface SourcePanelProps {
   client: ArtifreeClient;
-  artifact: Artifact;
-  revisions: Revision[];
+  loaded: Loaded;
+  /** The page's current reset count. */
+  resets: number;
   onSaved: (artifact: Artifact) => void;
   onReload: () => void;
   unsaved: boolean;
@@ -229,19 +319,42 @@ interface SourcePanelProps {
   reloading: boolean;
 }
 
+/** The revision a draft was written against, and what it was read in. */
+interface DraftBase {
+  readonly revision: Revision;
+  readonly epoch: number;
+  readonly resets: number;
+}
+
 function SourcePanel({
   client,
-  artifact,
-  revisions,
+  loaded,
+  resets,
   onSaved,
   onReload,
   unsaved,
   onUnsavedChange,
   reloading,
 }: SourcePanelProps) {
-  const current = revisions.find(
-    (item) => item.revision === artifact.current_revision,
-  );
+  const { artifact, revisions } = loaded;
+  // While a draft exists the editor stays on the revision it was written
+  // against, with that revision's files, even when newer metadata arrives
+  // or the revision is no longer listed.
+  const [held, setHeld] = useState<DraftBase>();
+  // After a save or "Load latest" the draft is done, but the editor keeps
+  // its revision, read-only, until the reload that replaces it arrives.
+  const [releasing, setReleasing] = useState(false);
+  if (releasing && !reloading) {
+    setReleasing(false);
+    setHeld(undefined);
+  }
+  function release(): void {
+    if (held !== undefined) setReleasing(true);
+  }
+  const current =
+    held?.revision ??
+    revisions.find((item) => item.revision === artifact.current_revision);
+  const contentEpoch = held?.epoch ?? loaded.epoch;
   const textFiles = (current?.files ?? []).filter((file) =>
     TEXT_TYPES.test(file.media_type),
   );
@@ -250,7 +363,17 @@ function SourcePanel({
   const path = textFiles.some((file) => file.path === chosen)
     ? chosen
     : 'index.html';
-  if (textFiles.length === 0)
+  function reportUnsaved(next: boolean): void {
+    if (!next) setHeld(undefined);
+    else if (held === undefined && current !== undefined)
+      setHeld({
+        revision: current,
+        epoch: loaded.epoch,
+        resets: loaded.resets,
+      });
+    onUnsavedChange(next);
+  }
+  if (current === undefined || textFiles.length === 0)
     return (
       <p className="text-sm text-muted-foreground">
         This revision has no text files to edit here.
@@ -282,13 +405,21 @@ function SourcePanel({
         ) : null}
       </FieldGroup>
       <FileEditor
-        key={`${artifact.current_revision}:${path}`}
+        key={`${current.revision}:${path}:${contentEpoch}`}
         client={client}
         artifact={artifact}
+        base={current.revision}
         path={path}
-        onSaved={onSaved}
-        onReload={onReload}
-        onUnsavedChange={onUnsavedChange}
+        replaced={held !== undefined && held.resets !== resets}
+        onSaved={(saved) => {
+          release();
+          onSaved(saved);
+        }}
+        onReload={() => {
+          release();
+          onReload();
+        }}
+        onUnsavedChange={reportUnsaved}
         reloading={reloading}
       />
     </div>
@@ -297,8 +428,16 @@ function SourcePanel({
 
 interface FileEditorProps {
   client: ArtifreeClient;
+  /** The artifact as last read; it may be newer than `base`. */
   artifact: Artifact;
+  /** The revision this editor reads and saves against. */
+  base: number;
   path: string;
+  /**
+   * The server's data may have been replaced since `base` was read, so a
+   * save could overwrite content the user never saw.
+   */
+  replaced: boolean;
   onSaved: (artifact: Artifact) => void;
   onReload: () => void;
   onUnsavedChange: (unsaved: boolean) => void;
@@ -314,13 +453,14 @@ type SaveState =
 function FileEditor({
   client,
   artifact,
+  base,
   path,
+  replaced,
   onSaved,
   onReload,
   onUnsavedChange,
   reloading,
 }: FileEditorProps) {
-  const base = artifact.current_revision;
   const [readAttempt, setReadAttempt] = useState(0);
   const loaded = useRequest(
     `${artifact.id}:${base}:${path}:${readAttempt}`,
@@ -377,6 +517,15 @@ function FileEditor({
   // Read-only while a request will replace this editor: a save in flight
   // carries the text as sent, and a reload remounts it with a new revision.
   const locked = saving || reloading;
+  // A newer revision while this page's own save is in flight, or after its
+  // response was lost, may be that save, so it is not reported then.
+  const newer =
+    !replaced &&
+    artifact.current_revision > base &&
+    (save.status === 'idle' || save.status === 'conflict');
+
+  // The draft cannot be saved as it is; loading the latest replaces it.
+  const outdated = save.status === 'conflict' || newer || replaced;
 
   function edit(next: string | undefined): void {
     setDraft(next);
@@ -434,6 +583,28 @@ function FileEditor({
           current.
         </FieldDescription>
       </Field>
+      {replaced ? (
+        <Alert variant="destructive">
+          <AlertTitle>The server's data may have been replaced</AlertTitle>
+          <AlertDescription>
+            Revision {base} was read before the server's data changed, so it may
+            no longer be what you edited, and saving could overwrite content you
+            have not seen. Saving is disabled: copy your changes if you need
+            them, then load the latest revision.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {newer && save.status === 'idle' ? (
+        <Alert>
+          <AlertTitle>
+            Revision {artifact.current_revision} was saved elsewhere
+          </AlertTitle>
+          <AlertDescription>
+            Your changes are based on revision {base}, so saving them will be
+            refused. Copy them if you need them, then load the latest revision.
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {save.status === 'conflict' ? (
         <Alert variant="destructive">
           <AlertTitle>Not saved: the artifact changed</AlertTitle>
@@ -453,13 +624,13 @@ function FileEditor({
       <Field orientation="horizontal">
         <Button
           type="button"
-          disabled={!changed || locked}
+          disabled={!changed || locked || replaced}
           onClick={() => void commit()}
         >
           <SaveIcon data-icon="inline-start" aria-hidden="true" />
           {saving ? 'Saving…' : 'Save revision'}
         </Button>
-        {changed && !locked && save.status !== 'conflict' ? (
+        {changed && !locked && !outdated ? (
           <Button
             type="button"
             variant="outline"
@@ -469,7 +640,7 @@ function FileEditor({
             Discard changes
           </Button>
         ) : null}
-        {save.status === 'conflict' ? (
+        {outdated ? (
           <Button
             type="button"
             variant="outline"

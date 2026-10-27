@@ -25,6 +25,9 @@ export async function checkWorkspace({
   await expect(
     workspace.getByText('The access token was rejected.', { exact: false }),
   ).toBeVisible();
+  await expect(
+    workspace.getByText('Live updates stopped; reconnect to try again.'),
+  ).toBeVisible();
   await workspace.getByRole('button', { name: 'Disconnect' }).click();
   await workspace.getByLabel('Access token').fill(server.token);
   await workspace.getByRole('button', { name: 'Connect' }).click();
@@ -234,6 +237,11 @@ fetch('${origin}/v1/artifacts').then(
       },
     ],
   });
+  // The page follows the commit; wait for it, so that the failure below is
+  // met by the load after the reload rather than by that refresh.
+  await expect(
+    workspace.getByText('Revision 6', { exact: true }),
+  ).toBeVisible();
   // A failed load offers a retry instead of leaving the panel stuck.
   await page.route(
     `**/v1/artifacts/${id}`,
@@ -353,7 +361,8 @@ async function bytes(server, path) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function api(server, method, path, body) {
+/** Calls the API directly, as another client would. */
+export async function api(server, method, path, body) {
   const init = {
     method,
     headers: { authorization: `Bearer ${server.token}` },

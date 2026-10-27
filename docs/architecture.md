@@ -10,8 +10,9 @@ commits with retry keys, revision-pinned reads, and sandboxed previews, through
 the HTTP API, MCP tools for agents
 ([decision 0004](decisions/0004-inbound-mcp-adapter.md)), the CLI, and the web
 workspace, stored in local SQLite. Clients can follow committed changes as an
-event stream ([decision 0006](decisions/0006-change-feed.md)); the web
-workspace does not use it yet.
+event stream ([decision 0006](decisions/0006-change-feed.md)), and the web
+workspace follows them without losing a pinned preview or an unsaved draft
+([decision 0007](decisions/0007-live-web-workspace.md)).
 
 ## Repository map
 
@@ -160,8 +161,9 @@ Pi configuration. These are agent tools, not page capabilities.
 ## Next implementation slices
 
 The [PR roadmap](roadmap.md) is the implementation plan. A01 (committed
-change notifications and the deferred CLI retry diagnostic) is implemented;
-the next slice is A02 (safe web updates after an external agent saves).
+change notifications and the deferred CLI retry diagnostic) and A02 (the web
+workspace following committed changes) are implemented; the next slice is
+A03 (list and metadata management).
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

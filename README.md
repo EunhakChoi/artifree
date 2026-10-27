@@ -85,13 +85,15 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0003](docs/decisions/0003-local-html-artifact-slice.md),
 [0004](docs/decisions/0004-inbound-mcp-adapter.md),
 [0005](docs/decisions/0005-request-limits.md),
-[0006](docs/decisions/0006-change-feed.md)).
+[0006](docs/decisions/0006-change-feed.md),
+[0007](docs/decisions/0007-live-web-workspace.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
 The [PR roadmap](docs/roadmap.md) records the remaining work, dependencies,
 acceptance checks, and evidence requirements. The committed change feed (A01)
-is implemented; the next slice is safe web updates after agent edits.
+and the web workspace following it (A02) are implemented; the next slice is
+list and metadata management (A03).
 
 ## Verification
 
