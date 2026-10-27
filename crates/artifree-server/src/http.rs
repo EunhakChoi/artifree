@@ -7,7 +7,10 @@
 //! pool because the core and store are synchronous. The router also mounts
 //! the MCP endpoint (`crate::mcp`) behind the same token.
 
+use std::future::poll_fn;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
@@ -17,16 +20,19 @@ use artifree_contracts::api::{
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_domain::identity::{ActorId, RequestKey};
 use artifree_providers::storage::SqliteStore;
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::rejection::{JsonRejection, PathRejection};
-use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router, middleware};
+use axum::{Json, Router};
 
 use crate::auth::AccessToken;
+use crate::limits::{Limiter, Refusal, RequestLimits};
 use crate::mcp;
 use crate::operations::{self, ApiError};
 use crate::preview::{self, PreviewTickets};
@@ -46,6 +52,8 @@ pub struct Settings {
     pub preview_ttl: Duration,
     /// CSP `frame-ancestors` source list allowed to embed previews.
     pub frame_ancestors: String,
+    /// Per-actor request budget shared by HTTP and MCP.
+    pub limits: RequestLimits,
 }
 
 /// Shared request state for the API and content routers.
@@ -60,6 +68,8 @@ struct Shared {
     token: AccessToken,
     owner: ActorId,
     previews: PreviewTickets,
+    limiter: Limiter,
+    draining: AtomicUsize,
     settings: Settings,
     content_policy: HeaderValue,
 }
@@ -82,6 +92,8 @@ impl AppState {
                 token,
                 owner,
                 previews: PreviewTickets::new(settings.preview_ttl),
+                limiter: Limiter::new(settings.limits.validate()?),
+                draining: AtomicUsize::new(0),
                 settings,
                 content_policy,
             }),
@@ -126,7 +138,9 @@ impl AppState {
     }
 }
 
-/// Routes of HTTP API v1 and the MCP endpoint.
+/// Routes of HTTP API v1 and the MCP endpoint. Every request, including an
+/// unmatched one, is authenticated and admitted by the actor's request limits
+/// before anything else runs.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(mcp::routes(state.clone()))
@@ -151,8 +165,117 @@ pub fn router(state: AppState) -> Router {
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(no_such_route)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn_with_state(state.clone(), admit))
         .layer(middleware::map_response(no_store))
         .with_state(state)
+}
+
+/// Authenticates the request, then admits it under the actor's limits. A
+/// refused request never reaches the application, so it commits nothing and
+/// its idempotency key stays unused.
+async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    let actor = match state.authenticate(request.headers()) {
+        Ok(actor) => actor,
+        Err(error) => return error.into_response(),
+    };
+    let permit = match state.shared.limiter.admit(&actor) {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            discard(&state, request.into_body()).await;
+            return refused(refusal);
+        }
+    };
+    request.extensions_mut().insert(Authenticated(actor));
+    // The request runs in its own task, which keeps the permit until the
+    // handler finishes. A client that disconnects cancels only this wait, so
+    // it cannot free the slot while storage work continues.
+    let task = tokio::spawn(async move {
+        let response = next.run(request).await;
+        drop(permit);
+        response
+    });
+    task.await.unwrap_or_else(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            "the request failed; retry with the same key to learn its outcome",
+        )
+        .into_response()
+    })
+}
+
+/// How long a refused request's body is read before the refusal is sent.
+pub const MAX_DRAIN_TIME: Duration = Duration::from_secs(2);
+/// Refused bodies read at the same time, across all actors. Refused requests
+/// hold no permit, so this bounds the connections and tasks they can occupy.
+pub const MAX_DRAINING: usize = 32;
+
+/// Reads and drops a refused request's body so that a client still sending
+/// it reads the refusal rather than a reset connection. Nothing is kept in
+/// memory, and the reading stops at the API body limit, after
+/// [`MAX_DRAIN_TIME`], or at once when [`MAX_DRAINING`] bodies are already
+/// being read; a slow or endless sender then gets the refusal regardless.
+async fn discard(state: &AppState, mut body: Body) {
+    let Some(_reading) = Draining::start(&state.shared.draining) else {
+        return;
+    };
+    let drain = async {
+        let mut read = 0;
+        while read <= MAX_BODY_BYTES {
+            match poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
+                Some(Ok(frame)) => read += frame.data_ref().map_or(0, Bytes::len),
+                _ => break,
+            }
+        }
+    };
+    // A timeout stops reading; the refusal is sent either way.
+    let _finished_in_time: bool = tokio::time::timeout(MAX_DRAIN_TIME, drain).await.is_ok();
+}
+
+/// One refused body counted against [`MAX_DRAINING`]. The count is released
+/// on drop, so a request cancelled mid-read, such as when its connection is
+/// dropped, does not keep it.
+struct Draining<'count>(&'count AtomicUsize);
+
+impl<'count> Draining<'count> {
+    /// Counts one more body, or returns `None` when the limit is reached.
+    fn start(count: &'count AtomicUsize) -> Option<Self> {
+        let reading = Self(count);
+        (count.fetch_add(1, Ordering::AcqRel) < MAX_DRAINING).then_some(reading)
+    }
+}
+
+impl Drop for Draining<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn refused(refusal: Refusal) -> Response {
+    let wait = match refusal {
+        Refusal::Rate(wait) => wait,
+        Refusal::Busy => Duration::from_secs(1),
+        Refusal::Unavailable => {
+            return ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                refusal.to_string(),
+            )
+            .into_response();
+        }
+    };
+    // Whole seconds, rounded up: retrying at the stated time succeeds.
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    let mut response = ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        ErrorCode::RateLimited,
+        refusal.to_string(),
+    )
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(seconds.max(1)));
+    response
 }
 
 // Unmatched requests authenticate first, like every route, so that callers
@@ -214,15 +337,20 @@ impl From<PathRejection> for ApiError {
     }
 }
 
-/// The actor authenticated by the bearer token.
+/// The actor authenticated by the bearer token and admitted by its limits.
+/// Only the `admit` middleware creates it; a request without it is refused.
 #[derive(Debug, Clone)]
 pub(crate) struct Authenticated(pub(crate) ActorId);
 
-impl FromRequestParts<AppState> for Authenticated {
+impl<S: Sync> FromRequestParts<S> for Authenticated {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        state.authenticate(&parts.headers).map(Self)
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, ApiError> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or_else(ApiError::unauthenticated)
     }
 }
 

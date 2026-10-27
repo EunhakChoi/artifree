@@ -38,23 +38,30 @@ const ARTIFACT_KINDS: readonly ArtifactKind[] = [
   'motion',
 ];
 
-const ERROR_CODES: readonly ErrorCode[] = [
-  'invalid_request',
-  'unauthenticated',
-  'not_found',
-  'revision_conflict',
-  'request_key_reused',
-  'payload_too_large',
-  'unavailable',
-  'internal',
-];
+// A record, not a list: adding a code to the contract fails type checking
+// here until it is accepted, instead of turning it into invalid_response.
+const ERROR_CODES: Record<ErrorCode, true> = {
+  invalid_request: true,
+  unauthenticated: true,
+  not_found: true,
+  revision_conflict: true,
+  request_key_reused: true,
+  payload_too_large: true,
+  rate_limited: true,
+  unavailable: true,
+  internal: true,
+};
 
 function artifactKind(value: unknown): ArtifactKind | undefined {
   return ARTIFACT_KINDS.find((kind) => kind === value);
 }
 
+function isErrorCode(value: string): value is ErrorCode {
+  return Object.hasOwn(ERROR_CODES, value);
+}
+
 function errorCode(value: unknown): ErrorCode | undefined {
-  return ERROR_CODES.find((code) => code === value);
+  return typeof value === 'string' && isErrorCode(value) ? value : undefined;
 }
 
 function artifact(value: unknown): Artifact | undefined {

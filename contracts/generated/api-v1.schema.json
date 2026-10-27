@@ -218,6 +218,11 @@
           "type": "string"
         },
         {
+          "const": "rate_limited",
+          "description": "Too many requests from this caller. Nothing was done; retry after the\n`Retry-After` delay with the same idempotency key.",
+          "type": "string"
+        },
+        {
           "const": "unavailable",
           "description": "Storage or capacity is temporarily unavailable; retry with the same key.",
           "type": "string"

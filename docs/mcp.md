@@ -150,6 +150,19 @@ after later saves. Keys are shared with the HTTP API and CLI.
 A wrong or missing token is an HTTP `401` before MCP starts; an unknown tool
 name is a JSON-RPC error.
 
+## Request limits
+
+Each actor's HTTP and MCP requests share one budget: by default 120 at once,
+then 1200 per minute (20 per second), with at most 16 running at the same time
+([decision 0005](decisions/0005-request-limits.md)). Beyond that the server
+answers HTTP `429` with `Retry-After` and
+`{ "error": { "code": "rate_limited", ... } }` before the MCP layer, so the
+agent sees a transport error rather than a tool result. Nothing was done:
+wait for the delay and resend the identical call with the same
+`idempotency_key`. Change the limits with `--request-burst`,
+`--requests-per-minute`, and `--concurrent-requests` on
+`artifree-server serve`.
+
 ## What the tools do not do
 
 Previews are sandboxed pages with no data, model, or file capabilities, and a

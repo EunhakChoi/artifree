@@ -22,10 +22,7 @@ use artifree_contracts::mcp::{
 use artifree_core::artifacts::ArtifactError;
 use artifree_domain::identity::ActorId;
 use axum::Router;
-use axum::extract::{Request, State};
 use axum::http::request::Parts;
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use rmcp::model::{
@@ -51,13 +48,13 @@ pub const MCP_PATH: &str = "/mcp";
 /// with the server build.
 const TOOL_LIST_TTL_MS: u64 = 5 * 60 * 1000;
 
-/// The MCP endpoint, authenticated like every API route.
+/// The MCP endpoint. The API router authenticates and admits every request
+/// before it reaches the SDK (`http::router`).
 ///
 /// The SDK also rejects a `Host` other than loopback names, which stops DNS
 /// rebinding, and any request carrying an `Origin`: MCP clients are not web
 /// pages, and the web workspace does not use this endpoint.
 pub(crate) fn routes(state: AppState) -> Router<AppState> {
-    let tools_state = state.clone();
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
@@ -66,25 +63,13 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
     let service = StreamableHttpService::new(
         move || {
             Ok(ArtifactTools {
-                state: tools_state.clone(),
+                state: state.clone(),
             })
         },
         Arc::new(NeverSessionManager::default()),
         config,
     );
-    Router::new()
-        .route_service(MCP_PATH, service)
-        .route_layer(middleware::from_fn_with_state(state, authenticate))
-}
-
-async fn authenticate(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    match state.authenticate(request.headers()) {
-        Ok(actor) => {
-            request.extensions_mut().insert(Authenticated(actor));
-            next.run(request).await
-        }
-        Err(error) => error.into_response(),
-    }
+    Router::new().route_service(MCP_PATH, service)
 }
 
 /// The MCP server for one request.
@@ -121,8 +106,8 @@ impl ServerHandler for ArtifactTools {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        // The authentication layer inserts the actor; the SDK forwards the
-        // HTTP request parts. Without both, nothing may run.
+        // The API router's admission layer inserts the actor; the SDK
+        // forwards the HTTP request parts. Without both, nothing may run.
         let actor = context
             .extensions
             .get::<Parts>()

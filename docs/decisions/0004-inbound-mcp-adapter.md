@@ -108,6 +108,8 @@ selection or edit-intent handoff to agent sessions.
 
 ## Costs and limits
 
+- Request rate and concurrency limits were added in
+  [decision 0005](0005-request-limits.md), shared with HTTP.
 - Single user and loopback only. Exposing the endpoint beyond loopback needs
   TLS, real authentication, and a `Host` policy first.
 - A preview link is a bearer credential returned to the agent and, through

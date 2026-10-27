@@ -100,3 +100,16 @@ test('Uploads use the smaller wire form and keep exact bytes', () => {
   const binary = encodeFile('c.png', new Uint8Array([0x89, 0xff, 0x00]));
   assert.equal(binary.encoding, 'base64');
 });
+
+test('A rate-limited response keeps its code and retry delay', async () => {
+  const client = clientWith(() =>
+    Response.json(
+      { error: { code: 'rate_limited', message: 'too many requests' } },
+      { status: 429, headers: { 'retry-after': '3' } },
+    ),
+  );
+  const error = await failure(client.getArtifact(artifact.id));
+  assert.equal(error.code, 'rate_limited');
+  assert.equal(error.status, 429);
+  assert.equal(error.retryAfterSeconds, 3);
+});
