@@ -162,21 +162,29 @@ export function parsePreview(value: unknown): Preview | undefined {
   return { url, revision: number, expires_at_ms };
 }
 
+/**
+ * A committed change of the feed. `change` is `unknown` for a kind added to
+ * the contract after this client was built; read the artifact again, as for
+ * any other change.
+ */
+export type FeedChange = Omit<ArtifactChange, 'change'> & {
+  readonly change: ChangeKind | 'unknown';
+};
+
 /** Parses the data of a `change` event. */
-export function parseArtifactChange(
-  value: unknown,
-): ArtifactChange | undefined {
+export function parseArtifactChange(value: unknown): FeedChange | undefined {
   if (!isRecord(value)) return undefined;
   const { cursor, artifact_id, change, revision, committed_at_ms } = value;
-  const kind = CHANGE_KINDS.find((known) => known === change);
   if (
     !isCount(cursor) ||
     typeof artifact_id !== 'string' ||
-    kind === undefined ||
+    typeof change !== 'string' ||
+    change === '' ||
     !isCount(revision) ||
     !isTime(committed_at_ms)
   )
     return undefined;
+  const kind = CHANGE_KINDS.find((known) => known === change) ?? 'unknown';
   return { cursor, artifact_id, change: kind, revision, committed_at_ms };
 }
 

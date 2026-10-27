@@ -79,7 +79,9 @@ delivery guarantees; everything below about them is an Artifree decision.
    ends every open stream when it starts shutting down.
 8. **Client.** `ArtifreeClient.openChanges` reads one stream and validates
    each known event against the contract, skipping comments and unknown
-   event types. `followChanges` reconnects from the last cursor after an
+   event types. A change kind added after the client was built arrives as
+   `unknown`, so an older client still reads the artifact again instead of
+   stopping. `followChanges` reconnects from the last cursor after an
    ended or failed connection, waiting `Retry-After` or doubling from 0.5 to
    30 seconds, and rejects on failures a retry cannot fix (`unauthenticated`,
    `invalid_request`, `not_found`, `invalid_response`).

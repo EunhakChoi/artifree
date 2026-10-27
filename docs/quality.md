@@ -113,7 +113,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the server before it listens.
 - `scripts/tests/client.test.mjs`: the API client with an injected `fetch`: a
   body cut off mid-stream is a network error, a complete foreign body is an
-  invalid response, and uploads pick the smaller exact encoding.
+  invalid response, uploads pick the smaller exact encoding, a change kind
+  added later reaches an older client as `unknown`, and an abort during a
+  retry wait stops following at once.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
   read the parent page, use storage, open a popup, or reach the API; create,
   save, and reload requests held in flight keep the forms read-only and the

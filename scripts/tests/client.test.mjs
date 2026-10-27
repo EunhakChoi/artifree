@@ -113,3 +113,71 @@ test('A rate-limited response keeps its code and retry delay', async () => {
   assert.equal(error.status, 429);
   assert.equal(error.retryAfterSeconds, 3);
 });
+
+/** A change feed response whose body is `text`, then ends. */
+function feed(text) {
+  return new Response(text, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+test('A change kind this client does not know is delivered as unknown', async () => {
+  const client = clientWith(() =>
+    feed(
+      'event: change\nid: 7\ndata: {"cursor":7,"artifact_id":"art_1","change":"renamed","revision":3,"committed_at_ms":1}\n\n' +
+        'event: future\nid: 8\ndata: {}\n\n' +
+        ': comment\n\n',
+    ),
+  );
+  const events = [];
+  for await (const event of await client.openChanges({ after: 6 }))
+    events.push(event);
+  assert.deepEqual(events, [
+    {
+      type: 'change',
+      change: {
+        cursor: 7,
+        artifact_id: 'art_1',
+        change: 'unknown',
+        revision: 3,
+        committed_at_ms: 1,
+      },
+    },
+  ]);
+  // A known event that breaks the contract is still refused.
+  const broken = clientWith(() =>
+    feed('event: change\ndata: {"cursor":1}\n\n'),
+  );
+  const error = await failure(
+    (async () => {
+      for await (const event of await broken.openChanges()) void event;
+    })(),
+  );
+  assert.equal(error.code, 'invalid_response');
+});
+
+test('Aborting while disconnected stops following at once', async () => {
+  // The server ends every stream at once and asks for a long wait.
+  const client = clientWith(() =>
+    Response.json(
+      { error: { code: 'rate_limited', message: 'too many streams' } },
+      { status: 429, headers: { 'retry-after': '600' } },
+    ),
+  );
+  const controller = new AbortController();
+  const started = performance.now();
+  await client.followChanges({
+    signal: controller.signal,
+    onEvent() {},
+    onDisconnect(error, retryInMs) {
+      assert.equal(error?.code, 'rate_limited');
+      assert.equal(retryInMs, 600_000);
+      controller.abort();
+    },
+  });
+  assert.ok(
+    performance.now() - started < 1000,
+    'followChanges waited for the retry delay after an abort',
+  );
+});

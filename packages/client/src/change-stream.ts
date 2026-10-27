@@ -1,6 +1,11 @@
-import type { ArtifactChange } from '@artifree/contracts';
 import { ArtifreeApiError } from './errors.js';
-import { parseArtifactChange, parseFeedPosition } from './responses.js';
+import {
+  type FeedChange,
+  parseArtifactChange,
+  parseFeedPosition,
+} from './responses.js';
+
+export type { FeedChange };
 
 /**
  * One event of `GET /v1/changes`. `ready` starts a stream opened without a
@@ -12,7 +17,7 @@ import { parseArtifactChange, parseFeedPosition } from './responses.js';
 export type ChangeFeedEvent =
   | { readonly type: 'ready'; readonly cursor: number }
   | { readonly type: 'reset'; readonly cursor: number }
-  | { readonly type: 'change'; readonly change: ArtifactChange };
+  | { readonly type: 'change'; readonly change: FeedChange };
 
 /** The cursor an event leaves the feed at. */
 export function cursorOf(event: ChangeFeedEvent): number {
@@ -166,6 +171,12 @@ export async function follow(
 
 function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
+    // An abort that already happened, for example in onDisconnect, fires no
+    // more events.
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
     const timer = setTimeout(done, milliseconds);
     signal.addEventListener('abort', done, { once: true });
     function done(): void {

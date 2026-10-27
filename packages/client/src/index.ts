@@ -4,4 +4,8 @@ export type { ClientConfiguration, MutationOptions } from './client.js';
 export { ArtifreeApiError } from './errors.js';
 export type { FailureCode } from './errors.js';
 export { cursorOf } from './change-stream.js';
-export type { ChangeFeedEvent, FollowOptions } from './change-stream.js';
+export type {
+  ChangeFeedEvent,
+  FeedChange,
+  FollowOptions,
+} from './change-stream.js';
