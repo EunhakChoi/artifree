@@ -1,8 +1,19 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
-@import 'shadcn/tailwind.css';
 
 @custom-variant dark (&:is(.dark *));
+
+/*
+ * State variants the shadcn/ui components use, matched to the attributes
+ * Base UI sets: `data-open`, `data-closed`, `data-active`, and `data-checked` while present
+ * and not "false", and the orientation of tabs and separators.
+ */
+@custom-variant data-open (&:where([data-open]:not([data-open='false'])));
+@custom-variant data-closed (&:where([data-closed]:not([data-closed='false'])));
+@custom-variant data-active (&:where([data-active]:not([data-active='false'])));
+@custom-variant data-checked (&:where([data-checked]:not([data-checked='false'])));
+@custom-variant data-horizontal (&:where([data-orientation='horizontal']));
+@custom-variant data-vertical (&:where([data-orientation='vertical']));
 
 @theme inline {
   --font-heading: var(--font-sans);
