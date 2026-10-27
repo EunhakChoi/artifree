@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { RotateCwIcon, SaveIcon, Undo2Icon } from 'lucide-react';
 import { ArtifreeApiError, newIdempotencyKey } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
@@ -31,7 +31,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { fromEditable, toEditable } from './editable-text';
-import { describeFailure, useRequest } from './use-request';
+import { describeFailure, type ReadQueue, useRequest } from './use-request';
 
 /**
  * Sandbox flags for previews, matching the content server's CSP: without
@@ -86,7 +86,7 @@ export function ArtifactDetail({
       // contains its current revision.
       const artifact = await client.getArtifact(artifactId);
       const revisions = await client.listRevisions(artifactId);
-      return { artifact, revisions, generation };
+      return { artifact, revisions, generation, epoch, resets };
     },
     // The card, and any draft in it, stays while a newer read is pending
     // and when it fails.
@@ -102,9 +102,18 @@ export function ArtifactDetail({
         ? details.previous
         : undefined;
   // A known revision newer than the one shown is read once; one already
-  // shown, or older, reads nothing.
+  // shown, or older, reads nothing. While a read is pending, its result is
+  // awaited first: it may already bring that revision.
+  const settled =
+    details.status === 'error' ||
+    (details.status === 'ready' && details.refreshing !== true);
   const shown = loaded?.artifact.current_revision;
-  if (shown !== undefined && knownRevision > shown && knownRevision > caught)
+  if (
+    settled &&
+    shown !== undefined &&
+    knownRevision > shown &&
+    knownRevision > caught
+  )
     setCaughtUp({ epoch, revision: knownRevision });
   const retry = (
     <Button type="button" variant="outline" size="sm" onClick={reload}>
@@ -165,7 +174,7 @@ export function ArtifactDetail({
           <TabsContent value="preview" className="mt-4">
             <PreviewPanel
               client={client}
-              epoch={epoch}
+              epoch={loaded.epoch}
               artifact={artifact}
               revisions={revisions}
               pinned={pinned}
@@ -175,7 +184,8 @@ export function ArtifactDetail({
           <TabsContent value="source" keepMounted className="mt-4">
             <SourcePanel
               client={client}
-              epoch={epoch}
+              epoch={loaded.epoch}
+              readResets={loaded.resets}
               resets={resets}
               artifact={artifact}
               revisions={revisions}
@@ -288,6 +298,8 @@ interface SourcePanelProps {
   client: ArtifreeClient;
   /** Advances when content read before may be out of date. */
   epoch: number;
+  /** The count of possible replacements when the shown data was read. */
+  readResets: number;
   /** Advances when the server's data may have been replaced. */
   resets: number;
   artifact: Artifact;
@@ -303,6 +315,7 @@ interface SourcePanelProps {
 function SourcePanel({
   client,
   epoch,
+  readResets,
   resets,
   artifact,
   revisions,
@@ -318,6 +331,9 @@ function SourcePanel({
   // It also keeps the epoch its text was read in: without a draft the
   // editor reads again in each epoch, while a draft written before a reset
   // may be based on content that no longer exists, so it cannot be saved.
+  // Editors replace each other per revision and file; their reads share
+  // one queue.
+  const fileReads = useRef(Promise.resolve());
   const [held, setHeld] = useState<{
     revision: Revision | undefined;
     epoch: number;
@@ -329,7 +345,9 @@ function SourcePanel({
   const base = current?.revision ?? artifact.current_revision;
   function reportUnsaved(next: boolean): void {
     setHeld((value) =>
-      next ? (value ?? { revision: current, epoch, resets }) : undefined,
+      next
+        ? (value ?? { revision: current, epoch, resets: readResets })
+        : undefined,
     );
     onUnsavedChange(next);
   }
@@ -387,6 +405,7 @@ function SourcePanel({
           onReload();
         }}
         onUnsavedChange={reportUnsaved}
+        reads={fileReads}
         reloading={reloading}
         replaced={held !== undefined && held.resets !== resets}
       />
@@ -407,6 +426,8 @@ interface FileEditorProps {
   reloading: boolean;
   /** The server's data may have been replaced since this draft's text was read. */
   replaced: boolean;
+  /** The order of file reads across editors of this panel. */
+  reads: ReadQueue;
 }
 
 type SaveState =
@@ -425,11 +446,13 @@ function FileEditor({
   onUnsavedChange,
   reloading,
   replaced,
+  reads,
 }: FileEditorProps) {
   const [readAttempt, setReadAttempt] = useState(0);
   const loaded = useRequest(
     `${artifact.id}:${base}:${path}:${readAttempt}`,
     async () => toEditable(await client.readFile(artifact.id, base, path)),
+    { queue: reads },
   );
   const [draft, setDraft] = useState<string>();
   const [save, setSave] = useState<SaveState>({ status: 'idle' });

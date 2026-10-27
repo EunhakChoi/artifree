@@ -32,9 +32,11 @@ unpublished trace maps each to its evidence.
 
 1. **One read policy, in one hook.** `useLiveWorkspace` follows the feed and
    decides when the page may read; components only say what they show. A
-   hidden page starts no reads: notices stop with its stream, and a page
-   opened in the background reads first when shown. Reads already asked
-   for, including one waiting out a `429`, still complete. The first list
+   hidden page starts no reads: notices stop with its stream, and every
+   view holds a read asked for while the page is hidden, such as one for a
+   revision that a read already under way brought, until the page is
+   shown. Reads already sent, including one waiting out a `429`, still
+   complete. The first list
    read waits until the stream starts with `ready`, so no commit falls
    between the read and the subscription and the page does not read twice;
    it waits at most two seconds of visibility, because a browser out of HTTP/1.1 connections
@@ -55,10 +57,16 @@ unpublished trace maps each to its evidence.
    list, and the open artifact if the revision is newer than the one shown.
    A kind unknown to the client counts as a change.
 4. **Request budget.** Each view (the list, the open artifact, the preview,
-   the editor's file) sends one read at a time. A read asked for while
-   another is in flight waits for it, at most ten seconds; reads replaced
-   meanwhile are never sent. A read answered `429` was not processed: the
-   view sends it again after `Retry-After` and keeps showing what it had.
+   the editor's file across the editors that replace each other) sends one
+   read at a time. A read asked for while another is in flight waits for
+   it, at most ten seconds; reads replaced meanwhile are never sent. A read
+   answered `429` was not processed: the view sends it again after
+   `Retry-After`, keeps showing what it had, and sends no other read before
+   that delay has passed. File content and previews follow the epoch of
+   the metadata they belong to, so after a reset they are read once, for
+   the revision the new metadata names, not first for the old one. The open
+   artifact does not read again for a known revision while its own read is
+   pending, since that read may bring it.
 5. **Failures keep what is shown.** A failed refresh of the list or of the
    open artifact keeps the earlier result and its draft, and shows the
    failure with "Try again" above it.
@@ -104,7 +112,10 @@ to contain, and when the page read was decided in several places.
 Decisions 1, 4, and 6 state those rules, and the code keeps each in one
 place. The rewrite's first review found that file content and previews were
 still reused after a reset; decision 7 now reads them again and disables
-saving a draft written before the reset.
+saving a draft written before the reset. An independent review then found
+that a read for a new key ignored a pending `Retry-After`, that content was
+read twice after a reset, and that follow-on reads started while hidden;
+decisions 1 and 4 now cover them.
 
 ## Costs and limits
 
@@ -119,5 +130,8 @@ saving a draft written before the reset.
 - A read that keeps being refused with `429` keeps the page on what it
   showed; the ten-second bound on waiting for an earlier read is not
   exercised by a test.
+- A save made on this page can read the list and the artifact twice when
+  its own notice arrives before its response: the notice is news until the
+  response says the revision is this page's.
 - The draft notice does not merge or compare the draft with the newer
   revision; revision comparison is roadmap A04.

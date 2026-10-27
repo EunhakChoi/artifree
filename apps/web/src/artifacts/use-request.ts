@@ -1,5 +1,6 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { ArtifreeApiError } from '@artifree/client';
+import { pageVisible, usePageVisible } from './use-page-visible';
 
 /** The state of one asynchronous read. */
 export type RequestState<T> =
@@ -39,6 +40,26 @@ function retryDelayMs(error: unknown): number | undefined {
   return (error.retryAfterSeconds ?? 1) * 1000;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** Settles when `previous` does, or after `ms`, whichever is first. */
+function within(previous: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    previous,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** The reads of one view, in the order they were asked for. */
+export type ReadQueue = { current: Promise<void> };
+
 /**
  * Runs `load` whenever `key` changes and ignores results of reads that a
  * newer key replaced. `key` must identify every input `load` reads; while
@@ -47,62 +68,71 @@ function retryDelayMs(error: unknown): number | undefined {
  * fails (`previous`); use it only where a briefly stale value cannot
  * mislead.
  *
- * One view sends one read at a time, so a burst of key changes costs the
- * actor's request budget once: a new read waits for the one in flight, at
- * most ten seconds, and a key replaced while waiting is never read. A `429`
- * was not processed, so the same read is sent again after `Retry-After`.
+ * Reads follow the page's request budget (decision 0007). While the page
+ * is hidden no read starts; the latest key is read when it is shown. One
+ * view sends one read at a time: a new read waits for the one before it,
+ * at most ten seconds, and a key replaced while waiting is never read. A
+ * `429` was not processed, so the read is sent again after `Retry-After`,
+ * and the view's next read waits for that too. `queue` shares the order
+ * across components that replace each other, such as an editor remounted
+ * for another revision.
  */
 export function useRequest<T>(
   key: string | undefined,
   load: () => Promise<T>,
-  options: { keepPrevious?: boolean } = {},
+  options: { keepPrevious?: boolean; queue?: ReadQueue } = {},
 ): RequestState<T> {
+  // The key being read: the latest one while the page is visible; while it
+  // is hidden, the last one asked for while it was visible.
+  const visible = usePageVisible();
+  const [asked, setAsked] = useState(() => (pageVisible() ? key : undefined));
+  if (visible && asked !== key) setAsked(key);
+  const current = visible ? key : asked;
   const [state, setState] = useState<{
     key: string | undefined;
     result: RequestState<T>;
     last?: T;
   }>({ key: undefined, result: { status: 'loading' } });
   const start = useEffectEvent(load);
-  const queue = useRef<Promise<void>>(Promise.resolve());
+  const ownQueue = useRef<Promise<void>>(Promise.resolve());
+  const queue = options.queue ?? ownQueue;
   useEffect(() => {
-    if (key === undefined) return undefined;
+    if (current === undefined) return undefined;
     let wanted = true;
-    let retry: ReturnType<typeof setTimeout> | undefined;
     const read = (): Promise<void> =>
       start().then(
         (value) => {
           if (wanted)
-            setState({ key, result: { status: 'ready', value }, last: value });
+            setState({
+              key: current,
+              result: { status: 'ready', value },
+              last: value,
+            });
         },
         (error: unknown) => {
-          if (!wanted) return;
-          const delay = retryDelayMs(error);
-          if (delay === undefined)
+          const wait = retryDelayMs(error);
+          // Kept in the queue, so that no read of this view goes out
+          // before the server's delay has passed.
+          if (wait !== undefined)
+            return delay(wait).then(() => (wanted ? read() : undefined));
+          if (wanted)
             setState((previous) => ({
               ...previous,
-              key,
+              key: current,
               result: { status: 'error', message: describeFailure(error) },
             }));
-          else
-            retry = setTimeout(() => {
-              queue.current = read();
-            }, delay);
+          return undefined;
         },
       );
-    const turn = Promise.race([
-      queue.current,
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, QUEUE_WAIT_MS);
-      }),
-    ]);
-    queue.current = turn.then(() => (wanted ? read() : undefined));
+    queue.current = within(queue.current, QUEUE_WAIT_MS).then(() =>
+      wanted ? read() : undefined,
+    );
     return () => {
       wanted = false;
-      clearTimeout(retry);
     };
-  }, [key]);
+  }, [current, queue]);
   const keep = options.keepPrevious === true;
-  if (key !== undefined && state.key === key) {
+  if (current !== undefined && state.key === current) {
     if (keep && state.result.status === 'error' && state.last !== undefined)
       return { ...state.result, previous: state.last };
     return state.result;

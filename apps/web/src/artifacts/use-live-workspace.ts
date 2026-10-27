@@ -1,12 +1,7 @@
-import {
-  useEffect,
-  useEffectEvent,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { cursorOf } from '@artifree/client';
 import type { ArtifreeClient, ChangeFeedEvent } from '@artifree/client';
+import { usePageVisible } from './use-page-visible';
 
 /** Whether commits made elsewhere reach this page. */
 export type FeedState =
@@ -71,15 +66,6 @@ function withKnown(
   return { ...announced, known, news: announced.news + (news ? 1 : 0) };
 }
 
-function subscribeVisibility(onChange: () => void): () => void {
-  document.addEventListener('visibilitychange', onChange);
-  return () => document.removeEventListener('visibilitychange', onChange);
-}
-
-function pageVisible(): boolean {
-  return document.visibilityState !== 'hidden';
-}
-
 /**
  * The read policy of a connected workspace (decision 0007). While the page
  * is visible it follows the change feed, resuming from its last cursor; a
@@ -90,7 +76,7 @@ function pageVisible(): boolean {
  * known advances `news`.
  */
 export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
-  const visible = useSyncExternalStore(subscribeVisibility, pageVisible);
+  const visible = usePageVisible();
   const [announced, setAnnounced] = useState<Announced>({
     epoch: 0,
     resets: 0,

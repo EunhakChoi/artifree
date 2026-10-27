@@ -122,21 +122,37 @@ export async function checkLiveUpdates({
 
     // A hidden page gives up its stream and reads nothing; shown again, it
     // resumes from its cursor with the commit made meanwhile.
+    // It starts no reads either, not even for a revision that a read under
+    // way when it was hidden brings; those wait until it is shown.
     const [stream] = reads.streams;
     assert.equal(reads.streams.length, 1, 'One stream per page.');
     const closed = ended(page, stream);
+    const underWay = holdNextRead(`/v1/artifacts/${id}`);
+    await page.route('**/v1/artifacts/**', underWay.handler);
+    await commit(server, id, current, 'While going hidden');
+    current += 1;
+    await underWay.requested;
+    await expect(nav.getByText(`r${current}`)).toBeVisible();
     reads.take();
+    const content = countContentReads(page, id);
     await setVisibility(page, 'hidden');
     await expect(
       workspace.getByText('Live updates paused while this tab is hidden.'),
     ).toBeVisible();
     await closed;
+    underWay.release();
+    await expect(badge(current)).toBeVisible();
+    await page.waitForTimeout(1000);
+    assert.deepEqual(content.take(), { files: 0, previews: 0 }, 'Hidden.');
+    await page.unroute('**/v1/artifacts/**', underWay.handler);
     await saveElsewhere('Saved while hidden');
     await expect(badge(current - 1)).toBeVisible();
     assert.deepEqual(reads.take(), { list: 0, artifact: 0 }, 'Hidden reads.');
     await setVisibility(page, 'visible');
     await expect(badge(current)).toBeVisible();
     await expect(workspace.getByText('Live updates on')).toBeVisible();
+    await expect.poll(() => content.take().files).toBeGreaterThan(0);
+    content.stop();
     assert.equal(reads.streams.length, 2, 'One stream after showing again.');
     assert.match(
       reads.streams[1].headers()['last-event-id'] ?? '',
@@ -173,13 +189,52 @@ export async function checkLiveUpdates({
       await commit(server, id, current++, text);
     await expect(badge(current)).toBeVisible();
     await expect(nav.getByText(`r${current}`)).toBeVisible();
+    // A notice during the delay does not send the list read early.
     paced.limitNextList();
     await commit(server, id, current++, 'Rate limited');
+    await expect.poll(() => paced.limitedAt).toBeGreaterThan(0);
+    await commit(server, id, current++, 'During the delay');
     await expect(nav.getByText(`r${current}`)).toBeVisible();
-    assert.ok(paced.limited, 'No list read was rate limited.');
+    const nextList = paced.listAt.find((at) => at > paced.limitedAt);
+    assert.ok(
+      nextList !== undefined && nextList - paced.limitedAt >= 1900,
+      `The list was read ${nextList - paced.limitedAt} ms after a 429 with Retry-After: 2.`,
+    );
     assert.deepEqual(paced.most, { list: 1, artifact: 1 }, 'Overlap.');
     await expect(workspace.getByText('Could not list artifacts')).toBeHidden();
     await page.unroute('**/v1/artifacts**', paced.handler);
+
+    // While the open artifact's read is pending, a newer notice waits for
+    // it instead of queueing another read: the pending read brings it.
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    const pending = holdNextRead(`/v1/artifacts/${id}`);
+    await page.route('**/v1/artifacts/**', pending.handler);
+    const artifactReads = reads.peek().artifact;
+    await commit(server, id, current++, 'Pending one');
+    await pending.requested;
+    await commit(server, id, current++, 'Pending two');
+    await expect(nav.getByText(`r${current}`)).toBeVisible();
+    pending.release();
+    await expect(badge(current)).toBeVisible();
+    await page.waitForTimeout(500);
+    assert.equal(reads.peek().artifact - artifactReads, 1, 'Read again.');
+    await page.unroute('**/v1/artifacts/**', pending.handler);
+
+    // Editors that replace each other for newer revisions read one file at
+    // a time.
+    const fileRead = holdNextRead(
+      new RegExp(`^/v1/artifacts/${id}/revisions/\\d+/files/`),
+    );
+    await page.route('**/v1/artifacts/**', fileRead.handler);
+    await commit(server, id, current++, 'File one');
+    await fileRead.requested;
+    await commit(server, id, current++, 'File two');
+    await expect(badge(current)).toBeVisible();
+    await page.waitForTimeout(1000);
+    assert.equal(fileRead.arrivals(), 1, 'File reads overlapped.');
+    fileRead.release();
+    await expect(editor).toHaveValue(/File two/);
+    await page.unroute('**/v1/artifacts/**', fileRead.handler);
 
     reads.stop();
     assert.deepEqual(otherErrors, [], 'Second page JavaScript errors.');
@@ -194,10 +249,11 @@ export async function checkLiveUpdates({
  * server: the first stream is held back, so the page reads without it; it
  * then starts at the head, which reads again and marks a draft written
  * meanwhile as unsaveable; the next brings a duplicate
- * and an older change, which read nothing; three resets stand for a
+ * and an older change, which read nothing; four resets stand for a
  * server whose data was replaced: by an older copy while a draft is open,
- * by a restored copy with the same revision and other content, and by an
- * empty one while a draft is open; the last reconnection waits while a
+ * by a restored copy with the same revision and other content, by one a
+ * revision behind (each view reads once), and by an empty one while a
+ * draft is open; the last reconnection waits while a
  * commit lands elsewhere and, resuming from its cursor, brings it.
  */
 async function checkForgedStreams({
@@ -221,6 +277,7 @@ async function checkForgedStreams({
   const streams = scriptStreams(page, [
     position('ready'),
     change(`${feed}.${head - 1}`, id, latest - 1) + change(cursor, id, latest),
+    position('reset'),
     position('reset'),
     position('reset'),
     position('reset'),
@@ -253,7 +310,7 @@ async function checkForgedStreams({
   // cannot be saved.
   await workspace.getByRole('tab', { name: 'Source' }).click();
   await editor.fill(htmlPage('Draft across a reset'));
-  const older = replaceData(id, 'older');
+  const older = replaceData(id, { revision: 1 });
   await page.route('**/v1/artifacts**', older);
   streams.release(2);
   await expect.poll(() => reads.peek()).toEqual({ list: 1, artifact: 1 });
@@ -277,15 +334,40 @@ async function checkForgedStreams({
   await expect(
     page.frameLocator('iframe[title^="Preview of"]').locator('#label'),
   ).toBeVisible();
-  const previews = countPreviews(page, id);
+  const previews = countContentReads(page, id);
   const restored = restoredFile(id, latest);
   await page.route('**/v1/artifacts/**', restored);
   streams.release(3);
-  await expect.poll(() => previews.count()).toBeGreaterThan(0);
+  await expect.poll(() => previews.peek().previews).toBeGreaterThan(0);
   await workspace.getByRole('tab', { name: 'Source' }).click();
   await expect(editor).toHaveValue(/Restored copy/);
   await page.unroute('**/v1/artifacts/**', restored);
   previews.stop();
+
+  // Reset to a restored copy one revision behind, with other content: the
+  // preview, the file, and the artifact are each read once, after the new
+  // metadata says which revision to read.
+  const content = countContentReads(page, id);
+  const artifactReads = reads.peek().artifact;
+  const behind = replaceData(id, { revision: latest - 1 });
+  const behindFile = restoredFile(id, latest - 1);
+  await page.route('**/v1/artifacts**', behind);
+  await page.route('**/v1/artifacts/**', behindFile);
+  await workspace.getByRole('tab', { name: 'Preview' }).click();
+  await expect.poll(() => content.peek().previews).toBe(1);
+  content.take();
+  streams.release(4);
+  await expect(badge(latest - 1)).toBeVisible();
+  await expect.poll(() => content.peek()).toEqual({ files: 1, previews: 1 });
+  content.take();
+  await page.waitForTimeout(1000);
+  assert.deepEqual(content.take(), { files: 0, previews: 0 }, 'Read twice.');
+  assert.equal(reads.peek().artifact - artifactReads, 1, 'Artifact reads.');
+  content.stop();
+  await workspace.getByRole('tab', { name: 'Source' }).click();
+  await expect(editor).toHaveValue(/Restored copy/);
+  await page.unroute('**/v1/artifacts/**', behindFile);
+  await page.unroute('**/v1/artifacts**', behind);
 
   // Reset to empty data: the list is empty and the artifact is gone, yet the
   // open draft stays until the user discards it; then the open artifact
@@ -293,7 +375,7 @@ async function checkForgedStreams({
   await editor.fill(htmlPage('Draft across an empty reset'));
   const empty = replaceData(id, 'empty');
   await page.route('**/v1/artifacts**', empty);
-  streams.release(4);
+  streams.release(5);
   await expect(nav.getByText('No artifacts yet')).toBeVisible();
   await expect(
     workspace.getByText('Could not refresh the artifact'),
@@ -307,14 +389,14 @@ async function checkForgedStreams({
 
   // The last reconnection resumes from its cursor with the commit made
   // while it waited, which brings the artifact back.
-  await expect.poll(() => streams.opened()).toBe(6);
+  await expect.poll(() => streams.opened()).toBe(7);
   await saveElsewhere('Missed while away');
-  streams.release(5);
+  streams.release(6);
   await expect(badge(latest + 1)).toBeVisible();
   await expect(workspace.getByText('Live updates on')).toBeVisible();
   assert.deepEqual(
     streams.resumedFrom,
-    [cursor, cursor, cursor, cursor, cursor],
+    [cursor, cursor, cursor, cursor, cursor, cursor],
     'Each reconnection must resume after the last cursor.',
   );
   await page.unroute('**/v1/changes', streams.handler);
@@ -449,7 +531,8 @@ function scriptStreams(page, bodies) {
 
 /**
  * A route handler that answers reads as a server whose data was replaced:
- * `older` puts artifact `id` at revision 1; `empty` has no artifacts.
+ * `{ revision }` puts artifact `id` at that earlier revision; `'empty'`
+ * has no artifacts.
  */
 function replaceData(id, data) {
   const artifactPath = `/v1/artifacts/${id}`;
@@ -469,12 +552,15 @@ function replaceData(id, data) {
           });
     const response = await route.fetch();
     const body = await response.json();
-    if (pathname === artifactPath) body.current_revision = 1;
+    const { revision } = data;
+    if (pathname === artifactPath) body.current_revision = revision;
     else if (pathname === '/v1/artifacts') {
       for (const artifact of body.artifacts)
-        if (artifact.id === id) artifact.current_revision = 1;
+        if (artifact.id === id) artifact.current_revision = revision;
     } else
-      body.revisions = body.revisions.filter((item) => item.revision === 1);
+      body.revisions = body.revisions.filter(
+        (item) => item.revision <= revision,
+      );
     return route.fulfill({ response, json: body });
   };
 }
@@ -495,19 +581,66 @@ function restoredFile(id, revision) {
       : route.fallback();
 }
 
-/** Counts preview links this page asks for artifact `id`. */
-function countPreviews(page, id) {
-  let count = 0;
-  const pattern = new RegExp(`^/v1/artifacts/${id}/revisions/\\d+/previews$`);
+/**
+ * Counts this page's file reads and preview links for artifact `id`, since
+ * the last `take`.
+ */
+function countContentReads(page, id) {
+  let counts = { files: 0, previews: 0 };
+  const files = new RegExp(`^/v1/artifacts/${id}/revisions/\\d+/files/`);
+  const previews = new RegExp(`^/v1/artifacts/${id}/revisions/\\d+/previews$`);
   const listener = (request) => {
-    if (
-      request.method() === 'POST' &&
-      pattern.test(new URL(request.url()).pathname)
-    )
-      count += 1;
+    const { pathname } = new URL(request.url());
+    if (request.method() === 'GET' && files.test(pathname)) counts.files += 1;
+    if (request.method() === 'POST' && previews.test(pathname))
+      counts.previews += 1;
   };
   page.on('request', listener);
-  return { count: () => count, stop: () => page.off('request', listener) };
+  return {
+    peek: () => ({ ...counts }),
+    take() {
+      const taken = counts;
+      counts = { files: 0, previews: 0 };
+      return taken;
+    },
+    stop: () => page.off('request', listener),
+  };
+}
+
+/**
+ * A route handler that holds the next GET whose path is `path`, or matches
+ * it when it is a regular expression, until `release`; `requested`
+ * resolves when it arrives, and `arrivals` counts every matching GET.
+ */
+function holdNextRead(path) {
+  const matches = (pathname) =>
+    path instanceof RegExp ? path.test(pathname) : pathname === path;
+  let count = 0;
+  let arrived;
+  const requested = new Promise((resolveArrived) => {
+    arrived = resolveArrived;
+  });
+  let release;
+  const released = new Promise((resolveReleased) => {
+    release = resolveReleased;
+  });
+  let held = false;
+  return {
+    requested,
+    release: () => release(),
+    arrivals: () => count,
+    async handler(route) {
+      const { pathname } = new URL(route.request().url());
+      if (route.request().method() !== 'GET' || !matches(pathname))
+        return route.fallback();
+      count += 1;
+      if (held) return route.fallback();
+      held = true;
+      arrived();
+      await released;
+      return route.fallback();
+    },
+  };
 }
 
 /** A route handler that fails the next GET of `path` with 503. */
@@ -542,7 +675,9 @@ function paceReads(id) {
   const inFlight = { list: 0, artifact: 0 };
   const paced = {
     most: { list: 0, artifact: 0 },
-    limited: false,
+    /** When each list read reached the server, in milliseconds. */
+    listAt: [],
+    limitedAt: 0,
     limitNext: false,
     limitNextList() {
       paced.limitNext = true;
@@ -557,12 +692,13 @@ function paceReads(id) {
             : undefined;
       if (view === undefined || route.request().method() !== 'GET')
         return route.fallback();
+      if (view === 'list') paced.listAt.push(Date.now());
       if (view === 'list' && paced.limitNext) {
         paced.limitNext = false;
-        paced.limited = true;
+        paced.limitedAt = Date.now();
         return route.fulfill({
           status: 429,
-          headers: { 'retry-after': '1' },
+          headers: { 'retry-after': '2' },
           json: { error: { code: 'rate_limited', message: 'Slow down.' } },
         });
       }
