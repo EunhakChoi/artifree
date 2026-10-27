@@ -181,3 +181,96 @@ test('Aborting while disconnected stops following at once', async () => {
     'followChanges waited for the retry delay after an abort',
   );
 });
+
+/** A change feed response delivered in the given chunks. */
+function chunks(...parts) {
+  const body = new ReadableStream({
+    start(controller) {
+      for (const part of parts)
+        controller.enqueue(new TextEncoder().encode(part));
+      controller.close();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+test('Line endings split across chunks or ended by CR keep events whole', async () => {
+  const data =
+    '{"cursor":4,"artifact_id":"art_1","change":"revised","revision":2,"committed_at_ms":1}';
+  const read = async (response) => {
+    const client = clientWith(() => response);
+    const events = [];
+    for await (const event of await client.openChanges({ after: 3 }))
+      events.push(event);
+    return events;
+  };
+  const change = {
+    type: 'change',
+    change: {
+      cursor: 4,
+      artifact_id: 'art_1',
+      change: 'revised',
+      revision: 2,
+      committed_at_ms: 1,
+    },
+  };
+  // A CRLF split after its CR is one line end, not a blank line.
+  assert.deepEqual(
+    await read(chunks('event: change\r', `\ndata: ${data}\r`, '\n\r', '\n')),
+    [change],
+  );
+  // CR-only line ends, with the final blank line's CR as the last byte.
+  assert.deepEqual(await read(chunks(`event: change\rdata: ${data}\r\r`)), [
+    change,
+  ]);
+  // An event cut off before its blank line is dropped.
+  assert.deepEqual(await read(chunks(`event: change\ndata: ${data}\n`)), []);
+});
+
+test('A proxy error while the server restarts is retried; a 4xx one is not', async () => {
+  // A proxy answers with an empty 502 until the server is back.
+  const answers = [
+    () => new Response('', { status: 502 }),
+    () => chunks('event: ready\nid: 0\ndata: {"cursor":0}\n\n'),
+  ];
+  const controller = new AbortController();
+  const events = [];
+  const disconnects = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async () =>
+      (answers.shift() ?? (() => new Response('', { status: 502 })))(),
+  });
+  await client.followChanges({
+    signal: controller.signal,
+    retryDelayMs: { min: 1, max: 1 },
+    onEvent(event) {
+      events.push(event);
+      controller.abort();
+    },
+    onDisconnect(error) {
+      disconnects.push([error?.status, error?.code]);
+    },
+  });
+  assert.deepEqual(disconnects, [[502, 'invalid_response']]);
+  assert.deepEqual(events, [{ type: 'ready', cursor: 0 }]);
+
+  const missing = clientWith(
+    () =>
+      new Response('<h1>Not here</h1>', {
+        status: 404,
+        headers: { 'content-type': 'text/html' },
+      }),
+  );
+  const error = await failure(
+    missing.followChanges({
+      signal: new AbortController().signal,
+      onEvent() {},
+    }),
+  );
+  assert.deepEqual([error.status, error.code], [404, 'invalid_response']);
+});

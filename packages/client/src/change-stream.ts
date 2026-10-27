@@ -34,7 +34,7 @@ export async function* readChangeEvents(
 ): AsyncGenerator<ChangeFeedEvent> {
   const decoder = new TextDecoder();
   const reader = body.getReader();
-  let buffer = '';
+  const lines = new LineSplitter();
   let name = '';
   let data: string[] = [];
   try {
@@ -49,12 +49,10 @@ export async function* readChangeEvents(
           cause: error,
         });
       }
-      if (chunk.done) return;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      const lines = buffer.split(/\r\n|\r|\n/);
-      // The last piece may be an incomplete line.
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
+      const complete = chunk.done
+        ? lines.end()
+        : lines.push(decoder.decode(chunk.value, { stream: true }));
+      for (const line of complete) {
         if (line === '') {
           const event = dispatch(name, data);
           name = '';
@@ -69,11 +67,37 @@ export async function* readChangeEvents(
           else if (field === 'data') data.push(value);
         }
       }
+      // An event without its closing blank line is dropped, as the
+      // server-sent events format requires.
+      if (chunk.done) return;
     }
   } finally {
     reader.releaseLock();
     // Ends the connection when the caller stops early.
     await body.cancel().catch(() => undefined);
+  }
+}
+
+/**
+ * Splits text into lines ended by CRLF, LF, or CR, across chunk boundaries.
+ * A CR at the end of a chunk may be the first half of a CRLF, so it ends a
+ * line only once the next chunk, or the end of the stream, shows it.
+ */
+class LineSplitter {
+  private rest = '';
+
+  /** The lines that `text` completes. */
+  push(text: string): string[] {
+    const pending = `${this.rest}${text}`;
+    const held = pending.endsWith('\r') ? 1 : 0;
+    const lines = pending.slice(0, pending.length - held).split(/\r\n|\r|\n/);
+    this.rest = `${lines.pop() ?? ''}${pending.slice(pending.length - held)}`;
+    return lines;
+  }
+
+  /** The last line, when the stream ended right after its CR. */
+  end(): string[] {
+    return this.rest.endsWith('\r') ? [this.rest.slice(0, -1)] : [];
   }
 }
 
@@ -119,13 +143,18 @@ export interface FollowOptions {
   readonly retryDelayMs?: { readonly min: number; readonly max: number };
 }
 
-// Failures that reconnecting cannot fix.
+// Failures that reconnecting cannot fix, unless the status is a 5xx: a
+// proxy in front of a restarting server answers with a body that is not an
+// API error, and the server is back later.
 const FATAL: ReadonlySet<string> = new Set([
   'unauthenticated',
   'invalid_request',
   'not_found',
   'invalid_response',
 ]);
+
+const retryable = (error: ArtifreeApiError): boolean =>
+  error.status >= 500 || !FATAL.has(error.code);
 
 /**
  * Follows the feed through `open`, reconnecting after each ended or failed
@@ -154,7 +183,7 @@ export async function follow(
       }
     } catch (error: unknown) {
       if (signal.aborted) return;
-      if (!(error instanceof ArtifreeApiError) || FATAL.has(error.code))
+      if (!(error instanceof ArtifreeApiError) || !retryable(error))
         throw error;
       failure = error;
     }

@@ -135,7 +135,7 @@ Bodies are defined in `crates/artifree-contracts/src/api.rs`.
 a durable feed cursor. Each commit records its change in its own
 transaction, so replays and failed commits send nothing, and a client that
 reconnects with `Last-Event-ID` receives every commit it missed, also after
-a restart. Events name the artifact and revision to read again; they carry
+a restart of the same database. Events name the artifact and revision to read again; they carry
 no content. An open stream takes one of the actor's `--change-streams`
 slots, not a request slot.
 

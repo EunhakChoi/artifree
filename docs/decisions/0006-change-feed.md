@@ -55,7 +55,11 @@ delivery guarantees; everything below about them is an Artifree decision.
    later commit follows. With `Last-Event-ID` it continues after that
    cursor with `change` events in order. A cursor beyond the head comes from
    another or a restored database: the server sends `reset` with its head,
-   and the client reads all state again. An invalid cursor is
+   and the client reads all state again. A cursor at or below the head is
+   trusted, so a replaced or restored database that has already passed the
+   client's cursor is not detected; telling databases apart needs an
+   identity in the cursor, which backup and restore (O04) must add before it
+   restores a database under running clients. An invalid cursor is
    `400 invalid_request`. A comment line every 15 seconds keeps idle
    connections open.
 4. **Wake-up.** A stream rereads storage after this process commits and
