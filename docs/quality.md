@@ -103,6 +103,14 @@ fail. All jobs feed the stable **Quality gate** status; failed, skipped, or
 cancelled dependencies cannot pass it. Repository branch rules must require
 that status to enforce merging restrictions.
 
+Dependabot opens weekly update pull requests for npm, Cargo, and GitHub
+Actions. Minor and patch updates are grouped per ecosystem; majors arrive one
+at a time. Every update must pass the full gate before it is merged.
+`@types/node` majors are ignored because Node types must match the oldest
+supported runtime in `engines`; nothing else would catch code that uses APIs
+missing from Node 22. Rust needs no such rule: the Rust 1.85.0 job rejects
+crates that raise the minimum version.
+
 ## Limits and the next implementation
 
 There are no arbitrary coverage-percentage gates for empty modules. The
