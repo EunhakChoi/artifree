@@ -50,6 +50,12 @@ fn run() -> Result<(), String> {
             println!("{json}");
             Ok(())
         }
+        [arg] if arg == "--package-rules" => {
+            let json = serde_json::to_string_pretty(&artifree_server::package_rules())
+                .map_err(|error| format!("Could not serialize the package rules: {error}"))?;
+            println!("{json}");
+            Ok(())
+        }
         [command, options @ ..] if command == "serve" => {
             let options = parse_serve(options)?;
             serve::run(options, |ready| {
@@ -148,7 +154,7 @@ fn print_help() {
 
 Usage:
   artifree-server serve --data-dir <dir> [options]
-  artifree-server --describe | --version | --help
+  artifree-server --describe | --package-rules | --version | --help
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or
 SIGTERM. When both listeners are ready it prints one JSON line on stdout:
@@ -175,7 +181,8 @@ stream counts as one request; an open stream holds one of the actor's
 change stream slots instead of a running request.
 
 --describe emits the build-time module inventory as JSON; it does not probe a
-running server.",
+running server. --package-rules emits the package limits and file extensions
+this build enforces, as JSON.",
         api = serve::DEFAULT_API_ADDRESS,
         content = serve::DEFAULT_CONTENT_ADDRESS,
         ancestors = serve::DEFAULT_FRAME_ANCESTORS,

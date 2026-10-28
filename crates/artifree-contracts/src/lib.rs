@@ -4,6 +4,8 @@
 pub mod api;
 pub mod mcp;
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -80,4 +82,29 @@ pub struct ServiceDescription {
     pub mcp_api: bool,
     /// Modules included in this build-time inventory.
     pub components: Vec<Component>,
+}
+
+/// The package rules this build enforces, for clients that check a package
+/// before sending it. The server checks every request again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageRules {
+    /// The file a preview opens; every package has it.
+    pub entry_path: String,
+    /// Most files in one package.
+    pub max_files: u64,
+    /// Largest file, in bytes.
+    pub max_file_bytes: u64,
+    /// Largest package, all files together, in bytes.
+    pub max_package_bytes: u64,
+    /// Longest path, in UTF-8 bytes.
+    pub max_path_bytes: u64,
+    /// Most `/`-separated segments in a path.
+    pub max_path_segments: u64,
+    /// Longest segment, in bytes.
+    pub max_segment_bytes: u64,
+    /// Each lowercase file extension a path may end with, and the
+    /// `Content-Type` its file is served with. Extensions match without
+    /// regard to ASCII case.
+    pub media_types: BTreeMap<String, String>,
 }

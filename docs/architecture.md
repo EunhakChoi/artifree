@@ -32,7 +32,8 @@ crates/
   artifree-providers/  SQLite artifact store, ZIP source archives; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
   artifree-server/     composition root, Axum HTTP API, MCP endpoint, preview origin
-contracts/generated/  generated JSON Schemas (descriptor, API v1), MCP tool catalog, inventory snapshot
+contracts/generated/  generated JSON Schemas (descriptor, API v1), MCP tool catalog, package rules, inventory snapshot
+contracts/fixtures/   cases the Rust and TypeScript sides must judge alike
 docs/architecture/    TypeScript, CSS, and HTML source for the standalone design
 scripts/              contract generation, architecture build, checks, smoke
 ```
@@ -197,8 +198,15 @@ confirmation, the trash is shown from the list and recovered from, and
 moves made elsewhere close the open artifact unless a draft holds it, which
 nothing then reads for; what the page knows of the trash, like the versions
 it knows, lasts one feed epoch, and answers to writes from an earlier epoch
-move nothing ([0014](decisions/0014-web-trash.md)). The next slice is A09,
-the code editing workspace.
+move nothing ([0014](decisions/0014-web-trash.md)). A09 edits an
+artifact's files in the web workspace: a draft spans files and holds the
+bytes a rename moves, one reader serves every read for it and stops once
+the server's data may have been replaced, and saving sends every change as
+one revision against the draft's base without reading anything. Paths are
+checked before sending with the domain's rules, generated into
+`packageRules` from `artifree-server --package-rules`
+([0017](decisions/0017-code-workspace.md)). The next slice is A10, keeping
+unsaved source drafts across reloads.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

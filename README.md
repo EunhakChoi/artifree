@@ -95,7 +95,8 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0013](docs/decisions/0013-deleting-artifacts-and-the-trash.md),
 [0014](docs/decisions/0014-web-trash.md),
 [0015](docs/decisions/0015-source-exports.md),
-[0016](docs/decisions/0016-bounded-file-reads.md)).
+[0016](docs/decisions/0016-bounded-file-reads.md),
+[0017](docs/decisions/0017-code-workspace.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -108,8 +109,10 @@ workspace (A04), duplicating a revision into an artifact with its own
 history (A05), deleting artifacts to a trash and recovering them through
 the API, MCP, client, and CLI (A06a) and the web workspace (A06b), and
 exporting a revision's source as a ZIP archive with a manifest through the
-API, client, CLI, and web workspace (A07); the next slice is editing an
-artifact's files in the web workspace (A09).
+API, client, CLI, and web workspace (A07), reading part of a pinned file
+(A11), and editing an artifact's files in the web workspace, where a draft
+spans files, adds, renames, and deletes them, and is saved as one revision
+(A09). The next slice keeps unsaved drafts across reloads (A10).
 
 ## Verification
 

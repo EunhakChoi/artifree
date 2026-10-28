@@ -48,6 +48,20 @@ No domain test exists merely to repeat a field declaration.
 Artifact behavior is tested at the boundary that owns it:
 
 - `crates/artifree-domain`: path, identifier, and package validation.
+- `crates/artifree-server/tests/package_paths.rs` and
+  `scripts/tests/package-path.test.mjs`: every case of
+  `contracts/fixtures/package-paths.json` judged alike by the domain and
+  by the web's copy of its path rules, including a path longer in UTF-8
+  bytes than in characters; `descriptor_cli.rs` checks that
+  `--package-rules` prints the domain's limits and that each listed
+  extension, in either case, is accepted and served with its listed type.
+- `scripts/tests/source-draft.test.mjs`: bundles the web's draft rules. A
+  rename of an unchanged file needs and carries its base bytes, moving on
+  reads nothing, and moving home undoes it; moved text keeps its text but
+  not its original, also onto a deleted base path; text equal to its own
+  original is no change; saved text keeps CRLF and a byte order mark; each
+  reason the server would refuse a draft is named until it is fixed, and
+  sizes count moved bytes.
 - `crates/artifree-core/src/parts.rs`: parts of a file cut exactly at bytes
   with the whole file's size and digest; the end as an empty part and past
   it refused; for every offset and length over a text of 1- to 4-byte
@@ -234,7 +248,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   save, and reload requests held in flight keep the forms read-only and the
   dialog open; a response lost after commit is retried with the same key and
   replays; a failed load offers a retry; a failed list refresh keeps the open
-  draft; unsaved changes lock navigation;
+  draft; unsaved changes lock choosing another artifact;
   non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
   line breaks; a rejected token also stops live updates; an empty workspace
   says so and still offers the trash.
@@ -319,7 +333,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the artifact with the order shown then; an open artifact listed first and
   moved elsewhere closes with a notice, and the next one outside the trash
   opens, before the list is read again; with a draft it stays open, cannot
-  be saved, and neither previews nor reads its history; with the feed cut,
+  be saved, neither previews nor reads its history, and offers no file to
+  open, add, or move; with the feed cut,
   a refused recovery reads the artifact once and is sent again from the
   revision the refusal named, the draft editable throughout, or finds it
   recovered elsewhere and the draft savable again; recovered, it previews
@@ -329,6 +344,22 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   nor says what it did; a recovery answered after the page left the trash
   keeps a draft written meanwhile. The dialog, the trash, and the draft
   notice are checked for accessibility.
+- `scripts/smoke-editor.mjs`, in its own browser context: a draft spans
+  files, which can be switched while it exists; the rename dialog refuses
+  an extension the server does not serve and a case-only clash, and a
+  failed read of the file to move moves nothing; a binary file renamed, a
+  file added and deleted, and `index.html` renamed away (saving disabled)
+  and back; the save reads nothing and makes one revision whose moved file
+  has its exact bytes and whose edit keeps CRLF; a save whose answer was
+  lost stays possibly committed after a refused retry, shows no "saved
+  elsewhere" notice for its revision, and replays with its key; a revision
+  saved through the API leaves the draft, saving is refused, and "Load
+  latest" replaces it; text moved onto a deleted path is edited while the
+  replaced file's read is held; the saved revision is previewed beside the
+  editor; after a forged `reset` the draft stays, saving is disabled, and
+  nothing of its revision is read, moved, or sent. The path dialog, the
+  draft's problems, and the side-by-side preview are checked for
+  accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

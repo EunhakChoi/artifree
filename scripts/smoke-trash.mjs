@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { expect } from '@playwright/test';
 import { forgeReset } from './smoke-history.mjs';
 import { setVisible } from './smoke-list.mjs';
-import { api, hold } from './smoke-workspace.mjs';
+import { api, fileButton, hold } from './smoke-workspace.mjs';
 
 /**
  * Browser checks for the trash in the web workspace (decision 0014) against
@@ -274,6 +274,18 @@ export async function checkTrash({
       workspace.getByText(/Recover it to compare or restore its revisions/),
     ).toBeVisible();
     await workspace.getByRole('tab', { name: 'Source' }).click();
+    // Opening, adding, moving, or restoring a file would read it.
+    const files = workspace.getByRole('navigation', { name: 'Files' });
+    await expect(
+      files.getByRole('button', { name: 'New file' }),
+    ).toBeDisabled();
+    await expect(fileButton(files, 'index.html')).toBeDisabled();
+    await expect(
+      workspace.getByRole('button', { name: 'Rename file' }),
+    ).toBeDisabled();
+    await expect(
+      workspace.getByRole('button', { name: 'Show saved preview' }),
+    ).toBeHidden();
     tab.off('request', recordRead);
     assert.deepEqual(readsInTrash, [], 'Nothing is read for it in the trash.');
 

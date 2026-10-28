@@ -43,6 +43,18 @@ const inventory = JSON.parse(
     '--describe',
   ]),
 );
+const rulesSchema = schemas.package_rules;
+const rules = JSON.parse(
+  run([
+    'run',
+    '--quiet',
+    '--locked',
+    '-p',
+    'artifree-server',
+    '--',
+    '--package-rules',
+  ]),
+);
 const ajv = createAjv();
 const validate = ajv.compile(schema);
 ajv.compile(apiSchema);
@@ -51,7 +63,17 @@ if (!validate(inventory))
   throw new Error(
     `Rust inventory violates its schema: ${ajv.errorsText(validate.errors)}`,
   );
+const validateRules = ajv.compile(rulesSchema);
+if (!validateRules(rules))
+  throw new Error(
+    `Package rules violate their schema: ${ajv.errorsText(validateRules.errors)}`,
+  );
 
+const generatedRules = await compile(rulesSchema, 'PackageRules', {
+  bannerComment:
+    '/* Generated from artifree-server --package-rules. Run npm run generate:contracts; do not edit. */',
+  style: { singleQuote: true, tabWidth: 2 },
+});
 const generated = await compile(schema, 'ServiceDescription', {
   bannerComment:
     '/* Generated from artifree-contracts. Run npm run generate:contracts; do not edit. */',
@@ -114,6 +136,14 @@ const outputs = new Map([
     'contracts/generated/scaffold-inventory.json',
     `${JSON.stringify(inventory, null, 2)}\n`,
   ],
+  [
+    'contracts/generated/package-rules.json',
+    `${JSON.stringify(rules, null, 2)}\n`,
+  ],
+  [
+    'packages/contracts/src/generated/package-rules.ts',
+    `${generatedRules}\n/** The rules this build's server enforces; it checks every request again. */\nexport const packageRules: PackageRules = ${JSON.stringify(rules, null, 2)};\n`,
+  ],
   ['packages/contracts/src/generated/schema.ts', generated],
   [
     'packages/contracts/src/generated/api.ts',
@@ -138,5 +168,5 @@ for (const [path, content] of outputs) {
   }
 }
 console.log(
-  `${checking ? 'Verified' : 'Generated'} ${outputs.size} contract files; inventory validates against Rust schema.`,
+  `${checking ? 'Verified' : 'Generated'} ${outputs.size} contract files; inventory and package rules validate against Rust schemas.`,
 );

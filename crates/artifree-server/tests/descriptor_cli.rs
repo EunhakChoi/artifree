@@ -1,6 +1,9 @@
 //! Verify the installed binary's stdout/stderr and failure protocol.
 use std::error::Error;
 use std::process::Command;
+use std::str::FromStr;
+
+use artifree_domain::package::{self, PackagePath};
 
 #[test]
 fn descriptor_is_machine_readable_and_exits_without_serving() -> Result<(), Box<dyn Error>> {
@@ -28,11 +31,48 @@ fn descriptor_is_machine_readable_and_exits_without_serving() -> Result<(), Box<
 }
 
 #[test]
+fn package_rules_are_those_the_domain_enforces() -> Result<(), Box<dyn Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_artifree-server"))
+        .arg("--package-rules")
+        .output()?;
+    assert!(output.status.success(), "Rules failed: {:?}", output.stderr);
+    assert!(output.stderr.is_empty(), "Rules emitted errors");
+    let rules: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let limits = [
+        ("max_files", package::MAX_FILES),
+        ("max_file_bytes", package::MAX_FILE_BYTES),
+        ("max_package_bytes", package::MAX_PACKAGE_BYTES),
+        ("max_path_bytes", package::MAX_PATH_BYTES),
+        ("max_path_segments", package::MAX_PATH_SEGMENTS),
+        ("max_segment_bytes", package::MAX_SEGMENT_BYTES),
+    ];
+    for (name, limit) in limits {
+        assert_eq!(rules[name], serde_json::json!(limit), "{name}");
+    }
+    assert_eq!(rules["entry_path"], package::ENTRY_PATH);
+    // Every listed extension is one the domain accepts, in either case, and
+    // serves with the listed type.
+    let types = rules["media_types"]
+        .as_object()
+        .ok_or("media_types is not an object")?;
+    assert!(types.len() >= 20, "Extensions are missing: {types:?}");
+    for (extension, media_type) in types {
+        for name in [extension.clone(), extension.to_ascii_uppercase()] {
+            let path = PackagePath::from_str(&format!("file.{name}"))
+                .map_err(|error| format!("{name}: {error:?}"))?;
+            assert_eq!(path.media_type().essence(), media_type, "{name}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn invalid_arguments_fail_without_success_output() -> Result<(), Box<dyn Error>> {
     for args in [
         ["--serve", ""],
         ["--describe", "extra"],
         ["--version", "--describe"],
+        ["--package-rules", "--describe"],
         ["serve", "--unknown"],
         ["serve", "--data-dir"],
     ] {

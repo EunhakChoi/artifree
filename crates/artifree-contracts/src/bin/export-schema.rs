@@ -1,6 +1,8 @@
 //! Emits the public JSON Schemas for contract generation.
 //!
-//! Output: `{ "service_description": <schema>, "api": <schema>, "mcp": <tools> }`.
+//! Output: `{ "service_description": <schema>, "package_rules": <schema>,
+//! "api": <schema>, "mcp": <tools> }`. The package rules schema describes
+//! what `artifree-server --package-rules` prints.
 //! The API schema's root accepts any v1 JSON request or response body, the
 //! data of each change feed event, and the manifest of a source export; each body and its parts are `$defs`
 //! entries. The query of the artifact list is a `$defs` entry only: it is
@@ -20,7 +22,7 @@ use artifree_contracts::api::{
     ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
     SaveRevisionRequest, SourceExportManifest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
-use artifree_contracts::{ServiceDescription, mcp};
+use artifree_contracts::{PackageRules, ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let output = serde_json::json!({
         "service_description": schemars::schema_for!(ServiceDescription),
+        "package_rules": schemars::schema_for!(PackageRules),
         "api": api,
         "mcp": {
             "instructions": mcp::SERVER_INSTRUCTIONS,
