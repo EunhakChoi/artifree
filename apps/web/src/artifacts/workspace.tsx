@@ -333,6 +333,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 client={client}
                 artifactId={selectedId}
                 epoch={epoch}
+                isCurrent={isCurrent}
                 resets={resets}
                 known={live.known[selectedId]}
                 unknownChanges={live.unknown[selectedId] ?? 0}

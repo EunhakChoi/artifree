@@ -61,13 +61,16 @@ unpublished trace maps each to its evidence.
    path is no change. Edited text that moves keeps its text but not its
    original, since the file it replaces, if any, is another one.
 4. **One reader per draft.** Every read for a draft, to show a file or to
-   move one, names the draft's base revision. Once the page learns that
-   the server's data may have been replaced since that revision was read
+   move one, names the draft's base revision and the feed epoch it was
+   read in. Once the server's data may have been replaced since then
    (0011), the reader reads nothing, and an answer that arrives after it
-   is dropped: the number may now name other content. The draft stays,
-   saving is disabled, and what the draft holds can still be read and
-   copied. Text the draft holds is shown without reading; a file the
-   draft has not changed is read at its own path.
+   is refused: the number may now name other content. The reader asks the
+   feed, which changes its epoch as soon as a `reset` arrives, before the
+   page renders it, so an answer that settles in between is refused too.
+   The draft stays, saving is disabled, and what the draft holds or the
+   page read before can still be read, edited, and copied. Text the draft
+   holds is shown without reading; a file the draft has not changed is
+   read at its own path, once while it is open.
 5. **One save, one request, nothing read on the way.** Saving sends every
    change, in path order, as one `POST /v1/artifacts/{id}/revisions` with
    the draft's base revision, through `ArtifactService` like every other
@@ -101,8 +104,9 @@ unpublished trace maps each to its evidence.
    draft remembers so until a save of it succeeds or the draft ends, also
    when a later attempt fails for another reason, and shows no such
    notice meanwhile. In the trash, where every read is refused (0014),
-   the open file's text stays editable, but no file can be opened, added,
-   moved, deleted, or restored, and no preview is shown. Carrying a draft
+   the open file's text stays editable, also when it was read and not
+   yet changed, but no file can be opened, added, moved, deleted, or
+   restored, and no preview is shown, so nothing is read. Carrying a draft
    onto a newer revision is A10's.
 9. **The saved revision is previewed beside the editor.** "Show saved
    preview" puts the draft's base revision, in its sandboxed frame,

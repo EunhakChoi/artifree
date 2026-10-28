@@ -38,6 +38,11 @@ interface ArtifactDetailProps {
   artifactId: string;
   /** The page's feed epoch; a new one reads everything again. */
   epoch: number;
+  /**
+   * Whether an epoch is still the feed's, as of the last event received;
+   * it changes before the page renders a new one.
+   */
+  isCurrent: (epoch: number) => boolean;
   /** How often the server's data may have been replaced so far. */
   resets: number;
   /** The newest version the page knows this artifact has, if any. */
@@ -76,6 +81,7 @@ export function ArtifactDetail({
   client,
   artifactId,
   epoch,
+  isCurrent,
   resets,
   known,
   unknownChanges,
@@ -321,6 +327,7 @@ export function ArtifactDetail({
                 client={client}
                 loaded={shown}
                 resets={resets}
+                isCurrent={isCurrent}
                 known={known?.revision}
                 onRefused={(base, current) => {
                   // A restore names the same source revision as a save.

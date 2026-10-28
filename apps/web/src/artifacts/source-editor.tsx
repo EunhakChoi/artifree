@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   ArchiveRestoreIcon,
@@ -84,16 +84,6 @@ interface DraftBase {
   readonly resets: number;
 }
 
-/** Refuses a read once the draft's base revision may name other content. */
-class ReplacedError extends Error {
-  constructor() {
-    super(
-      "Nothing was read: the server's data may have been replaced since this draft's revision was read.",
-    );
-    this.name = 'ReplacedError';
-  }
-}
-
 /** Reads a file of the draft's base revision (decision 0017, item 4). */
 type ReadBase = (path: string, signal?: AbortSignal) => Promise<Uint8Array>;
 
@@ -102,6 +92,8 @@ interface SourcePanelProps {
   loaded: Loaded;
   /** The page's reset count now. */
   resets: number;
+  /** Whether an epoch is still the feed's, as of the last event received. */
+  isCurrent: (epoch: number) => boolean;
   /** The newest revision a notice or list reported, if any. */
   known: number | undefined;
   onSaved: (artifact: Artifact) => void;
@@ -131,6 +123,7 @@ export function SourcePanel({
   client,
   loaded,
   resets,
+  isCurrent,
   known,
   onSaved,
   onRefused,
@@ -158,11 +151,6 @@ export function SourcePanel({
   // reuses the key, so a retry after a lost answer cannot commit twice.
   const [attempt, setAttempt] = useState<{ body: string; key: string }>();
   const [showPreview, setShowPreview] = useState(false);
-  // The reset count as last rendered, for reads that settle later.
-  const resetsNow = useRef(resets);
-  useEffect(() => {
-    resetsNow.current = resets;
-  }, [resets]);
   // Whatever replaces this panel discards its draft, so it must not leave
   // the workspace locked.
   const release = useEffectEvent(() => onUnsavedChange(false));
@@ -191,7 +179,7 @@ export function SourcePanel({
       </p>
     );
   const baseNumber = base.revision.revision;
-  const baseResets = base.resets;
+  const baseEpoch = base.epoch;
   const draft =
     changes?.base === baseNumber
       ? changes
@@ -212,22 +200,29 @@ export function SourcePanel({
   const fixed = locked || inTrash;
   // The base number may now name other content: nothing is read for it,
   // nothing read before is moved, and nothing is saved (0011).
-  const replaced = baseResets !== resets;
+  const replaced = base.resets !== resets;
   const latest = Math.max(artifact.current_revision, known ?? 0);
   // While this page's own save is in flight, or may have committed, a
   // newer revision may be that save: no notice then.
   const newer = !replaced && latest > baseNumber && !saving && !uncertain;
   const outdated = replaced || newer || save.status === 'conflict';
 
+  // The one reader of the draft's revision. The feed's epoch changes as
+  // soon as a `reset` arrives, before this page renders it, so a read that
+  // settles in between is refused too. In the trash no read starts: no
+  // file can be opened or moved there.
   const readBase: ReadBase = async (path, signal) => {
-    if (resetsNow.current !== baseResets) throw new ReplacedError();
+    const refused = new Error(
+      "Nothing was read: the server's data may have been replaced since this draft's revision was read.",
+    );
+    if (!isCurrent(baseEpoch)) throw refused;
     const bytes = await client.readFile(
       artifact.id,
       baseNumber,
       path,
       signal === undefined ? {} : { signal },
     );
-    if (resetsNow.current !== baseResets) throw new ReplacedError();
+    if (!isCurrent(baseEpoch)) throw refused;
     return bytes;
   };
 
@@ -296,7 +291,7 @@ export function SourcePanel({
               draft={draft}
               entry={selected}
               readBase={readBase}
-              readable={!replaced && !inTrash}
+              canRead={!replaced && !inTrash}
               locked={locked}
               fixed={fixed}
               onChange={update}
@@ -537,8 +532,11 @@ interface FileViewProps {
   draft: SourceDraft;
   entry: DraftEntry;
   readBase: ReadBase;
-  /** Files of the base revision can be read. */
-  readable: boolean;
+  /**
+   * Files of the base revision can be read now; a read refused for it is
+   * not offered again. What was read before stays shown.
+   */
+  canRead: boolean;
   /** The text cannot change. */
   locked: boolean;
   /** No path can be added, moved, deleted, or restored. */
@@ -553,7 +551,7 @@ function FileView({
   draft,
   entry,
   readBase,
-  readable,
+  canRead,
   locked,
   fixed,
   onChange,
@@ -638,7 +636,7 @@ function FileView({
         draft={draft}
         entry={entry}
         readBase={readBase}
-        readable={readable}
+        canRead={canRead}
         locked={locked}
         onChange={onChange}
       />
@@ -650,7 +648,7 @@ interface FileTextProps {
   draft: SourceDraft;
   entry: DraftEntry;
   readBase: ReadBase;
-  readable: boolean;
+  canRead: boolean;
   locked: boolean;
   onChange: (draft: SourceDraft) => void;
 }
@@ -691,13 +689,15 @@ function shownFromDraft(content: Content): Shown {
  * The text of a path, edited as the draft holds it. What the draft holds is
  * shown without reading; a path the draft has not changed is read from the
  * base revision, and stays read while its text is edited, so returning to
- * the original does not wait again.
+ * the original does not wait again. Text read before the artifact moved to
+ * the trash, or before a possible replacement, stays shown and editable;
+ * the reader refuses any read after either.
  */
 function FileText({
   draft,
   entry,
   readBase,
-  readable,
+  canRead,
   locked,
   onChange,
 }: FileTextProps) {
@@ -712,9 +712,7 @@ function FileText({
       (content.kind === 'text' && content.original !== undefined));
   const [attempt, setAttempt] = useState(0);
   const read = useRequest(
-    isText && ownBase && readable
-      ? `${draft.base}:${path}:${attempt}`
-      : undefined,
+    isText && ownBase ? `${draft.base}:${path}:${attempt}` : undefined,
     async (signal) => toEditable(await readBase(path, signal)),
   );
   if (!isText)
@@ -726,11 +724,6 @@ function FileText({
     );
   let shown: Shown;
   if (content !== undefined) shown = shownFromDraft(content);
-  else if (!readable)
-    shown = {
-      kind: 'none',
-      message: `${path} is not read here now. Load the latest revision to read it.`,
-    };
   else if (read.status === 'loading')
     return (
       <output className="text-sm text-muted-foreground">Loading {path}…</output>
@@ -741,15 +734,17 @@ function FileText({
         <AlertTitle>Could not read {path}</AlertTitle>
         <AlertDescription>
           <p>{read.message}</p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setAttempt((value) => value + 1)}
-          >
-            <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
-            Try again
-          </Button>
+          {canRead ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setAttempt((value) => value + 1)}
+            >
+              <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+              Try again
+            </Button>
+          ) : null}
         </AlertDescription>
       </Alert>
     );
