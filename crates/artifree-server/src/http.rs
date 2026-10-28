@@ -440,7 +440,8 @@ async fn save_revision(
     body: Result<Json<SaveRevisionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Path(id) = path?;
-    // An unknown artifact is reported before a malformed body.
+    // An identifier that cannot name an artifact is reported before a
+    // malformed body; whether the artifact exists is checked with the request.
     operations::artifact_id(&id)?;
     let Json(request) = body?;
     let response = operations::save(&state, actor, key, &id, request).await?;
@@ -459,7 +460,8 @@ async fn restore_revision(
     body: Result<Json<RestoreRevisionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision)) = path?;
-    // An unknown artifact or revision is reported before a malformed body.
+    // An identifier or revision number that cannot name one is reported
+    // before a malformed body; whether they exist is checked with the request.
     operations::artifact_id(&id)?;
     operations::revision_number(revision)?;
     let Json(request) = body?;
@@ -479,7 +481,8 @@ async fn duplicate_artifact(
     body: Result<Json<DuplicateArtifactRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision)) = path?;
-    // An unknown artifact or revision is reported before a malformed body.
+    // An identifier or revision number that cannot name one is reported
+    // before a malformed body; whether they exist is checked with the request.
     operations::artifact_id(&id)?;
     operations::revision_number(revision)?;
     let Json(request) = body?;
@@ -505,7 +508,8 @@ async fn update_artifact(
     body: Result<Json<UpdateArtifactRequest>, JsonRejection>,
 ) -> Result<Json<UpdateArtifactResponse>, ApiError> {
     let Path(id) = path?;
-    // An unknown artifact is reported before a malformed body.
+    // An identifier that cannot name an artifact is reported before a
+    // malformed body; whether the artifact exists is checked with the request.
     operations::artifact_id(&id)?;
     let Json(request) = body?;
     Ok(Json(

@@ -891,6 +891,20 @@ async fn duplicate_refusals_create_nothing() -> TestResult {
         )
         .await?;
     assert_eq!(malformed.status, StatusCode::NOT_FOUND);
+    // Whether a well-formed artifact exists is checked with the request,
+    // after its body.
+    let unread = harness
+        .send(
+            authorized(Request::post(
+                "/v1/artifacts/art_00000000000000000000000000000000/revisions/1/duplicate",
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", "copy-key-6")
+            .body(Body::from("{"))?,
+        )
+        .await?;
+    assert_eq!(unread.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&unread), "invalid_request");
     // A key of another request is refused without a copy.
     let reused = harness
         .send(duplicate(&id, 1, Some("create-key-1"), &json!({}))?)

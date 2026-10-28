@@ -55,9 +55,11 @@ unpublished trace maps each to its evidence.
    and clients reject a part they do not know rather than report a copy
    as complete. The source is not touched.
 4. **Refusals create nothing.** A missing or inaccessible artifact, or a
-   revision that is 0 or after the current one, is `404 not_found`; it is
-   reported before a malformed body. An invalid title is `422`, an
-   unknown field `400`, and a missing key `400`. A duplicate is not
+   revision that is 0 or after the current one, is `404 not_found`. A path
+   that cannot name one, such as revision 0, is reported before a
+   malformed body; whether the artifact and revision exist is checked
+   with the request, after the body, as for every write. An invalid title
+   is `422`, an unknown field `400`, and a missing key `400`. A duplicate is not
    conditional: it needs no base revision, since it changes nothing that
    exists.
 5. **Retries.** The request fingerprint covers the operation, the
