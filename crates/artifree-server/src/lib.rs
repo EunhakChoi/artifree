@@ -9,6 +9,7 @@ pub mod limits;
 pub mod mcp;
 mod operations;
 pub mod preview;
+mod ranges;
 pub mod serve;
 
 use artifree_contracts::{Component, ServiceDescription};

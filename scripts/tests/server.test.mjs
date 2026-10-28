@@ -128,6 +128,26 @@ test('CLI creates, saves, reads pinned revisions, and rejects stale saves', asyn
     assert.equal(first.stdout, '<h1>v1</h1>');
     assert.equal(cli(server, ['cat', id, 'index.html']).stdout, '<h1>v2</h1>');
     assert.equal(cli(server, ['cat', id, 'notes.txt']).stdout, notes);
+    // cat writes one byte range of the file, counted in bytes.
+    const part = (...range) => cli(server, ['cat', id, 'notes.txt', ...range]);
+    assert.equal(part('--offset', '3', '--length', '4').stdout, 'line');
+    assert.equal(part('--offset', '13').stdout, 'line two\r\n');
+    assert.equal(part('--length', '4').stdout, '\uFEFFl');
+    const past = part('--offset', String(Buffer.byteLength(notes)));
+    assert.equal(past.status, 1);
+    assert.equal(past.stdout, '');
+    assert.match(past.stderr, /^error\[range_not_satisfiable\]/);
+    for (const range of [
+      ['--offset=-1'],
+      ['--offset=1e3'],
+      ['--offset='],
+      ['--offset', '1.5'],
+      ['--length', '0'],
+    ]) {
+      const refused = part(...range);
+      assert.equal(refused.status, 2, range.join(' '));
+      assert.equal(refused.stdout, '', range.join(' '));
+    }
 
     // URL parsing would resolve dot segments to another route, such as the
     // artifact's metadata; the client refuses them instead.

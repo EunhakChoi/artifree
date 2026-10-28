@@ -36,6 +36,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact delete <id> --base-metadata <n>
   artifree artifact recover <id> --base-metadata <n>
   artifree artifact cat <id> <package-path> [--revision <n>]
+      [--offset <n>] [--length <n>]
   artifree artifact export <id> --output <file> [--revision <n>]
   artifree artifact preview <id> [--revision <n>]
 
@@ -60,6 +61,10 @@ export writes a ZIP archive of one revision's files, at their package paths
 and byte for byte, with the manifest .artifree-export.json, to a new file
 (--output; an existing file is never replaced). It prints the archive's size
 and SHA-256. It is one revision, not a backup of the artifact or its history.
+cat --offset and --length write one byte range of the file instead: --length
+bytes from --offset (default 0), or to the end of the file without --length.
+A range that starts at or past the end of the file is refused. history lists
+each file's size and SHA-256.
 
 create, save, restore, duplicate, rename, pin, unpin, delete, and recover
 accept --idempotency-key <key>. Without it a new key is
@@ -100,6 +105,13 @@ function positiveNumber(value: string | undefined, flag: string): number {
   const number = Number(value);
   if (value === undefined || !Number.isSafeInteger(number) || number < 1)
     throw new UsageError(`${flag} must be a positive whole number.`);
+  return number;
+}
+
+function wholeNumber(value: string, flag: string): number {
+  const number = Number(value);
+  if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(number))
+    throw new UsageError(`${flag} must be a whole number.`);
   return number;
 }
 
@@ -484,17 +496,38 @@ async function duplicate(args: string[]): Promise<void> {
 async function cat(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
-    options: { ...connectionOptions, revision: { type: 'string' } },
+    options: {
+      ...connectionOptions,
+      revision: { type: 'string' },
+      offset: { type: 'string' },
+      length: { type: 'string' },
+    },
     allowPositionals: true,
     strict: true,
   });
   const [id = '', path = ''] = single(positionals, ['id', 'package-path']);
+  const range =
+    values.offset === undefined && values.length === undefined
+      ? undefined
+      : {
+          offset:
+            values.offset === undefined
+              ? 0
+              : wholeNumber(values.offset, '--offset'),
+          ...(values.length === undefined
+            ? {}
+            : { length: positiveNumber(values.length, '--length') }),
+        };
   const client = await connect(values);
   const revision =
     values.revision === undefined
       ? (await client.getArtifact(id)).current_revision
       : positiveNumber(values.revision, '--revision');
-  process.stdout.write(await client.readFile(id, revision, path));
+  process.stdout.write(
+    range === undefined
+      ? await client.readFile(id, revision, path)
+      : (await client.readFilePart(id, revision, path, range)).content,
+  );
 }
 
 async function exportRevision(args: string[]): Promise<void> {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,7 +33,12 @@ let apiSchema;
 before(async () => {
   binary = buildServer(root);
   scratch = await mkdtemp(join(tmpdir(), 'artifree-mcp-test-'));
-  server = await startServer(binary, join(scratch, 'data'));
+  // One actor makes every request of this suite, more at once than the
+  // default burst allows; limits.test.mjs checks the limits themselves.
+  server = await startServer(binary, join(scratch, 'data'), [
+    '--request-burst',
+    '1000',
+  ]);
   catalog = JSON.parse(
     await readFile(join(root, 'contracts/generated/mcp-tools.json'), 'utf8'),
   );
@@ -589,6 +595,10 @@ test('An agent deletes to the trash, finds nothing there, and recovers', async (
       ['get_artifact', { artifact_id: id }],
       ['list_revisions', { artifact_id: id }],
       ['read_file', { artifact_id: id, revision: 1, path: 'index.html' }],
+      [
+        'read_file',
+        { artifact_id: id, revision: 1, path: 'index.html', offset: 99 },
+      ],
       ['create_preview', { artifact_id: id, revision: 1 }],
       [
         'save_revision',
@@ -634,6 +644,111 @@ test('An agent deletes to the trash, finds nothing there, and recovers', async (
     });
     assert.equal(file.content, '<p>kept</p>');
     assert.deepEqual(await listed(false), [id]);
+  });
+});
+
+test('An agent reads a file in parts that join into it', async () => {
+  // 1- to 4-byte characters, a byte order mark, and CRLF. Every offset and
+  // length is covered by the core's tests; this checks what crosses MCP.
+  const text = '\u{FEFF}a\u{e9}\u{d55c}\u{1F600}\r\n'.repeat(2);
+  const bytes = Buffer.from(text);
+  // Not UTF-8 as a whole, but its first bytes alone are.
+  const binary = [0x41, 0x42, 0x43, 0xff, 0xfe, 0x00];
+  await withClient(async (client) => {
+    const created = await ok(client, 'create_artifact', {
+      title: 'Parts',
+      files: [
+        utf8('index.html', '<p>parts</p>'),
+        utf8('notes.txt', text),
+        base64('data.png', binary),
+      ],
+      idempotency_key: freshKey(),
+    });
+    const file = { artifact_id: created.artifact.id, revision: 1 };
+    const notes = { ...file, path: 'notes.txt' };
+    const whole = await ok(client, 'read_file', notes);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    assert.deepEqual(
+      [whole.content, whole.size, whole.sha256, whole.offset],
+      [text, bytes.length, sha256, 0],
+    );
+    assert.equal(whole.next_offset, undefined);
+
+    // Each part is text that ends between characters, and they join.
+    for (const length of [4, 13]) {
+      const parts = [];
+      let offset = 0;
+      for (;;) {
+        const part = await ok(client, 'read_file', {
+          ...notes,
+          offset,
+          length,
+        });
+        assert.deepEqual(
+          [part.encoding, part.offset, part.size, part.sha256],
+          ['utf8', offset, bytes.length, sha256],
+        );
+        assert.ok(part.content.length > 0, `length ${length} made progress`);
+        assert.ok(Buffer.byteLength(part.content) <= length);
+        parts.push(part.content);
+        if (part.next_offset === undefined) break;
+        assert.equal(
+          part.next_offset,
+          offset + Buffer.byteLength(part.content),
+        );
+        offset = part.next_offset;
+      }
+      assert.equal(parts.join(''), text, `length ${length}`);
+    }
+    // A part ends before the character it would split.
+    const cut = await ok(client, 'read_file', {
+      ...notes,
+      offset: 3,
+      length: 3,
+    });
+    assert.deepEqual([cut.content, cut.next_offset], ['a\u{e9}', 6]);
+    const end = await ok(client, 'read_file', {
+      ...notes,
+      offset: bytes.length,
+    });
+    assert.deepEqual([end.content, end.next_offset], ['', undefined]);
+
+    // A file that is not UTF-8 is cut at bytes and sent as base64, also
+    // where the part's bytes alone would be text.
+    const head = await ok(client, 'read_file', {
+      ...file,
+      path: 'data.png',
+      offset: 0,
+      length: 3,
+    });
+    assert.deepEqual(
+      [
+        head.encoding,
+        [...Buffer.from(head.content, 'base64')],
+        head.next_offset,
+      ],
+      ['base64', binary.slice(0, 3), 3],
+    );
+
+    for (const [args, code, message] of [
+      [{ offset: 5 }, 'invalid_request', /inside a UTF-8 character/],
+      [{ offset: 9, length: 3 }, 'invalid_request', /at least 4 bytes/],
+      [
+        { offset: bytes.length + 1 },
+        'range_not_satisfiable',
+        new RegExp(`${bytes.length} bytes`),
+      ],
+      [{ length: 0 }, 'invalid_request', /expected a nonzero u64/],
+      [{ offset: -1 }, 'invalid_request', /expected u64/],
+    ]) {
+      const error = await refused(
+        client,
+        'read_file',
+        { ...notes, ...args },
+        code,
+      );
+      assert.match(error.message, message, JSON.stringify(args));
+    }
   });
 });
 

@@ -13,6 +13,7 @@ use artifree_contracts::api::{
 };
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
+use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::package::{
     ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
@@ -35,6 +36,9 @@ use crate::http::AppState;
 pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
     pub(crate) body: ErrorBody,
+    /// For `range_not_satisfiable`, the file's size, which HTTP states in
+    /// `Content-Range`.
+    pub(crate) range_size: Option<u64>,
 }
 
 impl ApiError {
@@ -47,7 +51,19 @@ impl ApiError {
                 current_revision: None,
                 current_metadata_revision: None,
             },
+            range_size: None,
         }
+    }
+
+    /// A range that selects no bytes of a file of `size` bytes.
+    pub(crate) fn unsatisfiable(size: u64, message: impl Into<String>) -> Self {
+        let mut error = Self::new(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            ErrorCode::RangeNotSatisfiable,
+            message,
+        );
+        error.range_size = Some(size);
+        error
     }
 
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
@@ -92,6 +108,10 @@ impl From<ArtifactError> for ApiError {
                 conflict
             }
             ArtifactError::InvalidPageToken => Self::invalid(format!("page_token: {message}")),
+            ArtifactError::InvalidRange(RangeError::PastEnd { size }) => {
+                Self::unsatisfiable(size, message)
+            }
+            ArtifactError::InvalidRange(_) => Self::invalid(message),
             ArtifactError::RequestKeyReused => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::RequestKeyReused,
@@ -111,12 +131,12 @@ impl From<ArtifactError> for ApiError {
     }
 }
 
-/// The bytes of one file of a pinned revision.
+/// One file of a pinned revision, or the part of it a range selected.
 #[derive(Debug)]
 pub(crate) struct FileBytes {
     pub(crate) path: PackagePath,
     pub(crate) revision: SourceRevision,
-    pub(crate) content: Vec<u8>,
+    pub(crate) part: FilePart,
 }
 
 /// Parses a retry key; `field` names where it came from.
@@ -355,24 +375,30 @@ pub(crate) async fn revision(
     Ok(revision_dto(record))
 }
 
+/// Reads the part of a file that `range` selects, cut at `boundary`
+/// (decision 0016); [`ByteRange::WHOLE`] reads all of it.
 pub(crate) async fn read_file(
     state: &AppState,
     actor: ActorId,
     id: &str,
     revision: u64,
     path: &str,
+    range: ByteRange,
+    boundary: Boundary,
 ) -> Result<FileBytes, ApiError> {
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
     let path = package_path("path", path)?;
     let read_path = path.clone();
-    let content = state
-        .run(move |artifacts| artifacts.read_file(&actor, &id, revision, &read_path))
+    let part = state
+        .run(move |artifacts| {
+            artifacts.read_file_part(&actor, &id, revision, &read_path, range, boundary)
+        })
         .await?;
     Ok(FileBytes {
         path,
         revision,
-        content,
+        part,
     })
 }
 
