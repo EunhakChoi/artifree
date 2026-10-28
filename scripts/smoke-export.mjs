@@ -10,7 +10,7 @@ import { api } from './smoke-workspace.mjs';
  * artifree-server: the file the browser saves for the revision the preview
  * shows holds that revision's bytes and manifest, a failed download says
  * nothing changed and can be tried again, and a possible replacement of the
- * server's data stops it. The page has its own browser context.
+ * server's data stops a download in flight and holds the next. The page has its own browser context.
  */
 export async function checkExport({
   browser,
@@ -97,7 +97,25 @@ export async function checkExport({
     assert.equal(entries[2].content.toString('utf8'), '<p>first</p>\r\n');
 
     // After a possible replacement the same number may name other files,
-    // so it waits until the artifact is read again.
+    // so a download in flight is not saved, and the button waits until the
+    // artifact is read again.
+    let answer;
+    const answered = new Promise((resolve) => {
+      answer = resolve;
+    });
+    await tab.route(
+      '**/export',
+      async (route) => {
+        await answered;
+        await route.fallback().catch(() => {});
+      },
+      { times: 1 },
+    );
+    let saved = 0;
+    tab.on('download', () => {
+      saved += 1;
+    });
+    await button.click();
     let held;
     const reread = new Promise((resolve) => {
       held = resolve;
@@ -113,14 +131,17 @@ export async function checkExport({
     await expect(
       workspace.getByRole('button', { name: /^Download revision/ }),
     ).toBeDisabled();
+    await expect(failed).toContainText('may have been replaced');
+    answer();
     held();
     await tab.unrouteAll({ behavior: 'ignoreErrors' });
     await expect(
       workspace.getByRole('button', { name: 'Download revision 2' }),
     ).toBeEnabled();
 
+    assert.equal(saved, 0, 'The download in flight was not saved.');
     assert.deepEqual(errors, [], 'Page errors.');
-    return { downloads: 1, failed: 1 };
+    return { downloads: 1, failed: 2 };
   } finally {
     await context.close();
   }

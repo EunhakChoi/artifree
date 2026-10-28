@@ -18,12 +18,16 @@ type Download =
   | { readonly status: 'idle' | 'loading' }
   | { readonly status: 'failed'; readonly message: string };
 
+/** Why a download in flight stopped: what it asked for may name other files. */
+const REPLACED = 'replaced';
+
 /**
  * Saves the source export of a revision (decision 0015): a ZIP archive of
  * its files with their manifest. It is a read, so a failure changed
  * nothing and can simply be tried again. While what is shown may predate a
  * replacement of the server's data it waits, since the same number may
- * then name other files (0011 decision 6).
+ * then name other files (0011 decision 6); a download in flight then stops
+ * and nothing is saved.
  */
 export function ExportButton({
   client,
@@ -43,6 +47,9 @@ export function ExportButton({
     },
     [],
   );
+  useEffect(() => {
+    if (stale) running.current?.abort(REPLACED);
+  }, [stale]);
 
   async function start(): Promise<void> {
     const controller = new AbortController();
@@ -54,8 +61,15 @@ export function ExportButton({
         signal: controller.signal,
       });
     } catch (error: unknown) {
-      if (!controller.signal.aborted)
-        setDownload({ status: 'failed', message: describeFailure(error) });
+      const { signal } = controller;
+      // Closing the artifact aborts it too; then nothing is said.
+      if (signal.aborted && signal.reason !== REPLACED) return;
+      setDownload({
+        status: 'failed',
+        message: signal.aborted
+          ? "The server's data may have been replaced while the archive was read, so it was not saved."
+          : describeFailure(error),
+      });
       return;
     }
     if (controller.signal.aborted) return;
