@@ -700,9 +700,6 @@
       "$ref": "#/$defs/Artifact"
     },
     {
-      "$ref": "#/$defs/ListArtifactsQuery"
-    },
-    {
       "$ref": "#/$defs/ArtifactList"
     },
     {

@@ -64,7 +64,8 @@ Artifact behavior is tested at the boundary that owns it:
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
   the same conflict for every save form, every JSON response validated against
-  the API schema root with its expected status, and a SIGKILL after commit
+  the API schema root (which must reject an empty object) with its expected
+  status, and a SIGKILL after commit
   followed by a restart and a replayed retry.
 - `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
   authenticates before anything else, refuses a request with an `Origin` or a

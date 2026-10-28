@@ -10,7 +10,6 @@ export type ApiBody =
   | CommitResponse
   | UpdateArtifactResponse
   | Artifact
-  | ListArtifactsQuery
   | ArtifactList
   | Revision
   | RevisionList
@@ -50,10 +49,6 @@ export type FileChange =
  * version; the other families are reserved for planned source models.
  */
 export type ArtifactKind = 'app' | 'document' | 'slides' | 'dashboard' | 'design' | 'motion';
-/**
- * Order of `GET /v1/artifacts`. Ties are broken by identifier.
- */
-export type ListSort = 'updated' | 'created';
 /**
  * Machine-readable error category.
  */
@@ -232,34 +227,6 @@ export interface UpdateArtifactResponse {
   replayed: boolean;
 }
 /**
- * Query parameters of `GET /v1/artifacts`, all optional. Without any, the
- * response lists up to 500 artifacts, most recently updated first.
- */
-export interface ListArtifactsQuery {
-  /**
-   * Page size, 1-500; 500 when absent.
-   */
-  limit?: number | null;
-  /**
-   * `next_page_token` of the previous page, with the same `q`, `sort`,
-   * and `pinned`.
-   */
-  page_token?: string | null;
-  /**
-   * Only pinned (`true`) or only unpinned (`false`) artifacts.
-   */
-  pinned?: boolean | null;
-  /**
-   * Only artifacts whose title contains this text, 1-200 characters.
-   * ASCII letters match regardless of case; other characters exactly.
-   */
-  q?: string | null;
-  /**
-   * The order.
-   */
-  sort?: ListSort | null;
-}
-/**
  * Response of `GET /v1/artifacts`.
  */
 export interface ArtifactList {
@@ -365,4 +332,38 @@ export interface FeedPosition {
    * Opaque feed position, also the event's `id`.
    */
   cursor: string;
+}
+
+/**
+ * Order of `GET /v1/artifacts`. Ties are broken by identifier.
+ */
+export type ListSort = 'updated' | 'created';
+
+/**
+ * Query parameters of `GET /v1/artifacts`, all optional. Without any, the
+ * response lists up to 500 artifacts, most recently updated first.
+ */
+export interface ListArtifactsQuery {
+  /**
+   * Page size, 1-500; 500 when absent.
+   */
+  limit?: number | null;
+  /**
+   * `next_page_token` of the previous page, with the same `q`, `sort`,
+   * and `pinned`.
+   */
+  page_token?: string | null;
+  /**
+   * Only pinned (`true`) or only unpinned (`false`) artifacts.
+   */
+  pinned?: boolean | null;
+  /**
+   * Only artifacts whose title contains this text, 1-200 characters.
+   * ASCII letters match regardless of case; other characters exactly.
+   */
+  q?: string | null;
+  /**
+   * The order.
+   */
+  sort?: ListSort | null;
 }

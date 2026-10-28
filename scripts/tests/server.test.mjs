@@ -158,6 +158,8 @@ test('Every JSON body the server sends matches the API schema root', async () =>
     ),
   );
   const validate = createAjv().compile(schema);
+  // A root that accepts an arbitrary object would let any body pass below.
+  assert.equal(validate({}), false, 'The schema root accepts an empty object.');
   const server = await startServer(binary, dataDirectory('schema-data'));
   try {
     // Each call states the expected status, so an error body (which the
