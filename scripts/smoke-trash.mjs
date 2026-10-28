@@ -205,7 +205,8 @@ export async function checkTrash({
     await workspace.getByRole('button', { name: 'Discard changes' }).click();
 
     // A recovery from the trash that another change refused waits until
-    // the list shows that change.
+    // the list shows that change; it holds back no other artifact.
+    await setDeleted(other, true);
     await show.selectOption('trash');
     const recoverDemo = trashNav.getByRole('button', {
       name: 'Recover Trash demo',
@@ -234,6 +235,9 @@ export async function checkTrash({
       trashNav.getByText(/changed since this page read it/),
     ).toBeVisible();
     await expect(recoverDemo).toBeDisabled();
+    await expect(
+      trashNav.getByRole('button', { name: 'Recover Trash other' }),
+    ).toBeEnabled();
     await setDeleted(demo, false);
     await setDeleted(demo, true);
     await expect(recoverDemo).toBeEnabled();

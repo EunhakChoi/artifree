@@ -257,7 +257,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   closes with a notice before the list is read again, the next one outside
   the trash opens, and one with a draft stays open with the draft and
   recovers in place; a recovery that another change refused waits for that
-  change; a trash read before a forged `reset` recovers nothing until read
+  change and holds back no other artifact in the trash; a trash read before a forged `reset` recovers nothing until read
   again; a draft disables moving to the trash and showing it. The dialog
   and the trash are checked for accessibility.
 

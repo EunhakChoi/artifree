@@ -53,11 +53,13 @@ unpublished trace maps each to its evidence.
    artifacts in the trash, with search and order, and its items do not
    open: an artifact there cannot be read. Showing the trash and leaving
    it, also by a recovery or the notice's "Show trash", change only what
-   is shown; the search and order stay as their fields show them. Each has "Recover", a metadata
-   update with `deleted: false` against the metadata revision the list
-   read, through a gate of its own with the same rules: it waits while the
-   page knows of a newer version or the list predates a possible
-   replacement. A recovered artifact opens in the list of artifacts.
+   is shown; the search and order stay as their fields show them. Each
+   artifact has "Recover", a metadata update with `deleted: false`
+   against the metadata revision the list read, through a gate of that
+   artifact's own with the same rules: it waits while the page knows of a
+   newer version of it or the list predates a possible replacement. A
+   refused recovery holds back no other artifact. A recovered artifact
+   opens in the list of artifacts.
 6. **Deleted elsewhere.** The page knows which artifacts are in the trash,
    as of the newest metadata revision it has seen: from the feed (0013
    decision 5), from a list, or from its own write. An open artifact the

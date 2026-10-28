@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArchiveRestoreIcon } from 'lucide-react';
 import type { ArtifreeClient } from '@artifree/client';
@@ -42,8 +41,7 @@ interface TrashNavProps {
 
 /**
  * The trash (decision 0014, item 5). Its artifacts cannot be opened; each
- * can be recovered against the metadata revision the list read, through a
- * gate of the list's own with the rules of decision 0011, item 6.
+ * can be recovered against the metadata revision the list read.
  */
 export function TrashNav({
   client,
@@ -57,6 +55,63 @@ export function TrashNav({
   onShowMore,
   children,
 }: TrashNavProps) {
+  return (
+    <nav aria-label="Trash" className="flex flex-col gap-2">
+      {children}
+      {shownResets === resets ? null : (
+        <output className="text-sm text-muted-foreground">
+          Reading the trash again: the server&apos;s data may have changed
+          wholesale. Recovering waits until it is read.
+        </output>
+      )}
+      {artifacts.length === 0 ? empty : null}
+      {artifacts.map((artifact) => (
+        <TrashItem
+          key={artifact.id}
+          client={client}
+          artifact={artifact}
+          resets={resets}
+          shownResets={shownResets}
+          known={known[artifact.id]?.metadata}
+          onRecovered={onRecovered}
+          onConflict={onConflict}
+        />
+      ))}
+      {onShowMore === undefined ? null : (
+        <Button type="button" variant="outline" onClick={onShowMore}>
+          Show more
+        </Button>
+      )}
+    </nav>
+  );
+}
+
+interface TrashItemProps {
+  client: ArtifreeClient;
+  /** The artifact as the list read it. */
+  artifact: Artifact;
+  resets: number;
+  shownResets: number;
+  /** The newest metadata revision the page knows of for it. */
+  known: number | undefined;
+  onRecovered: (artifact: Artifact) => void;
+  onConflict: () => void;
+}
+
+/**
+ * One artifact in the trash and its recovery, through a gate of its own
+ * with the rules of decision 0011, item 6: what a refused recovery proves
+ * about this artifact says nothing about the others.
+ */
+function TrashItem({
+  client,
+  artifact,
+  resets,
+  shownResets,
+  known,
+  onRecovered,
+  onConflict,
+}: TrashItemProps) {
   const gate = useWriteGate(resets);
   const recover = useConditionalWrite({
     gate,
@@ -72,71 +127,40 @@ export function TrashNav({
     onDone: (result) => onRecovered(result.artifact),
     onConflict,
   });
-  // The artifact of the last recovery, whose outcome is shown with it.
-  const [last, setLast] = useState<string>();
+  const listed = artifact.metadata_revision;
+  const wait = (version: number) => gate.wait(version, known, shownResets);
+  const { base, retry } = preparedBase(
+    listed,
+    listed,
+    wait,
+    lostBase(recover.state),
+  );
+  const waiting = retry ? undefined : wait(base);
   return (
-    <nav aria-label="Trash" className="flex flex-col gap-2">
-      {children}
-      {shownResets === resets ? null : (
-        <output className="text-sm text-muted-foreground">
-          Reading the trash again: the server&apos;s data may have changed
-          wholesale. Recovering waits until it is read.
-        </output>
-      )}
-      {artifacts.length === 0 ? empty : null}
-      {artifacts.map((artifact) => {
-        const listed = artifact.metadata_revision;
-        const wait = (version: number) =>
-          gate.wait(version, known[artifact.id]?.metadata, shownResets);
-        const own = last === artifact.id;
-        const { base, retry } = preparedBase(
-          listed,
-          listed,
-          wait,
-          own ? lostBase(recover.state) : undefined,
-        );
-        const waiting = retry ? undefined : wait(base);
-        return (
-          <div key={artifact.id} className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="min-w-0 truncate text-sm" title={artifact.title}>
-                {artifact.title}
-              </span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                aria-label={`Recover ${artifact.title}`}
-                disabled={waiting !== undefined}
-                onClick={() => {
-                  setLast(artifact.id);
-                  void recover.write({ id: artifact.id, base });
-                }}
-              >
-                <ArchiveRestoreIcon
-                  data-icon="inline-start"
-                  aria-hidden="true"
-                />
-                Recover
-              </Button>
-            </div>
-            {own ? (
-              <WriteNotice
-                state={recover.state}
-                action="recover it"
-                changed="It"
-                behind={false}
-                waiting={waiting === 'replaced' ? undefined : waiting}
-              />
-            ) : null}
-          </div>
-        );
-      })}
-      {onShowMore === undefined ? null : (
-        <Button type="button" variant="outline" onClick={onShowMore}>
-          Show more
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-sm" title={artifact.title}>
+          {artifact.title}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-label={`Recover ${artifact.title}`}
+          disabled={waiting !== undefined}
+          onClick={() => void recover.write({ id: artifact.id, base })}
+        >
+          <ArchiveRestoreIcon data-icon="inline-start" aria-hidden="true" />
+          Recover
         </Button>
-      )}
-    </nav>
+      </div>
+      <WriteNotice
+        state={recover.state}
+        action="recover it"
+        changed="It"
+        behind={false}
+        waiting={waiting === 'replaced' ? undefined : waiting}
+      />
+    </div>
   );
 }
