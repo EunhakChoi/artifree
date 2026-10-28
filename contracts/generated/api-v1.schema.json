@@ -420,6 +420,16 @@
       ],
       "type": "object"
     },
+    "ExportRuntime": {
+      "description": "What exported files need from a host to run as they do in Artifree.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Nothing: previews give files no capabilities (decision 0003), so a\nbrowser is all they need. Resources they load from the network are\nnot part of the export and may be unavailable offline.",
+          "type": "string"
+        }
+      ]
+    },
     "FeedPosition": {
       "additionalProperties": false,
       "description": "Data of the `ready` and `reset` events of `GET /v1/changes`. `ready`\nstarts a stream opened without a cursor. `reset` answers a cursor this\nfeed cannot continue from: changes may have been missed, so read the\nstate again. Later events follow this position.",
@@ -731,6 +741,71 @@
       ],
       "type": "object"
     },
+    "SourceExportFormat": {
+      "description": "Version of a source export manifest.",
+      "oneOf": [
+        {
+          "const": "artifree.source-export.v1",
+          "description": "Version 1, described by [`SourceExportManifest`].",
+          "type": "string"
+        }
+      ]
+    },
+    "SourceExportManifest": {
+      "additionalProperties": false,
+      "description": "The manifest of a source export: the file `.artifree-export.json`, first\nin the ZIP archive that `GET /v1/artifacts/{id}/revisions/{revision}/export`\nanswers. Package paths never start with a dot, so no file of the revision\nhas this name. Every other entry is one file of the revision, at its\npackage path, with its bytes unchanged.",
+      "properties": {
+        "artifact_id": {
+          "description": "The exported artifact.",
+          "type": "string"
+        },
+        "created_at_ms": {
+          "description": "When the revision was committed, in Unix milliseconds; also the\nmodification time of every entry.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "entry": {
+          "description": "The file a preview opens: `index.html`.",
+          "type": "string"
+        },
+        "files": {
+          "description": "The revision's files in path order, as the revision lists them.",
+          "items": {
+            "$ref": "#/$defs/RevisionFile"
+          },
+          "type": "array"
+        },
+        "format": {
+          "$ref": "#/$defs/SourceExportFormat",
+          "description": "Format and version of this manifest."
+        },
+        "revision": {
+          "description": "The exported revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtime": {
+          "$ref": "#/$defs/ExportRuntime",
+          "description": "What the files need to run."
+        },
+        "title": {
+          "description": "The artifact's title when it was exported. Titles are not part of a\nrevision.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "format",
+        "artifact_id",
+        "title",
+        "revision",
+        "created_at_ms",
+        "entry",
+        "runtime",
+        "files"
+      ],
+      "type": "object"
+    },
     "UpdateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or\nseveral of them. Source revisions are not touched.",
@@ -835,8 +910,11 @@
     },
     {
       "$ref": "#/$defs/FeedPosition"
+    },
+    {
+      "$ref": "#/$defs/SourceExportManifest"
     }
   ],
-  "description": "Any JSON request or response body of HTTP API v1, or the data of a change feed event.",
+  "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",
   "title": "ApiBody"
 }

@@ -38,6 +38,17 @@ pub enum Missing {
     File,
 }
 
+/// What a source export holds; see [`ArtifactService::export`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionExport {
+    /// The artifact when exported. Its title is not part of the revision.
+    pub artifact: ArtifactRecord,
+    /// The exported revision, with its files listed in path order.
+    pub revision: RevisionRecord,
+    /// The revision's files.
+    pub files: FilePackage,
+}
+
 /// Why an artifact operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -491,6 +502,35 @@ impl<S: ArtifactStore> ArtifactService<S> {
         self.store
             .revision_file(id, revision, path)?
             .ok_or(ArtifactError::NotFound(Missing::File))
+    }
+
+    /// Everything a source export of `revision` holds (decision 0015): the
+    /// artifact as it is now, the revision's listing, and its files. A read
+    /// like [`Self::read_file`], with the same access and the same answers
+    /// for a missing artifact or revision.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] or [`ArtifactError::Unavailable`].
+    pub fn export(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        revision: SourceRevision,
+    ) -> Result<RevisionExport, ArtifactError> {
+        let artifact = self.authorized(actor, id)?;
+        let files = self.revision_of(&artifact, revision)?;
+        let listing = self
+            .store
+            .revisions(id)?
+            .into_iter()
+            .find(|record| record.revision == revision)
+            .ok_or(ArtifactError::NotFound(Missing::Revision))?;
+        Ok(RevisionExport {
+            artifact,
+            revision: listing,
+            files,
+        })
     }
 
     /// The files a save commits: `changes` applied to `base`.

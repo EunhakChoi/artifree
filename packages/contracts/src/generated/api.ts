@@ -1,7 +1,7 @@
 /* Generated from artifree-contracts. Run npm run generate:contracts; do not edit. */
 
 /**
- * Any JSON request or response body of HTTP API v1, or the data of a change feed event.
+ * Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.
  */
 export type ApiBody =
   | CreateArtifactRequest
@@ -18,7 +18,8 @@ export type ApiBody =
   | Preview
   | ErrorResponse
   | ArtifactChange
-  | FeedPosition;
+  | FeedPosition
+  | SourceExportManifest;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -74,6 +75,14 @@ export type ErrorCode =
  * still means the artifact changed: read it again.
  */
 export type ChangeKind = 'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered';
+/**
+ * Version of a source export manifest.
+ */
+export type SourceExportFormat = 'artifree.source-export.v1';
+/**
+ * What exported files need from a host to run as they do in Artifree.
+ */
+export type ExportRuntime = 'none';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -381,6 +390,43 @@ export interface FeedPosition {
    * Opaque feed position, also the event's `id`.
    */
   cursor: string;
+}
+/**
+ * The manifest of a source export: the file `.artifree-export.json`, first
+ * in the ZIP archive that `GET /v1/artifacts/{id}/revisions/{revision}/export`
+ * answers. Package paths never start with a dot, so no file of the revision
+ * has this name. Every other entry is one file of the revision, at its
+ * package path, with its bytes unchanged.
+ */
+export interface SourceExportManifest {
+  /**
+   * The exported artifact.
+   */
+  artifact_id: string;
+  /**
+   * When the revision was committed, in Unix milliseconds; also the
+   * modification time of every entry.
+   */
+  created_at_ms: number;
+  /**
+   * The file a preview opens: `index.html`.
+   */
+  entry: string;
+  /**
+   * The revision's files in path order, as the revision lists them.
+   */
+  files: RevisionFile[];
+  format: SourceExportFormat;
+  /**
+   * The exported revision.
+   */
+  revision: number;
+  runtime: ExportRuntime;
+  /**
+   * The artifact's title when it was exported. Titles are not part of a
+   * revision.
+   */
+  title: string;
 }
 
 /**

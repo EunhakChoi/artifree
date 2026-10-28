@@ -1,8 +1,8 @@
 //! Emits the public JSON Schemas for contract generation.
 //!
 //! Output: `{ "service_description": <schema>, "api": <schema>, "mcp": <tools> }`.
-//! The API schema's root accepts any v1 JSON request or response body and
-//! the data of each change feed event; each body and its parts are `$defs`
+//! The API schema's root accepts any v1 JSON request or response body, the
+//! data of each change feed event, and the manifest of a source export; each body and its parts are `$defs`
 //! entries. The query of the artifact list is a `$defs` entry only: it is
 //! not a body, and with every field optional it would admit any object. The
 //! body of a duplicate is a `$defs` entry only for the same reason: its
@@ -18,7 +18,7 @@ use artifree_contracts::api::{
     Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
     DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse, FeedPosition,
     ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
-    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    SaveRevisionRequest, SourceExportManifest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<ErrorResponse>(),
         generator.subschema_for::<ArtifactChange>(),
         generator.subschema_for::<FeedPosition>(),
+        generator.subschema_for::<SourceExportManifest>(),
     ];
     // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();
@@ -49,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://artifree.invalid/schemas/api-v1.json",
         "title": "ApiBody",
-        "description": "Any JSON request or response body of HTTP API v1, or the data of a change feed event.",
+        "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",
         "anyOf": bodies,
         "$defs": generator.take_definitions(true),
     });

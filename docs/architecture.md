@@ -29,7 +29,7 @@ crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
   artifree-core/       artifact service and owner policy; documents, jobs, handoff planned
   artifree-ports/      artifact store contract; other families planned
-  artifree-providers/  SQLite artifact store; models, tools, build, export planned
+  artifree-providers/  SQLite artifact store, ZIP source archives; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
   artifree-server/     composition root, Axum HTTP API, MCP endpoint, preview origin
 contracts/generated/  generated JSON Schemas (descriptor, API v1), MCP tool catalog, inventory snapshot
@@ -180,8 +180,13 @@ MCP, client, CLI, and web workspace
 trash and recovers them through the API, MCP, client, and CLI: deleting is a
 conditional metadata update, and an artifact in the trash answers every
 other request as an unknown one, except the replay of a request made before
-the delete ([0013](decisions/0013-deleting-artifacts-and-the-trash.md)). The
-next slice is A06b, the trash in the web workspace.
+the delete ([0013](decisions/0013-deleting-artifacts-and-the-trash.md)). A07
+exports one revision's files as a deterministic, uncompressed ZIP archive
+whose first entry is a manifest of paths, sizes, digests, and media types,
+through the API, client, CLI, and web workspace; it is a read with the
+access and trash rules of every read
+([0015](decisions/0015-source-exports.md)). The next slice is A06b, the trash
+in the web workspace.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

@@ -196,6 +196,7 @@ async fn every_api_route_requires_the_bearer_token() -> TestResult {
             format!("/v1/artifacts/{id}/revisions/1/files/index.html"),
         ),
         ("POST", format!("/v1/artifacts/{id}/revisions/1/previews")),
+        ("GET", format!("/v1/artifacts/{id}/revisions/1/export")),
         ("DELETE", "/v1/artifacts".to_owned()),
         ("GET", "/v1/no-such-route".to_owned()),
     ] {
@@ -458,6 +459,48 @@ async fn revision_reads_are_pinned() -> TestResult {
         let reply = harness.send(get(&missing)?).await?;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{missing}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_export_is_a_zip_of_the_pinned_revision() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let path = format!("/v1/artifacts/{id}/revisions");
+    harness
+        .send(post(
+            &path,
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+
+    let first = harness.send(get(&format!("{path}/1/export"))?).await?;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.header(header::CONTENT_TYPE), "application/zip");
+    assert_eq!(
+        first.header(header::CONTENT_DISPOSITION),
+        format!("attachment; filename=\"{id}-r1.zip\"")
+    );
+    assert_eq!(first.header(header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+    // The manifest comes first; each file is stored as it is.
+    assert_eq!(&first.body[..4], b"PK\x03\x04");
+    assert_eq!(&first.body[30..51], b".artifree-export.json");
+    let contains = |body: &[u8], part: &[u8]| body.windows(part.len()).any(|at| at == part);
+    assert!(contains(&first.body, b"<h1>v1</h1>"), "revision 1's page");
+    assert!(!contains(&first.body, b"<h1>v2</h1>"), "not revision 2's");
+    let again = harness.send(get(&format!("{path}/1/export"))?).await?;
+    assert_eq!(again.body, first.body, "the same revision, the same bytes");
+    let second = harness.send(get(&format!("{path}/2/export"))?).await?;
+    assert!(contains(&second.body, b"<h1>v2</h1>"), "revision 2's page");
+
+    for missing in [format!("{path}/3/export"), format!("{path}/0/export")] {
+        let reply = harness.send(get(&missing)?).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{missing}");
+        assert_eq!(error_code(&reply), "not_found", "{missing}");
+    }
+    let malformed = harness.send(get(&format!("{path}/first/export"))?).await?;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
     Ok(())
 }
 
@@ -1399,6 +1442,7 @@ fn reads_and_saves(id: &str) -> Result<Requests, axum::http::Error> {
         ("history", get(&history)?),
         ("manifest", get(&format!("{history}/2"))?),
         ("file", get(&format!("{history}/2/files/index.html"))?),
+        ("export", get(&format!("{history}/2/export"))?),
         (
             "preview",
             post(&format!("{history}/2/previews"), None, &json!({}))?,
@@ -1533,7 +1577,7 @@ async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
             missing += 1;
         }
     }
-    assert_eq!(missing, 21, "every request valid in itself is not found");
+    assert_eq!(missing, 22, "every request valid in itself is not found");
     assert_eq!(
         harness.content(&link).await?.status,
         StatusCode::NOT_FOUND,

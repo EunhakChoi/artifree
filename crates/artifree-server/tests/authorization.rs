@@ -55,6 +55,12 @@ fn another_actor_can_neither_see_nor_change_an_artifact() -> TestResult {
             .map(|_| ()),
         hidden
     );
+    assert_eq!(
+        service
+            .export(&intruder, &id, SourceRevision(1))
+            .map(|_| ()),
+        hidden
+    );
     let change = vec![FileChange::Put {
         path: PackagePath::entry(),
         content: b"<p>defaced</p>".to_vec(),

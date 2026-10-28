@@ -48,6 +48,12 @@ No domain test exists merely to repeat a field declaration.
 Artifact behavior is tested at the boundary that owns it:
 
 - `crates/artifree-domain`: path, identifier, and package validation.
+- `crates/artifree-providers/src/archive.rs`: the ZIP writer's CRC-32
+  against the standard check value, entry dates in UTC within the format's
+  range (a leap day, odd seconds, before 1980, past 2107), entries stored in
+  order at the offsets the directory lists, the same bytes for the same
+  entries, and names, counts, and sizes the classic format cannot hold
+  refused.
 - `crates/artifree-providers/tests/sqlite_store.rs`: the store contract on a
   real database — reopen durability, replay, key reuse, conflicts, eight
   concurrent writers, a trigger-injected failure that must leave no partial
@@ -83,7 +89,10 @@ Artifact behavior is tested at the boundary that owns it:
   through a preview link issued before, and is listed only in the trash;
   requests made before the delete replay as of their request, and a
   recovery is conditional, keyed apart from the delete, and brings back the
-  artifact and its link; non-owners cannot delete.
+  artifact and its link; non-owners cannot delete; an export is a ZIP of
+  the pinned revision, manifest first, with the same bytes each time, named
+  after the revision, and missing for revision 0, a later revision, a
+  trashed artifact, and other actors.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
@@ -93,7 +102,12 @@ Artifact behavior is tested at the boundary that owns it:
   conflict and usage errors, a duplicate through the CLI with exact bytes,
   its replay, a title, a missing revision, and usage errors, a delete,
   `list --deleted`, and a recovery through the CLI with a replay, a conflict,
-  and usage errors, and a SIGKILL after commit
+  and usage errors, an export through the CLI read back with Node's own
+  CRC-32 (`scripts/lib/zip-entries.mjs`): every file at its path with its
+  exact bytes and mode, a manifest valid against its schema that equals the
+  revision's listing, entries dated at the commit, the same bytes on a
+  second export, an existing file never replaced, and a missing revision
+  that writes nothing, and a SIGKILL after commit
   followed by a restart and a replayed retry.
 - `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
   authenticates before anything else, refuses a request with an `Origin` or a
@@ -157,7 +171,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   its revision, base, and key, a manifest without a valid lowercase
   `sha256` is an invalid response, and a duplicate whose `copied` is missing
   or names a part the client does not know is an invalid response, as is an
-  artifact whose `deleted_at_ms` is missing or not a time. For the
+  artifact whose `deleted_at_ms` is missing or not a time, and an export
+  that is not `application/zip`; an export cut off mid-body is a network
+  error. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without
@@ -245,6 +261,11 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   source revision's digests; the source keeps its revisions, pin, and
   title; a dialog open during a forged `reset` sends nothing; a draft
   disables duplicating. The dialog is checked for accessibility.
+- `scripts/smoke-export.mjs`: a failed download says nothing changed and is
+  checked for accessibility; tried again, the file the browser saves for
+  the revision the preview shows is named after it and holds that
+  revision's exact bytes and manifest, read with Node's own CRC-32; after a
+  forged `reset` the button waits until the artifact is read again.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

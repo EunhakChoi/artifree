@@ -18,7 +18,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "apps/web",
       "status": "implemented",
-      "summary": "React/Vite workspace: search, page, create, rename, pin, edit, save, compare, restore, duplicate, and preview HTML artifacts via the local API, following committed changes live."
+      "summary": "React/Vite workspace: search, page, create, rename, pin, edit, save, compare, restore, duplicate, download, and preview HTML artifacts via the local API, following committed changes live."
     },
     {
       "id": "cli",
@@ -27,7 +27,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "apps/cli",
       "status": "implemented",
-      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, save, restore, duplicate, cat, and preview over HTTP; build inventory."
+      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, save, restore, duplicate, cat, export, and preview over HTTP; build inventory."
     },
     {
       "id": "runtime",
@@ -63,7 +63,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/artifacts.rs",
       "status": "implemented",
-      "summary": "Create, conditional revisions, restores, duplicates (files only), metadata updates, and a recoverable trash, retry keys, pinned reads with digests, list queries; publish planned."
+      "summary": "Create, conditional revisions, restores, duplicates (files only), metadata updates, and a recoverable trash, retry keys, pinned reads with digests, source exports, list queries; publish planned."
     },
     {
       "id": "policy",

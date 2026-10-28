@@ -183,6 +183,10 @@ pub fn router(state: AppState) -> Router {
             get(read_file),
         )
         .route(
+            "/v1/artifacts/{id}/revisions/{revision}/export",
+            get(export_revision),
+        )
+        .route(
             "/v1/artifacts/{id}/revisions/{revision}/restore",
             axum::routing::post(restore_revision),
         )
@@ -564,6 +568,27 @@ async fn read_file(
             ),
         ],
         file.content,
+    )
+        .into_response())
+}
+
+async fn export_revision(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, u64)>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision)) = path?;
+    let export = operations::export(&state, actor, &id, revision).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", export.file_name),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+        ],
+        export.archive,
     )
         .into_response())
 }
