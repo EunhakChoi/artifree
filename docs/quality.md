@@ -54,6 +54,14 @@ Artifact behavior is tested at the boundary that owns it:
   order at the offsets the directory lists, the same bytes for the same
   entries, and names, counts, and sizes the classic format cannot hold
   refused.
+- `crates/artifree-core/src/parts.rs`: a part of a file is the exact bytes
+  asked for, from an offset or the last bytes, with the file's size and
+  digest; the end of the file is an empty part and past it is refused;
+  over a text of one- to four-byte characters, a byte order mark, and
+  CRLF, parts of every length from four to eight bytes end between
+  characters and join into the file, an offset inside a character or a
+  length shorter than the character there is refused, and the same ranges
+  read by bytes are exact; a file that is not UTF-8 is read by bytes.
 - `crates/artifree-providers/tests/sqlite_store.rs`: the store contract on a
   real database — reopen durability, one revision read alone exactly as the
   history lists it, replay, key reuse, conflicts, eight
@@ -73,7 +81,11 @@ Artifact behavior is tested at the boundary that owns it:
 - `crates/artifree-server/tests/`: HTTP status and error codes, including
   unsupported methods; the bearer token on every route and unmatched path, with
   a case-insensitive scheme; unsafe paths, body limits, pinned reads, preview
-  tickets and CSP, expiry, owner-only access in the core, and (on Unix) an
+  tickets and CSP, expiry, owner-only access in the core; one byte range
+  of a pinned file as `206` with its exact bytes and `Content-Range`, in
+  every form and spelling, `416` with `bytes */size` from the end on,
+  malformed, inverted, and multiple ranges refused, and another unit or
+  `If-Range` reading the whole file; and (on Unix) an
   owner-only data directory, refusing one other users can access; a restore
   that commits an earlier revision's exact files and digests and keeps the
   title, replays after later saves, and refuses a reused key, a stale base
@@ -108,7 +120,9 @@ Artifact behavior is tested at the boundary that owns it:
   exact bytes and mode, a manifest valid against its schema that equals the
   revision's listing, entries dated at the commit, the same bytes on a
   second export, an existing file never replaced, and a missing revision
-  that writes nothing, and a SIGKILL after commit
+  that writes nothing, `cat --offset --length` writing exact bytes, also
+  inside a character, a range past the end that writes nothing and fails,
+  and invalid flags as usage errors, and a SIGKILL after commit
   followed by a restart and a replayed retry.
 - `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
   authenticates before anything else, refuses a request with an `Origin` or a
@@ -119,7 +133,11 @@ Artifact behavior is tested at the boundary that owns it:
   spawned server: the 2.x client in the legacy and 2026-07-28 protocol eras,
   and the 1.x client, which validates error results against output schemas. `tools/list`
   equals the generated catalog; an agent creates, reads, saves, lists history,
-  reads exact pinned bytes (BOM, CRLF, binary), opens a sandboxed preview,
+  reads exact pinned bytes (BOM, CRLF, binary) whole or in parts that never
+  split a character and join into the file, with its listed size and
+  digest, an empty part at the end, and an offset inside a character, past
+  the end, or a zero length refused, and a binary file read by bytes as
+  base64; opens a sandboxed preview,
   restores an earlier revision byte for byte, replayed over HTTP, and
   duplicates a revision with binary bytes intact, replayed over HTTP;
   deletes an artifact that every other tool and HTTP then report as unknown,
@@ -174,7 +192,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   or names a part the client does not know is an invalid response, as is an
   artifact whose `deleted_at_ms` is missing or not a time, and an export
   that is not `application/zip`; an export cut off mid-body is a network
-  error. For the
+  error; a part of a file is the one range asked for, and a whole file,
+  another range, a longer or shorter body, or a missing `Content-Range` is
+  an invalid response. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without
