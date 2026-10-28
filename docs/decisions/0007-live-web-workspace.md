@@ -94,7 +94,9 @@ unpublished trace maps each to its evidence.
    open artifact keeps the earlier result and any draft, and shows the
    failure with "Try again". A first read that failed is retried by the
    user, not by later notices.
-7. **The open artifact stays while selected.** Selection changes only when
+7. **The open artifact stays while selected.** (Amended by
+   [0009](0009-web-list-and-metadata.md) decision 3: only a list of every
+   artifact can close it.) Selection changes only when
    the user chooses another artifact, which is disabled while a draft
    exists, or, without a draft, when a list answered for the current request
    no longer contains it; then the first listed artifact opens. An artifact

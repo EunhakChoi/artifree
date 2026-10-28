@@ -31,6 +31,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { fromEditable, toEditable } from './editable-text';
+import { MetadataActions } from './metadata-actions';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { Version } from './use-live-workspace';
 import { describeFailure, useRequest } from './use-request';
@@ -70,6 +71,8 @@ interface ArtifactDetailProps {
   unknownChanges: number;
   /** Called after a revision is committed so lists can refresh. */
   onSaved: (artifact: Artifact) => void;
+  /** Called after this page renamed or pinned the artifact. */
+  onMetadataChanged: (artifact: Artifact) => void;
   /** Whether the editor holds changes that are not saved. */
   unsaved: boolean;
   /** Reports when the editor gains or loses unsaved changes. */
@@ -85,6 +88,7 @@ export function ArtifactDetail({
   known,
   unknownChanges,
   onSaved,
+  onMetadataChanged,
   unsaved,
   onUnsavedChange,
 }: ArtifactDetailProps) {
@@ -97,7 +101,7 @@ export function ArtifactDetail({
   const targetVersion = target.epoch === epoch ? target.version : undefined;
   // A revision chosen for the preview, kept across tabs; none follows the
   // latest.
-  const [pinned, setPinned] = useState<number>();
+  const [chosen, setChosen] = useState<number>();
   const details = useRequest<Loaded>(
     `${artifactId}:${generation}:${epoch}:${targetVersion?.revision}:${targetVersion?.metadata}:${unknownChanges}`,
     async (signal) => {
@@ -166,9 +170,17 @@ export function ArtifactDetail({
           <code>{artifact.id}</code>
         </CardDescription>
         <CardAction>
-          <Badge variant="secondary">
-            Revision {artifact.current_revision}
-          </Badge>
+          <div className="flex flex-col items-end gap-2">
+            <Badge variant="secondary">
+              Revision {artifact.current_revision}
+            </Badge>
+            <MetadataActions
+              client={client}
+              artifact={artifact}
+              onUpdated={onMetadataChanged}
+              onConflict={reload}
+            />
+          </div>
         </CardAction>
       </CardHeader>
       <CardContent>
@@ -204,8 +216,8 @@ export function ArtifactDetail({
                 artifact={artifact}
                 revisions={revisions}
                 epoch={shown.epoch}
-                pinned={pinned}
-                onPin={setPinned}
+                chosen={chosen}
+                onChoose={setChosen}
               />
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
@@ -240,8 +252,9 @@ interface PreviewPanelProps {
   artifact: Artifact;
   revisions: Revision[];
   epoch: number;
-  pinned: number | undefined;
-  onPin: (revision: number | undefined) => void;
+  /** A revision chosen for the preview; none follows the latest. */
+  chosen: number | undefined;
+  onChoose: (revision: number | undefined) => void;
 }
 
 function PreviewPanel({
@@ -249,15 +262,15 @@ function PreviewPanel({
   artifact,
   revisions,
   epoch,
-  pinned,
-  onPin,
+  chosen,
+  onChoose,
 }: PreviewPanelProps) {
   const latest = artifact.current_revision;
-  // A pinned revision that is no longer listed, as after a reset to older
+  // A chosen revision that is no longer listed, as after a reset to older
   // data, falls back to the latest.
   const kept =
-    pinned !== undefined && revisions.some((item) => item.revision === pinned)
-      ? pinned
+    chosen !== undefined && revisions.some((item) => item.revision === chosen)
+      ? chosen
       : undefined;
   const revision = kept ?? latest;
   const preview = useRequest(`${artifact.id}:${revision}:${epoch}`, (signal) =>
@@ -272,7 +285,7 @@ function PreviewPanel({
             id="preview-revision"
             value={kept === undefined ? 'latest' : String(kept)}
             onChange={(event) =>
-              onPin(
+              onChoose(
                 event.target.value === 'latest'
                   ? undefined
                   : Number(event.target.value),

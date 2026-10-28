@@ -19,7 +19,7 @@ features.
 | Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                          |
 | Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset |
 | CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                    |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                                                  |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes, search, pages, rename, pin; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                      |
 | Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                  |
 | CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                           |
 
@@ -168,6 +168,14 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   a draft as possibly replaced; a background page neither reads nor
   subscribes. An observer installed in each page records any read started
   while another was outstanding.
+- `scripts/smoke-list.mjs`: a page lists 50 artifacts and shows more on
+  request; a commit elsewhere reads the list once, as long as it was; typing
+  a search reads once after the pause and keeps the open artifact open;
+  pinning, the pin filter, and both orders; a rename reads the list, the
+  artifact, and its history once and keeps a draft; a rename whose answer was
+  lost is retried with its key and applies once; a forged conflict changes
+  nothing and reads the artifact again. The rename dialog is checked for
+  accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

@@ -87,15 +87,16 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0005](docs/decisions/0005-request-limits.md),
 [0006](docs/decisions/0006-change-feed.md),
 [0007](docs/decisions/0007-live-web-workspace.md),
-[0008](docs/decisions/0008-artifact-metadata-and-lists.md)).
+[0008](docs/decisions/0008-artifact-metadata-and-lists.md),
+[0009](docs/decisions/0009-web-list-and-metadata.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
 The [PR roadmap](docs/roadmap.md) records the remaining work, dependencies,
 acceptance checks, and evidence requirements. The committed change feed (A01)
 and the web workspace following it (A02) are implemented, and so are renaming,
-pins, search, order, and pages through the API, MCP, and CLI (A03a); the next
-slice brings them to the web workspace (A03b).
+pins, search, order, and pages through the API, MCP, CLI, and web workspace
+(A03); the next slice is revision comparison and source restore (A04).
 
 ## Verification
 

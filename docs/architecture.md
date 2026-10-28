@@ -164,10 +164,11 @@ Pi configuration. These are agent tools, not page capabilities.
 
 The [PR roadmap](roadmap.md) is the implementation plan. A01 (committed
 change notifications and the deferred CLI retry diagnostic) and A02 (the web
-workspace following committed changes) are implemented, and A03a adds renaming,
-pins, search, order, and pages to the API, MCP, client, and CLI
-([0008](decisions/0008-artifact-metadata-and-lists.md)). The next slice is A03b,
-the same operations in the web workspace.
+workspace following committed changes) are implemented, and A03 adds renaming,
+pins, search, order, and pages to the API, MCP, client, CLI
+([0008](decisions/0008-artifact-metadata-and-lists.md)), and web workspace
+([0009](decisions/0009-web-list-and-metadata.md)). The next slice is A04,
+revision comparison and source restore.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured
