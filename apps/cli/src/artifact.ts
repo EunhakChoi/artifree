@@ -21,6 +21,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact create --title <title> (--dir <dir> | --file <path>...)
   artifree artifact save <id> --base <revision>
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
+  artifree artifact restore <id> <revision> --base <revision>
   artifree artifact rename <id> <title> --base-metadata <n>
   artifree artifact pin <id> --base-metadata <n>
   artifree artifact unpin <id> --base-metadata <n>
@@ -36,8 +37,10 @@ list prints every matching artifact, reading page after page, unless
 --limit or --page-token asks for one page; that page carries next_page_token
 when more follow. rename, pin, and unpin change metadata only and need the
 metadata_revision read with show (--base-metadata); they create no revision.
+restore commits the files of an earlier revision, exactly as they were, as
+the next revision; --base names the current revision, as for save.
 
-create, save, rename, pin, and unpin accept --idempotency-key <key>. Without it a new key is
+create, save, restore, rename, pin, and unpin accept --idempotency-key <key>. Without it a new key is
 generated and reported on stderr if the outcome is unknown; retry with that key
 to get the original result instead of a duplicate. save --dir replaces the
 package with the directory's files (hidden entries skipped) and deletes
@@ -109,6 +112,8 @@ export async function runArtifact(args: string[]): Promise<void> {
       return create(rest);
     case 'save':
       return save(rest);
+    case 'restore':
+      return restore(rest);
     case 'rename':
     case 'pin':
     case 'unpin':
@@ -370,6 +375,38 @@ async function save(args: string[]): Promise<void> {
       client.saveRevision(
         id,
         { base_revision: base, changes },
+        { idempotencyKey },
+      ),
+  );
+  print(result);
+}
+
+async function restore(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      ...connectionOptions,
+      base: { type: 'string' },
+      'idempotency-key': { type: 'string' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = '', revisionText] = single(positionals, ['id', 'revision']);
+  const revision = positiveNumber(revisionText, '<revision>');
+  if (values.base === undefined)
+    throw new UsageError(
+      'restore requires --base <revision>; read current_revision with artifree artifact show <id>.',
+    );
+  const base = positiveNumber(values.base, '--base');
+  const client = await connect(values);
+  const result = await mutate(
+    values['idempotency-key'] ?? newIdempotencyKey(),
+    (idempotencyKey) =>
+      client.restoreRevision(
+        id,
+        revision,
+        { base_revision: base },
         { idempotencyKey },
       ),
   );

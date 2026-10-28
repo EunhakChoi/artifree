@@ -6,6 +6,7 @@ import type {
   FileUpload,
   ListArtifactsQuery,
   Preview,
+  RestoreRevisionRequest,
   Revision,
   SaveRevisionRequest,
   UpdateArtifactRequest,
@@ -195,6 +196,28 @@ export class ArtifreeClient {
     return this.json(
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions`,
+      parseCommit,
+      {
+        mutation: { body: request, idempotencyKey: options.idempotencyKey },
+      },
+    );
+  }
+
+  /**
+   * Commits the files of an earlier `revision`, exactly as they were, as
+   * the next revision, prepared against `request.base_revision`. Rejects
+   * with code `revision_conflict` and `currentRevision` when another save
+   * won.
+   */
+  async restoreRevision(
+    id: string,
+    revision: number,
+    request: RestoreRevisionRequest,
+    options: MutationOptions,
+  ): Promise<CommitResponse> {
+    return this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/restore`,
       parseCommit,
       {
         mutation: { body: request, idempotencyKey: options.idempotencyKey },

@@ -6,6 +6,7 @@
 export type ApiBody =
   | CreateArtifactRequest
   | SaveRevisionRequest
+  | RestoreRevisionRequest
   | UpdateArtifactRequest
   | CommitResponse
   | UpdateArtifactResponse
@@ -112,6 +113,17 @@ export interface SaveRevisionRequest {
   changes: FileChange[];
 }
 /**
+ * Body of `POST /v1/artifacts/{id}/revisions/{revision}/restore`: commits
+ * the files of that earlier revision as the next revision.
+ */
+export interface RestoreRevisionRequest {
+  /**
+   * The revision the restore was prepared against. The commit fails with
+   * `revision_conflict` unless it is still current.
+   */
+  base_revision: number;
+}
+/**
  * Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
  * revisions are not touched.
  */
@@ -211,6 +223,11 @@ export interface RevisionFile {
    * Package path.
    */
   path: string;
+  /**
+   * SHA-256 of the file's bytes, as 64 lowercase hex digits. Files with
+   * equal digests have equal bytes.
+   */
+  sha256: string;
   /**
    * Size in bytes.
    */

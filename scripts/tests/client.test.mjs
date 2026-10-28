@@ -212,6 +212,52 @@ test('A metadata conflict reports the current metadata revision', async () => {
   assert.equal(error.currentRevision, undefined);
 });
 
+test('A restore names the revision, base, and key; manifests need digests', async () => {
+  const file = {
+    path: 'index.html',
+    size: 3,
+    sha256: 'ab'.repeat(32),
+    media_type: 'text/html; charset=utf-8',
+  };
+  const commit = (files) => ({
+    artifact: { ...artifact, current_revision: 3 },
+    revision: { revision: 3, created_by: 'owner', created_at_ms: 1, files },
+    replayed: false,
+  });
+  const sent = [];
+  let files = [file];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([init.method, String(url), init.headers, init.body]);
+      return Response.json(commit(files), { status: 201 });
+    },
+  });
+  const restore = () =>
+    client.restoreRevision(
+      artifact.id,
+      1,
+      { base_revision: 2 },
+      { idempotencyKey: 'test-key-1' },
+    );
+  const restored = await restore();
+  assert.deepEqual(restored.revision.files, [file]);
+  const [method, url, headers, body] = sent[0];
+  assert.equal(method, 'POST');
+  assert.equal(
+    url,
+    `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/1/restore`,
+  );
+  assert.equal(new Headers(headers).get('idempotency-key'), 'test-key-1');
+  assert.deepEqual(JSON.parse(body), { base_revision: 2 });
+  for (const sha256 of [undefined, 'AB'.repeat(32), 'ab'.repeat(31)]) {
+    files = [{ ...file, sha256 }];
+    const error = await failure(restore());
+    assert.equal(error.code, 'invalid_response', String(sha256));
+  }
+});
+
 // The change feed. Each rule below is one way an earlier version failed:
 // a split line end, an unknown kind or event, an aborted wait, a proxy
 // error, and a successful response that is not the feed.

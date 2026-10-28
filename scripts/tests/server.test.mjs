@@ -303,6 +303,59 @@ test('CLI renames, pins, and lists by filter and page', async () => {
   }
 });
 
+test('CLI restores an earlier revision byte for byte', async () => {
+  const server = await startServer(binary, dataDirectory('cli-restore'));
+  try {
+    const site = await freshDirectory('cli-restore-site');
+    const notes = '\uFEFFfirst\r\n';
+    await writeFile(join(site, 'index.html'), '<h1>1</h1>');
+    await writeFile(join(site, 'notes.txt'), notes);
+    const id = json(
+      cli(server, ['create', '--title', 'Restore', '--dir', site]),
+    ).artifact.id;
+    const page = join(site, 'index.html');
+    await writeFile(page, '<h1>2</h1>');
+    json(
+      cli(server, [
+        'save',
+        id,
+        '--base',
+        '1',
+        '--put',
+        `index.html=${page}`,
+        '--delete',
+        'notes.txt',
+      ]),
+    );
+    const restore = ['restore', id, '1', '--base', '2'];
+    const key = ['--idempotency-key', 'cli-restore-key-1'];
+    const restored = json(cli(server, [...restore, ...key]));
+    assert.equal(restored.revision.revision, 3);
+    assert.equal(restored.replayed, false);
+    const bytes = cli(server, ['cat', id, 'notes.txt', '--revision', '3']);
+    assert.equal(bytes.status, 0, bytes.stderr);
+    assert.equal(bytes.stdout, notes);
+    assert.equal(json(cli(server, [...restore, ...key])).replayed, true);
+
+    const stale = cli(server, restore);
+    assert.equal(stale.status, 1);
+    assert.equal(stale.stdout, '');
+    assert.match(stale.stderr, /^error\[revision_conflict\]/);
+    assert.match(stale.stderr, /current_revision=3/);
+    for (const args of [
+      ['restore', id, '1'],
+      ['restore', id, 'first', '--base', '3'],
+      ['restore', id, '--base', '3'],
+    ]) {
+      const refused = cli(server, args);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stdout, '', args.join(' '));
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
 test('CLI uploads text that JSON escaping would inflate within the body limit', async () => {
   // Two 4 MiB files are within the package limits, but escaped as JSON text
   // (NUL becomes \u0000) they would exceed the request body limit.

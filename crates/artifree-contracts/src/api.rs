@@ -74,6 +74,16 @@ pub struct SaveRevisionRequest {
     pub changes: Vec<FileChange>,
 }
 
+/// Body of `POST /v1/artifacts/{id}/revisions/{revision}/restore`: commits
+/// the files of that earlier revision as the next revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreRevisionRequest {
+    /// The revision the restore was prepared against. The commit fails with
+    /// `revision_conflict` unless it is still current.
+    pub base_revision: u64,
+}
+
 /// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
 /// revisions are not touched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -142,6 +152,9 @@ pub struct RevisionFile {
     pub path: String,
     /// Size in bytes.
     pub size: u64,
+    /// SHA-256 of the file's bytes, as 64 lowercase hex digits. Files with
+    /// equal digests have equal bytes.
+    pub sha256: String,
     /// `Content-Type` used when the file is served.
     pub media_type: String,
 }

@@ -7,8 +7,8 @@
 use artifree_contracts::api::{
     Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse, ContentEncoding,
     CreateArtifactRequest, ErrorBody, ErrorCode, FileChange as WireChange, FileUpload,
-    ListArtifactsQuery, ListSort, Preview, Revision, RevisionFile, RevisionList,
-    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    ListArtifactsQuery, ListSort, Preview, RestoreRevisionRequest, Revision, RevisionFile,
+    RevisionList, SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
@@ -22,6 +22,7 @@ use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
+use crate::auth::hex;
 use crate::http::AppState;
 
 /// A failed operation: the HTTP status and the contract error body. MCP
@@ -235,6 +236,23 @@ pub(crate) async fn save(
     Ok(announce(state, receipt))
 }
 
+pub(crate) async fn restore(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    revision: u64,
+    request: RestoreRevisionRequest,
+) -> Result<CommitResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let revision = revision_number(revision)?;
+    let base = SourceRevision(request.base_revision);
+    let receipt = state
+        .run(move |artifacts| artifacts.restore(&actor, &key, &id, base, revision))
+        .await?;
+    Ok(announce(state, receipt))
+}
+
 pub(crate) async fn update(
     state: &AppState,
     actor: ActorId,
@@ -367,7 +385,7 @@ pub(crate) fn artifact_id(value: &str) -> Result<ArtifactId, ApiError> {
     })
 }
 
-fn revision_number(value: u64) -> Result<SourceRevision, ApiError> {
+pub(crate) fn revision_number(value: u64) -> Result<SourceRevision, ApiError> {
     if value == 0 {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
@@ -445,6 +463,7 @@ fn revision_dto(record: RevisionRecord) -> Revision {
                 media_type: entry.path.media_type().essence().to_owned(),
                 path: entry.path.to_string(),
                 size: entry.size,
+                sha256: hex(&entry.sha256),
             })
             .collect(),
     }

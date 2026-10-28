@@ -526,6 +526,22 @@
       ],
       "type": "object"
     },
+    "RestoreRevisionRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/artifacts/{id}/revisions/{revision}/restore`: commits\nthe files of that earlier revision as the next revision.",
+      "properties": {
+        "base_revision": {
+          "description": "The revision the restore was prepared against. The commit fails with\n`revision_conflict` unless it is still current.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "base_revision"
+      ],
+      "type": "object"
+    },
     "Revision": {
       "additionalProperties": false,
       "description": "An immutable source revision.",
@@ -573,6 +589,10 @@
           "description": "Package path.",
           "type": "string"
         },
+        "sha256": {
+          "description": "SHA-256 of the file's bytes, as 64 lowercase hex digits. Files with\nequal digests have equal bytes.",
+          "type": "string"
+        },
         "size": {
           "description": "Size in bytes.",
           "format": "uint64",
@@ -583,6 +603,7 @@
       "required": [
         "path",
         "size",
+        "sha256",
         "media_type"
       ],
       "type": "object"
@@ -686,6 +707,9 @@
     },
     {
       "$ref": "#/$defs/SaveRevisionRequest"
+    },
+    {
+      "$ref": "#/$defs/RestoreRevisionRequest"
     },
     {
       "$ref": "#/$defs/UpdateArtifactRequest"

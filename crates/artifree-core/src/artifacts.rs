@@ -1,10 +1,10 @@
-//! HTML file-package artifacts: create, conditional revision commits,
-//! conditional metadata updates, lists, and revision-pinned reads.
+//! HTML file-package artifacts: create, conditional revision commits and
+//! restores, conditional metadata updates, lists, and revision-pinned reads.
 //!
 //! Every operation checks the actor's authority against current stored
 //! metadata. Commit success means durable acceptance. Source history is kept
-//! separate from future application data and access policy. Publish, restore,
-//! and fork are not implemented.
+//! separate from future application data and access policy. Publish and fork
+//! are not implemented.
 
 use std::fmt;
 
@@ -97,6 +97,7 @@ impl From<StoreError> for ArtifactError {
             StoreError::RevisionConflict { current } => Self::RevisionConflict { current },
             StoreError::MetadataConflict { current } => Self::MetadataConflict { current },
             StoreError::RequestKeyReused => Self::RequestKeyReused,
+            StoreError::Unchanged => Self::InvalidPackage(PackageError::Unchanged),
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
             other => Self::Unavailable(other.to_string()),
         }
@@ -210,18 +211,68 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
         }
         let fingerprint = hasher.finish();
-        let base_package = self
-            .store
-            .revision_package(id, base)?
-            .ok_or(ArtifactError::NotFound(Missing::Revision))?;
-        let package = base_package
-            .apply(changes)
-            .map_err(ArtifactError::InvalidPackage)?;
+        let base_package = self.package(id, base)?;
+        let package = match base_package.apply(changes) {
+            Ok(package) => package,
+            // Whether the files change is decided with the commit, against
+            // the base as it is then: a stale base is a conflict, and a retry
+            // of a committed save a replay.
+            Err(PackageError::Unchanged) => base_package,
+            Err(error) => return Err(ArtifactError::InvalidPackage(error)),
+        };
         let receipt = self.store.commit_revision(RevisionCommit {
             request: RequestIdentity {
                 actor,
                 key,
                 fingerprint,
+            },
+            artifact: id,
+            base,
+            package: &package,
+        })?;
+        Ok(receipt)
+    }
+
+    /// Commits the files of an earlier `revision` as the next revision, only
+    /// if `base` is still current. Every revision stays as it was, and the
+    /// title and pin are not touched.
+    ///
+    /// Retrying with the same key returns the original receipt even after
+    /// later revisions were committed.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or
+    /// revision, [`ArtifactError::RevisionConflict`] when `base` is not
+    /// current, [`ArtifactError::InvalidPackage`] when the current revision
+    /// `base` already has those files, [`ArtifactError::RequestKeyReused`], or
+    /// [`ArtifactError::Unavailable`].
+    pub fn restore(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        base: SourceRevision,
+        revision: SourceRevision,
+    ) -> Result<CommitReceipt, ArtifactError> {
+        let record = self.authorized(actor, id)?;
+        if base.0 == 0 || base > record.current_revision {
+            return Err(ArtifactError::RevisionConflict {
+                current: record.current_revision,
+            });
+        }
+        let mut hasher = Fingerprint::new("restore");
+        hasher.field(id.as_str().as_bytes());
+        hasher.field(&base.0.to_be_bytes());
+        hasher.field(&revision.0.to_be_bytes());
+        // The store decides in one step whether this is a replay, a stale
+        // base, or files the base already has.
+        let package = self.package(id, revision)?;
+        let receipt = self.store.commit_revision(RevisionCommit {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
             },
             artifact: id,
             base,
@@ -386,6 +437,16 @@ impl<S: ArtifactStore> ArtifactService<S> {
         self.store
             .revision_file(id, revision, path)?
             .ok_or(ArtifactError::NotFound(Missing::File))
+    }
+
+    fn package(
+        &self,
+        id: &ArtifactId,
+        revision: SourceRevision,
+    ) -> Result<FilePackage, ArtifactError> {
+        self.store
+            .revision_package(id, revision)?
+            .ok_or(ArtifactError::NotFound(Missing::Revision))
     }
 
     fn authorized(

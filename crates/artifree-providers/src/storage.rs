@@ -24,6 +24,7 @@
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -325,6 +326,9 @@ impl ArtifactStore for SqliteStore {
                 return Err(StoreError::RevisionConflict {
                     current: current.current_revision,
                 });
+            }
+            if same_files(transaction, request.artifact, request.base, request.package)? {
+                return Err(StoreError::Unchanged);
             }
             let next = SourceRevision(current.current_revision.0 + 1);
             let now = commit_time(transaction)?;
@@ -897,6 +901,28 @@ fn add_metadata_revisions(transaction: &Transaction<'_>) -> Result<(), StoreErro
     Ok(())
 }
 
+/// Whether `package` has exactly the paths and bytes of a stored revision,
+/// compared by digest.
+fn same_files(
+    connection: &Connection,
+    id: &ArtifactId,
+    revision: SourceRevision,
+    package: &FilePackage,
+) -> Result<bool, StoreError> {
+    let Some(stored) = revision_record(connection, id, revision)? else {
+        return Ok(false);
+    };
+    let digests: BTreeMap<&PackagePath, [u8; 32]> = stored
+        .files
+        .iter()
+        .map(|entry| (&entry.path, entry.sha256))
+        .collect();
+    Ok(digests.len() == package.len()
+        && package
+            .files()
+            .all(|(path, content)| digests.get(path) == Some(&Sha256::digest(content).into())))
+}
+
 fn revision_record(
     connection: &Connection,
     id: &ArtifactId,
@@ -916,20 +942,28 @@ fn revision_record(
     };
     let mut statement = connection
         .prepare_cached(
-            "SELECT path, size FROM revision_files WHERE artifact_id = ?1 AND revision = ?2 ORDER BY path",
+            "SELECT path, size, digest FROM revision_files
+             WHERE artifact_id = ?1 AND revision = ?2 ORDER BY path",
         )
         .map_err(unavailable)?;
     let rows = statement
         .query_map(params![id.as_str(), number], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .map_err(unavailable)?;
     let mut files = Vec::new();
     for row in rows {
-        let (path, size) = row.map_err(unavailable)?;
+        let (path, size, digest) = row.map_err(unavailable)?;
         files.push(FileEntry {
             path: stored_path(&path)?,
             size: u64::try_from(size).map_err(corrupt)?,
+            sha256: digest
+                .try_into()
+                .map_err(|_| corrupt("a file digest is not 32 bytes"))?,
         });
     }
     Ok(Some(RevisionRecord {

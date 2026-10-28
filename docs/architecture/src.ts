@@ -58,8 +58,8 @@ const notes: Record<string, ModuleNote> = {
   artifacts: {
     purpose: '아티팩트의 원본 파일과 불변 revision, 게시 대상을 관리합니다.',
     exists:
-      '생성, 기준 revision 조건부 commit, 같은 key 재시도 replay와 다른 요청 거절, revision 고정 읽기.',
-    next: '게시 대상 revision 고정, 복원·복제를 앱 데이터·권한과 분리해 구현합니다.',
+      '생성, 기준 revision 조건부 commit과 과거 revision 복원, 같은 key 재시도 replay와 다른 요청 거절, revision 고정 읽기와 파일 digest.',
+    next: '게시 대상 revision 고정, 복제를 앱 데이터·권한과 분리해 구현합니다.',
   },
   policy: {
     purpose: '사용자·agent·runtime이 수행할 수 있는 작업을 판정합니다.',
