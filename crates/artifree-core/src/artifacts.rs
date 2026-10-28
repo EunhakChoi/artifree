@@ -24,6 +24,7 @@ use artifree_ports::artifact_store::{
 use sha2::{Digest, Sha256};
 
 use crate::listing::{self, ArtifactPage, ListQuery};
+use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
 
 /// What could not be found. Inaccessible artifacts are reported as missing so
@@ -70,6 +71,8 @@ pub enum ArtifactError {
     },
     /// The page token is malformed or belongs to another order or filters.
     InvalidPageToken,
+    /// The range cannot be read from the file; see [`RangeError`].
+    InvalidRange(RangeError),
     /// The actor already used this request key for different content.
     RequestKeyReused,
     /// Storage failed. The request may be retried with the same key.
@@ -95,6 +98,7 @@ impl fmt::Display for ArtifactError {
             ),
             Self::InvalidPageToken => formatter
                 .write_str("page token is malformed or belongs to another order or filters"),
+            Self::InvalidRange(error) => write!(formatter, "{error}"),
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -517,6 +521,29 @@ impl<S: ArtifactStore> ArtifactService<S> {
         self.store
             .revision_file(id, revision, path)?
             .ok_or(ArtifactError::NotFound(Missing::File))
+    }
+
+    /// Part of one file of a pinned revision (decision 0016). The file is
+    /// read as [`Self::read_file`] reads it, with the same access and the same
+    /// answers for a missing artifact, revision, or file, and then cut; see
+    /// [`parts::part`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_file`], and [`ArtifactError::InvalidRange`] for a
+    /// range that starts past the end of the file or, read between
+    /// characters, cannot be cut there.
+    pub fn read_file_part(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        revision: SourceRevision,
+        path: &PackagePath,
+        range: ByteRange,
+        boundary: Boundary,
+    ) -> Result<FilePart, ArtifactError> {
+        let file = self.read_file(actor, id, revision, path)?;
+        parts::part(file, range, boundary).map_err(ArtifactError::InvalidRange)
     }
 
     /// Everything a source export of `revision` holds (decision 0015): the

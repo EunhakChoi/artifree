@@ -96,6 +96,169 @@ test('An export is a ZIP archive, whole, or a failure', async () => {
   assert.equal(error.code, 'network_error');
 });
 
+/** Each whole number from 0 to `last`. */
+function upTo(last) {
+  return Array.from({ length: last + 1 }, (_, number) => number);
+}
+
+test('A part is accepted only when it is exactly the bytes asked for', async () => {
+  const bytes = new TextEncoder().encode('abcdef');
+  const ranges = upTo(4).flatMap((offset) =>
+    [undefined, 1, 2, 3, 4, 5].map((length) => ({ offset, length })),
+  );
+  // Every Content-Range of positions up to 5, with a body of its length or
+  // one byte off.
+  const answers = upTo(5).flatMap((first) =>
+    upTo(5).flatMap((last) =>
+      upTo(5).flatMap((size) =>
+        [-1, 0, 1].map((off) => ({
+          first,
+          last,
+          size,
+          received: Math.max(0, last - first + 1 + off),
+        })),
+      ),
+    ),
+  );
+  for (const { offset, length } of ranges) {
+    const range = length === undefined ? { offset } : { offset, length };
+    for (const { first, last, size, received } of answers) {
+      let sent;
+      const client = new ArtifreeClient({
+        baseUrl: 'http://127.0.0.1:7410',
+        accessToken: 'token',
+        fetch: async (_url, init) => {
+          sent = init.headers.range;
+          return new Response(bytes.slice(first, first + received), {
+            status: 206,
+            headers: { 'content-range': `bytes ${first}-${last}/${size}` },
+          });
+        },
+      });
+      // The size the answer states decides where the part ends.
+      const end = Math.min(length === undefined ? size : offset + length, size);
+      const exact =
+        offset < end &&
+        first === offset &&
+        last === end - 1 &&
+        received === end - offset;
+      const what = `${JSON.stringify(range)}: bytes ${first}-${last}/${size}, ${received} bytes`;
+      const read = client.readFilePart(artifact.id, 1, 'a.txt', range);
+      if (exact)
+        assert.deepEqual(
+          await read,
+          { content: bytes.slice(offset, end), offset, size },
+          what,
+        );
+      else assert.equal((await failure(read)).code, 'invalid_response', what);
+      const lastAsked = length === undefined ? '' : offset + length - 1;
+      assert.equal(sent, `bytes=${offset}-${lastAsked}`, what);
+    }
+  }
+});
+
+test('A part comes only as one well-formed byte range', async () => {
+  const answer =
+    (status, headers, body = 'ab') =>
+    () =>
+      new Response(body, { status, headers });
+  const read = (respond) =>
+    clientWith(respond).readFilePart(artifact.id, 1, 'a.txt', {
+      offset: 0,
+      length: 2,
+    });
+  // The unit is matched without regard to case.
+  const part = await read(answer(206, { 'content-range': 'BYTES 0-1/4' }));
+  assert.deepEqual(
+    [part.content, part.size],
+    [new TextEncoder().encode('ab'), 4],
+  );
+  for (const [status, headers] of [
+    // A server or proxy that ignored the range sent the whole file.
+    [200, {}],
+    [200, { 'content-range': 'bytes 0-1/4' }],
+    [206, {}],
+    [206, { 'content-range': 'bytes 0-1/*' }],
+    [206, { 'content-range': 'bytes */4' }],
+    [206, { 'content-range': 'bytes=0-1/4' }],
+    [206, { 'content-range': 'bytes 0-1/4, bytes 0-1/4' }],
+    [206, { 'content-range': 'items 0-1/4' }],
+    [206, { 'content-range': 'bytes 0x0-1/4' }],
+    [206, { 'content-range': 'bytes 0-1/9007199254740993' }],
+    [206, { 'content-type': 'multipart/byteranges; boundary=x' }],
+  ]) {
+    const error = await failure(read(answer(status, headers)));
+    assert.equal(error.code, 'invalid_response', JSON.stringify(headers));
+  }
+  // The whole file from a server or proxy that ignored the range is not
+  // read. The stream is finite, so a client that reads it still ends.
+  let cancelled = false;
+  let chunks = 0;
+  const whole = new ReadableStream({
+    pull(controller) {
+      chunks += 1;
+      if (chunks > 64) controller.close();
+      else controller.enqueue(new Uint8Array(1024));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const ignored = await failure(read(() => new Response(whole)));
+  assert.deepEqual([ignored.code, cancelled], ['invalid_response', true]);
+  // A range that starts at or past the end is the server's refusal.
+  const refusal = await failure(
+    read(() =>
+      Response.json(
+        { error: { code: 'range_not_satisfiable', message: 'past the end' } },
+        { status: 416, headers: { 'content-range': 'bytes */0' } },
+      ),
+    ),
+  );
+  assert.deepEqual(
+    [refusal.status, refusal.code],
+    [416, 'range_not_satisfiable'],
+  );
+});
+
+test('A range that cannot be asked for is refused before sending', async () => {
+  let requests = 0;
+  const client = clientWith(() => {
+    requests += 1;
+    return new Response('a', {
+      status: 206,
+      headers: {
+        'content-range': `bytes ${Number.MAX_SAFE_INTEGER - 1}-${Number.MAX_SAFE_INTEGER - 1}/${Number.MAX_SAFE_INTEGER}`,
+      },
+    });
+  });
+  for (const range of [
+    { offset: -1 },
+    { offset: 1.5 },
+    { offset: Number.NaN },
+    { offset: 0, length: 0 },
+    { offset: 0, length: 1.5 },
+    { offset: Number.MAX_SAFE_INTEGER, length: 2 },
+    { offset: 2, length: Number.MAX_SAFE_INTEGER },
+  ]) {
+    const error = await failure(
+      client.readFilePart(artifact.id, 1, 'a.txt', range),
+    );
+    assert.deepEqual(
+      [error.status, error.code],
+      [0, 'invalid_request'],
+      JSON.stringify(range),
+    );
+  }
+  assert.equal(requests, 0);
+  // Positions up to the largest safe integer can be asked for and read.
+  const part = await client.readFilePart(artifact.id, 1, 'a.txt', {
+    offset: Number.MAX_SAFE_INTEGER - 1,
+    length: 1,
+  });
+  assert.equal(part.size, Number.MAX_SAFE_INTEGER);
+});
+
 test('Every artifact carries its trash time: null or a time', async () => {
   const read = (body) =>
     clientWith(() => Response.json(body)).getArtifact(artifact.id);

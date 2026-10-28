@@ -20,6 +20,7 @@ use artifree_contracts::api::{
     SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
+use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::{ActorId, RequestKey};
 use artifree_providers::storage::SqliteStore;
 use axum::body::{Body, Bytes, HttpBody};
@@ -39,6 +40,7 @@ use crate::limits::{Limiter, Refusal, RequestLimits};
 use crate::mcp;
 use crate::operations::{self, ApiError};
 use crate::preview::{self, PreviewTickets};
+use crate::ranges::{self, Requested};
 
 /// Largest accepted request body: a maximum package in base64 plus JSON
 /// framing. Clients send a file as UTF-8 text only when its JSON escaping is
@@ -351,6 +353,12 @@ impl IntoResponse for ApiError {
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         }
+        if let Some(Ok(value)) = self
+            .range_size
+            .map(|size| HeaderValue::try_from(format!("bytes */{size}")))
+        {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
         response
     }
 }
@@ -550,14 +558,47 @@ async fn show_revision(
     ))
 }
 
+/// A pinned file, or one byte range of it (decision 0016). A range that
+/// starts at or past the end of the file, and `-0`, select nothing: `416`.
 async fn read_file(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
+    headers: HeaderMap,
     path: Result<Path<(String, u64, String)>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision, file)) = path?;
-    let file = operations::read_file(&state, actor, &id, revision, &file).await?;
-    Ok((
+    let requested =
+        ranges::requested(&headers).map_err(|error| ApiError::invalid(error.to_string()))?;
+    let range = match requested {
+        Requested::Part(range) => range,
+        // The whole file is read for `-0` too, so that it is answered with
+        // the file's size, after every check a read makes.
+        Requested::Whole | Requested::Nothing => ByteRange::WHOLE,
+    };
+    let file =
+        operations::read_file(&state, actor, &id, revision, &file, range, Boundary::Byte).await?;
+    let part = file.part;
+    let ranged = requested != Requested::Whole;
+    if ranged && (requested == Requested::Nothing || part.content.is_empty()) {
+        return Err(ApiError::unsatisfiable(
+            part.size,
+            format!(
+                "the range selects no bytes of the file, which has {} bytes",
+                part.size
+            ),
+        ));
+    }
+    let content_range = ranged.then(|| {
+        let last = part.offset + part.content.len() as u64 - 1;
+        format!("bytes {}-{last}/{}", part.offset, part.size)
+    });
+    let status = if ranged {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    let mut response = (
+        status,
         [
             (header::CONTENT_TYPE, file.path.media_type().essence()),
             (header::CONTENT_DISPOSITION, "attachment"),
@@ -566,10 +607,15 @@ async fn read_file(
                 header::CONTENT_SECURITY_POLICY,
                 "sandbox; default-src 'none'",
             ),
+            (header::ACCEPT_RANGES, "bytes"),
         ],
-        file.content,
+        part.content,
     )
-        .into_response())
+        .into_response();
+    if let Some(Ok(value)) = content_range.map(HeaderValue::try_from) {
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
+    }
+    Ok(response)
 }
 
 async fn export_revision(

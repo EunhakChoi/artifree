@@ -48,6 +48,18 @@ No domain test exists merely to repeat a field declaration.
 Artifact behavior is tested at the boundary that owns it:
 
 - `crates/artifree-domain`: path, identifier, and package validation.
+- `crates/artifree-core/src/parts.rs`: parts of a file cut exactly at bytes
+  with the whole file's size and digest; the end as an empty part and past
+  it refused; for every offset and length over a text of 1- to 4-byte
+  characters, a byte order mark, and CRLF, a part that ends between
+  characters, a start inside one refused, and a length too short for one
+  refused, with the parts read from each next offset joining into the file;
+  a file that is not UTF-8 cut at bytes.
+- `crates/artifree-server/src/ranges.rs`: every form of one byte range,
+  with case, whitespace, empty list elements, `-0`, and positions past 64
+  bits; the whole file without `Range`, for another unit, and with
+  `If-Range`; several ranges in one line or several, an inverted range,
+  and malformed fields refused.
 - `crates/artifree-providers/src/archive.rs`: the ZIP writer's CRC-32
   against the standard check value, entry dates in UTC within the format's
   range (a leap day, odd seconds, before 1980, past 2107), entries stored in
@@ -93,7 +105,12 @@ Artifact behavior is tested at the boundary that owns it:
   artifact and its link; non-owners cannot delete; an export is a ZIP of
   the pinned revision, manifest first, with the same bytes each time, named
   after the revision, and missing for revision 0, a later revision, a
-  trashed artifact, and other actors.
+  trashed artifact, and other actors; a byte range of a pinned file as
+  `206` with its `Content-Range` and the headers of a whole read, also
+  inside a UTF-8 character; ranges that select no bytes as `416` with the
+  size, malformed and several ranges as `400`, the whole file without a
+  byte range or with `If-Range`, and a missing file, revision, or trashed
+  artifact refused before any range, telling nothing of the size.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
@@ -108,7 +125,9 @@ Artifact behavior is tested at the boundary that owns it:
   exact bytes and mode, a manifest valid against its schema that equals the
   revision's listing, entries dated at the commit, the same bytes on a
   second export, an existing file never replaced, and a missing revision
-  that writes nothing, and a SIGKILL after commit
+  that writes nothing, `cat --offset/--length` writing exact parts, a
+  range past the end refused with nothing written, and invalid range
+  flags as usage errors, and a SIGKILL after commit
   followed by a restart and a replayed retry.
 - `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
   authenticates before anything else, refuses a request with an `Origin` or a
@@ -124,6 +143,10 @@ Artifact behavior is tested at the boundary that owns it:
   duplicates a revision with binary bytes intact, replayed over HTTP;
   deletes an artifact that every other tool and HTTP then report as unknown,
   lists the trash, replays the delete, and recovers it with its bytes;
+  reads a text file in parts that end between characters and join into it,
+  with the whole file's size and SHA-256, the end as an empty part, a
+  binary file's parts as base64, and offsets inside a character, lengths
+  too short for one, offsets past the end, and invalid numbers refused;
   results validate against the API schema; retries replay, reordered changes
   are the same request, a reused key is refused, and keys are shared with
   HTTP; stale bases conflict without partial writes; invalid arguments are
@@ -174,7 +197,13 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   or names a part the client does not know is an invalid response, as is an
   artifact whose `deleted_at_ms` is missing or not a time, and an export
   that is not `application/zip`; an export cut off mid-body is a network
-  error. For the
+  error. For parts of files: every range within 5 bytes answered with
+  every `Content-Range` of positions up to 5 and a body of its length or
+  one byte off, where only the exact part asked for resolves, with the
+  `Range` it sent; a `200`, a missing, unknown-size, multiple, or
+  malformed `Content-Range` as invalid responses; `416` as
+  `range_not_satisfiable`; and ranges that cannot be asked for refused
+  before sending. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without

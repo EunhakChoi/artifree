@@ -462,6 +462,170 @@ async fn revision_reads_are_pinned() -> TestResult {
     Ok(())
 }
 
+/// A read of the file at `path` with one `Range` line per entry of `ranges`.
+fn ranged(path: &str, ranges: &[&str], if_range: bool) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = authorized(Request::get(path));
+    for range in ranges {
+        builder = builder.header(header::RANGE, *range);
+    }
+    if if_range {
+        builder = builder.header(header::IF_RANGE, "\"anything\"");
+    }
+    builder.body(Body::empty())
+}
+
+/// An artifact whose revision 1 has the 11-byte `index.html` "<h1>v1</h1>"
+/// and whose revision 2 adds `notes.txt` ("a\u{e9}") and an empty
+/// `empty.txt`. Returns the path of its revisions.
+async fn parts_fixture(harness: &Harness) -> Result<String, Box<dyn std::error::Error>> {
+    let id = created_id(harness).await?;
+    let history = format!("/v1/artifacts/{id}/revisions");
+    let saved = harness
+        .send(post(
+            &history,
+            Some("save-key-1"),
+            &json!({ "base_revision": 1, "changes": [
+                { "op": "put", "path": "notes.txt", "encoding": "utf8", "content": "a\u{e9}" },
+                { "op": "put", "path": "empty.txt", "encoding": "utf8", "content": "" }
+            ] }),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    Ok(history)
+}
+
+#[tokio::test]
+async fn one_byte_range_of_a_pinned_file_is_read() -> TestResult {
+    let harness = Harness::new();
+    let history = parts_fixture(&harness).await?;
+    let index = format!("{history}/1/files/index.html");
+    for (range, body, content_range) in [
+        ("bytes=0-3", &b"<h1>"[..], "bytes 0-3/11"),
+        ("bytes=4-", b"v1</h1>", "bytes 4-10/11"),
+        ("bytes=-4", b"/h1>", "bytes 7-10/11"),
+        ("bytes=10-10", b">", "bytes 10-10/11"),
+        // A range that ends past the end of the file stops there.
+        ("bytes=8-99", b"h1>", "bytes 8-10/11"),
+        ("bytes=-99", b"<h1>v1</h1>", "bytes 0-10/11"),
+        (
+            "bytes=0-99999999999999999999",
+            b"<h1>v1</h1>",
+            "bytes 0-10/11",
+        ),
+    ] {
+        let reply = harness.send(ranged(&index, &[range], false)?).await?;
+        assert_eq!(
+            reply.status,
+            StatusCode::PARTIAL_CONTENT,
+            "{range}: {}",
+            error_code(&reply)
+        );
+        assert_eq!(reply.body, body, "{range}");
+        assert_eq!(
+            reply.header(header::CONTENT_RANGE),
+            content_range,
+            "{range}"
+        );
+        assert_eq!(
+            reply.header(header::CONTENT_TYPE),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(reply.header(header::CONTENT_DISPOSITION), "attachment");
+    }
+    // Over HTTP a part is cut at bytes, also inside a UTF-8 character.
+    let notes = harness
+        .send(ranged(
+            &format!("{history}/2/files/notes.txt"),
+            &["bytes=1-1"],
+            false,
+        )?)
+        .await?;
+    assert_eq!(
+        (notes.status, notes.body),
+        (StatusCode::PARTIAL_CONTENT, vec![0xC3])
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn other_range_fields_read_nothing_or_the_whole_file() -> TestResult {
+    let harness = Harness::new();
+    let history = parts_fixture(&harness).await?;
+    let index = format!("{history}/1/files/index.html");
+    // A range that selects no bytes is not satisfiable, and says the size.
+    let empty = format!("{history}/2/files/empty.txt");
+    for (path, range, size) in [
+        (&index, "bytes=11-", "11"),
+        (&index, "bytes=12-20", "11"),
+        (&index, "bytes=99999999999999999999-", "11"),
+        (&index, "bytes=-0", "11"),
+        (&empty, "bytes=0-", "0"),
+        (&empty, "bytes=-1", "0"),
+    ] {
+        let reply = harness.send(ranged(path, &[range], false)?).await?;
+        assert_eq!(reply.status, StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(error_code(&reply), "range_not_satisfiable", "{range}");
+        assert_eq!(
+            reply.header(header::CONTENT_RANGE),
+            format!("bytes */{size}"),
+            "{range}"
+        );
+    }
+    // A range the API does not serve is refused; nothing is read.
+    for ranges in [
+        &["bytes=3-1"][..],
+        &["bytes=0-1,3-4"],
+        &["bytes=0-1", "bytes=3-4"],
+        &["bytes=one-two"],
+    ] {
+        let reply = harness.send(ranged(&index, ranges, false)?).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{ranges:?}");
+        assert_eq!(error_code(&reply), "invalid_request", "{ranges:?}");
+        assert!(
+            reply.headers.get(header::CONTENT_RANGE).is_none(),
+            "{ranges:?}"
+        );
+    }
+    // Without a byte range the whole file is read, as before.
+    for (ranges, if_range) in [
+        (&[][..], false),
+        (&["items=0-1"], false),
+        (&["bytes=0-1"], true),
+    ] {
+        let reply = harness.send(ranged(&index, ranges, if_range)?).await?;
+        assert_eq!(
+            (reply.status, reply.body.as_slice()),
+            (StatusCode::OK, &b"<h1>v1</h1>"[..]),
+            "{ranges:?}"
+        );
+        assert!(
+            reply.headers.get(header::CONTENT_RANGE).is_none(),
+            "{ranges:?}"
+        );
+        assert_eq!(reply.header(header::ACCEPT_RANGES), "bytes");
+    }
+    // What a read refuses is refused before any range is considered.
+    for (path, status) in [
+        (
+            format!("{history}/3/files/index.html"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("{history}/1/files/absent.css"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("{history}/0/files/index.html"),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let reply = harness.send(ranged(&path, &["bytes=99-"], false)?).await?;
+        assert_eq!(reply.status, status, "{path}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_export_is_a_zip_of_the_pinned_revision() -> TestResult {
     let harness = Harness::new();
@@ -1442,6 +1606,23 @@ fn reads_and_saves(id: &str) -> Result<Requests, axum::http::Error> {
         ("history", get(&history)?),
         ("manifest", get(&format!("{history}/2"))?),
         ("file", get(&format!("{history}/2/files/index.html"))?),
+        (
+            "part of a file",
+            ranged(
+                &format!("{history}/2/files/index.html"),
+                &["bytes=0-3"],
+                false,
+            )?,
+        ),
+        // A range past the end tells nothing of the file's size.
+        (
+            "part past the end of a file",
+            ranged(
+                &format!("{history}/2/files/index.html"),
+                &["bytes=99-"],
+                false,
+            )?,
+        ),
         ("export", get(&format!("{history}/2/export"))?),
         (
             "preview",
@@ -1577,7 +1758,7 @@ async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
             missing += 1;
         }
     }
-    assert_eq!(missing, 22, "every request valid in itself is not found");
+    assert_eq!(missing, 24, "every request valid in itself is not found");
     assert_eq!(
         harness.content(&link).await?.status,
         StatusCode::NOT_FOUND,

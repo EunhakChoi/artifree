@@ -67,6 +67,7 @@ export type ErrorCode =
   | 'metadata_conflict'
   | 'request_key_reused'
   | 'payload_too_large'
+  | 'range_not_satisfiable'
   | 'rate_limited'
   | 'unavailable'
   | 'internal';

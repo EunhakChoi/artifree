@@ -90,7 +90,7 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 | `update_artifact`    | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
 | `list_revisions`     | `artifact_id`                                                                                           | `{ revisions }`, newest first              |
 | `get_revision`       | `artifact_id`, `revision`                                                                               | one revision manifest                      |
-| `read_file`          | `artifact_id`, `revision`, `path`                                                                       | exact bytes as `utf8` or `base64`          |
+| `read_file`          | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                       | exact bytes as `utf8` or `base64`          |
 | `create_preview`     | `artifact_id`, `revision`                                                                               | `{ url, revision, expires_at_ms }`         |
 
 The full schemas are in
@@ -125,6 +125,15 @@ source's title followed by " (Copy)". It needs no `base_revision`, and a retry
 with the same key returns the same copy. `copied` lists what the copy received:
 only `files`, since artifacts have no application data or uploaded assets yet
 (decision [0012](decisions/0012-duplicate-artifacts.md)).
+`read_file` with `offset` and `length` reads part of a file: `length` bytes
+at most from `offset`, ending before a UTF-8 character it would split, so
+each part of a text file is text. Read on from the returned `next_offset`,
+which is absent at the end; `size` and `sha256` describe the whole file, so
+the joined parts can be checked. An offset inside a character, or a length
+shorter than the character at the offset, is `invalid_request`; an offset
+past the end is `range_not_satisfiable`. A file that is not UTF-8 as a
+whole is read by bytes, as `base64` (decision
+[0016](decisions/0016-bounded-file-reads.md)).
 
 Limits: 256 files, 5 MiB per file, 25 MiB per package, and 36 MiB for the
 whole JSON request. Send binary data, or text with many control characters,

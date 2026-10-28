@@ -390,6 +390,11 @@
           "type": "string"
         },
         {
+          "const": "range_not_satisfiable",
+          "description": "The byte range selects no bytes of the file; nothing was read. Over\nHTTP it starts at or past the end of the file, and `Content-Range`\ngives the file's size; over MCP it starts past the end, and the\nmessage gives the size.",
+          "type": "string"
+        },
+        {
           "const": "rate_limited",
           "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
           "type": "string"

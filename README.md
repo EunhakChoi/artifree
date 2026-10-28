@@ -93,7 +93,8 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0011](docs/decisions/0011-web-history-and-restore.md),
 [0012](docs/decisions/0012-duplicate-artifacts.md),
 [0013](docs/decisions/0013-deleting-artifacts-and-the-trash.md),
-[0015](docs/decisions/0015-source-exports.md)).
+[0015](docs/decisions/0015-source-exports.md),
+[0016](docs/decisions/0016-bounded-file-reads.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

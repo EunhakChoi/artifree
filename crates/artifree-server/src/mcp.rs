@@ -23,6 +23,7 @@ use artifree_contracts::mcp::{
     ToolDefinition, UpdateArtifactArguments,
 };
 use artifree_core::artifacts::ArtifactError;
+use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::ActorId;
 use axum::Router;
 use axum::http::request::Parts;
@@ -41,6 +42,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::auth::hex;
 use crate::http::{AppState, Authenticated, MAX_BODY_BYTES};
 use crate::operations::{self, ApiError};
 
@@ -294,20 +296,44 @@ async fn read_file(
         artifact_id,
         revision,
         path,
+        offset,
+        length,
     } = parse(arguments)?;
-    let file = operations::read_file(state, actor, &artifact_id, revision, &path).await?;
-    let size = file.content.len() as u64;
-    // Valid UTF-8 travels as text; JSON strings carry every Unicode scalar
-    // value, so both forms reproduce the stored bytes exactly.
-    let (encoding, content) = match String::from_utf8(file.content) {
-        Ok(text) => (ContentEncoding::Utf8, text),
+    // A part of a UTF-8 file ends between characters, so that each part is
+    // text and the parts join into the file (decision 0016).
+    let range = ByteRange::From {
+        offset: offset.unwrap_or(0),
+        length,
+    };
+    let file = operations::read_file(
+        state,
+        actor,
+        &artifact_id,
+        revision,
+        &path,
+        range,
+        Boundary::Character,
+    )
+    .await?;
+    let part = file.part;
+    let next_offset = part.next_offset();
+    // Parts of a UTF-8 file travel as text, and parts of any other file as
+    // base64, even where the bytes of the part alone would be UTF-8. JSON
+    // strings carry every Unicode scalar value, so both forms reproduce the
+    // stored bytes exactly.
+    let (encoding, content) = match String::from_utf8(part.content) {
+        Ok(text) if part.text => (ContentEncoding::Utf8, text),
+        Ok(text) => (ContentEncoding::Base64, BASE64.encode(text)),
         Err(error) => (ContentEncoding::Base64, BASE64.encode(error.into_bytes())),
     };
     Ok(FileContent {
         media_type: file.path.media_type().essence().to_owned(),
         path: file.path.to_string(),
         revision: file.revision.0,
-        size,
+        size: part.size,
+        sha256: hex(&part.sha256),
+        offset: part.offset,
+        next_offset,
         encoding,
         content,
     })

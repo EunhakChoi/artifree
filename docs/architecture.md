@@ -120,14 +120,15 @@ in the Rust core.
 | `GET /v1/artifacts/{id}/revisions`                  | History, newest first                             |
 | `POST /v1/artifacts/{id}/revisions`                 | Conditional commit (`Idempotency-Key`)            |
 | `GET /v1/artifacts/{id}/revisions/{n}`              | One revision manifest                             |
-| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file (attachment)           |
+| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file, or one `Range`        |
 | `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin     |
 | `GET /v1/changes`                                   | Committed changes as server-sent events           |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
 `invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
 `revision_conflict` and `metadata_conflict` (409), `request_key_reused` (422), `payload_too_large`
-(413), `rate_limited` (429 with `Retry-After`; this attempt was not processed),
+(413), `range_not_satisfiable` (416 with `Content-Range: bytes */{size}`), `rate_limited` (429 with
+`Retry-After`; this attempt was not processed),
 `unavailable` (503, retry with the same key), and `internal` (500).
 
 Every request is authenticated first and then admitted under one per-actor
@@ -151,8 +152,9 @@ failures.
 `POST /mcp` serves MCP Streamable HTTP through the official Rust SDK, `rmcp`,
 statelessly and with JSON responses, for protocol versions up to 2026-07-28.
 It requires the same bearer token, accepts only loopback `Host` names, and
-refuses requests carrying an `Origin`. Eight tools mirror the HTTP routes:
+refuses requests carrying an `Origin`. Eleven tools mirror the HTTP routes:
 `list_artifacts`, `get_artifact`, `create_artifact`, `save_revision`,
+`restore_revision`, `duplicate_artifact`, `update_artifact`,
 `list_revisions`, `get_revision`, `read_file`, and `create_preview`. Results
 are the HTTP API v1 bodies; failures are those error bodies with
 `isError: true`. MCP requests share the per-actor request limits with HTTP;
@@ -185,8 +187,12 @@ exports one revision's files as a deterministic, uncompressed ZIP archive
 whose first entry is a manifest of paths, sizes, digests, and media types,
 through the API, client, CLI, and web workspace; it is a read with the
 access and trash rules of every read
-([0015](decisions/0015-source-exports.md)). The next slice is A06b, the trash
-in the web workspace.
+([0015](decisions/0015-source-exports.md)). A11 reads part of a pinned
+file: one byte range over HTTP, served by one parser of the `Range` field;
+parts cut between characters over MCP, with the next offset and the whole
+file's size and SHA-256; and a client that accepts only the exact part it
+asked for ([0016](decisions/0016-bounded-file-reads.md)). The next slice is
+A06b, the trash in the web workspace.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

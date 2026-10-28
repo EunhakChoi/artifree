@@ -7,6 +7,8 @@ export {
 } from './client.js';
 export type {
   ClientConfiguration,
+  FilePart,
+  FileRange,
   MutationOptions,
   ReadOptions,
 } from './client.js';

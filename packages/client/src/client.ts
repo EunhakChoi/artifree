@@ -51,6 +51,24 @@ export interface ReadOptions {
   readonly signal?: AbortSignal;
 }
 
+/** Which bytes of a file {@link ArtifreeClient.readFilePart} reads. */
+export interface FileRange {
+  /** The first byte, counted from 0. */
+  readonly offset: number;
+  /** How many bytes at most; the rest of the file when absent. */
+  readonly length?: number;
+}
+
+/** Part of a file. */
+export interface FilePart {
+  /** The part's bytes. */
+  readonly content: Uint8Array<ArrayBuffer>;
+  /** Where the part starts in the file. */
+  readonly offset: number;
+  /** The whole file's size in bytes. */
+  readonly size: number;
+}
+
 /** Options for requests that change state. */
 export interface MutationOptions {
   /**
@@ -113,6 +131,48 @@ function filePath(path: string): string {
       { status: 0, code: 'invalid_request' },
     );
   return segments.map(encodeURIComponent).join('/');
+}
+
+/**
+ * Whether `range` can be asked for: whole numbers, a length of at least 1,
+ * and a last position that is still a safe integer.
+ */
+function rangeIsValid({ offset, length }: FileRange): boolean {
+  if (!Number.isSafeInteger(offset) || offset < 0) return false;
+  if (length === undefined) return true;
+  return (
+    Number.isSafeInteger(length) &&
+    length >= 1 &&
+    offset <= Number.MAX_SAFE_INTEGER - (length - 1)
+  );
+}
+
+/**
+ * The part a `206` holds, when its `Content-Range` is exactly the part
+ * `range` asks for: from `range.offset` to the end of the range or of the
+ * file, whichever comes first. Its body must then have `length` bytes.
+ */
+function statedPart(
+  range: FileRange,
+  contentRange: string | null,
+): { readonly size: number; readonly length: number } | undefined {
+  const match = /^bytes ([0-9]+)-([0-9]+)\/([0-9]+)$/i.exec(contentRange ?? '');
+  if (match === null) return undefined;
+  const [first, last, size] = match.slice(1).map(Number);
+  if (
+    first === undefined ||
+    last === undefined ||
+    size === undefined ||
+    !Number.isSafeInteger(size)
+  )
+    return undefined;
+  const end = Math.min(
+    range.length === undefined ? size : range.offset + range.length,
+    size,
+  );
+  const exact =
+    range.offset < end && first === range.offset && last === end - 1;
+  return exact ? { size, length: end - range.offset } : undefined;
 }
 
 interface SendOptions {
@@ -284,6 +344,54 @@ export class ArtifreeClient {
       { signal: options.signal },
     );
     return this.bytes(response, path);
+  }
+
+  /**
+   * One byte range of a pinned file (decision 0016): `length` bytes from
+   * `offset`, or to the end of the file without `length`, cut at bytes
+   * whatever the file holds. A range that ends past the end of the file
+   * stops there; one that starts at or past it rejects with
+   * `range_not_satisfiable`, so an empty file has no parts. Resolves only
+   * with exactly the bytes asked for and rejects with `invalid_response`
+   * otherwise, also when the response is the whole file.
+   */
+  async readFilePart(
+    id: string,
+    revision: number,
+    path: string,
+    range: FileRange,
+    options: ReadOptions = {},
+  ): Promise<FilePart> {
+    const { offset, length } = range;
+    if (!rangeIsValid(range))
+      throw new ArtifreeApiError(
+        `Invalid range ${JSON.stringify(range)}: the offset and length must be whole numbers, the length at least 1, with the last position at most ${Number.MAX_SAFE_INTEGER}.`,
+        { status: 0, code: 'invalid_request' },
+      );
+    const last = length === undefined ? '' : `${offset + length - 1}`;
+    const response = await this.send(
+      'GET',
+      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/files/${filePath(path)}`,
+      { headers: { range: `bytes=${offset}-${last}` }, signal: options.signal },
+    );
+    const notThePart = () =>
+      new ArtifreeApiError(
+        `GET ${path} did not return bytes ${offset}-${last} of the file.`,
+        { status: response.status, code: 'invalid_response' },
+      );
+    // Anything else, such as the whole file from a server or proxy that
+    // ignored the range, is not read.
+    const part =
+      response.status === 206
+        ? statedPart(range, response.headers.get('content-range'))
+        : undefined;
+    if (part === undefined) {
+      await response.body?.cancel().catch(() => undefined);
+      throw notThePart();
+    }
+    const content = await this.bytes(response, path);
+    if (content.length !== part.length) throw notThePart();
+    return { content, offset, size: part.size };
   }
 
   /**
