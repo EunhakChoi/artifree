@@ -666,7 +666,7 @@ fn a_version_1_database_gains_the_feed_and_metadata_and_keeps_its_data() -> Test
         feed(&store, &owner, 0, 100)?,
         (vec![(1, ChangeKind::MetadataUpdated, 2)], 1)
     );
-    assert_eq!(user_version(&db)?, 3);
+    assert_eq!(user_version(&db)?, 4);
     Ok(())
 }
 
@@ -745,7 +745,7 @@ fn a_version_2_database_keeps_its_feed_head_and_its_request_keys() -> TestResult
         feed(&store, &owner, 2, 100)?,
         (vec![(6, ChangeKind::Revised, 3)], 6)
     );
-    assert_eq!(user_version(&db)?, 3);
+    assert_eq!(user_version(&db)?, 4);
     Ok(())
 }
 
@@ -1053,5 +1053,74 @@ fn list_pages_continue_after_the_last_position_through_a_tie() -> TestResult {
         });
     }
     assert_eq!(paged, by_update);
+    Ok(())
+}
+
+#[test]
+fn commit_times_follow_commit_order_after_the_clock_was_set_back() -> TestResult {
+    for version in [1, 2] {
+        let db = TempDb::new();
+        old_database(&db, version)?;
+        // The old artifact was created an hour ahead of the clock, which was
+        // then set back. In version 2 its feed entries are out of order:
+        // the last one is older than the first. Version 1 has none.
+        let ahead = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis(),
+        )? + 3_600_000;
+        let connection = rusqlite::Connection::open(db.path())?;
+        connection.execute(
+            "UPDATE revisions SET created_at = ?1 WHERE revision = 1",
+            [ahead],
+        )?;
+        connection.execute("UPDATE artifacts SET created_at = ?1", [ahead])?;
+        let store = SqliteStore::open(&db.path())?;
+        let owner = actor("owner");
+        let old = store.artifact(&old_artifact())?.ok_or("artifact kept")?;
+
+        let created = create(&store, &owner, &key("created"), 1)?;
+        let saved = store.commit_revision(RevisionCommit {
+            request: RequestIdentity {
+                actor: &owner,
+                key: &key("saved"),
+                fingerprint: RequestFingerprint([2; 32]),
+            },
+            artifact: &old.id,
+            base: SourceRevision(2),
+            package: &package(&[("index.html", "<h1>new</h1>")]),
+        })?;
+        update(&store, &created, &key("renamed"), 1, Some("Renamed"), None)?;
+        assert_eq!(
+            [created.revision.created_at, saved.revision.created_at],
+            [UnixMillis(ahead + 1), UnixMillis(ahead + 2)],
+            "version {version}: each commit follows the latest one"
+        );
+        let after = if version == 1 { 0 } else { 2 };
+        let page = store.changes(&owner, ChangeSequence(after), 100)?;
+        let times: Vec<UnixMillis> = page
+            .changes
+            .iter()
+            .map(|change| change.committed_at)
+            .collect();
+        assert_eq!(
+            times,
+            [ahead + 1, ahead + 2, ahead + 3].map(UnixMillis),
+            "version {version}"
+        );
+        // The source changed last is listed first; a rename changes no
+        // update time.
+        assert_eq!(
+            listed(&store, &owner, None, None, ListOrder::Updated, None, 10)?,
+            ["Old", "Renamed"],
+            "version {version}"
+        );
+        assert_eq!(
+            listed(&store, &owner, None, None, ListOrder::Created, None, 10)?,
+            ["Renamed", "Old"],
+            "version {version}"
+        );
+        assert_eq!(user_version(&db)?, 4);
+    }
     Ok(())
 }

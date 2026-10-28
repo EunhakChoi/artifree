@@ -12,7 +12,9 @@
 //!
 //! Each commit appends one row to the change feed in its transaction; the
 //! row's `AUTOINCREMENT` key is the feed sequence. The feed's random identity
-//! is created with the database.
+//! is created with the database. The feed also keeps the latest commit time,
+//! and each commit takes a later one, so times follow commit order even when
+//! the clock is set back.
 //!
 //! Titles and pins are kept per metadata revision, apart from source
 //! revisions, and every request key records the source and metadata revision
@@ -37,7 +39,7 @@ use artifree_ports::artifact_store::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SCHEMA: &str = "
@@ -155,6 +157,20 @@ DROP TABLE changes;
 ALTER TABLE changes_v3 RENAME TO changes;
 ";
 
+/// Added in schema version 4: the latest commit time, which the next commit
+/// must exceed. It starts at the latest time any earlier commit stored, also
+/// when stored times are out of order or have no feed entry.
+const COMMIT_TIME_SCHEMA: &str = "
+ALTER TABLE feed ADD COLUMN committed_at INTEGER NOT NULL DEFAULT 0;
+UPDATE feed SET committed_at = coalesce((SELECT max(at) FROM (
+    SELECT max(created_at) AS at FROM revisions
+    UNION ALL SELECT max(created_at) FROM artifacts
+    UNION ALL SELECT max(updated_at) FROM artifacts
+    UNION ALL SELECT max(created_at) FROM metadata_revisions
+    UNION ALL SELECT max(committed_at) FROM changes
+)), 0);
+";
+
 /// Artifact storage in one local `SQLite` database file.
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -164,7 +180,8 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Opens or creates the database at `path` and applies the schema. A
     /// version 1 database gains the change feed; its earlier commits have no
-    /// feed entries. A version 1 or 2 database gains metadata revisions.
+    /// feed entries. A version 1 or 2 database gains metadata revisions, and
+    /// a version 1 to 3 database the latest commit time.
     ///
     /// # Errors
     ///
@@ -185,7 +202,7 @@ impl SqliteStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(unavailable)?;
         match version {
-            0..=2 => {
+            0..=3 => {
                 if version < 1 {
                     transaction.execute_batch(SCHEMA).map_err(unavailable)?;
                 }
@@ -200,7 +217,12 @@ impl SqliteStore {
                         )
                         .map_err(unavailable)?;
                 }
-                add_metadata_revisions(&transaction)?;
+                if version < 3 {
+                    add_metadata_revisions(&transaction)?;
+                }
+                transaction
+                    .execute_batch(COMMIT_TIME_SCHEMA)
+                    .map_err(unavailable)?;
                 transaction
                     .pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(unavailable)?;
@@ -250,7 +272,7 @@ impl ArtifactStore for SqliteStore {
                 return Ok(receipt);
             }
             let id = ArtifactId::from_random(random_bytes()?);
-            let now = now()?;
+            let now = commit_time(transaction)?;
             let revision = SourceRevision(1);
             let metadata = MetadataRevision(1);
             transaction
@@ -305,7 +327,7 @@ impl ArtifactStore for SqliteStore {
                 });
             }
             let next = SourceRevision(current.current_revision.0 + 1);
-            let now = now()?;
+            let now = commit_time(transaction)?;
             transaction
                 .execute(
                     "UPDATE artifacts SET current_revision = ?2, updated_at = ?3 WHERE id = ?1",
@@ -356,7 +378,7 @@ impl ArtifactStore for SqliteStore {
             }
             let title = request.title.unwrap_or(&current.title);
             let pinned = request.pinned.unwrap_or(current.pinned);
-            let now = now()?;
+            let now = commit_time(transaction)?;
             let metadata = if *title == current.title && pinned == current.pinned {
                 current.metadata_revision
             } else {
@@ -984,6 +1006,28 @@ fn stored_sequence(value: i64) -> Result<ChangeSequence, StoreError> {
 
 fn sql_revision(revision: SourceRevision) -> Result<i64, StoreError> {
     i64::try_from(revision.0).map_err(corrupt)
+}
+
+/// The time of a commit: the clock, or one millisecond after the latest
+/// commit when the clock reads that time or earlier, as after it is set back.
+/// Commit times then follow commit order, which update and creation order
+/// rely on. Records the time as the latest.
+fn commit_time(transaction: &Transaction<'_>) -> Result<UnixMillis, StoreError> {
+    let clock = now()?;
+    let latest: i64 = transaction
+        .query_row("SELECT committed_at FROM feed", [], |row| row.get(0))
+        .map_err(unavailable)?;
+    let time = if latest < clock.0 {
+        clock.0
+    } else {
+        latest
+            .checked_add(1)
+            .ok_or_else(|| corrupt("the latest commit time is out of range"))?
+    };
+    transaction
+        .execute("UPDATE feed SET committed_at = ?1", [time])
+        .map_err(unavailable)?;
+    Ok(UnixMillis(time))
 }
 
 fn now() -> Result<UnixMillis, StoreError> {

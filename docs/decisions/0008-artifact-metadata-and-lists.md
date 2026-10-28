@@ -1,7 +1,8 @@
 # 0008: Artifact metadata and list queries
 
-Date: 2026-10-28. Status: accepted. Builds on
-[0003](0003-local-html-artifact-slice.md) and [0006](0006-change-feed.md).
+Date: 2026-10-28. Status: accepted; decision 8 added the same day. Builds
+on [0003](0003-local-html-artifact-slice.md) and
+[0006](0006-change-feed.md).
 
 ## Context
 
@@ -82,7 +83,7 @@ unpublished trace maps each to its evidence.
    change tables are rebuilt because their constraints change; the
    migration keeps the feed's head in `sqlite_sequence`, so cursors stay
    valid and new changes continue after it. A newer schema is still
-   refused.
+   refused. Version 4 adds the latest commit time of decision 8.
 7. **Clients.** `ArtifreeClient.listArtifacts` takes the query and returns
    the page with its token; `updateArtifact` sends the update. `artifree
 artifact list` prints every matching artifact, reading page after page,
@@ -92,11 +93,26 @@ artifact list` prints every matching artifact, reading page after page,
    in the sense of decision 0007, when either is newer than known, so a
    rename elsewhere reads the list and the open artifact once and a repeated
    notice reads nothing.
+8. **Commit times follow commit order.** The update order of decision 4
+   and the creation order compare times taken from the system clock, which
+   can be set back. While the browser checks ran on WSL 2, it moved back
+   by over a second between two requests, and an artifact saved last then
+   sorted below older ones. The feed keeps the latest commit time. A
+   commit takes the clock's time, or one millisecond after the latest when
+   the clock reads that time or earlier, and records it, in its write
+   transaction. `created_at`, `updated_at`, and `committed_at` then
+   increase with every commit. Schema version 4 adds the latest commit
+   time, starting at the latest time stored anywhere: times an earlier
+   build stored can be out of order, and those of a version 1 database
+   have no feed entries. A clock set back by an hour makes commits an hour
+   ahead of it until it catches up.
 
 ## Costs and limits
 
 - Search folds only ASCII letters; `é` does not match `É`.
 - Paging by update time is not a snapshot (decision 4).
+- Commit times can run ahead of the clock after it is set back
+  (decision 8); they are ordering times, not exact wall-clock readings.
 - Pins belong to the artifact, not to a user.
 - The metadata history has no API yet; it serves receipts.
 - The web workspace gains search, order, pins, more pages, and renaming in
