@@ -117,7 +117,9 @@ unpublished trace maps each to its evidence.
    save committed nothing, so the notice stays.
 9. **Previews and status.** The preview menu's default entry, "Latest (N)",
    follows each new revision; a numbered revision stays chosen until the
-   user chooses again, also across the source tab. A status line says
+   user chooses again, also across the source tab. (Amended by
+   [0011](0011-web-history-and-restore.md) decision 8: a possible
+   replacement of the server's data forgets the choice.) A status line says
    whether live updates are connecting, on, reconnecting (changes made
    meanwhile follow), paused while the tab is hidden, or stopped (reconnect
    to try again).

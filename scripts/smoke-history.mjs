@@ -243,18 +243,31 @@ export async function checkHistory({
     await expect(rename.getByText('Changed elsewhere')).toBeVisible();
     await rename.getByRole('button', { name: 'Cancel' }).click();
     await renameButton.click();
-    await expect(
-      rename.getByText(/you can rename again once it has/),
-    ).toBeVisible();
+    await expect(rename.getByText(/you can rename once it has/)).toBeVisible();
     await expect(send).toBeDisabled();
+    // A pin names the same refused metadata revision, so it waits too.
+    await rename.getByRole('button', { name: 'Cancel' }).click();
+    await expect(
+      workspace.getByRole('button', { name: 'Pin', exact: true }),
+    ).toBeDisabled();
+    await renameButton.click();
     renamed();
     await tab.unrouteAll({ behavior: 'ignoreErrors' });
     await expect(title).toHaveValue('Theirs');
     await expect(send).toBeDisabled();
     await rename.getByRole('button', { name: 'Cancel' }).click();
 
-    // While what is shown predates a reset, nothing is prepared from it.
-    await workspace.locator('#history-revision').selectOption('5');
+    // While what is shown predates a reset, nothing is prepared from it,
+    // and revisions chosen before it are forgotten: the same numbers may
+    // name other content now.
+    const history = workspace.locator('#history-revision');
+    const against = workspace.locator('#history-against');
+    const previewRevision = workspace.locator('#preview-revision');
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    await previewRevision.selectOption('2');
+    await workspace.getByRole('tab', { name: 'History' }).click();
+    await history.selectOption('2');
+    await against.selectOption('3');
     let reread;
     const held = new Promise((resolve) => {
       reread = resolve;
@@ -268,14 +281,28 @@ export async function checkHistory({
       { times: 1 },
     );
     await forgeReset(tab);
+    // Until the artifact is read again, what was read before the reset
+    // and the choices made in it stay on screen.
     const writes = [
       workspace.getByRole('button', { name: 'Pin', exact: true }),
       workspace.getByRole('button', { name: 'Rename', exact: true }),
-      restoreButton(5),
     ];
-    for (const control of writes) await expect(control).toBeDisabled();
+    for (const control of [...writes, restoreButton(2)])
+      await expect(control).toBeDisabled();
+    await expect(
+      workspace.getByText(/pin, rename, and restore wait until it is read/),
+    ).toBeVisible();
+    // A choice made from what was read before the reset belongs to it too.
+    await history.selectOption('3');
+    await expect(restoreButton(3)).toBeDisabled();
     reread();
-    for (const control of writes) await expect(control).toBeEnabled();
+    for (const control of [...writes, restoreButton(5)])
+      await expect(control).toBeEnabled();
+    await expect(history).toHaveValue('5');
+    await expect(against).toHaveValue('latest');
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    await expect(previewRevision).toHaveValue('latest');
+    await workspace.getByRole('tab', { name: 'History' }).click();
 
     // A dialog open across a reset sends nothing; opened again, it is
     // prepared from what the page reads now.

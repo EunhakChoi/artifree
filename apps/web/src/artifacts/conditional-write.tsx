@@ -36,33 +36,60 @@ interface ConditionalWriteOptions<Request, Result> {
   readonly onDone: (result: Result) => void;
   /** Called after a conflict; the view reads the latest. */
   readonly onConflict: () => void;
-  /** How often the server's data may have been replaced so far. */
-  readonly resets: number;
+  /** Shared by every write prepared against the same versions. */
+  readonly gate: WriteGate;
 }
+
+/**
+ * What every write prepared against the same versions shares, such as a
+ * pin and a rename of one artifact's metadata: one is sent at a time, so
+ * neither races the other's base, and after either is refused, both wait
+ * for the same read.
+ */
+export function useWriteGate(
+  /** How often the server's data may have been replaced so far. */
+  resets: number,
+) {
+  const [refused, setRefused] = useState<Refusal>();
+  const [sending, setSending] = useState(false);
+  return {
+    /** Whether the page, showing `version`, has read past any conflict. */
+    caughtUp: (version: number) => readPast(refused, version, resets),
+    /** Whether a write of this gate is in flight. */
+    sending,
+    setSending,
+    refuse: (base: number, current: number | undefined) =>
+      setRefused({ base, current, resets }),
+    /**
+     * A write succeeded: its base was current. Writes of a gate are sent
+     * one at a time, so no refusal of a later read can be outstanding.
+     */
+    lift: () => setRefused(undefined),
+  };
+}
+
+export type WriteGate = ReturnType<typeof useWriteGate>;
 
 /**
  * Sends conditional writes of one kind: renames, pins, or restores
  * (decisions 0009 and 0011). Sending the same request again reuses its
  * key, so a retry after a lost answer applies at most once; any other
  * request gets a new key. After a conflict, the refused base is kept until
- * the page has read past it (see {@link readPast}), so a retry can never
- * resend it while the latest read is outstanding or failed.
+ * the page has read past it (see {@link readPast}), so neither a retry nor
+ * another write of the same gate resends it while the latest read is
+ * outstanding or failed.
  */
 export function useConditionalWrite<Request, Result>(
   options: ConditionalWriteOptions<Request, Result>,
 ) {
   const [state, setState] = useState<WriteState>({ status: 'idle' });
   const [attempt, setAttempt] = useState<{ body: string; key: string }>();
-  const [refused, setRefused] = useState<Refusal>();
-
-  /** Whether the page, showing `version`, has read past any conflict. */
-  function caughtUp(version: number): boolean {
-    return readPast(refused, version, options.resets);
-  }
+  const { gate } = options;
+  const { caughtUp } = gate;
 
   /** Whether a request prepared against `version` may be sent now. */
   function ready(version: number): boolean {
-    return state.status !== 'sending' && caughtUp(version);
+    return !gate.sending && caughtUp(version);
   }
 
   async function write(request: Request): Promise<WriteResult> {
@@ -70,9 +97,10 @@ export function useConditionalWrite<Request, Result>(
     const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
     setAttempt({ body, key });
     setState({ status: 'sending' });
+    gate.setSending(true);
     try {
       const result = await options.send(request, key);
-      setRefused(undefined);
+      gate.lift();
       setState({ status: 'idle' });
       options.onDone(result);
       return 'done';
@@ -81,11 +109,7 @@ export function useConditionalWrite<Request, Result>(
         error instanceof ArtifreeApiError &&
         error.code === options.conflict
       ) {
-        setRefused({
-          base: options.base(request),
-          current: options.current(error),
-          resets: options.resets,
-        });
+        gate.refuse(options.base(request), options.current(error));
         setState({ status: 'conflict' });
         options.onConflict();
         return 'conflict';
@@ -97,6 +121,8 @@ export function useConditionalWrite<Request, Result>(
         base: options.base(request),
       });
       return 'failed';
+    } finally {
+      gate.setSending(false);
     }
   }
 
@@ -125,12 +151,11 @@ export function WriteOutcome({
   action: string;
   /** What changed elsewhere, as in "The title or pin changed". */
   changed: string;
-  /** Whether the page has read past a conflict's refused base. */
+  /** Whether the page has read past any refused base of the gate. */
   caughtUp: boolean;
 }): ReactNode {
-  // A refusal that still holds is explained even after its notice was
-  // cleared, so a disabled control always says why.
-  if (state.status === 'conflict' || (state.status === 'idle' && !caughtUp))
+  const reading = `If it cannot be read, the artifact says so and offers to try again.`;
+  if (state.status === 'conflict')
     return (
       <Alert>
         <AlertTitle>Changed elsewhere</AlertTitle>
@@ -138,7 +163,20 @@ export function WriteOutcome({
           {changed} since this page read it, so nothing was changed.{' '}
           {caughtUp
             ? `The page shows the latest now; ${action} again if you still want to.`
-            : `The page is reading the latest; you can ${action} again once it has. If it cannot be read, close this and try again from the page.`}
+            : `The page is reading the latest; you can ${action} again once it has. ${reading}`}
+        </AlertDescription>
+      </Alert>
+    );
+  // A refusal that still holds, of this write or another of its gate, is
+  // explained after its notice was cleared, so a disabled control always
+  // says why.
+  if (state.status === 'idle' && !caughtUp)
+    return (
+      <Alert>
+        <AlertTitle>Changed elsewhere</AlertTitle>
+        <AlertDescription>
+          {changed} since this page read it. The page is reading the latest; you
+          can {action} once it has. {reading}
         </AlertDescription>
       </Alert>
     );

@@ -241,6 +241,17 @@ export async function checkListAndMetadata({
     await expect(
       workspace.getByText(/you can pin or unpin again once it has/),
     ).toBeVisible();
+    // A rename names the same metadata revision, so it waits too.
+    await workspace
+      .getByRole('button', { name: 'Rename', exact: true })
+      .click();
+    const waiting = page.getByRole('dialog', { name: 'Rename artifact' });
+    await waiting.getByLabel('Title').fill('Alpha waits');
+    await expect(waiting.getByText(/you can rename once it has/)).toBeVisible();
+    await expect(
+      waiting.getByRole('button', { name: 'Rename', exact: true }),
+    ).toBeDisabled();
+    await waiting.getByRole('button', { name: 'Cancel' }).click();
     await api(server, 'PATCH', `/v1/artifacts/${alpha.id}`, {
       base_metadata_revision: 3,
       pinned: true,
@@ -273,6 +284,30 @@ export async function checkListAndMetadata({
     await page.unrouteAll({ behavior: 'ignoreErrors' });
     current = await api(server, 'GET', `/v1/artifacts/${beta.id}`);
     assert.equal(current.pinned, true, 'Beta stayed pinned.');
+
+    // Pin and rename name the same metadata revision, so one waits while
+    // the other is sent: a rename would race the pin's base.
+    let release;
+    const answered = new Promise((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/v1/artifacts/${alpha.id}`, async (route) => {
+      if (route.request().method() === 'PATCH') await answered;
+      return route.fallback();
+    });
+    await pin.click();
+    await workspace
+      .getByRole('button', { name: 'Rename', exact: true })
+      .click();
+    const racing = page.getByRole('dialog', { name: 'Rename artifact' });
+    const send = racing.getByRole('button', { name: 'Rename', exact: true });
+    await racing.getByLabel('Title').fill('Alpha racing');
+    await expect(send).toBeDisabled();
+    release();
+    await expect(send).toBeEnabled();
+    await racing.getByRole('button', { name: 'Cancel' }).click();
+    await expect(pin).toHaveAttribute('aria-pressed', 'true');
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
 
     assert.deepEqual(errors, [], 'Page errors.');
     return { artifacts: shown, lists: lists.length };

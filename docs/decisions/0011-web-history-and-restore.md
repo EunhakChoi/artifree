@@ -68,7 +68,7 @@ unpublished trace maps each to its evidence.
    - Not while what is shown was read before the server's data may have
      been replaced (a `reset`, or a `ready` after the page read without a
      stream; 0007 decision 8). Pin, rename, and restore are disabled until
-     the artifact is read again.
+     the artifact is read again, and the page says why.
    - Not from a dialog that was open when such a replacement happened: it
      says so and sends nothing, since replaced data can hold other content
      under the same numbers and the base check would pass. Opened again,
@@ -82,14 +82,32 @@ unpublished trace maps each to its evidence.
      then, never the refused one. If that read fails, the detail view's
      retry recovers it. A refusal lapses when the server's data may have
      been replaced, since the versions it names may no longer exist.
+   - Writes prepared against the same versions share a gate: a pin and a
+     rename name the same metadata revision, so one is sent at a time
+     (else this page's own pin would refuse its rename), and after either
+     is refused, both wait for the same read. A restore, which names the
+     source revision, has its own.
+   - A dialog open across such a replacement shows only that it sends
+     nothing, not how its last request ended: a retry it would offer is
+     not sent.
 7. **Plain functions.** The comparison of manifests and lines, and the
    rule for when a refusal is read past, are plain code without React,
    tested on their own.
+8. **Choices follow the data they were made in.** A revision or file the
+   user chose, in the history tab or the preview menu, belongs to the read
+   it was chosen from. Once the page shows a read made after a possible
+   replacement of the server's data, the choice is forgotten and the
+   default is shown instead: the replacement can hold other content under
+   the same number, and later reach that number again. Until then the
+   earlier read and its choices stay on screen together, also a choice
+   made while the new read is pending. This amends 0007 decision 9, which
+   kept a numbered preview revision until the user chose again.
 
 ## Costs and limits
 
 - One file is compared at a time; the tab forgets its choices when it
-  closes.
+  closes, and every view forgets them after a possible replacement of the
+  server's data, also when nothing was replaced.
 - A conflict whose latest state cannot be read leaves the control disabled
   until a read succeeds.
 - A pin whose answer was lost, followed by a reset to data with the same

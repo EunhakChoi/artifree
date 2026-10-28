@@ -33,6 +33,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { fromEditable, toEditable } from './editable-text';
 import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
+import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { Version } from './use-live-workspace';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
@@ -100,9 +101,6 @@ export function ArtifactDetail({
   // known before.
   const [target, setTarget] = useState({ epoch, version: known });
   const targetVersion = target.epoch === epoch ? target.version : undefined;
-  // A revision chosen for the preview, kept across tabs; none follows the
-  // latest.
-  const [chosen, setChosen] = useState<number>();
   const details = useRequest<Loaded>(
     `${artifactId}:${generation}:${epoch}:${targetVersion?.revision}:${targetVersion?.metadata}:${unknownChanges}`,
     async (signal) => {
@@ -139,6 +137,10 @@ export function ArtifactDetail({
   function reload(): void {
     setGeneration((value) => value + 1);
   }
+  // A revision chosen for the preview, kept across tabs; none follows the
+  // latest. It belongs to the data it was chosen in, and is forgotten once
+  // the page shows data read after a possible replacement.
+  const [chosen, setChosen] = useChoice<number>(shown?.resets ?? resets);
   // Held here, outside the history tab, so that a retry keeps its key and
   // a refused base stays refused when the tab closes and opens again.
   const restore = useRestore(
@@ -203,6 +205,12 @@ export function ArtifactDetail({
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-4">
+          {stale ? (
+            <output className="text-sm text-muted-foreground">
+              Reading the artifact again, as the server&apos;s data may have
+              changed wholesale; pin, rename, and restore wait until it is read.
+            </output>
+          ) : null}
           {details.status === 'error' ? (
             <Alert variant="destructive">
               <AlertTitle>Could not refresh the artifact</AlertTitle>
@@ -249,6 +257,7 @@ export function ArtifactDetail({
                 restore={restore}
                 resets={resets}
                 stale={stale}
+                shownResets={shown.resets}
               />
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
@@ -297,8 +306,7 @@ function PreviewPanel({
   onChoose,
 }: PreviewPanelProps) {
   const latest = artifact.current_revision;
-  // A chosen revision that is no longer listed, as after a reset to older
-  // data, falls back to the latest.
+  // A chosen revision that is not listed falls back to the latest.
   const kept =
     chosen !== undefined && revisions.some((item) => item.revision === chosen)
       ? chosen

@@ -20,7 +20,9 @@ import {
   ReplacedNotice,
   WriteOutcome,
   useConditionalWrite,
+  useWriteGate,
 } from './conditional-write';
+import type { WriteGate } from './conditional-write';
 
 const CHANGED = 'The title or pin changed';
 
@@ -30,7 +32,7 @@ function useMetadataUpdate(
   artifactId: string,
   onUpdated: (artifact: Artifact) => void,
   onConflict: () => void,
-  resets: number,
+  gate: WriteGate,
 ) {
   return useConditionalWrite({
     send: (request: UpdateArtifactRequest, idempotencyKey: string) =>
@@ -40,7 +42,7 @@ function useMetadataUpdate(
     current: (error) => error.currentMetadataRevision,
     onDone: (result) => onUpdated(result.artifact),
     onConflict,
-    resets,
+    gate,
   });
 }
 
@@ -66,12 +68,15 @@ interface MetadataActionsProps {
  */
 export function MetadataActions(props: MetadataActionsProps) {
   const { client, artifact, onUpdated, onConflict, resets, stale } = props;
+  // Pin and rename name the same metadata revision: one is sent at a time,
+  // and a refusal of either holds both.
+  const gate = useWriteGate(resets);
   const pin = useMetadataUpdate(
     client,
     artifact.id,
     onUpdated,
     onConflict,
-    resets,
+    gate,
   );
   const version = artifact.metadata_revision;
   return (
@@ -93,7 +98,7 @@ export function MetadataActions(props: MetadataActionsProps) {
           <PinIcon data-icon="inline-start" aria-hidden="true" />
           Pin
         </Button>
-        <RenameDialog {...props} />
+        <RenameDialog {...props} gate={gate} />
       </div>
       {/* Once the page reads newer metadata, it shows what a lost update
           did, and pinning again would be a new request. */}
@@ -124,7 +129,8 @@ function RenameDialog({
   onConflict,
   resets,
   stale,
-}: MetadataActionsProps) {
+  gate,
+}: MetadataActionsProps & { gate: WriteGate }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState(artifact.title);
   // A rename is prepared from the artifact as the dialog opened on it, so a
@@ -142,7 +148,7 @@ function RenameDialog({
     artifact.id,
     onUpdated,
     onConflict,
-    resets,
+    gate,
   );
   // Whether the user typed since the dialog opened. Until then the field
   // shows the title the request would be prepared from, so a title the
@@ -225,13 +231,17 @@ function RenameDialog({
               />
             </Field>
           </FieldGroup>
-          {replaced ? <ReplacedNotice /> : null}
-          <WriteOutcome
-            state={rename.state}
-            action="rename"
-            changed={CHANGED}
-            caughtUp={rename.caughtUp(latest)}
-          />
+          {/* Replaced data sends nothing, so no retry is offered. */}
+          {replaced ? (
+            <ReplacedNotice />
+          ) : (
+            <WriteOutcome
+              state={rename.state}
+              action="rename"
+              changed={CHANGED}
+              caughtUp={rename.caughtUp(latest)}
+            />
+          )}
           <DialogFooter>
             <DialogClose
               render={<Button variant="outline" disabled={pending} />}

@@ -37,7 +37,9 @@ import {
   ReplacedNotice,
   WriteOutcome,
   useConditionalWrite,
+  useWriteGate,
 } from './conditional-write';
+import { useChoice } from './use-choice';
 import { useRequest } from './use-request';
 
 /** Text up to this size is compared line by line. */
@@ -63,6 +65,7 @@ export function useRestore(
   onConflict: () => void,
   resets: number,
 ) {
+  const gate = useWriteGate(resets);
   return useConditionalWrite({
     send: (
       { revision, base_revision }: RestoreRequest,
@@ -79,7 +82,7 @@ export function useRestore(
     current: (error) => error.currentRevision,
     onDone: (result) => onRestored(result.artifact),
     onConflict,
-    resets,
+    gate,
   });
 }
 
@@ -99,6 +102,8 @@ interface HistoryPanelProps {
   resets: number;
   /** Whether what is shown was read before the last possible replacement. */
   stale: boolean;
+  /** The count of possible replacements when what is shown was read. */
+  shownResets: number;
 }
 
 /**
@@ -114,13 +119,15 @@ export function HistoryPanel({
   restore,
   resets,
   stale,
+  shownResets,
 }: HistoryPanelProps) {
   const latest = artifact.current_revision;
-  // Chosen revisions; none means the default. A choice that is no longer
-  // listed, as after a reset, gives way to the default too.
-  const [chosen, setChosen] = useState<number>();
-  const [against, setAgainst] = useState<number>();
-  const [path, setPath] = useState<string>();
+  // Chosen revisions and file; none means the default. A choice belongs to
+  // the data it was made in: it is forgotten once the page shows data read
+  // after a possible replacement.
+  const [chosen, setChosen] = useChoice<number>(shownResets);
+  const [against, setAgainst] = useChoice<number>(shownResets);
+  const [path, setPath] = useChoice<string>(shownResets);
   const find = (revision: number | undefined) =>
     revisions.find((item) => item.revision === revision);
   const earlier =
@@ -485,13 +492,17 @@ function RestoreDialog({
                 they are.
               </DialogDescription>
             </DialogHeader>
-            {replaced ? <ReplacedNotice /> : null}
-            <WriteOutcome
-              state={restore.state}
-              action="restore"
-              changed="A revision was saved"
-              caughtUp={restore.caughtUp(latest)}
-            />
+            {/* Replaced data sends nothing, so no retry is offered. */}
+            {replaced ? (
+              <ReplacedNotice />
+            ) : (
+              <WriteOutcome
+                state={restore.state}
+                action="restore"
+                changed="A revision was saved"
+                caughtUp={restore.caughtUp(latest)}
+              />
+            )}
             <DialogFooter>
               <DialogClose
                 render={<Button variant="outline" disabled={pending} />}

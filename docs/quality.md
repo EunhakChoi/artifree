@@ -182,9 +182,10 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   pinning, the pin filter, and both orders; a rename reads the list, the
   artifact, and its history once and keeps a draft; a rename whose answer was
   lost is retried with its key and applies once; a forged conflict changes
-  nothing, reads the artifact again, and keeps pinning disabled until the
-  page has read past the refused metadata revision. The rename dialog is
-  checked for accessibility.
+  nothing, reads the artifact again, and keeps pinning and renaming
+  disabled until the page has read past the refused metadata revision; a
+  rename waits while a pin is in flight. The rename dialog is checked for
+  accessibility.
 - `scripts/tests/compare.test.mjs`: bundles the web comparison with esbuild:
   3,000 seeded random pairs of line lists, each compared with the fewest
   changed lines (checked against a longest common subsequence) that rebuild
@@ -196,17 +197,20 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   read a newer version and at least the one the conflict named, and lapses
   after a possible data replacement.
 - `scripts/smoke-history.mjs`: the history tab compares two revisions by
-  digest (changed, added, removed, a binary file of equal size) and shows
-  the lines of text files with visible carriage returns, byte order marks,
-  and missing final line feeds; a restore commits revision 1's digests as
+  digest (changed, added, removed, a binary file of equal size, a long path
+  in a narrow window) and shows the lines of text files with visible
+  carriage returns, byte order marks, and missing final line feeds, and
+  marks lines left out after the last change; a restore commits revision 1's digests as
   the next revision; a restore whose answer was lost is retried with its key
   and applies once; a restore refused because of a save the page had not
   yet read stays disabled until that read arrives, then restores against
   the revision the dialog opened on while the default moves on; a rename
   refused the same way and opened again explains the wait and then offers
-  the other client's title; after a forged `reset`, pin, rename, and restore stay disabled until
-  the artifact is read again, and a restore or rename dialog open across it
-  sends nothing; a draft disables restoring. The tab and the dialog are
+  the other client's title, while pinning waits too; after a forged
+  `reset`, pin, rename, and restore stay disabled until the artifact is
+  read again and the page says why, revisions chosen in the history tab
+  and the preview menu before the new read, also while it was pending, are
+  forgotten once it arrives, and a restore or rename dialog open across it sends nothing; a draft disables restoring. The tab and the dialog are
   checked for accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
