@@ -364,6 +364,33 @@ fn failed_commit_leaves_no_partial_revision() -> TestResult {
 }
 
 #[test]
+fn a_commit_of_the_base_files_is_refused_with_its_conflict_check() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("create"), 1)?;
+    // The base's own files, against the current base: nothing is written.
+    let same = commit(&store, &created, &key("same"), 1, "<h1>v1</h1>");
+    assert_eq!(same.err(), Some(StoreError::Unchanged));
+    assert_eq!(feed(&store, &owner, 0, 100)?.1, 1, "no feed entry");
+    commit(&store, &created, &key("v2"), 1, "<h1>v2</h1>")?;
+    // The same files against a base that is no longer current: the conflict
+    // is what the caller needs to know.
+    let stale = commit(&store, &created, &key("stale"), 1, "<h1>v1</h1>");
+    assert_eq!(
+        stale.err(),
+        Some(StoreError::RevisionConflict {
+            current: SourceRevision(2)
+        })
+    );
+    let current = store
+        .artifact(&created.artifact.id)?
+        .ok_or("artifact kept")?;
+    assert_eq!(current.current_revision, SourceRevision(2));
+    Ok(())
+}
+
+#[test]
 fn unchanged_files_share_stored_content() -> TestResult {
     let db = TempDb::new();
     let store = SqliteStore::open(&db.path())?;

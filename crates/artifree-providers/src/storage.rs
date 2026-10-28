@@ -24,6 +24,7 @@
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -325,6 +326,9 @@ impl ArtifactStore for SqliteStore {
                 return Err(StoreError::RevisionConflict {
                     current: current.current_revision,
                 });
+            }
+            if same_files(transaction, request.artifact, request.base, request.package)? {
+                return Err(StoreError::Unchanged);
             }
             let next = SourceRevision(current.current_revision.0 + 1);
             let now = commit_time(transaction)?;
@@ -895,6 +899,28 @@ fn add_metadata_revisions(transaction: &Transaction<'_>) -> Result<(), StoreErro
         }
     }
     Ok(())
+}
+
+/// Whether `package` has exactly the paths and bytes of a stored revision,
+/// compared by digest.
+fn same_files(
+    connection: &Connection,
+    id: &ArtifactId,
+    revision: SourceRevision,
+    package: &FilePackage,
+) -> Result<bool, StoreError> {
+    let Some(stored) = revision_record(connection, id, revision)? else {
+        return Ok(false);
+    };
+    let digests: BTreeMap<&PackagePath, [u8; 32]> = stored
+        .files
+        .iter()
+        .map(|entry| (&entry.path, entry.sha256))
+        .collect();
+    Ok(digests.len() == package.len()
+        && package
+            .files()
+            .all(|(path, content)| digests.get(path) == Some(&Sha256::digest(content).into())))
 }
 
 fn revision_record(

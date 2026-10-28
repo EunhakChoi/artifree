@@ -372,6 +372,16 @@ async fn stale_base_revision_conflicts_with_current_revision() -> TestResult {
     assert_eq!(stale.status, StatusCode::CONFLICT);
     assert_eq!(error_code(&stale), "revision_conflict");
     assert_eq!(stale.json()?["error"]["current_revision"], 2);
+    // Changes that leave a stale base as it was are a conflict too: the
+    // current files differ.
+    let unchanged = harness
+        .send(post(
+            &path,
+            Some("save-key-5"),
+            &put_index(1, "<h1>v1</h1>"),
+        )?)
+        .await?;
+    assert_eq!(error_code(&unchanged), "revision_conflict");
     let future = harness
         .send(post(
             &path,

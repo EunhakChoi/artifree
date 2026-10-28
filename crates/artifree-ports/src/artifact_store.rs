@@ -244,6 +244,8 @@ pub enum StoreError {
     },
     /// The actor already used the key for a request with different content.
     RequestKeyReused,
+    /// The files are those of the base revision; nothing was written.
+    Unchanged,
     /// Storage could not complete the operation; the outcome is not committed
     /// unless a later retry with the same key reports it.
     Unavailable(String),
@@ -262,6 +264,7 @@ impl fmt::Display for StoreError {
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
+            Self::Unchanged => formatter.write_str("the files are those of the base revision"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -283,13 +286,15 @@ pub trait ArtifactStore {
     /// fingerprint, or [`StoreError::Unavailable`].
     fn create_artifact(&self, request: NewArtifact<'_>) -> Result<CommitReceipt, StoreError>;
 
-    /// Appends the next revision if the artifact is still at `base`, or returns
-    /// the stored receipt of an identical earlier request.
+    /// Appends the next revision if the artifact is still at `base` and the
+    /// package differs from it, or returns the stored receipt of an identical
+    /// earlier request. All three are decided in one atomic step.
     ///
     /// # Errors
     ///
     /// [`StoreError::NotFound`], [`StoreError::RevisionConflict`],
-    /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
+    /// [`StoreError::Unchanged`], [`StoreError::RequestKeyReused`], or
+    /// [`StoreError::Unavailable`].
     fn commit_revision(&self, request: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError>;
 
     /// Changes the title or pin if the metadata is still at `base`, or

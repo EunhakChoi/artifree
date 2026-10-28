@@ -41,8 +41,10 @@ unpublished trace maps each to its evidence.
    clients that follow changes (0006, 0007) need nothing new.
 2. **Refusals write nothing.** They are checked in this order, so each
    request has one answer: the artifact, a base that cannot be current,
-   the restored revision, an unchanged restore, then in the store a
-   replay before a stale base.
+   the restored revision, then, in the store's write transaction, a
+   replay, a stale base, and files the base already has. Deciding the last
+   three in one step keeps a save that lands in between from turning a
+   conflict into "unchanged".
    - A missing or inaccessible artifact, or a revision that is 0 or after the
      current one, is `404 not_found`.
    - A base that is not current is `409 revision_conflict` with
@@ -50,14 +52,17 @@ unpublished trace maps each to its evidence.
    - Restoring the files a current base already has is
      `422 invalid_request`, as is a save that changes nothing. Against a
      stale base the conflict is reported instead, since the files the
-     restore would replace are no longer the base's.
+     restore would replace are no longer the base's. A save now follows
+     the same rule: the store, not the core, decides that its changes
+     leave the base as it was, so against a stale base it is a conflict
+     too.
    - A missing key is `400`.
 3. **Retries.** The request fingerprint covers the operation, the artifact,
    the base, and the restored revision. Resending the same restore with
    its key returns the original receipt, also after later commits. The key
-   is refused for a save or for a restore of another revision. As for a
-   save, a request refused before the store, such as an unchanged
-   restore, is refused whatever its key.
+   is refused for a save or for a restore of another revision. A request
+   refused before the store, such as a malformed one, is refused whatever
+   its key.
 4. **What a restore leaves alone.** The title and pin, and every existing
    revision. A restored revision does not record which revision it came
    from; its files and digests show it.
@@ -77,9 +82,10 @@ unpublished trace maps each to its evidence.
 
 ## Costs and limits
 
-- A restore holds both packages in memory to compare them, as a save holds
-  its base; packages are at most 25 MiB. A retry reads the restored
-  package before the store finds its replay.
+- A restore holds the restored package in memory, as a save holds its
+  base; packages are at most 25 MiB. A retry reads the restored
+  package before the store finds its replay. The store hashes the
+  package once more to compare it with the base.
 - The history does not say that a revision was restored, or from which
   revision.
 - The web workspace gains comparison and restore in A04b.

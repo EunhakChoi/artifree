@@ -97,6 +97,7 @@ impl From<StoreError> for ArtifactError {
             StoreError::RevisionConflict { current } => Self::RevisionConflict { current },
             StoreError::MetadataConflict { current } => Self::MetadataConflict { current },
             StoreError::RequestKeyReused => Self::RequestKeyReused,
+            StoreError::Unchanged => Self::InvalidPackage(PackageError::Unchanged),
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
             other => Self::Unavailable(other.to_string()),
         }
@@ -210,10 +211,15 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
         }
         let fingerprint = hasher.finish();
-        let package = self
-            .package(id, base)?
-            .apply(changes)
-            .map_err(ArtifactError::InvalidPackage)?;
+        let base_package = self.package(id, base)?;
+        let package = match base_package.apply(changes) {
+            Ok(package) => package,
+            // Whether the files change is decided with the commit, against
+            // the base as it is then: a stale base is a conflict, and a retry
+            // of a committed save a replay.
+            Err(PackageError::Unchanged) => base_package,
+            Err(error) => return Err(ArtifactError::InvalidPackage(error)),
+        };
         let receipt = self.store.commit_revision(RevisionCommit {
             request: RequestIdentity {
                 actor,
@@ -259,12 +265,9 @@ impl<S: ArtifactStore> ArtifactService<S> {
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
         hasher.field(&revision.0.to_be_bytes());
+        // The store decides in one step whether this is a replay, a stale
+        // base, or files the base already has.
         let package = self.package(id, revision)?;
-        // Against a stale base the store replays the request or refuses it
-        // as a conflict; only a restore that would commit can be a no-op.
-        if base == record.current_revision && package == self.package(id, base)? {
-            return Err(ArtifactError::InvalidPackage(PackageError::Unchanged));
-        }
         let receipt = self.store.commit_revision(RevisionCommit {
             request: RequestIdentity {
                 actor,
