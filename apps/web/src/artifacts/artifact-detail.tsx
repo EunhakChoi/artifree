@@ -34,7 +34,7 @@ import { fromEditable, toEditable } from './editable-text';
 import { MetadataActions } from './metadata-actions';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { Version } from './use-live-workspace';
-import { describeFailure, useRequest } from './use-request';
+import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
 
 /**
  * Sandbox flags for previews, matching the content server's CSP: without
@@ -675,19 +675,5 @@ function FileEditor({
         ) : null}
       </Field>
     </FieldGroup>
-  );
-}
-
-/**
- * Whether a failed save may still have been committed: its answer was lost
- * or unreadable, or the server or a proxy failed after the request reached
- * it. A refusal (4xx, including a rate limit) committed nothing.
- */
-function mayHaveCommitted(error: unknown): boolean {
-  if (!(error instanceof ArtifreeApiError)) return true;
-  return (
-    error.code === 'network_error' ||
-    error.code === 'invalid_response' ||
-    error.status >= 500
   );
 }

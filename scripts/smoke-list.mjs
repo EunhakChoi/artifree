@@ -133,7 +133,24 @@ export async function checkListAndMetadata({
       nav.getByRole('button', { name: /Beta notes Pinned, r1/ }),
     ).toBeVisible();
     await workspace.getByLabel('Search titles').fill('');
+    await expect(items).toHaveCount(50);
+    // A failed read for another filter shows no artifacts of the last one.
+    await page.route(
+      (url) =>
+        url.pathname === '/v1/artifacts' &&
+        url.searchParams.get('pinned') === 'true',
+      (route) =>
+        route.fulfill({
+          status: 503,
+          json: { error: { code: 'unavailable', message: 'List is busy.' } },
+        }),
+      { times: 1 },
+    );
     await workspace.getByLabel('Show').selectOption('pinned');
+    await expect(workspace.getByText('Could not list artifacts')).toBeVisible();
+    await expect(items).toHaveCount(0);
+    await expect(nav.getByRole('button', { name: 'Show more' })).toBeHidden();
+    await nav.getByRole('button', { name: 'Try again' }).click();
     await expect(items).toHaveCount(1);
     await expect(items.first()).toHaveAccessibleName(/^Beta notes/);
     await workspace.getByLabel('Show').selectOption('all');
@@ -187,7 +204,8 @@ export async function checkListAndMetadata({
       });
     });
     const dialog = await rename(page, workspace, 'Alpha final');
-    await expect(dialog.getByText('Response lost.')).toBeVisible();
+    await expect(dialog.getByText('Outcome unknown')).toBeVisible();
+    await expect(dialog.getByText(/Response lost\./)).toBeVisible();
     await dialog.getByRole('button', { name: 'Rename' }).click();
     await expect(dialog).toBeHidden();
     await expect(heading('Alpha final')).toBeVisible();
@@ -221,6 +239,26 @@ export async function checkListAndMetadata({
     await expect(pin).toHaveAttribute('aria-pressed', 'true');
     await expect(workspace.getByText('Changed elsewhere')).toBeHidden();
     await expect(editor).toHaveValue(html('Draft'));
+
+    // A pin whose answer was lost: once the page reads what it did, no
+    // unknown outcome is left on screen.
+    let lostPin = false;
+    await page.route(`**/v1/artifacts/${alpha.id}`, async (route) => {
+      if (lostPin || route.request().method() !== 'PATCH')
+        return route.fallback();
+      lostPin = true;
+      await route.fetch();
+      return route.fulfill({
+        status: 503,
+        json: { error: { code: 'unavailable', message: 'Response lost.' } },
+      });
+    });
+    await pin.click();
+    await expect(pin).toHaveAttribute('aria-pressed', 'false');
+    await expect(workspace.getByText('Outcome unknown')).toBeHidden();
+    current = await api(server, 'GET', `/v1/artifacts/${alpha.id}`);
+    assert.equal(current.pinned, false, 'The lost unpin was applied.');
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
     current = await api(server, 'GET', `/v1/artifacts/${beta.id}`);
     assert.equal(current.pinned, true, 'Beta stayed pinned.');
 

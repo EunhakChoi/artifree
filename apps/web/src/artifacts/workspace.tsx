@@ -106,13 +106,15 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     setCount(PAGE_SIZE);
   }, []);
   const { epoch } = live;
+  const shownQuery = queryKey(query);
   const artifacts = useRequest(
     live.canRead
-      ? `${generation}:${epoch}:${live.news}:${queryKey(query)}:${count}`
+      ? `${generation}:${epoch}:${live.news}:${shownQuery}:${count}`
       : undefined,
     async (signal) => {
       const listed = await readArtifacts(client, query, count, signal);
       return {
+        query: shownQuery,
         list: listed.artifacts,
         // Only a complete list without filters shows every artifact, so
         // only it can tell that one no longer exists.
@@ -141,12 +143,15 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
         })),
       );
   }, [fresh, learn]);
-  const shownList =
+  const lastList =
     artifacts.status === 'ready'
       ? artifacts.value
       : artifacts.status === 'error'
         ? artifacts.previous
         : undefined;
+  // Another query's results never stand in for this one's, neither while
+  // it loads nor after it failed.
+  const shownList = lastList?.query === shownQuery ? lastList : undefined;
   const listed = shownList?.list;
   const showMore = shownList !== undefined && !shownList.complete;
   const noArtifacts = listed?.length === 0 && !isFiltered(query);
@@ -206,7 +211,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       <output aria-live="polite" className="text-sm text-muted-foreground">
         {FEED_MESSAGES[live.feed]}
       </output>
-      {artifacts.status === 'loading' ? (
+      {shownList === undefined && artifacts.status !== 'error' ? (
         <output className="text-sm text-muted-foreground">
           Loading artifacts…
         </output>

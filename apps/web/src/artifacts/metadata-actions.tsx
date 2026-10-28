@@ -18,13 +18,20 @@ import {
 } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { describeFailure } from './use-request';
+import { describeFailure, mayHaveCommitted } from './use-request';
 
 type UpdateState =
   | { readonly status: 'idle' }
   | { readonly status: 'updating' }
   | { readonly status: 'conflict' }
-  | { readonly status: 'failed'; readonly message: string };
+  | {
+      readonly status: 'failed';
+      readonly message: string;
+      /** The answer was lost: the update may have been made. */
+      readonly unknown: boolean;
+      /** The metadata revision the update was prepared against. */
+      readonly base: number;
+    };
 
 /**
  * Sends metadata updates for one artifact (decision 0008). Sending the same
@@ -58,7 +65,13 @@ function useMetadataUpdate(
       ) {
         setState({ status: 'conflict' });
         onConflict();
-      } else setState({ status: 'failed', message: describeFailure(error) });
+      } else
+        setState({
+          status: 'failed',
+          message: describeFailure(error),
+          unknown: mayHaveCommitted(error),
+          base: request.base_metadata_revision,
+        });
       return false;
     }
   }
@@ -78,7 +91,18 @@ function UpdateOutcome({
         <AlertTitle>Changed elsewhere</AlertTitle>
         <AlertDescription>
           The title or pin changed since this page read it, so nothing was
-          changed. The latest is shown; {action} again if you still want to.
+          changed. The page reads the latest; {action} again if you still want
+          to.
+        </AlertDescription>
+      </Alert>
+    );
+  if (state.status === 'failed' && state.unknown)
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Outcome unknown</AlertTitle>
+        <AlertDescription>
+          {state.message} The change may have been made. To retry, {action}{' '}
+          again: the same request is sent and applies at most once.
         </AlertDescription>
       </Alert>
     );
@@ -138,7 +162,13 @@ export function MetadataActions({
           onConflict={onConflict}
         />
       </div>
-      <UpdateOutcome state={pin.state} action="pin or unpin" />
+      {/* Once the page reads newer metadata, it shows what a lost update
+          did, and pinning again would be a new request. */}
+      {pin.state.status === 'failed' &&
+      pin.state.unknown &&
+      pin.state.base !== artifact.metadata_revision ? null : (
+        <UpdateOutcome state={pin.state} action="pin or unpin" />
+      )}
     </div>
   );
 }
@@ -154,16 +184,16 @@ function RenameDialog({
   // The artifact as the dialog opened on it. A rename is prepared against
   // it, so a retry after a lost answer is the same request even when the
   // view has meanwhile read that the rename took effect. After a conflict,
-  // the next rename is prepared against the latest read.
+  // the next rename is prepared against the latest read and title.
   const [opened, setOpened] = useState<{
     base: number | undefined;
-    title: string;
+    title: string | undefined;
   }>({
     base: artifact.metadata_revision,
     title: artifact.title,
   });
   const rename = useMetadataUpdate(client, artifact.id, onUpdated, () => {
-    setOpened((current) => ({ ...current, base: undefined }));
+    setOpened({ base: undefined, title: undefined });
     onConflict();
   });
   const pending = rename.state.status === 'updating';
@@ -235,7 +265,9 @@ function RenameDialog({
             <Button
               type="submit"
               disabled={
-                pending || title.trim() === '' || title.trim() === opened.title
+                pending ||
+                title.trim() === '' ||
+                title.trim() === (opened.title ?? artifact.title)
               }
             >
               {pending ? 'Renaming…' : 'Rename'}

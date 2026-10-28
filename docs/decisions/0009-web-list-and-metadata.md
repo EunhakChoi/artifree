@@ -33,7 +33,9 @@ unpublished trace maps each to its evidence.
    recently created), and a pin filter (all, pinned, not pinned) form the
    query. Search waits until typing pauses for 300 ms and sends the trimmed
    text, so typing a word reads the list once. Changing the query starts
-   again at the first 50 artifacts.
+   again at the first 50 artifacts. The list shows only results of the
+   query its controls show: while another query loads, or after its read
+   failed, the earlier query's artifacts are not shown in its place.
 2. **The list is a prefix, read from the start.** The page shows the first
    N artifacts of the query, 50 at first; "Show more" adds 50. Each read,
    including the one a notice causes, reads those N again from the start,
@@ -59,8 +61,13 @@ unpublished trace maps each to its evidence.
    that the rename took effect; the server replays it. A
    `metadata_conflict` says that the title or pin changed elsewhere and
    nothing was changed, reads the artifact again, and prepares the next
-   attempt against what it reads. Pin requests are prepared at each click
-   from the state shown, the same way.
+   attempt against what it reads, title included. Pin requests are
+   prepared at each click from the state shown, the same way. A failure
+   that may have committed (as 0007 decision 8 defines for saves) is shown
+   as an unknown outcome, not as "not changed": the update may have been
+   made, and sending it again applies it at most once. For a pin, that
+   notice goes once the page reads newer metadata, which shows what the
+   update did; another click is then a new request.
 6. **This page's own updates.** The answer's version is learned as known
    (0007 decision 4), so the notice for it reads nothing more; learning it
    makes the open artifact read its metadata and history once, and the list
