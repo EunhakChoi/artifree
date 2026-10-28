@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { expect } from '@playwright/test';
-import { api, bytes } from './smoke-workspace.mjs';
+import { forgeReset } from './smoke-history.mjs';
+import { api, bytes, hold } from './smoke-workspace.mjs';
 
 /**
  * Browser checks for the code workspace (decision 0017) against a real
@@ -207,6 +208,51 @@ export async function checkEditor({
       workspace.locator('iframe[title="Saved revision 3 of Editor demo"]'),
     ).toBeVisible();
     await checkAccessibility('editor-saved-preview', tab);
+    await workspace.getByRole('button', { name: 'Hide saved preview' }).click();
+
+    // A possible replacement of the server's data while moved bytes are
+    // read: revision 3 may now name other content, so nothing is sent.
+    await fileButton('assets/logo.png').click();
+    await panel.getByRole('button', { name: 'Rename file' }).click();
+    const late = tab.getByRole('dialog', { name: 'Rename assets/logo.png' });
+    await late.getByLabel('Path').fill('logo.png');
+    await late.getByRole('button', { name: 'Rename' }).click();
+    const posts = [];
+    const recordPost = (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/revisions'))
+        posts.push(request.url());
+    };
+    tab.on('request', recordPost);
+    const releaseRead = await hold(
+      tab,
+      'GET',
+      `**${source}/revisions/3/files/assets/logo.png`,
+    );
+    await save.click();
+    await expect(
+      workspace.getByRole('button', { name: 'Saving…' }),
+    ).toBeVisible();
+    await forgeReset(tab);
+    await expect(
+      workspace.getByText("The server's data may have been replaced"),
+    ).toBeVisible();
+    await releaseRead();
+    await expect(save).toBeDisabled();
+    await expect(
+      workspace.getByRole('alert').filter({ hasText: 'Not saved' }),
+    ).toBeHidden();
+    tab.off('request', recordPost);
+    assert.deepEqual(
+      posts,
+      [],
+      'Nothing is sent after a possible replacement.',
+    );
+    assert.deepEqual(
+      (await api(server, 'GET', `${source}/revisions`)).revisions.map(
+        ({ revision }) => revision,
+      ),
+      [3, 2, 1],
+    );
 
     assert.deepEqual(errors, [], 'Page errors.');
     return { revisions: 3, moved: 'bytes kept', refused: 3 };

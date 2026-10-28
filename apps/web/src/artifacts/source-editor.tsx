@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   ArchiveRestoreIcon,
@@ -144,6 +144,12 @@ export function SourcePanel({
   // reuses the key, so a retry after a lost answer cannot commit twice.
   const [attempt, setAttempt] = useState<{ body: string; key: string }>();
   const [showPreview, setShowPreview] = useState(false);
+  // The page's reset count as last rendered, for a save that awaits reads
+  // before it sends.
+  const resetsNow = useRef(resets);
+  useEffect(() => {
+    resetsNow.current = resets;
+  }, [resets]);
   // Whatever replaces this panel discards its draft, so it must not leave
   // the workspace locked.
   const release = useEffectEvent(() => onUnsavedChange(false));
@@ -172,6 +178,7 @@ export function SourcePanel({
       </p>
     );
   const baseNumber = base.revision.revision;
+  const baseResets = base.resets;
   const draft =
     changes?.base === baseNumber
       ? changes
@@ -232,6 +239,13 @@ export function SourcePanel({
         message: describeFailure(error),
         unknown: false,
       });
+      return;
+    }
+    // The server's data may have been replaced while the moved bytes were
+    // read: the base number may now name other content, so nothing is sent
+    // (0011). The draft says why.
+    if (resetsNow.current !== baseResets) {
+      setSave({ status: 'idle' });
       return;
     }
     const body = JSON.stringify(request);

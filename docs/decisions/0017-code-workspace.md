@@ -57,8 +57,10 @@ unpublished trace maps each to its evidence.
    deletes `a` and puts at `b` what `a` holds in the draft: its edited
    text, or a reference to the base file, read only when the draft is
    saved. The base revision is pinned and never changes, so the bytes
-   read then are those the draft was written against. If one cannot be
-   read, nothing is sent. Moving a file back to its base path is no
+   read then are those the draft was written against, unless the
+   server's data was replaced meanwhile. If one cannot be read, or if the
+   page learns of a possible replacement (0011) while they are read,
+   nothing is sent, and the draft says why. Moving a file back to its base path is no
    change.
 4. **One save, one request.** Saving sends every change, in path order,
    as one `POST /v1/artifacts/{id}/revisions` with the draft's base
