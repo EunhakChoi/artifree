@@ -30,8 +30,11 @@ import {
 } from '@/components/ui/native-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
+import { refusedFloor, useWriteGate } from './conditional-write';
 import { fromEditable, toEditable } from './editable-text';
+import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
+import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { Version } from './use-live-workspace';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
@@ -99,9 +102,6 @@ export function ArtifactDetail({
   // known before.
   const [target, setTarget] = useState({ epoch, version: known });
   const targetVersion = target.epoch === epoch ? target.version : undefined;
-  // A revision chosen for the preview, kept across tabs; none follows the
-  // latest.
-  const [chosen, setChosen] = useState<number>();
   const details = useRequest<Loaded>(
     `${artifactId}:${generation}:${epoch}:${targetVersion?.revision}:${targetVersion?.metadata}:${unknownChanges}`,
     async (signal) => {
@@ -138,6 +138,25 @@ export function ArtifactDetail({
   function reload(): void {
     setGeneration((value) => value + 1);
   }
+  // Conditional writes share a gate per kind of version (decision 0011,
+  // item 6): pin and rename the metadata revision; restore and save the
+  // source revision. The gates live here, so what they learned and a
+  // restore's key outlive the history tab.
+  const metadataGate = useWriteGate(resets);
+  const sourceGate = useWriteGate(resets);
+  const restore = useRestore(
+    client,
+    artifactId,
+    sourceGate,
+    (restored) => {
+      reload();
+      onSaved(restored);
+    },
+    reload,
+  );
+  // A revision chosen for the preview, kept across tabs; none follows the
+  // latest. It belongs to the read it was chosen from.
+  const [chosen, setChosen] = useChoice<number>(shown?.resets ?? resets);
   if (details.status === 'loading')
     return (
       <output className="text-sm text-muted-foreground">
@@ -160,6 +179,14 @@ export function ArtifactDetail({
   const { artifact, revisions } = shown;
   // A save or "Load latest" asked for a newer state that has not arrived.
   const reloading = shown.generation !== generation;
+  // What is shown was read before the server's data may have been
+  // replaced. It is read again; meanwhile nothing is read or written for
+  // it (decision 0011, items 6 and 9).
+  const stale = shown.resets !== resets;
+  const metadataWait = (version: number) =>
+    metadataGate.wait(version, known?.metadata, shown.resets);
+  const sourceWait = (version: number) =>
+    sourceGate.wait(version, known?.revision, shown.resets);
   return (
     <Card>
       <CardHeader>
@@ -177,6 +204,9 @@ export function ArtifactDetail({
             <MetadataActions
               client={client}
               artifact={artifact}
+              gate={metadataGate}
+              wait={metadataWait}
+              resets={resets}
               onUpdated={onMetadataChanged}
               onConflict={reload}
             />
@@ -185,6 +215,13 @@ export function ArtifactDetail({
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-4">
+          {stale ? (
+            <output className="text-sm text-muted-foreground">
+              Reading the artifact again: the server&apos;s data may have
+              changed wholesale. Pin, rename, restore, previews, and comparisons
+              wait until it is read.
+            </output>
+          ) : null}
           {details.status === 'error' ? (
             <Alert variant="destructive">
               <AlertTitle>Could not refresh the artifact</AlertTitle>
@@ -209,6 +246,7 @@ export function ArtifactDetail({
             <TabsList aria-label="Artifact views">
               <TabsTrigger value="preview">Preview</TabsTrigger>
               <TabsTrigger value="source">Source</TabsTrigger>
+              <TabsTrigger value="history">History</TabsTrigger>
             </TabsList>
             <TabsContent value="preview" className="mt-4">
               <PreviewPanel
@@ -216,8 +254,22 @@ export function ArtifactDetail({
                 artifact={artifact}
                 revisions={revisions}
                 epoch={shown.epoch}
+                stale={stale}
                 chosen={chosen}
                 onChoose={setChosen}
+              />
+            </TabsContent>
+            <TabsContent value="history" className="mt-4">
+              <HistoryPanel
+                client={client}
+                artifact={artifact}
+                revisions={revisions}
+                epoch={shown.epoch}
+                shownResets={shown.resets}
+                resets={resets}
+                unsaved={unsaved}
+                restore={restore}
+                wait={sourceWait}
               />
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
@@ -225,6 +277,12 @@ export function ArtifactDetail({
                 client={client}
                 loaded={shown}
                 resets={resets}
+                known={known?.revision}
+                onRefused={(base, current) => {
+                  // A restore names the same source revision as a save.
+                  const floor = refusedFloor(base, current);
+                  if (floor !== undefined) sourceGate.refuse(floor);
+                }}
                 onSaved={(saved) => {
                   onUnsavedChange(false);
                   reload();
@@ -252,6 +310,8 @@ interface PreviewPanelProps {
   artifact: Artifact;
   revisions: Revision[];
   epoch: number;
+  /** Whether what is shown predates a possible data replacement. */
+  stale: boolean;
   /** A revision chosen for the preview; none follows the latest. */
   chosen: number | undefined;
   onChoose: (revision: number | undefined) => void;
@@ -262,19 +322,22 @@ function PreviewPanel({
   artifact,
   revisions,
   epoch,
+  stale,
   chosen,
   onChoose,
 }: PreviewPanelProps) {
   const latest = artifact.current_revision;
-  // A chosen revision that is no longer listed, as after a reset to older
-  // data, falls back to the latest.
+  // A chosen revision that is not listed falls back to the latest.
   const kept =
     chosen !== undefined && revisions.some((item) => item.revision === chosen)
       ? chosen
       : undefined;
   const revision = kept ?? latest;
-  const preview = useRequest(`${artifact.id}:${revision}:${epoch}`, (signal) =>
-    client.createPreview(artifact.id, revision, { signal }),
+  // No preview is prepared for metadata that predates a possible data
+  // replacement, and none prepared meanwhile is shown.
+  const preview = useRequest(
+    stale ? undefined : `${artifact.id}:${revision}:${epoch}`,
+    (signal) => client.createPreview(artifact.id, revision, { signal }),
   );
   return (
     <div className="flex flex-col gap-4">
@@ -305,7 +368,9 @@ function PreviewPanel({
       </FieldGroup>
       {preview.status === 'loading' ? (
         <output className="text-sm text-muted-foreground">
-          Preparing preview…
+          {stale
+            ? 'The preview is prepared once the artifact is read again.'
+            : 'Preparing preview…'}
         </output>
       ) : null}
       {preview.status === 'error' ? (
@@ -346,7 +411,11 @@ interface SourcePanelProps {
   loaded: Loaded;
   /** The page's reset count now. */
   resets: number;
+  /** The newest revision a notice or list reported, if any. */
+  known: number | undefined;
   onSaved: (artifact: Artifact) => void;
+  /** A save against `base` was refused as stale. */
+  onRefused: (base: number, current: number | undefined) => void;
   onLoadLatest: () => void;
   unsaved: boolean;
   onUnsavedChange: (unsaved: boolean) => void;
@@ -358,7 +427,9 @@ function SourcePanel({
   client,
   loaded,
   resets,
+  known,
   onSaved,
+  onRefused,
   onLoadLatest,
   unsaved,
   onUnsavedChange,
@@ -380,11 +451,21 @@ function SourcePanel({
   const textFiles = (base?.revision.files ?? []).filter((file) =>
     TEXT_TYPES.test(file.media_type),
   );
+  // Without a draft, nothing is read for metadata that predates a possible
+  // data replacement, and nothing read meanwhile is shown. A draft stays
+  // (0007 decision 8).
+  const waiting = held === undefined && loaded.resets !== resets;
   const [chosen, setChosen] = useState('index.html');
   // The chosen file may be gone after loading a revision saved elsewhere.
   const path = textFiles.some((file) => file.path === chosen)
     ? chosen
     : 'index.html';
+  if (waiting)
+    return (
+      <output className="text-sm text-muted-foreground">
+        The source is read once the artifact is read again.
+      </output>
+    );
   if (base === undefined || textFiles.length === 0)
     return (
       <p className="text-sm text-muted-foreground">
@@ -422,10 +503,13 @@ function SourcePanel({
         artifactId={artifact.id}
         base={base.revision.revision}
         epoch={base.epoch}
-        latest={artifact.current_revision}
+        // A newer revision a notice reported counts as soon as it is
+        // known, also if reading it failed.
+        latest={Math.max(artifact.current_revision, known ?? 0)}
         replaced={held !== undefined && held.resets !== resets}
         path={path}
         onSaved={onSaved}
+        onRefused={onRefused}
         onLoadLatest={onLoadLatest}
         onDraftChange={(draft) => {
           setHeld(draft ? base : undefined);
@@ -444,12 +528,13 @@ interface FileEditorProps {
   base: number;
   /** The feed epoch `base` was read in. */
   epoch: number;
-  /** The artifact's newest revision as last read. */
+  /** The artifact's newest revision as the page knows it. */
   latest: number;
   /** The server's data may have been replaced since `base` was read. */
   replaced: boolean;
   path: string;
   onSaved: (artifact: Artifact) => void;
+  onRefused: (base: number, current: number | undefined) => void;
   onLoadLatest: () => void;
   onDraftChange: (draft: boolean) => void;
   reloading: boolean;
@@ -475,6 +560,7 @@ function FileEditor({
   replaced,
   path,
   onSaved,
+  onRefused,
   onLoadLatest,
   onDraftChange,
   reloading,
@@ -576,9 +662,10 @@ function FileEditor({
       if (
         error instanceof ArtifreeApiError &&
         error.code === 'revision_conflict'
-      )
+      ) {
         setSave({ status: 'conflict', current: error.currentRevision });
-      else
+        onRefused(base, error.currentRevision);
+      } else
         setSave({
           status: 'failed',
           message: describeFailure(error),

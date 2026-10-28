@@ -67,7 +67,10 @@ unpublished trace maps each to its evidence.
    as an unknown outcome, not as "not changed": the update may have been
    made, and sending it again applies it at most once. For a pin, that
    notice goes once the page reads newer metadata, which shows what the
-   update did; another click is then a new request.
+   update did; another click is then a new request. (Amended by
+   [0011](0011-web-history-and-restore.md) decision 6: no pin or rename is
+   prepared from metadata older than the page has learned of, and the two
+   are sent one at a time.)
 6. **This page's own updates.** The answer's version is learned as known
    (0007 decision 4), so the notice for it reads nothing more; learning it
    makes the open artifact read its metadata and history once, and the list

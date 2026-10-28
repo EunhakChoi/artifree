@@ -1,10 +1,8 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { PencilIcon, PinIcon } from 'lucide-react';
-import { ArtifreeApiError, newIdempotencyKey } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Artifact, UpdateArtifactRequest } from '@artifree/contracts';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -18,107 +16,51 @@ import {
 } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { describeFailure, mayHaveCommitted } from './use-request';
+import {
+  ReplacedNotice,
+  WriteNotice,
+  retryable,
+  useConditionalWrite,
+} from './conditional-write';
+import type { WriteGate } from './conditional-write';
+import type { Wait } from './write-gate';
 
-type UpdateState =
-  | { readonly status: 'idle' }
-  | { readonly status: 'updating' }
-  | { readonly status: 'conflict' }
-  | {
-      readonly status: 'failed';
-      readonly message: string;
-      /** The answer was lost: the update may have been made. */
-      readonly unknown: boolean;
-      /** The metadata revision the update was prepared against. */
-      readonly base: number;
-    };
+const CHANGED = 'The title or pin';
 
-/**
- * Sends metadata updates for one artifact (decision 0008). Sending the same
- * request again, base included, reuses its key, so a retry after a lost
- * answer cannot apply twice; any other request gets a new key.
- */
+/** Renames or pins one artifact (decision 0008) through the metadata gate. */
 function useMetadataUpdate(
   client: ArtifreeClient,
   artifactId: string,
+  gate: WriteGate,
   onUpdated: (artifact: Artifact) => void,
   onConflict: () => void,
 ) {
-  const [state, setState] = useState<UpdateState>({ status: 'idle' });
-  const [attempt, setAttempt] = useState<{ body: string; key: string }>();
-  async function update(request: UpdateArtifactRequest): Promise<boolean> {
-    const body = JSON.stringify(request);
-    const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
-    setAttempt({ body, key });
-    setState({ status: 'updating' });
-    try {
-      const result = await client.updateArtifact(artifactId, request, {
-        idempotencyKey: key,
-      });
-      setState({ status: 'idle' });
-      onUpdated(result.artifact);
-      return true;
-    } catch (error: unknown) {
-      if (
-        error instanceof ArtifreeApiError &&
-        error.code === 'metadata_conflict'
-      ) {
-        setState({ status: 'conflict' });
-        onConflict();
-      } else
-        setState({
-          status: 'failed',
-          message: describeFailure(error),
-          unknown: mayHaveCommitted(error),
-          base: request.base_metadata_revision,
-        });
-      return false;
-    }
-  }
-  return { state, update, clear: () => setState({ status: 'idle' }) };
+  return useConditionalWrite({
+    gate,
+    send: (request: UpdateArtifactRequest, idempotencyKey: string) =>
+      client.updateArtifact(artifactId, request, { idempotencyKey }),
+    base: (request) => request.base_metadata_revision,
+    conflict: 'metadata_conflict',
+    current: (error) => error.currentMetadataRevision,
+    onDone: (result) => onUpdated(result.artifact),
+    onConflict,
+  });
 }
 
-function UpdateOutcome({
-  state,
-  action,
-}: {
-  state: UpdateState;
-  action: string;
-}) {
-  if (state.status === 'conflict')
-    return (
-      <Alert>
-        <AlertTitle>Changed elsewhere</AlertTitle>
-        <AlertDescription>
-          The title or pin changed since this page read it, so nothing was
-          changed. The page reads the latest; {action} again if you still want
-          to.
-        </AlertDescription>
-      </Alert>
-    );
-  if (state.status === 'failed' && state.unknown)
-    return (
-      <Alert variant="destructive">
-        <AlertTitle>Outcome unknown</AlertTitle>
-        <AlertDescription>
-          {state.message} The change may have been made. To retry, {action}{' '}
-          again: the same request is sent and applies at most once.
-        </AlertDescription>
-      </Alert>
-    );
-  if (state.status === 'failed')
-    return (
-      <Alert variant="destructive">
-        <AlertTitle>Not changed</AlertTitle>
-        <AlertDescription>{state.message}</AlertDescription>
-      </Alert>
-    );
-  return null;
+/** A wait that the card already explains. */
+function explained(wait: Wait | undefined): Wait | undefined {
+  return wait === 'replaced' ? undefined : wait;
 }
 
 interface MetadataActionsProps {
   client: ArtifreeClient;
   artifact: Artifact;
+  /** Shared by pin and rename, which name the same metadata revision. */
+  gate: WriteGate;
+  /** Why a metadata write prepared against a revision would wait. */
+  wait: (metadataRevision: number) => Wait | undefined;
+  /** How often the server's data may have been replaced so far. */
+  resets: number;
   /** Called with the artifact as the update left it. */
   onUpdated: (artifact: Artifact) => void;
   /** Called when another update won; the view reads the latest. */
@@ -129,13 +71,25 @@ interface MetadataActionsProps {
  * Pins and renames the open artifact. Neither creates a source revision,
  * so both stay available while the editor holds a draft.
  */
-export function MetadataActions({
-  client,
-  artifact,
-  onUpdated,
-  onConflict,
-}: MetadataActionsProps) {
-  const pin = useMetadataUpdate(client, artifact.id, onUpdated, onConflict);
+export function MetadataActions(props: MetadataActionsProps) {
+  const { client, artifact, gate, wait, onUpdated, onConflict } = props;
+  const pin = useMetadataUpdate(
+    client,
+    artifact.id,
+    gate,
+    onUpdated,
+    onConflict,
+  );
+  const version = artifact.metadata_revision;
+  const waiting = wait(version);
+  // Once the page shows newer metadata, it shows what a lost update did,
+  // and pinning again is a new request.
+  const outcome =
+    pin.state.status === 'failed' &&
+    pin.state.unknown &&
+    pin.state.base !== version
+      ? { status: 'idle' as const }
+      : pin.state;
   return (
     <div className="flex flex-col items-end gap-2">
       <div className="flex flex-wrap justify-end gap-2">
@@ -144,10 +98,10 @@ export function MetadataActions({
           variant="outline"
           size="sm"
           aria-pressed={artifact.pinned}
-          disabled={pin.state.status === 'updating'}
+          disabled={waiting !== undefined}
           onClick={() =>
-            void pin.update({
-              base_metadata_revision: artifact.metadata_revision,
+            void pin.write({
+              base_metadata_revision: version,
               pinned: !artifact.pinned,
             })
           }
@@ -155,55 +109,79 @@ export function MetadataActions({
           <PinIcon data-icon="inline-start" aria-hidden="true" />
           Pin
         </Button>
-        <RenameDialog
-          client={client}
-          artifact={artifact}
-          onUpdated={onUpdated}
-          onConflict={onConflict}
-        />
+        <RenameDialog {...props} />
       </div>
-      {/* Once the page reads newer metadata, it shows what a lost update
-          did, and pinning again would be a new request. */}
-      {pin.state.status === 'failed' &&
-      pin.state.unknown &&
-      pin.state.base !== artifact.metadata_revision ? null : (
-        <UpdateOutcome state={pin.state} action="pin or unpin" />
-      )}
+      <WriteNotice
+        state={outcome}
+        action="pin or unpin"
+        changed={CHANGED}
+        behind={false}
+        waiting={explained(waiting)}
+      />
     </div>
   );
+}
+
+/** What a rename is prepared from: the artifact as a read showed it. */
+interface Prepared {
+  readonly base: number;
+  readonly title: string;
+  /** The page's count of possible data replacements then. */
+  readonly resets: number;
 }
 
 function RenameDialog({
   client,
   artifact,
+  gate,
+  wait,
+  resets,
   onUpdated,
   onConflict,
 }: MetadataActionsProps) {
+  const latest = artifact.metadata_revision;
   const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState(artifact.title);
-  // The artifact as the dialog opened on it. A rename is prepared against
-  // it, so a retry after a lost answer is the same request even when the
-  // view has meanwhile read that the rename took effect. After a conflict,
-  // the next rename is prepared against the latest read and title.
-  const [opened, setOpened] = useState<{
-    base: number | undefined;
-    title: string | undefined;
-  }>({
-    base: artifact.metadata_revision,
+  const [prepared, setPrepared] = useState<Prepared>({
+    base: latest,
     title: artifact.title,
+    resets,
   });
-  const rename = useMetadataUpdate(client, artifact.id, onUpdated, () => {
-    setOpened({ base: undefined, title: undefined });
-    onConflict();
-  });
-  const pending = rename.state.status === 'updating';
+  // The title typed since the dialog opened, if any. Until the user types,
+  // the field shows the title the request is prepared from.
+  const [typed, setTyped] = useState<string>();
+  const rename = useMetadataUpdate(
+    client,
+    artifact.id,
+    gate,
+    onUpdated,
+    onConflict,
+  );
+  // A request is prepared from the artifact as the dialog opened on it, so
+  // a retry after a lost answer is the same request. Once the page has
+  // learned of newer metadata and shows it, the next request is prepared
+  // from that instead, and the notice says why.
+  const learned = wait(prepared.base);
+  const retry = retryable(rename.state, prepared.base, learned);
+  const behind = !retry && (learned === 'refused' || learned === 'newer');
+  const from: Prepared =
+    behind && wait(latest) === undefined
+      ? { base: latest, title: artifact.title, resets }
+      : prepared;
+  const replaced = prepared.resets !== resets;
+  const pending = rename.state.status === 'sending';
+  const title = typed ?? from.title;
+  const sendable =
+    !replaced &&
+    (retry || wait(from.base) === undefined) &&
+    title.trim() !== '' &&
+    title.trim() !== from.title;
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    const base = opened.base ?? artifact.metadata_revision;
-    setOpened((current) => ({ ...current, base }));
-    const request = { base_metadata_revision: base, title: title.trim() };
-    if (await rename.update(request)) setOpen(false);
+    if (!sendable) return;
+    setPrepared(from);
+    const request = { base_metadata_revision: from.base, title: title.trim() };
+    if ((await rename.write(request)) === 'done') setOpen(false);
   }
 
   return (
@@ -213,17 +191,22 @@ function RenameDialog({
         // Stay open until the request settles, so its outcome is seen.
         if (pending) return;
         if (next) {
-          setTitle(artifact.title);
-          setOpened({
-            base: artifact.metadata_revision,
-            title: artifact.title,
-          });
+          setPrepared({ base: latest, title: artifact.title, resets });
+          setTyped(undefined);
           rename.clear();
         }
         setOpen(next);
       }}
     >
-      <DialogTrigger render={<Button variant="outline" size="sm" />}>
+      <DialogTrigger
+        render={
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={wait(latest) === 'replaced'}
+          />
+        }
+      >
         <PencilIcon data-icon="inline-start" aria-hidden="true" />
         Rename
       </DialogTrigger>
@@ -249,27 +232,31 @@ function RenameDialog({
                 readOnly={pending}
                 value={title}
                 onChange={(event) => {
-                  setTitle(event.target.value);
+                  setTyped(event.target.value);
                   rename.clear();
                 }}
               />
             </Field>
           </FieldGroup>
-          <UpdateOutcome state={rename.state} action="rename" />
+          {/* Nothing is sent again for data that may have been replaced. */}
+          {replaced ? (
+            <ReplacedNotice state={rename.state} />
+          ) : (
+            <WriteNotice
+              state={rename.state}
+              action="rename"
+              changed={CHANGED}
+              behind={behind}
+              waiting={explained(wait(from.base))}
+            />
+          )}
           <DialogFooter>
             <DialogClose
               render={<Button variant="outline" disabled={pending} />}
             >
               Cancel
             </DialogClose>
-            <Button
-              type="submit"
-              disabled={
-                pending ||
-                title.trim() === '' ||
-                title.trim() === (opened.title ?? artifact.title)
-              }
-            >
+            <Button type="submit" disabled={!sendable}>
               {pending ? 'Renaming…' : 'Rename'}
             </Button>
           </DialogFooter>

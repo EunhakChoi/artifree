@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
+import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
@@ -235,6 +236,12 @@ try {
     server: api,
     checkAccessibility,
   });
+  const history = await checkHistory({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -399,6 +406,7 @@ try {
     workspace,
     live,
     list,
+    history,
     artifactConsole,
     expectedApiFailures,
     pageErrors,
