@@ -48,6 +48,21 @@ No domain test exists merely to repeat a field declaration.
 Artifact behavior is tested at the boundary that owns it:
 
 - `crates/artifree-domain`: path, identifier, and package validation.
+- `crates/artifree-server/tests/package_paths.rs` and
+  `scripts/tests/package-path.test.mjs`: every case of
+  `contracts/fixtures/package-paths.json` judged alike by the domain and by
+  the web's copy of its path rules, in the domain's order (length in UTF-8
+  bytes, characters, depth, segments, dots, reserved names, extensions);
+  `descriptor_cli.rs` checks that `--package-rules` prints the limits and
+  media types the domain enforces.
+- `scripts/tests/source-draft.test.mjs`: bundles the web's draft rules. A
+  rename moves base bytes unread and is undone by moving back; renamed
+  edited text keeps its text, and a renamed new file leaves no deletion;
+  text back at its original is no change, text a rename brought always is;
+  saved text keeps CRLF and a byte order mark; the reasons the server would
+  refuse a draft (an invalid path, a case collision, a file under a file, a
+  missing `index.html`, too many files, a moved file too large) are named
+  and go away with their cause.
 - `crates/artifree-core/src/parts.rs`: parts of a file cut exactly at bytes
   with the whole file's size and digest; the end as an empty part and past
   it refused; for every offset and length over a text of 1- to 4-byte
@@ -234,7 +249,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   save, and reload requests held in flight keep the forms read-only and the
   dialog open; a response lost after commit is retried with the same key and
   replays; a failed load offers a retry; a failed list refresh keeps the open
-  draft; unsaved changes lock navigation;
+  draft; unsaved changes lock choosing another artifact;
   non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
   line breaks; a rejected token also stops live updates; an empty workspace
   says so and still offers the trash.
@@ -319,7 +334,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the artifact with the order shown then; an open artifact listed first and
   moved elsewhere closes with a notice, and the next one outside the trash
   opens, before the list is read again; with a draft it stays open, cannot
-  be saved, and neither previews nor reads its history; with the feed cut,
+  be saved, neither previews nor reads its history, and offers no file to
+  open, add, or move; with the feed cut,
   a refused recovery reads the artifact once and is sent again from the
   revision the refusal named, the draft editable throughout, or finds it
   recovered elsewhere and the draft savable again; recovered, it previews
@@ -329,6 +345,17 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   nor says what it did; a recovery answered after the page left the trash
   keeps a draft written meanwhile. The dialog, the trash, and the draft
   notice are checked for accessibility.
+- `scripts/smoke-editor.mjs`, in its own browser context: a draft spans
+  files, which can be switched while it exists; a rename dialog refuses an
+  extension the server does not serve and a path that differs from another
+  only by case; a binary file renamed, a file added, a file deleted, and
+  `index.html` renamed away (which disables saving) and back; a moved file
+  whose read fails sends nothing; the draft is saved as one revision, whose
+  moved file has its exact bytes and whose edit keeps CRLF; a revision saved
+  elsewhere through the API leaves the draft, saving it is refused, and
+  "Load latest" replaces it; the saved revision is previewed beside the
+  editor. The path dialog, the draft's problems, and the side-by-side
+  preview are checked for accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

@@ -1,0 +1,173 @@
+{
+  "description": "Package paths and how the server judges them (decision 0017): null for a valid path, otherwise the PathError variant. Checked by crates/artifree-server/tests/package_paths.rs and scripts/tests/package-path.test.mjs.",
+  "cases": [
+    {
+      "path": "index.html",
+      "error": null
+    },
+    {
+      "path": "assets/app.js",
+      "error": null
+    },
+    {
+      "path": "A/B/c.CSS",
+      "error": null
+    },
+    {
+      "path": "notes.md",
+      "error": null
+    },
+    {
+      "path": "data.JSON",
+      "error": null
+    },
+    {
+      "path": "x.htm",
+      "error": null
+    },
+    {
+      "path": "font.woff2",
+      "error": null
+    },
+    {
+      "path": "con.d/x.txt",
+      "error": "Reserved"
+    },
+    {
+      "path": "console.txt",
+      "error": null
+    },
+    {
+      "path": "com10.txt",
+      "error": null
+    },
+    {
+      "path": "a-b_c.d.txt",
+      "error": null
+    },
+    {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "error": null
+    },
+    {
+      "path": "d/d/d/d/d/d/d/x.css",
+      "error": null
+    },
+    {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccc.txt",
+      "error": null
+    },
+    {
+      "path": "",
+      "error": "Length"
+    },
+    {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccc.txtx",
+      "error": "Length"
+    },
+    {
+      "path": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.txt",
+      "error": "Length"
+    },
+    {
+      "path": "a b.txt",
+      "error": "Character"
+    },
+    {
+      "path": "ünï.txt",
+      "error": "Character"
+    },
+    {
+      "path": "a\\b.txt",
+      "error": "Character"
+    },
+    {
+      "path": "a:b.txt",
+      "error": "Character"
+    },
+    {
+      "path": "%2e.txt",
+      "error": "Character"
+    },
+    {
+      "path": "d/d/d/d/d/d/d/d/x.css",
+      "error": "Depth"
+    },
+    {
+      "path": "a//b.txt",
+      "error": "Segment"
+    },
+    {
+      "path": "/a.txt",
+      "error": "Segment"
+    },
+    {
+      "path": "a/",
+      "error": "Segment"
+    },
+    {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "error": "Segment"
+    },
+    {
+      "path": ".hidden.txt",
+      "error": "Dot"
+    },
+    {
+      "path": "a/..",
+      "error": "Dot"
+    },
+    {
+      "path": "a/./b.txt",
+      "error": "Dot"
+    },
+    {
+      "path": "name.",
+      "error": "Dot"
+    },
+    {
+      "path": "dir./x.txt",
+      "error": "Dot"
+    },
+    {
+      "path": "con.txt",
+      "error": "Reserved"
+    },
+    {
+      "path": "NUL",
+      "error": "Reserved"
+    },
+    {
+      "path": "a/aux.css",
+      "error": "Reserved"
+    },
+    {
+      "path": "com1.js",
+      "error": "Reserved"
+    },
+    {
+      "path": "LPT9.md",
+      "error": "Reserved"
+    },
+    {
+      "path": "prn.x.txt",
+      "error": "Reserved"
+    },
+    {
+      "path": "readme",
+      "error": "Extension"
+    },
+    {
+      "path": "app.exe",
+      "error": "Extension"
+    },
+    {
+      "path": "a.tar.gz",
+      "error": "Extension"
+    },
+    {
+      "path": "dir.css/file",
+      "error": "Extension"
+    }
+  ]
+}

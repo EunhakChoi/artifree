@@ -28,10 +28,28 @@ fn descriptor_is_machine_readable_and_exits_without_serving() -> Result<(), Box<
 }
 
 #[test]
+fn package_rules_are_the_rules_the_domain_enforces() -> Result<(), Box<dyn Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_artifree-server"))
+        .arg("--package-rules")
+        .output()?;
+    assert!(output.status.success(), "Failed: {:?}", output.stderr);
+    assert!(output.stderr.is_empty(), "Errors: {:?}", output.stderr);
+    let rules: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(rules["entry_path"], "index.html");
+    assert_eq!(rules["max_files"], 256);
+    assert_eq!(rules["max_file_bytes"], 5 * 1024 * 1024);
+    assert_eq!(rules["media_types"]["htm"], "text/html; charset=utf-8");
+    assert_eq!(rules["media_types"]["woff2"], "font/woff2");
+    assert!(rules["media_types"]["exe"].is_null());
+    Ok(())
+}
+
+#[test]
 fn invalid_arguments_fail_without_success_output() -> Result<(), Box<dyn Error>> {
     for args in [
         ["--serve", ""],
         ["--describe", "extra"],
+        ["--package-rules", "--describe"],
         ["--version", "--describe"],
         ["serve", "--unknown"],
         ["serve", "--data-dir"],

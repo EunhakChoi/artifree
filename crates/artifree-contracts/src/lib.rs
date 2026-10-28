@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod mcp;
+pub mod package;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

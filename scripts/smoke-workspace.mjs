@@ -162,9 +162,12 @@ fetch('${origin}/v1/artifacts').then(
   // Unsaved changes lock navigation that would replace the editor, and a save
   // in flight keeps it read-only: text typed meanwhile would be missing from
   // the request and dropped when the editor reloads the committed revision.
-  const fileSelect = workspace.getByLabel('File', { exact: true });
+  const files = workspace.getByRole('navigation', { name: 'Files' });
+  const fileButton = (path) =>
+    files.getByRole('button', {
+      name: new RegExp(`^${path.replaceAll('.', '\\.')}( |$)`),
+    });
   await editor.fill(probe('Revision four'));
-  await expect(fileSelect).toBeDisabled();
   await expect(
     workspace.getByRole('button', { name: 'Disconnect' }),
   ).toBeDisabled();
@@ -180,7 +183,6 @@ fetch('${origin}/v1/artifacts').then(
   ).toBeVisible();
   await expect(editor).toBeEditable();
   await expect(editor).toHaveValue(/Revision four/);
-  await expect(fileSelect).toBeEnabled();
 
   // A save whose response is lost after the commit: retrying the same text,
   // even after an edit that was undone, replays revision 5 instead of
@@ -269,12 +271,12 @@ fetch('${origin}/v1/artifacts').then(
     workspace.getByText('Revision 6', { exact: true }),
   ).toBeVisible();
   await workspace.getByRole('tab', { name: 'Source' }).click();
-  await fileSelect.selectOption('legacy.html');
+  await fileButton('legacy.html').click();
   await expect(
     workspace.getByText('legacy.html cannot be edited here'),
   ).toBeVisible();
   await checkAccessibility('workspace-not-editable');
-  await fileSelect.selectOption('notes.txt');
+  await fileButton('notes.txt').click();
   const notes = workspace.getByLabel('notes.txt');
   await expect(notes).toHaveValue('\uFEFFline one\nline two\n');
   await notes.focus();
@@ -284,7 +286,7 @@ fetch('${origin}/v1/artifacts').then(
   await expect(
     workspace.getByText('Revision 7', { exact: true }),
   ).toBeVisible();
-  await expect(fileSelect).toHaveValue('notes.txt');
+  await expect(fileButton('notes.txt')).toHaveAttribute('aria-current', 'true');
   assert.deepEqual(
     await bytes(server, `/v1/artifacts/${id}/revisions/7/files/notes.txt`),
     Buffer.from('\uFEFFline one\r\nline two\r\nline three'),
@@ -357,7 +359,7 @@ async function typeAndUndo(field) {
   await field.press('Backspace');
 }
 
-async function bytes(server, path) {
+export async function bytes(server, path) {
   const response = await fetch(`${server.api_url}${path}`, {
     headers: { authorization: `Bearer ${server.token}` },
   });

@@ -116,30 +116,40 @@ pub enum MediaType {
 }
 
 impl MediaType {
+    /// Every supported file extension, in lowercase, with its media type.
+    /// Extensions match without regard to ASCII case.
+    pub const EXTENSIONS: &'static [(&'static str, Self)] = &[
+        ("html", Self::Html),
+        ("htm", Self::Html),
+        ("css", Self::Css),
+        ("js", Self::JavaScript),
+        ("mjs", Self::JavaScript),
+        ("json", Self::Json),
+        ("map", Self::Json),
+        ("svg", Self::Svg),
+        ("png", Self::Png),
+        ("jpg", Self::Jpeg),
+        ("jpeg", Self::Jpeg),
+        ("gif", Self::Gif),
+        ("webp", Self::Webp),
+        ("avif", Self::Avif),
+        ("ico", Self::Icon),
+        ("txt", Self::Text),
+        ("md", Self::Markdown),
+        ("csv", Self::Csv),
+        ("woff", Self::Woff),
+        ("woff2", Self::Woff2),
+        ("ttf", Self::Ttf),
+        ("otf", Self::Otf),
+        ("wasm", Self::Wasm),
+        ("xml", Self::Xml),
+    ];
+
     fn from_extension(extension: &str) -> Option<Self> {
-        Some(match extension.to_ascii_lowercase().as_str() {
-            "html" | "htm" => Self::Html,
-            "css" => Self::Css,
-            "js" | "mjs" => Self::JavaScript,
-            "json" | "map" => Self::Json,
-            "svg" => Self::Svg,
-            "png" => Self::Png,
-            "jpg" | "jpeg" => Self::Jpeg,
-            "gif" => Self::Gif,
-            "webp" => Self::Webp,
-            "avif" => Self::Avif,
-            "ico" => Self::Icon,
-            "txt" => Self::Text,
-            "md" => Self::Markdown,
-            "csv" => Self::Csv,
-            "woff" => Self::Woff,
-            "woff2" => Self::Woff2,
-            "ttf" => Self::Ttf,
-            "otf" => Self::Otf,
-            "wasm" => Self::Wasm,
-            "xml" => Self::Xml,
-            _ => return None,
-        })
+        Self::EXTENSIONS
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(extension))
+            .map(|&(_, media_type)| media_type)
     }
 
     /// The `Content-Type` value, with a UTF-8 charset for text formats.

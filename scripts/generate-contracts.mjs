@@ -43,8 +43,25 @@ const inventory = JSON.parse(
     '--describe',
   ]),
 );
+const packageRulesSchema = schemas.package_rules;
+const packageRules = JSON.parse(
+  run([
+    'run',
+    '--quiet',
+    '--locked',
+    '-p',
+    'artifree-server',
+    '--',
+    '--package-rules',
+  ]),
+);
 const ajv = createAjv();
 const validate = ajv.compile(schema);
+const validatePackageRules = ajv.compile(packageRulesSchema);
+if (!validatePackageRules(packageRules))
+  throw new Error(
+    `Rust package rules violate their schema: ${ajv.errorsText(validatePackageRules.errors)}`,
+  );
 ajv.compile(apiSchema);
 checkMcpCatalog(mcpCatalog);
 if (!validate(inventory))
@@ -97,6 +114,15 @@ const generatedParts = await Promise.all(
     ),
   ),
 );
+const generatedPackageRules = await compile(
+  packageRulesSchema,
+  'PackageRules',
+  {
+    bannerComment:
+      '/* Generated from the rules artifree-server enforces. Run npm run generate:contracts; do not edit. */',
+    style: { singleQuote: true, tabWidth: 2 },
+  },
+);
 const outputs = new Map([
   [
     'contracts/generated/service-description.schema.json',
@@ -109,6 +135,14 @@ const outputs = new Map([
   [
     'contracts/generated/mcp-tools.json',
     `${JSON.stringify(mcpCatalog, null, 2)}\n`,
+  ],
+  [
+    'contracts/generated/package-rules.json',
+    `${JSON.stringify(packageRules, null, 2)}\n`,
+  ],
+  [
+    'packages/contracts/src/generated/package-rules.ts',
+    `${generatedPackageRules}\nexport const packageRules: PackageRules = ${JSON.stringify(packageRules, null, 2)};\n`,
   ],
   [
     'contracts/generated/scaffold-inventory.json',
