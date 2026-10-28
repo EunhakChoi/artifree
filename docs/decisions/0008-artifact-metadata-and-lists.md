@@ -83,7 +83,7 @@ unpublished trace maps each to its evidence.
    change tables are rebuilt because their constraints change; the
    migration keeps the feed's head in `sqlite_sequence`, so cursors stay
    valid and new changes continue after it. A newer schema is still
-   refused.
+   refused. Version 4 adds the latest commit time of decision 8.
 7. **Clients.** `ArtifreeClient.listArtifacts` takes the query and returns
    the page with its token; `updateArtifact` sends the update. `artifree
 artifact list` prints every matching artifact, reading page after page,
@@ -97,13 +97,15 @@ artifact list` prints every matching artifact, reading page after page,
    and the creation order compare times taken from the system clock, which
    can be set back. While the browser checks ran on WSL 2, it moved back
    by over a second between two requests, and an artifact saved last then
-   sorted below older ones. A
-   commit takes the clock's time, or one millisecond after the last commit
-   in the feed when the clock reads that time or earlier, inside the same
-   write transaction. `created_at`, `updated_at`, and `committed_at` then
-   increase with the feed sequence, so the last change sorts first and
-   ties come only from data written before this rule. A clock set back by
-   an hour makes commits an hour ahead of it until it catches up.
+   sorted below older ones. The feed keeps the latest commit time. A
+   commit takes the clock's time, or one millisecond after the latest when
+   the clock reads that time or earlier, and records it, in its write
+   transaction. `created_at`, `updated_at`, and `committed_at` then
+   increase with every commit. Schema version 4 adds the latest commit
+   time, starting at the latest time stored anywhere: times an earlier
+   build stored can be out of order, and those of a version 1 database
+   have no feed entries. A clock set back by an hour makes commits an hour
+   ahead of it until it catches up.
 
 ## Costs and limits
 

@@ -2320,7 +2320,7 @@ const notes = {
   },
   storage: {
     purpose: "메타데이터와 파일 bytes를 환경에 맞게 보관하는 adapter입니다.",
-    exists: "로컬 SQLite 한 파일: WAL·synchronous=FULL, BEGIN IMMEDIATE 조건부 commit, 같은 transaction의 변경 피드 기록, 동일 내용 공유 저장, schema version 확인과 v1→v2 migration.",
+    exists: "로컬 SQLite 한 파일: WAL·synchronous=FULL, BEGIN IMMEDIATE 조건부 commit, 같은 transaction의 변경 피드 기록, 동일 내용 공유 저장, commit 순서를 따르는 commit 시각, schema version 확인과 이전 version migration.",
     next: "PostgreSQL·object storage adapter에 같은 계약 테스트를 적용합니다. blob과 SQL commit 경계를 명시합니다."
   },
   models: {
