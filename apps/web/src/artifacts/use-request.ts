@@ -31,6 +31,20 @@ export function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : 'Unexpected failure.';
 }
 
+/**
+ * Whether a failed write may still have been committed: its answer was lost
+ * or unreadable, or the server or a proxy failed after the request reached
+ * it. A refusal (4xx, including a rate limit) committed nothing.
+ */
+export function mayHaveCommitted(error: unknown): boolean {
+  if (!(error instanceof ArtifreeApiError)) return true;
+  return (
+    error.code === 'network_error' ||
+    error.code === 'invalid_response' ||
+    error.status >= 500
+  );
+}
+
 interface Settled<T> {
   readonly key: string;
   readonly result: RequestState<T>;

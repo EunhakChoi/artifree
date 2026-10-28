@@ -8,6 +8,7 @@ import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
+import { checkListAndMetadata } from './smoke-list.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -112,8 +113,8 @@ const consoleErrors = [];
 const artifactConsole = [];
 const expectedApiFailures = [];
 const externalRequests = [];
-async function checkAccessibility(label) {
-  const report = await new AxeBuilder({ page })
+async function checkAccessibility(label, target = page) {
+  const report = await new AxeBuilder({ page: target })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
     .analyze();
   await writeFile(
@@ -228,6 +229,12 @@ try {
     checkAccessibility,
   });
   const live = await checkLiveUpdates({ browser, origin, server: api });
+  const list = await checkListAndMetadata({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -391,6 +398,7 @@ try {
     downloadedHtml: 'passed',
     workspace,
     live,
+    list,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

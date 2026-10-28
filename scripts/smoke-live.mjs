@@ -17,6 +17,14 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     files: [file('Live 1')],
   });
   const { id } = artifact;
+  // The checks below open the first listed artifact; it must be this one.
+  const [newest] = (await api(server, 'GET', '/v1/artifacts?limit=1'))
+    .artifacts;
+  assert.equal(
+    newest.id,
+    id,
+    `The new artifact must be listed first; ${newest.title} was updated at ${newest.updated_at}, the new one at ${artifact.updated_at}.`,
+  );
   const pages = [];
   const opened = async (options) => {
     const tracked = await open(browser, origin, options);

@@ -199,13 +199,15 @@ fetch('${origin}/v1/artifacts').then(
       json: { error: { code: 'unavailable', message: 'List is busy.' } },
     });
   };
-  await page.route('**/v1/artifacts', failList);
+  // The list is read with a query string; match its path.
+  const listUrl = (url) => url.pathname === '/v1/artifacts';
+  await page.route(listUrl, failList);
   await workspace.getByRole('button', { name: 'Save revision' }).click();
   await expect(
     workspace.getByText('Revision 5', { exact: true }),
   ).toBeVisible();
   await expect(workspace.getByText('Could not list artifacts')).toBeVisible();
-  await page.unroute('**/v1/artifacts', failList);
+  await page.unroute(listUrl, failList);
   await editor.fill(probe('Draft kept while the list fails'));
   await workspace
     .getByRole('navigation', { name: 'Artifacts' })

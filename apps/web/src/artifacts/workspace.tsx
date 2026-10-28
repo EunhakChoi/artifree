@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { FileCode2Icon, LogOutIcon, RotateCwIcon } from 'lucide-react';
 import { ArtifreeClient } from '@artifree/client';
 import type { Artifact } from '@artifree/contracts';
@@ -12,6 +12,16 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty';
 import { ArtifactDetail } from './artifact-detail';
+import {
+  ALL_ARTIFACTS,
+  ArtifactNav,
+  ListControls,
+  PAGE_SIZE,
+  isFiltered,
+  queryKey,
+  readArtifacts,
+} from './artifact-list';
+import type { ListQuery } from './artifact-list';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
 import { pageVisibility } from './page-visibility';
@@ -88,13 +98,30 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   // While the editor holds unsaved changes, actions that would replace it are
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
+  const [query, setQuery] = useState(ALL_ARTIFACTS);
+  // How many artifacts are shown; a notice reads them all again.
+  const [count, setCount] = useState(PAGE_SIZE);
+  const changeQuery = useCallback((next: ListQuery) => {
+    setQuery(next);
+    setCount(PAGE_SIZE);
+  }, []);
   const { epoch } = live;
+  const shownQuery = queryKey(query);
   const artifacts = useRequest(
-    live.canRead ? `${generation}:${epoch}:${live.news}` : undefined,
+    live.canRead
+      ? `${generation}:${epoch}:${live.news}:${shownQuery}:${count}`
+      : undefined,
     async (signal) => {
-      // The first page only; paging the list is roadmap A03b.
-      const page = await client.listArtifacts({}, { signal });
-      return { list: page.artifacts, epoch };
+      const listed = await readArtifacts(client, query, count, signal);
+      return {
+        query: shownQuery,
+        list: listed.artifacts,
+        // Only a complete list without filters shows every artifact, so
+        // only it can tell that one no longer exists.
+        everything: listed.complete && !isFiltered(query),
+        complete: listed.complete,
+        epoch,
+      };
     },
     // Keep the list and the open artifact mounted while it refreshes.
     { keepPrevious: true },
@@ -116,18 +143,27 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
         })),
       );
   }, [fresh, learn]);
-  const listed =
+  const lastList =
     artifacts.status === 'ready'
-      ? artifacts.value.list
+      ? artifacts.value
       : artifacts.status === 'error'
-        ? artifacts.previous?.list
+        ? artifacts.previous
         : undefined;
-  // A draft keeps its artifact open; otherwise the open artifact follows
-  // the fresh list: when it is no longer listed, the first one opens.
+  // Another query's results never stand in for this one's, neither while
+  // it loads nor after it failed.
+  const shownList = lastList?.query === shownQuery ? lastList : undefined;
+  const listed = shownList?.list;
+  const showMore = shownList !== undefined && !shownList.complete;
+  const noArtifacts = listed?.length === 0 && !isFiltered(query);
+  // A draft keeps its artifact open; otherwise the open artifact stays
+  // until a fresh list of every artifact no longer contains it, and then
+  // the first listed one opens. A search, a filter, or a partial list does
+  // not close it.
   const keepSelected =
     selected !== undefined &&
     (unsaved ||
       fresh === undefined ||
+      !fresh.everything ||
       fresh.list.some(({ id }) => id === selected));
   const selectedId = keepSelected ? selected : (fresh?.list ?? listed)?.[0]?.id;
   // An artifact opened because it was listed first stays open like a chosen
@@ -137,6 +173,11 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     // This page's own save is not news when its notice arrives.
     learn(epoch, [{ id: artifact.id, version: versionOf(artifact) }]);
     setSelected(artifact.id);
+    setGeneration((value) => value + 1);
+  }
+  function metadataChanged(artifact: Artifact): void {
+    // Learning the new version also makes the open artifact read it.
+    learn(epoch, [{ id: artifact.id, version: versionOf(artifact) }]);
     setGeneration((value) => value + 1);
   }
   const listFailure =
@@ -170,50 +211,58 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       <output aria-live="polite" className="text-sm text-muted-foreground">
         {FEED_MESSAGES[live.feed]}
       </output>
-      {artifacts.status === 'loading' ? (
+      {shownList === undefined && artifacts.status !== 'error' ? (
         <output className="text-sm text-muted-foreground">
           Loading artifacts…
         </output>
       ) : null}
-      {selectedId === undefined ? (
+      {selectedId === undefined && (listed === undefined || noArtifacts) ? (
         listFailure
       ) : (
         <div className="grid gap-5 lg:grid-cols-3">
-          <nav aria-label="Artifacts" className="flex flex-col gap-2">
-            {listFailure}
-            {listed?.map((artifact) => (
-              <Button
-                key={artifact.id}
-                variant={artifact.id === selectedId ? 'secondary' : 'ghost'}
-                aria-current={artifact.id === selectedId ? 'true' : undefined}
-                className="justify-between"
-                disabled={unsaved && artifact.id !== selectedId}
-                onClick={() => setSelected(artifact.id)}
-              >
-                <span className="truncate">{artifact.title}</span>
-                <span className="text-xs text-muted-foreground">
-                  r{artifact.current_revision}
-                </span>
-              </Button>
-            ))}
-          </nav>
+          <div className="flex flex-col gap-4">
+            <ListControls query={query} onQueryChange={changeQuery} />
+            <ArtifactNav
+              artifacts={listed ?? []}
+              selectedId={selectedId}
+              locked={unsaved}
+              onSelect={setSelected}
+              empty={
+                listed === undefined ? null : (
+                  <p className="text-sm text-muted-foreground">
+                    No artifacts match.
+                  </p>
+                )
+              }
+              onShowMore={
+                showMore
+                  ? () => setCount((value) => value + PAGE_SIZE)
+                  : undefined
+              }
+            >
+              {listFailure}
+            </ArtifactNav>
+          </div>
           <div className="min-w-0 lg:col-span-2">
-            <ArtifactDetail
-              key={selectedId}
-              client={client}
-              artifactId={selectedId}
-              epoch={epoch}
-              resets={live.resets}
-              known={live.known[selectedId]}
-              unknownChanges={live.unknown[selectedId] ?? 0}
-              onSaved={saved}
-              unsaved={unsaved}
-              onUnsavedChange={setUnsaved}
-            />
+            {selectedId === undefined ? null : (
+              <ArtifactDetail
+                key={selectedId}
+                client={client}
+                artifactId={selectedId}
+                epoch={epoch}
+                resets={live.resets}
+                known={live.known[selectedId]}
+                unknownChanges={live.unknown[selectedId] ?? 0}
+                onSaved={saved}
+                onMetadataChanged={metadataChanged}
+                unsaved={unsaved}
+                onUnsavedChange={setUnsaved}
+              />
+            )}
           </div>
         </div>
       )}
-      {listed?.length === 0 ? (
+      {noArtifacts ? (
         <Empty>
           <EmptyHeader>
             <EmptyMedia variant="icon">
