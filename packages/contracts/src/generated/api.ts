@@ -179,9 +179,9 @@ export interface Artifact {
   current_revision: number;
   /**
    * When the artifact was moved to the trash, in Unix milliseconds, or
-   * `null` outside it.
+   * `null` outside it. Always present.
    */
-  deleted_at_ms?: number | null;
+  deleted_at_ms: number | null;
   /**
    * Opaque identifier.
    */

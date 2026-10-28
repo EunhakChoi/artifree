@@ -16,7 +16,7 @@
           "type": "integer"
         },
         "deleted_at_ms": {
-          "description": "When the artifact was moved to the trash, in Unix milliseconds, or\n`null` outside it.",
+          "description": "When the artifact was moved to the trash, in Unix milliseconds, or\n`null` outside it. Always present.",
           "format": "int64",
           "type": [
             "integer",
@@ -58,6 +58,7 @@
         "pinned",
         "current_revision",
         "metadata_revision",
+        "deleted_at_ms",
         "created_at_ms",
         "updated_at_ms"
       ],

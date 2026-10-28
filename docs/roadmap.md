@@ -24,7 +24,7 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | 목록·메타데이터 | A03: 이름 변경·pin(별도 metadata revision, 조건부·재실행 가능), 검색·정렬·pin 필터·keyset 페이지를 API·MCP·CLI·웹에 연결. 웹은 보이는 만큼 처음부터 다시 읽음                                                                                                                                                      |
 | 이력·복제       | A04: 파일 digest, 과거 리비전의 조건부 복원(API·MCP·CLI·웹), 웹의 digest·줄 단위 비교. 웹의 조건부 쓰기는 페이지가 아는 최신 version 이상을 보일 때만 준비하고, reset 뒤에는 다시 읽기 전까지 내용 읽기·쓰기를 하지 않음. A05: 선택 리비전의 파일만 새 아티팩트로 복제(독립 이력, pin 미상속, `copied: ["files"]`) |
 | 휴지통          | A06a: 삭제 = 조건부 metadata 변경(`deleted`), 휴지통 artifact는 회복 update와 `deleted=true` 목록 외 모든 읽기·쓰기·preview가 `404`, 변경 알림 `deleted`/`recovered`, schema v5                                                                                                                                    |
-| 검증            | 기준 코드에서 Node 134개·Rust 103개 테스트 및 빌드 통과. Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한 CI 8개 작업 통과                                                                                                                                                                                        |
+| 검증            | 기준 코드에서 Node 134개·Rust 104개 테스트 및 빌드 통과. Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한 CI 8개 작업 통과                                                                                                                                                                                        |
 
 구현 결정은 [0001](decisions/0001-foundation.md)부터
 [0012](decisions/0012-duplicate-artifacts.md)까지가 기준이다. Axum/Tokio와 SQLite는

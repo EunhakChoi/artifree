@@ -246,10 +246,11 @@ pub fn tools() -> Vec<ToolDefinition> {
             "list_artifacts",
             "List artifacts",
             "List the artifacts you own, most recently updated first unless sort is created. \
-             q keeps titles containing the text; pinned keeps pinned or unpinned artifacts. A \
-             call returns at most limit artifacts (default and maximum 500); when \
-             next_page_token is present, pass it as page_token with the same q, sort, and \
-             pinned for the next page."
+             q keeps titles containing the text; pinned keeps pinned or unpinned artifacts; \
+             deleted true lists the trash instead of the artifacts outside it. A call returns \
+             at most limit artifacts (default and maximum 500); when next_page_token is \
+             present, pass it as page_token with the same q, sort, pinned, and deleted for the \
+             next page."
                 .into(),
             ToolEffect::Read,
         ),

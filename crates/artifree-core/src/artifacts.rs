@@ -195,7 +195,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
         changes: Vec<FileChange>,
     ) -> Result<CommitReceipt, ArtifactError> {
         let record = self.owned(actor, id)?;
-        prepared_base(&record, base)?;
+        let hidden = |error| hidden_in_trash(&record, error);
+        prepared_base(&record, base).map_err(hidden)?;
         let mut hasher = Fingerprint::new("save");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -214,19 +215,14 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
         }
         let fingerprint = hasher.finish();
-        let base_package = self.package(id, base)?;
+        let base_package = self.package(id, base).map_err(hidden)?;
         let package = match base_package.apply(changes) {
             Ok(package) => package,
             // Whether the files change is decided with the commit, against
             // the base as it is then: a stale base is a conflict, and a retry
             // of a committed save a replay.
             Err(PackageError::Unchanged) => base_package,
-            // A request that cannot form a package never committed, so it
-            // is no retry; in the trash it is refused like any other write.
-            Err(_) if record.deleted_at.is_some() => {
-                return Err(ArtifactError::NotFound(Missing::Artifact));
-            }
-            Err(error) => return Err(ArtifactError::InvalidPackage(error)),
+            Err(error) => return Err(hidden(ArtifactError::InvalidPackage(error))),
         };
         let receipt = self.store.commit_revision(RevisionCommit {
             request: RequestIdentity {
@@ -264,14 +260,15 @@ impl<S: ArtifactStore> ArtifactService<S> {
         revision: SourceRevision,
     ) -> Result<CommitReceipt, ArtifactError> {
         let record = self.owned(actor, id)?;
-        prepared_base(&record, base)?;
+        let hidden = |error| hidden_in_trash(&record, error);
+        prepared_base(&record, base).map_err(hidden)?;
         let mut hasher = Fingerprint::new("restore");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
         hasher.field(&revision.0.to_be_bytes());
         // The store decides in one step whether this is a replay, a stale
         // base, or files the base already has.
-        let package = self.package(id, revision)?;
+        let package = self.package(id, revision).map_err(hidden)?;
         let receipt = self.store.commit_revision(RevisionCommit {
             request: RequestIdentity {
                 actor,
@@ -307,10 +304,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
         title: Option<&Title>,
     ) -> Result<CommitReceipt, ArtifactError> {
         let record = self.owned(actor, id)?;
+        let hidden = |error| hidden_in_trash(&record, error);
         // Checked here, as for a read, so that a number past every revision
         // is missing rather than a storage failure.
         if revision.0 == 0 || revision > record.current_revision {
-            return Err(ArtifactError::NotFound(Missing::Revision));
+            return Err(hidden(ArtifactError::NotFound(Missing::Revision)));
         }
         let mut hasher = Fingerprint::new("duplicate");
         hasher.field(id.as_str().as_bytes());
@@ -324,7 +322,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
             None => hasher.field(b"copy title"),
         }
-        let package = self.package(id, revision)?;
+        let package = self.package(id, revision).map_err(hidden)?;
         let title = title.cloned().unwrap_or_else(|| record.title.copy_of());
         let receipt = self.store.create_artifact(NewArtifact {
             request: RequestIdentity {
@@ -534,7 +532,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
 
     /// An artifact the actor may change, also in the trash. A write leaves
     /// the trash to the store, which replays a retry of an earlier request
-    /// before it refuses anything else there (decision 0013).
+    /// before it refuses anything else there (decision 0013); what the core
+    /// checks first goes through [`hidden_in_trash`].
     fn owned(&self, actor: &ActorId, id: &ArtifactId) -> Result<ArtifactRecord, ArtifactError> {
         match self.store.artifact(id)? {
             Some(record) if policy::may_access(actor, &record) => Ok(record),
@@ -544,15 +543,28 @@ impl<S: ArtifactStore> ArtifactService<S> {
 }
 
 /// Refuses a base that cannot be current: revision 0 never exists, and a
-/// future one is not current either. An artifact in the trash is left to the
-/// store, so that a write there is missing, not a conflict.
+/// future one is not current either.
 fn prepared_base(record: &ArtifactRecord, base: SourceRevision) -> Result<(), ArtifactError> {
-    if record.deleted_at.is_none() && (base.0 == 0 || base > record.current_revision) {
+    if base.0 == 0 || base > record.current_revision {
         return Err(ArtifactError::RevisionConflict {
             current: record.current_revision,
         });
     }
     Ok(())
+}
+
+/// The answer to a write whose check before the store failed. In the trash
+/// only a retry of a request made before the delete can commit, and a retry
+/// passes every such check: its base and revision existed, and its changes
+/// formed a package. So a failed check there says only that the artifact is
+/// missing, as for every other request that reaches the trash (decision
+/// 0013). A storage failure stays one, so that it is retried.
+fn hidden_in_trash(record: &ArtifactRecord, error: ArtifactError) -> ArtifactError {
+    match error {
+        ArtifactError::Unavailable(_) => error,
+        _ if record.deleted_at.is_some() => ArtifactError::NotFound(Missing::Artifact),
+        _ => error,
+    }
 }
 
 /// Length-prefixed SHA-256 over a request's operation and content, so that

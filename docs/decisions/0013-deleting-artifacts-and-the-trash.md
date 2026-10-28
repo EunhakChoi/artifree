@@ -51,13 +51,19 @@ true}` and an `Idempotency-Key` moves the artifact to the trash, and
    checks this in the transaction of each write, so a save and a delete
    are ordered: one commits first, and the other is refused or conflicts.
    A copy's source must be in place when the copy commits. A request
-   there that could never have committed, such as changes that do not
-   form a valid package, is no retry and is `404` too, not `422`.
+   there that could never have committed is no retry and is `404` too,
+   with the answer of an unknown artifact: a base or revision that does
+   not exist is not a conflict or a missing revision, and changes that do
+   not form a valid package are not `422`. A retry passes those checks,
+   since its base and revision existed and its changes formed a package.
 3. **Retries.** A retry with the key of an earlier request returns what
    that request did, also after the artifact was deleted: a replay comes
    before the trash check. The fingerprint of a metadata update covers
-   whether it deletes, recovers, or keeps the trash state. A delete of an
-   artifact already in the trash, with another key, is `404`.
+   whether it deletes, recovers, or keeps the trash state. A key used
+   before for a different request is refused as reused, there as
+   anywhere: the key is looked up first, and the answer tells only what
+   the caller sent. A delete of an artifact already in the trash, with
+   another key, is `404`.
 4. **The trash.** `GET /v1/artifacts` lists artifacts outside the trash;
    with `deleted=true` it lists only those in the trash, with the same
    search, pin filter, orders, and pages. Page tokens are bound to the

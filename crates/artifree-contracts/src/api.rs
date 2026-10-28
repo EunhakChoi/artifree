@@ -154,7 +154,10 @@ pub struct Artifact {
     /// only when they change, independently of `current_revision`.
     pub metadata_revision: u64,
     /// When the artifact was moved to the trash, in Unix milliseconds, or
-    /// `null` outside it.
+    /// `null` outside it. Always present.
+    // Schemars leaves an `Option` out of `required`, and drops its `null`
+    // when told it is required; this field is both.
+    #[schemars(required, extend("type" = ["integer", "null"]))]
     pub deleted_at_ms: Option<i64>,
     /// Creation time in Unix milliseconds.
     pub created_at_ms: i64,

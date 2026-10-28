@@ -1395,6 +1395,10 @@ async fn deleted_fixture(
 async fn an_artifact_in_the_trash_is_missing_to_every_read_and_write() -> TestResult {
     let harness = Harness::new();
     let (id, link, deleted_at) = deleted_fixture(&harness).await?;
+    let unknown = harness
+        .send(get("/v1/artifacts/art_00000000000000000000000000000000")?)
+        .await?
+        .json()?;
     let history = format!("/v1/artifacts/{id}/revisions");
     for (what, request) in [
         ("read", get(&format!("/v1/artifacts/{id}"))?),
@@ -1422,13 +1426,30 @@ async fn an_artifact_in_the_trash_is_missing_to_every_read_and_write() -> TestRe
                 }),
             )?,
         ),
-        // A base that could never be current is missing too, not a conflict.
+        // A base or revision that could never be current is missing too,
+        // not a conflict or a missing revision.
         (
             "future save",
             post(&history, Some("save-key-3"), &put_index(9, "<h1>v9</h1>"))?,
         ),
+        (
+            "save on revision 0",
+            post(&history, Some("save-key-5"), &put_index(0, "<h1>v0</h1>"))?,
+        ),
         ("restore", restore(&id, 1, Some("restore-key-1"), 2)?),
+        (
+            "restore a future revision",
+            restore(&id, 9, Some("restore-key-2"), 2)?,
+        ),
+        (
+            "restore on a future base",
+            restore(&id, 1, Some("restore-key-3"), 9)?,
+        ),
         ("copy", duplicate(&id, 2, Some("copy-key-1"), &json!({}))?),
+        (
+            "copy a future revision",
+            duplicate(&id, 9, Some("copy-key-2"), &json!({}))?,
+        ),
         (
             "rename",
             patch(
@@ -1441,7 +1462,9 @@ async fn an_artifact_in_the_trash_is_missing_to_every_read_and_write() -> TestRe
     ] {
         let reply = harness.send(request).await?;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{what}");
-        assert_eq!(error_code(&reply), "not_found", "{what}");
+        // The whole answer is that of an unknown artifact, so it does not
+        // tell that the artifact is in the trash.
+        assert_eq!(reply.json()?, unknown, "{what}");
     }
     assert_eq!(
         harness.content(&link).await?.status,

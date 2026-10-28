@@ -1,6 +1,12 @@
 //! Behavioral checks for the public contracts' Serde boundary.
 use artifree_contracts::ServiceDescription;
-use artifree_contracts::api::{CreateArtifactRequest, SaveRevisionRequest};
+use artifree_contracts::api::{
+    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
+    DuplicateArtifactResponse, ErrorResponse, FeedPosition, Preview, Revision, RevisionList,
+    SaveRevisionRequest, UpdateArtifactResponse,
+};
+use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde_json::Value;
 
 fn descriptor() -> Value {
@@ -120,4 +126,47 @@ fn create_request_rejects_unknown_encodings_and_fields() {
             "Expected {message:?}, got {error}"
         );
     }
+}
+
+/// The published schema is the one Schemars derives for reading a value,
+/// where an `Option` may be left out. A client reads responses, so each one
+/// must be published as the server writes it: every field it always writes
+/// required, with the same type.
+#[test]
+fn response_schemas_describe_what_the_server_writes() -> Result<(), serde_json::Error> {
+    fn differs<T: JsonSchema>() -> Result<Option<String>, serde_json::Error> {
+        let published = SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<T>();
+        let written = SchemaSettings::draft2020_12()
+            .for_serialize()
+            .into_generator()
+            .into_root_schema_for::<T>();
+        let published = serde_json::to_value(published)?;
+        let written = serde_json::to_value(written)?;
+        Ok((published != written).then(|| {
+            format!(
+                "{}: published {published:#}, written {written:#}",
+                T::schema_name()
+            )
+        }))
+    }
+    let differences: Vec<String> = [
+        differs::<Artifact>()?,
+        differs::<ArtifactList>()?,
+        differs::<CommitResponse>()?,
+        differs::<DuplicateArtifactResponse>()?,
+        differs::<UpdateArtifactResponse>()?,
+        differs::<Revision>()?,
+        differs::<RevisionList>()?,
+        differs::<Preview>()?,
+        differs::<ErrorResponse>()?,
+        differs::<ArtifactChange>()?,
+        differs::<FeedPosition>()?,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    Ok(())
 }
