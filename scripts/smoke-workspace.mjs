@@ -305,7 +305,7 @@ fetch('${origin}/v1/artifacts').then(
  * Holds `method` requests matching `pattern` until the returned function is
  * called, which lets them proceed and removes the hold.
  */
-async function hold(page, method, pattern) {
+export async function hold(page, method, pattern) {
   let release = () => {};
   const held = new Promise((resolve) => {
     release = resolve;

@@ -89,7 +89,9 @@ unpublished trace maps each to its evidence.
    may name other content afterwards, for example in a restored database.
    File content and preview links are keyed by the epoch of the metadata
    they belong to: after a reset they are read once, for the revision the
-   new metadata names.
+   new metadata names. (Amended by
+   [0011](0011-web-history-and-restore.md) decision 9: nothing is read for
+   metadata read before a possible replacement.)
 6. **Failures keep what is shown.** A failed refresh of the list or of the
    open artifact keeps the earlier result and any draft, and shows the
    failure with "Try again". A first read that failed is retried by the
@@ -117,7 +119,9 @@ unpublished trace maps each to its evidence.
    save committed nothing, so the notice stays.
 9. **Previews and status.** The preview menu's default entry, "Latest (N)",
    follows each new revision; a numbered revision stays chosen until the
-   user chooses again, also across the source tab. A status line says
+   user chooses again, also across the source tab. (Amended by
+   [0011](0011-web-history-and-restore.md) decision 8: a possible
+   replacement of the server's data forgets the choice.) A status line says
    whether live updates are connecting, on, reconnecting (changes made
    meanwhile follow), paused while the tab is hidden, or stopped (reconnect
    to try again).

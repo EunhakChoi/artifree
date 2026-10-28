@@ -212,7 +212,9 @@ export async function checkListAndMetadata({
     current = await api(server, 'GET', `/v1/artifacts/${alpha.id}`);
     assert.equal(current.metadata_revision, 3, 'The retry applied once.');
 
-    // An update another client won changes nothing; the latest is read.
+    // An update another client won changes nothing; the latest is read,
+    // and pinning and renaming wait until the page has read the metadata
+    // revision the conflict named.
     await page.route(`**/v1/artifacts/${alpha.id}`, (route) =>
       route.request().method() === 'PATCH'
         ? route.fulfill({
@@ -235,9 +237,30 @@ export async function checkListAndMetadata({
     await quiet();
     assert.deepEqual(reads.slice(mark).sort(), ['', 'revisions']);
     await page.unrouteAll({ behavior: 'ignoreErrors' });
-    await pin.click();
+    await expect(pin).toBeDisabled();
+    await expect(
+      workspace.getByText(/you can pin or unpin again once it has/),
+    ).toBeVisible();
+    await workspace
+      .getByRole('button', { name: 'Rename', exact: true })
+      .click();
+    const waiting = page.getByRole('dialog', { name: 'Rename artifact' });
+    await waiting.getByLabel('Title').fill('Alpha waits');
+    await expect(waiting.getByText(/you can rename once it has/)).toBeVisible();
+    await expect(
+      waiting.getByRole('button', { name: 'Rename', exact: true }),
+    ).toBeDisabled();
+    await waiting.getByRole('button', { name: 'Cancel' }).click();
+    // Another client's pin reaches revision 4.
+    await api(server, 'PATCH', `/v1/artifacts/${alpha.id}`, {
+      base_metadata_revision: 3,
+      pinned: true,
+    });
     await expect(pin).toHaveAttribute('aria-pressed', 'true');
-    await expect(workspace.getByText('Changed elsewhere')).toBeHidden();
+    await expect(pin).toBeEnabled();
+    await expect(
+      workspace.getByText(/The page shows the latest now/),
+    ).toBeVisible();
     await expect(editor).toHaveValue(html('Draft'));
 
     // A pin whose answer was lost: once the page reads what it did, no
@@ -270,7 +293,7 @@ export async function checkListAndMetadata({
 }
 
 /** Shows or hides the page as a browser does when its tab changes. */
-function setVisible(page, visible) {
+export function setVisible(page, visible) {
   return page.evaluate(
     (state) => {
       Object.defineProperty(document, 'visibilityState', {
