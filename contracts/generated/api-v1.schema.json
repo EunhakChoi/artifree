@@ -390,6 +390,11 @@
           "type": "string"
         },
         {
+          "const": "range_not_satisfiable",
+          "description": "The byte range starts past the end of the file; nothing was read.\nThe `Content-Range` header of the HTTP answer gives the file's size.",
+          "type": "string"
+        },
+        {
           "const": "rate_limited",
           "description": "Too many requests from this caller. This attempt was not processed;\nretry after the `Retry-After` delay with the same idempotency key,\nwhich returns the original result if an earlier attempt committed.",
           "type": "string"

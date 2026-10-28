@@ -90,7 +90,7 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 | `update_artifact`    | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
 | `list_revisions`     | `artifact_id`                                                                                           | `{ revisions }`, newest first              |
 | `get_revision`       | `artifact_id`, `revision`                                                                               | one revision manifest                      |
-| `read_file`          | `artifact_id`, `revision`, `path`                                                                       | exact bytes as `utf8` or `base64`          |
+| `read_file`          | `artifact_id`, `revision`, `path`, optional `offset`, `length`                                          | exact bytes as `utf8` or `base64`          |
 | `create_preview`     | `artifact_id`, `revision`                                                                               | `{ url, revision, expires_at_ms }`         |
 
 The full schemas are in
@@ -125,6 +125,14 @@ source's title followed by " (Copy)". It needs no `base_revision`, and a retry
 with the same key returns the same copy. `copied` lists what the copy received:
 only `files`, since artifacts have no application data or uploaded assets yet
 (decision [0012](decisions/0012-duplicate-artifacts.md)).
+`read_file` with `offset` (from 0) and `length` (in bytes) reads part of a
+file and returns its `offset`, the whole file's `size` and `sha256`, and
+`next_offset` while the file continues. A part of a UTF-8 file is text: it
+ends before a character the length would split, and parts read from each
+`next_offset` join into the file. An offset inside a character, or a length
+shorter than the character at the offset, is `invalid_request`; an offset
+past the end is `range_not_satisfiable`, and one at the end reads an empty
+part (decision [0016](decisions/0016-bounded-file-reads.md)).
 
 Limits: 256 files, 5 MiB per file, 25 MiB per package, and 36 MiB for the
 whole JSON request. Send binary data, or text with many control characters,

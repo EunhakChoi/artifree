@@ -51,6 +51,23 @@ export interface ReadOptions {
   readonly signal?: AbortSignal;
 }
 
+/** The bytes of a file to read: from `offset`, `length` or to the end. */
+export interface ByteRange {
+  /** First byte, counted from 0. */
+  readonly offset: number;
+  /** Most bytes to read, at least 1; to the end of the file without it. */
+  readonly length?: number;
+}
+
+/** Part of a file, as `readFilePart` returns it. */
+export interface FilePart {
+  readonly bytes: Uint8Array<ArrayBuffer>;
+  /** Where the part starts in the file. */
+  readonly offset: number;
+  /** Size of the whole file in bytes. */
+  readonly size: number;
+}
+
 /** Options for requests that change state. */
 export interface MutationOptions {
   /**
@@ -308,6 +325,51 @@ export class ArtifreeClient {
       });
     }
     return this.bytes(response, `the export of revision ${revision}`);
+  }
+
+  /**
+   * Exact bytes of part of one file in a pinned revision (decision 0016),
+   * read with an HTTP `Range`. A range that starts at or past the end of
+   * the file rejects with `range_not_satisfiable`; an answer that is not
+   * the part asked for rejects with `invalid_response`.
+   */
+  async readFilePart(
+    id: string,
+    revision: number,
+    path: string,
+    range: ByteRange,
+    options: ReadOptions = {},
+  ): Promise<FilePart> {
+    const { offset, length } = range;
+    if (!Number.isSafeInteger(offset) || offset < 0)
+      throw new RangeError('offset must be a whole number of at least 0.');
+    if (length !== undefined && (!Number.isSafeInteger(length) || length < 1))
+      throw new RangeError('length must be a whole number of at least 1.');
+    const last = length === undefined ? '' : String(offset + length - 1);
+    const response = await this.send(
+      'GET',
+      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/files/${filePath(path)}`,
+      { signal: options.signal, headers: { range: `bytes=${offset}-${last}` } },
+    );
+    const bytes = await this.bytes(response, path);
+    const content = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(
+      response.headers.get('content-range') ?? '',
+    );
+    const [start, end, size] = (content?.slice(1) ?? []).map(Number);
+    if (
+      response.status !== 206 ||
+      start !== offset ||
+      end === undefined ||
+      size === undefined ||
+      end - offset + 1 !== bytes.length ||
+      end >= size ||
+      (length !== undefined && end - offset + 1 > length)
+    )
+      throw new ArtifreeApiError(
+        `GET ${path} did not return bytes ${offset}-${last} of the file.`,
+        { status: response.status, code: 'invalid_response' },
+      );
+    return { bytes, offset, size };
   }
 
   /**

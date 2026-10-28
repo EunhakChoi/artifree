@@ -9,6 +9,7 @@
 //! behind the same token.
 
 use std::future::poll_fn;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,6 +21,7 @@ use artifree_contracts::api::{
     SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
+use artifree_core::parts::{Boundary, ByteRange, RangeError};
 use artifree_domain::identity::{ActorId, RequestKey};
 use artifree_providers::storage::SqliteStore;
 use axum::body::{Body, Bytes, HttpBody};
@@ -351,6 +353,12 @@ impl IntoResponse for ApiError {
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         }
+        if let Some(value) = self
+            .file_size
+            .and_then(|size| HeaderValue::from_str(&format!("bytes */{size}")).ok())
+        {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
         response
     }
 }
@@ -553,11 +561,35 @@ async fn show_revision(
 async fn read_file(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
+    headers: HeaderMap,
     path: Result<Path<(String, u64, String)>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision, file)) = path?;
-    let file = operations::read_file(&state, actor, &id, revision, &file).await?;
-    Ok((
+    let range = requested_range(&headers)?;
+    let file = operations::read_file(
+        &state,
+        actor,
+        &id,
+        revision,
+        &file,
+        range.unwrap_or(ByteRange::WHOLE),
+        Boundary::Byte,
+    )
+    .await?;
+    let part = file.part;
+    let mut status = StatusCode::OK;
+    let mut content_range = None;
+    if range.is_some() {
+        // A range that starts at the end of the file selects nothing.
+        if part.content.is_empty() {
+            return Err(unsatisfiable(part.size));
+        }
+        status = StatusCode::PARTIAL_CONTENT;
+        let last = part.offset + part.content.len() as u64 - 1;
+        content_range = Some(format!("bytes {}-{last}/{}", part.offset, part.size));
+    }
+    let mut response = (
+        status,
         [
             (header::CONTENT_TYPE, file.path.media_type().essence()),
             (header::CONTENT_DISPOSITION, "attachment"),
@@ -566,10 +598,75 @@ async fn read_file(
                 header::CONTENT_SECURITY_POLICY,
                 "sandbox; default-src 'none'",
             ),
+            (header::ACCEPT_RANGES, "bytes"),
         ],
-        file.content,
+        part.content,
     )
-        .into_response())
+        .into_response();
+    if let Some(value) = content_range.and_then(|value| HeaderValue::from_str(&value).ok()) {
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
+    }
+    Ok(response)
+}
+
+/// The byte range a `Range` header asks for (RFC 9110, section 14), or
+/// `None` for the whole file: without the header, with a unit other than
+/// bytes, and with `If-Range`, since this API sends no validator that one
+/// could match. One range only; a malformed one is refused.
+fn requested_range(headers: &HeaderMap) -> Result<Option<ByteRange>, ApiError> {
+    let Some(value) = headers.get(header::RANGE) else {
+        return Ok(None);
+    };
+    if headers.contains_key(header::IF_RANGE) {
+        return Ok(None);
+    }
+    let malformed = || ApiError::invalid("Range: expected bytes=first-last, first-, or -suffix");
+    let (unit, set) = value
+        .to_str()
+        .ok()
+        .and_then(|value| value.split_once('='))
+        .ok_or_else(malformed)?;
+    if !unit.trim().eq_ignore_ascii_case("bytes") {
+        return Ok(None);
+    }
+    if set.contains(',') {
+        return Err(ApiError::invalid("Range: one byte range only"));
+    }
+    let (first, last) = set.trim().split_once('-').ok_or_else(malformed)?;
+    let number = |digits: &str| {
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<u64>().ok()
+    };
+    let range = match (first, last) {
+        ("", suffix) => ByteRange::Last(
+            number(suffix)
+                .and_then(NonZeroU64::new)
+                .ok_or_else(malformed)?,
+        ),
+        (first, "") => ByteRange::From {
+            offset: number(first).ok_or_else(malformed)?,
+            length: None,
+        },
+        (first, last) => {
+            let (first, last) = number(first).zip(number(last)).ok_or_else(malformed)?;
+            let length = last
+                .checked_sub(first)
+                .and_then(|span| span.checked_add(1))
+                .and_then(NonZeroU64::new)
+                .ok_or_else(malformed)?;
+            ByteRange::From {
+                offset: first,
+                length: Some(length),
+            }
+        }
+    };
+    Ok(Some(range))
+}
+
+fn unsatisfiable(size: u64) -> ApiError {
+    ArtifactError::InvalidRange(RangeError::PastEnd { size }).into()
 }
 
 async fn export_revision(

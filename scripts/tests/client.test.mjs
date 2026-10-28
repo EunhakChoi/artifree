@@ -62,6 +62,68 @@ test('A body cut off mid-stream is a network error, not a contract error', async
   assert.equal(error.code, 'network_error');
 });
 
+test('A part of a file is the range asked for, or a failure', async () => {
+  const sent = [];
+  const answer = (status, headers, body) =>
+    new ArtifreeClient({
+      baseUrl: 'http://127.0.0.1:7410',
+      accessToken: 'token',
+      fetch: async (url, init) => {
+        sent.push(init.headers.range);
+        return new Response(body, { status, headers });
+      },
+    });
+  const part = await answer(
+    206,
+    { 'content-range': 'bytes 2-4/10' },
+    'abc',
+  ).readFilePart(artifact.id, 1, 'index.html', { offset: 2, length: 3 });
+  assert.deepEqual(
+    [Buffer.from(part.bytes).toString(), part.offset, part.size],
+    ['abc', 2, 10],
+  );
+  await answer(
+    206,
+    { 'content-range': 'bytes 2-9/10' },
+    '01234567',
+  ).readFilePart(artifact.id, 1, 'index.html', { offset: 2 });
+  assert.deepEqual(sent, ['bytes=2-4', 'bytes=2-']);
+  // A whole file, another range, a longer part, or a short body is not the
+  // part asked for.
+  for (const [status, headers, body] of [
+    [200, {}, '0123456789'],
+    [200, { 'content-range': 'bytes 2-4/10' }, 'abc'],
+    [206, { 'content-range': 'bytes 0-2/10' }, 'abc'],
+    [206, { 'content-range': 'bytes 2-9/10' }, '23456789'],
+    [206, { 'content-range': 'bytes 2-4/10' }, 'ab'],
+    [206, {}, 'abc'],
+  ]) {
+    const error = await failure(
+      answer(status, headers, body).readFilePart(artifact.id, 1, 'index.html', {
+        offset: 2,
+        length: 3,
+      }),
+    );
+    assert.equal(error.code, 'invalid_response', JSON.stringify(headers));
+  }
+  const past = await failure(
+    answer(
+      416,
+      { 'content-type': 'application/json', 'content-range': 'bytes */10' },
+      JSON.stringify({
+        error: { code: 'range_not_satisfiable', message: 'Past the end.' },
+      }),
+    ).readFilePart(artifact.id, 1, 'index.html', { offset: 10 }),
+  );
+  assert.equal(past.code, 'range_not_satisfiable');
+  await assert.rejects(
+    answer(206, {}, '').readFilePart(artifact.id, 1, 'index.html', {
+      offset: -1,
+    }),
+    RangeError,
+  );
+});
+
 test('A complete body that is not the contract is an invalid response', async () => {
   const client = clientWith(
     () => new Response('<html>proxy error</html>', { status: 200 }),

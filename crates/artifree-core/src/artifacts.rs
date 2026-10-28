@@ -24,6 +24,7 @@ use artifree_ports::artifact_store::{
 use sha2::{Digest, Sha256};
 
 use crate::listing::{self, ArtifactPage, ListQuery};
+use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
 
 /// What could not be found. Inaccessible artifacts are reported as missing so
@@ -70,6 +71,8 @@ pub enum ArtifactError {
     },
     /// The page token is malformed or belongs to another order or filters.
     InvalidPageToken,
+    /// The byte range cannot be read from the file.
+    InvalidRange(RangeError),
     /// The actor already used this request key for different content.
     RequestKeyReused,
     /// Storage failed. The request may be retried with the same key.
@@ -93,6 +96,7 @@ impl fmt::Display for ArtifactError {
                 "artifact metadata changed; current metadata revision is {}",
                 current.0
             ),
+            Self::InvalidRange(error) => error.fmt(formatter),
             Self::InvalidPageToken => formatter
                 .write_str("page token is malformed or belongs to another order or filters"),
             Self::RequestKeyReused => {
@@ -541,6 +545,28 @@ impl<S: ArtifactStore> ArtifactService<S> {
             revision: listing,
             files,
         })
+    }
+
+    /// Part of one file of a pinned revision (decision 0016): the bytes
+    /// `range` asks for, ending at `boundary`, with the whole file's size
+    /// and digest. Access and missing targets are answered as for
+    /// [`Self::read_file`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`], [`ArtifactError::InvalidRange`], or
+    /// [`ArtifactError::Unavailable`].
+    pub fn read_file_part(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        revision: SourceRevision,
+        path: &PackagePath,
+        range: ByteRange,
+        boundary: Boundary,
+    ) -> Result<FilePart, ArtifactError> {
+        let file = self.read_file(actor, id, revision, path)?;
+        parts::part(file, range, boundary).map_err(ArtifactError::InvalidRange)
     }
 
     /// The files a save commits: `changes` applied to `base`.

@@ -6,7 +6,9 @@ export {
   parseRetryAfter,
 } from './client.js';
 export type {
+  ByteRange,
   ClientConfiguration,
+  FilePart,
   MutationOptions,
   ReadOptions,
 } from './client.js';

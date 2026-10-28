@@ -55,6 +55,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   metadata_conflict: true,
   request_key_reused: true,
   payload_too_large: true,
+  range_not_satisfiable: true,
   rate_limited: true,
   unavailable: true,
   internal: true,

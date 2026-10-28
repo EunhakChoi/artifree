@@ -432,6 +432,9 @@ pub enum ErrorCode {
     RequestKeyReused,
     /// The request body exceeds the size limit.
     PayloadTooLarge,
+    /// The byte range starts past the end of the file; nothing was read.
+    /// The `Content-Range` header of the HTTP answer gives the file's size.
+    RangeNotSatisfiable,
     /// Too many requests from this caller. This attempt was not processed;
     /// retry after the `Retry-After` delay with the same idempotency key,
     /// which returns the original result if an earlier attempt committed.

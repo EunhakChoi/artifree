@@ -504,6 +504,80 @@ async fn an_export_is_a_zip_of_the_pinned_revision() -> TestResult {
     Ok(())
 }
 
+fn ranged(path: &str, range: &str) -> Result<Request<Body>, axum::http::Error> {
+    authorized(Request::get(path))
+        .header(header::RANGE, range)
+        .body(Body::empty())
+}
+
+#[tokio::test]
+async fn a_range_reads_exact_bytes_of_a_pinned_file() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let page = format!("/v1/artifacts/{id}/revisions/1/files/index.html");
+    // The page is "<h1>v1</h1>", 11 bytes.
+    let whole = harness.send(get(&page)?).await?;
+    assert_eq!(whole.status, StatusCode::OK);
+    assert_eq!(whole.header(header::ACCEPT_RANGES), "bytes");
+    for (range, bytes, content_range) in [
+        ("bytes=1-3", &b"h1>"[..], "bytes 1-3/11"),
+        ("bytes=7-", &b"/h1>"[..], "bytes 7-10/11"),
+        ("bytes=-3", &b"h1>"[..], "bytes 8-10/11"),
+        ("bytes=0-999", &b"<h1>v1</h1>"[..], "bytes 0-10/11"),
+        ("bytes=-99", &b"<h1>v1</h1>"[..], "bytes 0-10/11"),
+        ("BYTES = 4-5", &b"v1"[..], "bytes 4-5/11"),
+    ] {
+        let part = harness.send(ranged(&page, range)?).await?;
+        assert_eq!(part.status, StatusCode::PARTIAL_CONTENT, "{range}");
+        assert_eq!(part.body, bytes, "{range}");
+        assert_eq!(part.header(header::CONTENT_RANGE), content_range, "{range}");
+        assert_eq!(part.header(header::ACCEPT_RANGES), "bytes", "{range}");
+        assert_eq!(
+            part.header(header::CONTENT_TYPE),
+            "text/html; charset=utf-8",
+            "{range}"
+        );
+    }
+    let logo = format!("/v1/artifacts/{id}/revisions/1/files/assets/logo.png");
+    let binary = harness.send(ranged(&logo, "bytes=0-3")?).await?;
+    assert_eq!(binary.body, [0x89, b'P', b'N', b'G']);
+
+    for range in ["bytes=11-", "bytes=20-30"] {
+        let past = harness.send(ranged(&page, range)?).await?;
+        assert_eq!(past.status, StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(error_code(&past), "range_not_satisfiable", "{range}");
+        assert_eq!(past.header(header::CONTENT_RANGE), "bytes */11", "{range}");
+    }
+    for range in [
+        "bytes=3-1",
+        "bytes=a-b",
+        "bytes=-0",
+        "bytes=+1-2",
+        "bytes=0-1,4-5",
+        "bytes",
+        "bytes=-",
+    ] {
+        let refused = harness.send(ranged(&page, range)?).await?;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{range}");
+        assert_eq!(error_code(&refused), "invalid_request", "{range}");
+    }
+    // Another unit, or If-Range, which no validator here can match, reads
+    // the whole file.
+    let other = harness.send(ranged(&page, "items=0-1")?).await?;
+    assert_eq!(
+        (other.status, other.body),
+        (StatusCode::OK, b"<h1>v1</h1>".to_vec())
+    );
+    let conditional = authorized(Request::get(&page))
+        .header(header::RANGE, "bytes=0-1")
+        .header(header::IF_RANGE, "\"anything\"")
+        .body(Body::empty())?;
+    let conditional = harness.send(conditional).await?;
+    assert_eq!(conditional.status, StatusCode::OK);
+    assert_eq!(conditional.body, b"<h1>v1</h1>");
+    Ok(())
+}
+
 fn restore(
     id: &str,
     revision: u64,
@@ -1444,6 +1518,10 @@ fn reads_and_saves(id: &str) -> Result<Requests, axum::http::Error> {
         ("file", get(&format!("{history}/2/files/index.html"))?),
         ("export", get(&format!("{history}/2/export"))?),
         (
+            "part of a file",
+            ranged(&format!("{history}/2/files/index.html"), "bytes=0-1")?,
+        ),
+        (
             "preview",
             post(&format!("{history}/2/previews"), None, &json!({}))?,
         ),
@@ -1577,7 +1655,7 @@ async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
             missing += 1;
         }
     }
-    assert_eq!(missing, 22, "every request valid in itself is not found");
+    assert_eq!(missing, 23, "every request valid in itself is not found");
     assert_eq!(
         harness.content(&link).await?.status,
         StatusCode::NOT_FOUND,

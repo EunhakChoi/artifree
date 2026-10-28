@@ -32,7 +32,13 @@ let apiSchema;
 before(async () => {
   binary = buildServer(root);
   scratch = await mkdtemp(join(tmpdir(), 'artifree-mcp-test-'));
-  server = await startServer(binary, join(scratch, 'data'));
+  // This file checks the tools; limits.test.mjs checks the request limits.
+  // One burst covers every request here, so that no test is refused for
+  // the requests of the tests before it.
+  server = await startServer(binary, join(scratch, 'data'), [
+    '--request-burst',
+    '1000',
+  ]);
   catalog = JSON.parse(
     await readFile(join(root, 'contracts/generated/mcp-tools.json'), 'utf8'),
   );
@@ -634,6 +640,108 @@ test('An agent deletes to the trash, finds nothing there, and recovers', async (
     });
     assert.equal(file.content, '<p>kept</p>');
     assert.deepEqual(await listed(false), [id]);
+  });
+});
+
+test('An agent reads a file in parts that join into its exact bytes', async () => {
+  await withClient(async (client) => {
+    // One, two, three, and four-byte characters, a BOM, and CRLF.
+    const text = '\uFEFFa\u00e9\ud55c\u{1F600}\r\n';
+    const png = [0x89, 0x50, 0x4e, 0x47, 0, 0xff, 0x0d, 0x0a];
+    const { artifact } = await ok(client, 'create_artifact', {
+      title: 'Parts',
+      files: [utf8('index.html', text), base64('logo.png', png)],
+      idempotency_key: freshKey(),
+    });
+    const read = (args) =>
+      ok(client, 'read_file', {
+        artifact_id: artifact.id,
+        revision: 1,
+        ...args,
+      });
+    const whole = await read({ path: 'index.html' });
+    const { files } = await ok(client, 'get_revision', {
+      artifact_id: artifact.id,
+      revision: 1,
+    });
+    const listed = files.find((file) => file.path === 'index.html');
+    assert.deepEqual(
+      [
+        whole.content,
+        whole.offset,
+        whole.next_offset,
+        whole.size,
+        whole.sha256,
+      ],
+      [text, 0, undefined, listed.size, listed.sha256],
+    );
+
+    // Parts never split a character, and join into the file. (The core's
+    // unit tests try every length; requests here share the rate limit.)
+    const parts = [];
+    let offset = 0;
+    for (;;) {
+      const part = await read({ path: 'index.html', offset, length: 5 });
+      assert.equal(part.encoding, 'utf8');
+      assert.equal(part.offset, offset);
+      assert.ok(Buffer.byteLength(part.content) <= 5);
+      assert.ok(part.content.length > 0, 'a part made no progress');
+      parts.push(part.content);
+      if (part.next_offset === undefined) break;
+      offset = part.next_offset;
+    }
+    assert.deepEqual(parts, ['\uFEFFa', '\u00e9\ud55c', '\u{1F600}\r', '\n']);
+    // The emoji starts at byte 9 and takes 4 bytes.
+    await refused(
+      client,
+      'read_file',
+      { artifact_id: artifact.id, revision: 1, path: 'index.html', offset: 10 },
+      'invalid_request',
+    );
+    await refused(
+      client,
+      'read_file',
+      {
+        artifact_id: artifact.id,
+        revision: 1,
+        path: 'index.html',
+        offset: 9,
+        length: 3,
+      },
+      'invalid_request',
+    );
+    const end = Buffer.byteLength(text);
+    const last = await read({ path: 'index.html', offset: end });
+    assert.deepEqual([last.content, last.next_offset], ['', undefined]);
+    await refused(
+      client,
+      'read_file',
+      {
+        artifact_id: artifact.id,
+        revision: 1,
+        path: 'index.html',
+        offset: end + 1,
+      },
+      'range_not_satisfiable',
+    );
+    await refused(
+      client,
+      'read_file',
+      { artifact_id: artifact.id, revision: 1, path: 'logo.png', length: 0 },
+      'invalid_request',
+    );
+
+    // A file that is not text is read by bytes, as base64, also where the
+    // part alone ("PNG") would be valid UTF-8.
+    const middle = await read({ path: 'logo.png', offset: 1, length: 3 });
+    assert.deepEqual(
+      [
+        middle.encoding,
+        [...Buffer.from(middle.content, 'base64')],
+        middle.next_offset,
+      ],
+      ['base64', png.slice(1, 4), 4],
+    );
   });
 });
 

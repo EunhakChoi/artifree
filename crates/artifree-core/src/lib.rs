@@ -6,4 +6,5 @@ pub mod artifacts;
 pub mod documents;
 pub mod jobs;
 pub mod listing;
+pub mod parts;
 pub mod policy;

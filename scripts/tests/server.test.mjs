@@ -591,6 +591,62 @@ test('CLI exports a revision byte for byte, with a manifest that lists it', asyn
   }
 });
 
+test('CLI reads part of a file by bytes', async () => {
+  const server = await startServer(binary, dataDirectory('cli-part'));
+  try {
+    const site = await freshDirectory('cli-part-site');
+    const page = Buffer.from('\uFEFF<h1>\ud55c</h1>\r\n');
+    await writeFile(join(site, 'index.html'), page);
+    const id = json(cli(server, ['create', '--title', 'Part', '--dir', site]))
+      .artifact.id;
+    const bytes = (args) => {
+      const result = spawnSync(
+        process.execPath,
+        ['apps/cli/dist/main.js', 'artifact', 'cat', id, 'index.html', ...args],
+        {
+          cwd: root,
+          env: {
+            ...process.env,
+            ARTIFREE_URL: server.api_url,
+            ARTIFREE_TOKEN: server.token,
+          },
+        },
+      );
+      assert.equal(result.status, 0, String(result.stderr));
+      return result.stdout;
+    };
+    // Bytes are exact, also inside a character.
+    assert.deepEqual(
+      bytes(['--offset', '7', '--length', '2']),
+      page.subarray(7, 9),
+    );
+    assert.deepEqual(bytes(['--offset', '10']), page.subarray(10));
+    assert.deepEqual(bytes(['--length', '3']), page.subarray(0, 3));
+    assert.deepEqual(bytes([]), page);
+    const past = cli(server, [
+      'cat',
+      id,
+      'index.html',
+      '--offset',
+      String(page.length),
+    ]);
+    assert.equal(past.status, 1);
+    assert.equal(past.stdout, '');
+    assert.match(past.stderr, /^error\[range_not_satisfiable\]/);
+    for (const args of [
+      ['--offset', '-1'],
+      ['--offset', '1.5'],
+      ['--length', '0'],
+    ]) {
+      const refused = cli(server, ['cat', id, 'index.html', ...args]);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stdout, '', args.join(' '));
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
 test('CLI uploads text that JSON escaping would inflate within the body limit', async () => {
   // Two 4 MiB files are within the package limits, but escaped as JSON text
   // (NUL becomes \u0000) they would exceed the request body limit.

@@ -23,6 +23,7 @@ use artifree_contracts::mcp::{
     ToolDefinition, UpdateArtifactArguments,
 };
 use artifree_core::artifacts::ArtifactError;
+use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::ActorId;
 use axum::Router;
 use axum::http::request::Parts;
@@ -41,6 +42,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::auth::hex;
 use crate::http::{AppState, Authenticated, MAX_BODY_BYTES};
 use crate::operations::{self, ApiError};
 
@@ -294,20 +296,41 @@ async fn read_file(
         artifact_id,
         revision,
         path,
+        offset,
+        length,
     } = parse(arguments)?;
-    let file = operations::read_file(state, actor, &artifact_id, revision, &path).await?;
-    let size = file.content.len() as u64;
-    // Valid UTF-8 travels as text; JSON strings carry every Unicode scalar
-    // value, so both forms reproduce the stored bytes exactly.
-    let (encoding, content) = match String::from_utf8(file.content) {
-        Ok(text) => (ContentEncoding::Utf8, text),
-        Err(error) => (ContentEncoding::Base64, BASE64.encode(error.into_bytes())),
+    let range = ByteRange::From {
+        offset: offset.unwrap_or(0),
+        length,
+    };
+    let file = operations::read_file(
+        state,
+        actor,
+        &artifact_id,
+        revision,
+        &path,
+        range,
+        Boundary::Character,
+    )
+    .await?;
+    let next_offset = file.part.next_offset();
+    let part = file.part;
+    // A text file's parts never split a character, so they travel as text;
+    // JSON strings carry every Unicode scalar value, so both forms
+    // reproduce the stored bytes exactly.
+    let (encoding, content) = match (part.text, String::from_utf8(part.content)) {
+        (true, Ok(text)) => (ContentEncoding::Utf8, text),
+        (_, Ok(text)) => (ContentEncoding::Base64, BASE64.encode(text)),
+        (_, Err(error)) => (ContentEncoding::Base64, BASE64.encode(error.into_bytes())),
     };
     Ok(FileContent {
         media_type: file.path.media_type().essence().to_owned(),
         path: file.path.to_string(),
         revision: file.revision.0,
-        size,
+        size: part.size,
+        sha256: hex(&part.sha256),
+        offset: part.offset,
+        next_offset,
         encoding,
         content,
     })

@@ -120,14 +120,15 @@ in the Rust core.
 | `GET /v1/artifacts/{id}/revisions`                  | History, newest first                             |
 | `POST /v1/artifacts/{id}/revisions`                 | Conditional commit (`Idempotency-Key`)            |
 | `GET /v1/artifacts/{id}/revisions/{n}`              | One revision manifest                             |
-| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file (attachment)           |
+| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file, or one `Range`        |
 | `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin     |
 | `GET /v1/changes`                                   | Committed changes as server-sent events           |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
 `invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
 `revision_conflict` and `metadata_conflict` (409), `request_key_reused` (422), `payload_too_large`
-(413), `rate_limited` (429 with `Retry-After`; this attempt was not processed),
+(413), `range_not_satisfiable` (416 with `Content-Range`; [decision
+0016](decisions/0016-bounded-file-reads.md)), `rate_limited` (429 with `Retry-After`; this attempt was not processed),
 `unavailable` (503, retry with the same key), and `internal` (500).
 
 Every request is authenticated first and then admitted under one per-actor
