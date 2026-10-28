@@ -55,7 +55,8 @@ Artifact behavior is tested at the boundary that owns it:
   entries, and names, counts, and sizes the classic format cannot hold
   refused.
 - `crates/artifree-providers/tests/sqlite_store.rs`: the store contract on a
-  real database — reopen durability, replay, key reuse, conflicts, eight
+  real database — reopen durability, one revision read alone exactly as the
+  history lists it, replay, key reuse, conflicts, eight
   concurrent writers, a trigger-injected failure that must leave no partial
   revision, content sharing, and newer-schema refusal; in the trash, a write
   that is its replay or not found, a key used for another request and a copy

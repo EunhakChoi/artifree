@@ -349,14 +349,10 @@ pub(crate) async fn revision(
 ) -> Result<Revision, ApiError> {
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
-    let revisions = state
-        .run(move |artifacts| artifacts.revisions(&actor, &id))
+    let record = state
+        .run(move |artifacts| artifacts.revision(&actor, &id, revision))
         .await?;
-    revisions
-        .into_iter()
-        .find(|record| record.revision == revision)
-        .map(revision_dto)
-        .ok_or_else(|| ArtifactError::NotFound(Missing::Revision).into())
+    Ok(revision_dto(record))
 }
 
 pub(crate) async fn read_file(

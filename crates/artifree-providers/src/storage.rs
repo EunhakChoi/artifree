@@ -549,6 +549,14 @@ impl ArtifactStore for SqliteStore {
         Ok(records)
     }
 
+    fn revision(
+        &self,
+        id: &ArtifactId,
+        revision: SourceRevision,
+    ) -> Result<Option<RevisionRecord>, StoreError> {
+        revision_record(&self.connect()?, id, revision)
+    }
+
     fn revision_package(
         &self,
         id: &ArtifactId,

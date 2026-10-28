@@ -364,6 +364,18 @@ pub trait ArtifactStore {
     /// [`StoreError::Unavailable`].
     fn revisions(&self, id: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError>;
 
+    /// Metadata of one revision, as [`Self::revisions`] lists it, read
+    /// without the others.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Unavailable`].
+    fn revision(
+        &self,
+        id: &ArtifactId,
+        revision: SourceRevision,
+    ) -> Result<Option<RevisionRecord>, StoreError>;
+
     /// The complete source of one revision.
     ///
     /// # Errors

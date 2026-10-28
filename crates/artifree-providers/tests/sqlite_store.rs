@@ -174,6 +174,21 @@ fn committed_revisions_survive_reopening_the_database() -> TestResult {
 }
 
 #[test]
+fn one_revision_reads_as_the_history_lists_it() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let created = create(&store, &actor("owner"), &key("a"), 1)?;
+    commit(&store, &created, &key("b"), 1, "<h1>v2</h1>")?;
+    let id = &created.artifact.id;
+    let history = store.revisions(id)?;
+    for listed in &history {
+        assert_eq!(store.revision(id, listed.revision)?.as_ref(), Some(listed));
+    }
+    assert_eq!(store.revision(id, SourceRevision(3))?, None);
+    Ok(())
+}
+
+#[test]
 fn retry_with_same_key_and_fingerprint_replays_without_writing() -> TestResult {
     let db = TempDb::new();
     let store = SqliteStore::open(&db.path())?;

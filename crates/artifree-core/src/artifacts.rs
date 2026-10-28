@@ -482,6 +482,21 @@ impl<S: ArtifactStore> ArtifactService<S> {
         Ok(self.store.revisions(id)?)
     }
 
+    /// One revision of an accessible artifact.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] or [`ArtifactError::Unavailable`].
+    pub fn revision(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        revision: SourceRevision,
+    ) -> Result<RevisionRecord, ArtifactError> {
+        let artifact = self.authorized(actor, id)?;
+        self.listing_of(&artifact, revision)
+    }
+
     /// One file of a pinned revision. Authority is checked on every read, so a
     /// previously issued link stops working when access ends.
     ///
@@ -519,13 +534,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
         revision: SourceRevision,
     ) -> Result<RevisionExport, ArtifactError> {
         let artifact = self.authorized(actor, id)?;
-        let files = self.revision_of(&artifact, revision)?;
-        let listing = self
-            .store
-            .revisions(id)?
-            .into_iter()
-            .find(|record| record.revision == revision)
-            .ok_or(ArtifactError::NotFound(Missing::Revision))?;
+        let listing = self.listing_of(&artifact, revision)?;
+        let files = self.package(id, revision)?;
         Ok(RevisionExport {
             artifact,
             revision: listing,
@@ -575,6 +585,21 @@ impl<S: ArtifactStore> ArtifactService<S> {
             return Err(ArtifactError::NotFound(Missing::Revision));
         }
         self.package(&record.id, revision)
+    }
+
+    /// The listing of an existing revision, checked as in
+    /// [`Self::revision_of`].
+    fn listing_of(
+        &self,
+        record: &ArtifactRecord,
+        revision: SourceRevision,
+    ) -> Result<RevisionRecord, ArtifactError> {
+        if revision.0 == 0 || revision > record.current_revision {
+            return Err(ArtifactError::NotFound(Missing::Revision));
+        }
+        self.store
+            .revision(&record.id, revision)?
+            .ok_or_else(|| ArtifactError::Unavailable("a listed revision is missing".into()))
     }
 
     fn package(
