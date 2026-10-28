@@ -18,7 +18,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "apps/web",
       "status": "implemented",
-      "summary": "React/Vite workspace: search, page, create, rename, pin, edit, save, and preview HTML artifacts via the local API, following committed changes live."
+      "summary": "React/Vite workspace: search, page, create, rename, pin, edit, save, compare, restore, and preview HTML artifacts via the local API, following committed changes live."
     },
     {
       "id": "cli",

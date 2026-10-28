@@ -19,7 +19,7 @@ features.
 | Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                          |
 | Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset |
 | CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                    |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes, search, pages, rename, pin; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                      |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes, search, pages, rename, pin, compare, restore; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                    |
 | Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                  |
 | CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                           |
 
@@ -144,6 +144,11 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   cancels an open stream, and stops events already received in the same
   chunk. A proxy's `429` without an API body is still `rate_limited`, and a
   read's signal reaches `fetch`.
+- `scripts/tests/compare.test.mjs`: bundles the web workspace's comparison:
+  3,000 seeded random pairs rebuild both sides with the fewest changed lines
+  (checked against a longest common subsequence) and number every line;
+  the size and edit limits; line splitting that keeps carriage returns;
+  hunks with three lines of context; manifests compared by digest.
 - `scripts/tests/request-gate.test.mjs`: bundles the web workspace's request
   gate with esbuild and drives it with mock timers, a fake visibility source,
   and a server the test answers by hand: reads go one at a time in order
@@ -181,8 +186,19 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   a search reads once after the pause and keeps the open artifact open;
   pinning, the pin filter, and both orders; a rename reads the list, the
   artifact, and its history once and keeps a draft; a rename whose answer was
-  lost is retried with its key and applies once; a forged conflict changes
-  nothing and reads the artifact again. The rename dialog is checked for
+  lost shows an unknown outcome and, retried with its key, applies once; a
+  pin whose answer was lost leaves no notice once its result is read; a
+  failed read of another filter shows none of the last filter's artifacts; a
+  forged conflict changes nothing and reads the artifact again. The rename
+  dialog is checked for accessibility.
+- `scripts/smoke-history.mjs`: the history tab compares two revisions by
+  digest (changed, added, removed, a binary file by size) and shows the
+  changed lines of a text file; a restore commits revision 1's exact
+  digests as the next revision; a restore whose answer was lost is retried
+  with its key and applies once; a save elsewhere while the dialog is open
+  keeps the revision the dialog opened on, restores nothing, and the next
+  attempt restores that revision against the latest; a
+  draft disables restoring. The tab and the dialog are checked for
   accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed

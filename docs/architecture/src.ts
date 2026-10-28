@@ -26,8 +26,8 @@ const notes: Record<string, ModuleNote> = {
   web: {
     purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
     exists:
-      'access token 연결, 아티팩트 목록(검색·정렬·pin 필터·더 보기)·생성·이름 변경·pin, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. 변경 피드를 따라 목록·열린 아티팩트·최신 preview를 갱신하고, 고정 preview와 미저장 초안은 유지합니다. client 아래 request gate가 모든 요청의 가시성·429 지연·한 번에 한 읽기를 결정합니다. build-time module inventory.',
-    next: 'revision 비교·소스 복원, 복제, 파일 추가·삭제를 같은 HTTP client로 연결합니다.',
+      'access token 연결, 아티팩트 목록(검색·정렬·pin 필터·더 보기)·생성·이름 변경·pin, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기, revision 비교(digest·줄 차이)와 복원. 변경 피드를 따라 목록·열린 아티팩트·최신 preview를 갱신하고, 고정 preview와 미저장 초안은 유지합니다. client 아래 request gate가 모든 요청의 가시성·429 지연·한 번에 한 읽기를 결정합니다. build-time module inventory.',
+    next: '복제, 파일 추가·삭제를 같은 HTTP client로 연결합니다.',
   },
   cli: {
     purpose: '터미널과 외부 agent가 사용하는 작은 TypeScript client입니다.',

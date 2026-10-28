@@ -96,9 +96,9 @@ The [PR roadmap](docs/roadmap.md) records the remaining work, dependencies,
 acceptance checks, and evidence requirements. The committed change feed (A01)
 and the web workspace following it (A02) are implemented, and so are renaming,
 pins, search, order, and pages through the API, MCP, CLI, and web workspace
-(A03). Restoring an earlier revision and file digests are available through
-the API, MCP, and CLI (A04a); the next slice brings comparison and restore to
-the web workspace (A04b).
+(A03), and revision comparison and restore through the API, MCP, CLI, and web
+workspace (A04); the next slice is duplicating an artifact with its own
+history (A05).
 
 ## Verification
 

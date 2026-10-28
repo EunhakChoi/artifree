@@ -31,6 +31,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { fromEditable, toEditable } from './editable-text';
+import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { Version } from './use-live-workspace';
@@ -138,6 +139,17 @@ export function ArtifactDetail({
   function reload(): void {
     setGeneration((value) => value + 1);
   }
+  // Held here, outside the history tab, so a retry keeps its key when the
+  // tab closes and opens again.
+  const restore = useRestore(
+    client,
+    artifactId,
+    (restored) => {
+      reload();
+      onSaved(restored);
+    },
+    reload,
+  );
   if (details.status === 'loading')
     return (
       <output className="text-sm text-muted-foreground">
@@ -209,6 +221,7 @@ export function ArtifactDetail({
             <TabsList aria-label="Artifact views">
               <TabsTrigger value="preview">Preview</TabsTrigger>
               <TabsTrigger value="source">Source</TabsTrigger>
+              <TabsTrigger value="history">History</TabsTrigger>
             </TabsList>
             <TabsContent value="preview" className="mt-4">
               <PreviewPanel
@@ -218,6 +231,16 @@ export function ArtifactDetail({
                 epoch={shown.epoch}
                 chosen={chosen}
                 onChoose={setChosen}
+              />
+            </TabsContent>
+            <TabsContent value="history" className="mt-4">
+              <HistoryPanel
+                client={client}
+                artifact={artifact}
+                revisions={revisions}
+                epoch={shown.epoch}
+                unsaved={unsaved}
+                restore={restore}
               />
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
