@@ -73,7 +73,7 @@ export type ErrorCode =
  * What a commit did to an artifact. A kind that a client does not know
  * still means the artifact changed: read it again.
  */
-export type ChangeKind = 'created' | 'revised' | 'metadata_updated';
+export type ChangeKind = 'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -129,8 +129,8 @@ export interface RestoreRevisionRequest {
   base_revision: number;
 }
 /**
- * Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
- * revisions are not touched.
+ * Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or
+ * several of them. Source revisions are not touched.
  */
 export interface UpdateArtifactRequest {
   /**
@@ -138,6 +138,12 @@ export interface UpdateArtifactRequest {
    * fails with `metadata_conflict` unless it is still current.
    */
   base_metadata_revision: number;
+  /**
+   * `true` moves the artifact to the trash, where every other request
+   * treats it as missing; `false` takes it out, the only update an
+   * artifact in the trash accepts.
+   */
+  deleted?: boolean | null;
   /**
    * Whether the artifact is pinned.
    */
@@ -172,13 +178,18 @@ export interface Artifact {
    */
   current_revision: number;
   /**
+   * When the artifact was moved to the trash, in Unix milliseconds, or
+   * `null` outside it. Always present.
+   */
+  deleted_at_ms: number | null;
+  /**
    * Opaque identifier.
    */
   id: string;
   kind: ArtifactKind;
   /**
-   * Version of the title and pin, starting at 1. It changes only when
-   * they change, independently of `current_revision`.
+   * Version of the title, pin, and trash state, starting at 1. It changes
+   * only when they change, independently of `current_revision`.
    */
   metadata_revision: number;
   /**
@@ -354,8 +365,8 @@ export interface ArtifactChange {
    */
   metadata_revision: number;
   /**
-   * The revision the commit created, or the current one for
-   * `metadata_updated`.
+   * The revision the commit created, or the current one for a metadata
+   * change (`metadata_updated`, `deleted`, or `recovered`).
    */
   revision: number;
 }
@@ -383,12 +394,16 @@ export type ListSort = 'updated' | 'created';
  */
 export interface ListArtifactsQuery {
   /**
+   * `true` lists the trash instead of the artifacts outside it.
+   */
+  deleted?: boolean | null;
+  /**
    * Page size, 1-500; 500 when absent.
    */
   limit?: number | null;
   /**
    * `next_page_token` of the previous page, with the same `q`, `sort`,
-   * and `pinned`.
+   * `pinned`, and `deleted`.
    */
   page_token?: string | null;
   /**

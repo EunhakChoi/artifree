@@ -66,6 +66,8 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   created: true,
   revised: true,
   metadata_updated: true,
+  deleted: true,
+  recovered: true,
 };
 
 // A record for the same reason as the error codes: a part added later must
@@ -109,6 +111,7 @@ function artifact(value: unknown): Artifact | undefined {
     pinned,
     current_revision,
     metadata_revision,
+    deleted_at_ms,
     created_at_ms,
     updated_at_ms,
   } = value;
@@ -119,6 +122,8 @@ function artifact(value: unknown): Artifact | undefined {
     typeof pinned !== 'boolean' ||
     !isCount(current_revision) ||
     !isCount(metadata_revision) ||
+    // Present on every artifact: `null` outside the trash.
+    (deleted_at_ms !== null && !isTime(deleted_at_ms)) ||
     !isTime(created_at_ms) ||
     !isTime(updated_at_ms)
   )
@@ -130,6 +135,7 @@ function artifact(value: unknown): Artifact | undefined {
     pinned,
     current_revision,
     metadata_revision,
+    deleted_at_ms,
     created_at_ms,
     updated_at_ms,
   };

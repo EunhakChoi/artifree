@@ -143,6 +143,18 @@ impl Harness {
         self.send(Request::patch(format!("/v1/artifacts/{id}")), key, change)
             .await
     }
+
+    async fn set_deleted(
+        &self,
+        id: &str,
+        key: &str,
+        base: u64,
+        deleted: bool,
+    ) -> Result<Value, TestError> {
+        let change = json!({ "base_metadata_revision": base, "deleted": deleted });
+        self.send(Request::patch(format!("/v1/artifacts/{id}")), key, change)
+            .await
+    }
 }
 
 impl Drop for Harness {
@@ -283,6 +295,43 @@ async fn a_stream_starts_at_the_head_and_sends_each_commit_once() -> TestResult 
     assert!(
         events.quiet().await,
         "an update without effect was announced"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn deletes_and_recoveries_are_announced_as_such() -> TestResult {
+    let harness = Harness::new(4);
+    let created = harness.create("feed-create-1").await?;
+    let id = created["artifact"]["id"].as_str().ok_or("no id")?;
+    let mut events = harness.follow(None).await?;
+    events.expect("ready").await?;
+
+    harness.set_deleted(id, "feed-delete-1", 1, true).await?;
+    let deleted = events.expect("change").await?;
+    assert_eq!(
+        (
+            &deleted.data["change"],
+            &deleted.data["revision"],
+            &deleted.data["metadata_revision"]
+        ),
+        (&json!("deleted"), &json!(1), &json!(2))
+    );
+    // A write refused in the trash commits nothing and sends nothing.
+    assert_eq!(
+        harness.save(id, "feed-save-1", 1).await?["error"]["code"],
+        "not_found"
+    );
+    assert!(events.quiet().await, "a refused write was announced");
+
+    harness.set_deleted(id, "feed-recover-1", 2, false).await?;
+    let recovered = events.expect("change").await?;
+    assert_eq!(
+        (
+            &recovered.data["change"],
+            &recovered.data["metadata_revision"]
+        ),
+        (&json!("recovered"), &json!(3))
     );
     Ok(())
 }

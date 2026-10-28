@@ -564,6 +564,79 @@ test('An agent duplicates a revision into an artifact of its own', async () => {
   });
 });
 
+test('An agent deletes to the trash, finds nothing there, and recovers', async () => {
+  await withClient(async (client) => {
+    const title = `Trash ${process.pid}`;
+    const created = await ok(client, 'create_artifact', {
+      title,
+      files: [utf8('index.html', '<p>kept</p>')],
+      idempotency_key: freshKey(),
+    });
+    const id = created.artifact.id;
+    const deletion = {
+      artifact_id: id,
+      base_metadata_revision: 1,
+      deleted: true,
+      idempotency_key: freshKey(),
+    };
+    const deleted = await ok(client, 'update_artifact', deletion);
+    assert.equal(typeof deleted.artifact.deleted_at_ms, 'number');
+
+    // Every other tool, and HTTP, finds nothing; a retry replays.
+    const missing = (await api(`/v1/artifacts/${'art_' + '0'.repeat(32)}`)).body
+      .error;
+    for (const [name, args] of [
+      ['get_artifact', { artifact_id: id }],
+      ['list_revisions', { artifact_id: id }],
+      ['read_file', { artifact_id: id, revision: 1, path: 'index.html' }],
+      ['create_preview', { artifact_id: id, revision: 1 }],
+      [
+        'save_revision',
+        {
+          artifact_id: id,
+          base_revision: 1,
+          changes: [{ op: 'put', ...utf8('index.html', '<p>lost</p>') }],
+          idempotency_key: freshKey(),
+        },
+      ],
+      [
+        'update_artifact',
+        { ...deletion, base_metadata_revision: 2, idempotency_key: freshKey() },
+      ],
+    ])
+      assert.deepEqual(await refused(client, name, args, 'not_found'), missing);
+    assert.equal((await api(`/v1/artifacts/${id}`)).status, 404);
+    assert.equal(
+      (await ok(client, 'update_artifact', deletion)).replayed,
+      true,
+    );
+    const listed = async (deletedOnly) =>
+      (
+        await ok(client, 'list_artifacts', {
+          q: title,
+          ...(deletedOnly ? { deleted: true } : {}),
+        })
+      ).artifacts.map((artifact) => artifact.id);
+    assert.deepEqual(await listed(false), []);
+    assert.deepEqual(await listed(true), [id]);
+
+    const recovered = await ok(client, 'update_artifact', {
+      artifact_id: id,
+      base_metadata_revision: 2,
+      deleted: false,
+      idempotency_key: freshKey(),
+    });
+    assert.equal(recovered.artifact.deleted_at_ms, null);
+    const file = await ok(client, 'read_file', {
+      artifact_id: id,
+      revision: 1,
+      path: 'index.html',
+    });
+    assert.equal(file.content, '<p>kept</p>');
+    assert.deepEqual(await listed(false), [id]);
+  });
+});
+
 test('Invalid input is a tool error the model can read', async () => {
   await withClient(async (client) => {
     const created = await ok(client, 'create_artifact', {

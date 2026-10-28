@@ -3,7 +3,9 @@
 //! revision-pinned reads.
 //!
 //! Every operation checks the actor's authority against current stored
-//! metadata. Commit success means durable acceptance. Source history is kept
+//! metadata. An artifact in the trash is missing to every request but its
+//! recovery and the replay of a request made before the delete (decision
+//! 0013). Commit success means durable acceptance. Source history is kept
 //! separate from future application data and access policy. A duplicate
 //! copies files only, since artifacts have no application data or uploaded
 //! assets yet. Publishing is not implemented.
@@ -106,18 +108,24 @@ impl From<StoreError> for ArtifactError {
     }
 }
 
-/// A change to an artifact's title, pin, or both.
+/// A change to an artifact's title, pin, trash state, or several of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataChange {
     title: Option<Title>,
     pinned: Option<bool>,
+    deleted: Option<bool>,
 }
 
 impl MetadataChange {
-    /// A change of the given fields, or `None` when it names neither.
+    /// A change of the given fields, or `None` when it names none. `deleted`
+    /// moves the artifact to the trash (`true`) or out of it (`false`).
     #[must_use]
-    pub fn new(title: Option<Title>, pinned: Option<bool>) -> Option<Self> {
-        (title.is_some() || pinned.is_some()).then_some(Self { title, pinned })
+    pub fn new(title: Option<Title>, pinned: Option<bool>, deleted: Option<bool>) -> Option<Self> {
+        (title.is_some() || pinned.is_some() || deleted.is_some()).then_some(Self {
+            title,
+            pinned,
+            deleted,
+        })
     }
 }
 
@@ -164,6 +172,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             kind,
             title,
             package,
+            source: None,
         })?;
         Ok(receipt)
     }
@@ -188,13 +197,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: SourceRevision,
         changes: Vec<FileChange>,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.authorized(actor, id)?;
-        // Revision 0 never exists; like a future base, it cannot be current.
-        if base.0 == 0 || base > record.current_revision {
-            return Err(ArtifactError::RevisionConflict {
-                current: record.current_revision,
-            });
-        }
+        let record = self.owned(actor, id)?;
         let mut hasher = Fingerprint::new("save");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -213,15 +216,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
         }
         let fingerprint = hasher.finish();
-        let base_package = self.package(id, base)?;
-        let package = match base_package.apply(changes) {
-            Ok(package) => package,
-            // Whether the files change is decided with the commit, against
-            // the base as it is then: a stale base is a conflict, and a retry
-            // of a committed save a replay.
-            Err(PackageError::Unchanged) => base_package,
-            Err(error) => return Err(ArtifactError::InvalidPackage(error)),
-        };
+        let package = checked(&record, self.saved_package(&record, base, changes))?;
         let receipt = self.store.commit_revision(RevisionCommit {
             request: RequestIdentity {
                 actor,
@@ -257,19 +252,14 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: SourceRevision,
         revision: SourceRevision,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.authorized(actor, id)?;
-        if base.0 == 0 || base > record.current_revision {
-            return Err(ArtifactError::RevisionConflict {
-                current: record.current_revision,
-            });
-        }
+        let record = self.owned(actor, id)?;
         let mut hasher = Fingerprint::new("restore");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
         hasher.field(&revision.0.to_be_bytes());
         // The store decides in one step whether this is a replay, a stale
         // base, or files the base already has.
-        let package = self.package(id, revision)?;
+        let package = checked(&record, self.restored_package(&record, base, revision))?;
         let receipt = self.store.commit_revision(RevisionCommit {
             request: RequestIdentity {
                 actor,
@@ -304,12 +294,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         revision: SourceRevision,
         title: Option<&Title>,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.authorized(actor, id)?;
-        // Checked here, as for a read, so that a number past every revision
-        // is missing rather than a storage failure.
-        if revision.0 == 0 || revision > record.current_revision {
-            return Err(ArtifactError::NotFound(Missing::Revision));
-        }
+        let record = self.owned(actor, id)?;
         let mut hasher = Fingerprint::new("duplicate");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&revision.0.to_be_bytes());
@@ -322,7 +307,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
             None => hasher.field(b"copy title"),
         }
-        let package = self.package(id, revision)?;
+        let package = checked(&record, self.revision_of(&record, revision))?;
         let title = title.cloned().unwrap_or_else(|| record.title.copy_of());
         let receipt = self.store.create_artifact(NewArtifact {
             request: RequestIdentity {
@@ -333,20 +318,25 @@ impl<S: ArtifactStore> ArtifactService<S> {
             kind: record.kind,
             title: &title,
             package: &package,
+            // The store refuses the copy unless its source is still outside
+            // the trash when the copy commits.
+            source: Some(id),
         })?;
         Ok(receipt)
     }
 
-    /// Changes the title or pin of an accessible artifact, only if its
-    /// metadata is still at `base`. Source revisions are not touched. A
-    /// change to the values already stored writes nothing but the key.
+    /// Changes the title, pin, or trash state of an accessible artifact, only
+    /// if its metadata is still at `base`. Source revisions are not touched.
+    /// A change to the values already stored writes nothing but the key. In
+    /// the trash, only a change that takes the artifact out is accepted.
     ///
     /// Retrying with the same key and content returns the original receipt
     /// even after later changes.
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact,
+    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact, or
+    /// one in the trash that the change does not take out,
     /// [`ArtifactError::MetadataConflict`] when `base` is not current,
     /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
     pub fn update(
@@ -357,7 +347,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: MetadataRevision,
         change: &MetadataChange,
     ) -> Result<MetadataReceipt, ArtifactError> {
-        self.authorized(actor, id)?;
+        // The store decides the trash: only a recovery reaches it.
+        self.owned(actor, id)?;
         let mut hasher = Fingerprint::new("update");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -373,6 +364,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
             Some(false) => b"unpin",
             None => b"keep pin",
         });
+        hasher.field(match change.deleted {
+            Some(true) => b"delete",
+            Some(false) => b"recover",
+            None => b"keep trash state",
+        });
         let receipt = self.store.update_metadata(MetadataUpdate {
             request: RequestIdentity {
                 actor,
@@ -383,6 +379,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             base,
             title: change.title.as_ref(),
             pinned: change.pinned,
+            deleted: change.deleted,
         })?;
         Ok(receipt)
     }
@@ -425,6 +422,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             owner: actor,
             search: query.search.as_ref().map(listing::SearchText::as_str),
             pinned: query.pinned,
+            deleted: query.deleted,
             order: query.order,
             after: after.as_ref(),
             limit: limit + 1,
@@ -495,6 +493,50 @@ impl<S: ArtifactStore> ArtifactService<S> {
             .ok_or(ArtifactError::NotFound(Missing::File))
     }
 
+    /// The files a save commits: `changes` applied to `base`.
+    fn saved_package(
+        &self,
+        record: &ArtifactRecord,
+        base: SourceRevision,
+        changes: Vec<FileChange>,
+    ) -> Result<FilePackage, ArtifactError> {
+        current_candidate(record, base)?;
+        let base_package = self.package(&record.id, base)?;
+        match base_package.apply(changes) {
+            Ok(package) => Ok(package),
+            // Whether the files change is decided with the commit, against
+            // the base as it is then: a stale base is a conflict, and a retry
+            // of a committed save a replay.
+            Err(PackageError::Unchanged) => Ok(base_package),
+            Err(error) => Err(ArtifactError::InvalidPackage(error)),
+        }
+    }
+
+    /// The files a restore of `revision` onto `base` commits.
+    fn restored_package(
+        &self,
+        record: &ArtifactRecord,
+        base: SourceRevision,
+        revision: SourceRevision,
+    ) -> Result<FilePackage, ArtifactError> {
+        current_candidate(record, base)?;
+        self.revision_of(record, revision)
+    }
+
+    /// The files of an existing revision. Its number is checked first, as for
+    /// a read, so that one past every revision is missing rather than a
+    /// storage failure.
+    fn revision_of(
+        &self,
+        record: &ArtifactRecord,
+        revision: SourceRevision,
+    ) -> Result<FilePackage, ArtifactError> {
+        if revision.0 == 0 || revision > record.current_revision {
+            return Err(ArtifactError::NotFound(Missing::Revision));
+        }
+        self.package(&record.id, revision)
+    }
+
     fn package(
         &self,
         id: &ArtifactId,
@@ -505,15 +547,55 @@ impl<S: ArtifactStore> ArtifactService<S> {
             .ok_or(ArtifactError::NotFound(Missing::Revision))
     }
 
+    /// An artifact the actor may read: one it owns, outside the trash.
     fn authorized(
         &self,
         actor: &ActorId,
         id: &ArtifactId,
     ) -> Result<ArtifactRecord, ArtifactError> {
+        let record = self.owned(actor, id)?;
+        if record.deleted_at.is_some() {
+            return Err(ArtifactError::NotFound(Missing::Artifact));
+        }
+        Ok(record)
+    }
+
+    /// An artifact the actor may change, also in the trash: a write there
+    /// is answered by [`checked`] and the store (decision 0013).
+    fn owned(&self, actor: &ActorId, id: &ArtifactId) -> Result<ArtifactRecord, ArtifactError> {
         match self.store.artifact(id)? {
             Some(record) if policy::may_access(actor, &record) => Ok(record),
             _ => Err(ArtifactError::NotFound(Missing::Artifact)),
         }
+    }
+}
+
+/// Refuses a base that cannot be current: revision 0 never exists, and a
+/// future one is not current either. Whether a past one still is, the store
+/// decides with the commit.
+fn current_candidate(record: &ArtifactRecord, base: SourceRevision) -> Result<(), ArtifactError> {
+    if base.0 == 0 || base > record.current_revision {
+        return Err(ArtifactError::RevisionConflict {
+            current: record.current_revision,
+        });
+    }
+    Ok(())
+}
+
+/// The outcome of a write's checks before the store (decision 0013, item 2).
+/// In the trash only the retry of a request that committed before the delete
+/// can succeed, and such a retry passes these checks: its base and revision
+/// existed, and its changes formed a package. A failed check there is
+/// therefore answered as for an unknown artifact. A storage failure stays
+/// one, so that the request is retried.
+fn checked<T>(
+    record: &ArtifactRecord,
+    prepared: Result<T, ArtifactError>,
+) -> Result<T, ArtifactError> {
+    match prepared {
+        Err(error @ ArtifactError::Unavailable(_)) => Err(error),
+        Err(_) if record.deleted_at.is_some() => Err(ArtifactError::NotFound(Missing::Artifact)),
+        prepared => prepared,
     }
 }
 

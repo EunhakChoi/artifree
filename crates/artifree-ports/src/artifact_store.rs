@@ -28,8 +28,11 @@ pub struct ArtifactRecord {
     pub pinned: bool,
     /// Latest committed source revision.
     pub current_revision: SourceRevision,
-    /// Latest metadata revision: the version of the title and pin.
+    /// Latest metadata revision: the version of the title, pin, and trash
+    /// state.
     pub metadata_revision: MetadataRevision,
+    /// When the artifact was moved to the trash, or `None` outside it.
+    pub deleted_at: Option<UnixMillis>,
     /// Creation time.
     pub created_at: UnixMillis,
     /// Time of the latest committed source revision; metadata updates do
@@ -87,6 +90,10 @@ pub struct NewArtifact<'a> {
     pub title: &'a Title,
     /// Initial source.
     pub package: &'a FilePackage,
+    /// The artifact a copy is made from. The create is refused as
+    /// [`StoreError::NotFound`] unless it is outside the trash when the
+    /// create commits.
+    pub source: Option<&'a ArtifactId>,
 }
 
 /// A request to append a revision when the artifact is still at `base`.
@@ -102,8 +109,8 @@ pub struct RevisionCommit<'a> {
     pub package: &'a FilePackage,
 }
 
-/// A request to change an artifact's title or pin when its metadata is still
-/// at `base`. A field that is `None` stays as it is.
+/// A request to change an artifact's title, pin, or trash state when its
+/// metadata is still at `base`. A field that is `None` stays as it is.
 #[derive(Debug, Clone, Copy)]
 pub struct MetadataUpdate<'a> {
     /// Retry identity of the updating actor.
@@ -116,6 +123,17 @@ pub struct MetadataUpdate<'a> {
     pub title: Option<&'a Title>,
     /// New pin.
     pub pinned: Option<bool>,
+    /// Whether the artifact is in the trash.
+    pub deleted: Option<bool>,
+}
+
+impl MetadataUpdate<'_> {
+    /// Whether the update takes the artifact out of the trash, the only
+    /// change an artifact in the trash accepts.
+    #[must_use]
+    pub fn recovers(&self) -> bool {
+        self.deleted == Some(false)
+    }
 }
 
 /// Whether a commit was performed now or is the stored result of a retry.
@@ -176,6 +194,8 @@ pub struct ArtifactListing<'a> {
     pub search: Option<&'a str>,
     /// Only artifacts with this pin.
     pub pinned: Option<bool>,
+    /// List the trash instead of the artifacts outside it.
+    pub deleted: bool,
     /// The order.
     pub order: ListOrder,
     /// Continue after this position.
@@ -194,6 +214,10 @@ pub enum ChangeKind {
     Revised,
     /// The title or pin changed; no source revision was written.
     MetadataUpdated,
+    /// The artifact was moved to the trash.
+    Deleted,
+    /// The artifact was taken out of the trash.
+    Recovered,
 }
 
 /// One commit as recorded in the change feed.
@@ -230,7 +254,7 @@ pub struct ChangePage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StoreError {
-    /// The artifact does not exist.
+    /// The artifact does not exist, or the request reached it in the trash.
     NotFound,
     /// The artifact's current revision is not the requested base.
     RevisionConflict {
@@ -276,14 +300,20 @@ impl std::error::Error for StoreError {}
 ///
 /// Reads of a revision are stable: a committed revision never changes. Methods
 /// do not check authorization; the application core does.
+///
+/// A write to an artifact in the trash is answered with the replay of the
+/// same request or [`StoreError::NotFound`], before any other check, unless
+/// it recovers the artifact (decision 0013). Reads return artifacts in the
+/// trash as stored; the core decides who may see them.
 pub trait ArtifactStore {
     /// Creates an artifact at revision 1, or returns the stored receipt when
     /// the actor already committed the same request key and fingerprint.
     ///
     /// # Errors
     ///
-    /// [`StoreError::RequestKeyReused`] when the key was used with another
-    /// fingerprint, or [`StoreError::Unavailable`].
+    /// [`StoreError::NotFound`] when the copy's source is missing or in the
+    /// trash, [`StoreError::RequestKeyReused`] when the key was used with
+    /// another fingerprint, or [`StoreError::Unavailable`].
     fn create_artifact(&self, request: NewArtifact<'_>) -> Result<CommitReceipt, StoreError>;
 
     /// Appends the next revision if the artifact is still at `base` and the
@@ -297,10 +327,10 @@ pub trait ArtifactStore {
     /// [`StoreError::Unavailable`].
     fn commit_revision(&self, request: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError>;
 
-    /// Changes the title or pin if the metadata is still at `base`, or
-    /// returns the stored receipt of an identical earlier request. A change
-    /// to the values already stored writes no metadata revision and no
-    /// change feed entry, but its key is recorded.
+    /// Changes the title, pin, or trash state if the metadata is still at
+    /// `base`, or returns the stored receipt of an identical earlier request.
+    /// A change to the values already stored writes no metadata revision and
+    /// no change feed entry, but its key is recorded.
     ///
     /// # Errors
     ///
@@ -316,7 +346,8 @@ pub trait ArtifactStore {
     fn artifact(&self, id: &ArtifactId) -> Result<Option<ArtifactRecord>, StoreError>;
 
     /// Up to `listing.limit` of an owner's artifacts that match the listing,
-    /// in its order, after its position.
+    /// in its order, after its position: those in the trash or those outside
+    /// it.
     ///
     /// # Errors
     ///

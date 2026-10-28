@@ -1,6 +1,12 @@
 //! Behavioral checks for the public contracts' Serde boundary.
 use artifree_contracts::ServiceDescription;
-use artifree_contracts::api::{CreateArtifactRequest, SaveRevisionRequest};
+use artifree_contracts::api::{
+    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
+    DuplicateArtifactResponse, ErrorResponse, FeedPosition, Preview, Revision, RevisionList,
+    SaveRevisionRequest, UpdateArtifactResponse,
+};
+use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde_json::Value;
 
 fn descriptor() -> Value {
@@ -120,4 +126,47 @@ fn create_request_rejects_unknown_encodings_and_fields() {
             "Expected {message:?}, got {error}"
         );
     }
+}
+
+/// Whether the schema Schemars derives for reading `T`, the published one,
+/// differs from the one it derives for writing it.
+fn published_unlike_written<T: JsonSchema>() -> bool {
+    let schema = |settings: SchemaSettings| settings.into_generator().into_root_schema_for::<T>();
+    schema(SchemaSettings::draft2020_12()) != schema(SchemaSettings::draft2020_12().for_serialize())
+}
+
+/// Clients read responses with the published schema, where an `Option`
+/// would be optional. Each response must be published as the server writes
+/// it: every field it always writes required, with its type.
+#[test]
+fn response_schemas_describe_what_the_server_writes() {
+    let differing: Vec<&str> = [
+        ("Artifact", published_unlike_written::<Artifact>()),
+        ("ArtifactList", published_unlike_written::<ArtifactList>()),
+        (
+            "CommitResponse",
+            published_unlike_written::<CommitResponse>(),
+        ),
+        (
+            "DuplicateArtifactResponse",
+            published_unlike_written::<DuplicateArtifactResponse>(),
+        ),
+        (
+            "UpdateArtifactResponse",
+            published_unlike_written::<UpdateArtifactResponse>(),
+        ),
+        ("Revision", published_unlike_written::<Revision>()),
+        ("RevisionList", published_unlike_written::<RevisionList>()),
+        ("Preview", published_unlike_written::<Preview>()),
+        ("ErrorResponse", published_unlike_written::<ErrorResponse>()),
+        (
+            "ArtifactChange",
+            published_unlike_written::<ArtifactChange>(),
+        ),
+        ("FeedPosition", published_unlike_written::<FeedPosition>()),
+    ]
+    .into_iter()
+    .filter_map(|(name, differs)| differs.then_some(name))
+    .collect();
+    assert_eq!(differing, Vec::<&str>::new());
 }

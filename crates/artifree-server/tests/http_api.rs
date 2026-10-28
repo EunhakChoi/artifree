@@ -1333,3 +1333,287 @@ async fn lists_search_filter_and_page_with_tokens() -> TestResult {
     }
     Ok(())
 }
+
+fn set_deleted(
+    id: &str,
+    key: &str,
+    base: u64,
+    deleted: bool,
+) -> Result<Request<Body>, axum::http::Error> {
+    patch(
+        &format!("/v1/artifacts/{id}"),
+        Some(key),
+        &json!({ "base_metadata_revision": base, "deleted": deleted }),
+    )
+}
+
+/// An artifact at revision 2, with a preview link to it issued before it
+/// went to the trash with "delete-key-1". Returns its id and the link.
+async fn trashed(harness: &Harness) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let id = created_id(harness).await?;
+    let history = format!("/v1/artifacts/{id}/revisions");
+    let saved = harness
+        .send(post(
+            &history,
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let link = preview_url(harness, &id, 2).await?;
+    let deleted = harness
+        .send(set_deleted(&id, "delete-key-1", 1, true)?)
+        .await?;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", error_code(&deleted));
+    let artifact = &deleted.json()?["artifact"];
+    assert!(artifact["deleted_at_ms"].is_i64(), "{artifact}");
+    assert_eq!(artifact["metadata_revision"], 2);
+    Ok((id, link))
+}
+
+async fn listed_ids(
+    harness: &Harness,
+    query: &str,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let list = harness
+        .send(get(&format!("/v1/artifacts{query}"))?)
+        .await?
+        .json()?;
+    Ok(list["artifacts"]
+        .as_array()
+        .ok_or("artifacts")?
+        .iter()
+        .map(|artifact| artifact["id"].clone())
+        .collect())
+}
+
+type Requests = Vec<(&'static str, Request<Body>)>;
+
+/// Reads and source writes that name the artifact `id`, as made after the
+/// [`trashed`] fixture: none may succeed in the trash.
+fn reads_and_saves(id: &str) -> Result<Requests, axum::http::Error> {
+    let history = format!("/v1/artifacts/{id}/revisions");
+    let save = |key, body: &Value| post(&history, Some(key), body);
+    Ok(vec![
+        ("read", get(&format!("/v1/artifacts/{id}"))?),
+        ("history", get(&history)?),
+        ("manifest", get(&format!("{history}/2"))?),
+        ("file", get(&format!("{history}/2/files/index.html"))?),
+        (
+            "preview",
+            post(&format!("{history}/2/previews"), None, &json!({}))?,
+        ),
+        ("save", save("save-key-2", &put_index(2, "<h1>v3</h1>"))?),
+        // Checks before the store answer the same, for any request but a
+        // retry, and so does a key used for another request.
+        (
+            "save on revision 0",
+            save("save-key-3", &put_index(0, "x"))?,
+        ),
+        (
+            "save on a future base",
+            save("save-key-4", &put_index(9, "x"))?,
+        ),
+        (
+            "save that forms no package",
+            save(
+                "save-key-5",
+                &json!({ "base_revision": 2, "changes": [{ "op": "delete", "path": "index.html" }] }),
+            )?,
+        ),
+        (
+            "save with a reused key",
+            save("save-key-1", &put_index(2, "y"))?,
+        ),
+        (
+            "save on revision 0 with a reused key",
+            save("save-key-1", &put_index(0, "y"))?,
+        ),
+        // A request invalid in itself is refused before any artifact is
+        // looked up, so it is answered the same way too.
+        (
+            "save to an unsafe path",
+            save(
+                "save-key-6",
+                &json!({ "base_revision": 2, "changes": [{ "op": "delete", "path": "../x" }] }),
+            )?,
+        ),
+        (
+            "save without a key",
+            post(&history, None, &put_index(2, "z"))?,
+        ),
+    ])
+}
+
+/// The other writes that name the artifact `id`, as for [`reads_and_saves`].
+fn other_writes(id: &str) -> Result<Requests, axum::http::Error> {
+    let metadata = |key, body: Value| patch(&format!("/v1/artifacts/{id}"), Some(key), &body);
+    Ok(vec![
+        ("restore", restore(id, 1, Some("restore-key-1"), 2)?),
+        (
+            "restore a future revision",
+            restore(id, 9, Some("restore-key-2"), 2)?,
+        ),
+        (
+            "restore onto a future base",
+            restore(id, 1, Some("restore-key-3"), 9)?,
+        ),
+        ("copy", duplicate(id, 2, Some("copy-key-1"), &json!({}))?),
+        (
+            "copy a future revision",
+            duplicate(id, 9, Some("copy-key-2"), &json!({}))?,
+        ),
+        (
+            "copy with a reused key",
+            duplicate(id, 9, Some("save-key-1"), &json!({}))?,
+        ),
+        (
+            "copy with an invalid title",
+            duplicate(id, 2, Some("copy-key-3"), &json!({ "title": "" }))?,
+        ),
+        (
+            "rename",
+            metadata(
+                "rename-key-1",
+                json!({ "base_metadata_revision": 2, "title": "New" }),
+            )?,
+        ),
+        (
+            "pin",
+            metadata(
+                "pin-key-1",
+                json!({ "base_metadata_revision": 2, "pinned": true }),
+            )?,
+        ),
+        ("delete again", set_deleted(id, "delete-key-2", 2, true)?),
+        (
+            "rename with a reused key",
+            metadata(
+                "delete-key-1",
+                json!({ "base_metadata_revision": 2, "title": "New" }),
+            )?,
+        ),
+        (
+            "rename to an invalid title",
+            metadata(
+                "rename-key-2",
+                json!({ "base_metadata_revision": 2, "title": "" }),
+            )?,
+        ),
+        (
+            "update without a change",
+            metadata("rename-key-3", json!({ "base_metadata_revision": 2 }))?,
+        ),
+    ])
+}
+
+#[tokio::test]
+async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
+    let harness = Harness::new();
+    let (id, link) = trashed(&harness).await?;
+    let unknown = "art_00000000000000000000000000000000";
+    let mut missing = 0;
+    for ((what, request), (_, control)) in reads_and_saves(&id)?
+        .into_iter()
+        .chain(other_writes(&id)?)
+        .zip(
+            reads_and_saves(unknown)?
+                .into_iter()
+                .chain(other_writes(unknown)?),
+        )
+    {
+        let reply = harness.send(request).await?;
+        let expected = harness.send(control).await?;
+        assert_eq!(
+            (reply.status, reply.json()?),
+            (expected.status, expected.json()?),
+            "{what}: answered unlike an unknown artifact"
+        );
+        if reply.status == StatusCode::NOT_FOUND {
+            missing += 1;
+        }
+    }
+    assert_eq!(missing, 21, "every request valid in itself is not found");
+    assert_eq!(
+        harness.content(&link).await?.status,
+        StatusCode::NOT_FOUND,
+        "a link issued before the delete"
+    );
+    assert_eq!(listed_ids(&harness, "").await?, Vec::<Value>::new());
+    assert_eq!(listed_ids(&harness, "?deleted=true").await?, [json!(id)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn retries_replay_in_the_trash_and_a_recovery_brings_it_back() -> TestResult {
+    let harness = Harness::new();
+    let (id, link) = trashed(&harness).await?;
+    let again = harness
+        .send(set_deleted(&id, "delete-key-1", 1, true)?)
+        .await?;
+    assert_eq!(again.status, StatusCode::OK, "{}", error_code(&again));
+    assert_eq!(again.json()?["replayed"], true);
+    let resaved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(
+        resaved.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&resaved)
+    );
+    let replayed = resaved.json()?;
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(
+        replayed["artifact"]["deleted_at_ms"],
+        Value::Null,
+        "as of its request"
+    );
+
+    // A recovery is an ordinary conditional update. The delete's key does
+    // not recover, even on the delete's own base.
+    let reused = harness
+        .send(set_deleted(&id, "delete-key-1", 1, false)?)
+        .await?;
+    assert_eq!(error_code(&reused), "request_key_reused");
+    let stale = harness
+        .send(set_deleted(&id, "recover-key-1", 1, false)?)
+        .await?;
+    assert_eq!(error_code(&stale), "metadata_conflict");
+    assert_eq!(stale.json()?["error"]["current_metadata_revision"], 2);
+    let recovered = harness
+        .send(set_deleted(&id, "recover-key-1", 2, false)?)
+        .await?;
+    assert_eq!(
+        recovered.status,
+        StatusCode::OK,
+        "{}",
+        error_code(&recovered)
+    );
+    let artifact = &recovered.json()?["artifact"];
+    assert_eq!(artifact["deleted_at_ms"], Value::Null);
+    assert_eq!(
+        (
+            &artifact["current_revision"],
+            &artifact["metadata_revision"]
+        ),
+        (&json!(2), &json!(3))
+    );
+    let read = harness.send(get(&format!("/v1/artifacts/{id}"))?).await?;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(
+        harness.content(&link).await?.status,
+        StatusCode::OK,
+        "the link works again until it expires"
+    );
+    assert_eq!(listed_ids(&harness, "").await?, [json!(id)]);
+    assert_eq!(
+        listed_ids(&harness, "?deleted=true").await?,
+        Vec::<Value>::new()
+    );
+    Ok(())
+}

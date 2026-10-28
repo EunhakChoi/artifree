@@ -90,6 +90,8 @@ pub struct ListQuery {
     pub search: Option<SearchText>,
     /// Only pinned, or only unpinned, artifacts.
     pub pinned: Option<bool>,
+    /// List the trash instead of the artifacts outside it.
+    pub deleted: bool,
     /// The order.
     pub order: ListOrder,
     /// The page size.
@@ -101,6 +103,7 @@ impl Default for ListQuery {
         Self {
             search: None,
             pinned: None,
+            deleted: false,
             order: ListOrder::Updated,
             limit: PageSize::default(),
         }
@@ -184,6 +187,11 @@ fn filters_digest(query: &ListQuery) -> String {
         Some(false) => 1,
         Some(true) => 2,
     }]);
+    // Added only for the trash, so that tokens of other lists keep their
+    // digest across the upgrade that added it.
+    if query.deleted {
+        hasher.update(b"trash");
+    }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(16);
     for byte in &digest[..8] {
@@ -222,6 +230,7 @@ mod tests {
             pinned: false,
             current_revision: SourceRevision(3),
             metadata_revision: MetadataRevision(1),
+            deleted_at: None,
             created_at: UnixMillis(10),
             updated_at: UnixMillis(20),
         }
@@ -254,6 +263,10 @@ mod tests {
             },
             ListQuery {
                 pinned: Some(true),
+                ..query.clone()
+            },
+            ListQuery {
+                deleted: true,
                 ..query.clone()
             },
             ListQuery {
