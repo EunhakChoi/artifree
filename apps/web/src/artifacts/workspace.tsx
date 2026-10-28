@@ -123,6 +123,24 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     setCount(PAGE_SIZE);
     setMoved(undefined);
   }, []);
+  // An artifact recovered from the trash, to open once its answer arrives.
+  // What to do is decided from the page as it is then, not as it was when
+  // the recovery was sent (decision 0014, item 5).
+  const [recoveredId, setRecoveredId] = useState<string>();
+  if (recoveredId !== undefined) {
+    setRecoveredId(undefined);
+    // Still showing the trash: it opens in the list of artifacts, with the
+    // search and order the fields show now. A page that left the trash
+    // meanwhile may hold a draft elsewhere; it keeps what it shows. An
+    // answer to a request sent before a reset is not learned (decision
+    // 0007, item 4), so the page may still know the artifact as in the
+    // trash; it opens once the page learns otherwise.
+    if (query.deleted) {
+      setQuery(showing(query, 'all'));
+      setCount(PAGE_SIZE);
+      if (live.trash[recoveredId]?.deleted !== true) setSelected(recoveredId);
+    }
+  }
   const { epoch, resets } = live;
   const shownQuery = queryKey(query);
   const artifacts = useRequest(
@@ -164,12 +182,21 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   // Another query's results never stand in for this one's, neither while
   // it loads nor after it failed.
   const shownList = lastList?.query === shownQuery ? lastList : undefined;
-  const listed = shownList?.list;
-  const showMore = shownList !== undefined && !shownList.complete;
-  const noArtifacts = listed?.length === 0 && !isFiltered(query);
   // Whether the page knows the artifact went to the trash: from the feed,
   // a list, or its own move (decision 0014, items 4 and 6).
   const inTrash = (id: string) => live.trash[id]?.deleted === true;
+  // A list leaves out what the page learned left its view after the list
+  // was read: a move to the trash, or a recovery from it.
+  const listed = shownList?.list.filter((artifact) => {
+    const known = live.trash[artifact.id];
+    return (
+      known === undefined ||
+      known.metadata <= artifact.metadata_revision ||
+      known.deleted === query.deleted
+    );
+  });
+  const showMore = shownList !== undefined && !shownList.complete;
+  const noArtifacts = listed?.length === 0 && !isFiltered(query);
   // A draft keeps its artifact open. Otherwise the open artifact closes
   // once the page knows it went to the trash, or once a fresh list of
   // every artifact no longer contains it; a search, a filter, or a partial
@@ -226,14 +253,12 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   }
   function recovered(artifact: Artifact): void {
     learn(epoch, [artifact]);
-    // It opens in the list of artifacts.
-    changeQuery(showing(query, 'all'));
     setMoved({
       id: artifact.id,
       text: `Recovered “${artifact.title}”.`,
       toTrash: false,
     });
-    setSelected(artifact.id);
+    setRecoveredId(artifact.id);
     setGeneration((value) => value + 1);
   }
   function showMoreArtifacts(): void {
@@ -291,9 +316,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
           Loading artifacts…
         </output>
       ) : null}
-      {selectedId === undefined &&
-      !query.deleted &&
-      (listed === undefined || noArtifacts) ? (
+      {selectedId === undefined && !query.deleted && listed === undefined ? (
         listFailure
       ) : (
         <div className="grid gap-5 lg:grid-cols-3">
@@ -333,7 +356,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                   setSelected(id);
                 }}
                 empty={
-                  listed === undefined ? null : (
+                  listed === undefined || noArtifacts ? null : (
                     <p className="text-sm text-muted-foreground">
                       No artifacts match.
                     </p>

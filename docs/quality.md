@@ -249,17 +249,20 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   title; a dialog open during a forged `reset` sends nothing; a draft
   disables duplicating. The dialog is checked for accessibility.
 - `scripts/smoke-trash.mjs`: moving the open artifact to the trash after a
-  confirmation, retried after a lost answer as one request; the artifact
-  closes from the page's own answer, without the feed and before the list
-  is read again, leaves the list, and the API answers `404`; the trash lists
-  it without opening it, and recovering opens it, with the search kept in
-  every list read; an open artifact listed first and deleted elsewhere
-  closes with a notice before the list is read again, the next one outside
-  the trash opens, and one with a draft stays open with the draft and
-  recovers in place; a recovery that another change refused waits for that
-  change and holds back no other artifact in the trash; a trash read before a forged `reset` recovers nothing until read
-  again; a draft disables moving to the trash and showing it. The dialog
-  and the trash are checked for accessibility.
+  confirmation; with the feed cut, a first attempt that committed and lost
+  its answer is retried with the same key and moves it once; the artifact
+  closes and leaves the list from the page's own answer, before the list
+  is read again, and the API answers `404`; the trash lists it without
+  opening it, and recovering opens it, with the search kept in every list
+  read; an open artifact listed first and deleted elsewhere closes with a
+  notice before the list is read again, the next one outside the trash
+  opens, and one with a draft stays open with the draft and recovers in
+  place; a recovery that another change refused waits for that change and
+  holds back no other artifact in the trash; a trash read before a forged
+  `reset` recovers nothing until read again; a draft disables moving to the
+  trash and showing it. The dialog and the trash are checked for
+  accessibility. `scripts/smoke-workspace.mjs` checks that an empty list
+  still offers the trash.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

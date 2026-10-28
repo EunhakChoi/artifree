@@ -53,7 +53,10 @@ unpublished trace maps each to its evidence.
    artifacts in the trash, with search and order, and its items do not
    open: an artifact there cannot be read. Showing the trash and leaving
    it, also by a recovery or the notice's "Show trash", change only what
-   is shown; the search and order stay as their fields show them. Each
+   is shown; the search and order stay as their fields show them. The
+   choice is offered also when no artifact is listed, since every one may
+   be in the trash. A list leaves out an artifact the page learned left its
+   view after the list was read, by a move or a recovery. Each
    artifact has "Recover", a metadata update with `deleted: false`
    against the metadata revision the list read, through a gate of that
    artifact's own with the same rules: it waits while the page knows of a

@@ -75,13 +75,24 @@ export async function checkTrash({
     await nav.getByRole('button', { name: /^Trash demo/ }).click();
     await expect(heading('Trash demo')).toBeVisible();
 
-    // A move whose outcome is unknown is resent as the same request. The
-    // first attempt fails on the way: had it committed, the feed would
-    // close the artifact before the retry (decision 0014, item 6).
-    let lost = false;
+    // A move whose answer is lost is resent as the same request, and the
+    // server answers the retry under its key without moving it again. The
+    // feed is cut first: it would close the artifact before the retry.
+    // Without it the page learns the move from its own answer alone
+    // (decision 0014, items 4 and 6).
+    const feed = (url) => url.pathname === '/v1/changes';
+    await tab.route(feed, (route) => route.abort());
+    await setVisible(tab, false);
+    await setVisible(tab, true);
+    await expect(
+      workspace.getByText(/^Reconnecting live updates/),
+    ).toBeVisible();
+    const keys = [];
     await tab.route(`**${path(demo)}`, async (route) => {
-      if (lost || route.request().method() !== 'PATCH') return route.fallback();
-      lost = true;
+      if (route.request().method() !== 'PATCH') return route.fallback();
+      keys.push(route.request().headers()['idempotency-key']);
+      if (keys.length > 1) return route.fallback();
+      await route.fetch();
       return route.abort('connectionreset');
     });
     await moveButton.click();
@@ -92,21 +103,17 @@ export async function checkTrash({
     const confirm = dialog.getByRole('button', { name: 'Move to trash' });
     await confirm.click();
     await expect(dialog.getByText('Outcome unknown')).toBeVisible();
-    // The page closes it from its own answer, before any list is read
-    // again. (Reads are sent one at a time, so the next artifact opens once
-    // the list is.)
-    // Without the feed it learns the move from its own answer alone.
-    const feed = (url) => url.pathname === '/v1/changes';
-    await tab.route(feed, (route) => route.abort());
-    await setVisible(tab, false);
-    await setVisible(tab, true);
-    await expect(
-      workspace.getByText(/^Reconnecting live updates/),
-    ).toBeVisible();
+    assert.equal(await status(demo), 404, 'The lost attempt committed.');
+    // The page closes it, and the list leaves it out, from its own answer
+    // before any list is read again. (Reads are sent one at a time, so the
+    // next artifact opens once the list is.)
     const ownMove = await hold(tab, 'GET', lists);
     await confirm.click();
     await expect(dialog).toBeHidden();
     await expect(heading('Trash demo')).toBeHidden();
+    await expect(nav.getByRole('button', { name: /^Trash demo/ })).toHaveCount(
+      0,
+    );
     await ownMove();
     await expect(heading('Trash other')).toBeVisible();
     await tab.unroute(feed);
@@ -120,7 +127,8 @@ export async function checkTrash({
     await expect(nav.getByRole('button', { name: /^Trash demo/ })).toHaveCount(
       0,
     );
-    assert.equal(await status(demo), 404, 'It is in the trash.');
+    assert.equal(keys.length, 2, 'The move was sent twice.');
+    assert.equal(keys[0], keys[1], 'The retry reused the key.');
     assert.equal(await metadata(demo), 2, 'The retry moved it once.');
 
     // The trash lists it; nothing there opens, and a recovery opens it.
@@ -137,9 +145,17 @@ export async function checkTrash({
       workspace.getByText(/Artifacts in the trash cannot be opened/),
     ).toBeVisible();
     await checkAccessibility('workspace-trash', tab);
+    // The order changed while the recovery was on its way stays.
+    const order = workspace.getByLabel('Order');
+    const slowRecovery = await hold(tab, 'PATCH', `**${path(demo)}`);
     await trashNav.getByRole('button', { name: 'Recover Trash demo' }).click();
+    await order.selectOption('created');
+    await slowRecovery();
     await expect(show).toHaveValue('all');
     await expect(workspace.getByText('Recovered “Trash demo”.')).toBeVisible();
+    await expect(order).toHaveValue('created');
+    await expect(heading('Trash demo')).toBeVisible();
+    await order.selectOption('updated');
     // Showing the trash and leaving it keep the search the field shows.
     await expect(workspace.getByLabel('Search titles')).toHaveValue('Trash');
     await expect(nav.getByRole('button')).toHaveText([
@@ -253,6 +269,29 @@ export async function checkTrash({
     await recoverDemo.click();
     await expect(heading('Trash demo')).toBeVisible();
     assert.equal(await status(demo), 200);
+
+    // A recovery whose answer arrives after the page left the trash opens
+    // nothing: a draft begun meanwhile stays where it is.
+    await setDeleted(other, false);
+    await setDeleted(demo, true);
+    await expect(
+      workspace.getByText('The open artifact was moved to the trash.'),
+    ).toBeVisible();
+    await show.selectOption('trash');
+    const lateRecovery = await hold(tab, 'PATCH', `**${path(demo)}`);
+    await recoverDemo.click();
+    await show.selectOption('all');
+    await nav.getByRole('button', { name: /^Trash other/ }).click();
+    await expect(heading('Trash other')).toBeVisible();
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    await editor.fill('<p>kept</p>');
+    await lateRecovery();
+    await expect(workspace.getByText('Recovered “Trash demo”.')).toBeVisible();
+    await expect(heading('Trash other')).toBeVisible();
+    await expect(heading('Trash demo')).toBeHidden();
+    await expect(editor).toHaveValue('<p>kept</p>');
+    assert.equal(await status(demo), 200);
+    await workspace.getByRole('button', { name: 'Discard changes' }).click();
 
     assert.deepEqual(errors, [], 'Page errors.');
     return { recovered: 3 };
