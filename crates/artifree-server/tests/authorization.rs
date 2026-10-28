@@ -71,20 +71,24 @@ fn another_actor_can_neither_see_nor_change_an_artifact() -> TestResult {
             .map(|_| ()),
         hidden
     );
-    let rename =
-        MetadataChange::new(Some(parsed("Defaced")), Some(true)).ok_or("a change with fields")?;
-    assert_eq!(
-        service
-            .update(
-                &intruder,
-                &parsed::<RequestKey>("intruder-key-2"),
-                &id,
-                MetadataRevision(1),
-                &rename
-            )
-            .map(|_| ()),
-        hidden
-    );
+    let rename = MetadataChange::new(Some(parsed("Defaced")), Some(true), None)
+        .ok_or("a change with fields")?;
+    let delete = MetadataChange::new(None, None, Some(true)).ok_or("a change with fields")?;
+    for (key, change) in [("intruder-key-2", &rename), ("intruder-key-3", &delete)] {
+        assert_eq!(
+            service
+                .update(
+                    &intruder,
+                    &parsed::<RequestKey>(key),
+                    &id,
+                    MetadataRevision(1),
+                    change
+                )
+                .map(|_| ()),
+            hidden,
+            "{key}"
+        );
+    }
     assert!(
         service
             .list(&intruder, &ListQuery::default(), None)?

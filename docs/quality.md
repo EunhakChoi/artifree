@@ -40,7 +40,9 @@ remain enabled there. Application call sites retain all six rules.
 schema, architecture policy, and workflow policy. It verifies that all six UI
 rules still produce errors; a zero-file lint run is a failure. It also catches
 unpinned actions, ignored failures, and a new job omitted from the aggregate.
-The Rust tests execute Serde rejection and the native descriptor CLI directly.
+The Rust tests execute Serde rejection and the native descriptor CLI directly,
+and check that each response schema is published as the server writes it,
+with every field it always writes required.
 No domain test exists merely to repeat a field declaration.
 
 Artifact behavior is tested at the boundary that owns it:
@@ -49,7 +51,11 @@ Artifact behavior is tested at the boundary that owns it:
 - `crates/artifree-providers/tests/sqlite_store.rs`: the store contract on a
   real database — reopen durability, replay, key reuse, conflicts, eight
   concurrent writers, a trigger-injected failure that must leave no partial
-  revision, content sharing, and newer-schema refusal; one feed entry per
+  revision, content sharing, and newer-schema refusal; in the trash, a write
+  that is its replay or not found, a key used for another request and a copy
+  of the artifact included, a listing of the trash alone, and a recovery as
+  the one update that reaches it, conditional and keyed, that keeps every
+  byte, with `deleted` and `recovered` feed entries; one feed entry per
   commit and none for replays, conflicts, reused keys, or a failed commit,
   a commit that fails with its feed entry, owner-only pages that end at the
   head, a feed identity kept on reopening and different in another
@@ -70,7 +76,13 @@ Artifact behavior is tested at the boundary that owns it:
   the same digests, later saves to either artifact that leave the other
   as it was, a title of the caller's, a replay after the source was
   renamed and revised, a reused key, and a missing revision, invalid
-  title, unknown field, or missing key that create nothing.
+  title, unknown field, or missing key that create nothing; an artifact in
+  the trash answers every read and write, checks that fail before the store
+  and reused keys included, with the body of an unknown artifact, also
+  through a preview link issued before, and is listed only in the trash;
+  requests made before the delete replay as of their request, and a
+  recovery is conditional, keyed apart from the delete, and brings back the
+  artifact and its link; non-owners cannot delete.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
@@ -78,7 +90,9 @@ Artifact behavior is tested at the boundary that owns it:
   the API schema root (which must reject an empty object) with its expected
   status, a restore through the CLI with exact bytes, its replay, and its
   conflict and usage errors, a duplicate through the CLI with exact bytes,
-  its replay, a title, a missing revision, and usage errors, and a SIGKILL after commit
+  its replay, a title, a missing revision, and usage errors, a delete,
+  `list --deleted`, and a recovery through the CLI with a replay, a conflict,
+  and usage errors, and a SIGKILL after commit
   followed by a restart and a replayed retry.
 - `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
   authenticates before anything else, refuses a request with an `Origin` or a
@@ -92,6 +106,8 @@ Artifact behavior is tested at the boundary that owns it:
   reads exact pinned bytes (BOM, CRLF, binary), opens a sandboxed preview,
   restores an earlier revision byte for byte, replayed over HTTP, and
   duplicates a revision with binary bytes intact, replayed over HTTP;
+  deletes an artifact that every other tool and HTTP then report as unknown,
+  lists the trash, replays the delete, and recovers it with its bytes;
   results validate against the API schema; retries replay, reordered changes
   are the same request, a reused key is refused, and keys are shared with
   HTTP; stale bases conflict without partial writes; invalid arguments are
@@ -110,7 +126,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   bodies being read.
 - `crates/artifree-server/tests/change_feed.rs`: a stream starts with `ready`
   at the head and sends each commit once and nothing for a replay or
-  conflict; a stream resumes after its cursor; a cursor of another feed or
+  conflict; deletes and recoveries arrive as `deleted` and `recovered`, and
+  a write refused in the trash sends nothing; a stream resumes after its cursor; a cursor of another feed or
   beyond the head is reset to the head; a malformed cursor and a token in the
   query string are refused without taking a stream slot; streams beyond the
   per-actor cap get `429` with `Retry-After: 5` until a reader leaves; and
@@ -138,11 +155,13 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   invalid response, uploads pick the smaller exact encoding, a restore sends
   its revision, base, and key, a manifest without a valid lowercase
   `sha256` is an invalid response, and a duplicate whose `copied` is missing
-  or names a part the client does not know is an invalid response. For the
+  or names a part the client does not know is an invalid response, as is an
+  artifact whose `deleted_at_ms` is missing or not a time. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without
-  data or without its blank line); an unknown change kind arriving as
+  data or without its blank line); deletes and recoveries arriving as
+  themselves and an unknown change kind arriving as
   `unknown` while broken data is refused; reconnecting from the last cursor
   after a lost connection, an empty `502`, an HTML `504`, `503`, and `429`
   with their delays; stopping on `401`, `400`, an HTML `404`, a successful

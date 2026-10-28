@@ -79,19 +79,19 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 
 ## Tools
 
-| Tool                 | Arguments                                                                           | Result                                     |
-| -------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------ |
-| `list_artifacts`     | optional `q`, `sort`, `pinned`, `limit`, `page_token`                               | `{ artifacts, next_page_token? }`          |
-| `get_artifact`       | `artifact_id`                                                                       | artifact with `current_revision`           |
-| `create_artifact`    | `title`, `files`, `idempotency_key`                                                 | `{ artifact, revision, replayed }`         |
-| `save_revision`      | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                        | `{ artifact, revision, replayed }`         |
-| `restore_revision`   | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                       | `{ artifact, revision, replayed }`         |
-| `duplicate_artifact` | `artifact_id`, `revision`, optional `title`, `idempotency_key`                      | `{ artifact, revision, copied, replayed }` |
-| `update_artifact`    | `artifact_id`, `base_metadata_revision`, `title` and/or `pinned`, `idempotency_key` | `{ artifact, replayed }`                   |
-| `list_revisions`     | `artifact_id`                                                                       | `{ revisions }`, newest first              |
-| `get_revision`       | `artifact_id`, `revision`                                                           | one revision manifest                      |
-| `read_file`          | `artifact_id`, `revision`, `path`                                                   | exact bytes as `utf8` or `base64`          |
-| `create_preview`     | `artifact_id`, `revision`                                                           | `{ url, revision, expires_at_ms }`         |
+| Tool                 | Arguments                                                                                               | Result                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `list_artifacts`     | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                        | `{ artifacts, next_page_token? }`          |
+| `get_artifact`       | `artifact_id`                                                                                           | artifact with `current_revision`           |
+| `create_artifact`    | `title`, `files`, `idempotency_key`                                                                     | `{ artifact, revision, replayed }`         |
+| `save_revision`      | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                            | `{ artifact, revision, replayed }`         |
+| `restore_revision`   | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                           | `{ artifact, revision, replayed }`         |
+| `duplicate_artifact` | `artifact_id`, `revision`, optional `title`, `idempotency_key`                                          | `{ artifact, revision, copied, replayed }` |
+| `update_artifact`    | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
+| `list_revisions`     | `artifact_id`                                                                                           | `{ revisions }`, newest first              |
+| `get_revision`       | `artifact_id`, `revision`                                                                               | one revision manifest                      |
+| `read_file`          | `artifact_id`, `revision`, `path`                                                                       | exact bytes as `utf8` or `base64`          |
+| `create_preview`     | `artifact_id`, `revision`                                                                               | `{ url, revision, expires_at_ms }`         |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
@@ -101,11 +101,18 @@ A file is `{ "path", "encoding": "utf8" | "base64", "content" }`. A change is
 
 `list_artifacts` returns the most recently updated first, or the newest first
 with `sort: "created"`, in pages of up to 500 (`limit`, default 500). Pass a
-returned `next_page_token` with the same `q`, `sort`, and `pinned` to read the
-next page. `update_artifact` renames or pins without creating a source
-revision; it fails with `metadata_conflict` and `current_metadata_revision`
-when `base_metadata_revision` is stale (decision
-[0008](decisions/0008-artifact-metadata-and-lists.md)).
+returned `next_page_token` with the same `q`, `sort`, `pinned`, and `deleted`
+to read the next page. `update_artifact` renames or pins without creating a
+source revision; it fails with `metadata_conflict` and
+`current_metadata_revision` when `base_metadata_revision` is stale (decision
+[0008](decisions/0008-artifact-metadata-and-lists.md)). With `deleted: true`
+it moves the artifact to the trash: every other tool then answers
+`not_found` exactly as for an unknown artifact, except the retry of a call
+made before the delete, which replays. `list_artifacts` with `deleted: true`
+lists the trash, and `update_artifact` with `deleted: false` recovers an
+artifact from it, under the same base and key rules. Nothing is removed;
+each artifact carries `deleted_at_ms`, `null` outside the trash (decision
+[0013](decisions/0013-deleting-artifacts-and-the-trash.md)).
 `restore_revision` commits an earlier revision's files, byte for byte, as the
 next revision under the same `base_revision` and key rules as a save; it
 changes no title or pin. Each file in a manifest carries `sha256`, so two

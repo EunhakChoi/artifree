@@ -275,6 +275,8 @@ impl Producer {
             change: match record.kind {
                 ChangeKind::Created => WireKind::Created,
                 ChangeKind::MetadataUpdated => WireKind::MetadataUpdated,
+                ChangeKind::Deleted => WireKind::Deleted,
+                ChangeKind::Recovered => WireKind::Recovered,
                 // A kind added later is a revision to clients of this
                 // contract: they read the artifact again.
                 _ => WireKind::Revised,

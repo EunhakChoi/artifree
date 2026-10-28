@@ -225,7 +225,27 @@ test('Every JSON body the server sends matches the API schema root', async () =>
     await request(201, 'POST', `/v1/artifacts/${id}/revisions/1/restore`, {
       base_revision: 2,
     });
-    await request(201, 'POST', `/v1/artifacts/${id}/revisions/1/duplicate`, {});
+    const copy = await request(
+      201,
+      'POST',
+      `/v1/artifacts/${id}/revisions/1/duplicate`,
+      {},
+    );
+    // An artifact in the trash carries its time; a write there is missing.
+    const trashed = `/v1/artifacts/${copy.artifact.id}`;
+    await request(200, 'PATCH', trashed, {
+      base_metadata_revision: 1,
+      deleted: true,
+    });
+    await request(200, 'GET', '/v1/artifacts?deleted=true');
+    await request(404, 'PATCH', trashed, {
+      base_metadata_revision: 2,
+      title: 'Lost',
+    });
+    await request(200, 'PATCH', trashed, {
+      base_metadata_revision: 2,
+      deleted: false,
+    });
     await request(
       404,
       'GET',
@@ -297,6 +317,61 @@ test('CLI renames, pins, and lists by filter and page', async () => {
       ['list', '--limit', '0'],
       ['rename', ids[1], 'Missing base'],
       ['pin', ids[1], 'extra', '--base-metadata', '1'],
+    ]) {
+      const refused = cli(server, args);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stdout, '', args.join(' '));
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CLI deletes to the trash, lists it, and recovers', async () => {
+  const server = await startServer(binary, dataDirectory('cli-trash'));
+  try {
+    const site = await freshDirectory('cli-trash-site');
+    await writeFile(join(site, 'index.html'), '<h1>kept</h1>');
+    const id = json(cli(server, ['create', '--title', 'Old', '--dir', site]))
+      .artifact.id;
+    const deletion = [
+      'delete',
+      id,
+      '--base-metadata',
+      '1',
+      '--idempotency-key',
+      'cli-delete-key-1',
+    ];
+    const deleted = json(cli(server, deletion));
+    assert.equal(typeof deleted.artifact.deleted_at_ms, 'number');
+    assert.equal(deleted.artifact.metadata_revision, 2);
+    assert.equal(json(cli(server, deletion)).replayed, true);
+    const missing = cli(server, ['show', id]);
+    assert.equal(missing.status, 1);
+    assert.equal(missing.stdout, '');
+    assert.match(missing.stderr, /^error\[not_found\]/);
+    const ids = (args) =>
+      json(cli(server, ['list', ...args])).artifacts.map(
+        (artifact) => artifact.id,
+      );
+    assert.deepEqual(ids([]), []);
+    assert.deepEqual(ids(['--deleted']), [id]);
+
+    const stale = cli(server, ['recover', id, '--base-metadata', '1']);
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /^error\[metadata_conflict\]/);
+    const recovered = json(
+      cli(server, ['recover', id, '--base-metadata', '2']),
+    );
+    assert.equal(recovered.artifact.deleted_at_ms, null);
+    assert.deepEqual(ids([]), [id]);
+    assert.equal(
+      cli(server, ['cat', id, 'index.html']).stdout,
+      '<h1>kept</h1>',
+    );
+    for (const args of [
+      ['delete', id],
+      ['recover', id, 'extra', '--base-metadata', '3'],
     ]) {
       const refused = cli(server, args);
       assert.equal(refused.status, 2, args.join(' '));

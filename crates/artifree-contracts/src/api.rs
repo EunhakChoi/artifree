@@ -95,8 +95,8 @@ pub struct DuplicateArtifactRequest {
     pub title: Option<String>,
 }
 
-/// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
-/// revisions are not touched.
+/// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or
+/// several of them. Source revisions are not touched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateArtifactRequest {
@@ -109,6 +109,11 @@ pub struct UpdateArtifactRequest {
     /// Whether the artifact is pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    /// `true` moves the artifact to the trash, where every other request
+    /// treats it as missing; `false` takes it out, the only update an
+    /// artifact in the trash accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
 }
 
 /// Source model family of an artifact. Only `app` can be created by this
@@ -145,9 +150,15 @@ pub struct Artifact {
     /// Latest committed revision when this metadata was produced; see
     /// [`CommitResponse::artifact`] for replays.
     pub current_revision: u64,
-    /// Version of the title and pin, starting at 1. It changes only when
-    /// they change, independently of `current_revision`.
+    /// Version of the title, pin, and trash state, starting at 1. It changes
+    /// only when they change, independently of `current_revision`.
     pub metadata_revision: u64,
+    /// When the artifact was moved to the trash, in Unix milliseconds, or
+    /// `null` outside it. Always present.
+    // Schemars leaves an `Option` out of `required`, and its `required`
+    // attribute drops the `null`; the field is both required and nullable.
+    #[schemars(required, extend("type" = ["integer", "null"]))]
+    pub deleted_at_ms: Option<i64>,
     /// Creation time in Unix milliseconds.
     pub created_at_ms: i64,
     /// Time of the latest source revision in Unix milliseconds; metadata
@@ -260,11 +271,14 @@ pub struct ListArtifactsQuery {
     /// Only pinned (`true`) or only unpinned (`false`) artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    /// `true` lists the trash instead of the artifacts outside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
     /// Page size, 1-500; 500 when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
     /// `next_page_token` of the previous page, with the same `q`, `sort`,
-    /// and `pinned`.
+    /// `pinned`, and `deleted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_token: Option<String>,
 }
@@ -313,6 +327,10 @@ pub enum ChangeKind {
     Revised,
     /// The title or pin changed; no source revision was committed.
     MetadataUpdated,
+    /// The artifact was moved to the trash; reading it is `not_found`.
+    Deleted,
+    /// The artifact was taken out of the trash.
+    Recovered,
 }
 
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
@@ -328,8 +346,8 @@ pub struct ArtifactChange {
     pub artifact_id: String,
     /// What the commit did.
     pub change: ChangeKind,
-    /// The revision the commit created, or the current one for
-    /// `metadata_updated`.
+    /// The revision the commit created, or the current one for a metadata
+    /// change (`metadata_updated`, `deleted`, or `recovered`).
     pub revision: u64,
     /// The metadata revision after the commit.
     pub metadata_revision: u64,

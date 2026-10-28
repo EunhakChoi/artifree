@@ -24,7 +24,7 @@
       "language": "TypeScript",
       "path": "apps/cli",
       "status": "implemented",
-      "summary": "Artifact create, list (search, order, pages), show, rename, pin, save, restore, duplicate, cat, and preview over HTTP; build inventory."
+      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, save, restore, duplicate, cat, and preview over HTTP; build inventory."
     },
     {
       "id": "runtime",
@@ -60,7 +60,7 @@
       "language": "Rust",
       "path": "crates/artifree-core/src/artifacts.rs",
       "status": "implemented",
-      "summary": "Create, conditional revisions, restores, duplicates (files only), and metadata updates, retry keys, pinned reads with digests, list queries; publish planned."
+      "summary": "Create, conditional revisions, restores, duplicates (files only), metadata updates, and a recoverable trash, retry keys, pinned reads with digests, list queries; publish planned."
     },
     {
       "id": "policy",

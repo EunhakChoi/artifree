@@ -13,6 +13,7 @@ const artifact = {
   pinned: false,
   current_revision: 1,
   metadata_revision: 1,
+  deleted_at_ms: null,
   created_at_ms: 1,
   updated_at_ms: 1,
 };
@@ -67,6 +68,22 @@ test('A complete body that is not the contract is an invalid response', async ()
   );
   const error = await failure(client.getArtifact(artifact.id));
   assert.equal(error.code, 'invalid_response');
+});
+
+test('Every artifact carries its trash time: null or a time', async () => {
+  const read = (body) =>
+    clientWith(() => Response.json(body)).getArtifact(artifact.id);
+  assert.equal((await read(artifact)).deleted_at_ms, null);
+  assert.equal(
+    (await read({ ...artifact, deleted_at_ms: 5 })).deleted_at_ms,
+    5,
+  );
+  const missing = { ...artifact };
+  delete missing.deleted_at_ms;
+  for (const body of [missing, { ...artifact, deleted_at_ms: '5' }]) {
+    const error = await failure(read(body));
+    assert.equal(error.code, 'invalid_response', JSON.stringify(body));
+  }
 });
 
 test('An error with a null current revision keeps its code', async () => {
@@ -398,6 +415,18 @@ test('The feed parser follows the event stream rules', async () => {
   assert.deepEqual(
     await eventsOf(stream([`event: change\ndata: ${data}\n`])),
     [],
+  );
+});
+
+test('Deletes and recoveries arrive as themselves', async () => {
+  assert.deepEqual(
+    await eventsOf(
+      stream([
+        `event: change\ndata: ${changeData(7, 'deleted')}\n\n`,
+        `event: change\ndata: ${changeData(8, 'recovered')}\n\n`,
+      ]),
+    ),
+    [changeEvent(7, 'deleted'), changeEvent(8, 'recovered')],
   );
 });
 

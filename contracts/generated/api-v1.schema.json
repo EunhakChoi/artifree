@@ -15,6 +15,14 @@
           "minimum": 0,
           "type": "integer"
         },
+        "deleted_at_ms": {
+          "description": "When the artifact was moved to the trash, in Unix milliseconds, or\n`null` outside it. Always present.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "id": {
           "description": "Opaque identifier.",
           "type": "string"
@@ -24,7 +32,7 @@
           "description": "Source model family."
         },
         "metadata_revision": {
-          "description": "Version of the title and pin, starting at 1. It changes only when\nthey change, independently of `current_revision`.",
+          "description": "Version of the title, pin, and trash state, starting at 1. It changes\nonly when they change, independently of `current_revision`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -50,6 +58,7 @@
         "pinned",
         "current_revision",
         "metadata_revision",
+        "deleted_at_ms",
         "created_at_ms",
         "updated_at_ms"
       ],
@@ -83,7 +92,7 @@
           "type": "integer"
         },
         "revision": {
-          "description": "The revision the commit created, or the current one for\n`metadata_updated`.",
+          "description": "The revision the commit created, or the current one for a metadata\nchange (`metadata_updated`, `deleted`, or `recovered`).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -174,6 +183,16 @@
         {
           "const": "metadata_updated",
           "description": "The title or pin changed; no source revision was committed.",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "The artifact was moved to the trash; reading it is `not_found`.",
+          "type": "string"
+        },
+        {
+          "const": "recovered",
+          "description": "The artifact was taken out of the trash.",
           "type": "string"
         }
       ]
@@ -496,6 +515,13 @@
       "additionalProperties": false,
       "description": "Query parameters of `GET /v1/artifacts`, all optional. Without any, the\nresponse lists up to 500 artifacts, most recently updated first.",
       "properties": {
+        "deleted": {
+          "description": "`true` lists the trash instead of the artifacts outside it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "limit": {
           "description": "Page size, 1-500; 500 when absent.",
           "format": "uint64",
@@ -506,7 +532,7 @@
           ]
         },
         "page_token": {
-          "description": "`next_page_token` of the previous page, with the same `q`, `sort`,\nand `pinned`.",
+          "description": "`next_page_token` of the previous page, with the same `q`, `sort`,\n`pinned`, and `deleted`.",
           "type": [
             "string",
             "null"
@@ -707,13 +733,20 @@
     },
     "UpdateArtifactRequest": {
       "additionalProperties": false,
-      "description": "Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source\nrevisions are not touched.",
+      "description": "Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or\nseveral of them. Source revisions are not touched.",
       "properties": {
         "base_metadata_revision": {
           "description": "The metadata revision this change was prepared against. The update\nfails with `metadata_conflict` unless it is still current.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "deleted": {
+          "description": "`true` moves the artifact to the trash, where every other request\ntreats it as missing; `false` takes it out, the only update an\nartifact in the trash accepts.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "pinned": {
           "description": "Whether the artifact is pinned.",
