@@ -15,7 +15,7 @@ const bundle = await build({
   platform: 'neutral',
   write: false,
 });
-const { raise, waitFor } = await import(
+const { prepare, raise, waitFor } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
@@ -56,4 +56,36 @@ test('A floor only rises', () => {
   assert.equal(raise(floor, 5, 2), floor, 'A lower version is ignored.');
   assert.equal(raise(floor, 6, 2), floor);
   assert.deepEqual(raise(floor, 8, 2), { version: 8, resets: 2 });
+});
+
+test('A dialog prepares from what it opened on until the page shows newer', () => {
+  const opened = { base: 4, title: 'Old' };
+  const shown = { base: 6, title: 'New' };
+  const waits = (known, floor) => (version) =>
+    waitFor(version, { ...page, known, floor });
+  // Nothing newer learned: the dialog keeps its base.
+  assert.deepEqual(prepare(opened, shown, waits(undefined), false), {
+    from: opened,
+    behind: false,
+  });
+  // A newer version is known and shown: the next request starts from it.
+  assert.deepEqual(prepare(opened, shown, waits(6), false), {
+    from: shown,
+    behind: true,
+  });
+  // Known but not shown yet: it waits on what it opened on, and says so.
+  assert.deepEqual(prepare(opened, shown, waits(7), false), {
+    from: opened,
+    behind: true,
+  });
+  // A conflict proved a newer version than either.
+  assert.deepEqual(
+    prepare(opened, shown, waits(undefined, raise(undefined, 8, 2)), false),
+    { from: opened, behind: true },
+  );
+  // A request whose answer was lost is sent again as it was.
+  assert.deepEqual(prepare(opened, shown, waits(6), true), {
+    from: opened,
+    behind: false,
+  });
 });

@@ -70,3 +70,32 @@ export function waitFor(version: number, page: Knowledge): Wait | undefined {
   if (page.known !== undefined && version < page.known) return 'newer';
   return undefined;
 }
+
+/** What a dialog's request is prepared from: a read the page showed. */
+export interface Prepared {
+  /** The version the request names as its base. */
+  readonly base: number;
+}
+
+/**
+ * What a dialog prepares its next request from (decision 0014, item 2,
+ * for rename and the move to the trash). It keeps what it opened on, so a
+ * request whose answer was lost is sent again as it was (`retry`), also
+ * after the page learned of a newer version, which may be that very write.
+ * Otherwise, once the page has learned of a newer version than it opened
+ * on and shows it, the next request is prepared from what is shown, and
+ * `behind` says the dialog's view changed.
+ */
+export function prepare<T extends Prepared>(
+  opened: T,
+  shown: T,
+  wait: (version: number) => Wait | undefined,
+  retry: boolean,
+): { readonly from: T; readonly behind: boolean } {
+  const learned = wait(opened.base);
+  const behind = !retry && (learned === 'refused' || learned === 'newer');
+  return {
+    from: behind && wait(shown.base) === undefined ? shown : opened,
+    behind,
+  };
+}

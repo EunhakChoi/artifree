@@ -10,37 +10,13 @@ import {
   NativeSelect,
   NativeSelectOption,
 } from '@/components/ui/native-select';
+import { isShown, shownBy, showing } from './list-query';
+import type { ListQuery } from './list-query';
 
-/** Artifacts shown at first, and added by each "Show more". */
-export const PAGE_SIZE = 50;
 /** The most one list request returns (decision 0008). */
 const REQUEST_LIMIT = 500;
 /** How long typing pauses before the list is searched. */
 const SEARCH_DELAY_MS = 300;
-
-/** Which artifacts the list shows, and in what order. */
-export interface ListQuery {
-  /** Search text, trimmed; empty searches nothing. */
-  readonly search: string;
-  readonly sort: ListSort;
-  readonly pinned: boolean | undefined;
-}
-
-export const ALL_ARTIFACTS: ListQuery = {
-  search: '',
-  sort: 'updated',
-  pinned: undefined,
-};
-
-/** Whether `query` shows only some artifacts. */
-export function isFiltered(query: ListQuery): boolean {
-  return query.search !== '' || query.pinned !== undefined;
-}
-
-/** A query's identity, for request keys. */
-export function queryKey(query: ListQuery): string {
-  return JSON.stringify([query.search, query.sort, query.pinned ?? null]);
-}
 
 /** The first `count` artifacts `query` selects, read afresh. */
 export interface ListedArtifacts {
@@ -69,6 +45,7 @@ export async function readArtifacts(
         q: query.search === '' ? null : query.search,
         sort: query.sort,
         pinned: query.pinned ?? null,
+        deleted: query.deleted,
         limit: Math.min(REQUEST_LIMIT, count - artifacts.length),
         page_token: token ?? null,
       },
@@ -80,18 +57,6 @@ export async function readArtifacts(
   return { artifacts, complete: token === undefined };
 }
 
-const PIN_FILTERS = { all: undefined, pinned: true, unpinned: false } as const;
-type PinFilter = keyof typeof PIN_FILTERS;
-
-function pinFilterOf(pinned: boolean | undefined): PinFilter {
-  if (pinned === undefined) return 'all';
-  return pinned ? 'pinned' : 'unpinned';
-}
-
-function isPinFilter(value: string): value is PinFilter {
-  return Object.hasOwn(PIN_FILTERS, value);
-}
-
 function isSort(value: string): value is ListSort {
   return value === 'updated' || value === 'created';
 }
@@ -99,10 +64,19 @@ function isSort(value: string): value is ListSort {
 interface ListControlsProps {
   query: ListQuery;
   onQueryChange: (query: ListQuery) => void;
+  /**
+   * Whether the trash cannot be shown: showing it closes the open artifact,
+   * so not while the editor holds a draft (decision 0014, item 3).
+   */
+  trashLocked: boolean;
 }
 
-/** Search, order, and pin filter for the artifact list. */
-export function ListControls({ query, onQueryChange }: ListControlsProps) {
+/** Search, order, and what the artifact list shows. */
+export function ListControls({
+  query,
+  onQueryChange,
+  trashLocked,
+}: ListControlsProps) {
   const [text, setText] = useState(query.search);
   const search = useEffectEvent((next: string) =>
     onQueryChange({ ...query, search: next }),
@@ -146,19 +120,21 @@ export function ListControls({ query, onQueryChange }: ListControlsProps) {
           </NativeSelect>
         </Field>
         <Field>
-          <FieldLabel htmlFor="artifact-pins">Show</FieldLabel>
+          <FieldLabel htmlFor="artifact-shown">Show</FieldLabel>
           <NativeSelect
-            id="artifact-pins"
-            value={pinFilterOf(query.pinned)}
+            id="artifact-shown"
+            value={shownBy(query)}
             onChange={(event) => {
-              const filter = event.target.value;
-              if (isPinFilter(filter))
-                onQueryChange({ ...query, pinned: PIN_FILTERS[filter] });
+              const shown = event.target.value;
+              if (isShown(shown)) onQueryChange(showing(query, shown));
             }}
           >
             <NativeSelectOption value="all">All</NativeSelectOption>
             <NativeSelectOption value="pinned">Pinned</NativeSelectOption>
             <NativeSelectOption value="unpinned">Not pinned</NativeSelectOption>
+            <NativeSelectOption value="trash" disabled={trashLocked}>
+              Trash
+            </NativeSelectOption>
           </NativeSelect>
         </Field>
       </div>

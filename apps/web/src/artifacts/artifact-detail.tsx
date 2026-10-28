@@ -37,8 +37,9 @@ import { ExportButton } from './export-button';
 import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
 import { useChoice } from './use-choice';
+import { RecoverNotice } from './trash-list';
 import { isNewer, versionOf } from './use-live-workspace';
-import type { Version } from './use-live-workspace';
+import type { TrashState, Version } from './use-live-workspace';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
 
 /**
@@ -81,6 +82,15 @@ interface ArtifactDetailProps {
   onSaved: (artifact: Artifact) => void;
   /** Called after this page renamed or pinned the artifact. */
   onMetadataChanged: (artifact: Artifact) => void;
+  /** Called after this page moved the artifact to the trash. */
+  onDeleted: (artifact: Artifact) => void;
+  /** Called after this page recovered the artifact from the trash. */
+  onRecovered: (artifact: Artifact) => void;
+  /**
+   * Whether the page saw the artifact go to the trash, and whether it is
+   * still there (decision 0014, item 6). It stays open only for a draft.
+   */
+  trash: TrashState | undefined;
   /** Whether the editor holds changes that are not saved. */
   unsaved: boolean;
   /** Reports when the editor gains or loses unsaved changes. */
@@ -97,6 +107,9 @@ export function ArtifactDetail({
   unknownChanges,
   onSaved,
   onMetadataChanged,
+  onDeleted,
+  onRecovered,
+  trash,
   unsaved,
   onUnsavedChange,
 }: ArtifactDetailProps) {
@@ -194,6 +207,9 @@ export function ArtifactDetail({
     sourceGate.wait(version, known?.revision, shown.resets);
   // Duplicate and download offer the revision the preview shows.
   const previewed = keptChoice(revisions, chosen) ?? artifact.current_revision;
+  // In the trash, nothing about the artifact can be read or changed but its
+  // recovery; a draft keeps it open until saved after it, or discarded.
+  const inTrash = trash?.deleted === true;
   return (
     <Card>
       <CardHeader>
@@ -208,31 +224,37 @@ export function ArtifactDetail({
             <Badge variant="secondary">
               Revision {artifact.current_revision}
             </Badge>
-            <MetadataActions
-              client={client}
-              artifact={artifact}
-              gate={metadataGate}
-              wait={metadataWait}
-              resets={resets}
-              onUpdated={onMetadataChanged}
-              onConflict={reload}
-            />
-            <DuplicateDialog
-              client={client}
-              artifact={artifact}
-              revisions={revisions}
-              revision={previewed}
-              unsaved={unsaved}
-              resets={resets}
-              stale={stale}
-              onDuplicated={onSaved}
-            />
-            <ExportButton
-              client={client}
-              artifactId={artifact.id}
-              revision={previewed}
-              stale={stale}
-            />
+            {inTrash ? null : (
+              <>
+                <MetadataActions
+                  client={client}
+                  artifact={artifact}
+                  gate={metadataGate}
+                  wait={metadataWait}
+                  resets={resets}
+                  onUpdated={onMetadataChanged}
+                  onDeleted={onDeleted}
+                  onConflict={reload}
+                  unsaved={unsaved}
+                />
+                <DuplicateDialog
+                  client={client}
+                  artifact={artifact}
+                  revisions={revisions}
+                  revision={previewed}
+                  unsaved={unsaved}
+                  resets={resets}
+                  stale={stale}
+                  onDuplicated={onSaved}
+                />
+                <ExportButton
+                  client={client}
+                  artifactId={artifact.id}
+                  revision={previewed}
+                  stale={stale}
+                />
+              </>
+            )}
           </div>
         </CardAction>
       </CardHeader>
@@ -245,7 +267,20 @@ export function ArtifactDetail({
               previews, and comparisons wait until it is read.
             </output>
           ) : null}
-          {details.status === 'error' ? (
+          {inTrash ? (
+            <RecoverNotice
+              client={client}
+              artifactId={artifactId}
+              base={trash.metadata}
+              resets={resets}
+              onRecovered={(recovered) => {
+                reload();
+                onRecovered(recovered);
+              }}
+              // A newer change refused it; the feed reports that change.
+              onConflict={reload}
+            />
+          ) : details.status === 'error' ? (
             <Alert variant="destructive">
               <AlertTitle>Could not refresh the artifact</AlertTitle>
               <AlertDescription>
@@ -319,6 +354,7 @@ export function ArtifactDetail({
                 unsaved={unsaved}
                 onUnsavedChange={onUnsavedChange}
                 reloading={reloading}
+                inTrash={inTrash}
               />
             </TabsContent>
           </Tabs>
@@ -451,6 +487,8 @@ interface SourcePanelProps {
   onUnsavedChange: (unsaved: boolean) => void;
   /** A newer state is loading and will replace the editor. */
   reloading: boolean;
+  /** The artifact is in the trash, where nothing can be saved. */
+  inTrash: boolean;
 }
 
 function SourcePanel({
@@ -464,6 +502,7 @@ function SourcePanel({
   unsaved,
   onUnsavedChange,
   reloading,
+  inTrash,
 }: SourcePanelProps) {
   const { artifact, revisions } = loaded;
   // While a draft exists the editor keeps the revision it was written
@@ -546,6 +585,7 @@ function SourcePanel({
           onUnsavedChange(draft);
         }}
         reloading={reloading}
+        inTrash={inTrash}
       />
     </div>
   );
@@ -568,6 +608,8 @@ interface FileEditorProps {
   onLoadLatest: () => void;
   onDraftChange: (draft: boolean) => void;
   reloading: boolean;
+  /** The artifact is in the trash: a save would be refused. */
+  inTrash: boolean;
 }
 
 type SaveState =
@@ -594,6 +636,7 @@ function FileEditor({
   onLoadLatest,
   onDraftChange,
   reloading,
+  inTrash,
 }: FileEditorProps) {
   const [readAttempt, setReadAttempt] = useState(0);
   const loaded = useRequest(
@@ -763,13 +806,13 @@ function FileEditor({
       <Field orientation="horizontal">
         <Button
           type="button"
-          disabled={!changed || locked || replaced}
+          disabled={!changed || locked || replaced || inTrash}
           onClick={() => void commit()}
         >
           <SaveIcon data-icon="inline-start" aria-hidden="true" />
           {saving ? 'Saving…' : 'Save revision'}
         </Button>
-        {changed && !locked && !outdated ? (
+        {changed && !locked && (!outdated || inTrash) ? (
           <Button
             type="button"
             variant="outline"
@@ -779,7 +822,7 @@ function FileEditor({
             Discard changes
           </Button>
         ) : null}
-        {outdated ? (
+        {outdated && !inTrash ? (
           <Button
             type="button"
             variant="outline"

@@ -185,8 +185,12 @@ exports one revision's files as a deterministic, uncompressed ZIP archive
 whose first entry is a manifest of paths, sizes, digests, and media types,
 through the API, client, CLI, and web workspace; it is a read with the
 access and trash rules of every read
-([0015](decisions/0015-source-exports.md)). The next slice is A06b, the trash
-in the web workspace.
+([0015](decisions/0015-source-exports.md)). A06b adds the trash to the web
+workspace: a confirmed move, the trash with a recovery gate per artifact,
+and deletes made elsewhere followed without dropping a draft. Where the
+page is, which artifact is open, and its notices are one reducer state, and
+the answers to writes are events applied to the page as it is when they
+arrive ([0014](decisions/0014-web-trash.md)).
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

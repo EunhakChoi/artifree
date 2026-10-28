@@ -239,7 +239,13 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   changes; files by digest in path order. The gate: a write waits for every
   version learned from a notice, its own write, or a conflict, for a write
   in flight, and after a possible replacement, when what was learned
-  before lapses.
+  before lapses; a dialog prepares from what it opened on until the page
+  shows a newer version, and resends a lost request as it was.
+- `scripts/tests/navigation.test.mjs`: bundles the workspace's navigation
+  reducer. A recovery answered after the user searched opens the artifact
+  with the search shown then; one answered after the page left the trash
+  changes nothing it shows; the reason an open artifact closed is said
+  once, and the page's own move is not reported as one made elsewhere.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest
   (a same-size binary file; a 215-byte path and a 100-byte name inside a
   360-pixel window) and shows text lines with visible carriage returns,
@@ -266,7 +272,23 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   checked for accessibility; tried again, the file the browser saves for
   the revision the preview shows is named after it and holds that
   revision's exact bytes and manifest, read with Node's own CRC-32; after a
-  forged `reset` the button waits until the artifact is read again.
+  forged `reset` a download in flight is not saved and says why, and the
+  button waits until the artifact is read again.
+- `scripts/smoke-trash.mjs`: a draft disables the move and the trash; with
+  the feed cut, a move that committed and lost its answer is retried with
+  the same key and moves the artifact once, which closes and leaves the
+  list before the list is read again; the trash keeps the search, opens
+  nothing, and a recovery answered after the order changed opens the
+  artifact with the order shown then; an open artifact listed first and
+  deleted elsewhere closes with a notice before the list is read again,
+  and the next one outside the trash opens; with a draft it stays open,
+  cannot be saved, and recovers in place with the draft; a forged conflict
+  holds back only its own artifact in the trash; after a forged `reset`
+  nothing in the trash is recovered until it is read again; a recovery
+  answered after the page left the trash keeps a draft written meanwhile.
+  The dialog, the trash, and the draft notice are checked for
+  accessibility. `scripts/smoke-workspace.mjs` checks that an empty list
+  still offers the trash.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

@@ -49,10 +49,13 @@ function latest(a: Version | undefined, b: Version): Version {
   };
 }
 
-/** An artifact's version as a list or a save reported it. */
-export interface ListedVersion {
-  readonly id: string;
-  readonly version: Version;
+/**
+ * Whether an artifact is in the trash, as a metadata revision showed it
+ * (decision 0014, item 6).
+ */
+export interface TrashState {
+  readonly deleted: boolean;
+  readonly metadata: number;
 }
 
 /** What the page knows from the change feed. */
@@ -75,6 +78,12 @@ interface Knowledge {
   readonly known: Readonly<Record<string, Version>>;
   /** Changes of a kind this client does not know, per artifact. */
   readonly unknown: Readonly<Record<string, number>>;
+  /**
+   * The artifacts the page saw in the trash in this epoch, and whether
+   * they still are, as of the newest metadata revision it saw: from a
+   * notice, a list, or its own write.
+   */
+  readonly trash: Readonly<Record<string, TrashState>>;
 }
 
 type Learned =
@@ -82,7 +91,7 @@ type Learned =
   | {
       readonly type: 'listed';
       readonly epoch: number;
-      readonly versions: readonly ListedVersion[];
+      readonly artifacts: readonly Artifact[];
     }
   | { readonly type: 'read anyway' };
 
@@ -93,6 +102,7 @@ const START: Knowledge = {
   news: 0,
   known: {},
   unknown: {},
+  trash: {},
 };
 
 /** How long a visible page waits for the stream before reading anyway. */
@@ -104,11 +114,20 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
       return state.canRead ? state : { ...state, canRead: true };
     case 'listed': {
       if (learned.epoch !== state.epoch) return state;
-      let known = state.known;
-      for (const { id, version } of learned.versions)
+      let { known, trash } = state;
+      for (const artifact of learned.artifacts) {
+        const { id } = artifact;
+        const version = versionOf(artifact);
         if (isNewer(version, known[id]))
           known = { ...known, [id]: latest(known[id], version) };
-      return known === state.known ? state : { ...state, known };
+        trash = seen(trash, id, {
+          deleted: artifact.deleted_at_ms !== null,
+          metadata: version.metadata,
+        });
+      }
+      return known === state.known && trash === state.trash
+        ? state
+        : { ...state, known, trash };
     }
     case 'event': {
       const { event } = learned;
@@ -123,6 +142,7 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
           news: state.news,
           known: {},
           unknown: {},
+          trash: {},
         };
       const {
         artifact_id: id,
@@ -137,22 +157,54 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
           news: state.news + 1,
           unknown: { ...state.unknown, [id]: (state.unknown[id] ?? 0) + 1 },
         };
+      // A notice of the page's own move may arrive after its answer, as
+      // nothing new; what it says of the trash is learned either way.
+      const trash =
+        change === 'deleted' || change === 'recovered'
+          ? seen(state.trash, id, {
+              deleted: change === 'deleted',
+              metadata: metadata_revision,
+            })
+          : state.trash;
       const version = { revision, metadata: metadata_revision };
-      if (!isNewer(version, state.known[id])) return state;
+      if (!isNewer(version, state.known[id]))
+        return trash === state.trash ? state : { ...state, trash };
       return {
         ...state,
         news: state.news + 1,
         known: { ...state.known, [id]: latest(state.known[id], version) },
+        trash,
       };
     }
   }
 }
 
+/**
+ * `trash` with what `state` shows of artifact `id`, when it is newer than
+ * what is recorded. An artifact enters the record when it is seen in the
+ * trash; one never seen there is not recorded.
+ */
+function seen(
+  trash: Readonly<Record<string, TrashState>>,
+  id: string,
+  state: TrashState,
+): Readonly<Record<string, TrashState>> {
+  const before = trash[id];
+  if (before === undefined ? !state.deleted : state.metadata <= before.metadata)
+    return trash;
+  return { ...trash, [id]: state };
+}
+
 /** What a connected page knows from the change feed, and when it may read. */
 export interface LiveWorkspace extends Knowledge {
   readonly feed: FeedState;
-  /** Records versions from a list read in `epoch`; they are not news. */
-  readonly learn: (epoch: number, versions: readonly ListedVersion[]) => void;
+  /**
+   * Records what a list read in `epoch`, or the answer to a write sent in
+   * it, showed of artifacts: their versions, which are not news, and
+   * whether they are in the trash. What was read in an earlier epoch is
+   * not learned, since the server's data may have been replaced since.
+   */
+  readonly learn: (epoch: number, artifacts: readonly Artifact[]) => void;
 }
 
 /**
@@ -180,8 +232,8 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
     return () => clearTimeout(timer);
   }, [visible, canRead]);
   const learnListed = useCallback(
-    (epoch: number, versions: readonly ListedVersion[]) =>
-      learn({ type: 'listed', epoch, versions }),
+    (epoch: number, artifacts: readonly Artifact[]) =>
+      learn({ type: 'listed', epoch, artifacts }),
     [],
   );
   return { ...state, feed, learn: learnListed };
