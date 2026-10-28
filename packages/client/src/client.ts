@@ -331,7 +331,8 @@ export class ArtifreeClient {
    * Exact bytes of part of one file in a pinned revision (decision 0016),
    * read with an HTTP `Range`. A range that starts at or past the end of
    * the file rejects with `range_not_satisfiable`; an answer that is not
-   * the part asked for rejects with `invalid_response`.
+   * exactly the part asked for, cut only by the end of the file, rejects
+   * with `invalid_response`.
    */
   async readFilePart(
     id: string,
@@ -361,9 +362,11 @@ export class ArtifreeClient {
       start !== offset ||
       end === undefined ||
       size === undefined ||
-      end - offset + 1 !== bytes.length ||
-      end >= size ||
-      (length !== undefined && end - offset + 1 > length)
+      // The part ends where it was asked to, or at the end of the file; a
+      // server or proxy that sent less would make a part look complete.
+      end !==
+        Math.min(length === undefined ? size : offset + length, size) - 1 ||
+      end - offset + 1 !== bytes.length
     )
       throw new ArtifreeApiError(
         `GET ${path} did not return bytes ${offset}-${last} of the file.`,

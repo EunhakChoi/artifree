@@ -88,13 +88,14 @@ test('A part of a file is the range asked for, or a failure', async () => {
     '01234567',
   ).readFilePart(artifact.id, 1, 'index.html', { offset: 2 });
   assert.deepEqual(sent, ['bytes=2-4', 'bytes=2-']);
-  // A whole file, another range, a longer part, or a short body is not the
-  // part asked for.
+  // A whole file, another range, a longer or shorter part, or a short body
+  // is not the part asked for.
   for (const [status, headers, body] of [
     [200, {}, '0123456789'],
     [200, { 'content-range': 'bytes 2-4/10' }, 'abc'],
     [206, { 'content-range': 'bytes 0-2/10' }, 'abc'],
     [206, { 'content-range': 'bytes 2-9/10' }, '23456789'],
+    [206, { 'content-range': 'bytes 2-3/10' }, 'ab'],
     [206, { 'content-range': 'bytes 2-4/10' }, 'ab'],
     [206, {}, 'abc'],
   ]) {
@@ -106,6 +107,22 @@ test('A part of a file is the range asked for, or a failure', async () => {
     );
     assert.equal(error.code, 'invalid_response', JSON.stringify(headers));
   }
+  // Only the end of the file may cut a part short; an open range runs to it.
+  const tail = await answer(
+    206,
+    { 'content-range': 'bytes 8-9/10' },
+    '89',
+  ).readFilePart(artifact.id, 1, 'index.html', { offset: 8, length: 5 });
+  assert.deepEqual([Buffer.from(tail.bytes).toString(), tail.size], ['89', 10]);
+  const stopped = await failure(
+    answer(206, { 'content-range': 'bytes 2-5/10' }, '2345').readFilePart(
+      artifact.id,
+      1,
+      'index.html',
+      { offset: 2 },
+    ),
+  );
+  assert.equal(stopped.code, 'invalid_response');
   const past = await failure(
     answer(
       416,

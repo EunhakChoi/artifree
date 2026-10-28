@@ -66,7 +66,9 @@ range_not_satisfiable` with `Content-Range: bytes */size`; a malformed
    past the end, with a message that says what to send instead.
 5. **Clients.** `ArtifreeClient.readFilePart(id, revision, path, range)`
    sends a `Range` and accepts only a `206` whose `Content-Range` names the
-   range it asked for; anything else is `invalid_response`. `artifree
+   range it asked for, cut short only by the end of the file; anything
+   else, including a shorter part a server or proxy might send, is
+   `invalid_response`, so a part never looks complete when it is not. `artifree
 artifact cat` takes `--offset` and `--length` and writes the part's
    bytes to stdout, unchanged.
 6. **Errors.** `range_not_satisfiable` is a new error code. It is only

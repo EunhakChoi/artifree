@@ -192,9 +192,11 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   or names a part the client does not know is an invalid response, as is an
   artifact whose `deleted_at_ms` is missing or not a time, and an export
   that is not `application/zip`; an export cut off mid-body is a network
-  error; a part of a file is the one range asked for, and a whole file,
-  another range, a longer or shorter body, or a missing `Content-Range` is
-  an invalid response. For the
+  error; a part of a file is the one range asked for, cut short only by
+  the end of the file, and a whole file, another range, a longer or
+  shorter part (also an open range that stops before the end), a body
+  shorter than its range, or a missing `Content-Range` is an invalid
+  response. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without
