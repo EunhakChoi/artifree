@@ -282,7 +282,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   artifact with the order shown then; an open artifact listed first and
   deleted elsewhere closes with a notice before the list is read again,
   and the next one outside the trash opens; with a draft it stays open,
-  cannot be saved, and recovers in place with the draft; a forged conflict
+  cannot be saved, neither previews nor reads its history, and recovers in
+  place with the draft, after which it previews again; a forged conflict
   holds back only its own artifact in the trash; after a forged `reset`
   nothing in the trash is recovered until it is read again; a recovery
   answered after the page left the trash keeps a draft written meanwhile.

@@ -214,6 +214,29 @@ export async function checkTrash({
       workspace.getByRole('button', { name: 'Save revision' }),
     ).toBeDisabled();
     await checkAccessibility('workspace-trash-draft', tab);
+    // Nothing is read for it: the preview and the history say why instead.
+    const previews = [];
+    const recordPreview = (request) => {
+      if (
+        request.method() === 'POST' &&
+        new URL(request.url()).pathname.endsWith('/previews')
+      )
+        previews.push(request.url());
+    };
+    tab.on('request', recordPreview);
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    await expect(
+      workspace.getByText(
+        'This artifact is in the trash. Recover it to preview it.',
+      ),
+    ).toBeVisible();
+    await workspace.getByRole('tab', { name: 'History' }).click();
+    await expect(
+      workspace.getByText(/Recover it to compare or restore its revisions/),
+    ).toBeVisible();
+    tab.off('request', recordPreview);
+    assert.deepEqual(previews, [], 'Nothing is previewed in the trash.');
+    await workspace.getByRole('tab', { name: 'Source' }).click();
     await inTrash.getByRole('button', { name: 'Recover', exact: true }).click();
     await expect(inTrash).toBeHidden();
     await expect(workspace.getByText('Recovered “Bin two”.')).toBeVisible();
@@ -221,6 +244,13 @@ export async function checkTrash({
     await expect(
       workspace.getByRole('button', { name: 'Save revision' }),
     ).toBeEnabled();
+    // Recovered, it can be previewed again.
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    await expect(
+      workspace.locator('iframe[title^="Preview of Bin two"]'),
+    ).toBeVisible();
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    await expect(editor).toHaveValue('<p>kept</p>');
     await workspace.getByRole('button', { name: 'Discard changes' }).click();
 
     // A recovery another change refused waits for that change, and holds

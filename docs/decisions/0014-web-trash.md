@@ -87,12 +87,16 @@ true}` against the metadata revision the page shows, through the
    the move from. This is the one exception to 0011 decision 6, which
    prepares a write only from a version the page shows: an artifact in the
    trash cannot be read. A newer change refuses it, and the feed then
-   reports that change.
+   reports that change. While it is in the trash, the preview and the
+   history are not mounted and say why, since every read of the artifact
+   answers `not_found`; they mount afresh once it is recovered, so no
+   answer read in the trash outlives the recovery.
 7. **Notices.** The page says what its own move or recovery did, and why
    an open artifact closed; a notice about an artifact replaces none about
    the same artifact, so the page's own move is not reported again as one
    made elsewhere. A notice that an artifact went to the trash offers "Show
-   trash" while there is no draft.
+   trash" while there is no draft. An empty list of artifacts says that the
+   trash is shown from the "Show" field, since every artifact may be in it.
 
 ## Costs and limits
 

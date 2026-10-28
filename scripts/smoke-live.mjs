@@ -438,7 +438,9 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await editor.fill(html('Draft C'));
     restore = replaceData(main, id, { upTo: 0 });
     await restream(main, server, ['reset']);
-    await expect(workspace.getByText('No artifacts yet')).toBeVisible();
+    await expect(
+      workspace.getByText('No artifacts', { exact: true }),
+    ).toBeVisible();
     await expect(refreshFailure).toBeVisible();
     await expect(editor).toHaveValue(html('Draft C'));
     await workspace.getByRole('button', { name: 'Load latest' }).click();

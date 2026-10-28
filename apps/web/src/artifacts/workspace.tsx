@@ -342,10 +342,11 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
             <EmptyMedia variant="icon">
               <FileCode2Icon aria-hidden="true" />
             </EmptyMedia>
-            <EmptyTitle>No artifacts yet</EmptyTitle>
+            <EmptyTitle>No artifacts</EmptyTitle>
             <EmptyDescription>
               Create one here, or from an agent with{' '}
-              <code>artifree artifact create</code>.
+              <code>artifree artifact create</code>. Artifacts moved to the
+              trash are listed when Show is set to Trash.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>

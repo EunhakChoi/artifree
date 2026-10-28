@@ -32,7 +32,9 @@ export async function checkWorkspace({
   await workspace.getByRole('button', { name: 'Disconnect' }).click();
   await workspace.getByLabel('Access token').fill(server.token);
   await workspace.getByRole('button', { name: 'Connect' }).click();
-  await expect(workspace.getByText('No artifacts yet')).toBeVisible();
+  await expect(
+    workspace.getByText('No artifacts', { exact: true }),
+  ).toBeVisible();
   // Nothing listed may mean everything is in the trash, which stays
   // reachable (decision 0014, item 5).
   await expect(workspace.getByLabel('Show')).toBeVisible();

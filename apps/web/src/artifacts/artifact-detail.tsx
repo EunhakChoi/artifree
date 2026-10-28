@@ -306,29 +306,39 @@ export function ArtifactDetail({
               <TabsTrigger value="source">Source</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
             </TabsList>
+            {/* Nothing is read for an artifact in the trash; the panels
+                mount afresh once it is recovered. */}
             <TabsContent value="preview" className="mt-4">
-              <PreviewPanel
-                client={client}
-                artifact={artifact}
-                revisions={revisions}
-                epoch={shown.epoch}
-                stale={stale}
-                chosen={chosen}
-                onChoose={setChosen}
-              />
+              {inTrash ? (
+                <InTrash what="preview it" />
+              ) : (
+                <PreviewPanel
+                  client={client}
+                  artifact={artifact}
+                  revisions={revisions}
+                  epoch={shown.epoch}
+                  stale={stale}
+                  chosen={chosen}
+                  onChoose={setChosen}
+                />
+              )}
             </TabsContent>
             <TabsContent value="history" className="mt-4">
-              <HistoryPanel
-                client={client}
-                artifact={artifact}
-                revisions={revisions}
-                epoch={shown.epoch}
-                shownResets={shown.resets}
-                resets={resets}
-                unsaved={unsaved}
-                restore={restore}
-                wait={sourceWait}
-              />
+              {inTrash ? (
+                <InTrash what="compare or restore its revisions" />
+              ) : (
+                <HistoryPanel
+                  client={client}
+                  artifact={artifact}
+                  revisions={revisions}
+                  epoch={shown.epoch}
+                  shownResets={shown.resets}
+                  resets={resets}
+                  unsaved={unsaved}
+                  restore={restore}
+                  wait={sourceWait}
+                />
+              )}
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
               <SourcePanel
@@ -361,6 +371,15 @@ export function ArtifactDetail({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/** Said instead of a view that reads the artifact while it is in the trash. */
+function InTrash({ what }: { what: string }) {
+  return (
+    <p className="text-sm text-muted-foreground">
+      This artifact is in the trash. Recover it to {what}.
+    </p>
   );
 }
 
