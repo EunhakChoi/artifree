@@ -70,3 +70,41 @@ export function waitFor(version: number, page: Knowledge): Wait | undefined {
   if (page.known !== undefined && version < page.known) return 'newer';
   return undefined;
 }
+
+/** The base of a dialog's next request, and why. */
+export interface PreparedBase {
+  readonly base: number;
+  /**
+   * The page has learned that the request the dialog opened on is stale;
+   * the next one is prepared from the latest once it is shown.
+   */
+  readonly behind: boolean;
+  /** The request whose answer was lost is resent as it was. */
+  readonly retry: boolean;
+}
+
+/**
+ * The base of a dialog's next request (decision 0011, item 6): the version
+ * it opened on, so that a retry after a lost answer is the same request,
+ * until the page has learned of a newer version and shows it as `latest`.
+ * A request whose answer was lost (`lost` is its base) is resent as it was,
+ * also after a newer version is known, which may be that very write: a
+ * replay under its key, refused without writing if its base is stale. A
+ * possible replacement of the server's data still holds it.
+ */
+export function preparedBase(
+  opened: number,
+  latest: number,
+  wait: (version: number) => Wait | undefined,
+  lost: number | undefined,
+): PreparedBase {
+  const learned = wait(opened);
+  const stale = learned === 'refused' || learned === 'newer';
+  const retry = lost === opened && (learned === undefined || stale);
+  const behind = !retry && stale;
+  return {
+    base: behind && wait(latest) === undefined ? latest : opened,
+    behind,
+    retry,
+  };
+}

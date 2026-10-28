@@ -20,7 +20,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/web",
         ComponentStatus::Implemented,
-        "React/Vite workspace: search, page, create, rename, pin, edit, save, compare, restore, duplicate, and preview HTML artifacts via the local API, following committed changes live.",
+        "React/Vite workspace: search, page, create, rename, pin, edit, save, compare, restore, duplicate, delete to and recover from a trash, and preview HTML artifacts via the local API, following committed changes live.",
     ),
     (
         "cli",

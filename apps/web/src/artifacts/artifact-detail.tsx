@@ -34,10 +34,10 @@ import { refusedFloor, useWriteGate } from './conditional-write';
 import { fromEditable, toEditable } from './editable-text';
 import { DuplicateDialog } from './duplicate-dialog';
 import { HistoryPanel, useRestore } from './history-panel';
-import { MetadataActions } from './metadata-actions';
+import { MetadataActions, RecoverNotice } from './metadata-actions';
 import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
-import type { Version } from './use-live-workspace';
+import type { TrashState, Version } from './use-live-workspace';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
 
 /**
@@ -78,8 +78,12 @@ interface ArtifactDetailProps {
    * created it as a copy; the workspace opens it and lists refresh.
    */
   onSaved: (artifact: Artifact) => void;
-  /** Called after this page renamed or pinned the artifact. */
+  /** Called after this page renamed, pinned, or recovered the artifact. */
   onMetadataChanged: (artifact: Artifact) => void;
+  /** Called after this page moved the artifact to the trash. */
+  onDeleted: (artifact: Artifact) => void;
+  /** Whether the feed last reported it moved to the trash or out of it. */
+  trash: TrashState | undefined;
   /** Whether the editor holds changes that are not saved. */
   unsaved: boolean;
   /** Reports when the editor gains or loses unsaved changes. */
@@ -96,6 +100,8 @@ export function ArtifactDetail({
   unknownChanges,
   onSaved,
   onMetadataChanged,
+  onDeleted,
+  trash,
   unsaved,
   onUnsavedChange,
 }: ArtifactDetailProps) {
@@ -212,7 +218,9 @@ export function ArtifactDetail({
               wait={metadataWait}
               resets={resets}
               onUpdated={onMetadataChanged}
+              onDeleted={onDeleted}
               onConflict={reload}
+              unsaved={unsaved}
             />
             <DuplicateDialog
               client={client}
@@ -238,7 +246,21 @@ export function ArtifactDetail({
               comparisons wait until it is read.
             </output>
           ) : null}
-          {details.status === 'error' ? (
+          {details.status === 'error' && trash?.deleted === true ? (
+            <RecoverNotice
+              client={client}
+              artifactId={artifact.id}
+              gate={metadataGate}
+              wait={metadataWait}
+              base={trash.metadata}
+              unsaved={unsaved}
+              onRecovered={(recovered) => {
+                reload();
+                onMetadataChanged(recovered);
+              }}
+              onConflict={reload}
+            />
+          ) : details.status === 'error' ? (
             <Alert variant="destructive">
               <AlertTitle>Could not refresh the artifact</AlertTitle>
               <AlertDescription>

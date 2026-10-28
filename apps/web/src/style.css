@@ -76,9 +76,10 @@
   --muted-foreground: #52634f;
   --accent: #f0e4d5;
   --accent-foreground: #80522e;
-  /* Darker than the shadcn default so destructive alert text meets WCAG AA
-     (4.5:1) on the card color. */
-  --destructive: oklch(0.53 0.22 27.325);
+  /* Darker than the shadcn default so destructive text meets WCAG AA
+     (4.5:1) on the card color, in alerts, and on the destructive button's
+     own tint in a dialog. */
+  --destructive: oklch(0.51 0.22 27.325);
   --border: #d5ddce;
   --input: #d5ddce;
   --ring: #42745c;

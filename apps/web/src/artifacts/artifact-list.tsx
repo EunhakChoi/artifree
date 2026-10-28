@@ -4,7 +4,7 @@ import { PinIcon } from 'lucide-react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Artifact, ListSort } from '@artifree/contracts';
 import { Button } from '@/components/ui/button';
-import { Field, FieldLabel } from '@/components/ui/field';
+import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import {
   NativeSelect,
@@ -24,22 +24,30 @@ export interface ListQuery {
   readonly search: string;
   readonly sort: ListSort;
   readonly pinned: boolean | undefined;
+  /** The trash instead of the other artifacts (decision 0014, item 5). */
+  readonly deleted: boolean;
 }
 
 export const ALL_ARTIFACTS: ListQuery = {
   search: '',
   sort: 'updated',
   pinned: undefined,
+  deleted: false,
 };
 
-/** Whether `query` shows only some artifacts. */
+/** Whether `query` shows only some of the artifacts outside the trash. */
 export function isFiltered(query: ListQuery): boolean {
-  return query.search !== '' || query.pinned !== undefined;
+  return query.search !== '' || query.pinned !== undefined || query.deleted;
 }
 
 /** A query's identity, for request keys. */
 export function queryKey(query: ListQuery): string {
-  return JSON.stringify([query.search, query.sort, query.pinned ?? null]);
+  return JSON.stringify([
+    query.search,
+    query.sort,
+    query.pinned ?? null,
+    query.deleted,
+  ]);
 }
 
 /** The first `count` artifacts `query` selects, read afresh. */
@@ -69,6 +77,7 @@ export async function readArtifacts(
         q: query.search === '' ? null : query.search,
         sort: query.sort,
         pinned: query.pinned ?? null,
+        deleted: query.deleted,
         limit: Math.min(REQUEST_LIMIT, count - artifacts.length),
         page_token: token ?? null,
       },
@@ -80,16 +89,31 @@ export async function readArtifacts(
   return { artifacts, complete: token === undefined };
 }
 
-const PIN_FILTERS = { all: undefined, pinned: true, unpinned: false } as const;
-type PinFilter = keyof typeof PIN_FILTERS;
+/** The artifacts each "Show" choice selects. */
+const SHOWN = {
+  all: { pinned: undefined, deleted: false },
+  pinned: { pinned: true, deleted: false },
+  unpinned: { pinned: false, deleted: false },
+  trash: { pinned: undefined, deleted: true },
+} as const;
+export type Shown = keyof typeof SHOWN;
 
-function pinFilterOf(pinned: boolean | undefined): PinFilter {
-  if (pinned === undefined) return 'all';
-  return pinned ? 'pinned' : 'unpinned';
+/**
+ * `query` showing `shown` instead, with the same search and order: the
+ * search field and the order select keep what they show.
+ */
+export function showing(query: ListQuery, shown: Shown): ListQuery {
+  return { ...query, ...SHOWN[shown] };
 }
 
-function isPinFilter(value: string): value is PinFilter {
-  return Object.hasOwn(PIN_FILTERS, value);
+function shownOf(query: ListQuery): Shown {
+  if (query.deleted) return 'trash';
+  if (query.pinned === undefined) return 'all';
+  return query.pinned ? 'pinned' : 'unpinned';
+}
+
+function isShown(value: string): value is Shown {
+  return Object.hasOwn(SHOWN, value);
 }
 
 function isSort(value: string): value is ListSort {
@@ -99,10 +123,19 @@ function isSort(value: string): value is ListSort {
 interface ListControlsProps {
   query: ListQuery;
   onQueryChange: (query: ListQuery) => void;
+  /**
+   * While a draft exists the trash cannot be shown, since showing it
+   * closes the open artifact.
+   */
+  trashLocked: boolean;
 }
 
-/** Search, order, and pin filter for the artifact list. */
-export function ListControls({ query, onQueryChange }: ListControlsProps) {
+/** Search, order, and which artifacts the list shows. */
+export function ListControls({
+  query,
+  onQueryChange,
+  trashLocked,
+}: ListControlsProps) {
   const [text, setText] = useState(query.search);
   const search = useEffectEvent((next: string) =>
     onQueryChange({ ...query, search: next }),
@@ -149,19 +182,27 @@ export function ListControls({ query, onQueryChange }: ListControlsProps) {
           <FieldLabel htmlFor="artifact-pins">Show</FieldLabel>
           <NativeSelect
             id="artifact-pins"
-            value={pinFilterOf(query.pinned)}
+            value={shownOf(query)}
+            aria-describedby={trashLocked ? 'trash-locked' : undefined}
             onChange={(event) => {
-              const filter = event.target.value;
-              if (isPinFilter(filter))
-                onQueryChange({ ...query, pinned: PIN_FILTERS[filter] });
+              const shown = event.target.value;
+              if (isShown(shown)) onQueryChange(showing(query, shown));
             }}
           >
             <NativeSelectOption value="all">All</NativeSelectOption>
             <NativeSelectOption value="pinned">Pinned</NativeSelectOption>
             <NativeSelectOption value="unpinned">Not pinned</NativeSelectOption>
+            <NativeSelectOption value="trash" disabled={trashLocked}>
+              Trash
+            </NativeSelectOption>
           </NativeSelect>
         </Field>
       </div>
+      {trashLocked ? (
+        <FieldDescription id="trash-locked">
+          Save or discard your changes to show the trash.
+        </FieldDescription>
+      ) : null}
     </div>
   );
 }

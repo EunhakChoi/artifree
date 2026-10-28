@@ -180,8 +180,12 @@ MCP, client, CLI, and web workspace
 trash and recovers them through the API, MCP, client, and CLI: deleting is a
 conditional metadata update, and an artifact in the trash answers every
 other request as an unknown one, except the replay of a request made before
-the delete ([0013](decisions/0013-deleting-artifacts-and-the-trash.md)). The
-next slice is A06b, the trash in the web workspace.
+the delete ([0013](decisions/0013-deleting-artifacts-and-the-trash.md)).
+A06b moves the open artifact to the trash after a confirmation, shows and
+recovers from the trash, and follows deletes made elsewhere; an open draft
+is never dropped, and the writes follow the rules of 0011
+([0014](decisions/0014-web-trash.md)). The next slice is A07, exporting a
+revision's source package.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

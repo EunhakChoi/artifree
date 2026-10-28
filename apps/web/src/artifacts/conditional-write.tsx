@@ -190,24 +190,9 @@ export function useConditionalWrite<Request, Result>(
   };
 }
 
-/**
- * Whether a request whose answer was lost may be sent again as it was.
- * That is a replay under its key: it returns the first result if that was
- * committed, and is refused without writing if its base is stale, so a
- * newer version the page learned of meanwhile, maybe that very write, does
- * not hold it (as for saves, 0007 decision 8). A reset still does.
- */
-export function retryable(
-  state: WriteState,
-  base: number,
-  wait: Wait | undefined,
-): boolean {
-  return (
-    state.status === 'failed' &&
-    state.unknown &&
-    state.base === base &&
-    (wait === undefined || wait === 'newer' || wait === 'refused')
-  );
+/** The base of a write whose answer was lost, if the last one's was. */
+export function lostBase(state: WriteState): number | undefined {
+  return state.status === 'failed' && state.unknown ? state.base : undefined;
 }
 
 const READING =

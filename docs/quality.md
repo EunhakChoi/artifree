@@ -222,7 +222,10 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   changes; files by digest in path order. The gate: a write waits for every
   version learned from a notice, its own write, or a conflict, for a write
   in flight, and after a possible replacement, when what was learned
-  before lapses.
+  before lapses. The base a rename, restore, or move to the trash
+  prepares: the one its dialog opened on until a newer version is shown,
+  a lost request resent as it was, and nothing resent across a
+  replacement.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest
   (a same-size binary file; a 215-byte path and a 100-byte name inside a
   360-pixel window) and shows text lines with visible carriage returns,
@@ -245,6 +248,18 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   source revision's digests; the source keeps its revisions, pin, and
   title; a dialog open during a forged `reset` sends nothing; a draft
   disables duplicating. The dialog is checked for accessibility.
+- `scripts/smoke-trash.mjs`: moving the open artifact to the trash after a
+  confirmation, retried after a lost answer as one request; the artifact
+  closes from the page's own answer, without the feed and before the list
+  is read again, leaves the list, and the API answers `404`; the trash lists
+  it without opening it, and recovering opens it, with the search kept in
+  every list read; an open artifact listed first and deleted elsewhere
+  closes with a notice before the list is read again, the next one outside
+  the trash opens, and one with a draft stays open with the draft and
+  recovers in place; a recovery that another change refused waits for that
+  change; a trash read before a forged `reset` recovers nothing until read
+  again; a draft disables moving to the trash and showing it. The dialog
+  and the trash are checked for accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

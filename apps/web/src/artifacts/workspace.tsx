@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FileCode2Icon, LogOutIcon, RotateCwIcon } from 'lucide-react';
+import {
+  FileCode2Icon,
+  LogOutIcon,
+  RotateCwIcon,
+  Trash2Icon,
+} from 'lucide-react';
 import { ArtifreeClient } from '@artifree/client';
 import type { Artifact } from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -20,13 +25,15 @@ import {
   isFiltered,
   queryKey,
   readArtifacts,
+  showing,
 } from './artifact-list';
 import type { ListQuery } from './artifact-list';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
 import { pageVisibility } from './page-visibility';
 import { RequestGate } from './request-gate';
-import { useLiveWorkspace, versionOf } from './use-live-workspace';
+import { TrashNav } from './trash-list';
+import { useLiveWorkspace } from './use-live-workspace';
 import type { FeedState } from './use-live-workspace';
 import { useRequest } from './use-request';
 
@@ -67,6 +74,14 @@ export function ArtifactWorkspace() {
   );
 }
 
+/** What the page says about an artifact that left the view. */
+interface Moved {
+  readonly id: string;
+  readonly text: string;
+  /** It went to the trash, which the page offers to show. */
+  readonly toTrash: boolean;
+}
+
 interface ConnectedWorkspaceProps {
   token: string;
   onDisconnect: () => void;
@@ -101,11 +116,14 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   const [query, setQuery] = useState(ALL_ARTIFACTS);
   // How many artifacts are shown; a notice reads them all again.
   const [count, setCount] = useState(PAGE_SIZE);
+  // Where an artifact went that left the view (decision 0014, items 4-6).
+  const [moved, setMoved] = useState<Moved>();
   const changeQuery = useCallback((next: ListQuery) => {
     setQuery(next);
     setCount(PAGE_SIZE);
+    setMoved(undefined);
   }, []);
-  const { epoch } = live;
+  const { epoch, resets } = live;
   const shownQuery = queryKey(query);
   const artifacts = useRequest(
     live.canRead
@@ -121,6 +139,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
         everything: listed.complete && !isFiltered(query),
         complete: listed.complete,
         epoch,
+        resets,
       };
     },
     // Keep the list and the open artifact mounted while it refreshes.
@@ -134,14 +153,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       : undefined;
   const { learn } = live;
   useEffect(() => {
-    if (fresh !== undefined)
-      learn(
-        fresh.epoch,
-        fresh.list.map((artifact) => ({
-          id: artifact.id,
-          version: versionOf(artifact),
-        })),
-      );
+    if (fresh !== undefined) learn(fresh.epoch, fresh.list);
   }, [fresh, learn]);
   const lastList =
     artifacts.status === 'ready'
@@ -155,30 +167,77 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   const listed = shownList?.list;
   const showMore = shownList !== undefined && !shownList.complete;
   const noArtifacts = listed?.length === 0 && !isFiltered(query);
-  // A draft keeps its artifact open; otherwise the open artifact stays
-  // until a fresh list of every artifact no longer contains it, and then
-  // the first listed one opens. A search, a filter, or a partial list does
-  // not close it.
+  // Whether the page knows the artifact went to the trash: from the feed,
+  // a list, or its own move (decision 0014, items 4 and 6).
+  const inTrash = (id: string) => live.trash[id]?.deleted === true;
+  // A draft keeps its artifact open. Otherwise the open artifact closes
+  // once the page knows it went to the trash, or once a fresh list of
+  // every artifact no longer contains it; a search, a filter, or a partial
+  // list does not close it. The first listed one outside the trash then
+  // opens.
   const keepSelected =
     selected !== undefined &&
     (unsaved ||
-      fresh === undefined ||
-      !fresh.everything ||
-      fresh.list.some(({ id }) => id === selected));
-  const selectedId = keepSelected ? selected : (fresh?.list ?? listed)?.[0]?.id;
+      (!inTrash(selected) &&
+        (fresh === undefined ||
+          !fresh.everything ||
+          fresh.list.some(({ id }) => id === selected))));
+  // The trash opens nothing: its artifacts cannot be read.
+  const selectedId = query.deleted
+    ? undefined
+    : keepSelected
+      ? selected
+      : (fresh?.list ?? listed)?.find(({ id }) => !inTrash(id))?.id;
   // An artifact opened because it was listed first stays open like a chosen
   // one, also when a later list puts another first.
-  if (selectedId !== selected) setSelected(selectedId);
+  if (!query.deleted && selectedId !== selected) {
+    // One that closed because it went to the trash elsewhere says so; the
+    // page's own move has said so already.
+    if (
+      selected !== undefined &&
+      inTrash(selected) &&
+      !(moved?.id === selected && moved.toTrash)
+    )
+      setMoved({
+        id: selected,
+        text: 'The open artifact was moved to the trash.',
+        toTrash: true,
+      });
+    setSelected(selectedId);
+  }
   function saved(artifact: Artifact): void {
     // This page's own save is not news when its notice arrives.
-    learn(epoch, [{ id: artifact.id, version: versionOf(artifact) }]);
+    learn(epoch, [artifact]);
     setSelected(artifact.id);
     setGeneration((value) => value + 1);
   }
   function metadataChanged(artifact: Artifact): void {
     // Learning the new version also makes the open artifact read it.
-    learn(epoch, [{ id: artifact.id, version: versionOf(artifact) }]);
+    learn(epoch, [artifact]);
     setGeneration((value) => value + 1);
+  }
+  function deleted(artifact: Artifact): void {
+    metadataChanged(artifact);
+    setMoved({
+      id: artifact.id,
+      text: `Moved “${artifact.title}” to the trash.`,
+      toTrash: true,
+    });
+  }
+  function recovered(artifact: Artifact): void {
+    learn(epoch, [artifact]);
+    // It opens in the list of artifacts.
+    changeQuery(showing(query, 'all'));
+    setMoved({
+      id: artifact.id,
+      text: `Recovered “${artifact.title}”.`,
+      toTrash: false,
+    });
+    setSelected(artifact.id);
+    setGeneration((value) => value + 1);
+  }
+  function showMoreArtifacts(): void {
+    setCount((value) => value + PAGE_SIZE);
   }
   const listFailure =
     artifacts.status === 'error' ? (
@@ -211,40 +270,96 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
       <output aria-live="polite" className="text-sm text-muted-foreground">
         {FEED_MESSAGES[live.feed]}
       </output>
+      {moved === undefined ? null : (
+        <div className="flex flex-wrap items-center gap-3">
+          <output className="text-sm">{moved.text}</output>
+          {!moved.toTrash || query.deleted || unsaved ? null : (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => changeQuery(showing(query, 'trash'))}
+            >
+              <Trash2Icon data-icon="inline-start" aria-hidden="true" />
+              Show trash
+            </Button>
+          )}
+        </div>
+      )}
       {shownList === undefined && artifacts.status !== 'error' ? (
         <output className="text-sm text-muted-foreground">
           Loading artifacts…
         </output>
       ) : null}
-      {selectedId === undefined && (listed === undefined || noArtifacts) ? (
+      {selectedId === undefined &&
+      !query.deleted &&
+      (listed === undefined || noArtifacts) ? (
         listFailure
       ) : (
         <div className="grid gap-5 lg:grid-cols-3">
           <div className="flex flex-col gap-4">
-            <ListControls query={query} onQueryChange={changeQuery} />
-            <ArtifactNav
-              artifacts={listed ?? []}
-              selectedId={selectedId}
-              locked={unsaved}
-              onSelect={setSelected}
-              empty={
-                listed === undefined ? null : (
-                  <p className="text-sm text-muted-foreground">
-                    No artifacts match.
-                  </p>
-                )
-              }
-              onShowMore={
-                showMore
-                  ? () => setCount((value) => value + PAGE_SIZE)
-                  : undefined
-              }
-            >
-              {listFailure}
-            </ArtifactNav>
+            <ListControls
+              query={query}
+              onQueryChange={changeQuery}
+              trashLocked={unsaved}
+            />
+            {query.deleted ? (
+              <TrashNav
+                client={client}
+                artifacts={listed ?? []}
+                resets={resets}
+                shownResets={shownList?.resets ?? resets}
+                known={live.known}
+                onRecovered={recovered}
+                onConflict={() => setGeneration((value) => value + 1)}
+                empty={
+                  listed === undefined ? null : (
+                    <p className="text-sm text-muted-foreground">
+                      Nothing in the trash matches.
+                    </p>
+                  )
+                }
+                onShowMore={showMore ? showMoreArtifacts : undefined}
+              >
+                {listFailure}
+              </TrashNav>
+            ) : (
+              <ArtifactNav
+                artifacts={listed ?? []}
+                selectedId={selectedId}
+                locked={unsaved}
+                onSelect={(id) => {
+                  setMoved(undefined);
+                  setSelected(id);
+                }}
+                empty={
+                  listed === undefined ? null : (
+                    <p className="text-sm text-muted-foreground">
+                      No artifacts match.
+                    </p>
+                  )
+                }
+                onShowMore={showMore ? showMoreArtifacts : undefined}
+              >
+                {listFailure}
+              </ArtifactNav>
+            )}
           </div>
           <div className="min-w-0 lg:col-span-2">
-            {selectedId === undefined ? null : (
+            {query.deleted ? (
+              <Empty>
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <Trash2Icon aria-hidden="true" />
+                  </EmptyMedia>
+                  <EmptyTitle>Trash</EmptyTitle>
+                  <EmptyDescription>
+                    Artifacts in the trash cannot be opened, read, or changed.
+                    Recover one to open it; nothing here is removed.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : selectedId === undefined ? null : (
               <ArtifactDetail
                 key={selectedId}
                 client={client}
@@ -255,6 +370,8 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 unknownChanges={live.unknown[selectedId] ?? 0}
                 onSaved={saved}
                 onMetadataChanged={metadataChanged}
+                onDeleted={deleted}
+                trash={live.trash[selectedId]}
                 unsaved={unsaved}
                 onUnsavedChange={setUnsaved}
               />

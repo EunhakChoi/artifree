@@ -15,7 +15,7 @@ const bundle = await build({
   platform: 'neutral',
   write: false,
 });
-const { raise, waitFor } = await import(
+const { preparedBase, raise, waitFor } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
@@ -56,4 +56,45 @@ test('A floor only rises', () => {
   assert.equal(raise(floor, 5, 2), floor, 'A lower version is ignored.');
   assert.equal(raise(floor, 6, 2), floor);
   assert.deepEqual(raise(floor, 8, 2), { version: 8, resets: 2 });
+});
+
+test("A dialog's request keeps its base until a newer one is shown", () => {
+  // The page shows version 4 and knows of nothing newer.
+  const page4 = (version) => waitFor(version, { ...page, known: 4 });
+  assert.deepEqual(preparedBase(4, 4, page4, undefined), {
+    base: 4,
+    behind: false,
+    retry: false,
+  });
+  // It learned of 5 but still shows 4: the dialog waits on its base.
+  const learning = (version) => waitFor(version, { ...page, known: 5 });
+  assert.deepEqual(preparedBase(4, 4, learning, undefined), {
+    base: 4,
+    behind: true,
+    retry: false,
+  });
+  // Once 5 is shown, the next request is prepared from it.
+  assert.deepEqual(preparedBase(4, 5, learning, undefined), {
+    base: 5,
+    behind: true,
+    retry: false,
+  });
+});
+
+test('A lost request is resent as it was, but not across a replacement', () => {
+  const learning = (version) => waitFor(version, { ...page, known: 5 });
+  // Its answer was lost; 5 may be that very write.
+  assert.deepEqual(preparedBase(4, 5, learning, 4), {
+    base: 4,
+    behind: false,
+    retry: true,
+  });
+  // Another request's loss does not make this one a retry.
+  assert.equal(preparedBase(4, 5, learning, 3).retry, false);
+  const replaced = (version) =>
+    waitFor(version, { ...page, known: 5, shownResets: 1 });
+  assert.equal(preparedBase(4, 5, replaced, 4).retry, false);
+  const sending = (version) =>
+    waitFor(version, { ...page, known: 5, sending: true });
+  assert.equal(preparedBase(4, 5, sending, 4).retry, false);
 });
