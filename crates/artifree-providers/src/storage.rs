@@ -250,7 +250,7 @@ impl ArtifactStore for SqliteStore {
                 return Ok(receipt);
             }
             let id = ArtifactId::from_random(random_bytes()?);
-            let now = now()?;
+            let now = commit_time(transaction)?;
             let revision = SourceRevision(1);
             let metadata = MetadataRevision(1);
             transaction
@@ -305,7 +305,7 @@ impl ArtifactStore for SqliteStore {
                 });
             }
             let next = SourceRevision(current.current_revision.0 + 1);
-            let now = now()?;
+            let now = commit_time(transaction)?;
             transaction
                 .execute(
                     "UPDATE artifacts SET current_revision = ?2, updated_at = ?3 WHERE id = ?1",
@@ -356,7 +356,7 @@ impl ArtifactStore for SqliteStore {
             }
             let title = request.title.unwrap_or(&current.title);
             let pinned = request.pinned.unwrap_or(current.pinned);
-            let now = now()?;
+            let now = commit_time(transaction)?;
             let metadata = if *title == current.title && pinned == current.pinned {
                 current.metadata_revision
             } else {
@@ -984,6 +984,28 @@ fn stored_sequence(value: i64) -> Result<ChangeSequence, StoreError> {
 
 fn sql_revision(revision: SourceRevision) -> Result<i64, StoreError> {
     i64::try_from(revision.0).map_err(corrupt)
+}
+
+/// The time of a commit: the clock, or just after the last commit in the feed
+/// when the clock reads that time or earlier, as after it is set back. Commit
+/// times then follow commit order, which update and creation order rely on.
+fn commit_time(transaction: &Transaction<'_>) -> Result<UnixMillis, StoreError> {
+    let clock = now()?;
+    let last: Option<i64> = transaction
+        .query_row(
+            "SELECT committed_at FROM changes ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    match last {
+        Some(last) if last >= clock.0 => last
+            .checked_add(1)
+            .map(UnixMillis)
+            .ok_or_else(|| corrupt("the last commit time is out of range")),
+        _ => Ok(clock),
+    }
 }
 
 fn now() -> Result<UnixMillis, StoreError> {

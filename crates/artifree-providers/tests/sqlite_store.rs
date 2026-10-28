@@ -1055,3 +1055,54 @@ fn list_pages_continue_after_the_last_position_through_a_tie() -> TestResult {
     assert_eq!(paged, by_update);
     Ok(())
 }
+
+#[test]
+fn commit_times_follow_commit_order_when_the_clock_is_set_back() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let first = create(&store, &owner, &key("first"), 1)?;
+    // The first commit happened an hour ahead of the clock, as when the
+    // system clock is set back after it.
+    let ahead = first.revision.created_at.0 + 3_600_000;
+    let connection = rusqlite::Connection::open(db.path())?;
+    connection.execute(
+        "UPDATE artifacts SET created_at = ?1, updated_at = ?1",
+        [ahead],
+    )?;
+    connection.execute("UPDATE revisions SET created_at = ?1", [ahead])?;
+    connection.execute("UPDATE metadata_revisions SET created_at = ?1", [ahead])?;
+    connection.execute("UPDATE changes SET committed_at = ?1", [ahead])?;
+
+    let second = create(&store, &owner, &key("second"), 2)?;
+    let saved = commit(&store, &first, &key("saved"), 1, "<h1>v2</h1>")?;
+    let renamed = update(&store, &second, &key("rename"), 1, Some("Renamed"), None)?;
+    let times = [second.revision.created_at.0, saved.revision.created_at.0];
+    assert_eq!(
+        times,
+        [ahead + 1, ahead + 2],
+        "Each commit follows the last."
+    );
+    let page = store.changes(&owner, ChangeSequence(0), 100)?;
+    let committed: Vec<i64> = page
+        .changes
+        .iter()
+        .map(|change| change.committed_at.0)
+        .collect();
+    assert_eq!(committed, [ahead, ahead + 1, ahead + 2, ahead + 3]);
+    assert_eq!(
+        renamed.artifact.updated_at.0,
+        ahead + 1,
+        "A rename keeps the update time."
+    );
+    // The most recently changed source is listed first.
+    assert_eq!(
+        listed(&store, &owner, None, None, ListOrder::Updated, None, 10)?,
+        ["Demo", "Renamed"]
+    );
+    assert_eq!(
+        listed(&store, &owner, None, None, ListOrder::Created, None, 10)?,
+        ["Renamed", "Demo"]
+    );
+    Ok(())
+}

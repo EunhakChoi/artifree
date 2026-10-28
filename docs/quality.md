@@ -53,8 +53,9 @@ Artifact behavior is tested at the boundary that owns it:
   commit and none for replays, conflicts, reused keys, or a failed commit,
   a commit that fails with its feed entry, owner-only pages that end at the
   head, a feed identity kept on reopening and different in another
-  database, and a version 1 database that gains the feed and keeps its
-  data.
+  database, a version 1 database that gains the feed and keeps its
+  data, and commit times that follow commit order after the clock is set
+  back.
 - `crates/artifree-server/tests/`: HTTP status and error codes, including
   unsupported methods; the bearer token on every route and unmatched path, with
   a case-insensitive scheme; unsafe paths, body limits, pinned reads, preview
