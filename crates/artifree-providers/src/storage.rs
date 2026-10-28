@@ -916,20 +916,28 @@ fn revision_record(
     };
     let mut statement = connection
         .prepare_cached(
-            "SELECT path, size FROM revision_files WHERE artifact_id = ?1 AND revision = ?2 ORDER BY path",
+            "SELECT path, size, digest FROM revision_files
+             WHERE artifact_id = ?1 AND revision = ?2 ORDER BY path",
         )
         .map_err(unavailable)?;
     let rows = statement
         .query_map(params![id.as_str(), number], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .map_err(unavailable)?;
     let mut files = Vec::new();
     for row in rows {
-        let (path, size) = row.map_err(unavailable)?;
+        let (path, size, digest) = row.map_err(unavailable)?;
         files.push(FileEntry {
             path: stored_path(&path)?,
             size: u64::try_from(size).map_err(corrupt)?,
+            sha256: digest
+                .try_into()
+                .map_err(|_| corrupt("a file digest is not 32 bytes"))?,
         });
     }
     Ok(Some(RevisionRecord {

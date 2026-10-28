@@ -127,14 +127,16 @@ function artifact(value: unknown): Artifact | undefined {
 
 function revisionFile(value: unknown): RevisionFile | undefined {
   if (!isRecord(value)) return undefined;
-  const { path, size, media_type } = value;
+  const { path, size, sha256, media_type } = value;
   if (
     typeof path !== 'string' ||
     !isCount(size) ||
+    typeof sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
     typeof media_type !== 'string'
   )
     return undefined;
-  return { path, size, media_type };
+  return { path, size, sha256, media_type };
 }
 
 function revision(value: unknown): Revision | undefined {

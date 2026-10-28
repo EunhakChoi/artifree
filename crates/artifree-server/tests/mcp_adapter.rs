@@ -221,6 +221,13 @@ async fn another_owners_artifact_is_not_found_through_every_tool() -> TestResult
                 "changes": [{ "op": "delete", "path": "index.html" }]
             }),
         ),
+        (
+            "restore_revision",
+            json!({
+                "artifact_id": id, "revision": 1, "base_revision": 1,
+                "idempotency_key": "mine-key-3"
+            }),
+        ),
     ] {
         let result = harness.call(tool, arguments).await?;
         assert_eq!(error_code(&result), "not_found", "{tool}: {result}");

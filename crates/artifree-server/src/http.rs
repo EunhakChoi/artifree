@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use artifree_contracts::api::{
     Artifact, ArtifactList, CreateArtifactRequest, ErrorCode, ErrorResponse, ListArtifactsQuery,
-    Revision, RevisionList, SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    RestoreRevisionRequest, Revision, RevisionList, SaveRevisionRequest, UpdateArtifactRequest,
+    UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_domain::identity::{ActorId, RequestKey};
@@ -180,6 +181,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/artifacts/{id}/revisions/{revision}/files/{*path}",
             get(read_file),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/restore",
+            axum::routing::post(restore_revision),
         )
         .route(
             "/v1/artifacts/{id}/revisions/{revision}/previews",
@@ -435,6 +440,26 @@ async fn save_revision(
     operations::artifact_id(&id)?;
     let Json(request) = body?;
     let response = operations::save(&state, actor, key, &id, request).await?;
+    let location = format!(
+        "/v1/artifacts/{}/revisions/{}",
+        response.artifact.id, response.revision.revision
+    );
+    Ok(created(&location, Json(response)))
+}
+
+async fn restore_revision(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<(String, u64)>, PathRejection>,
+    body: Result<Json<RestoreRevisionRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision)) = path?;
+    // An unknown artifact or revision is reported before a malformed body.
+    operations::artifact_id(&id)?;
+    operations::revision_number(revision)?;
+    let Json(request) = body?;
+    let response = operations::restore(&state, actor, key, &id, revision, request).await?;
     let location = format!(
         "/v1/artifacts/{}/revisions/{}",
         response.artifact.id, response.revision.revision

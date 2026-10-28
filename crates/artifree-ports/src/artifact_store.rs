@@ -44,6 +44,8 @@ pub struct FileEntry {
     pub path: PackagePath,
     /// Content size in bytes.
     pub size: u64,
+    /// SHA-256 digest of the content. Equal digests mean equal content.
+    pub sha256: [u8; 32],
 }
 
 /// Stored metadata of one immutable revision.

@@ -13,12 +13,13 @@
 use std::sync::Arc;
 
 use artifree_contracts::api::{
-    ContentEncoding, CreateArtifactRequest, ErrorResponse, ListArtifactsQuery, SaveRevisionRequest,
-    UpdateArtifactRequest,
+    CommitResponse, ContentEncoding, CreateArtifactRequest, ErrorResponse, ListArtifactsQuery,
+    RestoreRevisionRequest, SaveRevisionRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::{
     self, ArtifactArguments, CreateArtifactArguments, FileArguments, FileContent,
-    RevisionArguments, SaveRevisionArguments, ToolDefinition, UpdateArtifactArguments,
+    RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments, ToolDefinition,
+    UpdateArtifactArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_domain::identity::ActorId;
@@ -180,6 +181,7 @@ async fn dispatch(
             })
             .await
         }
+        "restore_revision" => json(restore_revision(state, actor, arguments)).await,
         "update_artifact" => {
             json(async {
                 let UpdateArtifactArguments {
@@ -245,6 +247,22 @@ async fn json<T: Serialize>(
     let value = outcome.await?;
     serde_json::to_value(value)
         .map_err(|error| ArtifactError::Unavailable(format!("result encoding: {error}")).into())
+}
+
+async fn restore_revision(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<CommitResponse, ApiError> {
+    let RestoreRevisionArguments {
+        artifact_id,
+        revision,
+        base_revision,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = RestoreRevisionRequest { base_revision };
+    operations::restore(state, actor, key, &artifact_id, revision, request).await
 }
 
 async fn read_file(

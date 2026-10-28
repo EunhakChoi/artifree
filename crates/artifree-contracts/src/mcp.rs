@@ -78,6 +78,22 @@ pub struct SaveRevisionArguments {
     pub idempotency_key: String,
 }
 
+/// Arguments of `restore_revision`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreRevisionArguments {
+    /// Artifact identifier.
+    pub artifact_id: String,
+    /// The earlier revision whose files become the next revision.
+    pub revision: u64,
+    /// The revision the restore was prepared against. The commit fails
+    /// with `revision_conflict` unless it is still current.
+    pub base_revision: u64,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
 /// Arguments of `update_artifact`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -178,7 +194,8 @@ current files, reapply the change, and save against the new revision. Every \
 create or save carries an idempotency_key. If a call times out or its result \
 is lost, resend the identical call with the same key: it returns the original \
 result with replayed true instead of committing twice. Use a new key for a \
-different change. update_artifact renames or pins an artifact without a new \
+different change. restore_revision commits an earlier revision's files as the \
+next revision under the same base_revision and key rules. update_artifact renames or pins an artifact without a new \
 revision; it names base_metadata_revision and fails with metadata_conflict and \
 current_metadata_revision in the same way. list_artifacts returns at most 500 \
 artifacts per call; pass next_page_token back as page_token for more. File \
@@ -198,7 +215,7 @@ each intended change and resend the same value only to retry that change.";
 /// The agent-facing tools, in a stable order.
 #[must_use]
 pub fn tools() -> Vec<ToolDefinition> {
-    vec![
+    let mut tools = vec![
         tool::<ListArtifactsQuery, ArtifactList>(
             "list_artifacts",
             "List artifacts",
@@ -218,42 +235,9 @@ pub fn tools() -> Vec<ToolDefinition> {
                 .into(),
             ToolEffect::Read,
         ),
-        tool::<CreateArtifactArguments, CommitResponse>(
-            "create_artifact",
-            "Create artifact",
-            format!(
-                "Create an HTML artifact at revision 1 from a package of files that includes \
-                 index.html. Send each file's complete content as utf8 text or as base64 bytes. \
-                 Paths are portable relative names (letters, digits, '-', '_', '.'; no hidden \
-                 or '..' segments). Limits: 256 files, 5 MiB per file, 25 MiB per package. \
-                 {SIZE_RULE} {KEY_RULE}"
-            ),
-            ToolEffect::Commit,
-        ),
-        tool::<SaveRevisionArguments, CommitResponse>(
-            "save_revision",
-            "Save revision",
-            format!(
-                "Commit changes as the next revision of an artifact. Each change puts a file's \
-                 complete content or deletes a file; unchanged files carry over, and earlier \
-                 revisions are kept. The save is all or nothing and succeeds only if \
-                 base_revision is still current; otherwise it fails with revision_conflict and \
-                 the current revision. {SIZE_RULE} {KEY_RULE}"
-            ),
-            ToolEffect::Commit,
-        ),
-        tool::<UpdateArtifactArguments, UpdateArtifactResponse>(
-            "update_artifact",
-            "Rename or pin artifact",
-            format!(
-                "Change an artifact's title, its pin, or both, without committing a revision: \
-                 the files and revisions stay as they are. The update succeeds only if \
-                 base_metadata_revision is still current; otherwise it fails with \
-                 metadata_conflict and the current metadata revision. An update to the values \
-                 already set changes nothing. {KEY_RULE}"
-            ),
-            ToolEffect::Commit,
-        ),
+    ];
+    tools.extend(commit_tools());
+    tools.extend([
         tool::<ArtifactArguments, RevisionList>(
             "list_revisions",
             "List revisions",
@@ -285,6 +269,61 @@ pub fn tools() -> Vec<ToolDefinition> {
              network, and the page has no data, model, or file capabilities."
                 .into(),
             ToolEffect::IssueLink,
+        ),
+    ]);
+    tools
+}
+
+/// The tools that commit, after the two that read artifacts.
+fn commit_tools() -> [ToolDefinition; 4] {
+    [
+        tool::<CreateArtifactArguments, CommitResponse>(
+            "create_artifact",
+            "Create artifact",
+            format!(
+                "Create an HTML artifact at revision 1 from a package of files that includes \
+                 index.html. Send each file's complete content as utf8 text or as base64 bytes. \
+                 Paths are portable relative names (letters, digits, '-', '_', '.'; no hidden \
+                 or '..' segments). Limits: 256 files, 5 MiB per file, 25 MiB per package. \
+                 {SIZE_RULE} {KEY_RULE}"
+            ),
+            ToolEffect::Commit,
+        ),
+        tool::<SaveRevisionArguments, CommitResponse>(
+            "save_revision",
+            "Save revision",
+            format!(
+                "Commit changes as the next revision of an artifact. Each change puts a file's \
+                 complete content or deletes a file; unchanged files carry over, and earlier \
+                 revisions are kept. The save is all or nothing and succeeds only if \
+                 base_revision is still current; otherwise it fails with revision_conflict and \
+                 the current revision. {SIZE_RULE} {KEY_RULE}"
+            ),
+            ToolEffect::Commit,
+        ),
+        tool::<RestoreRevisionArguments, CommitResponse>(
+            "restore_revision",
+            "Restore revision",
+            format!(
+                "Commit the files of an earlier revision, exactly as they were, as the next \
+                 revision of an artifact. Every revision is kept, and the title and pin stay as \
+                 they are. The restore succeeds only if base_revision is still current; \
+                 otherwise it fails with revision_conflict and the current revision. Restoring \
+                 the files base_revision already has fails with invalid_request. {KEY_RULE}"
+            ),
+            ToolEffect::Commit,
+        ),
+        tool::<UpdateArtifactArguments, UpdateArtifactResponse>(
+            "update_artifact",
+            "Rename or pin artifact",
+            format!(
+                "Change an artifact's title, its pin, or both, without committing a revision: \
+                 the files and revisions stay as they are. The update succeeds only if \
+                 base_metadata_revision is still current; otherwise it fails with \
+                 metadata_conflict and the current metadata revision. An update to the values \
+                 already set changes nothing. {KEY_RULE}"
+            ),
+            ToolEffect::Commit,
         ),
     ]
 }

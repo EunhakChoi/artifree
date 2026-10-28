@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions and metadata updates, retry keys, pinned reads, list queries; publish/restore/fork planned.",
+        "Create, conditional revisions, restores, and metadata updates, retry keys, pinned reads with digests, list queries; publish/fork planned.",
     ),
     (
         "policy",

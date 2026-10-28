@@ -167,8 +167,10 @@ change notifications and the deferred CLI retry diagnostic) and A02 (the web
 workspace following committed changes) are implemented, and A03 adds renaming,
 pins, search, order, and pages to the API, MCP, client, CLI
 ([0008](decisions/0008-artifact-metadata-and-lists.md)), and web workspace
-([0009](decisions/0009-web-list-and-metadata.md)). The next slice is A04,
-revision comparison and source restore.
+([0009](decisions/0009-web-list-and-metadata.md)). A04a adds restoring an
+earlier revision and file digests to the API, MCP, client, and CLI
+([0010](decisions/0010-revision-restore-and-digests.md)). The next slice is
+A04b, revision comparison and restore in the web workspace.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

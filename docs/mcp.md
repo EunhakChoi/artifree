@@ -79,17 +79,18 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 
 ## Tools
 
-| Tool              | Arguments                                                                           | Result                             |
-| ----------------- | ----------------------------------------------------------------------------------- | ---------------------------------- |
-| `list_artifacts`  | optional `q`, `sort`, `pinned`, `limit`, `page_token`                               | `{ artifacts, next_page_token? }`  |
-| `get_artifact`    | `artifact_id`                                                                       | artifact with `current_revision`   |
-| `create_artifact` | `title`, `files`, `idempotency_key`                                                 | `{ artifact, revision, replayed }` |
-| `save_revision`   | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                        | `{ artifact, revision, replayed }` |
-| `update_artifact` | `artifact_id`, `base_metadata_revision`, `title` and/or `pinned`, `idempotency_key` | `{ artifact, replayed }`           |
-| `list_revisions`  | `artifact_id`                                                                       | `{ revisions }`, newest first      |
-| `get_revision`    | `artifact_id`, `revision`                                                           | one revision manifest              |
-| `read_file`       | `artifact_id`, `revision`, `path`                                                   | exact bytes as `utf8` or `base64`  |
-| `create_preview`  | `artifact_id`, `revision`                                                           | `{ url, revision, expires_at_ms }` |
+| Tool               | Arguments                                                                           | Result                             |
+| ------------------ | ----------------------------------------------------------------------------------- | ---------------------------------- |
+| `list_artifacts`   | optional `q`, `sort`, `pinned`, `limit`, `page_token`                               | `{ artifacts, next_page_token? }`  |
+| `get_artifact`     | `artifact_id`                                                                       | artifact with `current_revision`   |
+| `create_artifact`  | `title`, `files`, `idempotency_key`                                                 | `{ artifact, revision, replayed }` |
+| `save_revision`    | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                        | `{ artifact, revision, replayed }` |
+| `restore_revision` | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                       | `{ artifact, revision, replayed }` |
+| `update_artifact`  | `artifact_id`, `base_metadata_revision`, `title` and/or `pinned`, `idempotency_key` | `{ artifact, replayed }`           |
+| `list_revisions`   | `artifact_id`                                                                       | `{ revisions }`, newest first      |
+| `get_revision`     | `artifact_id`, `revision`                                                           | one revision manifest              |
+| `read_file`        | `artifact_id`, `revision`, `path`                                                   | exact bytes as `utf8` or `base64`  |
+| `create_preview`   | `artifact_id`, `revision`                                                           | `{ url, revision, expires_at_ms }` |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
@@ -104,6 +105,11 @@ next page. `update_artifact` renames or pins without creating a source
 revision; it fails with `metadata_conflict` and `current_metadata_revision`
 when `base_metadata_revision` is stale (decision
 [0008](decisions/0008-artifact-metadata-and-lists.md)).
+`restore_revision` commits an earlier revision's files, byte for byte, as the
+next revision under the same `base_revision` and key rules as a save; it
+changes no title or pin. Each file in a manifest carries `sha256`, so two
+revisions can be compared without reading unchanged files (decision
+[0010](decisions/0010-revision-restore-and-digests.md)).
 
 Limits: 256 files, 5 MiB per file, 25 MiB per package, and 36 MiB for the
 whole JSON request. Send binary data, or text with many control characters,

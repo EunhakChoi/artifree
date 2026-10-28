@@ -63,7 +63,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/artifacts.rs",
       "status": "implemented",
-      "summary": "Create, conditional revisions and metadata updates, retry keys, pinned reads, list queries; publish/restore/fork planned."
+      "summary": "Create, conditional revisions, restores, and metadata updates, retry keys, pinned reads with digests, list queries; publish/fork planned."
     },
     {
       "id": "policy",

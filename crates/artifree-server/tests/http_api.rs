@@ -451,6 +451,185 @@ async fn revision_reads_are_pinned() -> TestResult {
     Ok(())
 }
 
+fn restore(
+    id: &str,
+    revision: u64,
+    key: Option<&str>,
+    base: u64,
+) -> Result<Request<Body>, axum::http::Error> {
+    post(
+        &format!("/v1/artifacts/{id}/revisions/{revision}/restore"),
+        key,
+        &json!({ "base_revision": base }),
+    )
+}
+
+#[tokio::test]
+async fn restore_commits_an_earlier_revision_exactly_as_the_next() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let path = format!("/v1/artifacts/{id}/revisions");
+    let changed = json!({ "base_revision": 1, "changes": [
+        { "op": "put", "path": "index.html", "encoding": "utf8", "content": "<h1>v2</h1>" },
+        { "op": "put", "path": "notes.txt", "encoding": "utf8", "content": "new" },
+        { "op": "delete", "path": "assets/logo.png" }
+    ]});
+    let saved = harness
+        .send(post(&path, Some("save-key-1"), &changed)?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let renamed = harness
+        .send(patch(
+            &format!("/v1/artifacts/{id}"),
+            Some("rename-key-1"),
+            &json!({ "base_metadata_revision": 1, "title": "Renamed" }),
+        )?)
+        .await?;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", error_code(&renamed));
+
+    let restored = harness
+        .send(restore(&id, 1, Some("restore-key-1"), 2)?)
+        .await?;
+    assert_eq!(
+        restored.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&restored)
+    );
+    assert_eq!(restored.header(header::LOCATION), format!("{path}/3"));
+    let body = restored.json()?;
+    assert_eq!(body["replayed"], false);
+    assert_eq!(body["revision"]["revision"], 3);
+    // The manifest is revision 1's: the same paths, sizes, and digests.
+    let first = harness.send(get(&format!("{path}/1"))?).await?.json()?;
+    assert_eq!(body["revision"]["files"], first["files"]);
+    assert_eq!(
+        first["files"][1]["sha256"],
+        // SHA-256 of "<h1>v1</h1>".
+        "c5484ff4f6706fb9d2418ffdc2b0ba515106dc32c68fbffb365b303bd9a6427e"
+    );
+    let index = harness
+        .send(get(&format!("{path}/3/files/index.html"))?)
+        .await?;
+    assert_eq!(index.body, b"<h1>v1</h1>");
+    let logo = harness
+        .send(get(&format!("{path}/3/files/assets/logo.png"))?)
+        .await?;
+    assert_eq!(
+        logo.body,
+        [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
+    );
+    let notes = harness
+        .send(get(&format!("{path}/3/files/notes.txt"))?)
+        .await?;
+    assert_eq!(notes.status, StatusCode::NOT_FOUND);
+    // Earlier revisions and the title and pin stay as they were.
+    let kept = harness
+        .send(get(&format!("{path}/2/files/notes.txt"))?)
+        .await?;
+    assert_eq!(kept.body, b"new");
+    assert_eq!(body["artifact"]["title"], "Renamed");
+    assert_eq!(body["artifact"]["metadata_revision"], 2);
+
+    // A retry replays, also after a later save, and the key stays bound to
+    // the restore.
+    let later = harness
+        .send(post(
+            &path,
+            Some("save-key-2"),
+            &put_index(3, "<h1>v4</h1>"),
+        )?)
+        .await?;
+    assert_eq!(later.status, StatusCode::CREATED, "{}", error_code(&later));
+    let retry = harness
+        .send(restore(&id, 1, Some("restore-key-1"), 2)?)
+        .await?;
+    assert_eq!(retry.status, StatusCode::CREATED, "{}", error_code(&retry));
+    assert_eq!(retry.json()?["replayed"], true);
+    assert_eq!(retry.json()?["revision"]["revision"], 3);
+    let reused = harness
+        .send(post(
+            &path,
+            Some("restore-key-1"),
+            &put_index(4, "<h1>x</h1>"),
+        )?)
+        .await?;
+    assert_eq!(error_code(&reused), "request_key_reused");
+    let other = harness
+        .send(restore(&id, 2, Some("restore-key-1"), 2)?)
+        .await?;
+    assert_eq!(error_code(&other), "request_key_reused");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_refusals_write_nothing() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let saved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    // A stale base is a conflict, even when its files are the ones restored.
+    let stale = harness
+        .send(restore(&id, 1, Some("restore-key-1"), 1)?)
+        .await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&stale), "revision_conflict");
+    assert_eq!(stale.json()?["error"]["current_revision"], 2);
+    for base in [0, 9] {
+        let reply = harness
+            .send(restore(&id, 1, Some("restore-key-2"), base)?)
+            .await?;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "base {base}");
+    }
+    for missing in [0, 3] {
+        let reply = harness
+            .send(restore(&id, missing, Some("restore-key-3"), 2)?)
+            .await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "revision {missing}");
+    }
+    let unchanged = harness
+        .send(restore(&id, 2, Some("restore-key-4"), 2)?)
+        .await?;
+    assert_eq!(unchanged.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&unchanged), "invalid_request");
+    let keyless = harness.send(restore(&id, 1, None, 2)?).await?;
+    assert_eq!(keyless.status, StatusCode::BAD_REQUEST);
+    // A revision that cannot exist is reported before a malformed body.
+    let malformed = harness
+        .send(
+            authorized(Request::post(format!(
+                "/v1/artifacts/{id}/revisions/0/restore"
+            )))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", "restore-key-6")
+            .body(Body::from("{"))?,
+        )
+        .await?;
+    assert_eq!(malformed.status, StatusCode::NOT_FOUND);
+    let unknown = harness
+        .send(restore(
+            "art_00000000000000000000000000000000",
+            1,
+            Some("restore-key-5"),
+            1,
+        )?)
+        .await?;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    let artifact = harness
+        .send(get(&format!("/v1/artifacts/{id}"))?)
+        .await?
+        .json()?;
+    assert_eq!(artifact["current_revision"], 2);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_full_package_can_be_replaced_in_one_save() -> TestResult {
     let harness = Harness::new();

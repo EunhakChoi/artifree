@@ -14,8 +14,8 @@
 
 use artifree_contracts::api::{
     Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse,
-    FeedPosition, ListArtifactsQuery, Preview, Revision, RevisionList, SaveRevisionRequest,
-    UpdateArtifactRequest, UpdateArtifactResponse,
+    FeedPosition, ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
+    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bodies = [
         generator.subschema_for::<CreateArtifactRequest>(),
         generator.subschema_for::<SaveRevisionRequest>(),
+        generator.subschema_for::<RestoreRevisionRequest>(),
         generator.subschema_for::<UpdateArtifactRequest>(),
         generator.subschema_for::<CommitResponse>(),
         generator.subschema_for::<UpdateArtifactResponse>(),

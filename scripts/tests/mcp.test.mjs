@@ -449,6 +449,68 @@ test('A stale base is a conflict that writes nothing', async () => {
   });
 });
 
+test('An agent restores an earlier revision byte for byte', async () => {
+  await withClient(async (client) => {
+    const bytes = Uint8Array.from([0, 0xff, 0xfe, 0x80, 10]);
+    const created = await ok(client, 'create_artifact', {
+      title: 'Restorable',
+      files: [utf8('index.html', '<p>1</p>'), base64('image.png', bytes)],
+      idempotency_key: freshKey(),
+    });
+    const id = created.artifact.id;
+    await ok(client, 'save_revision', {
+      artifact_id: id,
+      base_revision: 1,
+      changes: [
+        { op: 'put', ...utf8('index.html', '<p>2</p>') },
+        { op: 'delete', path: 'image.png' },
+      ],
+      idempotency_key: freshKey(),
+    });
+    const restore = {
+      artifact_id: id,
+      revision: 1,
+      base_revision: 2,
+      idempotency_key: freshKey(),
+    };
+    const restored = await ok(client, 'restore_revision', restore);
+    assert.equal(restored.revision.revision, 3);
+    assert.equal(restored.replayed, false);
+    const first = await ok(client, 'get_revision', {
+      artifact_id: id,
+      revision: 1,
+    });
+    assert.deepEqual(restored.revision.files, first.files);
+    const data = await ok(client, 'read_file', {
+      artifact_id: id,
+      revision: 3,
+      path: 'image.png',
+    });
+    assert.equal(data.encoding, 'base64');
+    assert.deepEqual(Buffer.from(data.content, 'base64'), Buffer.from(bytes));
+
+    // A stale restore writes nothing; the same restore over HTTP replays.
+    const stale = await refused(
+      client,
+      'restore_revision',
+      { ...restore, idempotency_key: freshKey() },
+      'revision_conflict',
+    );
+    assert.equal(stale.current_revision, 3);
+    const viaHttp = await api(`/v1/artifacts/${id}/revisions/1/restore`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': restore.idempotency_key,
+      },
+      body: JSON.stringify({ base_revision: 2 }),
+    });
+    assert.equal(viaHttp.status, 201);
+    assert.equal(viaHttp.body.replayed, true);
+    assert.equal(viaHttp.body.revision.revision, 3);
+  });
+});
+
 test('Invalid input is a tool error the model can read', async () => {
   await withClient(async (client) => {
     const created = await ok(client, 'create_artifact', {
