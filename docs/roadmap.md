@@ -1,12 +1,12 @@
 # Artifree PR 로드맵
 
-기준: 2026-10-28, `main`의 A04a 병합까지 반영한 계획이다. 목표는 외부 agent로
+기준: 2026-10-28, `main`의 A04b 병합까지 반영한 계획이다. 목표는 외부 agent로
 아티팩트를 만들고 편집하며, 로컬·사설 서버에서 계속 사용할 수 있는 작업공간이다.
 아래 ID는 계획 식별자이며 GitHub PR 번호가 아니다. 표의 기능은 모두 미구현 또는
 부분 구현의 후속 범위다. 각 행은 별도로 검토·병합할 구현 PR 한 개의 출발점이다.
 
-**A01 변경 알림 서버 → A02 웹 자동 반영 → A03 목록·메타데이터(API·웹)**와 A04a 소스
-복원 API를 완료했고, 다음은 A04b 웹의 이력 비교와 복원이다. 개인 서버 운영 경로는 O01–O04를 앞당길 수 있으며,
+**A01 변경 알림 서버 → A02 웹 자동 반영 → A03 목록·메타데이터 → A04 이력 비교와 소스
+복원(API·웹)**을 완료했고, 다음은 A05 복제와 독립 이력이다. 개인 서버 운영 경로는 O01–O04를 앞당길 수 있으며,
 React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사이에는 순서를 바꿀 수 있다.
 
 ## 완료된 기반
@@ -16,15 +16,16 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | 개발 기반       | TypeScript presentation, Rust logic, React/Vite·Tailwind 4·shadcn/ui Base UI, 엄격한 품질 검사                                                                             |
 | HTML 아티팩트   | HTTP·CLI·웹 생성/조회/수정, SQLite 영속 저장, 불변 리비전, 충돌 감지, actor별 요청 key 재실행                                                                              |
 | 미리보기        | 별도 origin, CSP/iframe sandbox, 만료 ticket. 작업공간 격리까지 지원하며 네트워크·CPU·메모리 격리는 미구현                                                                 |
-| Agent MCP       | Streamable HTTP, 도구 9개, HTTP와 같은 application 동작·key·오류. Codex 수동 실행 확인, Pi 실행은 미검증                                                                   |
+| Agent MCP       | Streamable HTTP, 도구 10개, HTTP와 같은 application 동작·key·오류. Codex 수동 실행 확인, Pi 실행은 미검증                                                                  |
 | 호출 제한       | HTTP·MCP의 actor별 공유 빈도/동시 실행 제한, `429 rate_limited`와 `Retry-After`, 거절 body의 제한된 정리                                                                   |
 | 변경 알림       | A01: 커밋 트랜잭션의 변경 기록, DB 식별자를 포함한 cursor, `GET /v1/changes` SSE의 재개·reset·stream 수 제한, 표준 SSE 해석과 상태 기반 재연결 client, CLI P3 수정         |
 | 웹 자동 반영    | A02: 웹이 변경 알림을 따라 목록·열린 아티팩트·최신 preview를 갱신. client 아래 request gate가 모든 요청의 가시성·`429` 지연·한 번에 한 읽기를 결정. 고정 preview·초안 유지 |
 | 목록·메타데이터 | A03: 이름 변경·pin(별도 metadata revision, 조건부·재실행 가능), 검색·정렬·pin 필터·keyset 페이지를 API·MCP·CLI·웹에 연결. 웹은 보이는 만큼 처음부터 다시 읽음              |
-| 검증            | 기준 코드에서 Node 118개·Rust 90개 테스트 및 빌드 통과. Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한 CI 8개 작업 통과                                                 |
+| 이력            | A04: 파일 digest, 과거 리비전의 조건부 복원(API·MCP·CLI·웹), 웹의 digest·줄 단위 비교. 웹의 조건부 쓰기는 마지막 reset 이후·conflict를 지난 읽기에서만 준비                |
+| 검증            | 기준 코드에서 Node 128개·Rust 94개 테스트 및 빌드 통과. Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한 CI 8개 작업 통과                                                 |
 
 구현 결정은 [0001](decisions/0001-foundation.md)부터
-[0009](decisions/0009-web-list-and-metadata.md)까지가 기준이다. Axum/Tokio와 SQLite는
+[0011](decisions/0011-web-history-and-restore.md)까지가 기준이다. Axum/Tokio와 SQLite는
 이미 선택했다. 다른 DB·queue·editor·bundler·worker 도구는 해당 기능 PR에서 결정한다.
 
 ## 모든 구현 PR의 진입 조건과 완료 기준
@@ -64,7 +65,7 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | A03a | **[완료: 0008] 목록과 메타데이터 API.** 이름 변경, pin/unpin, 검색·정렬과 bounded pagination을 저장소·application·API·MCP·client·CLI에 연결한다. 메타데이터 수정으로 소스나 앱 데이터를 덮어쓰지 않고, 예전 호출자의 기본 목록 동작을 유지한다. 웹은 메타데이터 변경 알림을 따른다.                                                                                                                                              | A02           |
 | A03b | **[완료: 0009] 웹 목록과 메타데이터.** 웹 작업공간에서 검색·정렬·pin 필터·다음 페이지와 이름 변경·pin을 제공한다. 메타데이터 충돌을 작성 중 초안과 분리해 보여 주고, 500개를 넘는 목록을 다룬다.                                                                                                                                                                                                                                 | A03a          |
 | A04a | **[완료: 0010] 소스 복원 API와 파일 digest.** 과거 리비전의 파일 패키지를 base revision 조건과 idempotency key로 새 head에 바이트 그대로 커밋한다(API·MCP·client·CLI). 과거 리비전과 title·pin은 불변이며 stale 복원은 거절한다. manifest의 파일마다 SHA-256을 제공해 바뀌지 않은 파일을 읽지 않고 비교한다.                                                                                                                     | A02           |
-| A04b | **웹의 이력 비교와 복원.** 두 리비전의 파일 차이(추가·삭제·변경과 텍스트 줄 차이)를 보여 주고 과거 리비전을 복원한다. 웹 초안과 live 반영 규칙(0007)을 지키고, 응답 유실 재시도와 충돌을 0009처럼 다룬다. 앱 데이터·권한·게시 대상을 암묵적으로 되돌리지 않는다.                                                                                                                                                                 | A04a          |
+| A04b | **[완료: 0011] 웹의 이력 비교와 복원.** 두 리비전의 파일 차이(추가·삭제·변경과 텍스트 줄 차이)를 보여 주고 과거 리비전을 복원한다. 웹 초안과 live 반영 규칙(0007)을 지키고, 응답 유실 재시도와 충돌을 0009처럼 다룬다. 앱 데이터·권한·게시 대상을 암묵적으로 되돌리지 않는다.                                                                                                                                                    | A04a          |
 | A05  | **복제와 독립 이력.** 선택한 리비전에서 새 ID와 독립 이력을 만들고 이후 편집이 서로 영향을 주지 않음을 검증한다. 현 단계의 복제는 파일 패키지 범위다. 앱 데이터와 upload asset 복사는 R06·R09에서 반드시 확장하며, 그 전에는 전체 데이터 복제라고 표시하지 않는다.                                                                                                                                                               | A02           |
 | A06  | **삭제와 휴지통.** 삭제·복구의 접근 정책을 정의하고 목록·agent 도구·열린 viewer에 반영한다. 삭제 뒤 새 읽기/쓰기/preview 발급을 거절하고, 동시 저장과 충돌 처리한다. 실제 영구 정리는 O05에서 수행한다.                                                                                                                                                                                                                          | A03b          |
 | A07  | **소스 패키지 내보내기.** 리비전에 고정된 파일과 manifest를 ZIP으로 내려받아 해시·바이트·경로를 대조한다. HTML 다운로드와 서비스 전체 이전을 구분하고, runtime/provider 의존성을 기록한다. 아직 없는 SDK·데이터·모델 동작이 offline에서 제공된다고 표시하지 않는다.                                                                                                                                                              | 기반          |
@@ -78,16 +79,15 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | A10 | **소스 편집 초안 복구.** artifact/base revision/tab owner에 묶인 미저장 소스 초안과 결과 불명 요청의 key를 보존한다. 재열기·저장 중 종료·quota 실패 뒤 복구/폐기를 명시적으로 선택하고 최신 서버 내용과 충돌 처리한다. source 초안을 일반 앱 데이터 outbox나 Docs staging과 혼용하지 않는다.    | A09       |
 | A11 | **Agent의 bounded 파일 읽기.** revision/hash에 고정된 부분 읽기를 API·CLI·MCP에 추가한다. offset/길이·다중 바이트 UTF-8 경계·binary/base64·파일 끝을 검증하고 기존 전체 읽기의 바이트 의미를 유지한다. 모델 컨텍스트에 5 MiB 전체 파일을 항상 전달하지 않아도 수정할 수 있다.                   | 기반      |
 
-### 바로 다음 PR A04b의 경계
+### 바로 다음 PR A05의 경계
 
-원본 분석에서 일반 아티팩트의 restore와 리비전 비교 API·UI는 관찰되지 않았다. 관찰된 것은
-이력 목록과, 과거 version에서 새 아티팩트를 만드는 복제뿐이다(A05). 따라서 복원은
-Artifree의 결정으로 정했다(0010): 복원은 과거 리비전의 파일 패키지를 현재 head에 대한 새
-리비전으로 커밋하고, `base_revision`과 idempotency key를 사용하며, 과거 리비전과
-metadata는 바꾸지 않는다. A04b의 비교는 두 고정 리비전의 manifest digest로 바뀐 파일을
-고르고 그 파일의 바이트만 읽어 줄 차이를 웹에서 계산한다. 웹 초안과 live 반영 규칙(0007)을
-그대로 따른다. 원본의 Docs 전용 restore 관찰
-(새 rev 생성, guard 불일치 거절)은 참고만 하고 일반 계약의 근거로 쓰지 않는다.
+원본 분석에서 관찰된 복제는 과거 version을 지정할 수 있는 별도 요청이며, 새 ID·owner 전용·
+version 1개의 독립 이력과 "<원본 제목> (Copy)" 제목으로 시작했다. 원본 이력은 바뀌지 않았고
+앱 데이터 행과 upload asset도 복사되었다. Artifree는 아직 앱 데이터와 asset이 없으므로 A05의
+복제는 선택한 리비전의 파일 패키지만 새 아티팩트의 revision 1로 만들며, 그 범위를 응답과 UI에
+명시한다. 복제는 조건부가 아닌 생성이지만 idempotency key로 재시도해도 한 번만 만들어져야 한다.
+웹의 복제 dialog도 0011 결정 6의 reset 규칙을 따른다. 제목 규칙, 대상 리비전 지정, pin 비상속
+여부는 결정 기록에서 확정한다.
 
 ## O 로컬 사용과 사설 서버 운영
 

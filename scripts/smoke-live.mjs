@@ -886,6 +886,44 @@ async function restream(tracked, server, events) {
 }
 
 /**
+ * Has `page` reopen its change stream with the cursor of another feed. The
+ * server answers `reset`, as for a page whose server's data was replaced,
+ * and keeps the stream open, so no `ready` follows. Nothing is replaced.
+ */
+export async function forgeReset(page) {
+  let reopened;
+  const sent = new Promise((resolve) => {
+    reopened = resolve;
+  });
+  await page.route(
+    '**/v1/changes',
+    (route) => {
+      reopened();
+      return route.continue({
+        headers: {
+          ...route.request().headers(),
+          'last-event-id': `${'f0'.repeat(16)}.1`,
+        },
+      });
+    },
+    { times: 1 },
+  );
+  await setPageVisibility(page, 'hidden');
+  await setPageVisibility(page, 'visible');
+  await within(sent, 'A page shown again must open a new stream');
+}
+
+function setPageVisibility(page, state) {
+  return page.evaluate((visibility) => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visibility,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, state);
+}
+
+/**
  * Waits for `promise`, failing if it has not settled within ten seconds, so
  * a request that never comes fails the check instead of stopping it.
  */

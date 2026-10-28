@@ -169,8 +169,11 @@ pins, search, order, and pages to the API, MCP, client, CLI
 ([0008](decisions/0008-artifact-metadata-and-lists.md)), and web workspace
 ([0009](decisions/0009-web-list-and-metadata.md)). A04a adds restoring an
 earlier revision and file digests to the API, MCP, client, and CLI
-([0010](decisions/0010-revision-restore-and-digests.md)). The next slice is
-A04b, revision comparison and restore in the web workspace.
+([0010](decisions/0010-revision-restore-and-digests.md)), and A04b compares
+and restores revisions in the web workspace, preparing every conditional
+write only from what the page has read since the last reset and past any
+conflict ([0011](decisions/0011-web-history-and-restore.md)). The next slice
+is A05, duplicating an artifact with its own history.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

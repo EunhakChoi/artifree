@@ -31,6 +31,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { fromEditable, toEditable } from './editable-text';
+import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { Version } from './use-live-workspace';
@@ -138,6 +139,18 @@ export function ArtifactDetail({
   function reload(): void {
     setGeneration((value) => value + 1);
   }
+  // Held here, outside the history tab, so that a retry keeps its key and
+  // a refused base stays refused when the tab closes and opens again.
+  const restore = useRestore(
+    client,
+    artifactId,
+    (restored) => {
+      reload();
+      onSaved(restored);
+    },
+    reload,
+    resets,
+  );
   if (details.status === 'loading')
     return (
       <output className="text-sm text-muted-foreground">
@@ -158,6 +171,9 @@ export function ArtifactDetail({
       </Alert>
     );
   const { artifact, revisions } = shown;
+  // What is shown was read before the server's data may have been replaced;
+  // it is read again, and no write is prepared from it meanwhile.
+  const stale = shown.resets !== resets;
   // A save or "Load latest" asked for a newer state that has not arrived.
   const reloading = shown.generation !== generation;
   return (
@@ -179,6 +195,8 @@ export function ArtifactDetail({
               artifact={artifact}
               onUpdated={onMetadataChanged}
               onConflict={reload}
+              resets={resets}
+              stale={stale}
             />
           </div>
         </CardAction>
@@ -209,6 +227,7 @@ export function ArtifactDetail({
             <TabsList aria-label="Artifact views">
               <TabsTrigger value="preview">Preview</TabsTrigger>
               <TabsTrigger value="source">Source</TabsTrigger>
+              <TabsTrigger value="history">History</TabsTrigger>
             </TabsList>
             <TabsContent value="preview" className="mt-4">
               <PreviewPanel
@@ -218,6 +237,18 @@ export function ArtifactDetail({
                 epoch={shown.epoch}
                 chosen={chosen}
                 onChoose={setChosen}
+              />
+            </TabsContent>
+            <TabsContent value="history" className="mt-4">
+              <HistoryPanel
+                client={client}
+                artifact={artifact}
+                revisions={revisions}
+                epoch={shown.epoch}
+                unsaved={unsaved}
+                restore={restore}
+                resets={resets}
+                stale={stale}
               />
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">

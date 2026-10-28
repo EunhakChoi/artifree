@@ -19,7 +19,7 @@ features.
 | Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                          |
 | Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset |
 | CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                    |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes, search, pages, rename, pin; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                                      |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes, search, pages, rename, pin, compare, restore; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                    |
 | Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                  |
 | CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                           |
 
@@ -182,8 +182,32 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   pinning, the pin filter, and both orders; a rename reads the list, the
   artifact, and its history once and keeps a draft; a rename whose answer was
   lost is retried with its key and applies once; a forged conflict changes
-  nothing and reads the artifact again. The rename dialog is checked for
-  accessibility.
+  nothing, reads the artifact again, and keeps pinning disabled until the
+  page has read past the refused metadata revision. The rename dialog is
+  checked for accessibility.
+- `scripts/tests/compare.test.mjs`: bundles the web comparison with esbuild:
+  3,000 seeded random pairs of line lists, each compared with the fewest
+  changed lines (checked against a longest common subsequence) that rebuild
+  both sides with consecutive line numbers; the line and edit limits, and
+  common ends that cost nothing; line endings, byte order marks, and a
+  missing final line feed as differences; hunks with three lines of context
+  that join when they touch; manifests compared by digest in path order.
+- `scripts/tests/refusal.test.mjs`: a refused base holds until the page has
+  read a newer version and at least the one the conflict named, and lapses
+  after a possible data replacement.
+- `scripts/smoke-history.mjs`: the history tab compares two revisions by
+  digest (changed, added, removed, a binary file of equal size) and shows
+  the lines of text files with visible carriage returns, byte order marks,
+  and missing final line feeds; a restore commits revision 1's digests as
+  the next revision; a restore whose answer was lost is retried with its key
+  and applies once; a restore refused because of a save the page had not
+  yet read stays disabled until that read arrives, then restores against
+  the revision the dialog opened on while the default moves on; a rename
+  refused the same way and opened again explains the wait and then offers
+  the other client's title; after a forged `reset`, pin, rename, and restore stay disabled until
+  the artifact is read again, and a restore or rename dialog open across it
+  sends nothing; a draft disables restoring. The tab and the dialog are
+  checked for accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

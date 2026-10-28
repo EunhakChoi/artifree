@@ -212,7 +212,8 @@ export async function checkListAndMetadata({
     current = await api(server, 'GET', `/v1/artifacts/${alpha.id}`);
     assert.equal(current.metadata_revision, 3, 'The retry applied once.');
 
-    // An update another client won changes nothing; the latest is read.
+    // An update another client won changes nothing; the latest is read, and
+    // the next update waits until the page has read past the refused base.
     await page.route(`**/v1/artifacts/${alpha.id}`, (route) =>
       route.request().method() === 'PATCH'
         ? route.fulfill({
@@ -235,9 +236,20 @@ export async function checkListAndMetadata({
     await quiet();
     assert.deepEqual(reads.slice(mark).sort(), ['', 'revisions']);
     await page.unrouteAll({ behavior: 'ignoreErrors' });
-    await pin.click();
+    // The forged conflict named revision 4, which the page has not read.
+    await expect(pin).toBeDisabled();
+    await expect(
+      workspace.getByText(/you can pin or unpin again once it has/),
+    ).toBeVisible();
+    await api(server, 'PATCH', `/v1/artifacts/${alpha.id}`, {
+      base_metadata_revision: 3,
+      pinned: true,
+    });
     await expect(pin).toHaveAttribute('aria-pressed', 'true');
-    await expect(workspace.getByText('Changed elsewhere')).toBeHidden();
+    await expect(pin).toBeEnabled();
+    await expect(
+      workspace.getByText(/The page shows the latest now/),
+    ).toBeVisible();
     await expect(editor).toHaveValue(html('Draft'));
 
     // A pin whose answer was lost: once the page reads what it did, no
