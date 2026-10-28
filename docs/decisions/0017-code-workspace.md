@@ -78,7 +78,10 @@ unpublished trace maps each to its evidence.
    between the click and the request. The same request sent again reuses
    its idempotency key (0007), so a retry after a lost answer replays.
    There are no per-file conditions: a draft written on an older revision
-   is refused whole.
+   is refused whole. A save is sent only in the feed epoch its draft's
+   revision was read in, and an answer that arrives in a later one changes
+   nothing, as for every write of the page (0014): it names revisions of
+   data the server may no longer hold, so the draft stays.
 6. **Paths are checked with the server's rules.** `artifree-server
 --package-rules` prints the domain's package limits and the media type
    of each extension; `npm run generate:contracts` writes them to
@@ -106,7 +109,10 @@ unpublished trace maps each to its evidence.
    notice meanwhile. In the trash, where every read is refused (0014),
    the open file's text stays editable, also when it was read and not
    yet changed, but no file can be opened, added, moved, deleted, or
-   restored, and no preview is shown, so nothing is read. Carrying a draft
+   restored, and no preview is shown, so nothing is read. A move whose
+   read is still in flight when the page shows the trash is stopped and
+   moves nothing; the read is aborted, also when the server answered it
+   before the artifact moved. Carrying a draft
    onto a newer revision is A10's.
 9. **The saved revision is previewed beside the editor.** "Show saved
    preview" puts the draft's base revision, in its sandboxed frame,

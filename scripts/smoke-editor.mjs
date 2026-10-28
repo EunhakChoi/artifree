@@ -273,57 +273,126 @@ export async function checkEditor({
     await checkAccessibility('editor-saved-preview', tab);
     await workspace.getByRole('button', { name: 'Hide saved preview' }).click();
 
-    // In the trash, a file opened before the move stays editable, and
-    // nothing is read for the artifact.
+    // The artifact is moved to the trash and back through the API.
+    const setDeleted = async (deleted) => {
+      const { artifacts } = await api(
+        server,
+        'GET',
+        '/v1/artifacts?deleted=true&q=Editor%20demo',
+      );
+      const metadata = deleted
+        ? (await api(server, 'GET', source)).metadata_revision
+        : artifacts[0].metadata_revision;
+      await api(server, 'PATCH', source, {
+        base_metadata_revision: metadata,
+        deleted,
+      });
+    };
+    const trashNotice = workspace.getByText('Moved to the trash elsewhere');
+    const fileReads = [];
+    const recordFileRead = (request) => {
+      if (new URL(request.url()).pathname.includes('/files/'))
+        fileReads.push(request.url());
+    };
+
+    // A move whose read the server answered before the artifact moved to
+    // the trash, but which arrives after the page shows the trash, moves
+    // nothing.
     await open('index.html');
     await index.fill('<p>trashed</p>');
+    let answeredBefore;
+    const fetchedBefore = new Promise((resolve) => {
+      answeredBefore = resolve;
+    });
+    let deliver;
+    const delivered = new Promise((resolve) => {
+      deliver = resolve;
+    });
+    const lateAnswer = async (route) => {
+      const response = await route.fetch();
+      answeredBefore();
+      await delivered;
+      // The page may have aborted the read meanwhile.
+      await route.fulfill({ response }).catch(() => {});
+    };
+    const logoUrl = `**${source}/revisions/4/files/assets/logo.png`;
+    await tab.route(logoUrl, lateAnswer);
+    const stopped = await renameTo('assets/logo.png', 'logo.png');
+    await fetchedBefore;
+    await setDeleted(true);
+    await expect(trashNotice).toBeVisible();
+    deliver();
+    await expect(
+      stopped.getByText('assets/logo.png was not moved: the artifact moved'),
+    ).toBeVisible();
+    await tab.unroute(logoUrl, lateAnswer);
+    await stopped.getByRole('button', { name: 'Cancel' }).click();
+    await expect(fileButton(files, 'logo.png')).toBeHidden();
+    await setDeleted(false);
+    await expect(trashNotice).toBeHidden();
+
+    // In the trash, a file read before the move stays editable, and
+    // nothing is read for the artifact.
     await open('pages/about.html');
     await expect(about).toHaveValue('<p>about</p>');
-    const metadataOf = async () =>
-      (await api(server, 'GET', source)).metadata_revision;
-    const trashReads = [];
-    const recordTrashRead = (request) => {
-      if (new URL(request.url()).pathname.includes('/files/'))
-        trashReads.push(request.url());
-    };
-    tab.on('request', recordTrashRead);
-    await api(server, 'PATCH', source, {
-      base_metadata_revision: await metadataOf(),
-      deleted: true,
-    });
-    await expect(
-      workspace.getByText('Moved to the trash elsewhere'),
-    ).toBeVisible();
+    tab.on('request', recordFileRead);
+    await setDeleted(true);
+    await expect(trashNotice).toBeVisible();
     await expect(about).toHaveValue('<p>about</p>');
     await about.fill('<p>about, edited in the trash</p>');
     await expect(about).toHaveValue('<p>about, edited in the trash</p>');
     await expect(fileButton(files, 'index.html')).toBeDisabled();
-    tab.off('request', recordTrashRead);
-    assert.deepEqual(trashReads, [], 'Nothing is read in the trash.');
-    const { artifacts: trashed } = await api(
-      server,
-      'GET',
-      '/v1/artifacts?deleted=true&q=Editor%20demo',
-    );
-    await api(server, 'PATCH', source, {
-      base_metadata_revision: trashed[0].metadata_revision,
-      deleted: false,
-    });
-    await expect(
-      workspace.getByText('Moved to the trash elsewhere'),
-    ).toBeHidden();
+    tab.off('request', recordFileRead);
+    assert.deepEqual(fileReads, [], 'Nothing is read in the trash.');
+    await setDeleted(false);
+    await expect(trashNotice).toBeHidden();
     await workspace.getByRole('button', { name: 'Discard changes' }).click();
 
-    // After a possible replacement of the server's data, revision 4 may
-    // name other content: the draft stays and what was read stays shown,
-    // but nothing more of revision 4 is read, moved, or saved. A read in
-    // flight across the replacement is not used.
+    // A save answered after a possible replacement of the server's data
+    // changes nothing: the answer names revisions that may now be other
+    // content, so the draft stays, and saving stays disabled.
+    const disconnect = workspace.getByRole('button', { name: 'Disconnect' });
+    const replacedNotice = workspace.getByText(
+      "The server's data may have been replaced",
+    );
+    await open('index.html');
+    await index.fill('<p>sent before</p>');
+    const releaseHeldSave = await hold(tab, 'POST', `**${source}/revisions`);
+    const answered = tab.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        response.url().endsWith(`${source}/revisions`),
+    );
+    await save.click();
+    await expect(
+      workspace.getByRole('button', { name: 'Saving…' }),
+    ).toBeVisible();
+    await forgeReset(tab);
+    await expect(replacedNotice).toBeVisible();
+    await releaseHeldSave();
+    await answered;
+    await expect(save).toHaveText('Save revision');
+    await expect(disconnect).toBeDisabled();
+    await expect(replacedNotice).toBeVisible();
+    await expect(index).toHaveValue('<p>sent before</p>');
+    await expect(save).toBeDisabled();
+    await workspace.getByRole('button', { name: 'Load latest' }).click();
+    await expect(disconnect).toBeEnabled();
+    const latest = (await api(server, 'GET', source)).current_revision;
+    assert.equal(latest, 5, 'The held save reached the server once.');
+    await expect(
+      workspace.getByText('Revision 5', { exact: true }),
+    ).toBeVisible();
+
+    // After a possible replacement, revision 5 may name other content: the
+    // draft stays and what was read stays shown, but nothing more of it is
+    // read, moved, or saved. A read in flight across it is not used.
     await open('index.html');
     await index.fill('<p>kept</p>');
     const releaseLogo = await hold(
       tab,
       'GET',
-      `**${source}/revisions/4/files/assets/logo.png`,
+      `**${source}/revisions/5/files/assets/logo.png`,
     );
     const moving = await renameTo('assets/logo.png', 'logo.png');
     await expect(
@@ -333,16 +402,14 @@ export async function checkEditor({
     const recordLater = (request) => {
       const url = new URL(request.url());
       if (
-        url.pathname.startsWith(`${source}/revisions/4/files/`) ||
+        url.pathname.startsWith(`${source}/revisions/5/files/`) ||
         (request.method() === 'POST' && url.pathname.endsWith('/revisions'))
       )
         later.push(`${request.method()} ${url.pathname}`);
     };
     tab.on('request', recordLater);
     await forgeReset(tab);
-    await expect(
-      workspace.getByText("The server's data may have been replaced"),
-    ).toBeVisible();
+    await expect(replacedNotice).toBeVisible();
     await releaseLogo();
     await expect(
       moving.getByText(/assets\/logo\.png was not moved/),
@@ -358,11 +425,11 @@ export async function checkEditor({
     await expect(workspace.getByText(/Nothing was read/)).toBeVisible();
     await expect(panel.getByRole('button', { name: 'Try again' })).toBeHidden();
     tab.off('request', recordLater);
-    assert.deepEqual(later, [], 'Nothing is read or sent for revision 4.');
-    assert.deepEqual(await history(), [4, 3, 2, 1]);
+    assert.deepEqual(later, [], 'Nothing is read or sent for revision 5.');
+    assert.deepEqual(await history(), [5, 4, 3, 2, 1]);
 
     assert.deepEqual(errors, [], 'Page errors.');
-    return { revisions: 4, moved: 'bytes kept', replayed: 1 };
+    return { revisions: 5, moved: 'bytes kept', replayed: 1 };
   } finally {
     await context.close();
   }

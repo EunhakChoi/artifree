@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   ArchiveRestoreIcon,
@@ -235,8 +235,9 @@ export function SourcePanel({
   }
 
   async function commit(): Promise<void> {
-    // The draft holds every byte it saves, so nothing is awaited between
-    // this check of the base and the request.
+    // Sent only in the epoch the draft's revision was read in. The draft
+    // holds every byte it saves, so nothing is awaited before the request.
+    if (!isCurrent(baseEpoch)) return;
     const request: SaveRevisionRequest = {
       base_revision: baseNumber,
       changes: plan(draft).map((change) =>
@@ -249,24 +250,36 @@ export function SourcePanel({
     const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
     setAttempt({ body, key });
     setSave({ status: 'saving' });
+    let saved: Artifact | undefined;
+    let failure: unknown;
     try {
-      const result = await client.saveRevision(artifact.id, request, {
-        idempotencyKey: key,
-      });
+      saved = (
+        await client.saveRevision(artifact.id, request, {
+          idempotencyKey: key,
+        })
+      ).artifact;
+    } catch (error: unknown) {
+      failure = error;
+    }
+    // An answer from an earlier epoch names revisions of data the server
+    // may no longer hold: it changes nothing, and the draft stays (0014).
+    if (!isCurrent(baseEpoch)) {
+      setSave({ status: 'idle' });
+      return;
+    }
+    if (saved !== undefined) {
       setSave({ status: 'idle' });
       setUncertain(false);
-      onSaved(result.artifact);
-    } catch (error: unknown) {
-      if (
-        error instanceof ArtifreeApiError &&
-        error.code === 'revision_conflict'
-      ) {
-        setSave({ status: 'conflict', current: error.currentRevision });
-        onRefused(baseNumber, error.currentRevision);
-        return;
-      }
-      setSave({ status: 'failed', message: describeFailure(error) });
-      if (mayHaveCommitted(error)) setUncertain(true);
+      onSaved(saved);
+    } else if (
+      failure instanceof ArtifreeApiError &&
+      failure.code === 'revision_conflict'
+    ) {
+      setSave({ status: 'conflict', current: failure.currentRevision });
+      onRefused(baseNumber, failure.currentRevision);
+    } else {
+      setSave({ status: 'failed', message: describeFailure(failure) });
+      if (mayHaveCommitted(failure)) setUncertain(true);
     }
   }
 
@@ -294,6 +307,7 @@ export function SourcePanel({
               canRead={!replaced && !inTrash}
               locked={locked}
               fixed={fixed}
+              inTrash={inTrash}
               onChange={update}
               onMoved={setChosen}
             />
@@ -541,6 +555,8 @@ interface FileViewProps {
   locked: boolean;
   /** No path can be added, moved, deleted, or restored. */
   fixed: boolean;
+  /** The artifact is in the trash: a move whose read is pending stops. */
+  inTrash: boolean;
   onChange: (draft: SourceDraft) => void;
   /** The file now is at this path. */
   onMoved: (path: string) => void;
@@ -554,10 +570,18 @@ function FileView({
   canRead,
   locked,
   fixed,
+  inTrash,
   onChange,
   onMoved,
 }: FileViewProps) {
   const { path } = entry;
+  // The read of a move in flight. Once the page shows the artifact in the
+  // trash, the read is aborted and nothing moves: a move completes only if
+  // its read settled before then, since the move follows its read at once.
+  const moving = useRef<AbortController | undefined>(undefined);
+  useEffect(() => {
+    if (inTrash) moving.current?.abort();
+  }, [inTrash]);
   if (entry.status === 'deleted')
     return (
       <div className="flex flex-col gap-4">
@@ -579,12 +603,20 @@ function FileView({
     );
   async function move(to: string): Promise<string | undefined> {
     let bytes: Uint8Array | undefined;
-    if (movingReads(draft, path))
+    if (movingReads(draft, path)) {
+      const controller = new AbortController();
+      moving.current = controller;
+      const trashed = `${path} was not moved: the artifact moved to the trash.`;
       try {
-        bytes = await readBase(path);
+        bytes = await readBase(path, controller.signal);
       } catch (error: unknown) {
-        return `${path} was not moved. ${describeFailure(error)}`;
+        return controller.signal.aborted
+          ? trashed
+          : `${path} was not moved. ${describeFailure(error)}`;
+      } finally {
+        moving.current = undefined;
       }
+    }
     onChange(rename(draft, path, to, bytes));
     onMoved(to);
     return undefined;

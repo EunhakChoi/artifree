@@ -356,9 +356,12 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   saved through the API leaves the draft, saving is refused, and "Load
   latest" replaces it; text moved onto a deleted path is edited while the
   replaced file's read is held; the saved revision is previewed beside the
-  editor; in the trash, a file read before the move stays editable and
-  nothing is read; a rename whose read is held across a forged `reset` moves
-  nothing, and after it the draft stays, saving is disabled, and nothing of
+  editor; a move whose read the server answered before the artifact moved
+  to the trash, delivered after the page shows the trash, moves nothing; in
+  the trash, a file read before the move stays editable and nothing is
+  read; a save held across a forged `reset` reaches the server once but
+  changes nothing in the page, and the draft stays; a rename whose read is
+  held across a forged `reset` moves nothing, and after it the draft stays, saving is disabled, and nothing of
   its revision is read, moved, or sent. The path dialog, the
   draft's problems, and the side-by-side preview are checked for
   accessibility.
