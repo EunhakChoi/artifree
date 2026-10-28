@@ -7,10 +7,17 @@ import { describePathError, mediaTypeOf, pathError } from './package-path';
  * New content of a path: text from the editor, saved with the line breaks
  * the file was read with, or the unchanged bytes of a file of the base
  * revision, moved by a rename and read only when the draft is saved
- * (decision 0017, item 3).
+ * (decision 0017, item 3). Text keeps what the path's own base file held
+ * when the edit started from it, so the editor never reads that file again.
  */
 export type Content =
-  | { readonly kind: 'text'; readonly text: string; readonly crlf: boolean }
+  | {
+      readonly kind: 'text';
+      readonly text: string;
+      readonly crlf: boolean;
+      /** The text of the path's own base file, if the edit began there. */
+      readonly original?: string;
+    }
   | { readonly kind: 'copy'; readonly from: string };
 
 /** What a draft does to one path. */
@@ -82,28 +89,28 @@ export function exists(draft: SourceDraft, path: string): boolean {
 }
 
 /**
- * The text of `path` in the editor is now `text`. `original` is the text and
- * line breaks the file had in the base revision, if it was there; the
- * change disappears when the text is the original again.
+ * The text of `path` in the editor is now `text`, saved with `crlf` line
+ * breaks. `original` is the text of the path's own base file when the edit
+ * began from it; the change disappears when the text is that again.
  */
 export function edit(
   draft: SourceDraft,
   path: string,
   text: string,
-  original: { readonly text: string; readonly crlf: boolean } | undefined,
   crlf: boolean,
+  original: string | undefined,
 ): SourceDraft {
-  const unchanged =
-    original !== undefined &&
-    original.text === text &&
-    baseFile(draft, path) !== undefined;
-  return withChange(
-    draft,
-    path,
-    unchanged
-      ? undefined
-      : { kind: 'put', content: { kind: 'text', text, crlf } },
-  );
+  if (original !== undefined && original === text)
+    return withChange(draft, path, undefined);
+  return withChange(draft, path, {
+    kind: 'put',
+    content: {
+      kind: 'text',
+      text,
+      crlf,
+      ...(original === undefined ? {} : { original }),
+    },
+  });
 }
 
 /** Adds an empty text file at `path`. */
@@ -142,8 +149,17 @@ export function rename(
   to: string,
 ): SourceDraft {
   const change = draft.changes.get(from);
+  // Moved text is no longer its base file's text, wherever it goes.
   const content: Content =
-    change?.kind === 'put' ? change.content : { kind: 'copy', from };
+    change?.kind !== 'put'
+      ? { kind: 'copy', from }
+      : change.content.kind === 'text'
+        ? {
+            kind: 'text',
+            text: change.content.text,
+            crlf: change.content.crlf,
+          }
+        : change.content;
   const moved = remove(draft, from);
   const back = content.kind === 'copy' && content.from === to;
   return withChange(moved, to, back ? undefined : { kind: 'put', content });

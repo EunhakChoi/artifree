@@ -202,6 +202,32 @@ export async function checkEditor({
     await workspace.getByRole('button', { name: 'Load latest' }).click();
     await expect(index).toHaveValue('agent');
 
+    // Text moved onto a deleted file's path is edited there without
+    // waiting for the file it replaces, whose read is held.
+    const releaseAbout = await hold(
+      tab,
+      'GET',
+      `**${source}/revisions/3/files/pages/about.html`,
+    );
+    await fileButton('pages/about.html').click();
+    await panel.getByRole('button', { name: 'Delete file' }).click();
+    await files.getByRole('button', { name: 'New file' }).click();
+    const fresh = tab.getByRole('dialog', { name: 'New file' });
+    await fresh.getByLabel('Path').fill('draft.html');
+    await fresh.getByRole('button', { name: 'Add' }).click();
+    await workspace.getByLabel('draft.html').fill('<p>moved</p>');
+    await panel.getByRole('button', { name: 'Rename file' }).click();
+    const onto = tab.getByRole('dialog', { name: 'Rename draft.html' });
+    await onto.getByLabel('Path').fill('pages/about.html');
+    await onto.getByRole('button', { name: 'Rename' }).click();
+    const about = workspace.getByLabel('pages/about.html');
+    await expect(about).toHaveValue('<p>moved</p>');
+    await about.fill('<p>moved and edited</p>');
+    await expect(about).toHaveValue('<p>moved and edited</p>');
+    await releaseAbout();
+    await workspace.getByRole('button', { name: 'Discard changes' }).click();
+    await expect(fileButton('draft.html')).toBeHidden();
+
     // The saved revision can be previewed beside the editor.
     await workspace.getByRole('button', { name: 'Show saved preview' }).click();
     await expect(

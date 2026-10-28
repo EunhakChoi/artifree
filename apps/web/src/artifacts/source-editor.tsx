@@ -646,10 +646,10 @@ interface FileTextProps {
 }
 
 /**
- * The text of a file, edited as the draft holds it. A file is read from the
- * draft's base revision, from where a rename moved it, or not at all when
- * the draft added it; files that are not text, or whose bytes the editor
- * cannot keep, are moved or deleted only.
+ * The text of a file, edited as the draft holds it. Text the draft holds is
+ * never read again; other files are read from the draft's base revision, at
+ * their own path or where a rename moved them from. Files that are not
+ * text, or whose bytes the editor cannot keep, are moved or deleted only.
  */
 function FileText({
   client,
@@ -663,9 +663,17 @@ function FileText({
   const { path } = entry;
   const change = draft.changes.get(path);
   const content = change?.kind === 'put' ? change.content : undefined;
+  const drafted = content?.kind === 'text' ? content : undefined;
   const inBase = draft.files.some((file) => file.path === path);
+  // The path's own base file stays read while its text is edited, so the
+  // editor does not wait again when the text returns to it. Text moved or
+  // typed here never waits for a file.
   const readPath =
-    content?.kind === 'copy' ? content.from : inBase ? path : undefined;
+    content?.kind === 'copy'
+      ? content.from
+      : inBase && (content === undefined || drafted?.original !== undefined)
+        ? path
+        : undefined;
   const text =
     entry.mediaType !== undefined && TEXT_TYPES.test(entry.mediaType);
   const [readAttempt, setReadAttempt] = useState(0);
@@ -687,8 +695,8 @@ function FileText({
         replaced with <code>artifree artifact save</code>.
       </p>
     );
-  let original: { readonly text: string; readonly crlf: boolean } | undefined;
-  if (readPath !== undefined) {
+  let fromFile: { readonly text: string; readonly crlf: boolean } | undefined;
+  if (drafted === undefined && readPath !== undefined) {
     if (read.status === 'loading')
       return (
         <output className="text-sm text-muted-foreground">
@@ -725,12 +733,18 @@ function FileText({
           </AlertDescription>
         </Alert>
       );
-    original = file;
+    fromFile = file;
   }
-  const crlf =
-    content?.kind === 'text' ? content.crlf : (original?.crlf ?? false);
-  const value =
-    content?.kind === 'text' ? content.text : (original?.text ?? '');
+  const crlf = drafted?.crlf ?? fromFile?.crlf ?? false;
+  const value = drafted?.text ?? fromFile?.text ?? '';
+  // Only the path's own base text is its original; text moved here from
+  // another path counts as changed.
+  const original =
+    drafted === undefined
+      ? readPath === path
+        ? fromFile?.text
+        : undefined
+      : drafted.original;
   return (
     <Field>
       <FieldLabel htmlFor="source-editor">{path}</FieldLabel>
@@ -743,17 +757,7 @@ function FileText({
         readOnly={locked}
         aria-busy={locked}
         onChange={(event) =>
-          onChange(
-            edit(
-              draft,
-              path,
-              event.target.value,
-              // Only the file's own base text is its original; text moved
-              // here from another path counts as changed.
-              readPath === path ? original : undefined,
-              crlf,
-            ),
-          )
+          onChange(edit(draft, path, event.target.value, crlf, original))
         }
       />
     </Field>

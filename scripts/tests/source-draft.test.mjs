@@ -80,13 +80,7 @@ test('A rename moves the base bytes unread and undoes itself when moved back', (
 });
 
 test('A rename carries edited text, and a renamed new file leaves nothing behind', () => {
-  const edited = edit(
-    base,
-    'style.css',
-    'a{}\n',
-    { text: 'b{}\n', crlf: false },
-    false,
-  );
+  const edited = edit(base, 'style.css', 'a{}\n', false, 'b{}\n');
   assert.deepEqual(planned(rename(edited, 'style.css', 'css/site.css')), [
     { op: 'put', path: 'css/site.css', bytes: 'a{}\n' },
     { op: 'delete', path: 'style.css' },
@@ -98,19 +92,33 @@ test('A rename carries edited text, and a renamed new file leaves nothing behind
 });
 
 test('Text back at its original is no change; moved text always is', () => {
-  const original = { text: '<p>hi</p>\n', crlf: false };
-  const edited = edit(base, 'index.html', '<p>ho</p>\n', original, false);
+  const original = '<p>hi</p>\n';
+  const edited = edit(base, 'index.html', '<p>ho</p>\n', false, original);
   assert.equal(entries(edited)[1].status, 'edited');
-  assert.ok(
-    isEmpty(edit(edited, 'index.html', original.text, original, false)),
-  );
+  assert.ok(isEmpty(edit(edited, 'index.html', original, false, original)));
   // Text a rename brought has no original at its new path.
   const moved = rename(base, 'style.css', 'site.css');
-  const typed = edit(moved, 'site.css', 'b{}\n', undefined, false);
+  const typed = edit(moved, 'site.css', 'b{}\n', false, undefined);
   assert.deepEqual(planned(typed), [
     { op: 'put', path: 'site.css', bytes: 'b{}\n' },
     { op: 'delete', path: 'style.css' },
   ]);
+  // Nor does edited text moved onto a deleted base file's path: that
+  // file's text is not its original.
+  const over = rename(
+    remove(edit(base, 'style.css', 'a{}\n', false, 'b{}\n'), 'index.html'),
+    'style.css',
+    'index.html',
+  );
+  assert.deepEqual(over.changes.get('index.html'), {
+    kind: 'put',
+    content: { kind: 'text', text: 'a{}\n', crlf: false },
+  });
+  assert.deepEqual(entries(over)[1], {
+    path: 'index.html',
+    status: 'edited',
+    mediaType: 'text/html; charset=utf-8',
+  });
 });
 
 test('Removing deletes a base file and forgets a new one; restoring undoes it', () => {
@@ -128,7 +136,7 @@ test('Removing deletes a base file and forgets a new one; restoring undoes it', 
 });
 
 test('Line breaks and a byte order mark are saved as they were read', () => {
-  const draft = edit(base, 'index.html', '﻿a\nb\n', undefined, true);
+  const draft = edit(base, 'index.html', '﻿a\nb\n', true, undefined);
   const [change] = plan(draft);
   assert.deepEqual(
     [...change.bytes],

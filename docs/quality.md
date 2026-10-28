@@ -354,7 +354,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   moved file has its exact bytes and whose edit keeps CRLF; a revision saved
   elsewhere through the API leaves the draft, saving it is refused, and
   "Load latest" replaces it; the saved revision is previewed beside the
-  editor; a forged `reset` while moved bytes are read sends nothing. The path dialog, the draft's problems, and the side-by-side
+  editor; text moved onto a deleted file's path is edited there while that
+  file's read is held; a forged `reset` while moved bytes are read sends
+  nothing. The path dialog, the draft's problems, and the side-by-side
   preview are checked for accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
