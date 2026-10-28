@@ -77,8 +77,9 @@ Artifact behavior is tested at the boundary that owns it:
   as it was, a title of the caller's, a replay after the source was
   renamed and revised, a reused key, and a missing revision, invalid
   title, unknown field, or missing key that create nothing; an artifact in
-  the trash answers every read and write, checks that fail before the store
-  and reused keys included, with the body of an unknown artifact, also
+  the trash answers every read and write exactly as the same request to an
+  unknown artifact, checks that fail before the store, reused keys, and
+  requests invalid in themselves included, also
   through a preview link issued before, and is listed only in the trash;
   requests made before the delete replay as of their request, and a
   recovery is conditional, keyed apart from the delete, and brings back the

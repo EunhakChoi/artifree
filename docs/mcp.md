@@ -106,9 +106,10 @@ to read the next page. `update_artifact` renames or pins without creating a
 source revision; it fails with `metadata_conflict` and
 `current_metadata_revision` when `base_metadata_revision` is stale (decision
 [0008](decisions/0008-artifact-metadata-and-lists.md)). With `deleted: true`
-it moves the artifact to the trash: every other tool then answers
-`not_found` exactly as for an unknown artifact, except the retry of a call
-made before the delete, which replays. `list_artifacts` with `deleted: true`
+it moves the artifact to the trash: every other call then answers exactly
+as for an unknown artifact (`not_found`, or the same error for arguments
+invalid in themselves), except the retry of a call made before the delete,
+which replays. `list_artifacts` with `deleted: true`
 lists the trash, and `update_artifact` with `deleted: false` recovers an
 artifact from it, under the same base and key rules. Nothing is removed;
 each artifact carries `deleted_at_ms`, `null` outside the trash (decision

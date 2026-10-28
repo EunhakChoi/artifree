@@ -1387,17 +1387,14 @@ async fn listed_ids(
         .collect())
 }
 
-#[tokio::test]
-async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
-    let harness = Harness::new();
-    let (id, link) = trashed(&harness).await?;
-    let unknown = harness
-        .send(get("/v1/artifacts/art_00000000000000000000000000000000")?)
-        .await?
-        .json()?;
+type Requests = Vec<(&'static str, Request<Body>)>;
+
+/// Reads and source writes that name the artifact `id`, as made after the
+/// [`trashed`] fixture: none may succeed in the trash.
+fn reads_and_saves(id: &str) -> Result<Requests, axum::http::Error> {
     let history = format!("/v1/artifacts/{id}/revisions");
-    let metadata = |key, body: Value| patch(&format!("/v1/artifacts/{id}"), Some(key), &body);
-    for (what, request) in [
+    let save = |key, body: &Value| post(&history, Some(key), body);
+    Ok(vec![
         ("read", get(&format!("/v1/artifacts/{id}"))?),
         ("history", get(&history)?),
         ("manifest", get(&format!("{history}/2"))?),
@@ -1406,54 +1403,73 @@ async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
             "preview",
             post(&format!("{history}/2/previews"), None, &json!({}))?,
         ),
-        (
-            "save",
-            post(&history, Some("save-key-2"), &put_index(2, "<h1>v3</h1>"))?,
-        ),
-        // Checks that fail before the store, for any request but a retry,
-        // answer the same.
+        ("save", save("save-key-2", &put_index(2, "<h1>v3</h1>"))?),
+        // Checks before the store answer the same, for any request but a
+        // retry, and so does a key used for another request.
         (
             "save on revision 0",
-            post(&history, Some("save-key-3"), &put_index(0, "x"))?,
+            save("save-key-3", &put_index(0, "x"))?,
         ),
         (
             "save on a future base",
-            post(&history, Some("save-key-4"), &put_index(9, "x"))?,
+            save("save-key-4", &put_index(9, "x"))?,
         ),
         (
             "save that forms no package",
-            post(
-                &history,
-                Some("save-key-5"),
+            save(
+                "save-key-5",
                 &json!({ "base_revision": 2, "changes": [{ "op": "delete", "path": "index.html" }] }),
             )?,
         ),
-        // A key used for another request is not told apart either.
         (
             "save with a reused key",
-            post(&history, Some("save-key-1"), &put_index(2, "y"))?,
+            save("save-key-1", &put_index(2, "y"))?,
         ),
         (
             "save on revision 0 with a reused key",
-            post(&history, Some("save-key-1"), &put_index(0, "y"))?,
+            save("save-key-1", &put_index(0, "y"))?,
         ),
-        ("restore", restore(&id, 1, Some("restore-key-1"), 2)?),
+        // A request invalid in itself is refused before any artifact is
+        // looked up, so it is answered the same way too.
+        (
+            "save to an unsafe path",
+            save(
+                "save-key-6",
+                &json!({ "base_revision": 2, "changes": [{ "op": "delete", "path": "../x" }] }),
+            )?,
+        ),
+        (
+            "save without a key",
+            post(&history, None, &put_index(2, "z"))?,
+        ),
+    ])
+}
+
+/// The other writes that name the artifact `id`, as for [`reads_and_saves`].
+fn other_writes(id: &str) -> Result<Requests, axum::http::Error> {
+    let metadata = |key, body: Value| patch(&format!("/v1/artifacts/{id}"), Some(key), &body);
+    Ok(vec![
+        ("restore", restore(id, 1, Some("restore-key-1"), 2)?),
         (
             "restore a future revision",
-            restore(&id, 9, Some("restore-key-2"), 2)?,
+            restore(id, 9, Some("restore-key-2"), 2)?,
         ),
         (
             "restore onto a future base",
-            restore(&id, 1, Some("restore-key-3"), 9)?,
+            restore(id, 1, Some("restore-key-3"), 9)?,
         ),
-        ("copy", duplicate(&id, 2, Some("copy-key-1"), &json!({}))?),
+        ("copy", duplicate(id, 2, Some("copy-key-1"), &json!({}))?),
         (
             "copy a future revision",
-            duplicate(&id, 9, Some("copy-key-2"), &json!({}))?,
+            duplicate(id, 9, Some("copy-key-2"), &json!({}))?,
         ),
         (
             "copy with a reused key",
-            duplicate(&id, 9, Some("save-key-1"), &json!({}))?,
+            duplicate(id, 9, Some("save-key-1"), &json!({}))?,
+        ),
+        (
+            "copy with an invalid title",
+            duplicate(id, 2, Some("copy-key-3"), &json!({ "title": "" }))?,
         ),
         (
             "rename",
@@ -1469,7 +1485,7 @@ async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
                 json!({ "base_metadata_revision": 2, "pinned": true }),
             )?,
         ),
-        ("delete again", set_deleted(&id, "delete-key-2", 2, true)?),
+        ("delete again", set_deleted(id, "delete-key-2", 2, true)?),
         (
             "rename with a reused key",
             metadata(
@@ -1477,11 +1493,47 @@ async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
                 json!({ "base_metadata_revision": 2, "title": "New" }),
             )?,
         ),
-    ] {
+        (
+            "rename to an invalid title",
+            metadata(
+                "rename-key-2",
+                json!({ "base_metadata_revision": 2, "title": "" }),
+            )?,
+        ),
+        (
+            "update without a change",
+            metadata("rename-key-3", json!({ "base_metadata_revision": 2 }))?,
+        ),
+    ])
+}
+
+#[tokio::test]
+async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
+    let harness = Harness::new();
+    let (id, link) = trashed(&harness).await?;
+    let unknown = "art_00000000000000000000000000000000";
+    let mut missing = 0;
+    for ((what, request), (_, control)) in reads_and_saves(&id)?
+        .into_iter()
+        .chain(other_writes(&id)?)
+        .zip(
+            reads_and_saves(unknown)?
+                .into_iter()
+                .chain(other_writes(unknown)?),
+        )
+    {
         let reply = harness.send(request).await?;
-        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{what}");
-        assert_eq!(reply.json()?, unknown, "{what}");
+        let expected = harness.send(control).await?;
+        assert_eq!(
+            (reply.status, reply.json()?),
+            (expected.status, expected.json()?),
+            "{what}: answered unlike an unknown artifact"
+        );
+        if reply.status == StatusCode::NOT_FOUND {
+            missing += 1;
+        }
     }
+    assert_eq!(missing, 21, "every request valid in itself is not found");
     assert_eq!(
         harness.content(&link).await?.status,
         StatusCode::NOT_FOUND,

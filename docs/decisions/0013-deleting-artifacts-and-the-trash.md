@@ -41,18 +41,22 @@ unpublished trace maps each to its evidence.
    The same request may also rename or pin. The artifact carries
    `deleted_at_ms`: when it went to the trash, or `null`.
 2. **One rule for the trash.** While an artifact is in the trash, every
-   request that names it is answered as for an unknown artifact
-   (`404 not_found`, with the same body), with two exceptions: a request
-   that recovers it, and the retry of a request that committed before the
-   delete, which replays. This covers reads (the artifact, its history,
-   manifests, files, previews, and preview links issued before, which are
-   checked on every read, 0003) and writes (saves, restores, copies,
-   renames, pins, a second delete, and a key reused for another request).
-   The rule does not depend on the order of checks: the store answers a
-   write in the trash with its replay or `404`, and the core answers `404`
-   where one of its own checks fails in the trash, since a retry passes
-   them all: its base and revision existed, and its changes formed a
-   package.
+   request that names it gets the answer the same request gets for an
+   unknown artifact, with two exceptions: a request that recovers it, and
+   the retry of a request that committed before the delete, which replays.
+   A request valid in itself is therefore `404 not_found`, with the same
+   body; one invalid in itself, such as an empty title, an unsafe path, or
+   a missing key, gets the same validation error as for any artifact,
+   since it is refused before an artifact is looked up and tells nothing
+   about it. This covers reads (the artifact, its history, manifests,
+   files, previews, and preview links issued before, which are checked on
+   every read, 0003) and writes (saves, restores, copies, renames, pins, a
+   second delete, and a key reused for another request). The rule does not
+   depend on the order of checks that need the artifact: the store answers
+   a write in the trash with its replay or `404`, and the core answers
+   `404` where one of its own checks fails in the trash, since a retry
+   passes them all: its base and revision existed, and its changes formed
+   a package.
 3. **Writes are ordered.** The store checks the trash in each write's
    transaction, after looking up its key. A save and a delete are ordered:
    one commits first, and the other conflicts or is refused. A copy's
