@@ -22,6 +22,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact save <id> --base <revision>
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
   artifree artifact restore <id> <revision> --base <revision>
+  artifree artifact duplicate <id> <revision> [--title <title>]
   artifree artifact rename <id> <title> --base-metadata <n>
   artifree artifact pin <id> --base-metadata <n>
   artifree artifact unpin <id> --base-metadata <n>
@@ -39,8 +40,11 @@ when more follow. rename, pin, and unpin change metadata only and need the
 metadata_revision read with show (--base-metadata); they create no revision.
 restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
+duplicate creates an artifact whose revision 1 has the files of that
+revision, with its own history; it is unpinned and named --title or the
+source's title followed by " (Copy)". Only files are copied.
 
-create, save, restore, rename, pin, and unpin accept --idempotency-key <key>. Without it a new key is
+create, save, restore, duplicate, rename, pin, and unpin accept --idempotency-key <key>. Without it a new key is
 generated and reported on stderr if the outcome is unknown; retry with that key
 to get the original result instead of a duplicate. save --dir replaces the
 package with the directory's files (hidden entries skipped) and deletes
@@ -114,6 +118,8 @@ export async function runArtifact(args: string[]): Promise<void> {
       return save(rest);
     case 'restore':
       return restore(rest);
+    case 'duplicate':
+      return duplicate(rest);
     case 'rename':
     case 'pin':
     case 'unpin':
@@ -407,6 +413,33 @@ async function restore(args: string[]): Promise<void> {
         id,
         revision,
         { base_revision: base },
+        { idempotencyKey },
+      ),
+  );
+  print(result);
+}
+
+async function duplicate(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      ...connectionOptions,
+      title: { type: 'string' },
+      'idempotency-key': { type: 'string' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = '', revisionText] = single(positionals, ['id', 'revision']);
+  const revision = positiveNumber(revisionText, '<revision>');
+  const client = await connect(values);
+  const result = await mutate(
+    values['idempotency-key'] ?? newIdempotencyKey(),
+    (idempotencyKey) =>
+      client.duplicateArtifact(
+        id,
+        revision,
+        values.title === undefined ? {} : { title: values.title },
         { idempotencyKey },
       ),
   );

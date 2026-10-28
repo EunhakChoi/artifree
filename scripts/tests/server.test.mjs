@@ -222,6 +222,10 @@ test('Every JSON body the server sends matches the API schema root', async () =>
     await request(200, 'GET', `/v1/artifacts/${id}/revisions`);
     await request(200, 'GET', `/v1/artifacts/${id}/revisions/1`);
     await request(201, 'POST', `/v1/artifacts/${id}/revisions/1/previews`);
+    await request(201, 'POST', `/v1/artifacts/${id}/revisions/1/restore`, {
+      base_revision: 2,
+    });
+    await request(201, 'POST', `/v1/artifacts/${id}/revisions/1/duplicate`, {});
     await request(
       404,
       'GET',
@@ -303,7 +307,7 @@ test('CLI renames, pins, and lists by filter and page', async () => {
   }
 });
 
-test('CLI restores an earlier revision byte for byte', async () => {
+test('CLI restores and duplicates a revision byte for byte', async () => {
   const server = await startServer(binary, dataDirectory('cli-restore'));
   try {
     const site = await freshDirectory('cli-restore-site');
@@ -342,10 +346,32 @@ test('CLI restores an earlier revision byte for byte', async () => {
     assert.equal(stale.stdout, '');
     assert.match(stale.stderr, /^error\[revision_conflict\]/);
     assert.match(stale.stderr, /current_revision=3/);
+
+    // A duplicate of revision 1 keeps its bytes in a history of its own.
+    const duplicate = ['duplicate', id, '1'];
+    const copyKey = ['--idempotency-key', 'cli-copy-key-1'];
+    const copied = json(cli(server, [...duplicate, ...copyKey]));
+    assert.equal(copied.artifact.title, 'Restore (Copy)');
+    assert.equal(copied.artifact.current_revision, 1);
+    assert.deepEqual(copied.copied, ['files']);
+    const copy = copied.artifact.id;
+    const copiedBytes = cli(server, ['cat', copy, 'notes.txt']);
+    assert.equal(copiedBytes.stdout, notes);
+    const again = json(cli(server, [...duplicate, ...copyKey]));
+    assert.deepEqual([again.artifact.id, again.replayed], [copy, true]);
+    const titled = json(cli(server, [...duplicate, '--title', 'Mine']));
+    assert.equal(titled.artifact.title, 'Mine');
+    assert.notEqual(titled.artifact.id, copy);
+    const missing = cli(server, ['duplicate', id, '9']);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /^error\[not_found\]/);
+
     for (const args of [
       ['restore', id, '1'],
       ['restore', id, 'first', '--base', '3'],
       ['restore', id, '--base', '3'],
+      ['duplicate', id],
+      ['duplicate', id, '1', '--base', '3'],
     ]) {
       const refused = cli(server, args);
       assert.equal(refused.status, 2, args.join(' '));

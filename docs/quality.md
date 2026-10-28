@@ -19,7 +19,7 @@ features.
 | Inventory    | Portable relative paths, existing sources, unique keys, no repository escape through symlinks; a named framework or runtime must be a real server dependency                                                                                                                                          |
 | Artifacts    | Path traversal and portability, size/count limits, stale-base conflicts, concurrent writers, request-key replay and reuse, injected commit failure, crash and restart, owner-only access, preview sandbox, per-actor request rate and concurrency limits, change feed delivery, resumption, and reset |
 | CLI          | Success and failure exit codes, machine-readable stdout, stderr diagnostics, contradictory flags, unknown commands                                                                                                                                                                                    |
-| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes, search, pages, rename, pin, compare, restore; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML                    |
+| Browsers     | Chromium and Firefox against a real server: connect, create, sandboxed preview probes, save, conflict, pinned revisions, following committed changes, search, pages, rename, pin, compare, restore, duplicate; module tabs, keyboard, dialogs, light/dark accessibility, mobile, offline HTML         |
 | Dependencies | npm advisory scan at every severity, Cargo advisories/yanks/licenses/sources/wildcards/duplicate versions for shipped native targets; no blanket advisory exceptions                                                                                                                                  |
 | CI           | Actionlint syntax/expressions, immutable action commits, read-only token defaults, timeouts, no ignored failures, aggregate includes every verification job                                                                                                                                           |
 
@@ -65,14 +65,20 @@ Artifact behavior is tested at the boundary that owns it:
   that commits an earlier revision's exact files and digests and keeps the
   title, replays after later saves, and refuses a reused key, a stale base
   (also one whose files are those restored), a missing revision, an
-  unchanged restore, and a missing key without writing.
+  unchanged restore, and a missing key without writing; a duplicate of an
+  earlier revision as revision 1 of an unpinned copy named "… (Copy)" with
+  the same digests, later saves to either artifact that leave the other
+  as it was, a title of the caller's, a replay after the source was
+  renamed and revised, a reused key, and a missing revision, invalid
+  title, unknown field, or missing key that create nothing.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
   the same conflict for every save form, every JSON response validated against
   the API schema root (which must reject an empty object) with its expected
   status, a restore through the CLI with exact bytes, its replay, and its
-  conflict and usage errors, and a SIGKILL after commit
+  conflict and usage errors, a duplicate through the CLI with exact bytes,
+  its replay, a title, a missing revision, and usage errors, and a SIGKILL after commit
   followed by a restart and a replayed retry.
 - `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
   authenticates before anything else, refuses a request with an `Origin` or a
@@ -84,7 +90,8 @@ Artifact behavior is tested at the boundary that owns it:
   and the 1.x client, which validates error results against output schemas. `tools/list`
   equals the generated catalog; an agent creates, reads, saves, lists history,
   reads exact pinned bytes (BOM, CRLF, binary), opens a sandboxed preview,
-  and restores an earlier revision byte for byte, replayed over HTTP;
+  restores an earlier revision byte for byte, replayed over HTTP, and
+  duplicates a revision with binary bytes intact, replayed over HTTP;
   results validate against the API schema; retries replay, reordered changes
   are the same request, a reused key is refused, and keys are shared with
   HTTP; stale bases conflict without partial writes; invalid arguments are
@@ -129,8 +136,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
 - `scripts/tests/client.test.mjs`: the API client with an injected `fetch`: a
   body cut off mid-stream is a network error, a complete foreign body is an
   invalid response, uploads pick the smaller exact encoding, a restore sends
-  its revision, base, and key, and a manifest without a valid lowercase
-  `sha256` is an invalid response. For the
+  its revision, base, and key, a manifest without a valid lowercase
+  `sha256` is an invalid response, and a duplicate whose `copied` is missing
+  or names a part the client does not know is an invalid response. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without
@@ -211,6 +219,12 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   nothing, and one whose request was sent says its outcome is unknown; a
   draft disables restoring. The tab and the dialog are checked for
   accessibility.
+- `scripts/smoke-duplicate.mjs`: the duplicate dialog offers the revision
+  the preview shows; a duplicate whose answer was lost is retried with its
+  key and creates one copy, which opens unpinned at revision 1 with the
+  source revision's digests; the source keeps its revisions, pin, and
+  title; a dialog open during a forged `reset` sends nothing; a draft
+  disables duplicating. The dialog is checked for accessibility.
 
 Important new behavior needs rejection and boundary tests and an observed
 failure when its implementation is intentionally broken. Restore every mutation

@@ -4,7 +4,9 @@
 //! The API schema's root accepts any v1 JSON request or response body and
 //! the data of each change feed event; each body and its parts are `$defs`
 //! entries. The query of the artifact list is a `$defs` entry only: it is
-//! not a body, and with every field optional it would admit any object. The MCP entry is the tool catalog
+//! not a body, and with every field optional it would admit any object. The
+//! body of a duplicate is a `$defs` entry only for the same reason: its
+//! fields are optional, so the empty object is one. The MCP entry is the tool catalog
 //! that `tools/list` returns, with the server instructions and the schema of
 //! an error result.
 #![expect(
@@ -13,8 +15,9 @@
 )]
 
 use artifree_contracts::api::{
-    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest, ErrorResponse,
-    FeedPosition, ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
+    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse, FeedPosition,
+    ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
     SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
@@ -28,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<RestoreRevisionRequest>(),
         generator.subschema_for::<UpdateArtifactRequest>(),
         generator.subschema_for::<CommitResponse>(),
+        generator.subschema_for::<DuplicateArtifactResponse>(),
         generator.subschema_for::<UpdateArtifactResponse>(),
         generator.subschema_for::<Artifact>(),
         generator.subschema_for::<ArtifactList>(),
@@ -38,8 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<ArtifactChange>(),
         generator.subschema_for::<FeedPosition>(),
     ];
-    // Registers the query's definition for generated clients.
+    // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();
+    generator.subschema_for::<DuplicateArtifactRequest>();
     let api = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://artifree.invalid/schemas/api-v1.json",

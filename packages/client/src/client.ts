@@ -3,6 +3,8 @@ import type {
   ArtifactList,
   CommitResponse,
   CreateArtifactRequest,
+  DuplicateArtifactRequest,
+  DuplicateArtifactResponse,
   FileUpload,
   ListArtifactsQuery,
   Preview,
@@ -23,6 +25,7 @@ import {
   parseArtifact,
   parseArtifactList,
   parseCommit,
+  parseDuplicate,
   parseError,
   parsePreview,
   parseRevisionList,
@@ -219,6 +222,28 @@ export class ArtifreeClient {
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/restore`,
       parseCommit,
+      {
+        mutation: { body: request, idempotencyKey: options.idempotencyKey },
+      },
+    );
+  }
+
+  /**
+   * Creates an artifact whose revision 1 has the files of `revision` of
+   * `id`, with its own history: unpinned, and named `request.title` or the
+   * source's title followed by " (Copy)". Only files are copied
+   * (`copied`).
+   */
+  async duplicateArtifact(
+    id: string,
+    revision: number,
+    request: DuplicateArtifactRequest,
+    options: MutationOptions,
+  ): Promise<DuplicateArtifactResponse> {
+    return this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/duplicate`,
+      parseDuplicate,
       {
         mutation: { body: request, idempotencyKey: options.idempotencyKey },
       },

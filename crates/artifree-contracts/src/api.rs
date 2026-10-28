@@ -84,6 +84,17 @@ pub struct RestoreRevisionRequest {
     pub base_revision: u64,
 }
 
+/// Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:
+/// creates an artifact from the files of that revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateArtifactRequest {
+    /// Display title of the copy, 1-200 characters. Without it the copy is
+    /// named after the source's current title followed by " (Copy)".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
 /// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
 /// revisions are not touched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -184,6 +195,31 @@ pub struct CommitResponse {
     /// The revision the request committed.
     pub revision: Revision,
     /// True when an earlier request with the same key already committed it.
+    pub replayed: bool,
+}
+
+/// A part of an artifact that a duplicate copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CopiedPart {
+    /// The files of the chosen revision, byte for byte.
+    Files,
+}
+
+/// Response of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateArtifactResponse {
+    /// The copy as of the duplicate this request identifies, unpinned and
+    /// with its own history. On a replay it can be older than the copy's
+    /// current state.
+    pub artifact: Artifact,
+    /// Revision 1 of the copy.
+    pub revision: Revision,
+    /// What the copy received. This version has no application data or
+    /// uploaded assets, so it copies files only.
+    pub copied: Vec<CopiedPart>,
+    /// True when an earlier request with the same key already created it.
     pub replayed: bool,
 }
 

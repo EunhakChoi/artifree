@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    Artifact, ArtifactList, CreateArtifactRequest, ErrorCode, ErrorResponse, ListArtifactsQuery,
-    RestoreRevisionRequest, Revision, RevisionList, SaveRevisionRequest, UpdateArtifactRequest,
-    UpdateArtifactResponse,
+    Artifact, ArtifactList, CreateArtifactRequest, DuplicateArtifactRequest, ErrorCode,
+    ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest, Revision, RevisionList,
+    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_domain::identity::{ActorId, RequestKey};
@@ -185,6 +185,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/artifacts/{id}/revisions/{revision}/restore",
             axum::routing::post(restore_revision),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/duplicate",
+            axum::routing::post(duplicate_artifact),
         )
         .route(
             "/v1/artifacts/{id}/revisions/{revision}/previews",
@@ -464,6 +468,23 @@ async fn restore_revision(
         "/v1/artifacts/{}/revisions/{}",
         response.artifact.id, response.revision.revision
     );
+    Ok(created(&location, Json(response)))
+}
+
+async fn duplicate_artifact(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<(String, u64)>, PathRejection>,
+    body: Result<Json<DuplicateArtifactRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision)) = path?;
+    // An unknown artifact or revision is reported before a malformed body.
+    operations::artifact_id(&id)?;
+    operations::revision_number(revision)?;
+    let Json(request) = body?;
+    let response = operations::duplicate(&state, actor, key, &id, revision, request).await?;
+    let location = format!("/v1/artifacts/{}", response.artifact.id);
     Ok(created(&location, Json(response)))
 }
 

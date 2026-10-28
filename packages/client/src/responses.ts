@@ -4,6 +4,8 @@ import type {
   ArtifactList,
   ChangeKind,
   CommitResponse,
+  CopiedPart,
+  DuplicateArtifactResponse,
   ErrorBody,
   ErrorCode,
   FeedPosition,
@@ -65,6 +67,14 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   revised: true,
   metadata_updated: true,
 };
+
+// A record for the same reason as the error codes: a part added later must
+// be accepted here before a copy is reported to callers.
+const COPIED_PARTS: Record<CopiedPart, true> = { files: true };
+
+function isCopiedPart(value: unknown): value is CopiedPart {
+  return typeof value === 'string' && Object.hasOwn(COPIED_PARTS, value);
+}
 
 /**
  * An opaque feed cursor. It is sent back in `Last-Event-ID`, so it must be
@@ -202,6 +212,18 @@ export function parseCommit(value: unknown): CommitResponse | undefined {
     revision: parsedRevision,
     replayed: value.replayed,
   };
+}
+
+/** Parses the response of a duplicate. */
+export function parseDuplicate(
+  value: unknown,
+): DuplicateArtifactResponse | undefined {
+  const commit = parseCommit(value);
+  const copied = isRecord(value)
+    ? list(value.copied, (part) => (isCopiedPart(part) ? part : undefined))
+    : undefined;
+  if (commit === undefined || copied === undefined) return undefined;
+  return { ...commit, copied };
 }
 
 /** Parses the response of a metadata update. */

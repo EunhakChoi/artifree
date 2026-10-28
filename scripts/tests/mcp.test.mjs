@@ -511,6 +511,59 @@ test('An agent restores an earlier revision byte for byte', async () => {
   });
 });
 
+test('An agent duplicates a revision into an artifact of its own', async () => {
+  await withClient(async (client) => {
+    const bytes = Uint8Array.from([0, 0xff, 0xfe, 0x80, 10]);
+    const created = await ok(client, 'create_artifact', {
+      title: 'Original',
+      files: [utf8('index.html', '<p>1</p>'), base64('image.png', bytes)],
+      idempotency_key: freshKey(),
+    });
+    const id = created.artifact.id;
+    await ok(client, 'save_revision', {
+      artifact_id: id,
+      base_revision: 1,
+      changes: [{ op: 'delete', path: 'image.png' }],
+      idempotency_key: freshKey(),
+    });
+    const duplicate = {
+      artifact_id: id,
+      revision: 1,
+      idempotency_key: freshKey(),
+    };
+    const copied = await ok(client, 'duplicate_artifact', duplicate);
+    assert.equal(copied.artifact.title, 'Original (Copy)');
+    assert.deepEqual(copied.copied, ['files']);
+    assert.equal(copied.revision.revision, 1);
+    const data = await ok(client, 'read_file', {
+      artifact_id: copied.artifact.id,
+      revision: 1,
+      path: 'image.png',
+    });
+    assert.deepEqual(Buffer.from(data.content, 'base64'), Buffer.from(bytes));
+
+    // The same duplicate over HTTP replays; a missing revision copies
+    // nothing.
+    const viaHttp = await api(`/v1/artifacts/${id}/revisions/1/duplicate`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': duplicate.idempotency_key,
+      },
+      body: '{}',
+    });
+    assert.equal(viaHttp.status, 201);
+    assert.equal(viaHttp.body.replayed, true);
+    assert.equal(viaHttp.body.artifact.id, copied.artifact.id);
+    await refused(
+      client,
+      'duplicate_artifact',
+      { ...duplicate, revision: 3, idempotency_key: freshKey() },
+      'not_found',
+    );
+  });
+});
+
 test('Invalid input is a tool error the model can read', async () => {
   await withClient(async (client) => {
     const created = await ok(client, 'create_artifact', {

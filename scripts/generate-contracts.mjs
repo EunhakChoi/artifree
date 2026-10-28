@@ -81,9 +81,10 @@ const generatedApi = await compile(
     unreachableDefinitions: true,
   },
 );
-// Definitions the root does not reach, such as the list query, which is
-// not a body; the generator emits only what a schema reaches.
-const unreachable = ['ListArtifactsQuery'];
+// Definitions the root does not reach: the list query, which is not a body,
+// and the duplicate body, whose fields are all optional. The generator emits
+// only what a schema reaches.
+const unreachable = ['ListArtifactsQuery', 'DuplicateArtifactRequest'];
 const generatedParts = await Promise.all(
   unreachable.map((name) =>
     compile(

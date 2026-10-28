@@ -90,7 +90,8 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0008](docs/decisions/0008-artifact-metadata-and-lists.md),
 [0009](docs/decisions/0009-web-list-and-metadata.md),
 [0010](docs/decisions/0010-revision-restore-and-digests.md),
-[0011](docs/decisions/0011-web-history-and-restore.md)).
+[0011](docs/decisions/0011-web-history-and-restore.md),
+[0012](docs/decisions/0012-duplicate-artifacts.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -98,9 +99,10 @@ The [PR roadmap](docs/roadmap.md) records the remaining work, dependencies,
 acceptance checks, and evidence requirements. The committed change feed (A01)
 and the web workspace following it (A02) are implemented, and so are renaming,
 pins, search, order, and pages through the API, MCP, CLI, and web workspace
-(A03), and revision comparison and restore through the API, MCP, CLI, and web
-workspace (A04); the next slice is duplicating an artifact with its own
-history (A05).
+(A03), revision comparison and restore through the API, MCP, CLI, and web
+workspace (A04), and duplicating a revision into an artifact with its own
+history (A05); the next slice is deleting artifacts and restoring them from
+a trash (A06).
 
 ## Verification
 

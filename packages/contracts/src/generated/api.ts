@@ -9,6 +9,7 @@ export type ApiBody =
   | RestoreRevisionRequest
   | UpdateArtifactRequest
   | CommitResponse
+  | DuplicateArtifactResponse
   | UpdateArtifactResponse
   | Artifact
   | ArtifactList
@@ -50,6 +51,10 @@ export type FileChange =
  * version; the other families are reserved for planned source models.
  */
 export type ArtifactKind = 'app' | 'document' | 'slides' | 'dashboard' | 'design' | 'motion';
+/**
+ * A part of an artifact that a duplicate copies.
+ */
+export type CopiedPart = 'files';
 /**
  * Machine-readable error category.
  */
@@ -234,6 +239,22 @@ export interface RevisionFile {
   size: number;
 }
 /**
+ * Response of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`.
+ */
+export interface DuplicateArtifactResponse {
+  artifact: Artifact;
+  /**
+   * What the copy received. This version has no application data or
+   * uploaded assets, so it copies files only.
+   */
+  copied: CopiedPart[];
+  /**
+   * True when an earlier request with the same key already created it.
+   */
+  replayed: boolean;
+  revision: Revision;
+}
+/**
  * Response of `PATCH /v1/artifacts/{id}`.
  */
 export interface UpdateArtifactResponse {
@@ -383,4 +404,16 @@ export interface ListArtifactsQuery {
    * The order.
    */
   sort?: ListSort | null;
+}
+
+/**
+ * Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:
+ * creates an artifact from the files of that revision.
+ */
+export interface DuplicateArtifactRequest {
+  /**
+   * Display title of the copy, 1-200 characters. Without it the copy is
+   * named after the source's current title followed by " (Copy)".
+   */
+  title?: string | null;
 }

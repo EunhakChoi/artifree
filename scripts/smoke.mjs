@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
+import { checkDuplicate } from './smoke-duplicate.mjs';
 import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
@@ -242,6 +243,12 @@ try {
     server: api,
     checkAccessibility,
   });
+  const duplicate = await checkDuplicate({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -407,6 +414,7 @@ try {
     live,
     list,
     history,
+    duplicate,
     artifactConsole,
     expectedApiFailures,
     pageErrors,
