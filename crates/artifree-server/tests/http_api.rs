@@ -526,6 +526,22 @@ async fn a_range_reads_exact_bytes_of_a_pinned_file() -> TestResult {
         ("bytes=0-999", &b"<h1>v1</h1>"[..], "bytes 0-10/11"),
         ("bytes=-99", &b"<h1>v1</h1>"[..], "bytes 0-10/11"),
         ("BYTES = 4-5", &b"v1"[..], "bytes 4-5/11"),
+        // Positions past any file mean its end, also beyond 64 bits.
+        (
+            "bytes=0-18446744073709551615",
+            &b"<h1>v1</h1>"[..],
+            "bytes 0-10/11",
+        ),
+        (
+            "bytes=0-99999999999999999999",
+            &b"<h1>v1</h1>"[..],
+            "bytes 0-10/11",
+        ),
+        (
+            "bytes=-99999999999999999999",
+            &b"<h1>v1</h1>"[..],
+            "bytes 0-10/11",
+        ),
     ] {
         let part = harness.send(ranged(&page, range)?).await?;
         assert_eq!(part.status, StatusCode::PARTIAL_CONTENT, "{range}");
@@ -542,7 +558,13 @@ async fn a_range_reads_exact_bytes_of_a_pinned_file() -> TestResult {
     let binary = harness.send(ranged(&logo, "bytes=0-3")?).await?;
     assert_eq!(binary.body, [0x89, b'P', b'N', b'G']);
 
-    for range in ["bytes=11-", "bytes=20-30"] {
+    // From the end on, and `-0`, which selects nothing, satisfy no range.
+    for range in [
+        "bytes=11-",
+        "bytes=20-30",
+        "bytes=99999999999999999999-",
+        "bytes=-0",
+    ] {
         let past = harness.send(ranged(&page, range)?).await?;
         assert_eq!(past.status, StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
         assert_eq!(error_code(&past), "range_not_satisfiable", "{range}");
@@ -551,7 +573,6 @@ async fn a_range_reads_exact_bytes_of_a_pinned_file() -> TestResult {
     for range in [
         "bytes=3-1",
         "bytes=a-b",
-        "bytes=-0",
         "bytes=+1-2",
         "bytes=0-1,4-5",
         "bytes",
@@ -561,6 +582,14 @@ async fn a_range_reads_exact_bytes_of_a_pinned_file() -> TestResult {
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{range}");
         assert_eq!(error_code(&refused), "invalid_request", "{range}");
     }
+    // A second field line is a second range.
+    let repeated = authorized(Request::get(&page))
+        .header(header::RANGE, "bytes=0-1")
+        .header(header::RANGE, "bytes=4-5")
+        .body(Body::empty())?;
+    let repeated = harness.send(repeated).await?;
+    assert_eq!(repeated.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&repeated), "invalid_request");
     // Another unit, or If-Range, which no validator here can match, reads
     // the whole file.
     let other = harness.send(ranged(&page, "items=0-1")?).await?;

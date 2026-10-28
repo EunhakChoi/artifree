@@ -139,6 +139,16 @@ test('A part of a file is the range asked for, or a failure', async () => {
     }),
     RangeError,
   );
+  // A range whose last byte has no exact number is not sent.
+  const sentBefore = sent.length;
+  await assert.rejects(
+    answer(206, {}, '').readFilePart(artifact.id, 1, 'index.html', {
+      offset: Number.MAX_SAFE_INTEGER,
+      length: 2,
+    }),
+    RangeError,
+  );
+  assert.equal(sent.length, sentBefore);
 });
 
 test('A complete body that is not the contract is an invalid response', async () => {

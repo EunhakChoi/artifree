@@ -69,7 +69,8 @@ to get the original result instead of a duplicate. save --dir replaces the
 package with the directory's files (hidden entries skipped) and deletes
 files the directory lacks. Results are JSON on stdout; cat writes raw bytes,
 all of the file or, with --offset or --length, the bytes from --offset
-(default 0), --length of them or to the end.
+(default 0), --length of them or to the end; a part that would start at or
+past the end, as any part of an empty file, fails with range_not_satisfiable.
 `;
 
 /** Invalid command-line input; the caller reports it with exit code 2. */

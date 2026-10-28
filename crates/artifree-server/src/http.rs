@@ -612,13 +612,20 @@ async fn read_file(
 /// The byte range a `Range` header asks for (RFC 9110, section 14), or
 /// `None` for the whole file: without the header, with a unit other than
 /// bytes, and with `If-Range`, since this API sends no validator that one
-/// could match. One range only; a malformed one is refused.
+/// could match. One range only, in one field line; a malformed one is
+/// refused.
 fn requested_range(headers: &HeaderMap) -> Result<Option<ByteRange>, ApiError> {
-    let Some(value) = headers.get(header::RANGE) else {
+    let mut values = headers.get_all(header::RANGE).iter();
+    let Some(value) = values.next() else {
         return Ok(None);
     };
     if headers.contains_key(header::IF_RANGE) {
         return Ok(None);
+    }
+    // Field lines combine into one list (RFC 9110, section 5.3), so a second
+    // line asks for a second range.
+    if values.next().is_some() {
+        return Err(ApiError::invalid("Range: one byte range only"));
     }
     let malformed = || ApiError::invalid("Range: expected bytes=first-last, first-, or -suffix");
     let (unit, set) = value
@@ -633,18 +640,24 @@ fn requested_range(headers: &HeaderMap) -> Result<Option<ByteRange>, ApiError> {
         return Err(ApiError::invalid("Range: one byte range only"));
     }
     let (first, last) = set.trim().split_once('-').ok_or_else(malformed)?;
+    // Positions are digits; one past any file's size counts as the largest,
+    // since a last position past the end means the end (RFC 9110, 14.1.1).
     let number = |digits: &str| {
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
-        digits.parse::<u64>().ok()
+        Some(digits.parse::<u64>().unwrap_or(u64::MAX))
     };
     let range = match (first, last) {
-        ("", suffix) => ByteRange::Last(
-            number(suffix)
-                .and_then(NonZeroU64::new)
-                .ok_or_else(malformed)?,
-        ),
+        ("", suffix) => match NonZeroU64::new(number(suffix).ok_or_else(malformed)?) {
+            Some(suffix) => ByteRange::Last(suffix),
+            // `-0` is well-formed but selects no bytes of any file, so it is
+            // answered as a range that starts past the end.
+            None => ByteRange::From {
+                offset: u64::MAX,
+                length: None,
+            },
+        },
         (first, "") => ByteRange::From {
             offset: number(first).ok_or_else(malformed)?,
             length: None,
@@ -653,8 +666,7 @@ fn requested_range(headers: &HeaderMap) -> Result<Option<ByteRange>, ApiError> {
             let (first, last) = number(first).zip(number(last)).ok_or_else(malformed)?;
             let length = last
                 .checked_sub(first)
-                .and_then(|span| span.checked_add(1))
-                .and_then(NonZeroU64::new)
+                .and_then(|span| NonZeroU64::new(span.saturating_add(1)))
                 .ok_or_else(malformed)?;
             ByteRange::From {
                 offset: first,

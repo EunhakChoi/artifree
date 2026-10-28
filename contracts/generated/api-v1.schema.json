@@ -391,7 +391,7 @@
         },
         {
           "const": "range_not_satisfiable",
-          "description": "The byte range starts past the end of the file; nothing was read.\nThe `Content-Range` header of the HTTP answer gives the file's size.",
+          "description": "The byte range selects no bytes of the file: it starts past the end\n(over HTTP, at or past it); nothing was read. Over HTTP, the\n`Content-Range` header gives the file's size.",
           "type": "string"
         },
         {

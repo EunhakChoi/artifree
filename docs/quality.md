@@ -83,8 +83,10 @@ Artifact behavior is tested at the boundary that owns it:
   a case-insensitive scheme; unsafe paths, body limits, pinned reads, preview
   tickets and CSP, expiry, owner-only access in the core; one byte range
   of a pinned file as `206` with its exact bytes and `Content-Range`, in
-  every form and spelling, `416` with `bytes */size` from the end on,
-  malformed, inverted, and multiple ranges refused, and another unit or
+  every form and spelling, positions past 64 bits meaning the end, `416`
+  with `bytes */size` from the end on and for `-0`,
+  malformed, inverted, and multiple ranges refused, also in two field
+  lines, and another unit or
   `If-Range` reading the whole file; and (on Unix) an
   owner-only data directory, refusing one other users can access; a restore
   that commits an earlier revision's exact files and digests and keeps the
@@ -196,7 +198,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the end of the file, and a whole file, another range, a longer or
   shorter part (also an open range that stops before the end), a body
   shorter than its range, or a missing `Content-Range` is an invalid
-  response. For the
+  response, and a range whose last byte has no exact number is not sent. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without

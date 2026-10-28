@@ -346,6 +346,9 @@ export class ArtifreeClient {
       throw new RangeError('offset must be a whole number of at least 0.');
     if (length !== undefined && (!Number.isSafeInteger(length) || length < 1))
       throw new RangeError('length must be a whole number of at least 1.');
+    // Past this, the last byte cannot be named exactly in the request.
+    if (length !== undefined && offset > Number.MAX_SAFE_INTEGER - (length - 1))
+      throw new RangeError('offset and length must end within 2^53 bytes.');
     const last = length === undefined ? '' : String(offset + length - 1);
     const response = await this.send(
       'GET',

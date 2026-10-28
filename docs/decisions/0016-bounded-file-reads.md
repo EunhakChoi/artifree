@@ -26,7 +26,7 @@ unpublished trace maps each to its evidence.
 | B2  | The parts of a text file are text and join into the file exactly.                   | Source-only: the model-facing tool skipped continuation bytes at the start of a part and cut an incomplete character at its end. Decision: the end is cut the same way, but a start inside a character is refused, because skipping bytes would lose them from the joined parts.                                                                                           |
 | B3  | Parts read one after another belong to the same file.                               | Source-only: the analyzed runtime advised starting over when the revision changed during a read. Decision: a read names its revision, which never changes (0003), and returns the whole file's size and SHA-256, so the joined parts can be checked.                                                                                                                       |
 | B4  | A file that is not text comes back exact.                                           | Source-only: a desktop handler decoded files leniently, which would turn invalid bytes into replacement characters (inference). Decision: as for whole reads, only a file that is UTF-8 as a whole is returned as text; any other is read by bytes.                                                                                                                        |
-| B5  | The end of the file, and a range past it, have one answer each.                     | Source-only: the end was the absence of a next offset, and an offset out of range was an error. Decision: a part at the end is empty without a next offset; a part past the end is refused.                                                                                                                                                                                |
+| B5  | The end of the file, and a range past it, have one answer each.                     | Source-only: the end was the absence of a next offset, and an offset out of range was an error. Decision: over MCP, a part at the end is empty without a next offset, and a part past it is refused; over HTTP, and so in the client and the CLI, a range that starts at or past the end, as any range of an empty file, is refused as RFC 9110 requires.                  |
 | B6  | A whole read is unchanged, and a part is subject to every rule of a read.           | Decision: one read path in `ArtifactService` for whole files and parts, with the access policy of 0003 and the trash rule of 0013.                                                                                                                                                                                                                                         |
 
 ## Decisions
@@ -53,9 +53,12 @@ bytes=first-last`, `first-`, or `-suffix` (RFC 9110). It answers `206`
    with `Content-Range: bytes first-last/size` and the exact bytes. A range
    that starts at or after the end of the file is `416
 range_not_satisfiable` with `Content-Range: bytes */size`; a malformed
-   range or several ranges are `400 invalid_request`. A unit other than
-   bytes, and a request with `If-Range`, read the whole file, since the API
-   sends no validator to match. Every answer says `Accept-Ranges: bytes`.
+   range or several ranges, also in separate `Range` field lines, are `400
+invalid_request`. A last position past the end means the end, a suffix
+   longer than the file the whole file, also for positions beyond 64 bits,
+   and `-0`, which selects nothing, is `416`. A unit other than bytes, and a request with
+   `If-Range`, read the whole file, since the API sends no validator to
+   match. Every answer says `Accept-Ranges: bytes`.
    HTTP reads by bytes: its clients store bytes, and a cut character is
    theirs to join.
 4. **MCP reads by characters.** `read_file` takes optional `offset` (from 0) and `length` (at least 1, in bytes). Its result adds `offset`,
