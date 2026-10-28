@@ -12,6 +12,7 @@ import { checkExport } from './smoke-export.mjs';
 import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
+import { checkTrash } from './smoke-trash.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -256,6 +257,12 @@ try {
     server: api,
     checkAccessibility,
   });
+  const trash = await checkTrash({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -423,6 +430,7 @@ try {
     history,
     duplicate,
     export: exported,
+    trash,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

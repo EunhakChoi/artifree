@@ -37,6 +37,7 @@ import {
 import type { WriteGate } from './conditional-write';
 import { useChoice } from './use-choice';
 import { useRequest } from './use-request';
+import { prepare } from './write-gate';
 import type { Wait } from './write-gate';
 
 /** Text up to this size is compared line by line. */
@@ -362,7 +363,7 @@ function FileComparison({
 }
 
 /** A restore as the dialog prepared it. */
-interface Prepared {
+interface RestoreBase {
   readonly revision: number;
   readonly base: number;
   /** The page's count of possible data replacements then. */
@@ -379,17 +380,16 @@ function RestoreDialog({
 }: HistoryPanelProps & { revision: number }) {
   const latest = artifact.current_revision;
   const [open, setOpen] = useState(false);
-  const [prepared, setPrepared] = useState<Prepared>({
+  const [prepared, setPrepared] = useState<RestoreBase>({
     revision,
     base: latest,
     resets,
   });
-  // As for a rename: the base the dialog opened on, until the page has
-  // learned of a newer revision and shows it.
-  const learned = wait(prepared.base);
-  const retry = retryable(restore.state, prepared.base, learned);
-  const behind = !retry && (learned === 'refused' || learned === 'newer');
-  const base = behind && wait(latest) === undefined ? latest : prepared.base;
+  const retry = retryable(restore.state, prepared.base, wait(prepared.base));
+  const {
+    from: { base },
+    behind,
+  } = prepare(prepared, { ...prepared, base: latest }, wait, retry);
   const replaced = prepared.resets !== resets;
   const pending = restore.state.status === 'sending';
   const waiting = retry ? undefined : wait(base);

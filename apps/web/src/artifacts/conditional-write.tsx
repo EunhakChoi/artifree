@@ -131,8 +131,11 @@ interface ConditionalWriteOptions<Request, Result> {
   /** The current version a conflict names, if it names one. */
   readonly current: (error: ArtifreeApiError) => number | undefined;
   readonly onDone: (result: Result) => void;
-  /** Called after a conflict; the view reads the latest. */
-  readonly onConflict: () => void;
+  /**
+   * Called after a conflict, with the current version it names, if any;
+   * the view reads the latest.
+   */
+  readonly onConflict: (current: number | undefined) => void;
 }
 
 /**
@@ -164,10 +167,11 @@ export function useConditionalWrite<Request, Result>(
         error instanceof ArtifreeApiError &&
         error.code === options.conflict
       ) {
-        const floor = refusedFloor(base, options.current(error));
+        const current = options.current(error);
+        const floor = refusedFloor(base, current);
         if (floor !== undefined) gate.refuse(floor);
         setState({ status: 'conflict' });
-        options.onConflict();
+        options.onConflict(current);
         return 'conflict';
       }
       setState({

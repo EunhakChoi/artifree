@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { PencilIcon, PinIcon } from 'lucide-react';
+import { PencilIcon, PinIcon, Trash2Icon } from 'lucide-react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Artifact, UpdateArtifactRequest } from '@artifree/contracts';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,7 @@ import {
   useConditionalWrite,
 } from './conditional-write';
 import type { WriteGate } from './conditional-write';
+import { prepare } from './write-gate';
 import type { Wait } from './write-gate';
 
 const CHANGED = 'The title or pin';
@@ -63,13 +64,18 @@ interface MetadataActionsProps {
   resets: number;
   /** Called with the artifact as the update left it. */
   onUpdated: (artifact: Artifact) => void;
+  /** Called with the artifact once this page moved it to the trash. */
+  onDeleted: (artifact: Artifact) => void;
   /** Called when another update won; the view reads the latest. */
   onConflict: () => void;
+  /** Whether the editor holds changes that are not saved. */
+  unsaved: boolean;
 }
 
 /**
- * Pins and renames the open artifact. Neither creates a source revision,
- * so both stay available while the editor holds a draft.
+ * Pins, renames, and moves the open artifact to the trash. Pin and rename
+ * create no source revision, so they stay available while the editor holds
+ * a draft; a move to the trash would close the draft, so it does not.
  */
 export function MetadataActions(props: MetadataActionsProps) {
   const { client, artifact, gate, wait, onUpdated, onConflict } = props;
@@ -110,7 +116,13 @@ export function MetadataActions(props: MetadataActionsProps) {
           Pin
         </Button>
         <RenameDialog {...props} />
+        <TrashDialog {...props} />
       </div>
+      {props.unsaved ? (
+        <p id="trash-locked" className="text-xs text-muted-foreground">
+          Save or discard your changes to move this artifact to the trash.
+        </p>
+      ) : null}
       <WriteNotice
         state={outcome}
         action="pin or unpin"
@@ -123,7 +135,7 @@ export function MetadataActions(props: MetadataActionsProps) {
 }
 
 /** What a rename is prepared from: the artifact as a read showed it. */
-interface Prepared {
+interface RenameBase {
   readonly base: number;
   readonly title: string;
   /** The page's count of possible data replacements then. */
@@ -141,7 +153,7 @@ function RenameDialog({
 }: MetadataActionsProps) {
   const latest = artifact.metadata_revision;
   const [open, setOpen] = useState(false);
-  const [prepared, setPrepared] = useState<Prepared>({
+  const [prepared, setPrepared] = useState<RenameBase>({
     base: latest,
     title: artifact.title,
     resets,
@@ -156,17 +168,13 @@ function RenameDialog({
     onUpdated,
     onConflict,
   );
-  // A request is prepared from the artifact as the dialog opened on it, so
-  // a retry after a lost answer is the same request. Once the page has
-  // learned of newer metadata and shows it, the next request is prepared
-  // from that instead, and the notice says why.
-  const learned = wait(prepared.base);
-  const retry = retryable(rename.state, prepared.base, learned);
-  const behind = !retry && (learned === 'refused' || learned === 'newer');
-  const from: Prepared =
-    behind && wait(latest) === undefined
-      ? { base: latest, title: artifact.title, resets }
-      : prepared;
+  const retry = retryable(rename.state, prepared.base, wait(prepared.base));
+  const { from, behind } = prepare(
+    prepared,
+    { base: latest, title: artifact.title, resets },
+    wait,
+    retry,
+  );
   const replaced = prepared.resets !== resets;
   const pending = rename.state.status === 'sending';
   const title = typed ?? from.title;
@@ -261,6 +269,115 @@ function RenameDialog({
             </Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Moves the open artifact to the trash after a confirmation that names it
+ * (decision 0014, item 1), through the metadata gate that rename and pin
+ * share. The request is prepared as a rename is.
+ */
+function TrashDialog({
+  client,
+  artifact,
+  gate,
+  wait,
+  resets,
+  onDeleted,
+  onConflict,
+  unsaved,
+}: MetadataActionsProps) {
+  const latest = artifact.metadata_revision;
+  const [open, setOpen] = useState(false);
+  const [prepared, setPrepared] = useState<RenameBase>({
+    base: latest,
+    title: artifact.title,
+    resets,
+  });
+  const move = useMetadataUpdate(
+    client,
+    artifact.id,
+    gate,
+    onDeleted,
+    onConflict,
+  );
+  const retry = retryable(move.state, prepared.base, wait(prepared.base));
+  const { from, behind } = prepare(
+    prepared,
+    { base: latest, title: artifact.title, resets },
+    wait,
+    retry,
+  );
+  const replaced = prepared.resets !== resets;
+  const pending = move.state.status === 'sending';
+  const sendable = !replaced && (retry || wait(from.base) === undefined);
+
+  async function confirm(): Promise<void> {
+    if (!sendable) return;
+    setPrepared(from);
+    const request = { base_metadata_revision: from.base, deleted: true };
+    if ((await move.write(request)) === 'done') setOpen(false);
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // Stay open until the request settles, so its outcome is seen.
+        if (pending) return;
+        if (next) {
+          setPrepared({ base: latest, title: artifact.title, resets });
+          move.clear();
+        }
+        setOpen(next);
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={unsaved || wait(latest) === 'replaced'}
+            aria-describedby={unsaved ? 'trash-locked' : undefined}
+          />
+        }
+      >
+        <Trash2Icon data-icon="inline-start" aria-hidden="true" />
+        Move to trash
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Move {from.title} to the trash</DialogTitle>
+          <DialogDescription>
+            It leaves the list, and nothing can read, preview, or change it
+            until it is recovered from the trash. Its revisions are kept.
+          </DialogDescription>
+        </DialogHeader>
+        {replaced ? (
+          <ReplacedNotice state={move.state} />
+        ) : (
+          <WriteNotice
+            state={move.state}
+            action="move it to the trash"
+            changed={CHANGED}
+            behind={behind}
+            waiting={explained(wait(from.base))}
+          />
+        )}
+        <DialogFooter>
+          <DialogClose render={<Button variant="outline" disabled={pending} />}>
+            Cancel
+          </DialogClose>
+          <Button
+            type="button"
+            disabled={!sendable}
+            onClick={() => void confirm()}
+          >
+            {pending ? 'Moving…' : 'Move to trash'}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
