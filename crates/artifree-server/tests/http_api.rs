@@ -1409,6 +1409,19 @@ async fn an_artifact_in_the_trash_is_missing_to_every_read_and_write() -> TestRe
             "save",
             post(&history, Some("save-key-2"), &put_index(2, "<h1>v3</h1>"))?,
         ),
+        // Changes that could not form a package are missing too, not
+        // invalid: they cannot be a retry.
+        (
+            "invalid save",
+            post(
+                &history,
+                Some("save-key-4"),
+                &json!({
+                    "base_revision": 2,
+                    "changes": [{ "op": "delete", "path": "index.html" }]
+                }),
+            )?,
+        ),
         // A base that could never be current is missing too, not a conflict.
         (
             "future save",

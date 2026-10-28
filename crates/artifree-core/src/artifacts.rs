@@ -221,6 +221,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
             // the base as it is then: a stale base is a conflict, and a retry
             // of a committed save a replay.
             Err(PackageError::Unchanged) => base_package,
+            // A request that cannot form a package never committed, so it
+            // is no retry; in the trash it is refused like any other write.
+            Err(_) if record.deleted_at.is_some() => {
+                return Err(ArtifactError::NotFound(Missing::Artifact));
+            }
             Err(error) => return Err(ArtifactError::InvalidPackage(error)),
         };
         let receipt = self.store.commit_revision(RevisionCommit {

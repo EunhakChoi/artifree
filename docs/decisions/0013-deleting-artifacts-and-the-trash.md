@@ -50,7 +50,9 @@ true}` and an `Idempotency-Key` moves the artifact to the trash, and
    `"deleted": false` reaches it, and the trash list shows it. The store
    checks this in the transaction of each write, so a save and a delete
    are ordered: one commits first, and the other is refused or conflicts.
-   A copy's source must be in place when the copy commits.
+   A copy's source must be in place when the copy commits. A request
+   there that could never have committed, such as changes that do not
+   form a valid package, is no retry and is `404` too, not `422`.
 3. **Retries.** A retry with the key of an earlier request returns what
    that request did, also after the artifact was deleted: a replay comes
    before the trash check. The fingerprint of a metadata update covers
