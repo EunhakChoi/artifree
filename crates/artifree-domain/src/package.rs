@@ -451,6 +451,12 @@ impl FilePackage {
             .map(|(path, content)| (path, content.as_slice()))
     }
 
+    /// Files in path order, taking their bytes.
+    #[must_use]
+    pub fn into_files(self) -> impl ExactSizeIterator<Item = (PackagePath, Vec<u8>)> {
+        self.files.into_iter()
+    }
+
     /// Number of files.
     #[must_use]
     pub fn len(&self) -> usize {

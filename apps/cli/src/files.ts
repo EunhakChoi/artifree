@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { lstat, open, readdir, readFile, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 /** A local file mapped to a package path. */
@@ -49,4 +49,33 @@ export async function readRegularFile(location: string): Promise<Uint8Array> {
   const status = await lstat(location);
   if (!status.isFile()) throw new Error(`Not a regular file: ${location}`);
   return readFile(location);
+}
+
+/**
+ * Writes `content` to `location`, which must not exist yet, so that an
+ * existing file is never replaced. A write that fails part way removes the
+ * file it created.
+ */
+export async function writeNewFile(
+  location: string,
+  content: Uint8Array,
+): Promise<void> {
+  let handle;
+  try {
+    handle = await open(location, 'wx');
+  } catch (error: unknown) {
+    if (error instanceof Error && 'code' in error && error.code === 'EEXIST')
+      throw new Error(`${location} already exists; nothing was written.`, {
+        cause: error,
+      });
+    throw error;
+  }
+  try {
+    await handle.writeFile(content);
+    await handle.close();
+  } catch (error: unknown) {
+    await handle.close().catch(() => undefined);
+    await rm(location, { force: true });
+    throw error;
+  }
 }

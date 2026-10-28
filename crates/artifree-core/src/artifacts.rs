@@ -38,6 +38,17 @@ pub enum Missing {
     File,
 }
 
+/// What a source export holds; see [`ArtifactService::export`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionExport {
+    /// The artifact when exported. Its title is not part of the revision.
+    pub artifact: ArtifactRecord,
+    /// The exported revision, with its files listed in path order.
+    pub revision: RevisionRecord,
+    /// The revision's files.
+    pub files: FilePackage,
+}
+
 /// Why an artifact operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -471,6 +482,21 @@ impl<S: ArtifactStore> ArtifactService<S> {
         Ok(self.store.revisions(id)?)
     }
 
+    /// One revision of an accessible artifact.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] or [`ArtifactError::Unavailable`].
+    pub fn revision(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        revision: SourceRevision,
+    ) -> Result<RevisionRecord, ArtifactError> {
+        let artifact = self.authorized(actor, id)?;
+        self.listing_of(&artifact, revision)
+    }
+
     /// One file of a pinned revision. Authority is checked on every read, so a
     /// previously issued link stops working when access ends.
     ///
@@ -491,6 +517,30 @@ impl<S: ArtifactStore> ArtifactService<S> {
         self.store
             .revision_file(id, revision, path)?
             .ok_or(ArtifactError::NotFound(Missing::File))
+    }
+
+    /// Everything a source export of `revision` holds (decision 0015): the
+    /// artifact as it is now, the revision's listing, and its files. A read
+    /// like [`Self::read_file`], with the same access and the same answers
+    /// for a missing artifact or revision.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] or [`ArtifactError::Unavailable`].
+    pub fn export(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        revision: SourceRevision,
+    ) -> Result<RevisionExport, ArtifactError> {
+        let artifact = self.authorized(actor, id)?;
+        let listing = self.listing_of(&artifact, revision)?;
+        let files = self.package(id, revision)?;
+        Ok(RevisionExport {
+            artifact,
+            revision: listing,
+            files,
+        })
     }
 
     /// The files a save commits: `changes` applied to `base`.
@@ -535,6 +585,21 @@ impl<S: ArtifactStore> ArtifactService<S> {
             return Err(ArtifactError::NotFound(Missing::Revision));
         }
         self.package(&record.id, revision)
+    }
+
+    /// The listing of an existing revision, checked as in
+    /// [`Self::revision_of`].
+    fn listing_of(
+        &self,
+        record: &ArtifactRecord,
+        revision: SourceRevision,
+    ) -> Result<RevisionRecord, ArtifactError> {
+        if revision.0 == 0 || revision > record.current_revision {
+            return Err(ArtifactError::NotFound(Missing::Revision));
+        }
+        self.store
+            .revision(&record.id, revision)?
+            .ok_or_else(|| ArtifactError::Unavailable("a listed revision is missing".into()))
     }
 
     fn package(

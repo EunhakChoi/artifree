@@ -8,6 +8,7 @@ import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
 import { checkDuplicate } from './smoke-duplicate.mjs';
+import { checkExport } from './smoke-export.mjs';
 import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
@@ -249,6 +250,12 @@ try {
     server: api,
     checkAccessibility,
   });
+  const exported = await checkExport({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -415,6 +422,7 @@ try {
     list,
     history,
     duplicate,
+    export: exported,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

@@ -277,20 +277,37 @@ export class ArtifreeClient {
     revision: number,
     path: string,
     options: ReadOptions = {},
-  ): Promise<Uint8Array> {
+  ): Promise<Uint8Array<ArrayBuffer>> {
     const response = await this.send(
       'GET',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/files/${filePath(path)}`,
       { signal: options.signal },
     );
-    try {
-      return new Uint8Array(await response.arrayBuffer());
-    } catch (error: unknown) {
-      throw new ArtifreeApiError(
-        `The connection to ${this.baseUrl || 'this origin'} ended while reading ${path}.`,
-        { status: response.status, code: 'network_error', cause: error },
-      );
+    return this.bytes(response, path);
+  }
+
+  /**
+   * The source export of a pinned revision (decision 0015): a ZIP archive
+   * of its files at their package paths, with the manifest
+   * `.artifree-export.json` first. Rejects with `invalid_response` when a
+   * successful response is not a ZIP archive.
+   */
+  async exportRevision(
+    id: string,
+    revision: number,
+    options: ReadOptions = {},
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    const path = `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/export`;
+    const response = await this.send('GET', path, { signal: options.signal });
+    const type = response.headers.get('content-type')?.split(';')[0]?.trim();
+    if (type?.toLowerCase() !== 'application/zip') {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ArtifreeApiError(`GET ${path} did not return a ZIP archive.`, {
+        status: response.status,
+        code: 'invalid_response',
+      });
     }
+    return this.bytes(response, `the export of revision ${revision}`);
   }
 
   /**
@@ -357,6 +374,21 @@ export class ArtifreeClient {
       parsePreview,
       { signal: options.signal },
     );
+  }
+
+  /** The whole body; a failure while reading is a `network_error`. */
+  private async bytes(
+    response: Response,
+    what: string,
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    try {
+      return new Uint8Array(await response.arrayBuffer());
+    } catch (error: unknown) {
+      throw new ArtifreeApiError(
+        `The connection to ${this.baseUrl || 'this origin'} ended while reading ${what}.`,
+        { status: response.status, code: 'network_error', cause: error },
+      );
+    }
   }
 
   private async json<T>(

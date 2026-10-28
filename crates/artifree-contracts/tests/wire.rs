@@ -3,7 +3,7 @@ use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
     DuplicateArtifactResponse, ErrorResponse, FeedPosition, Preview, Revision, RevisionList,
-    SaveRevisionRequest, UpdateArtifactResponse,
+    SaveRevisionRequest, SourceExportManifest, UpdateArtifactResponse,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -164,6 +164,10 @@ fn response_schemas_describe_what_the_server_writes() {
             published_unlike_written::<ArtifactChange>(),
         ),
         ("FeedPosition", published_unlike_written::<FeedPosition>()),
+        (
+            "SourceExportManifest",
+            published_unlike_written::<SourceExportManifest>(),
+        ),
     ]
     .into_iter()
     .filter_map(|(name, differs)| differs.then_some(name))

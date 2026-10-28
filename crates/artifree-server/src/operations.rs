@@ -7,18 +7,21 @@
 use artifree_contracts::api::{
     Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse, ContentEncoding, CopiedPart,
     CreateArtifactRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody,
-    ErrorCode, FileChange as WireChange, FileUpload, ListArtifactsQuery, ListSort, Preview,
-    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, SaveRevisionRequest,
-    UpdateArtifactRequest, UpdateArtifactResponse,
+    ErrorCode, ExportRuntime, FileChange as WireChange, FileUpload, ListArtifactsQuery, ListSort,
+    Preview, RestoreRevisionRequest, Revision, RevisionFile, RevisionList, SaveRevisionRequest,
+    SourceExportFormat, SourceExportManifest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
-use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing};
+use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
-use artifree_domain::package::{FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath};
+use artifree_domain::package::{
+    ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
+};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, Delivery, ListOrder, RevisionRecord,
 };
+use artifree_providers::archive::{self, ArchiveEntry};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -346,14 +349,10 @@ pub(crate) async fn revision(
 ) -> Result<Revision, ApiError> {
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
-    let revisions = state
-        .run(move |artifacts| artifacts.revisions(&actor, &id))
+    let record = state
+        .run(move |artifacts| artifacts.revision(&actor, &id, revision))
         .await?;
-    revisions
-        .into_iter()
-        .find(|record| record.revision == revision)
-        .map(revision_dto)
-        .ok_or_else(|| ArtifactError::NotFound(Missing::Revision).into())
+    Ok(revision_dto(record))
 }
 
 pub(crate) async fn read_file(
@@ -375,6 +374,69 @@ pub(crate) async fn read_file(
         revision,
         content,
     })
+}
+
+/// The name of the manifest inside a source export (decision 0015). A
+/// package path never starts with a dot, so no exported file has it.
+pub(crate) const EXPORT_MANIFEST: &str = ".artifree-export.json";
+
+/// A source export: a ZIP archive and the name to save it under.
+pub(crate) struct SourceExport {
+    pub(crate) file_name: String,
+    pub(crate) archive: Vec<u8>,
+}
+
+pub(crate) async fn export(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    revision: u64,
+) -> Result<SourceExport, ApiError> {
+    let id = artifact_id(id)?;
+    let revision = revision_number(revision)?;
+    let file_name = format!("{id}-r{}.zip", revision.0);
+    let archive = state
+        .run(move |artifacts| {
+            // Package limits keep an archive far within the ZIP format's, so
+            // this failure is not expected; it is answered as unavailable.
+            source_archive(artifacts.export(&actor, &id, revision)?)
+                .map_err(ArtifactError::Unavailable)
+        })
+        .await?;
+    Ok(SourceExport { file_name, archive })
+}
+
+/// The manifest first, then every file at its package path, all dated at
+/// the revision's commit.
+fn source_archive(export: RevisionExport) -> Result<Vec<u8>, String> {
+    let modified = export.revision.created_at;
+    let revision = revision_dto(export.revision);
+    let manifest = SourceExportManifest {
+        format: SourceExportFormat::V1,
+        artifact_id: export.artifact.id.to_string(),
+        title: export.artifact.title.as_str().to_owned(),
+        revision: revision.revision,
+        created_at_ms: revision.created_at_ms,
+        entry: ENTRY_PATH.to_owned(),
+        runtime: ExportRuntime::None,
+        files: revision.files,
+    };
+    let mut manifest = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("could not write the export manifest: {error}"))?;
+    manifest.push(b'\n');
+    let files = export
+        .files
+        .into_files()
+        .map(|(path, content)| ArchiveEntry {
+            name: path.to_string(),
+            content,
+        });
+    let entries = std::iter::once(ArchiveEntry {
+        name: EXPORT_MANIFEST.to_owned(),
+        content: manifest,
+    })
+    .chain(files);
+    archive::stored_zip(entries, modified).map_err(|error| error.to_string())
 }
 
 pub(crate) async fn preview(
@@ -501,5 +563,91 @@ fn revision_dto(record: RevisionRecord) -> Revision {
                 sha256: hex(&entry.sha256),
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use artifree_domain::identity::UnixMillis;
+    use artifree_ports::artifact_store::FileEntry;
+
+    use super::*;
+
+    fn u16_at(bytes: &[u8], at: usize) -> u16 {
+        u16::from_le_bytes([bytes[at], bytes[at + 1]])
+    }
+
+    fn u32_at(bytes: &[u8], at: usize) -> Result<usize, Box<dyn Error>> {
+        let value = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        Ok(usize::try_from(value)?)
+    }
+
+    #[test]
+    fn an_archive_holds_the_manifest_then_the_files_dated_at_the_commit()
+    -> Result<(), Box<dyn Error>> {
+        let page = b"<p>2</p>".to_vec();
+        // Created long before the revision, so the two times differ.
+        let artifact = ArtifactRecord {
+            id: format!("art_{}", "a".repeat(32)).parse()?,
+            owner: "owner".parse()?,
+            kind: ArtifactKind::App,
+            title: "Export".parse()?,
+            pinned: false,
+            current_revision: SourceRevision(2),
+            metadata_revision: MetadataRevision(1),
+            deleted_at: None,
+            created_at: UnixMillis(0),
+            updated_at: UnixMillis(1_793_180_967_999),
+        };
+        let revision = RevisionRecord {
+            revision: SourceRevision(2),
+            created_by: "owner".parse()?,
+            // 2026-10-28T09:49:27.999Z
+            created_at: UnixMillis(1_793_180_967_999),
+            files: vec![FileEntry {
+                path: PackagePath::entry(),
+                size: 8,
+                sha256: [7; 32],
+            }],
+        };
+        let files = FilePackage::new(vec![(PackagePath::entry(), page.clone())])?;
+        let archive = source_archive(RevisionExport {
+            artifact,
+            revision,
+            files,
+        })?;
+
+        let mut entries = Vec::new();
+        let mut at = 0;
+        while u32_at(&archive, at)? == 0x0403_4b50 {
+            let size = u32_at(&archive, at + 18)?;
+            let name_length = usize::from(u16_at(&archive, at + 26));
+            let start = at + 30 + name_length;
+            let name = std::str::from_utf8(&archive[at + 30..start])?.to_owned();
+            let (time, date) = (u16_at(&archive, at + 10), u16_at(&archive, at + 12));
+            entries.push((name, archive[start..start + size].to_vec(), time, date));
+            at = start + size;
+        }
+        let names: Vec<&str> = entries.iter().map(|entry| entry.0.as_str()).collect();
+        assert_eq!(names, [EXPORT_MANIFEST, "index.html"]);
+        assert_eq!(entries[1].1, page);
+        for (name, _, time, date) in &entries {
+            assert_eq!(
+                (1980 + (date >> 9), (date >> 5) & 0xF, date & 0x1F),
+                (2026, 10, 28),
+                "{name}"
+            );
+            assert_eq!((time >> 11, (time >> 5) & 0x3F), (9, 49), "{name}");
+        }
+        let manifest: SourceExportManifest = serde_json::from_slice(&entries[0].1)?;
+        assert_eq!(
+            (manifest.revision, manifest.created_at_ms, manifest.runtime),
+            (2, 1_793_180_967_999, ExportRuntime::None)
+        );
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].sha256, "07".repeat(32));
+        Ok(())
     }
 }

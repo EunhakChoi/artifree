@@ -195,6 +195,52 @@ pub struct Revision {
     pub files: Vec<RevisionFile>,
 }
 
+/// Version of a source export manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SourceExportFormat {
+    /// Version 1, described by [`SourceExportManifest`].
+    #[serde(rename = "artifree.source-export.v1")]
+    V1,
+}
+
+/// What exported files need from a host to run as they do in Artifree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportRuntime {
+    /// Nothing: previews give files no capabilities (decision 0003), so a
+    /// browser is all they need. Resources they load from the network are
+    /// not part of the export and may be unavailable offline.
+    None,
+}
+
+/// The manifest of a source export: the file `.artifree-export.json`, first
+/// in the ZIP archive that `GET /v1/artifacts/{id}/revisions/{revision}/export`
+/// answers. Package paths never start with a dot, so no file of the revision
+/// has this name. Every other entry is one file of the revision, at its
+/// package path, with its bytes unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceExportManifest {
+    /// Format and version of this manifest.
+    pub format: SourceExportFormat,
+    /// The exported artifact.
+    pub artifact_id: String,
+    /// The artifact's title when it was exported. Titles are not part of a
+    /// revision.
+    pub title: String,
+    /// The exported revision.
+    pub revision: u64,
+    /// When the revision was committed, in Unix milliseconds; also the
+    /// modification time of every entry.
+    pub created_at_ms: i64,
+    /// The file a preview opens: `index.html`.
+    pub entry: String,
+    /// What the files need to run.
+    pub runtime: ExportRuntime,
+    /// The revision's files in path order, as the revision lists them.
+    pub files: Vec<RevisionFile>,
+}
+
 /// Response of a create or revision commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

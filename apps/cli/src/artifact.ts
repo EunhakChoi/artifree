@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import {
@@ -12,7 +13,12 @@ import type {
   ListArtifactsQuery,
   UpdateArtifactRequest,
 } from '@artifree/contracts';
-import { readDirectory, readNamedFile, readRegularFile } from './files.js';
+import {
+  readDirectory,
+  readNamedFile,
+  readRegularFile,
+  writeNewFile,
+} from './files.js';
 
 export const ARTIFACT_HELP = `Usage:
   artifree artifact list [--search <text>] [--sort updated|created]
@@ -30,6 +36,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact delete <id> --base-metadata <n>
   artifree artifact recover <id> --base-metadata <n>
   artifree artifact cat <id> <package-path> [--revision <n>]
+  artifree artifact export <id> --output <file> [--revision <n>]
   artifree artifact preview <id> [--revision <n>]
 
 Connection:
@@ -49,6 +56,10 @@ the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
 revision, with its own history; it is unpinned and named --title or the
 source's title followed by " (Copy)". Only files are copied.
+export writes a ZIP archive of one revision's files, at their package paths
+and byte for byte, with the manifest .artifree-export.json, to a new file
+(--output; an existing file is never replaced). It prints the archive's size
+and SHA-256. It is one revision, not a backup of the artifact or its history.
 
 create, save, restore, duplicate, rename, pin, unpin, delete, and recover
 accept --idempotency-key <key>. Without it a new key is
@@ -135,6 +146,8 @@ export async function runArtifact(args: string[]): Promise<void> {
       return update(command, rest);
     case 'cat':
       return cat(rest);
+    case 'export':
+      return exportRevision(rest);
     case 'preview':
       return preview(rest);
     default:
@@ -482,6 +495,37 @@ async function cat(args: string[]): Promise<void> {
       ? (await client.getArtifact(id)).current_revision
       : positiveNumber(values.revision, '--revision');
   process.stdout.write(await client.readFile(id, revision, path));
+}
+
+async function exportRevision(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      ...connectionOptions,
+      revision: { type: 'string' },
+      output: { type: 'string' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = ''] = single(positionals, ['id']);
+  const output = values.output;
+  if (output === undefined || output === '')
+    throw new UsageError('export needs --output <file> for the ZIP archive.');
+  const client = await connect(values);
+  const revision =
+    values.revision === undefined
+      ? (await client.getArtifact(id)).current_revision
+      : positiveNumber(values.revision, '--revision');
+  const archive = await client.exportRevision(id, revision);
+  await writeNewFile(output, archive);
+  print({
+    artifact_id: id,
+    revision,
+    output,
+    bytes: archive.byteLength,
+    sha256: createHash('sha256').update(archive).digest('hex'),
+  });
 }
 
 async function preview(args: string[]): Promise<void> {

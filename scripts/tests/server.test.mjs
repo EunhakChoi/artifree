@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createAjv } from '../lib/schema.mjs';
 import { buildServer, startServer } from '../lib/server-process.mjs';
+import { storedZipEntries } from '../lib/zip-entries.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 let binary;
@@ -452,6 +454,138 @@ test('CLI restores and duplicates a revision byte for byte', async () => {
       assert.equal(refused.status, 2, args.join(' '));
       assert.equal(refused.stdout, '', args.join(' '));
     }
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CLI exports a revision byte for byte, with a manifest that lists it', async () => {
+  const schema = JSON.parse(
+    await readFile(
+      new URL('../../contracts/generated/api-v1.schema.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const manifestIsValid = createAjv().compile({
+    $schema: schema.$schema,
+    $defs: schema.$defs,
+    $ref: '#/$defs/SourceExportManifest',
+  });
+  const server = await startServer(binary, dataDirectory('cli-export'));
+  try {
+    const site = await freshDirectory('cli-export-site');
+    const files = {
+      'index.html': Buffer.from('\uFEFF<h1>one</h1>\r\n'),
+      'assets/logo.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0xff, 0x0d]),
+      'lib/empty.js': Buffer.alloc(0),
+    };
+    await mkdir(join(site, 'assets'));
+    await mkdir(join(site, 'lib'));
+    for (const [path, bytes] of Object.entries(files))
+      await writeFile(join(site, path), bytes);
+    const id = json(
+      cli(server, ['create', '--title', 'Export ✓', '--dir', site]),
+    ).artifact.id;
+    await writeFile(join(site, 'index.html'), '<h1>two</h1>');
+    json(cli(server, ['save', id, '--base', '1', '--dir', site]));
+    const [, first] = json(cli(server, ['history', id])).revisions;
+
+    const out = await freshDirectory('cli-export-out');
+    const archive = join(out, 'first.zip');
+    const exported = json(
+      cli(server, ['export', id, '--revision', '1', '--output', archive]),
+    );
+    const bytes = await readFile(archive);
+    assert.deepEqual(exported, {
+      artifact_id: id,
+      revision: 1,
+      output: archive,
+      bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    });
+    const entries = storedZipEntries(bytes);
+    assert.deepEqual(
+      entries.map((entry) => entry.name),
+      [
+        '.artifree-export.json',
+        'assets/logo.png',
+        'index.html',
+        'lib/empty.js',
+      ],
+    );
+    for (const entry of entries.slice(1)) {
+      assert.deepEqual(entry.content, files[entry.name], entry.name);
+      assert.equal(entry.mode, 0o100644, entry.name);
+    }
+    const manifest = JSON.parse(entries[0].content.toString('utf8'));
+    assert.ok(
+      manifestIsValid(manifest),
+      JSON.stringify(manifestIsValid.errors?.slice(0, 3)),
+    );
+    assert.deepEqual(manifest, {
+      format: 'artifree.source-export.v1',
+      artifact_id: id,
+      title: 'Export ✓',
+      revision: 1,
+      created_at_ms: first.created_at_ms,
+      entry: 'index.html',
+      runtime: 'none',
+      files: first.files,
+    });
+    for (const file of manifest.files)
+      assert.equal(
+        createHash('sha256').update(files[file.path]).digest('hex'),
+        file.sha256,
+        file.path,
+      );
+    const committed = new Date(first.created_at_ms);
+    assert.deepEqual(entries[1].modified, {
+      year: committed.getUTCFullYear(),
+      month: committed.getUTCMonth() + 1,
+      day: committed.getUTCDate(),
+      hour: committed.getUTCHours(),
+      minute: committed.getUTCMinutes(),
+      second: committed.getUTCSeconds() - (committed.getUTCSeconds() % 2),
+    });
+
+    // The current revision by default, and the same bytes every time.
+    const latest = join(out, 'latest.zip');
+    assert.equal(
+      json(cli(server, ['export', id, '--output', latest])).revision,
+      2,
+    );
+    const again = join(out, 'again.zip');
+    json(cli(server, ['export', id, '--output', again]));
+    assert.deepEqual(await readFile(again), await readFile(latest));
+
+    // An existing file is never replaced, and a refusal writes nothing.
+    const kept = cli(server, [
+      'export',
+      id,
+      '--revision',
+      '2',
+      '--output',
+      archive,
+    ]);
+    assert.equal(kept.status, 1);
+    assert.equal(kept.stdout, '');
+    assert.match(kept.stderr, /already exists/);
+    assert.deepEqual(await readFile(archive), bytes);
+    const missing = join(out, 'missing.zip');
+    const unknown = cli(server, [
+      'export',
+      id,
+      '--revision',
+      '3',
+      '--output',
+      missing,
+    ]);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /^error\[not_found\]/);
+    await assert.rejects(readFile(missing), { code: 'ENOENT' });
+    const usage = cli(server, ['export', id]);
+    assert.equal(usage.status, 2);
+    assert.equal(usage.stdout, '');
   } finally {
     await server.stop();
   }

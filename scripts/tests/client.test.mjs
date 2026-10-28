@@ -70,6 +70,32 @@ test('A complete body that is not the contract is an invalid response', async ()
   assert.equal(error.code, 'invalid_response');
 });
 
+test('An export is a ZIP archive, whole, or a failure', async () => {
+  // The end record of an empty archive.
+  const zip = new Uint8Array(22);
+  zip.set([0x50, 0x4b, 0x05, 0x06]);
+  const answer = (type) => () =>
+    new Response(zip, { status: 200, headers: { 'content-type': type } });
+  assert.deepEqual(
+    await clientWith(answer('application/zip')).exportRevision(artifact.id, 1),
+    zip,
+  );
+  // A proxy's page or a server that does not export yet is not an archive.
+  for (const type of ['text/html; charset=utf-8', 'application/json']) {
+    const error = await failure(
+      clientWith(answer(type)).exportRevision(artifact.id, 1),
+    );
+    assert.equal(error.code, 'invalid_response', type);
+  }
+  const cut = clientWith(() => {
+    const response = cutOff(200, 'PK');
+    response.headers.set('content-type', 'application/zip');
+    return response;
+  });
+  const error = await failure(cut.exportRevision(artifact.id, 1));
+  assert.equal(error.code, 'network_error');
+});
+
 test('Every artifact carries its trash time: null or a time', async () => {
   const read = (body) =>
     clientWith(() => Response.json(body)).getArtifact(artifact.id);

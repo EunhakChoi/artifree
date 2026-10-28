@@ -33,6 +33,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { refusedFloor, useWriteGate } from './conditional-write';
 import { fromEditable, toEditable } from './editable-text';
 import { DuplicateDialog } from './duplicate-dialog';
+import { ExportButton } from './export-button';
 import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
 import { useChoice } from './use-choice';
@@ -191,6 +192,8 @@ export function ArtifactDetail({
     metadataGate.wait(version, known?.metadata, shown.resets);
   const sourceWait = (version: number) =>
     sourceGate.wait(version, known?.revision, shown.resets);
+  // Duplicate and download offer the revision the preview shows.
+  const previewed = keptChoice(revisions, chosen) ?? artifact.current_revision;
   return (
     <Card>
       <CardHeader>
@@ -218,13 +221,17 @@ export function ArtifactDetail({
               client={client}
               artifact={artifact}
               revisions={revisions}
-              revision={
-                keptChoice(revisions, chosen) ?? artifact.current_revision
-              }
+              revision={previewed}
               unsaved={unsaved}
               resets={resets}
               stale={stale}
               onDuplicated={onSaved}
+            />
+            <ExportButton
+              client={client}
+              artifactId={artifact.id}
+              revision={previewed}
+              stale={stale}
             />
           </div>
         </CardAction>
@@ -234,8 +241,8 @@ export function ArtifactDetail({
           {stale ? (
             <output className="text-sm text-muted-foreground">
               Reading the artifact again: the server&apos;s data may have
-              changed wholesale. Pin, rename, restore, duplicate, previews, and
-              comparisons wait until it is read.
+              changed wholesale. Pin, rename, restore, duplicate, download,
+              previews, and comparisons wait until it is read.
             </output>
           ) : null}
           {details.status === 'error' ? (
