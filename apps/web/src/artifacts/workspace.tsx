@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import {
   FileCode2Icon,
   LogOutIcon,
@@ -20,8 +20,9 @@ import { ArtifactDetail } from './artifact-detail';
 import { ArtifactNav, ListControls, readArtifacts } from './artifact-list';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
-import { isFiltered, queryKey, showing } from './list-query';
+import { emptiness, isFiltered, queryKey, showing } from './list-query';
 import { START, navigate, opened } from './navigation';
+import type { NavigationEvent } from './navigation';
 import { pageVisibility } from './page-visibility';
 import { RequestGate } from './request-gate';
 import { TrashNav } from './trash-list';
@@ -101,6 +102,10 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
   const { epoch, resets } = live;
+  const epochNow = useRef(epoch);
+  useEffect(() => {
+    epochNow.current = epoch;
+  }, [epoch]);
   const shownQuery = queryKey(query);
   const artifacts = useRequest(
     live.canRead
@@ -155,7 +160,16 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     );
   });
   const showMore = shownList !== undefined && !shownList.complete;
-  const noArtifacts = listed?.length === 0 && !isFiltered(query);
+  const empty = emptiness(query, listed?.length, shownList?.complete ?? true);
+  const noArtifacts = empty === 'none';
+  // Everything the list read left its view, and more follow.
+  const leftNote =
+    empty === 'left' ? (
+      <p className="text-sm text-muted-foreground">
+        The artifacts listed so far have left this view. Show more to list the
+        next ones.
+      </p>
+    ) : undefined;
   const selectedId = opened({
     selected,
     trashShown: query.deleted,
@@ -185,13 +199,21 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
     learn(epoch, [artifact]);
     setGeneration((value) => value + 1);
   }
+  // A move or recovery answered after the server's data may have been
+  // replaced is not learned, and does not move the page either: what the
+  // page reads again says where the artifact is (decision 0014, item 4).
+  // Each handler runs as rendered when its write was sent, so `epoch` is
+  // the epoch then; `epochNow` is the epoch when the answer arrives.
+  function answered(event: NavigationEvent): void {
+    if (epoch === epochNow.current) dispatch(event);
+  }
   function deleted(artifact: Artifact): void {
     metadataChanged(artifact);
-    dispatch({ type: 'trashed', artifact });
+    answered({ type: 'trashed', artifact });
   }
   function recovered(artifact: Artifact): void {
     metadataChanged(artifact);
-    dispatch({ type: 'recovered', artifact });
+    answered({ type: 'recovered', artifact });
   }
   const changeQuery = (next: typeof query) =>
     dispatch({ type: 'query', query: next });
@@ -250,9 +272,10 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
           Loading artifacts…
         </output>
       ) : null}
-      {/* The controls stay once a list was read, also an empty one: every
-          artifact may be in the trash. */}
-      {selectedId === undefined && listed === undefined ? (
+      {/* The controls stay once a list was read, also an empty one, since
+          every artifact may be in the trash, and while another query's
+          list loads or fails, so typing and the way back are kept. */}
+      {selectedId === undefined && lastList === undefined ? (
         listFailure
       ) : (
         <div className="grid gap-5 lg:grid-cols-3">
@@ -272,11 +295,12 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 onRecovered={recovered}
                 onConflict={() => setGeneration((value) => value + 1)}
                 empty={
-                  listed === undefined ? null : (
+                  leftNote ??
+                  (empty === undefined ? null : (
                     <p className="text-sm text-muted-foreground">
                       Nothing in the trash matches.
                     </p>
-                  )
+                  ))
                 }
                 onShowMore={showMoreArtifacts}
               >
@@ -289,11 +313,12 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 locked={unsaved}
                 onSelect={(id) => dispatch({ type: 'choose', id })}
                 empty={
-                  listed === undefined || noArtifacts ? null : (
+                  leftNote ??
+                  (empty === 'unmatched' ? (
                     <p className="text-sm text-muted-foreground">
                       No artifacts match.
                     </p>
-                  )
+                  ) : null)
                 }
                 onShowMore={showMoreArtifacts}
               >

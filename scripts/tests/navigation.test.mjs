@@ -6,17 +6,19 @@ import { build } from 'esbuild';
 // The rules are web code without DOM or React imports; bundle them as they
 // ship.
 const bundle = await build({
-  entryPoints: [
-    fileURLToPath(
-      new URL('../../apps/web/src/artifacts/navigation.ts', import.meta.url),
+  stdin: {
+    contents:
+      "export * from './navigation.ts'; export { emptiness } from './list-query.ts';",
+    resolveDir: fileURLToPath(
+      new URL('../../apps/web/src/artifacts/', import.meta.url),
     ),
-  ],
+  },
   bundle: true,
   format: 'esm',
   platform: 'neutral',
   write: false,
 });
-const { START, navigate, opened } = await import(
+const { START, emptiness, navigate, opened } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
@@ -77,6 +79,17 @@ test('The page says why the open artifact closed, once', () => {
     text: 'The open artifact was moved to the trash.',
     toTrash: true,
   });
+  // A recovery said before it went to the trash again is out of date.
+  const recovered = apply(
+    START,
+    { type: 'query', query: { ...START.query, deleted: true } },
+    { type: 'recovered', artifact },
+  );
+  assert.equal(recovered.notice.text, 'Recovered “Report”.');
+  assert.deepEqual(
+    navigate(recovered, { type: 'left', id: 'a' }).notice,
+    elsewhere.notice,
+  );
   // An artifact opened because it is listed first keeps the notice; one
   // the user chooses clears it.
   assert.equal(
@@ -137,4 +150,17 @@ test('The first listed artifact outside the trash opens, also from a list read b
     'b',
   );
   assert.equal(opened({ ...page, trashShown: true }), undefined);
+});
+
+test('An empty list says the workspace is empty only when it read everything', () => {
+  const all = START.query;
+  const trash = { ...all, deleted: true };
+  // Every artifact read so far left the list, and more follow.
+  assert.equal(emptiness(all, 0, false), 'left');
+  assert.equal(emptiness(trash, 0, false), 'left');
+  assert.equal(emptiness(all, 0, true), 'none');
+  assert.equal(emptiness(searched, 0, true), 'unmatched');
+  assert.equal(emptiness(trash, 0, true), 'unmatched');
+  assert.equal(emptiness(all, 1, false), undefined);
+  assert.equal(emptiness(all, undefined, true), undefined);
 });

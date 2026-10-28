@@ -277,8 +277,10 @@ export function ArtifactDetail({
                 reload();
                 onRecovered(recovered);
               }}
-              // A newer change refused it; the feed reports that change.
-              onConflict={reload}
+              // A newer change refused it; the feed reports that change,
+              // which the recovery then waits for. The artifact itself
+              // cannot be read in the trash, so nothing is read again.
+              onConflict={() => {}}
             />
           ) : details.status === 'error' ? (
             <Alert variant="destructive">

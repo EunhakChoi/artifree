@@ -67,3 +67,21 @@ export function shownBy(query: ListQuery): Shown {
 export function showing(query: ListQuery, shown: Shown): ListQuery {
   return { ...query, ...SHOWN[shown] };
 }
+
+/**
+ * Why a list shows nothing, if it does: every artifact it read left its
+ * view and more follow (`left`), nothing matches `query`, or, only for a
+ * complete list of every artifact outside the trash, there are none
+ * (decision 0014, item 7).
+ */
+export type Emptiness = 'left' | 'unmatched' | 'none';
+
+export function emptiness(
+  query: ListQuery,
+  shown: number | undefined,
+  complete: boolean,
+): Emptiness | undefined {
+  if (shown !== 0) return undefined;
+  if (!complete) return 'left';
+  return isFiltered(query) ? 'unmatched' : 'none';
+}

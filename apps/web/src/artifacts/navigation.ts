@@ -104,8 +104,9 @@ export function navigate(
         : { ...state, notice };
     }
     case 'left':
-      // What the page's own write did is said already.
-      return state.notice?.id === event.id
+      // That the page's own move put it there is said already; any other
+      // notice about it, such as its recovery, is now out of date.
+      return state.notice?.id === event.id && state.notice.toTrash
         ? state
         : {
             ...state,

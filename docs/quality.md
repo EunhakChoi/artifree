@@ -245,7 +245,11 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   reducer. A recovery answered after the user searched opens the artifact
   with the search shown then; one answered after the page left the trash
   changes nothing it shows; the reason an open artifact closed is said
-  once, and the page's own move is not reported as one made elsewhere.
+  once, the page's own move is not reported as one made elsewhere, and a
+  recovery said before the artifact went to the trash again is replaced.
+  An empty list says there are no artifacts only when it read every
+  artifact outside the trash; one with more to show says its artifacts
+  left the view.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest
   (a same-size binary file; a 215-byte path and a 100-byte name inside a
   360-pixel window) and shows text lines with visible carriage returns,
@@ -278,15 +282,20 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the feed cut, a move that committed and lost its answer is retried with
   the same key and moves the artifact once, which closes and leaves the
   list before the list is read again; the trash keeps the search, opens
-  nothing, and a recovery answered after the order changed opens the
+  nothing, keeps its fields and the focus while another search's list
+  loads, and a recovery answered after the order changed opens the
   artifact with the order shown then; an open artifact listed first and
   deleted elsewhere closes with a notice before the list is read again,
   and the next one outside the trash opens; with a draft it stays open,
-  cannot be saved, neither previews nor reads its history, and recovers in
-  place with the draft, after which it previews again; a forged conflict
+  cannot be saved, neither previews nor reads its history, stays editable
+  after a refused recovery, and recovers in place with the draft, after
+  which it previews again; a forged conflict
   holds back only its own artifact in the trash; after a forged `reset`
-  nothing in the trash is recovered until it is read again; a recovery
-  answered after the page left the trash keeps a draft written meanwhile.
+  nothing in the trash is recovered until it is read again, and a recovery
+  answered after it neither opens the artifact nor says it was
+  recovered, nor does a move answered after it say it moved the artifact;
+  a recovery answered after the page left the trash keeps a draft written
+  meanwhile.
   The dialog, the trash, and the draft notice are checked for
   accessibility. `scripts/smoke-workspace.mjs` checks that an empty list
   still offers the trash.

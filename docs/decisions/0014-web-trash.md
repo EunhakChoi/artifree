@@ -56,15 +56,17 @@ true}` against the metadata revision the page shows, through the
    read. Each has "Recover", a metadata update with `deleted: false`
    against the revision the list read, through a gate of that artifact's
    own: a conflict proves something about one artifact and holds back no
-   other. The field stays when nothing is listed, since every artifact may
-   be in the trash.
+   other. The fields stay when nothing is listed, since every artifact may
+   be in the trash, and while the list of another search or view loads or
+   fails, so neither typing nor the way back is lost.
 4. **What the page knows of the trash.** The page records, per artifact
    it saw in the trash, whether it still is, as of the newest metadata
    revision it saw: from a `deleted` or `recovered` notice, from a list, or
    from the answer to its own write. Like the versions the page knows, the
    record holds for one feed epoch (0007 decision 4): it is forgotten
    whenever the server's data may have been replaced, and an answer to a
-   write sent before then is not learned. A list leaves out an artifact the
+   move or recovery sent before then is not learned and does not move the
+   page either; what the page reads again says where the artifact is. A list leaves out an artifact the
    record says left its view after the list was read, so the page's own
    move removes it from the list at once.
 5. **Where the page is, in one place.** What is listed (search, order,
@@ -87,16 +89,20 @@ true}` against the metadata revision the page shows, through the
    the move from. This is the one exception to 0011 decision 6, which
    prepares a write only from a version the page shows: an artifact in the
    trash cannot be read. A newer change refuses it, and the feed then
-   reports that change. While it is in the trash, the preview and the
+   reports that change, which the recovery waits for; nothing is read
+   again for the refusal, since the artifact cannot be read. While it is in the trash, the preview and the
    history are not mounted and say why, since every read of the artifact
    answers `not_found`; they mount afresh once it is recovered, so no
    answer read in the trash outlives the recovery.
 7. **Notices.** The page says what its own move or recovery did, and why
-   an open artifact closed; a notice about an artifact replaces none about
-   the same artifact, so the page's own move is not reported again as one
-   made elsewhere. A notice that an artifact went to the trash offers "Show
-   trash" while there is no draft. An empty list of artifacts says that the
-   trash is shown from the "Show" field, since every artifact may be in it.
+   an open artifact closed. The page's own move is not reported again as
+   one made elsewhere when the artifact closes; any other notice about it,
+   such as its recovery, is replaced by the reason it closed. A notice that an artifact went to the trash offers "Show
+   trash" while there is no draft. An empty list says why: a complete list of every artifact outside the
+   trash says there are none and that the trash is shown from the "Show"
+   field, since every artifact may be in it; a list with more to show
+   whose artifacts all left the view says so and offers "Show more"; any
+   other says that nothing matches.
 
 ## Costs and limits
 

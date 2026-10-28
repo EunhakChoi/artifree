@@ -166,6 +166,27 @@ export async function checkTrash({
       workspace.getByText(/cannot be opened, previewed, or changed/),
     ).toBeVisible();
     await checkAccessibility('workspace-trash', tab);
+    // While another search's list loads, the controls stay, with the text
+    // being typed and the way back.
+    const search = workspace.getByLabel('Search titles');
+    const searchHeld = await hold(tab, 'GET', lists);
+    await search.fill('Bin o');
+    await tab.waitForRequest(
+      (request) => new URL(request.url()).searchParams.get('q') === 'Bin o',
+    );
+    await expect(search).toBeFocused();
+    await expect(show).toHaveValue('trash');
+    await searchHeld();
+    await expect(recoverIn(one)).toBeVisible();
+    const back = tab.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === '/v1/artifacts' && url.searchParams.get('q') === 'Bin'
+      );
+    });
+    await search.fill('Bin');
+    await back;
+    listReads.length = 0;
 
     // A recovery answered late opens the artifact with the search and order
     // the page shows then, not those it was sent with.
@@ -237,7 +258,37 @@ export async function checkTrash({
     tab.off('request', recordPreview);
     assert.deepEqual(previews, [], 'Nothing is previewed in the trash.');
     await workspace.getByRole('tab', { name: 'Source' }).click();
-    await inTrash.getByRole('button', { name: 'Recover', exact: true }).click();
+    // A refused recovery reads nothing for it, so the draft stays usable.
+    await tab.route(
+      `**${path(two)}`,
+      async (route) =>
+        route.request().method() === 'PATCH'
+          ? route.fulfill({
+              status: 409,
+              json: {
+                error: {
+                  code: 'metadata_conflict',
+                  message: 'Changed elsewhere.',
+                  current_metadata_revision: await metadata(two),
+                },
+              },
+            })
+          : route.fallback(),
+      { times: 1 },
+    );
+    const recoverHere = inTrash.getByRole('button', {
+      name: 'Recover',
+      exact: true,
+    });
+    await recoverHere.click();
+    await expect(
+      inTrash.getByText(/changed since this page read it/),
+    ).toBeVisible();
+    await expect(editor).toBeEditable();
+    await expect(
+      workspace.getByRole('button', { name: 'Discard changes' }),
+    ).toBeVisible();
+    await recoverHere.click();
     await expect(inTrash).toBeHidden();
     await expect(workspace.getByText('Recovered “Bin two”.')).toBeVisible();
     await expect(editor).toHaveValue('<p>kept</p>');
@@ -292,6 +343,26 @@ export async function checkTrash({
     await expect(recoverIn(one)).toBeEnabled();
     await expect(recoverIn(three)).toBeEnabled();
 
+    // A recovery answered after a possible replacement of the server's data
+    // does not move the page: the trash it reads again says what is there.
+    const staleHeld = await hold(tab, 'GET', lists);
+    const answerHeld = await hold(tab, 'PATCH', `**${path(one)}`);
+    await recoverIn(one).click();
+    await forgeReset(tab);
+    await expect(recoverIn(three)).toBeDisabled();
+    const answered = tab.waitForResponse(
+      (response) =>
+        response.request().method() === 'PATCH' &&
+        new URL(response.url()).pathname === path(one),
+    );
+    await answerHeld();
+    expect((await answered).status()).toBe(200);
+    await staleHeld();
+    await expect(recoverIn(three)).toBeEnabled();
+    await expect(recoverIn(one)).toHaveCount(0);
+    await expect(show).toHaveValue('trash');
+    await expect(workspace.getByText('Recovered “Bin one”.')).toHaveCount(0);
+
     // A recovery answered after the page left the trash keeps what the page
     // shows, a draft included.
     const lateHeld = await hold(tab, 'PATCH', `**${path(three)}`);
@@ -305,8 +376,38 @@ export async function checkTrash({
     await workspace.getByRole('button', { name: 'Discard changes' }).click();
     await expect(item(three)).toBeVisible();
 
+    // A move answered after a possible replacement of the server's data
+    // says nothing of the move: the list read again says what is there.
+    await item(three).click();
+    await expect(heading(three)).toBeVisible();
+    const moveHeld = await hold(tab, 'PATCH', `**${path(three)}`);
+    const relistHeld = await hold(tab, 'GET', lists);
+    await moveButton.click();
+    await tab
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Move to trash' })
+      .click();
+    // The page lists again only once it has taken the reset.
+    const relisted = tab.waitForRequest(
+      (request) => request.method() === 'GET' && lists(new URL(request.url())),
+    );
+    await forgeReset(tab);
+    await relisted;
+    const moved = tab.waitForResponse(
+      (response) =>
+        response.request().method() === 'PATCH' &&
+        new URL(response.url()).pathname === path(three),
+    );
+    await moveHeld();
+    expect((await moved).status()).toBe(200);
+    await relistHeld();
+    await expect(item(three)).toHaveCount(0);
+    await expect(
+      workspace.getByText('Moved “Bin three” to the trash.'),
+    ).toHaveCount(0);
+
     assert.deepEqual(errors, [], 'Page errors.');
-    return { moved: 2, recovered: 3 };
+    return { moved: 3, recovered: 4 };
   } finally {
     await context.close();
   }
