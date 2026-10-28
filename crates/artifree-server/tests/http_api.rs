@@ -1333,3 +1333,213 @@ async fn lists_search_filter_and_page_with_tokens() -> TestResult {
     }
     Ok(())
 }
+
+fn set_deleted(
+    id: &str,
+    key: &str,
+    base: u64,
+    deleted: bool,
+) -> Result<Request<Body>, axum::http::Error> {
+    patch(
+        &format!("/v1/artifacts/{id}"),
+        Some(key),
+        &json!({ "base_metadata_revision": base, "deleted": deleted }),
+    )
+}
+
+async fn listed_ids(
+    harness: &Harness,
+    query: &str,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let list = harness
+        .send(get(&format!("/v1/artifacts{query}"))?)
+        .await?
+        .json()?;
+    Ok(list["artifacts"]
+        .as_array()
+        .ok_or("missing list")?
+        .iter()
+        .map(|artifact| artifact["id"].clone())
+        .collect())
+}
+
+/// An artifact at revision 2 with a preview link to it, then deleted with
+/// `delete-key-1`; returns its id, the link, and when it was deleted.
+async fn deleted_fixture(
+    harness: &Harness,
+) -> Result<(String, String, i64), Box<dyn std::error::Error>> {
+    let id = created_id(harness).await?;
+    let saved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let link = preview_url(harness, &id, 2).await?;
+    let deleted = harness
+        .send(set_deleted(&id, "delete-key-1", 1, true)?)
+        .await?;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", error_code(&deleted));
+    let artifact = &deleted.json()?["artifact"];
+    assert_eq!(artifact["metadata_revision"], 2);
+    assert_eq!(artifact["current_revision"], 2);
+    let deleted_at = artifact["deleted_at_ms"]
+        .as_i64()
+        .ok_or("a time in the trash")?;
+    Ok((id, link, deleted_at))
+}
+
+#[tokio::test]
+async fn an_artifact_in_the_trash_is_missing_to_every_read_and_write() -> TestResult {
+    let harness = Harness::new();
+    let (id, link, deleted_at) = deleted_fixture(&harness).await?;
+    let history = format!("/v1/artifacts/{id}/revisions");
+    for (what, request) in [
+        ("read", get(&format!("/v1/artifacts/{id}"))?),
+        ("history", get(&history)?),
+        ("manifest", get(&format!("{history}/2"))?),
+        ("file", get(&format!("{history}/2/files/index.html"))?),
+        (
+            "preview",
+            post(&format!("{history}/2/previews"), None, &json!({}))?,
+        ),
+        (
+            "save",
+            post(&history, Some("save-key-2"), &put_index(2, "<h1>v3</h1>"))?,
+        ),
+        // A base that could never be current is missing too, not a conflict.
+        (
+            "future save",
+            post(&history, Some("save-key-3"), &put_index(9, "<h1>v9</h1>"))?,
+        ),
+        ("restore", restore(&id, 1, Some("restore-key-1"), 2)?),
+        ("copy", duplicate(&id, 2, Some("copy-key-1"), &json!({}))?),
+        (
+            "rename",
+            patch(
+                &format!("/v1/artifacts/{id}"),
+                Some("rename-key-1"),
+                &json!({ "base_metadata_revision": 2, "title": "Renamed" }),
+            )?,
+        ),
+        ("delete again", set_deleted(&id, "delete-key-2", 2, true)?),
+    ] {
+        let reply = harness.send(request).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{what}");
+        assert_eq!(error_code(&reply), "not_found", "{what}");
+    }
+    assert_eq!(
+        harness.content(&link).await?.status,
+        StatusCode::NOT_FOUND,
+        "a link issued before the delete"
+    );
+    assert_eq!(listed_ids(&harness, "").await?, Vec::<Value>::new());
+    let trash = harness
+        .send(get("/v1/artifacts?deleted=true")?)
+        .await?
+        .json()?;
+    assert_eq!(trash["artifacts"][0]["id"], id);
+    assert_eq!(trash["artifacts"][0]["deleted_at_ms"], deleted_at);
+    Ok(())
+}
+
+#[tokio::test]
+async fn retries_replay_in_the_trash_and_a_recovery_brings_it_back() -> TestResult {
+    let harness = Harness::new();
+    let (id, link, _) = deleted_fixture(&harness).await?;
+    let again = harness
+        .send(set_deleted(&id, "delete-key-1", 1, true)?)
+        .await?;
+    assert_eq!(again.status, StatusCode::OK, "{}", error_code(&again));
+    assert_eq!(again.json()?["replayed"], true);
+    let resaved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(
+        resaved.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&resaved)
+    );
+    assert_eq!(resaved.json()?["replayed"], true);
+    // The delete's key names the delete: it does not recover.
+    let reused = harness
+        .send(set_deleted(&id, "delete-key-1", 1, false)?)
+        .await?;
+    assert_eq!(error_code(&reused), "request_key_reused");
+
+    // A recovery is conditional, and brings everything back as it was.
+    let stale = harness
+        .send(set_deleted(&id, "recover-key-1", 1, false)?)
+        .await?;
+    assert_eq!(error_code(&stale), "metadata_conflict");
+    assert_eq!(stale.json()?["error"]["current_metadata_revision"], 2);
+    let recovered = harness
+        .send(set_deleted(&id, "recover-key-2", 2, false)?)
+        .await?;
+    assert_eq!(
+        recovered.status,
+        StatusCode::OK,
+        "{}",
+        error_code(&recovered)
+    );
+    assert_eq!(recovered.json()?["artifact"]["deleted_at_ms"], Value::Null);
+    assert_eq!(recovered.json()?["artifact"]["metadata_revision"], 3);
+    let read = harness
+        .send(get(&format!("/v1/artifacts/{id}"))?)
+        .await?
+        .json()?;
+    assert_eq!(read["current_revision"], 2);
+    assert_eq!(read["deleted_at_ms"], Value::Null);
+    assert_eq!(harness.content(&link).await?.status, StatusCode::OK);
+    assert_eq!(listed_ids(&harness, "").await?, [json!(id)]);
+    assert_eq!(
+        listed_ids(&harness, "?deleted=true").await?,
+        Vec::<Value>::new()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_save_and_a_delete_are_ordered() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let history = format!("/v1/artifacts/{id}/revisions");
+    // A save first: the delete still applies, since it names the metadata.
+    let saved = harness
+        .send(post(
+            &history,
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let deleted = harness
+        .send(set_deleted(&id, "delete-key-1", 1, true)?)
+        .await?;
+    assert_eq!(deleted.json()?["artifact"]["current_revision"], 2);
+    // A delete first: the save is refused and nothing is written.
+    let refused = harness
+        .send(post(
+            &history,
+            Some("save-key-2"),
+            &put_index(2, "<h1>v3</h1>"),
+        )?)
+        .await?;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND);
+    harness
+        .send(set_deleted(&id, "recover-key-1", 2, false)?)
+        .await?;
+    let read = harness
+        .send(get(&format!("/v1/artifacts/{id}"))?)
+        .await?
+        .json()?;
+    assert_eq!(read["current_revision"], 2);
+    Ok(())
+}

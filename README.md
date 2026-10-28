@@ -91,7 +91,8 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0009](docs/decisions/0009-web-list-and-metadata.md),
 [0010](docs/decisions/0010-revision-restore-and-digests.md),
 [0011](docs/decisions/0011-web-history-and-restore.md),
-[0012](docs/decisions/0012-duplicate-artifacts.md)).
+[0012](docs/decisions/0012-duplicate-artifacts.md),
+[0013](docs/decisions/0013-deleting-artifacts-and-the-trash.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -101,8 +102,9 @@ and the web workspace following it (A02) are implemented, and so are renaming,
 pins, search, order, and pages through the API, MCP, CLI, and web workspace
 (A03), revision comparison and restore through the API, MCP, CLI, and web
 workspace (A04), and duplicating a revision into an artifact with its own
-history (A05); the next slice is deleting artifacts and restoring them from
-a trash (A06).
+history (A05). Deleting artifacts to a trash and recovering them works through
+the API, MCP, and CLI (A06a); the next slice brings them to the web workspace
+(A06b).
 
 ## Verification
 

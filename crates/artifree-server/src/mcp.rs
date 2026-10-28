@@ -191,6 +191,7 @@ async fn dispatch(
                     base_metadata_revision,
                     title,
                     pinned,
+                    deleted,
                     idempotency_key,
                 } = parse(arguments)?;
                 let key = operations::request_key("idempotency_key", &idempotency_key)?;
@@ -198,6 +199,7 @@ async fn dispatch(
                     base_metadata_revision,
                     title,
                     pinned,
+                    deleted,
                 };
                 operations::update(state, actor, key, &artifact_id, request).await
             })

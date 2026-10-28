@@ -56,7 +56,12 @@ Artifact behavior is tested at the boundary that owns it:
   database, a version 1 database that gains the feed and keeps its
   data, and commit times that follow commit order after the clock is set
   back, in migrated version 1 and 2 databases whose stored times are ahead
-  of the clock and out of order.
+  of the clock and out of order. An artifact in the trash refuses saves,
+  renames, a second delete, and copies of it, is listed only in the trash,
+  replays earlier requests, recovers only against its current metadata
+  revision, and records `deleted` and `recovered` changes; a delete that
+  also renames is a delete, and recovering one outside the trash writes
+  nothing.
 - `crates/artifree-server/tests/`: HTTP status and error codes, including
   unsupported methods; the bearer token on every route and unmatched path, with
   a case-insensitive scheme; unsafe paths, body limits, pinned reads, preview
@@ -70,7 +75,12 @@ Artifact behavior is tested at the boundary that owns it:
   the same digests, later saves to either artifact that leave the other
   as it was, a title of the caller's, a replay after the source was
   renamed and revised, a reused key, and a missing revision, invalid
-  title, unknown field, or missing key that create nothing.
+  title, unknown field, or missing key that create nothing; an artifact in
+  the trash missing to every read and write, previews and earlier preview
+  links included, listed only with `deleted=true`, replaying an earlier
+  delete and save, recovered only against its current metadata revision,
+  and readable again with its revisions and links; a save and a delete in
+  either order; and the feed's `deleted` and `recovered` kinds.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
@@ -78,7 +88,9 @@ Artifact behavior is tested at the boundary that owns it:
   the API schema root (which must reject an empty object) with its expected
   status, a restore through the CLI with exact bytes, its replay, and its
   conflict and usage errors, a duplicate through the CLI with exact bytes,
-  its replay, a title, a missing revision, and usage errors, and a SIGKILL after commit
+  its replay, a title, a missing revision, and usage errors, a delete to
+  the trash with its replay, refused commands, `list --deleted`, and a
+  recovery, and a SIGKILL after commit
   followed by a restart and a replayed retry.
 - `crates/artifree-server/tests/mcp_adapter.rs`: the MCP endpoint
   authenticates before anything else, refuses a request with an `Origin` or a
@@ -92,6 +104,8 @@ Artifact behavior is tested at the boundary that owns it:
   reads exact pinned bytes (BOM, CRLF, binary), opens a sandboxed preview,
   restores an earlier revision byte for byte, replayed over HTTP, and
   duplicates a revision with binary bytes intact, replayed over HTTP;
+  deletes to the trash, where other tools and HTTP find it missing and
+  `list_artifacts` with `deleted` lists it, and recovers it;
   results validate against the API schema; retries replay, reordered changes
   are the same request, a reused key is refused, and keys are shared with
   HTTP; stale bases conflict without partial writes; invalid arguments are
@@ -138,7 +152,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   invalid response, uploads pick the smaller exact encoding, a restore sends
   its revision, base, and key, a manifest without a valid lowercase
   `sha256` is an invalid response, and a duplicate whose `copied` is missing
-  or names a part the client does not know is an invalid response. For the
+  or names a part the client does not know is an invalid response, as is
+  an artifact without a `deleted_at_ms` that is `null` or a time. For the
   change feed: the event stream rules (line ends split across chunks or
   ended by a final CR, a byte order mark, a character split across chunks,
   comments, unknown fields and events, joined data lines, an event without

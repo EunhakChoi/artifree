@@ -56,6 +56,7 @@ test('CLI list without paging options prints every page', async () => {
     pinned: false,
     current_revision: 1,
     metadata_revision: 1,
+    deleted_at_ms: null,
     created_at_ms: index,
     updated_at_ms: index,
   });

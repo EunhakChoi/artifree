@@ -21,6 +21,9 @@
 //! its request produced. A replay therefore reports the artifact as of that
 //! request, also after later renames.
 //!
+//! An artifact in the trash keeps every row; its `deleted_at` is set, and each
+//! write checks it in its transaction, after looking up its request key.
+//!
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
@@ -40,7 +43,7 @@ use artifree_ports::artifact_store::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SCHEMA: &str = "
@@ -172,6 +175,30 @@ UPDATE feed SET committed_at = coalesce((SELECT max(at) FROM (
 )), 0);
 ";
 
+/// Added in schema version 5: when an artifact and each of its metadata
+/// revisions were in the trash, and two change kinds. The change kinds are a
+/// checked list, so the table is rebuilt with every row.
+const TRASH_SCHEMA: &str = "
+ALTER TABLE artifacts ADD COLUMN deleted_at INTEGER;
+ALTER TABLE metadata_revisions ADD COLUMN deleted_at INTEGER;
+CREATE TABLE changes_v5 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL
+        CHECK (kind IN ('created', 'revised', 'metadata_updated', 'deleted', 'recovered')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    committed_at INTEGER NOT NULL,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision)
+) STRICT;
+INSERT INTO changes_v5 (sequence, artifact_id, kind, revision, metadata_revision, committed_at)
+    SELECT sequence, artifact_id, kind, revision, metadata_revision, committed_at FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v5 RENAME TO changes;
+";
+
 /// Artifact storage in one local `SQLite` database file.
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -181,8 +208,9 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Opens or creates the database at `path` and applies the schema. A
     /// version 1 database gains the change feed; its earlier commits have no
-    /// feed entries. A version 1 or 2 database gains metadata revisions, and
-    /// a version 1 to 3 database the latest commit time.
+    /// feed entries. A version 1 or 2 database gains metadata revisions, a
+    /// version 1 to 3 database the latest commit time, and a version 1 to 4
+    /// database the trash, with no artifact in it.
     ///
     /// # Errors
     ///
@@ -203,7 +231,7 @@ impl SqliteStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(unavailable)?;
         match version {
-            0..=3 => {
+            0..=4 => {
                 if version < 1 {
                     transaction.execute_batch(SCHEMA).map_err(unavailable)?;
                 }
@@ -219,11 +247,14 @@ impl SqliteStore {
                         .map_err(unavailable)?;
                 }
                 if version < 3 {
-                    add_metadata_revisions(&transaction)?;
+                    keeping_feed_head(&transaction, METADATA_SCHEMA)?;
                 }
-                transaction
-                    .execute_batch(COMMIT_TIME_SCHEMA)
-                    .map_err(unavailable)?;
+                if version < 4 {
+                    transaction
+                        .execute_batch(COMMIT_TIME_SCHEMA)
+                        .map_err(unavailable)?;
+                }
+                keeping_feed_head(&transaction, TRASH_SCHEMA)?;
                 transaction
                     .pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(unavailable)?;
@@ -272,6 +303,11 @@ impl ArtifactStore for SqliteStore {
             if let Some(receipt) = replay(transaction, request.request)? {
                 return Ok(receipt);
             }
+            if let Some(source) = request.source {
+                artifact_record(transaction, source)?
+                    .filter(|record| record.deleted_at.is_none())
+                    .ok_or(StoreError::NotFound)?;
+            }
             let id = ArtifactId::from_random(random_bytes()?);
             let now = commit_time(transaction)?;
             let revision = SourceRevision(1);
@@ -296,7 +332,11 @@ impl ArtifactStore for SqliteStore {
                 transaction,
                 &id,
                 metadata,
-                (request.title, false),
+                &MetadataValues {
+                    title: request.title,
+                    pinned: false,
+                    deleted_at: None,
+                },
                 request.request.actor,
                 now,
             )?;
@@ -320,8 +360,9 @@ impl ArtifactStore for SqliteStore {
             if let Some(receipt) = replay(transaction, request.request)? {
                 return Ok(receipt);
             }
-            let current =
-                artifact_record(transaction, request.artifact)?.ok_or(StoreError::NotFound)?;
+            let current = artifact_record(transaction, request.artifact)?
+                .filter(|record| record.deleted_at.is_none())
+                .ok_or(StoreError::NotFound)?;
             if current.current_revision != request.base {
                 return Err(StoreError::RevisionConflict {
                     current: current.current_revision,
@@ -375,6 +416,11 @@ impl ArtifactStore for SqliteStore {
             }
             let current =
                 artifact_record(transaction, request.artifact)?.ok_or(StoreError::NotFound)?;
+            let was_deleted = current.deleted_at.is_some();
+            // In the trash, only taking it out reaches the artifact.
+            if was_deleted && request.deleted != Some(false) {
+                return Err(StoreError::NotFound);
+            }
             if current.metadata_revision != request.base {
                 return Err(StoreError::MetadataConflict {
                     current: current.metadata_revision,
@@ -382,40 +428,54 @@ impl ArtifactStore for SqliteStore {
             }
             let title = request.title.unwrap_or(&current.title);
             let pinned = request.pinned.unwrap_or(current.pinned);
+            let deleted = request.deleted.unwrap_or(was_deleted);
             let now = commit_time(transaction)?;
-            let metadata = if *title == current.title && pinned == current.pinned {
-                current.metadata_revision
-            } else {
-                let next = MetadataRevision(current.metadata_revision.0 + 1);
-                transaction
-                    .execute(
-                        "UPDATE artifacts SET title = ?2, pinned = ?3, metadata_revision = ?4
+            let metadata =
+                if *title == current.title && pinned == current.pinned && deleted == was_deleted {
+                    current.metadata_revision
+                } else {
+                    let next = MetadataRevision(current.metadata_revision.0 + 1);
+                    let deleted_at = deleted.then(|| current.deleted_at.unwrap_or(now));
+                    transaction
+                        .execute(
+                            "UPDATE artifacts
+                         SET title = ?2, pinned = ?3, metadata_revision = ?4, deleted_at = ?5
                          WHERE id = ?1",
-                        params![
-                            request.artifact.as_str(),
-                            title.as_str(),
+                            params![
+                                request.artifact.as_str(),
+                                title.as_str(),
+                                pinned,
+                                sql_metadata(next)?,
+                                deleted_at.map(|time| time.0)
+                            ],
+                        )
+                        .map_err(unavailable)?;
+                    insert_metadata(
+                        transaction,
+                        request.artifact,
+                        next,
+                        &MetadataValues {
+                            title,
                             pinned,
-                            sql_metadata(next)?
-                        ],
-                    )
-                    .map_err(unavailable)?;
-                insert_metadata(
-                    transaction,
-                    request.artifact,
-                    next,
-                    (title, pinned),
-                    request.request.actor,
-                    now,
-                )?;
-                record_change(
-                    transaction,
-                    request.artifact,
-                    ChangeKind::MetadataUpdated,
-                    (current.current_revision, next),
-                    now,
-                )?;
-                next
-            };
+                            deleted_at,
+                        },
+                        request.request.actor,
+                        now,
+                    )?;
+                    let kind = match (was_deleted, deleted) {
+                        (false, true) => ChangeKind::Deleted,
+                        (true, false) => ChangeKind::Recovered,
+                        _ => ChangeKind::MetadataUpdated,
+                    };
+                    record_change(
+                        transaction,
+                        request.artifact,
+                        kind,
+                        (current.current_revision, next),
+                        now,
+                    )?;
+                    next
+                };
             let position = (current.current_revision, metadata);
             record_key(
                 transaction,
@@ -454,7 +514,8 @@ impl ArtifactStore for SqliteStore {
                     listing.pinned,
                     listing.after.map(|position| position.at.0),
                     listing.after.map(|position| position.id.as_str()),
-                    i64::try_from(listing.limit).unwrap_or(i64::MAX)
+                    i64::try_from(listing.limit).unwrap_or(i64::MAX),
+                    listing.deleted
                 ],
                 RawArtifact::from_row,
             )
@@ -593,6 +654,8 @@ impl ArtifactStore for SqliteStore {
                     "created" => ChangeKind::Created,
                     "revised" => ChangeKind::Revised,
                     "metadata_updated" => ChangeKind::MetadataUpdated,
+                    "deleted" => ChangeKind::Deleted,
+                    "recovered" => ChangeKind::Recovered,
                     other => return Err(corrupt(format!("change kind {other}"))),
                 },
                 revision: stored_revision(revision)?,
@@ -693,25 +756,34 @@ fn insert_revision(
     Ok(())
 }
 
-/// Records a title and pin as `metadata` of the artifact.
+/// What a metadata revision records.
+struct MetadataValues<'a> {
+    title: &'a Title,
+    pinned: bool,
+    /// When the artifact went to the trash, if it is there.
+    deleted_at: Option<UnixMillis>,
+}
+
+/// Records `values` as `metadata` of the artifact.
 fn insert_metadata(
     transaction: &Transaction<'_>,
     id: &ArtifactId,
     metadata: MetadataRevision,
-    (title, pinned): (&Title, bool),
+    values: &MetadataValues<'_>,
     actor: &ActorId,
     now: UnixMillis,
 ) -> Result<(), StoreError> {
     transaction
         .execute(
             "INSERT INTO metadata_revisions
-                 (artifact_id, metadata_revision, title, pinned, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (artifact_id, metadata_revision, title, pinned, deleted_at, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id.as_str(),
                 sql_metadata(metadata)?,
-                title.as_str(),
-                pinned,
+                values.title.as_str(),
+                values.pinned,
+                values.deleted_at.map(|time| time.0),
                 actor.as_str(),
                 now.0
             ],
@@ -759,6 +831,8 @@ fn record_change(
         ChangeKind::Created => "created",
         ChangeKind::Revised => "revised",
         ChangeKind::MetadataUpdated => "metadata_updated",
+        ChangeKind::Deleted => "deleted",
+        ChangeKind::Recovered => "recovered",
         _ => {
             return Err(StoreError::Unavailable(
                 "this store cannot record that change".into(),
@@ -798,8 +872,8 @@ fn committed(
 }
 
 /// The artifact as it was at `position`: owner, kind, and creation time
-/// never change; title and pin are those of the metadata revision, and the
-/// update time is that of the source revision.
+/// never change; title, pin, and trash state are those of the metadata
+/// revision, and the update time is that of the source revision.
 fn snapshot(
     connection: &Connection,
     id: &ArtifactId,
@@ -808,7 +882,7 @@ fn snapshot(
     connection
         .query_row(
             "SELECT a.id, a.owner, a.kind, m.title, m.pinned, r.revision, m.metadata_revision,
-                 a.created_at, r.created_at
+                 a.created_at, r.created_at, m.deleted_at
              FROM artifacts a
              JOIN revisions r ON r.artifact_id = a.id AND r.revision = ?2
              JOIN metadata_revisions m ON m.artifact_id = a.id AND m.metadata_revision = ?3
@@ -833,7 +907,7 @@ fn artifact_record(
     connection
         .query_row(
             "SELECT id, owner, kind, title, pinned, current_revision, metadata_revision,
-                 created_at, updated_at
+                 created_at, updated_at, deleted_at
              FROM artifacts WHERE id = ?1",
             [id.as_str()],
             RawArtifact::from_row,
@@ -845,12 +919,15 @@ fn artifact_record(
 }
 
 /// An owner's artifacts by update time. `?2` is the search text, `?3` the
-/// pin, `?4` and `?5` the position to continue after, and `?6` the limit.
-/// `lower` folds ASCII letters only.
+/// pin, `?4` and `?5` the position to continue after, `?6` the limit, and
+/// `?7` whether to list those in the trash instead of the others. `lower`
+/// folds ASCII letters only.
 const LIST_BY_UPDATE: &str = "
-SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at
+SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at,
+    deleted_at
 FROM artifacts
 WHERE owner = ?1
+  AND (deleted_at IS NOT NULL) = ?7
   AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
   AND (?3 IS NULL OR pinned = ?3)
   AND (?4 IS NULL OR updated_at < ?4 OR (updated_at = ?4 AND id > ?5))
@@ -859,18 +936,21 @@ LIMIT ?6";
 
 /// As [`LIST_BY_UPDATE`], by creation time.
 const LIST_BY_CREATION: &str = "
-SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at
+SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at,
+    deleted_at
 FROM artifacts
 WHERE owner = ?1
+  AND (deleted_at IS NOT NULL) = ?7
   AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
   AND (?3 IS NULL OR pinned = ?3)
   AND (?4 IS NULL OR created_at < ?4 OR (created_at = ?4 AND id > ?5))
 ORDER BY created_at DESC, id
 LIMIT ?6";
 
-/// Applies [`METADATA_SCHEMA`] and keeps the change feed's head, which the
-/// rebuilt `changes` table would otherwise take from its largest row.
-fn add_metadata_revisions(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+/// Applies `schema`, which rebuilds the `changes` table, and keeps the change
+/// feed's head, which the rebuilt table would otherwise take from its
+/// largest row.
+fn keeping_feed_head(transaction: &Transaction<'_>, schema: &str) -> Result<(), StoreError> {
     let head: Option<i64> = transaction
         .query_row(
             "SELECT seq FROM sqlite_sequence WHERE name = 'changes'",
@@ -879,9 +959,7 @@ fn add_metadata_revisions(transaction: &Transaction<'_>) -> Result<(), StoreErro
         )
         .optional()
         .map_err(unavailable)?;
-    transaction
-        .execute_batch(METADATA_SCHEMA)
-        .map_err(unavailable)?;
+    transaction.execute_batch(schema).map_err(unavailable)?;
     if let Some(head) = head {
         let updated = transaction
             .execute(
@@ -984,6 +1062,7 @@ struct RawArtifact {
     metadata_revision: i64,
     created_at: i64,
     updated_at: i64,
+    deleted_at: Option<i64>,
 }
 
 impl RawArtifact {
@@ -998,6 +1077,7 @@ impl RawArtifact {
             metadata_revision: row.get(6)?,
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
+            deleted_at: row.get(9)?,
         })
     }
 
@@ -1012,6 +1092,7 @@ impl RawArtifact {
             pinned: self.pinned,
             current_revision: stored_revision(self.current_revision)?,
             metadata_revision: stored_metadata(self.metadata_revision)?,
+            deleted_at: self.deleted_at.map(UnixMillis),
             created_at: UnixMillis(self.created_at),
             updated_at: UnixMillis(self.updated_at),
         })

@@ -251,8 +251,10 @@ export class ArtifreeClient {
   }
 
   /**
-   * Changes the title or pin prepared against
+   * Changes the title, pin, or trash state prepared against
    * `request.base_metadata_revision`, without committing a revision.
+   * `deleted: true` moves the artifact to the trash, where every other
+   * call finds it missing; `deleted: false` takes it out.
    * Rejects with code `metadata_conflict` and `currentMetadataRevision`
    * when another update won.
    */

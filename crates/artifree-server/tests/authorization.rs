@@ -71,8 +71,8 @@ fn another_actor_can_neither_see_nor_change_an_artifact() -> TestResult {
             .map(|_| ()),
         hidden
     );
-    let rename =
-        MetadataChange::new(Some(parsed("Defaced")), Some(true)).ok_or("a change with fields")?;
+    let rename = MetadataChange::new(Some(parsed("Defaced")), Some(true), None)
+        .ok_or("a change with fields")?;
     assert_eq!(
         service
             .update(

@@ -143,6 +143,18 @@ impl Harness {
         self.send(Request::patch(format!("/v1/artifacts/{id}")), key, change)
             .await
     }
+
+    async fn set_deleted(
+        &self,
+        id: &str,
+        key: &str,
+        base: u64,
+        deleted: bool,
+    ) -> Result<Value, TestError> {
+        let change = json!({ "base_metadata_revision": base, "deleted": deleted });
+        self.send(Request::patch(format!("/v1/artifacts/{id}")), key, change)
+            .await
+    }
 }
 
 impl Drop for Harness {
@@ -283,6 +295,26 @@ async fn a_stream_starts_at_the_head_and_sends_each_commit_once() -> TestResult 
     assert!(
         events.quiet().await,
         "an update without effect was announced"
+    );
+
+    // Moving to the trash and out of it are kinds of their own.
+    harness.set_deleted(id, "feed-delete-1", 2, true).await?;
+    let deleted = events.expect("change").await?;
+    assert_eq!(
+        (
+            deleted.data["change"].clone(),
+            deleted.data["metadata_revision"].clone()
+        ),
+        (json!("deleted"), json!(3))
+    );
+    harness.set_deleted(id, "feed-recover-1", 3, false).await?;
+    let recovered = events.expect("change").await?;
+    assert_eq!(
+        (
+            recovered.data["change"].clone(),
+            recovered.data["metadata_revision"].clone()
+        ),
+        (json!("recovered"), json!(4))
     );
     Ok(())
 }

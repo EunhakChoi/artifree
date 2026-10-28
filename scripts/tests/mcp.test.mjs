@@ -564,6 +564,54 @@ test('An agent duplicates a revision into an artifact of its own', async () => {
   });
 });
 
+test('An agent deletes an artifact to the trash and recovers it', async () => {
+  await withClient(async (client) => {
+    const created = await ok(client, 'create_artifact', {
+      title: 'Disposable',
+      files: [utf8('index.html', '<p>1</p>')],
+      idempotency_key: freshKey(),
+    });
+    const id = created.artifact.id;
+    const deletion = {
+      artifact_id: id,
+      base_metadata_revision: 1,
+      deleted: true,
+      idempotency_key: freshKey(),
+    };
+    const deleted = await ok(client, 'update_artifact', deletion);
+    assert.equal(typeof deleted.artifact.deleted_at_ms, 'number');
+    // Every other tool finds it missing, as HTTP does; the trash lists it.
+    for (const [tool, input] of [
+      ['get_artifact', { artifact_id: id }],
+      ['read_file', { artifact_id: id, revision: 1, path: 'index.html' }],
+      ['create_preview', { artifact_id: id, revision: 1 }],
+    ])
+      await refused(client, tool, input, 'not_found');
+    const viaHttp = await api(`/v1/artifacts/${id}`);
+    assert.equal(viaHttp.status, 404);
+    const trash = await ok(client, 'list_artifacts', { deleted: true });
+    assert.ok(trash.artifacts.some((artifact) => artifact.id === id));
+    const listed = await ok(client, 'list_artifacts', {});
+    assert.ok(!listed.artifacts.some((artifact) => artifact.id === id));
+    assert.equal(
+      (await ok(client, 'update_artifact', deletion)).replayed,
+      true,
+    );
+
+    const recovered = await ok(client, 'update_artifact', {
+      artifact_id: id,
+      base_metadata_revision: 2,
+      deleted: false,
+      idempotency_key: freshKey(),
+    });
+    assert.equal(recovered.artifact.deleted_at_ms, null);
+    assert.equal(
+      (await ok(client, 'get_artifact', { artifact_id: id })).metadata_revision,
+      3,
+    );
+  });
+});
+
 test('Invalid input is a tool error the model can read', async () => {
   await withClient(async (client) => {
     const created = await ok(client, 'create_artifact', {

@@ -13,6 +13,7 @@ const artifact = {
   pinned: false,
   current_revision: 1,
   metadata_revision: 1,
+  deleted_at_ms: null,
   created_at_ms: 1,
   updated_at_ms: 1,
 };
@@ -178,13 +179,27 @@ test('Lists send only the given query and return the next page token', async () 
     limit: '2',
     page_token: 'next',
   });
-  const missingFields = clientWith(() =>
-    Response.json({ artifacts: [{ ...artifact, pinned: undefined }] }),
+  // The trash is listed with the times its artifacts went there; a time
+  // must be one, and an artifact outside the trash must say so.
+  const trash = clientWith(() =>
+    Response.json({ artifacts: [{ ...artifact, deleted_at_ms: 5 }] }),
   );
   assert.equal(
-    (await failure(missingFields.listArtifacts())).code,
-    'invalid_response',
+    (await trash.listArtifacts({ deleted: true })).artifacts[0].deleted_at_ms,
+    5,
   );
+  for (const broken of [
+    { ...artifact, pinned: undefined },
+    { ...artifact, deleted_at_ms: undefined },
+    { ...artifact, deleted_at_ms: '5' },
+  ]) {
+    const client = clientWith(() => Response.json({ artifacts: [broken] }));
+    assert.equal(
+      (await failure(client.listArtifacts())).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
 });
 
 test('A metadata conflict reports the current metadata revision', async () => {
@@ -407,6 +422,16 @@ test('A change kind this client does not know is delivered as unknown', async ()
       stream([`event: change\ndata: ${changeData(7, 'renamed')}\n\n`]),
     ),
     [changeEvent(7, 'unknown')],
+  );
+  // Moving to the trash and out of it are kinds this client knows.
+  assert.deepEqual(
+    await eventsOf(
+      stream([
+        `event: change\ndata: ${changeData(8, 'deleted')}\n\n`,
+        `event: change\ndata: ${changeData(9, 'recovered')}\n\n`,
+      ]),
+    ),
+    [changeEvent(8, 'deleted'), changeEvent(9, 'recovered')],
   );
   const broken = await failure(
     eventsOf(stream(['event: ready\ndata: {"cursor":7}\n\n'])),

@@ -15,7 +15,7 @@ import { readDirectory, readNamedFile, readRegularFile } from './files.js';
 
 export const ARTIFACT_HELP = `Usage:
   artifree artifact list [--search <text>] [--sort updated|created]
-      [--pinned | --unpinned] [--limit <n>] [--page-token <token>]
+      [--pinned | --unpinned] [--deleted] [--limit <n>] [--page-token <token>]
   artifree artifact show <id>
   artifree artifact history <id>
   artifree artifact create --title <title> (--dir <dir> | --file <path>...)
@@ -26,6 +26,8 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact rename <id> <title> --base-metadata <n>
   artifree artifact pin <id> --base-metadata <n>
   artifree artifact unpin <id> --base-metadata <n>
+  artifree artifact delete <id> --base-metadata <n>
+  artifree artifact recover <id> --base-metadata <n>
   artifree artifact cat <id> <package-path> [--revision <n>]
   artifree artifact preview <id> [--revision <n>]
 
@@ -36,15 +38,19 @@ Connection:
 
 list prints every matching artifact, reading page after page, unless
 --limit or --page-token asks for one page; that page carries next_page_token
-when more follow. rename, pin, and unpin change metadata only and need the
-metadata_revision read with show (--base-metadata); they create no revision.
+when more follow. rename, pin, unpin, delete, and recover change metadata
+only and need the metadata_revision read with show (--base-metadata); they
+create no revision. delete moves the artifact to the trash, where every
+other command finds it missing; list --deleted lists the trash with each
+metadata_revision, and recover takes an artifact out.
 restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
 revision, with its own history; it is unpinned and named --title or the
 source's title followed by " (Copy)". Only files are copied.
 
-create, save, restore, duplicate, rename, pin, and unpin accept --idempotency-key <key>. Without it a new key is
+create, save, restore, duplicate, rename, pin, unpin, delete, and recover
+accept --idempotency-key <key>. Without it a new key is
 generated and reported on stderr if the outcome is unknown; retry with that key
 to get the original result instead of a duplicate. save --dir replaces the
 package with the directory's files (hidden entries skipped) and deletes
@@ -123,6 +129,8 @@ export async function runArtifact(args: string[]): Promise<void> {
     case 'rename':
     case 'pin':
     case 'unpin':
+    case 'delete':
+    case 'recover':
       return update(command, rest);
     case 'cat':
       return cat(rest);
@@ -144,6 +152,7 @@ async function list(args: string[]): Promise<void> {
       sort: { type: 'string' },
       pinned: { type: 'boolean' },
       unpinned: { type: 'boolean' },
+      deleted: { type: 'boolean' },
       limit: { type: 'string' },
       'page-token': { type: 'string' },
     },
@@ -161,6 +170,7 @@ async function list(args: string[]): Promise<void> {
     ...(sort === undefined ? {} : { sort }),
     ...(values.pinned === true ? { pinned: true } : {}),
     ...(values.unpinned === true ? { pinned: false } : {}),
+    ...(values.deleted === true ? { deleted: true } : {}),
     ...(values.limit === undefined
       ? {}
       : { limit: positiveNumber(values.limit, '--limit') }),
@@ -267,8 +277,17 @@ async function create(args: string[]): Promise<void> {
   print(result);
 }
 
+/** What each metadata command changes, besides a rename's title. */
+const METADATA_CHANGES = {
+  rename: {},
+  pin: { pinned: true },
+  unpin: { pinned: false },
+  delete: { deleted: true },
+  recover: { deleted: false },
+} as const;
+
 async function update(
-  command: 'rename' | 'pin' | 'unpin',
+  command: keyof typeof METADATA_CHANGES,
   args: string[],
 ): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -299,7 +318,7 @@ async function update(
         {
           base_metadata_revision: base,
           ...(title === undefined ? {} : { title }),
-          ...(command === 'rename' ? {} : { pinned: command === 'pin' }),
+          ...METADATA_CHANGES[command],
         },
         { idempotencyKey },
       ),

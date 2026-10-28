@@ -132,6 +132,7 @@ pub(crate) async fn list(
         q,
         sort,
         pinned,
+        deleted,
         limit,
         page_token,
     } = query;
@@ -147,6 +148,7 @@ pub(crate) async fn list(
     let query = ListQuery {
         search,
         pinned,
+        deleted: deleted.unwrap_or(false),
         order: match sort.unwrap_or(ListSort::Updated) {
             ListSort::Updated => ListOrder::Updated,
             ListSort::Created => ListOrder::Created,
@@ -299,8 +301,8 @@ pub(crate) async fn update(
         .map(|title| title.parse())
         .transpose()
         .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
-    let change = MetadataChange::new(title, request.pinned)
-        .ok_or_else(|| ApiError::unprocessable("give a title, pinned, or both"))?;
+    let change = MetadataChange::new(title, request.pinned, request.deleted)
+        .ok_or_else(|| ApiError::unprocessable("give a title, pinned, or deleted"))?;
     let receipt = state
         .run(move |artifacts| artifacts.update(&actor, &key, &id, base, &change))
         .await?;
@@ -478,6 +480,7 @@ fn artifact_dto(record: &ArtifactRecord) -> Artifact {
         pinned: record.pinned,
         current_revision: record.current_revision.0,
         metadata_revision: record.metadata_revision.0,
+        deleted_at_ms: record.deleted_at.map(|time| time.0),
         created_at_ms: record.created_at.0,
         updated_at_ms: record.updated_at.0,
     }

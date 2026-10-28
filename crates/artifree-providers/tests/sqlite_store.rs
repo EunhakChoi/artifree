@@ -93,6 +93,7 @@ fn create(
         kind: ArtifactKind::App,
         title: &title,
         package: &package(&[("index.html", "<h1>v1</h1>"), ("style.css", "h1{}")]),
+        source: None,
     })
 }
 
@@ -687,13 +688,14 @@ fn a_version_1_database_gains_the_feed_and_metadata_and_keeps_its_data() -> Test
         base: MetadataRevision(1),
         title: Some(&parsed("New")),
         pinned: None,
+        deleted: None,
     })?;
     assert_eq!(receipt.artifact.metadata_revision, MetadataRevision(2));
     assert_eq!(
         feed(&store, &owner, 0, 100)?,
         (vec![(1, ChangeKind::MetadataUpdated, 2)], 1)
     );
-    assert_eq!(user_version(&db)?, 4);
+    assert_eq!(user_version(&db)?, 5);
     Ok(())
 }
 
@@ -751,6 +753,7 @@ fn a_version_2_database_keeps_its_feed_head_and_its_request_keys() -> TestResult
         kind: ArtifactKind::App,
         title: &parsed("Old"),
         package: &package(&[("index.html", "<h1>old</h1>")]),
+        source: None,
     })?;
     assert_eq!(replayed.delivery, Delivery::Replayed);
     assert_eq!(replayed.artifact.current_revision, SourceRevision(1));
@@ -772,7 +775,7 @@ fn a_version_2_database_keeps_its_feed_head_and_its_request_keys() -> TestResult
         feed(&store, &owner, 2, 100)?,
         (vec![(6, ChangeKind::Revised, 3)], 6)
     );
-    assert_eq!(user_version(&db)?, 4);
+    assert_eq!(user_version(&db)?, 5);
     Ok(())
 }
 
@@ -795,6 +798,7 @@ fn update(
         base: MetadataRevision(base),
         title: title.as_ref(),
         pinned,
+        deleted: None,
     })
 }
 
@@ -927,6 +931,7 @@ fn listed(
             owner,
             search,
             pinned,
+            deleted: false,
             order,
             after,
             limit,
@@ -959,6 +964,7 @@ fn listing_fixture(
             kind: ArtifactKind::App,
             title: &parsed(title),
             package: &package(&[("index.html", "<h1>x</h1>")]),
+            source: None,
         })?;
         ids.push(receipt.artifact.id);
     }
@@ -1068,6 +1074,7 @@ fn list_pages_continue_after_the_last_position_through_a_tie() -> TestResult {
             owner: &owner,
             search: None,
             pinned: None,
+            deleted: false,
             order: ListOrder::Updated,
             after: after.as_ref(),
             limit: 1,
@@ -1147,7 +1154,182 @@ fn commit_times_follow_commit_order_after_the_clock_was_set_back() -> TestResult
             ["Renamed", "Old"],
             "version {version}"
         );
-        assert_eq!(user_version(&db)?, 4);
+        assert_eq!(user_version(&db)?, 5);
     }
+    Ok(())
+}
+
+/// Moves `created` to the trash, or takes it out.
+fn trash(
+    store: &SqliteStore,
+    created: &CommitReceipt,
+    request_key: &RequestKey,
+    base: u64,
+    deleted: bool,
+) -> Result<MetadataReceipt, StoreError> {
+    store.update_metadata(MetadataUpdate {
+        request: RequestIdentity {
+            actor: &created.artifact.owner,
+            key: request_key,
+            fingerprint: RequestFingerprint(fingerprint_of(&format!("deleted {deleted}"))),
+        },
+        artifact: &created.artifact.id,
+        base: MetadataRevision(base),
+        title: None,
+        pinned: None,
+        deleted: Some(deleted),
+    })
+}
+
+/// Titles of the owner's artifacts in the trash, or of the others.
+fn listed_in(
+    store: &SqliteStore,
+    owner: &ActorId,
+    deleted: bool,
+) -> Result<Vec<String>, StoreError> {
+    Ok(store
+        .list_artifacts(ArtifactListing {
+            owner,
+            search: None,
+            pinned: None,
+            deleted,
+            order: ListOrder::Updated,
+            after: None,
+            limit: 10,
+        })?
+        .into_iter()
+        .map(|record| record.title.as_str().to_owned())
+        .collect())
+}
+
+#[test]
+fn an_artifact_in_the_trash_takes_only_its_recovery_and_replays() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("create"), 1)?;
+    let saved = commit(&store, &created, &key("save"), 1, "<h1>v2</h1>")?;
+    let deleted = trash(&store, &created, &key("delete"), 1, true)?;
+    let deleted_at = deleted.artifact.deleted_at.ok_or("a time in the trash")?;
+    assert_eq!(deleted.artifact.metadata_revision, MetadataRevision(2));
+    assert_eq!(
+        store
+            .artifact(&created.artifact.id)?
+            .ok_or("kept")?
+            .deleted_at,
+        Some(deleted_at)
+    );
+    assert_eq!(listed_in(&store, &owner, false)?, Vec::<String>::new());
+    assert_eq!(listed_in(&store, &owner, true)?, ["Demo"]);
+
+    // Nothing but a recovery reaches it, and nothing is written.
+    assert_eq!(
+        commit(&store, &created, &key("save-2"), 2, "<h1>v3</h1>").err(),
+        Some(StoreError::NotFound)
+    );
+    assert_eq!(
+        update(&store, &created, &key("rename"), 2, Some("Renamed"), None).err(),
+        Some(StoreError::NotFound)
+    );
+    assert_eq!(
+        trash(&store, &created, &key("delete-2"), 2, true).err(),
+        Some(StoreError::NotFound)
+    );
+    let copy = store.create_artifact(NewArtifact {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("copy"),
+            fingerprint: RequestFingerprint([9; 32]),
+        },
+        kind: ArtifactKind::App,
+        title: &parsed("Demo (Copy)"),
+        package: &package(&[("index.html", "<h1>v2</h1>")]),
+        source: Some(&created.artifact.id),
+    });
+    assert_eq!(copy.err(), Some(StoreError::NotFound));
+    assert_eq!(listed_in(&store, &owner, false)?, Vec::<String>::new());
+
+    // Retries of earlier requests still replay.
+    let resaved = commit(&store, &created, &key("save"), 1, "<h1>v2</h1>")?;
+    assert_eq!(
+        (resaved.delivery, resaved.revision.revision),
+        (Delivery::Replayed, saved.revision.revision)
+    );
+    assert_eq!(
+        trash(&store, &created, &key("delete"), 1, true)?.delivery,
+        Delivery::Replayed
+    );
+
+    // A recovery is conditional like any metadata update.
+    assert_eq!(
+        trash(&store, &created, &key("recover-stale"), 1, false).err(),
+        Some(StoreError::MetadataConflict {
+            current: MetadataRevision(2)
+        })
+    );
+    let recovered = trash(&store, &created, &key("recover"), 2, false)?;
+    assert_eq!(recovered.artifact.deleted_at, None);
+    assert_eq!(recovered.artifact.metadata_revision, MetadataRevision(3));
+    assert_eq!(listed_in(&store, &owner, false)?, ["Demo"]);
+    // The delete's replay reports the artifact as of its request.
+    assert_eq!(
+        trash(&store, &created, &key("delete"), 1, true)?
+            .artifact
+            .deleted_at,
+        Some(deleted_at)
+    );
+    commit(&store, &created, &key("save-3"), 2, "<h1>v3</h1>")?;
+    assert_eq!(
+        feed(&store, &owner, 0, 100)?,
+        (
+            vec![
+                (1, ChangeKind::Created, 1),
+                (2, ChangeKind::Revised, 2),
+                (3, ChangeKind::Deleted, 2),
+                (4, ChangeKind::Recovered, 2),
+                (5, ChangeKind::Revised, 3),
+            ],
+            5
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn a_delete_that_also_renames_is_recorded_as_a_delete() -> TestResult {
+    let db = TempDb::new();
+    let store = SqliteStore::open(&db.path())?;
+    let owner = actor("owner");
+    let created = create(&store, &owner, &key("create"), 1)?;
+    let title: Title = parsed("Gone");
+    let receipt = store.update_metadata(MetadataUpdate {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("delete"),
+            fingerprint: RequestFingerprint([3; 32]),
+        },
+        artifact: &created.artifact.id,
+        base: MetadataRevision(1),
+        title: Some(&title),
+        pinned: Some(true),
+        deleted: Some(true),
+    })?;
+    assert_eq!(metadata(&receipt.artifact), ("Gone", true, 2, 1));
+    assert!(receipt.artifact.deleted_at.is_some());
+    // Taking out an artifact that is not in the trash writes nothing.
+    let other = create(&store, &owner, &key("other"), 2)?;
+    let kept = trash(&store, &other, &key("recover"), 1, false)?;
+    assert_eq!(kept.artifact.metadata_revision, MetadataRevision(1));
+    assert_eq!(
+        feed(&store, &owner, 0, 100)?,
+        (
+            vec![
+                (1, ChangeKind::Created, 1),
+                (2, ChangeKind::Deleted, 1),
+                (3, ChangeKind::Created, 1),
+            ],
+            3
+        )
+    );
     Ok(())
 }

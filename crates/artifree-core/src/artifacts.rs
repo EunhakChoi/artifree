@@ -106,18 +106,23 @@ impl From<StoreError> for ArtifactError {
     }
 }
 
-/// A change to an artifact's title, pin, or both.
+/// A change to an artifact's title, pin, trash state, or several of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataChange {
     title: Option<Title>,
     pinned: Option<bool>,
+    deleted: Option<bool>,
 }
 
 impl MetadataChange {
-    /// A change of the given fields, or `None` when it names neither.
+    /// A change of the given fields, or `None` when it names none.
     #[must_use]
-    pub fn new(title: Option<Title>, pinned: Option<bool>) -> Option<Self> {
-        (title.is_some() || pinned.is_some()).then_some(Self { title, pinned })
+    pub fn new(title: Option<Title>, pinned: Option<bool>, deleted: Option<bool>) -> Option<Self> {
+        (title.is_some() || pinned.is_some() || deleted.is_some()).then_some(Self {
+            title,
+            pinned,
+            deleted,
+        })
     }
 }
 
@@ -164,6 +169,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             kind,
             title,
             package,
+            source: None,
         })?;
         Ok(receipt)
     }
@@ -188,13 +194,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: SourceRevision,
         changes: Vec<FileChange>,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.authorized(actor, id)?;
-        // Revision 0 never exists; like a future base, it cannot be current.
-        if base.0 == 0 || base > record.current_revision {
-            return Err(ArtifactError::RevisionConflict {
-                current: record.current_revision,
-            });
-        }
+        let record = self.owned(actor, id)?;
+        prepared_base(&record, base)?;
         let mut hasher = Fingerprint::new("save");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -257,12 +258,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: SourceRevision,
         revision: SourceRevision,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.authorized(actor, id)?;
-        if base.0 == 0 || base > record.current_revision {
-            return Err(ArtifactError::RevisionConflict {
-                current: record.current_revision,
-            });
-        }
+        let record = self.owned(actor, id)?;
+        prepared_base(&record, base)?;
         let mut hasher = Fingerprint::new("restore");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -304,7 +301,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         revision: SourceRevision,
         title: Option<&Title>,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.authorized(actor, id)?;
+        let record = self.owned(actor, id)?;
         // Checked here, as for a read, so that a number past every revision
         // is missing rather than a storage failure.
         if revision.0 == 0 || revision > record.current_revision {
@@ -333,20 +330,25 @@ impl<S: ArtifactStore> ArtifactService<S> {
             kind: record.kind,
             title: &title,
             package: &package,
+            // The store refuses the copy if its source went to the trash.
+            source: Some(id),
         })?;
         Ok(receipt)
     }
 
-    /// Changes the title or pin of an accessible artifact, only if its
-    /// metadata is still at `base`. Source revisions are not touched. A
-    /// change to the values already stored writes nothing but the key.
+    /// Changes the title, pin, or trash state of an accessible artifact,
+    /// only if its metadata is still at `base`. Source revisions are not
+    /// touched. A change to the values already stored writes nothing but
+    /// the key. An artifact in the trash accepts only a change that takes it
+    /// out (decision 0013).
     ///
     /// Retrying with the same key and content returns the original receipt
     /// even after later changes.
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact,
+    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact, or
+    /// one in the trash that the change does not take out,
     /// [`ArtifactError::MetadataConflict`] when `base` is not current,
     /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
     pub fn update(
@@ -357,7 +359,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: MetadataRevision,
         change: &MetadataChange,
     ) -> Result<MetadataReceipt, ArtifactError> {
-        self.authorized(actor, id)?;
+        self.owned(actor, id)?;
         let mut hasher = Fingerprint::new("update");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -373,6 +375,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
             Some(false) => b"unpin",
             None => b"keep pin",
         });
+        hasher.field(match change.deleted {
+            Some(true) => b"delete",
+            Some(false) => b"recover",
+            None => b"keep trash state",
+        });
         let receipt = self.store.update_metadata(MetadataUpdate {
             request: RequestIdentity {
                 actor,
@@ -383,6 +390,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             base,
             title: change.title.as_ref(),
             pinned: change.pinned,
+            deleted: change.deleted,
         })?;
         Ok(receipt)
     }
@@ -425,6 +433,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             owner: actor,
             search: query.search.as_ref().map(listing::SearchText::as_str),
             pinned: query.pinned,
+            deleted: query.deleted,
             order: query.order,
             after: after.as_ref(),
             limit: limit + 1,
@@ -505,16 +514,40 @@ impl<S: ArtifactStore> ArtifactService<S> {
             .ok_or(ArtifactError::NotFound(Missing::Revision))
     }
 
+    /// An artifact the actor may read, outside the trash.
     fn authorized(
         &self,
         actor: &ActorId,
         id: &ArtifactId,
     ) -> Result<ArtifactRecord, ArtifactError> {
+        let record = self.owned(actor, id)?;
+        if record.deleted_at.is_some() {
+            return Err(ArtifactError::NotFound(Missing::Artifact));
+        }
+        Ok(record)
+    }
+
+    /// An artifact the actor may change, also in the trash. A write leaves
+    /// the trash to the store, which replays a retry of an earlier request
+    /// before it refuses anything else there (decision 0013).
+    fn owned(&self, actor: &ActorId, id: &ArtifactId) -> Result<ArtifactRecord, ArtifactError> {
         match self.store.artifact(id)? {
             Some(record) if policy::may_access(actor, &record) => Ok(record),
             _ => Err(ArtifactError::NotFound(Missing::Artifact)),
         }
     }
+}
+
+/// Refuses a base that cannot be current: revision 0 never exists, and a
+/// future one is not current either. An artifact in the trash is left to the
+/// store, so that a write there is missing, not a conflict.
+fn prepared_base(record: &ArtifactRecord, base: SourceRevision) -> Result<(), ArtifactError> {
+    if record.deleted_at.is_none() && (base.0 == 0 || base > record.current_revision) {
+        return Err(ArtifactError::RevisionConflict {
+            current: record.current_revision,
+        });
+    }
+    Ok(())
 }
 
 /// Length-prefixed SHA-256 over a request's operation and content, so that

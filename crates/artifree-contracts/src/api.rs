@@ -95,8 +95,9 @@ pub struct DuplicateArtifactRequest {
     pub title: Option<String>,
 }
 
-/// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source
-/// revisions are not touched.
+/// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or trash state, or
+/// several of them. Source revisions are not touched. An artifact in the
+/// trash accepts only a body with `deleted: false`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateArtifactRequest {
@@ -109,6 +110,10 @@ pub struct UpdateArtifactRequest {
     /// Whether the artifact is pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    /// `true` moves the artifact to the trash, where it cannot be read or
+    /// changed until `false` takes it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
 }
 
 /// Source model family of an artifact. Only `app` can be created by this
@@ -145,9 +150,12 @@ pub struct Artifact {
     /// Latest committed revision when this metadata was produced; see
     /// [`CommitResponse::artifact`] for replays.
     pub current_revision: u64,
-    /// Version of the title and pin, starting at 1. It changes only when
-    /// they change, independently of `current_revision`.
+    /// Version of the title, pin, and trash state, starting at 1. It changes
+    /// only when they change, independently of `current_revision`.
     pub metadata_revision: u64,
+    /// When the artifact was moved to the trash, in Unix milliseconds, or
+    /// `null` outside it.
+    pub deleted_at_ms: Option<i64>,
     /// Creation time in Unix milliseconds.
     pub created_at_ms: i64,
     /// Time of the latest source revision in Unix milliseconds; metadata
@@ -260,11 +268,14 @@ pub struct ListArtifactsQuery {
     /// Only pinned (`true`) or only unpinned (`false`) artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    /// `true` lists the artifacts in the trash instead of the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
     /// Page size, 1-500; 500 when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
     /// `next_page_token` of the previous page, with the same `q`, `sort`,
-    /// and `pinned`.
+    /// `pinned`, and `deleted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_token: Option<String>,
 }
@@ -313,6 +324,11 @@ pub enum ChangeKind {
     Revised,
     /// The title or pin changed; no source revision was committed.
     MetadataUpdated,
+    /// The artifact was moved to the trash; reading it fails until it is
+    /// recovered.
+    Deleted,
+    /// The artifact was taken out of the trash.
+    Recovered,
 }
 
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a

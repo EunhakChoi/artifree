@@ -176,8 +176,11 @@ data that may have been replaced
 ([0011](decisions/0011-web-history-and-restore.md)). A05 duplicates a
 revision's files into a new artifact with its own history through the API,
 MCP, client, CLI, and web workspace
-([0012](decisions/0012-duplicate-artifacts.md)). The next slice is A06,
-deleting artifacts and restoring them from a trash.
+([0012](decisions/0012-duplicate-artifacts.md)). A06a deletes artifacts to
+a trash and recovers them through the API, MCP, client, and CLI, as a
+conditional metadata change that every read and write of a deleted artifact
+then refuses ([0013](decisions/0013-deleting-artifacts-and-the-trash.md)).
+The next slice is A06b, the same in the web workspace.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

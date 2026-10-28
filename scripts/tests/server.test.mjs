@@ -382,6 +382,56 @@ test('CLI restores and duplicates a revision byte for byte', async () => {
   }
 });
 
+test('CLI deletes to the trash, lists it, and recovers', async () => {
+  const server = await startServer(binary, dataDirectory('cli-trash'));
+  try {
+    const site = await freshDirectory('cli-trash-site');
+    await writeFile(join(site, 'index.html'), '<h1>kept</h1>');
+    const id = json(cli(server, ['create', '--title', 'Trash', '--dir', site]))
+      .artifact.id;
+    const del = ['delete', id, '--base-metadata', '1'];
+    const key = ['--idempotency-key', 'cli-delete-key-1'];
+    const deleted = json(cli(server, [...del, ...key]));
+    assert.equal(deleted.artifact.metadata_revision, 2);
+    assert.equal(typeof deleted.artifact.deleted_at_ms, 'number');
+    assert.equal(json(cli(server, [...del, ...key])).replayed, true);
+
+    // Every other command finds it missing; the trash lists it.
+    for (const args of [
+      ['show', id],
+      ['cat', id, 'index.html'],
+      ['rename', id, 'Gone', '--base-metadata', '2'],
+    ]) {
+      const refused = cli(server, args);
+      assert.equal(refused.status, 1, args.join(' '));
+      assert.match(refused.stderr, /^error\[not_found\]/, args.join(' '));
+    }
+    assert.deepEqual(json(cli(server, ['list'])).artifacts, []);
+    const trash = json(cli(server, ['list', '--deleted'])).artifacts;
+    assert.deepEqual(
+      trash.map((artifact) => [artifact.id, artifact.metadata_revision]),
+      [[id, 2]],
+    );
+
+    const recovered = json(
+      cli(server, ['recover', id, '--base-metadata', '2']),
+    );
+    assert.equal(recovered.artifact.deleted_at_ms, null);
+    const bytes = cli(server, ['cat', id, 'index.html']);
+    assert.equal(bytes.stdout, '<h1>kept</h1>');
+    for (const args of [
+      ['delete', id],
+      ['recover', id, 'extra', '--base-metadata', '3'],
+    ]) {
+      const refused = cli(server, args);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stdout, '', args.join(' '));
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
 test('CLI uploads text that JSON escaping would inflate within the body limit', async () => {
   // Two 4 MiB files are within the package limits, but escaped as JSON text
   // (NUL becomes \u0000) they would exceed the request body limit.
