@@ -6,16 +6,24 @@ import {
   encodeFile,
   newIdempotencyKey,
 } from '@artifree/client';
-import type { FileChange } from '@artifree/contracts';
+import type {
+  Artifact,
+  FileChange,
+  ListArtifactsQuery,
+} from '@artifree/contracts';
 import { readDirectory, readNamedFile, readRegularFile } from './files.js';
 
 export const ARTIFACT_HELP = `Usage:
-  artifree artifact list
+  artifree artifact list [--search <text>] [--sort updated|created]
+      [--pinned | --unpinned] [--limit <n>] [--page-token <token>]
   artifree artifact show <id>
   artifree artifact history <id>
   artifree artifact create --title <title> (--dir <dir> | --file <path>...)
   artifree artifact save <id> --base <revision>
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
+  artifree artifact rename <id> <title> --base-metadata <n>
+  artifree artifact pin <id> --base-metadata <n>
+  artifree artifact unpin <id> --base-metadata <n>
   artifree artifact cat <id> <package-path> [--revision <n>]
   artifree artifact preview <id> [--revision <n>]
 
@@ -24,7 +32,12 @@ Connection:
   --token-file <path>    Access token file [env ARTIFREE_TOKEN_FILE]
                          ARTIFREE_TOKEN may hold the token itself.
 
-create and save accept --idempotency-key <key>. Without it a new key is
+list prints every matching artifact, reading page after page, unless
+--limit or --page-token asks for one page; that page carries next_page_token
+when more follow. rename, pin, and unpin change metadata only and need the
+metadata_revision read with show (--base-metadata); they create no revision.
+
+create, save, rename, pin, and unpin accept --idempotency-key <key>. Without it a new key is
 generated and reported on stderr if the outcome is unknown; retry with that key
 to get the original result instead of a duplicate. save --dir replaces the
 package with the directory's files (hidden entries skipped) and deletes
@@ -58,7 +71,7 @@ async function connect(values: {
   return new ArtifreeClient({ baseUrl, accessToken });
 }
 
-function revisionNumber(value: string | undefined, flag: string): number {
+function positiveNumber(value: string | undefined, flag: string): number {
   const number = Number(value);
   if (value === undefined || !Number.isSafeInteger(number) || number < 1)
     throw new UsageError(`${flag} must be a positive whole number.`);
@@ -96,6 +109,10 @@ export async function runArtifact(args: string[]): Promise<void> {
       return create(rest);
     case 'save':
       return save(rest);
+    case 'rename':
+    case 'pin':
+    case 'unpin':
+      return update(command, rest);
     case 'cat':
       return cat(rest);
     case 'preview':
@@ -110,13 +127,53 @@ export async function runArtifact(args: string[]): Promise<void> {
 async function list(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
-    options: connectionOptions,
+    options: {
+      ...connectionOptions,
+      search: { type: 'string' },
+      sort: { type: 'string' },
+      pinned: { type: 'boolean' },
+      unpinned: { type: 'boolean' },
+      limit: { type: 'string' },
+      'page-token': { type: 'string' },
+    },
     allowPositionals: true,
     strict: true,
   });
   single(positionals, []);
+  if (values.pinned === true && values.unpinned === true)
+    throw new UsageError('Use --pinned or --unpinned, not both.');
+  const { sort } = values;
+  if (sort !== undefined && sort !== 'updated' && sort !== 'created')
+    throw new UsageError('--sort must be updated or created.');
+  const query: ListArtifactsQuery = {
+    ...(values.search === undefined ? {} : { q: values.search }),
+    ...(sort === undefined ? {} : { sort }),
+    ...(values.pinned === true ? { pinned: true } : {}),
+    ...(values.unpinned === true ? { pinned: false } : {}),
+    ...(values.limit === undefined
+      ? {}
+      : { limit: positiveNumber(values.limit, '--limit') }),
+    ...(values['page-token'] === undefined
+      ? {}
+      : { page_token: values['page-token'] }),
+  };
   const client = await connect(values);
-  print({ artifacts: await client.listArtifacts() });
+  if (query.limit !== undefined || query.page_token !== undefined) {
+    print(await client.listArtifacts(query));
+    return;
+  }
+  // Without paging options, print the whole list as before pages existed.
+  const artifacts: Artifact[] = [];
+  let page = await client.listArtifacts(query);
+  artifacts.push(...page.artifacts);
+  while (page.next_page_token !== undefined && page.next_page_token !== null) {
+    page = await client.listArtifacts({
+      ...query,
+      page_token: page.next_page_token,
+    });
+    artifacts.push(...page.artifacts);
+  }
+  print({ artifacts });
 }
 
 async function show(
@@ -199,6 +256,46 @@ async function create(args: string[]): Promise<void> {
   print(result);
 }
 
+async function update(
+  command: 'rename' | 'pin' | 'unpin',
+  args: string[],
+): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      ...connectionOptions,
+      'base-metadata': { type: 'string' },
+      'idempotency-key': { type: 'string' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = '', title] =
+    command === 'rename'
+      ? single(positionals, ['id', 'title'])
+      : single(positionals, ['id']);
+  if (values['base-metadata'] === undefined)
+    throw new UsageError(
+      `${command} requires --base-metadata <n>; read metadata_revision with artifree artifact show <id>.`,
+    );
+  const base = positiveNumber(values['base-metadata'], '--base-metadata');
+  const client = await connect(values);
+  const result = await mutate(
+    values['idempotency-key'] ?? newIdempotencyKey(),
+    (idempotencyKey) =>
+      client.updateArtifact(
+        id,
+        {
+          base_metadata_revision: base,
+          ...(title === undefined ? {} : { title }),
+          ...(command === 'rename' ? {} : { pinned: command === 'pin' }),
+        },
+        { idempotencyKey },
+      ),
+  );
+  print(result);
+}
+
 function splitPut(value: string): [string, string] {
   const separator = value.indexOf('=');
   if (separator <= 0 || separator === value.length - 1)
@@ -227,7 +324,7 @@ async function save(args: string[]): Promise<void> {
     throw new UsageError(
       'save requires --base <revision>; read current_revision with artifree artifact show <id>.',
     );
-  const base = revisionNumber(values.base, '--base');
+  const base = positiveNumber(values.base, '--base');
   const explicit = values.put !== undefined || values.delete !== undefined;
   if (explicit === (values.dir !== undefined))
     throw new UsageError('save requires either --dir or --put/--delete.');
@@ -291,7 +388,7 @@ async function cat(args: string[]): Promise<void> {
   const revision =
     values.revision === undefined
       ? (await client.getArtifact(id)).current_revision
-      : revisionNumber(values.revision, '--revision');
+      : positiveNumber(values.revision, '--revision');
   process.stdout.write(await client.readFile(id, revision, path));
 }
 
@@ -307,6 +404,6 @@ async function preview(args: string[]): Promise<void> {
   const revision =
     values.revision === undefined
       ? (await client.getArtifact(id)).current_revision
-      : revisionNumber(values.revision, '--revision');
+      : positiveNumber(values.revision, '--revision');
   print(await client.createPreview(id, revision));
 }

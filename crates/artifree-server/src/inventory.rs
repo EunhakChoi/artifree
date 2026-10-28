@@ -29,7 +29,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/cli",
         ComponentStatus::Implemented,
-        "Artifact create, list, show, save, cat, and preview over HTTP; build inventory.",
+        "Artifact create, list (search, order, pages), show, rename, pin, save, cat, and preview over HTTP; build inventory.",
     ),
     (
         "runtime",
@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions, retry keys, pinned reads; publish/restore/fork planned.",
+        "Create, conditional revisions and metadata updates, retry keys, pinned reads, list queries; publish/restore/fork planned.",
     ),
     (
         "policy",

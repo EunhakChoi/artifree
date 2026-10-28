@@ -134,6 +134,15 @@ fn post(path: &str, key: Option<&str>, body: &Value) -> Result<Request<Body>, ax
     builder.body(Body::from(body.to_string()))
 }
 
+fn patch(path: &str, key: Option<&str>, body: &Value) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder =
+        authorized(Request::patch(path)).header(header::CONTENT_TYPE, "application/json");
+    if let Some(key) = key {
+        builder = builder.header("idempotency-key", key);
+    }
+    builder.body(Body::from(body.to_string()))
+}
+
 fn page(html: &str) -> Value {
     json!({
         "title": "Demo",
@@ -181,6 +190,7 @@ async fn every_api_route_requires_the_bearer_token() -> TestResult {
         ("GET", "/v1/artifacts".to_owned()),
         ("POST", "/v1/artifacts".to_owned()),
         ("GET", format!("/v1/artifacts/{id}")),
+        ("PATCH", format!("/v1/artifacts/{id}")),
         (
             "GET",
             format!("/v1/artifacts/{id}/revisions/1/files/index.html"),
@@ -246,7 +256,7 @@ async fn unsupported_methods_and_routes_return_contract_errors() -> TestResult {
     let id = created_id(&harness).await?;
     for (method, path, allow) in [
         ("DELETE", "/v1/artifacts".to_owned(), "GET,HEAD,POST"),
-        ("PUT", format!("/v1/artifacts/{id}"), "GET,HEAD"),
+        ("PUT", format!("/v1/artifacts/{id}"), "GET,HEAD,PATCH"),
         (
             "GET",
             format!("/v1/artifacts/{id}/revisions/1/previews"),
@@ -680,5 +690,183 @@ async fn preview_of_a_future_revision_is_not_issued() -> TestResult {
         )?)
         .await?;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn metadata_updates_rename_and_pin_without_a_revision() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let path = format!("/v1/artifacts/{id}");
+    let rename = json!({ "base_metadata_revision": 1, "title": "Renamed" });
+    let renamed = harness
+        .send(patch(&path, Some("meta-key-1"), &rename)?)
+        .await?;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", error_code(&renamed));
+    let body = renamed.json()?;
+    assert_eq!(body["replayed"], false);
+    assert_eq!(body["artifact"]["title"], "Renamed");
+    assert_eq!(body["artifact"]["metadata_revision"], 2);
+    assert_eq!(body["artifact"]["current_revision"], 1);
+    let retried = harness
+        .send(patch(&path, Some("meta-key-1"), &rename)?)
+        .await?;
+    assert_eq!(retried.json()?["replayed"], true);
+    assert_eq!(retried.json()?["artifact"], body["artifact"]);
+
+    let stale = harness
+        .send(patch(
+            &path,
+            Some("meta-key-2"),
+            &json!({ "base_metadata_revision": 1, "pinned": true }),
+        )?)
+        .await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&stale), "metadata_conflict");
+    assert_eq!(stale.json()?["error"]["current_metadata_revision"], 2);
+    assert_eq!(stale.json()?["error"].get("current_revision"), None);
+
+    for (body, status) in [
+        (
+            json!({ "base_metadata_revision": 2 }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({ "base_metadata_revision": 2, "title": " padded" }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({ "base_metadata_revision": 2, "title": "x", "kind": "app" }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let reply = harness
+            .send(patch(&path, Some("meta-key-3"), &body)?)
+            .await?;
+        assert_eq!(reply.status, status, "{body}");
+        assert_eq!(error_code(&reply), "invalid_request", "{body}");
+    }
+    let keyless = harness
+        .send(patch(
+            &path,
+            None,
+            &json!({ "base_metadata_revision": 2, "pinned": true }),
+        )?)
+        .await?;
+    assert_eq!(keyless.status, StatusCode::BAD_REQUEST);
+
+    // Metadata changes create no revision and do not conflict with saves.
+    let saved = harness
+        .send(post(
+            &format!("{path}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    assert_eq!(saved.json()?["artifact"]["title"], "Renamed");
+    let history = harness
+        .send(get(&format!("{path}/revisions"))?)
+        .await?
+        .json()?;
+    assert_eq!(history["revisions"].as_array().map(Vec::len), Some(2));
+    let current = harness.send(get(&path)?).await?.json()?;
+    assert_eq!(current["title"], "Renamed");
+    assert_eq!(current["pinned"], false);
+    assert_eq!(current["metadata_revision"], 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lists_search_filter_and_page_with_tokens() -> TestResult {
+    let harness = Harness::new();
+    let mut ids = Vec::new();
+    for (index, title) in ["One plan", "Two", "Three plan"].into_iter().enumerate() {
+        // Distinct times make the order by time unambiguous.
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        let mut body = page("<h1>x</h1>");
+        body["title"] = json!(title);
+        let reply = harness.create(&format!("list-key-{index}"), &body).await?;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", error_code(&reply));
+        ids.push(
+            reply.json()?["artifact"]["id"]
+                .as_str()
+                .ok_or("id")?
+                .to_owned(),
+        );
+    }
+    let titles = |body: &Value| -> Vec<String> {
+        body["artifacts"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["title"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // Without parameters, the list is what callers received before pages.
+    let all = harness.send(get("/v1/artifacts")?).await?.json()?;
+    assert_eq!(titles(&all).len(), 3);
+    assert_eq!(all.get("next_page_token"), None);
+
+    let first = harness.send(get("/v1/artifacts?limit=2")?).await?.json()?;
+    let token = first["next_page_token"].as_str().ok_or("a next page")?;
+    let second = harness
+        .send(get(&format!("/v1/artifacts?limit=2&page_token={token}"))?)
+        .await?
+        .json()?;
+    assert_eq!(second.get("next_page_token"), None);
+    assert_eq!(
+        [titles(&first), titles(&second)].concat(),
+        titles(&all),
+        "pages continue the same order"
+    );
+
+    let plans = harness.send(get("/v1/artifacts?q=PLAN")?).await?.json()?;
+    assert_eq!(titles(&plans), ["Three plan", "One plan"]);
+    let created = harness
+        .send(get("/v1/artifacts?sort=created")?)
+        .await?
+        .json()?;
+    assert_eq!(titles(&created), ["Three plan", "Two", "One plan"]);
+    let pinned = harness
+        .send(patch(
+            &format!("/v1/artifacts/{}", ids[1]),
+            Some("pin-key-1"),
+            &json!({ "base_metadata_revision": 1, "pinned": true }),
+        )?)
+        .await?;
+    assert_eq!(pinned.status, StatusCode::OK, "{}", error_code(&pinned));
+    let only_pinned = harness
+        .send(get("/v1/artifacts?pinned=true")?)
+        .await?
+        .json()?;
+    assert_eq!(titles(&only_pinned), ["Two"]);
+
+    let filtered = harness
+        .send(get("/v1/artifacts?q=plan&limit=1")?)
+        .await?
+        .json()?;
+    let plan_token = filtered["next_page_token"].as_str().ok_or("a next page")?;
+    for query in [
+        "limit=0",
+        "limit=501",
+        "limit=x",
+        "sort=title",
+        "pinned=yes",
+        "q=",
+        "unknown=1",
+        "page_token=garbage",
+        &format!("page_token={plan_token}"),
+        &format!("q=plan&sort=created&page_token={plan_token}"),
+    ] {
+        let reply = harness
+            .send(get(&format!("/v1/artifacts?{query}"))?)
+            .await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(error_code(&reply), "invalid_request", "{query}");
+    }
     Ok(())
 }

@@ -7,7 +7,7 @@ import { runArtifact, UsageError } from './artifact.js';
 const help = `Artifree — open artifacts, any agent.
 
 Usage:
-  artifree artifact <command>  Create, read, save, and preview artifacts
+  artifree artifact <command>  Create, read, save, rename, pin, and preview artifacts
   artifree describe [--json]  Inspect the build-time module inventory
   artifree --version         Print the version
   artifree --help            Show this help
@@ -92,6 +92,10 @@ try {
     console.error(`error[${error.code}]: ${error.message}`);
     if (error.currentRevision !== undefined)
       console.error(`current_revision=${error.currentRevision}`);
+    if (error.currentMetadataRevision !== undefined)
+      console.error(
+        `current_metadata_revision=${error.currentMetadataRevision}`,
+      );
     process.exitCode = 1;
   } else if (isUsageError(error)) {
     console.error(error instanceof Error ? error.message : 'Invalid usage.');

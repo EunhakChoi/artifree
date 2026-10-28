@@ -1,11 +1,15 @@
 import type {
   Artifact,
+  ArtifactList,
   CommitResponse,
   CreateArtifactRequest,
   FileUpload,
+  ListArtifactsQuery,
   Preview,
   Revision,
   SaveRevisionRequest,
+  UpdateArtifactRequest,
+  UpdateArtifactResponse,
 } from '@artifree/contracts';
 import {
   type ChangeFeedEvent,
@@ -21,6 +25,7 @@ import {
   parseError,
   parsePreview,
   parseRevisionList,
+  parseUpdate,
 } from './responses.js';
 
 /** Connection settings for one Artifree API. */
@@ -125,10 +130,26 @@ export class ArtifreeClient {
       configuration.fetch ?? ((input, init) => fetch(input, init));
   }
 
-  async listArtifacts(options: ReadOptions = {}): Promise<Artifact[]> {
-    return this.json('GET', '/v1/artifacts', parseArtifactList, {
-      signal: options.signal,
-    });
+  /**
+   * One page of artifacts. Without a query it lists up to 500, most
+   * recently updated first; pass `next_page_token` back as `page_token`,
+   * with the same filters and order, for the next page.
+   */
+  async listArtifacts(
+    query: ListArtifactsQuery = {},
+    options: ReadOptions = {},
+  ): Promise<ArtifactList> {
+    const parameters = new URLSearchParams();
+    for (const [name, value] of Object.entries(query))
+      if (value !== undefined && value !== null)
+        parameters.set(name, String(value));
+    const search = parameters.toString();
+    return this.json(
+      'GET',
+      search === '' ? '/v1/artifacts' : `/v1/artifacts?${search}`,
+      parseArtifactList,
+      { signal: options.signal },
+    );
   }
 
   async getArtifact(id: string, options: ReadOptions = {}): Promise<Artifact> {
@@ -178,6 +199,25 @@ export class ArtifreeClient {
       {
         mutation: { body: request, idempotencyKey: options.idempotencyKey },
       },
+    );
+  }
+
+  /**
+   * Changes the title or pin prepared against
+   * `request.base_metadata_revision`, without committing a revision.
+   * Rejects with code `metadata_conflict` and `currentMetadataRevision`
+   * when another update won.
+   */
+  async updateArtifact(
+    id: string,
+    request: UpdateArtifactRequest,
+    options: MutationOptions,
+  ): Promise<UpdateArtifactResponse> {
+    return this.json(
+      'PATCH',
+      `/v1/artifacts/${encodeURIComponent(id)}`,
+      parseUpdate,
+      { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
     );
   }
 
@@ -333,6 +373,9 @@ export class ArtifreeClient {
       code: limited ? 'rate_limited' : failure.code,
       ...(typeof failure.current_revision === 'number'
         ? { currentRevision: failure.current_revision }
+        : {}),
+      ...(typeof failure.current_metadata_revision === 'number'
+        ? { currentMetadataRevision: failure.current_metadata_revision }
         : {}),
       ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });

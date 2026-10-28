@@ -81,6 +81,21 @@ const generatedApi = await compile(
     unreachableDefinitions: true,
   },
 );
+// Definitions the root does not reach, such as the list query, which is
+// not a body; the generator emits only what a schema reaches.
+const unreachable = ['ListArtifactsQuery'];
+const generatedParts = await Promise.all(
+  unreachable.map((name) =>
+    compile(
+      {
+        ...withoutRefDescriptions(apiSchema.$defs[name]),
+        $defs: withoutRefDescriptions(apiSchema.$defs),
+      },
+      name,
+      { bannerComment: '', style: { singleQuote: true, tabWidth: 2 } },
+    ),
+  ),
+);
 const outputs = new Map([
   [
     'contracts/generated/service-description.schema.json',
@@ -99,7 +114,10 @@ const outputs = new Map([
     `${JSON.stringify(inventory, null, 2)}\n`,
   ],
   ['packages/contracts/src/generated/schema.ts', generated],
-  ['packages/contracts/src/generated/api.ts', generatedApi],
+  [
+    'packages/contracts/src/generated/api.ts',
+    [generatedApi, ...generatedParts].join('\n'),
+  ],
   [
     'packages/contracts/src/generated/inventory.ts',
     `/* Generated build-time inventory; this is not live server health. */\nimport type { ServiceDescription } from './schema.js';\n\nexport const scaffoldDescription: ServiceDescription = ${JSON.stringify(inventory, null, 2)};\n`,

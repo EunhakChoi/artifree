@@ -23,12 +23,22 @@
           "$ref": "#/$defs/ArtifactKind",
           "description": "Source model family."
         },
+        "metadata_revision": {
+          "description": "Version of the title and pin, starting at 1. It changes only when\nthey change, independently of `current_revision`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pinned": {
+          "description": "Whether the owner pinned the artifact.",
+          "type": "boolean"
+        },
         "title": {
           "description": "Display title.",
           "type": "string"
         },
         "updated_at_ms": {
-          "description": "Time of the latest revision in Unix milliseconds.",
+          "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
           "format": "int64",
           "type": "integer"
         }
@@ -37,7 +47,9 @@
         "id",
         "kind",
         "title",
+        "pinned",
         "current_revision",
+        "metadata_revision",
         "created_at_ms",
         "updated_at_ms"
       ],
@@ -45,7 +57,7 @@
     },
     "ArtifactChange": {
       "additionalProperties": false,
-      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision. Retries that replay a commit, and failed commits, have none.\nIt names what to read again and carries no content.",
+      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata. Retries that replay a commit, failed\ncommits, and updates that changed nothing have none.\nIt names what to read again and carries no content.",
       "properties": {
         "artifact_id": {
           "description": "The changed artifact.",
@@ -64,8 +76,14 @@
           "description": "Opaque feed position of this change, also the event's `id`.",
           "type": "string"
         },
+        "metadata_revision": {
+          "description": "The metadata revision after the commit.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "revision": {
-          "description": "The revision the commit created.",
+          "description": "The revision the commit created, or the current one for\n`metadata_updated`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -76,6 +94,7 @@
         "artifact_id",
         "change",
         "revision",
+        "metadata_revision",
         "committed_at_ms"
       ],
       "type": "object"
@@ -120,11 +139,18 @@
       "description": "Response of `GET /v1/artifacts`.",
       "properties": {
         "artifacts": {
-          "description": "Accessible artifacts, most recently updated first.",
+          "description": "Accessible artifacts that match the query, in its order.",
           "items": {
             "$ref": "#/$defs/Artifact"
           },
           "type": "array"
+        },
+        "next_page_token": {
+          "description": "Pass as `page_token` to read the next page; absent on the last page.\nArtifacts updated while a caller pages by update time can appear\ntwice or be missed.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -143,6 +169,11 @@
         {
           "const": "revised",
           "description": "A revision was committed.",
+          "type": "string"
+        },
+        {
+          "const": "metadata_updated",
+          "description": "The title or pin changed; no source revision was committed.",
           "type": "string"
         }
       ]
@@ -216,6 +247,15 @@
           "$ref": "#/$defs/ErrorCode",
           "description": "Category for programmatic handling."
         },
+        "current_metadata_revision": {
+          "description": "The current metadata revision, present for `metadata_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "current_revision": {
           "description": "The current revision, present for `revision_conflict`.",
           "format": "uint64",
@@ -257,6 +297,11 @@
         {
           "const": "revision_conflict",
           "description": "The base revision is not current; reload and reapply the change.",
+          "type": "string"
+        },
+        {
+          "const": "metadata_conflict",
+          "description": "The base metadata revision is not current; reload and reapply the\nchange.",
           "type": "string"
         },
         {
@@ -391,6 +436,69 @@
       ],
       "type": "object"
     },
+    "ListArtifactsQuery": {
+      "additionalProperties": false,
+      "description": "Query parameters of `GET /v1/artifacts`, all optional. Without any, the\nresponse lists up to 500 artifacts, most recently updated first.",
+      "properties": {
+        "limit": {
+          "description": "Page size, 1-500; 500 when absent.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "page_token": {
+          "description": "`next_page_token` of the previous page, with the same `q`, `sort`,\nand `pinned`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pinned": {
+          "description": "Only pinned (`true`) or only unpinned (`false`) artifacts.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "q": {
+          "description": "Only artifacts whose title contains this text, 1-200 characters.\nASCII letters match regardless of case; other characters exactly.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListSort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The order."
+        }
+      },
+      "type": "object"
+    },
+    "ListSort": {
+      "description": "Order of `GET /v1/artifacts`. Ties are broken by identifier.",
+      "oneOf": [
+        {
+          "const": "updated",
+          "description": "The most recently updated source first, the default.",
+          "type": "string"
+        },
+        {
+          "const": "created",
+          "description": "The most recently created first.",
+          "type": "string"
+        }
+      ]
+    },
     "Preview": {
       "additionalProperties": false,
       "description": "A short-lived link that renders one pinned revision on the content origin.",
@@ -519,6 +627,55 @@
         "changes"
       ],
       "type": "object"
+    },
+    "UpdateArtifactRequest": {
+      "additionalProperties": false,
+      "description": "Body of `PATCH /v1/artifacts/{id}`: a new title, pin, or both. Source\nrevisions are not touched.",
+      "properties": {
+        "base_metadata_revision": {
+          "description": "The metadata revision this change was prepared against. The update\nfails with `metadata_conflict` unless it is still current.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pinned": {
+          "description": "Whether the artifact is pinned.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "New display title, 1-200 characters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "base_metadata_revision"
+      ],
+      "type": "object"
+    },
+    "UpdateArtifactResponse": {
+      "additionalProperties": false,
+      "description": "Response of `PATCH /v1/artifacts/{id}`.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/Artifact",
+          "description": "Artifact metadata as of the update this request identifies. On a\nreplay it can be older than the artifact's current state. An update\nto the values already stored returns them unchanged."
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key already applied it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "artifact",
+        "replayed"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://artifree.invalid/schemas/api-v1.json",
@@ -531,7 +688,13 @@
       "$ref": "#/$defs/SaveRevisionRequest"
     },
     {
+      "$ref": "#/$defs/UpdateArtifactRequest"
+    },
+    {
       "$ref": "#/$defs/CommitResponse"
+    },
+    {
+      "$ref": "#/$defs/UpdateArtifactResponse"
     },
     {
       "$ref": "#/$defs/Artifact"

@@ -8,16 +8,51 @@ import {
 } from 'react';
 import { cursorOf } from '@artifree/client';
 import type { ArtifreeClient, ChangeFeedEvent } from '@artifree/client';
+import type { Artifact } from '@artifree/contracts';
 import { usePageVisible } from './page-visibility';
 
 /** Whether commits made elsewhere reach this page. */
 export type FeedState =
   'connecting' | 'live' | 'reconnecting' | 'paused' | 'stopped';
 
-/** An artifact's revision as a list or a save reported it. */
-export interface ListedRevision {
-  readonly id: string;
+/**
+ * How far an artifact has changed: its content revision and its metadata
+ * revision, which advance independently (decision 0008).
+ */
+export interface Version {
   readonly revision: number;
+  readonly metadata: number;
+}
+
+/** Whether `version` has a change that `than` does not. */
+export function isNewer(version: Version, than: Version | undefined): boolean {
+  return (
+    than === undefined ||
+    version.revision > than.revision ||
+    version.metadata > than.metadata
+  );
+}
+
+/** The version an artifact's metadata names. */
+export function versionOf(artifact: Artifact): Version {
+  return {
+    revision: artifact.current_revision,
+    metadata: artifact.metadata_revision,
+  };
+}
+
+function latest(a: Version | undefined, b: Version): Version {
+  if (a === undefined) return b;
+  return {
+    revision: Math.max(a.revision, b.revision),
+    metadata: Math.max(a.metadata, b.metadata),
+  };
+}
+
+/** An artifact's version as a list or a save reported it. */
+export interface ListedVersion {
+  readonly id: string;
+  readonly version: Version;
 }
 
 /** What the page knows from the change feed. */
@@ -36,8 +71,8 @@ interface Knowledge {
   readonly resets: number;
   /** Advances on each change the page did not know of. */
   readonly news: number;
-  /** The newest revision known per artifact, in this epoch. */
-  readonly known: Readonly<Record<string, number>>;
+  /** The newest version known per artifact, in this epoch. */
+  readonly known: Readonly<Record<string, Version>>;
   /** Changes of a kind this client does not know, per artifact. */
   readonly unknown: Readonly<Record<string, number>>;
 }
@@ -47,7 +82,7 @@ type Learned =
   | {
       readonly type: 'listed';
       readonly epoch: number;
-      readonly revisions: readonly ListedRevision[];
+      readonly versions: readonly ListedVersion[];
     }
   | { readonly type: 'read anyway' };
 
@@ -70,8 +105,9 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
     case 'listed': {
       if (learned.epoch !== state.epoch) return state;
       let known = state.known;
-      for (const { id, revision } of learned.revisions)
-        if (revision > (known[id] ?? 0)) known = { ...known, [id]: revision };
+      for (const { id, version } of learned.versions)
+        if (isNewer(version, known[id]))
+          known = { ...known, [id]: latest(known[id], version) };
       return known === state.known ? state : { ...state, known };
     }
     case 'event': {
@@ -88,7 +124,12 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
           known: {},
           unknown: {},
         };
-      const { artifact_id: id, change, revision } = event.change;
+      const {
+        artifact_id: id,
+        change,
+        revision,
+        metadata_revision,
+      } = event.change;
       // A kind added after this client may change anything about it.
       if (change === 'unknown')
         return {
@@ -96,11 +137,12 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
           news: state.news + 1,
           unknown: { ...state.unknown, [id]: (state.unknown[id] ?? 0) + 1 },
         };
-      if (revision <= (state.known[id] ?? 0)) return state;
+      const version = { revision, metadata: metadata_revision };
+      if (!isNewer(version, state.known[id])) return state;
       return {
         ...state,
         news: state.news + 1,
-        known: { ...state.known, [id]: revision },
+        known: { ...state.known, [id]: latest(state.known[id], version) },
       };
     }
   }
@@ -109,8 +151,8 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
 /** What a connected page knows from the change feed, and when it may read. */
 export interface LiveWorkspace extends Knowledge {
   readonly feed: FeedState;
-  /** Records revisions from a list read in `epoch`; they are not news. */
-  readonly learn: (epoch: number, revisions: readonly ListedRevision[]) => void;
+  /** Records versions from a list read in `epoch`; they are not news. */
+  readonly learn: (epoch: number, versions: readonly ListedVersion[]) => void;
 }
 
 /**
@@ -138,8 +180,8 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
     return () => clearTimeout(timer);
   }, [visible, canRead]);
   const learnListed = useCallback(
-    (epoch: number, revisions: readonly ListedRevision[]) =>
-      learn({ type: 'listed', epoch, revisions }),
+    (epoch: number, versions: readonly ListedVersion[]) =>
+      learn({ type: 'listed', epoch, versions }),
     [],
   );
   return { ...state, feed, learn: learnListed };

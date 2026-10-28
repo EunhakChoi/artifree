@@ -79,22 +79,31 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 
 ## Tools
 
-| Tool              | Arguments                                                    | Result                             |
-| ----------------- | ------------------------------------------------------------ | ---------------------------------- |
-| `list_artifacts`  | none                                                         | `{ artifacts }`, newest first      |
-| `get_artifact`    | `artifact_id`                                                | artifact with `current_revision`   |
-| `create_artifact` | `title`, `files`, `idempotency_key`                          | `{ artifact, revision, replayed }` |
-| `save_revision`   | `artifact_id`, `base_revision`, `changes`, `idempotency_key` | `{ artifact, revision, replayed }` |
-| `list_revisions`  | `artifact_id`                                                | `{ revisions }`, newest first      |
-| `get_revision`    | `artifact_id`, `revision`                                    | one revision manifest              |
-| `read_file`       | `artifact_id`, `revision`, `path`                            | exact bytes as `utf8` or `base64`  |
-| `create_preview`  | `artifact_id`, `revision`                                    | `{ url, revision, expires_at_ms }` |
+| Tool              | Arguments                                                                           | Result                             |
+| ----------------- | ----------------------------------------------------------------------------------- | ---------------------------------- |
+| `list_artifacts`  | optional `q`, `sort`, `pinned`, `limit`, `page_token`                               | `{ artifacts, next_page_token? }`  |
+| `get_artifact`    | `artifact_id`                                                                       | artifact with `current_revision`   |
+| `create_artifact` | `title`, `files`, `idempotency_key`                                                 | `{ artifact, revision, replayed }` |
+| `save_revision`   | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                        | `{ artifact, revision, replayed }` |
+| `update_artifact` | `artifact_id`, `base_metadata_revision`, `title` and/or `pinned`, `idempotency_key` | `{ artifact, replayed }`           |
+| `list_revisions`  | `artifact_id`                                                                       | `{ revisions }`, newest first      |
+| `get_revision`    | `artifact_id`, `revision`                                                           | one revision manifest              |
+| `read_file`       | `artifact_id`, `revision`, `path`                                                   | exact bytes as `utf8` or `base64`  |
+| `create_preview`  | `artifact_id`, `revision`                                                           | `{ url, revision, expires_at_ms }` |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
 A file is `{ "path", "encoding": "utf8" | "base64", "content" }`. A change is
 `{ "op": "put", "path", "encoding", "content" }` or
 `{ "op": "delete", "path" }`; unchanged files carry over.
+
+`list_artifacts` returns the most recently updated first, or the newest first
+with `sort: "created"`, in pages of up to 500 (`limit`, default 500). Pass a
+returned `next_page_token` with the same `q`, `sort`, and `pinned` to read the
+next page. `update_artifact` renames or pins without creating a source
+revision; it fails with `metadata_conflict` and `current_metadata_revision`
+when `base_metadata_revision` is stale (decision
+[0008](decisions/0008-artifact-metadata-and-lists.md)).
 
 Limits: 256 files, 5 MiB per file, 25 MiB per package, and 36 MiB for the
 whole JSON request. Send binary data, or text with many control characters,
