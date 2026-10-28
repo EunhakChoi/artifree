@@ -16,7 +16,11 @@ import {
 } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { WriteOutcome, useRetryableWrite } from './retryable-write';
+import {
+  ReplacedNotice,
+  WriteOutcome,
+  useRetryableWrite,
+} from './retryable-write';
 
 /** Renames or pins one artifact (decision 0008). */
 function useMetadataUpdate(
@@ -44,6 +48,13 @@ interface MetadataActionsProps {
   onUpdated: (artifact: Artifact) => void;
   /** Called when another update won; the view reads the latest. */
   onConflict: () => void;
+  /** How often the server's data may have been replaced so far. */
+  resets: number;
+  /**
+   * Whether what is shown was read before the last possible replacement;
+   * it is read again, and nothing is sent meanwhile.
+   */
+  stale: boolean;
 }
 
 /**
@@ -55,6 +66,8 @@ export function MetadataActions({
   artifact,
   onUpdated,
   onConflict,
+  resets,
+  stale,
 }: MetadataActionsProps) {
   const pin = useMetadataUpdate(client, artifact.id, onUpdated, onConflict);
   return (
@@ -65,7 +78,7 @@ export function MetadataActions({
           variant="outline"
           size="sm"
           aria-pressed={artifact.pinned}
-          disabled={pin.state.status === 'sending'}
+          disabled={pin.state.status === 'sending' || stale}
           onClick={() =>
             void pin.write({
               base_metadata_revision: artifact.metadata_revision,
@@ -81,6 +94,8 @@ export function MetadataActions({
           artifact={artifact}
           onUpdated={onUpdated}
           onConflict={onConflict}
+          resets={resets}
+          stale={stale}
         />
       </div>
       {/* Once the page reads newer metadata, it shows what a lost update
@@ -103,6 +118,8 @@ function RenameDialog({
   artifact,
   onUpdated,
   onConflict,
+  resets,
+  stale,
 }: MetadataActionsProps) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState(artifact.title);
@@ -113,18 +130,22 @@ function RenameDialog({
   const [opened, setOpened] = useState<{
     base: number | undefined;
     title: string | undefined;
+    resets: number;
   }>({
     base: artifact.metadata_revision,
     title: artifact.title,
+    resets,
   });
   const rename = useMetadataUpdate(client, artifact.id, onUpdated, () => {
-    setOpened({ base: undefined, title: undefined });
+    setOpened((current) => ({ ...current, base: undefined, title: undefined }));
     onConflict();
   });
   const pending = rename.state.status === 'sending';
+  const replaced = opened.resets !== resets;
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (replaced) return;
     const base = opened.base ?? artifact.metadata_revision;
     setOpened((current) => ({ ...current, base }));
     const request = { base_metadata_revision: base, title: title.trim() };
@@ -142,13 +163,16 @@ function RenameDialog({
           setOpened({
             base: artifact.metadata_revision,
             title: artifact.title,
+            resets,
           });
           rename.clear();
         }
         setOpen(next);
       }}
     >
-      <DialogTrigger render={<Button variant="outline" size="sm" />}>
+      <DialogTrigger
+        render={<Button variant="outline" size="sm" disabled={stale} />}
+      >
         <PencilIcon data-icon="inline-start" aria-hidden="true" />
         Rename
       </DialogTrigger>
@@ -180,6 +204,7 @@ function RenameDialog({
               />
             </Field>
           </FieldGroup>
+          {replaced ? <ReplacedNotice /> : null}
           <WriteOutcome
             state={rename.state}
             action="rename"
@@ -195,6 +220,7 @@ function RenameDialog({
               type="submit"
               disabled={
                 pending ||
+                replaced ||
                 title.trim() === '' ||
                 title.trim() === (opened.title ?? artifact.title)
               }

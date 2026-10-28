@@ -66,6 +66,14 @@ unpublished trace maps each to its evidence.
    for conditional writes: key reuse for an identical request, the
    conflict code of each, and the same outcome messages. The comparison
    is plain functions without React, tested on their own.
+7. **Replaced data.** A restore or rename dialog records when it opens how
+   often the server's data may have been replaced so far (a `reset`, or a
+   `ready` after a lost stream; 0007 decision 8). If that changes while it
+   is open, it says so and sends nothing, since a replacement can hold
+   other files or metadata under the same revision numbers and the base
+   check would pass. Opened again, it is prepared from what the page reads
+   then. While what is shown was read before such a replacement, pin,
+   rename, and restore are disabled until it is read again.
 
 ## Costs and limits
 

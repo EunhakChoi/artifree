@@ -197,7 +197,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   digests as the next revision; a restore whose answer was lost is retried
   with its key and applies once; a save elsewhere while the dialog is open
   keeps the revision the dialog opened on, restores nothing, and the next
-  attempt restores that revision against the latest; a
+  attempt restores that revision against the latest; a restore or rename
+  dialog open when the server answers a reopened stream with `reset` sends
+  nothing, and opened again restores what the page reads; a
   draft disables restoring. The tab and the dialog are checked for
   accessibility.
 

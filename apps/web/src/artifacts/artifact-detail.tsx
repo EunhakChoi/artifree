@@ -170,6 +170,9 @@ export function ArtifactDetail({
       </Alert>
     );
   const { artifact, revisions } = shown;
+  // What is shown was read before the server's data may have been replaced;
+  // it is read again, and no write is prepared from it meanwhile.
+  const stale = shown.resets !== resets;
   // A save or "Load latest" asked for a newer state that has not arrived.
   const reloading = shown.generation !== generation;
   return (
@@ -191,6 +194,8 @@ export function ArtifactDetail({
               artifact={artifact}
               onUpdated={onMetadataChanged}
               onConflict={reload}
+              resets={resets}
+              stale={stale}
             />
           </div>
         </CardAction>
@@ -241,6 +246,8 @@ export function ArtifactDetail({
                 epoch={shown.epoch}
                 unsaved={unsaved}
                 restore={restore}
+                resets={resets}
+                stale={stale}
               />
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">

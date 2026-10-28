@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { expect } from '@playwright/test';
+import { forgeReset } from './smoke-live.mjs';
 import { api } from './smoke-workspace.mjs';
 
 /**
@@ -149,6 +150,63 @@ export async function checkHistory({
     await current(6);
     assert.deepEqual(await manifest(6), await manifest(3));
 
+    // Until the artifact is read again after a reset, nothing is prepared
+    // from what was read before it.
+    let release;
+    const reread = new Promise((resolve) => {
+      release = resolve;
+    });
+    await tab.route(
+      `**/v1/artifacts/${artifact.id}`,
+      async (route) => {
+        await reread;
+        return route.fallback();
+      },
+      { times: 1 },
+    );
+    await forgeReset(tab);
+    const writes = [
+      workspace.getByRole('button', { name: 'Pin', exact: true }),
+      workspace.getByRole('button', { name: 'Rename', exact: true }),
+      workspace.getByRole('button', { name: 'Restore revision 5' }),
+    ];
+    for (const button of writes) await expect(button).toBeDisabled();
+    release();
+    for (const button of writes) await expect(button).toBeEnabled();
+
+    // A dialog opened before the server's data may have been replaced
+    // sends nothing; opened again, it restores what the page reads now.
+    await workspace.getByRole('button', { name: 'Restore revision 5' }).click();
+    dialog = tab.getByRole('dialog', { name: 'Restore revision 5' });
+    await forgeReset(tab);
+    await expect(
+      dialog.getByText("The server's data may have been replaced"),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole('button', { name: 'Restore', exact: true }),
+    ).toBeDisabled();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    // A rename dialog follows the same rule.
+    await workspace.getByRole('button', { name: 'Rename' }).click();
+    const rename = tab.getByRole('dialog', { name: 'Rename artifact' });
+    await rename.getByLabel('Title').fill('History renamed');
+    await forgeReset(tab);
+    await expect(
+      rename.getByText("The server's data may have been replaced"),
+    ).toBeVisible();
+    await expect(
+      rename.getByRole('button', { name: 'Rename', exact: true }),
+    ).toBeDisabled();
+    await rename.getByRole('button', { name: 'Cancel' }).click();
+    await workspace.getByRole('button', { name: 'Restore revision 5' }).click();
+    await expect(
+      dialog.getByText("The server's data may have been replaced"),
+    ).toBeHidden();
+    await dialog.getByRole('button', { name: 'Restore', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await current(7);
+    assert.deepEqual(await manifest(7), await manifest(5));
+
     // A draft locks restoring, since a restore would leave it stale. The
     // tab opens again on the revision before the latest.
     await workspace.getByRole('tab', { name: 'Source' }).click();
@@ -157,7 +215,7 @@ export async function checkHistory({
       .fill('<p>draft</p>');
     await workspace.getByRole('tab', { name: 'History' }).click();
     await expect(
-      workspace.getByRole('button', { name: 'Restore revision 5' }),
+      workspace.getByRole('button', { name: 'Restore revision 6' }),
     ).toBeDisabled();
     await expect(
       workspace.getByText(
@@ -166,7 +224,7 @@ export async function checkHistory({
     ).toBeVisible();
 
     assert.deepEqual(errors, [], 'Page errors.');
-    return { revisions: 6 };
+    return { revisions: 7 };
   } finally {
     await context.close();
   }

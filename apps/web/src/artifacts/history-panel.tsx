@@ -28,7 +28,11 @@ import {
 } from '@/components/ui/native-select';
 import { compareManifests, diffLines, hunks, splitLines } from './compare';
 import type { FileDifference } from './compare';
-import { WriteOutcome, useRetryableWrite } from './retryable-write';
+import {
+  ReplacedNotice,
+  WriteOutcome,
+  useRetryableWrite,
+} from './retryable-write';
 import { useRequest } from './use-request';
 
 /** Text files up to this size are compared line by line. */
@@ -52,6 +56,10 @@ interface HistoryPanelProps {
   unsaved: boolean;
   /** The view's restore requests, from {@link useRestore}. */
   restore: Restore;
+  /** How often the server's data may have been replaced so far. */
+  resets: number;
+  /** Whether what is shown was read before the last possible replacement. */
+  stale: boolean;
 }
 
 /**
@@ -66,6 +74,8 @@ export function HistoryPanel({
   epoch,
   unsaved,
   restore,
+  resets,
+  stale,
 }: HistoryPanelProps) {
   const latest = artifact.current_revision;
   // The revision to inspect, and the one it is compared with; none follows
@@ -174,6 +184,8 @@ export function HistoryPanel({
         artifact={artifact}
         revision={before.revision}
         unsaved={unsaved}
+        resets={resets}
+        stale={stale}
       />
     </div>
   );
@@ -358,35 +370,44 @@ interface RestoreDialogProps {
   artifact: Artifact;
   revision: number;
   unsaved: boolean;
+  resets: number;
+  stale: boolean;
 }
 
 /**
  * Restores `revision` as the next revision. The revision and the base are
  * fixed when the dialog opens, as for a rename, so a retry after a lost
  * answer is the same request even while newer revisions arrive; after a
- * conflict the next attempt is prepared against the latest read.
+ * conflict the next attempt is prepared against the latest read. If the
+ * server's data may have been replaced since, it sends nothing: the same
+ * numbers may name other files.
  */
 function RestoreDialog({
   restore,
   artifact,
   revision,
   unsaved,
+  resets,
+  stale,
 }: RestoreDialogProps) {
   const [open, setOpen] = useState(false);
   const [opened, setOpened] = useState({
     revision,
     base: artifact.current_revision,
+    resets,
   });
   const pending = restore.state.status === 'sending';
+  const replaced = opened.resets !== resets;
   const latest = revision === artifact.current_revision;
   const target = open ? opened.revision : revision;
 
   async function confirm(): Promise<void> {
+    if (replaced) return;
     const base =
       restore.state.status === 'conflict'
         ? artifact.current_revision
         : opened.base;
-    setOpened({ revision: opened.revision, base });
+    setOpened({ ...opened, base });
     if (await restore.write({ revision: opened.revision, base_revision: base }))
       setOpen(false);
   }
@@ -400,7 +421,7 @@ function RestoreDialog({
             // Stay open until the request settles, so its outcome is seen.
             if (pending) return;
             if (next) {
-              setOpened({ revision, base: artifact.current_revision });
+              setOpened({ revision, base: artifact.current_revision, resets });
               restore.clear();
             }
             setOpen(next);
@@ -411,7 +432,7 @@ function RestoreDialog({
               <Button
                 variant="outline"
                 className="w-fit"
-                disabled={latest || unsaved}
+                disabled={latest || unsaved || stale}
                 aria-describedby={unsaved ? 'restore-locked' : undefined}
               />
             }
@@ -428,6 +449,7 @@ function RestoreDialog({
                 they are.
               </DialogDescription>
             </DialogHeader>
+            {replaced ? <ReplacedNotice /> : null}
             <WriteOutcome
               state={restore.state}
               action="restore"
@@ -441,7 +463,7 @@ function RestoreDialog({
               </DialogClose>
               <Button
                 type="button"
-                disabled={pending}
+                disabled={pending || replaced}
                 onClick={() => void confirm()}
               >
                 {pending ? 'Restoring…' : 'Restore'}

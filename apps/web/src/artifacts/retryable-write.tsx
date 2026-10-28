@@ -115,3 +115,21 @@ export function WriteOutcome({
     );
   return null;
 }
+
+/**
+ * Said by a dialog opened before the server's data may have been replaced
+ * (a `reset`, or a `ready` after a lost stream; 0007 decision 8). Its
+ * request names revisions as the page read them then, and a replacement
+ * can hold other content under the same numbers, so it sends nothing.
+ */
+export function ReplacedNotice(): ReactNode {
+  return (
+    <Alert variant="destructive">
+      <AlertTitle>The server&apos;s data may have been replaced</AlertTitle>
+      <AlertDescription>
+        This dialog was opened on what the page read before, so it sends
+        nothing. Close it, and open it again on what the page reads now.
+      </AlertDescription>
+    </Alert>
+  );
+}
