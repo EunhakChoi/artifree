@@ -32,7 +32,11 @@ export async function checkWorkspace({
   await workspace.getByRole('button', { name: 'Disconnect' }).click();
   await workspace.getByLabel('Access token').fill(server.token);
   await workspace.getByRole('button', { name: 'Connect' }).click();
-  await expect(workspace.getByText('No artifacts yet')).toBeVisible();
+  await expect(
+    workspace.getByText('No artifacts', { exact: true }),
+  ).toBeVisible();
+  // Every artifact may be in the trash, so the way to it stays.
+  await expect(workspace.getByLabel('Show')).toBeVisible();
   await checkAccessibility('workspace-empty');
 
   // The probe reports what sandboxed content could reach. It must not reach

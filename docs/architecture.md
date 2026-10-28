@@ -191,8 +191,14 @@ access and trash rules of every read
 file: one byte range over HTTP, served by one parser of the `Range` field;
 parts cut between characters over MCP, with the next offset and the whole
 file's size and SHA-256; and a client that accepts only the exact part it
-asked for ([0016](decisions/0016-bounded-file-reads.md)). The next slice is
-A06b, the trash in the web workspace.
+asked for ([0016](decisions/0016-bounded-file-reads.md)). A06b adds the
+trash to the web workspace: the open artifact moves there after a
+confirmation, the trash is shown from the list and recovered from, and
+moves made elsewhere close the open artifact unless a draft holds it, which
+nothing then reads for; what the page knows of the trash, like the versions
+it knows, lasts one feed epoch, and answers to writes from an earlier epoch
+move nothing ([0014](decisions/0014-web-trash.md)). The next slice is A09,
+the code editing workspace.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

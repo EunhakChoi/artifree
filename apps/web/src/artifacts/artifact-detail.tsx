@@ -36,9 +36,10 @@ import { DuplicateDialog } from './duplicate-dialog';
 import { ExportButton } from './export-button';
 import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
+import { RecoverNotice } from './trash-list';
 import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
-import type { Version } from './use-live-workspace';
+import type { TrashState, Version } from './use-live-workspace';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
 
 /**
@@ -81,6 +82,20 @@ interface ArtifactDetailProps {
   onSaved: (artifact: Artifact) => void;
   /** Called after this page renamed or pinned the artifact. */
   onMetadataChanged: (artifact: Artifact) => void;
+  /** Called after this page moved the artifact to the trash. */
+  onDeleted: (artifact: Artifact) => void;
+  /** Called after this page recovered the artifact from the trash. */
+  onRecovered: (artifact: Artifact) => void;
+  /**
+   * Whether the page knows the artifact is in the trash, and as of which
+   * metadata revision (decision 0014, item 6). It stays open there only
+   * for a draft.
+   */
+  trash: TrashState | undefined;
+  /** Called with the artifact when a read finds it outside the trash. */
+  onFound: (artifact: Artifact) => void;
+  /** Called when a refused recovery and a read show it still in the trash. */
+  onStillInTrash: (metadata: number) => void;
   /** Whether the editor holds changes that are not saved. */
   unsaved: boolean;
   /** Reports when the editor gains or loses unsaved changes. */
@@ -97,9 +112,18 @@ export function ArtifactDetail({
   unknownChanges,
   onSaved,
   onMetadataChanged,
+  onDeleted,
+  onRecovered,
+  trash,
+  onFound,
+  onStillInTrash,
   unsaved,
   onUnsavedChange,
 }: ArtifactDetailProps) {
+  // In the trash every read of the artifact answers as for one that does
+  // not exist, so nothing is read for it until it is recovered; what was
+  // read before stays shown, with a draft.
+  const inTrash = trash?.deleted === true;
   const [generation, setGeneration] = useState(0);
   // The version this view reads for, in the epoch it was known in. It
   // follows a newer known version only after its own read settled, since a
@@ -108,7 +132,9 @@ export function ArtifactDetail({
   const [target, setTarget] = useState({ epoch, version: known });
   const targetVersion = target.epoch === epoch ? target.version : undefined;
   const details = useRequest<Loaded>(
-    `${artifactId}:${generation}:${epoch}:${targetVersion?.revision}:${targetVersion?.metadata}:${unknownChanges}`,
+    inTrash
+      ? undefined
+      : `${artifactId}:${generation}:${epoch}:${targetVersion?.revision}:${targetVersion?.metadata}:${unknownChanges}`,
     async (signal) => {
       const asked = { generation, epoch, resets };
       // Revisions are listed after the artifact is read, so the list always
@@ -208,31 +234,37 @@ export function ArtifactDetail({
             <Badge variant="secondary">
               Revision {artifact.current_revision}
             </Badge>
-            <MetadataActions
-              client={client}
-              artifact={artifact}
-              gate={metadataGate}
-              wait={metadataWait}
-              resets={resets}
-              onUpdated={onMetadataChanged}
-              onConflict={reload}
-            />
-            <DuplicateDialog
-              client={client}
-              artifact={artifact}
-              revisions={revisions}
-              revision={previewed}
-              unsaved={unsaved}
-              resets={resets}
-              stale={stale}
-              onDuplicated={onSaved}
-            />
-            <ExportButton
-              client={client}
-              artifactId={artifact.id}
-              revision={previewed}
-              stale={stale}
-            />
+            {inTrash ? null : (
+              <>
+                <MetadataActions
+                  client={client}
+                  artifact={artifact}
+                  gate={metadataGate}
+                  wait={metadataWait}
+                  resets={resets}
+                  onUpdated={onMetadataChanged}
+                  onDeleted={onDeleted}
+                  onConflict={reload}
+                  unsaved={unsaved}
+                />
+                <DuplicateDialog
+                  client={client}
+                  artifact={artifact}
+                  revisions={revisions}
+                  revision={previewed}
+                  unsaved={unsaved}
+                  resets={resets}
+                  stale={stale}
+                  onDuplicated={onSaved}
+                />
+                <ExportButton
+                  client={client}
+                  artifactId={artifact.id}
+                  revision={previewed}
+                  stale={stale}
+                />
+              </>
+            )}
           </div>
         </CardAction>
       </CardHeader>
@@ -245,7 +277,17 @@ export function ArtifactDetail({
               previews, and comparisons wait until it is read.
             </output>
           ) : null}
-          {details.status === 'error' ? (
+          {inTrash ? (
+            <RecoverNotice
+              client={client}
+              artifactId={artifactId}
+              base={trash.metadata}
+              resets={resets}
+              onRecovered={onRecovered}
+              onFound={onFound}
+              onStillInTrash={onStillInTrash}
+            />
+          ) : details.status === 'error' ? (
             <Alert variant="destructive">
               <AlertTitle>Could not refresh the artifact</AlertTitle>
               <AlertDescription>
@@ -271,29 +313,39 @@ export function ArtifactDetail({
               <TabsTrigger value="source">Source</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
             </TabsList>
+            {/* The views that read the artifact are not mounted in the
+                trash; they mount afresh once it is recovered. */}
             <TabsContent value="preview" className="mt-4">
-              <PreviewPanel
-                client={client}
-                artifact={artifact}
-                revisions={revisions}
-                epoch={shown.epoch}
-                stale={stale}
-                chosen={chosen}
-                onChoose={setChosen}
-              />
+              {inTrash ? (
+                <InTrash what="preview it" />
+              ) : (
+                <PreviewPanel
+                  client={client}
+                  artifact={artifact}
+                  revisions={revisions}
+                  epoch={shown.epoch}
+                  stale={stale}
+                  chosen={chosen}
+                  onChoose={setChosen}
+                />
+              )}
             </TabsContent>
             <TabsContent value="history" className="mt-4">
-              <HistoryPanel
-                client={client}
-                artifact={artifact}
-                revisions={revisions}
-                epoch={shown.epoch}
-                shownResets={shown.resets}
-                resets={resets}
-                unsaved={unsaved}
-                restore={restore}
-                wait={sourceWait}
-              />
+              {inTrash ? (
+                <InTrash what="compare or restore its revisions" />
+              ) : (
+                <HistoryPanel
+                  client={client}
+                  artifact={artifact}
+                  revisions={revisions}
+                  epoch={shown.epoch}
+                  shownResets={shown.resets}
+                  resets={resets}
+                  unsaved={unsaved}
+                  restore={restore}
+                  wait={sourceWait}
+                />
+              )}
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
               <SourcePanel
@@ -319,12 +371,22 @@ export function ArtifactDetail({
                 unsaved={unsaved}
                 onUnsavedChange={onUnsavedChange}
                 reloading={reloading}
+                inTrash={inTrash}
               />
             </TabsContent>
           </Tabs>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/** Said instead of a view that would read an artifact in the trash. */
+function InTrash({ what }: { what: string }) {
+  return (
+    <p className="text-sm text-muted-foreground">
+      This artifact is in the trash. Recover it to {what}.
+    </p>
   );
 }
 
@@ -451,6 +513,8 @@ interface SourcePanelProps {
   onUnsavedChange: (unsaved: boolean) => void;
   /** A newer state is loading and will replace the editor. */
   reloading: boolean;
+  /** The artifact is in the trash, where nothing can be saved. */
+  inTrash: boolean;
 }
 
 function SourcePanel({
@@ -464,6 +528,7 @@ function SourcePanel({
   unsaved,
   onUnsavedChange,
   reloading,
+  inTrash,
 }: SourcePanelProps) {
   const { artifact, revisions } = loaded;
   // While a draft exists the editor keeps the revision it was written
@@ -546,6 +611,7 @@ function SourcePanel({
           onUnsavedChange(draft);
         }}
         reloading={reloading}
+        inTrash={inTrash}
       />
     </div>
   );
@@ -568,6 +634,8 @@ interface FileEditorProps {
   onLoadLatest: () => void;
   onDraftChange: (draft: boolean) => void;
   reloading: boolean;
+  /** The artifact is in the trash: a save would be refused. */
+  inTrash: boolean;
 }
 
 type SaveState =
@@ -594,6 +662,7 @@ function FileEditor({
   onLoadLatest,
   onDraftChange,
   reloading,
+  inTrash,
 }: FileEditorProps) {
   const [readAttempt, setReadAttempt] = useState(0);
   const loaded = useRequest(
@@ -763,13 +832,15 @@ function FileEditor({
       <Field orientation="horizontal">
         <Button
           type="button"
-          disabled={!changed || locked || replaced}
+          disabled={!changed || locked || replaced || inTrash}
           onClick={() => void commit()}
         >
           <SaveIcon data-icon="inline-start" aria-hidden="true" />
           {saving ? 'Saving…' : 'Save revision'}
         </Button>
-        {changed && !locked && !outdated ? (
+        {/* In the trash, discarding is the way out: the latest revision
+            cannot be read there. */}
+        {changed && !locked && (!outdated || inTrash) ? (
           <Button
             type="button"
             variant="outline"
@@ -779,7 +850,7 @@ function FileEditor({
             Discard changes
           </Button>
         ) : null}
-        {outdated ? (
+        {outdated && !inTrash ? (
           <Button
             type="button"
             variant="outline"

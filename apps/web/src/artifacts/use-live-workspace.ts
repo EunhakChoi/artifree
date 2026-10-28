@@ -49,10 +49,22 @@ function latest(a: Version | undefined, b: Version): Version {
   };
 }
 
-/** An artifact's version as a list or a save reported it. */
-export interface ListedVersion {
-  readonly id: string;
-  readonly version: Version;
+/**
+ * Whether an artifact is in the trash, as of a metadata revision
+ * (decision 0014, item 4).
+ */
+export interface TrashState {
+  readonly deleted: boolean;
+  readonly metadata: number;
+}
+
+/**
+ * The epoch after `event`: each `ready` and `reset` starts one. The feed
+ * handler and the reducer both apply it, so the handler knows the epoch
+ * as soon as an event arrives, before the page renders it.
+ */
+function epochAfter(epoch: number, event: ChangeFeedEvent): number {
+  return event.type === 'change' ? epoch : epoch + 1;
 }
 
 /** What the page knows from the change feed. */
@@ -75,14 +87,25 @@ interface Knowledge {
   readonly known: Readonly<Record<string, Version>>;
   /** Changes of a kind this client does not know, per artifact. */
   readonly unknown: Readonly<Record<string, number>>;
+  /**
+   * Per artifact the page saw in the trash in this epoch, whether it still
+   * is, as of the newest metadata revision the page saw.
+   */
+  readonly trash: Readonly<Record<string, TrashState>>;
 }
 
 type Learned =
   | { readonly type: 'event'; readonly event: ChangeFeedEvent }
   | {
-      readonly type: 'listed';
+      readonly type: 'read';
       readonly epoch: number;
-      readonly versions: readonly ListedVersion[];
+      readonly artifacts: readonly Artifact[];
+    }
+  | {
+      readonly type: 'in trash';
+      readonly epoch: number;
+      readonly id: string;
+      readonly metadata: number;
     }
   | { readonly type: 'read anyway' };
 
@@ -93,6 +116,7 @@ const START: Knowledge = {
   news: 0,
   known: {},
   unknown: {},
+  trash: {},
 };
 
 /** How long a visible page waits for the stream before reading anyway. */
@@ -102,20 +126,35 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
   switch (learned.type) {
     case 'read anyway':
       return state.canRead ? state : { ...state, canRead: true };
-    case 'listed': {
+    case 'read': {
       if (learned.epoch !== state.epoch) return state;
-      let known = state.known;
-      for (const { id, version } of learned.versions)
+      let { known, trash } = state;
+      for (const artifact of learned.artifacts) {
+        const { id } = artifact;
+        const version = versionOf(artifact);
         if (isNewer(version, known[id]))
           known = { ...known, [id]: latest(known[id], version) };
-      return known === state.known ? state : { ...state, known };
+        trash = seen(trash, id, {
+          deleted: artifact.deleted_at_ms !== null,
+          metadata: version.metadata,
+        });
+      }
+      return known === state.known && trash === state.trash
+        ? state
+        : { ...state, known, trash };
+    }
+    case 'in trash': {
+      if (learned.epoch !== state.epoch) return state;
+      const { id, metadata } = learned;
+      const trash = seen(state.trash, id, { deleted: true, metadata });
+      return trash === state.trash ? state : { ...state, trash };
     }
     case 'event': {
       const { event } = learned;
       if (event.type !== 'change')
         return {
           canRead: true,
-          epoch: state.epoch + 1,
+          epoch: epochAfter(state.epoch, event),
           // Reads made before this event may show data the server no
           // longer has.
           resets:
@@ -123,6 +162,7 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
           news: state.news,
           known: {},
           unknown: {},
+          trash: {},
         };
       const {
         artifact_id: id,
@@ -137,22 +177,65 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
           news: state.news + 1,
           unknown: { ...state.unknown, [id]: (state.unknown[id] ?? 0) + 1 },
         };
+      // The notice of the page's own move may arrive after its answer, as
+      // nothing new; what it says of the trash is learned either way.
+      const trash =
+        change === 'deleted' || change === 'recovered'
+          ? seen(state.trash, id, {
+              deleted: change === 'deleted',
+              metadata: metadata_revision,
+            })
+          : state.trash;
       const version = { revision, metadata: metadata_revision };
-      if (!isNewer(version, state.known[id])) return state;
+      if (!isNewer(version, state.known[id]))
+        return trash === state.trash ? state : { ...state, trash };
       return {
         ...state,
         news: state.news + 1,
         known: { ...state.known, [id]: latest(state.known[id], version) },
+        trash,
       };
     }
   }
 }
 
+/**
+ * `trash` with what `state` shows of artifact `id`, if that is newer than
+ * the record. An artifact enters the record when it is seen in the trash;
+ * one never seen there is not recorded.
+ */
+function seen(
+  trash: Readonly<Record<string, TrashState>>,
+  id: string,
+  state: TrashState,
+): Readonly<Record<string, TrashState>> {
+  const before = trash[id];
+  if (before === undefined ? !state.deleted : state.metadata <= before.metadata)
+    return trash;
+  return { ...trash, [id]: state };
+}
+
 /** What a connected page knows from the change feed, and when it may read. */
 export interface LiveWorkspace extends Knowledge {
   readonly feed: FeedState;
-  /** Records versions from a list read in `epoch`; they are not news. */
-  readonly learn: (epoch: number, versions: readonly ListedVersion[]) => void;
+  /**
+   * Records what a read in `epoch`, or the answer to a write sent in it,
+   * showed of artifacts: their versions, which are not news, and whether
+   * they are in the trash. Nothing from an earlier epoch is learned, since
+   * the server's data may have been replaced since.
+   */
+  readonly learn: (epoch: number, artifacts: readonly Artifact[]) => void;
+  /**
+   * Records that artifact `id` was in the trash at metadata revision
+   * `metadata`, as a refusal and a read in `epoch` showed together.
+   */
+  readonly learnInTrash: (epoch: number, id: string, metadata: number) => void;
+  /**
+   * Whether `epoch` is still the feed's epoch. It changes as soon as a
+   * `ready` or `reset` arrives, also before the page has rendered it, so
+   * an answer that settles in between is not taken as current.
+   */
+  readonly isCurrent: (epoch: number) => boolean;
 }
 
 /**
@@ -165,8 +248,14 @@ export interface LiveWorkspace extends Knowledge {
 export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
   const visible = usePageVisible();
   const [state, learn] = useReducer(learnFrom, START);
+  // The epoch as of the last event received, which the reducer reaches
+  // once it has applied every event dispatched so far.
+  const epochNow = useRef(START.epoch);
   const feed = useChangeFeed(client, visible, {
-    onEvent: (event) => learn({ type: 'event', event }),
+    onEvent: (event) => {
+      epochNow.current = epochAfter(epochNow.current, event);
+      learn({ type: 'event', event });
+    },
     onTrouble: () => learn({ type: 'read anyway' }),
   });
   // Counts visible time only: a background page has no reason to read.
@@ -179,12 +268,21 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
     );
     return () => clearTimeout(timer);
   }, [visible, canRead]);
-  const learnListed = useCallback(
-    (epoch: number, versions: readonly ListedVersion[]) =>
-      learn({ type: 'listed', epoch, versions }),
+  const learnRead = useCallback(
+    (epoch: number, artifacts: readonly Artifact[]) =>
+      learn({ type: 'read', epoch, artifacts }),
     [],
   );
-  return { ...state, feed, learn: learnListed };
+  const learnInTrash = useCallback(
+    (epoch: number, id: string, metadata: number) =>
+      learn({ type: 'in trash', epoch, id, metadata }),
+    [],
+  );
+  const isCurrent = useCallback(
+    (epoch: number) => epoch === epochNow.current,
+    [],
+  );
+  return { ...state, feed, learn: learnRead, learnInTrash, isCurrent };
 }
 
 interface FeedHandlers {
