@@ -228,6 +228,10 @@ async fn another_owners_artifact_is_not_found_through_every_tool() -> TestResult
                 "idempotency_key": "mine-key-3"
             }),
         ),
+        (
+            "duplicate_artifact",
+            json!({ "artifact_id": id, "revision": 1, "idempotency_key": "mine-key-4" }),
+        ),
     ] {
         let result = harness.call(tool, arguments).await?;
         assert_eq!(error_code(&result), "not_found", "{tool}: {result}");

@@ -5,10 +5,11 @@
 //! error semantics; only the framing differs.
 
 use artifree_contracts::api::{
-    Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse, ContentEncoding,
-    CreateArtifactRequest, ErrorBody, ErrorCode, FileChange as WireChange, FileUpload,
-    ListArtifactsQuery, ListSort, Preview, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse, ContentEncoding, CopiedPart,
+    CreateArtifactRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody,
+    ErrorCode, FileChange as WireChange, FileUpload, ListArtifactsQuery, ListSort, Preview,
+    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, SaveRevisionRequest,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
@@ -251,6 +252,37 @@ pub(crate) async fn restore(
         .run(move |artifacts| artifacts.restore(&actor, &key, &id, base, revision))
         .await?;
     Ok(announce(state, receipt))
+}
+
+pub(crate) async fn duplicate(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    revision: u64,
+    request: DuplicateArtifactRequest,
+) -> Result<DuplicateArtifactResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let revision = revision_number(revision)?;
+    let title: Option<Title> = request
+        .title
+        .map(|title| title.parse())
+        .transpose()
+        .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
+    let receipt = state
+        .run(move |artifacts| artifacts.duplicate(&actor, &key, &id, revision, title.as_ref()))
+        .await?;
+    let CommitResponse {
+        artifact,
+        revision,
+        replayed,
+    } = announce(state, receipt);
+    Ok(DuplicateArtifactResponse {
+        artifact,
+        revision,
+        copied: vec![CopiedPart::Files],
+        replayed,
+    })
 }
 
 pub(crate) async fn update(

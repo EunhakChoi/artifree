@@ -165,6 +165,23 @@ impl Title {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The default title of a copy: this title followed by " (Copy)". A
+    /// title too long for the suffix is shortened by whole characters, which
+    /// can split a sequence the reader sees as one character.
+    #[must_use]
+    pub fn copy_of(&self) -> Self {
+        const SUFFIX: &str = " (Copy)";
+        let kept = MAX_TITLE_CHARS - SUFFIX.chars().count();
+        let end = self
+            .0
+            .char_indices()
+            .nth(kept)
+            .map_or(self.0.len(), |(index, _)| index);
+        // A valid title has no leading whitespace or control characters, so
+        // neither has its prefix, and the suffix ends without whitespace.
+        Self(format!("{}{SUFFIX}", &self.0[..end]))
+    }
 }
 
 impl FromStr for Title {
@@ -227,6 +244,24 @@ mod tests {
         assert!("가".repeat(200).parse::<Title>().is_ok());
         for value in ["", " padded", "line\nbreak", "bell\u{7}", &"x".repeat(201)] {
             assert!(value.parse::<Title>().is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn a_copy_title_is_a_valid_title_that_names_the_copy() {
+        let copy = |title: &str| title.parse::<Title>().map(|title| title.copy_of());
+        assert_eq!(
+            copy("Plan").map(|title| title.0),
+            Ok("Plan (Copy)".to_owned())
+        );
+        for title in ["가".repeat(193), "가".repeat(194), "x".repeat(200)] {
+            let copied = copy(&title).map(|title| title.0).unwrap_or_default();
+            assert_eq!(copied.chars().count(), title.chars().count().min(193) + 7);
+            assert!(copied.ends_with(" (Copy)"), "{copied:?}");
+            assert!(
+                copied.parse::<Title>().is_ok(),
+                "invalid copy title {copied:?}"
+            );
         }
     }
 

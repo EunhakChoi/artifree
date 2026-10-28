@@ -65,12 +65,60 @@ export type WriteState =
       readonly message: string;
       /** The answer was lost: the write may have been made. */
       readonly unknown: boolean;
-      /** The version the write was prepared against. */
-      readonly base: number;
+      /** The version a conditional write was prepared against. */
+      readonly base: number | undefined;
     };
 
 /** How a write ended. */
 export type WriteResult = 'done' | 'conflict' | 'failed';
+
+/**
+ * The idempotency key for a request: the last request's key again when the
+ * request is the same, so a retry after a lost answer applies at most once;
+ * a new key for any other request.
+ */
+function useRequestKey(): (request: unknown) => string {
+  const [attempt, setAttempt] = useState<{ body: string; key: string }>();
+  return (request) => {
+    const body = JSON.stringify(request);
+    const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
+    setAttempt({ body, key });
+    return key;
+  };
+}
+
+/**
+ * Sends writes of one kind that name no base, such as duplicates (decision
+ * 0012), with the same key reuse as {@link useConditionalWrite}.
+ */
+export function useRetryableWrite<Request, Result>(options: {
+  readonly send: (request: Request, idempotencyKey: string) => Promise<Result>;
+  readonly onDone: (result: Result) => void;
+}) {
+  const [state, setState] = useState<WriteState>({ status: 'idle' });
+  const keyFor = useRequestKey();
+
+  async function write(request: Request): Promise<WriteResult> {
+    const key = keyFor(request);
+    setState({ status: 'sending' });
+    try {
+      const result = await options.send(request, key);
+      setState({ status: 'idle' });
+      options.onDone(result);
+      return 'done';
+    } catch (error: unknown) {
+      setState({
+        status: 'failed',
+        message: describeFailure(error),
+        unknown: mayHaveCommitted(error),
+        base: undefined,
+      });
+      return 'failed';
+    }
+  }
+
+  return { state, write, clear: () => setState({ status: 'idle' }) };
+}
 
 interface ConditionalWriteOptions<Request, Result> {
   readonly gate: WriteGate;
@@ -98,13 +146,11 @@ export function useConditionalWrite<Request, Result>(
   options: ConditionalWriteOptions<Request, Result>,
 ) {
   const [state, setState] = useState<WriteState>({ status: 'idle' });
-  const [attempt, setAttempt] = useState<{ body: string; key: string }>();
+  const keyFor = useRequestKey();
   const { gate } = options;
 
   async function write(request: Request): Promise<WriteResult> {
-    const body = JSON.stringify(request);
-    const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
-    setAttempt({ body, key });
+    const key = keyFor(request);
     const base = options.base(request);
     setState({ status: 'sending' });
     gate.setSending(true);
@@ -206,20 +252,7 @@ export function WriteNotice({
       </Alert>
     );
   if (state.status === 'failed')
-    return state.unknown ? (
-      <Alert variant="destructive">
-        <AlertTitle>Outcome unknown</AlertTitle>
-        <AlertDescription>
-          {state.message} The change may have been made. To retry, {action}{' '}
-          again: the same request is sent and applies at most once.
-        </AlertDescription>
-      </Alert>
-    ) : (
-      <Alert variant="destructive">
-        <AlertTitle>Not changed</AlertTitle>
-        <AlertDescription>{state.message}</AlertDescription>
-      </Alert>
-    );
+    return <FailureNotice state={state} action={action} />;
   if (behind || waiting === 'refused')
     return (
       <Alert>
@@ -246,6 +279,35 @@ export function WriteNotice({
       </output>
     );
   return null;
+}
+
+/**
+ * What became of a write that failed. A failure whose answer was lost is an
+ * unknown outcome, never "not changed". Nothing for any other state.
+ */
+export function FailureNotice({
+  state,
+  action,
+}: {
+  state: WriteState;
+  /** The control that sends the write, as in "duplicate". */
+  action: string;
+}): ReactNode {
+  if (state.status !== 'failed') return null;
+  return state.unknown ? (
+    <Alert variant="destructive">
+      <AlertTitle>Outcome unknown</AlertTitle>
+      <AlertDescription>
+        {state.message} The change may have been made. To retry, {action} again:
+        the same request is sent and applies at most once.
+      </AlertDescription>
+    </Alert>
+  ) : (
+    <Alert variant="destructive">
+      <AlertTitle>Not changed</AlertTitle>
+      <AlertDescription>{state.message}</AlertDescription>
+    </Alert>
+  );
 }
 
 /**

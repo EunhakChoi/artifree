@@ -640,6 +640,280 @@ async fn restore_refusals_write_nothing() -> TestResult {
     Ok(())
 }
 
+fn duplicate(
+    id: &str,
+    revision: u64,
+    key: Option<&str>,
+    body: &Value,
+) -> Result<Request<Body>, axum::http::Error> {
+    post(
+        &format!("/v1/artifacts/{id}/revisions/{revision}/duplicate"),
+        key,
+        body,
+    )
+}
+
+async fn artifact_count(harness: &Harness) -> Result<usize, Box<dyn std::error::Error>> {
+    let list = harness.send(get("/v1/artifacts")?).await?.json()?;
+    Ok(list["artifacts"].as_array().ok_or("missing list")?.len())
+}
+
+/// An artifact at revision 2, pinned, with the default fixture at revision 1.
+async fn pinned_source(harness: &Harness) -> Result<String, Box<dyn std::error::Error>> {
+    let id = created_id(harness).await?;
+    let saved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let pinned = harness
+        .send(patch(
+            &format!("/v1/artifacts/{id}"),
+            Some("pin-key-1"),
+            &json!({ "base_metadata_revision": 1, "pinned": true }),
+        )?)
+        .await?;
+    assert_eq!(pinned.status, StatusCode::OK, "{}", error_code(&pinned));
+    Ok(id)
+}
+
+#[tokio::test]
+async fn a_duplicate_starts_its_own_history_from_the_chosen_revision() -> TestResult {
+    let harness = Harness::new();
+    let id = pinned_source(&harness).await?;
+    let source = format!("/v1/artifacts/{id}");
+
+    // Revision 1 of the source becomes revision 1 of an unpinned copy named
+    // after the source.
+    let copied = harness
+        .send(duplicate(&id, 1, Some("copy-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(
+        copied.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&copied)
+    );
+    let body = copied.json()?;
+    let copy_id = body["artifact"]["id"].as_str().ok_or("missing copy id")?;
+    assert_ne!(copy_id, id);
+    let copy = format!("/v1/artifacts/{copy_id}");
+    assert_eq!(copied.header(header::LOCATION), copy);
+    assert_eq!(body["replayed"], false);
+    assert_eq!(body["copied"], json!(["files"]));
+    assert_eq!(body["artifact"]["title"], "Demo (Copy)");
+    assert_eq!(body["artifact"]["pinned"], false);
+    assert_eq!(body["artifact"]["current_revision"], 1);
+    assert_eq!(body["artifact"]["metadata_revision"], 1);
+    assert_eq!(body["revision"]["revision"], 1);
+    let first = harness
+        .send(get(&format!("{source}/revisions/1"))?)
+        .await?
+        .json()?;
+    assert_eq!(body["revision"]["files"], first["files"]);
+    let index = harness
+        .send(get(&format!("{copy}/revisions/1/files/index.html"))?)
+        .await?;
+    assert_eq!(index.body, b"<h1>v1</h1>");
+    let history = harness
+        .send(get(&format!("{copy}/revisions"))?)
+        .await?
+        .json()?;
+    assert_eq!(history["revisions"].as_array().map(Vec::len), Some(1));
+
+    // Later saves to either artifact leave the other as it is.
+    for (path, key, base, html) in [
+        (&copy, "save-key-2", 1, "<h1>copy</h1>"),
+        (&source, "save-key-3", 2, "<h1>v3</h1>"),
+    ] {
+        let saved = harness
+            .send(post(
+                &format!("{path}/revisions"),
+                Some(key),
+                &put_index(base, html),
+            )?)
+            .await?;
+        assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    }
+    for (path, revision, html, pinned) in [
+        (&source, 3, "<h1>v3</h1>", true),
+        (&copy, 2, "<h1>copy</h1>", false),
+    ] {
+        let artifact = harness.send(get(path)?).await?.json()?;
+        assert_eq!(artifact["current_revision"], revision, "{path}");
+        assert_eq!(artifact["pinned"], pinned, "{path}");
+        let index = harness
+            .send(get(&format!(
+                "{path}/revisions/{revision}/files/index.html"
+            ))?)
+            .await?;
+        assert_eq!(index.body, html.as_bytes(), "{path}");
+    }
+
+    // A title of its own, and a copy of the latest revision.
+    let titled = harness
+        .send(duplicate(
+            &id,
+            3,
+            Some("copy-key-2"),
+            &json!({ "title": "Mine" }),
+        )?)
+        .await?;
+    assert_eq!(
+        titled.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&titled)
+    );
+    let titled = titled.json()?;
+    assert_eq!(titled["artifact"]["title"], "Mine");
+    let latest = harness
+        .send(get(&format!("{source}/revisions/3"))?)
+        .await?
+        .json()?;
+    assert_eq!(titled["revision"]["files"], latest["files"]);
+    assert_eq!(artifact_count(&harness).await?, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retried_duplicate_replays_after_the_source_changed() -> TestResult {
+    let harness = Harness::new();
+    let id = pinned_source(&harness).await?;
+    let copied = harness
+        .send(duplicate(&id, 1, Some("copy-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(
+        copied.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&copied)
+    );
+    let copy_id = copied.json()?["artifact"]["id"].clone();
+    // The source is renamed and revised; the retry still names the copy
+    // as it was created.
+    let renamed = harness
+        .send(patch(
+            &format!("/v1/artifacts/{id}"),
+            Some("rename-key-1"),
+            &json!({ "base_metadata_revision": 2, "title": "Renamed" }),
+        )?)
+        .await?;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", error_code(&renamed));
+    let saved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-2"),
+            &put_index(2, "<h1>v3</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let retry = harness
+        .send(duplicate(&id, 1, Some("copy-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(retry.status, StatusCode::CREATED, "{}", error_code(&retry));
+    let retried = retry.json()?;
+    assert_eq!(retried["replayed"], true);
+    assert_eq!(retried["artifact"]["id"], copy_id);
+    assert_eq!(retried["artifact"]["title"], "Demo (Copy)");
+    assert_eq!(retried["copied"], json!(["files"]));
+    // The key stays bound to this duplicate.
+    for other in [
+        duplicate(&id, 2, Some("copy-key-1"), &json!({}))?,
+        duplicate(
+            &id,
+            1,
+            Some("copy-key-1"),
+            &json!({ "title": "Demo (Copy)" }),
+        )?,
+    ] {
+        let reply = harness.send(other).await?;
+        assert_eq!(error_code(&reply), "request_key_reused");
+    }
+    assert_eq!(artifact_count(&harness).await?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_refusals_create_nothing() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    // A revision past the store's range is missing too, not a failure.
+    for missing in [0, 2, u64::MAX] {
+        let reply = harness
+            .send(duplicate(&id, missing, Some("copy-key-1"), &json!({}))?)
+            .await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "revision {missing}");
+    }
+    for title in [json!(""), json!(" padded"), json!("x".repeat(201))] {
+        let reply = harness
+            .send(duplicate(
+                &id,
+                1,
+                Some("copy-key-2"),
+                &json!({ "title": title }),
+            )?)
+            .await?;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{title}");
+    }
+    let unknown_field = harness
+        .send(duplicate(
+            &id,
+            1,
+            Some("copy-key-3"),
+            &json!({ "pinned": true }),
+        )?)
+        .await?;
+    assert_eq!(unknown_field.status, StatusCode::BAD_REQUEST);
+    let keyless = harness.send(duplicate(&id, 1, None, &json!({}))?).await?;
+    assert_eq!(keyless.status, StatusCode::BAD_REQUEST);
+    let unknown = harness
+        .send(duplicate(
+            "art_00000000000000000000000000000000",
+            1,
+            Some("copy-key-4"),
+            &json!({}),
+        )?)
+        .await?;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    // A revision that cannot exist is reported before a malformed body.
+    let malformed = harness
+        .send(
+            authorized(Request::post(format!(
+                "/v1/artifacts/{id}/revisions/0/duplicate"
+            )))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", "copy-key-5")
+            .body(Body::from("{"))?,
+        )
+        .await?;
+    assert_eq!(malformed.status, StatusCode::NOT_FOUND);
+    // Whether a well-formed artifact exists is checked with the request,
+    // after its body.
+    let unread = harness
+        .send(
+            authorized(Request::post(
+                "/v1/artifacts/art_00000000000000000000000000000000/revisions/1/duplicate",
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", "copy-key-6")
+            .body(Body::from("{"))?,
+        )
+        .await?;
+    assert_eq!(unread.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&unread), "invalid_request");
+    // A key of another request is refused without a copy.
+    let reused = harness
+        .send(duplicate(&id, 1, Some("create-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(error_code(&reused), "request_key_reused");
+    assert_eq!(artifact_count(&harness).await?, 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_full_package_can_be_replaced_in_one_save() -> TestResult {
     let harness = Harness::new();

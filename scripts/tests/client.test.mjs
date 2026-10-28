@@ -258,6 +258,54 @@ test('A restore names the revision, base, and key; manifests need digests', asyn
   }
 });
 
+test('A duplicate names the revision and title; a copy must say what it copied', async () => {
+  const sent = [];
+  let copied = ['files'];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([String(url), init.body]);
+      return Response.json(
+        {
+          artifact: { ...artifact, id: 'art_copy' },
+          revision: {
+            revision: 1,
+            created_by: 'owner',
+            created_at_ms: 1,
+            files: [],
+          },
+          copied,
+          replayed: false,
+        },
+        { status: 201 },
+      );
+    },
+  });
+  const duplicate = (request) =>
+    client.duplicateArtifact(artifact.id, 2, request, {
+      idempotencyKey: 'test-key-1',
+    });
+  assert.deepEqual((await duplicate({})).copied, ['files']);
+  await duplicate({ title: 'Mine' });
+  assert.deepEqual(sent, [
+    [
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
+      '{}',
+    ],
+    [
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
+      '{"title":"Mine"}',
+    ],
+  ]);
+  // A part this client does not know could be data it would not report.
+  for (const parts of [undefined, 'files', ['files', 'data']]) {
+    copied = parts;
+    const error = await failure(duplicate({}));
+    assert.equal(error.code, 'invalid_response', String(parts));
+  }
+});
+
 // The change feed. Each rule below is one way an earlier version failed:
 // a split line end, an unknown kind or event, an aborted wait, a proxy
 // error, and a successful response that is not the feed.

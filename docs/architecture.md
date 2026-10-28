@@ -173,8 +173,11 @@ earlier revision and file digests to the API, MCP, client, and CLI
 and restores revisions in the web workspace, preparing no conditional write
 from a version older than the page has learned of and reading nothing for
 data that may have been replaced
-([0011](decisions/0011-web-history-and-restore.md)). The next slice is A05,
-duplicating an artifact with its own history.
+([0011](decisions/0011-web-history-and-restore.md)). A05 duplicates a
+revision's files into a new artifact with its own history through the API,
+MCP, client, CLI, and web workspace
+([0012](decisions/0012-duplicate-artifacts.md)). The next slice is A06,
+deleting artifacts and restoring them from a trash.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

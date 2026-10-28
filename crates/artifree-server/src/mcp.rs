@@ -13,13 +13,14 @@
 use std::sync::Arc;
 
 use artifree_contracts::api::{
-    CommitResponse, ContentEncoding, CreateArtifactRequest, ErrorResponse, ListArtifactsQuery,
-    RestoreRevisionRequest, SaveRevisionRequest, UpdateArtifactRequest,
+    CommitResponse, ContentEncoding, CreateArtifactRequest, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
+    SaveRevisionRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::{
-    self, ArtifactArguments, CreateArtifactArguments, FileArguments, FileContent,
-    RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments, ToolDefinition,
-    UpdateArtifactArguments,
+    self, ArtifactArguments, CreateArtifactArguments, DuplicateArtifactArguments, FileArguments,
+    FileContent, RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments,
+    ToolDefinition, UpdateArtifactArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_domain::identity::ActorId;
@@ -182,6 +183,7 @@ async fn dispatch(
             .await
         }
         "restore_revision" => json(restore_revision(state, actor, arguments)).await,
+        "duplicate_artifact" => json(duplicate_artifact(state, actor, arguments)).await,
         "update_artifact" => {
             json(async {
                 let UpdateArtifactArguments {
@@ -263,6 +265,22 @@ async fn restore_revision(
     let key = operations::request_key("idempotency_key", &idempotency_key)?;
     let request = RestoreRevisionRequest { base_revision };
     operations::restore(state, actor, key, &artifact_id, revision, request).await
+}
+
+async fn duplicate_artifact(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<DuplicateArtifactResponse, ApiError> {
+    let DuplicateArtifactArguments {
+        artifact_id,
+        revision,
+        title,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = DuplicateArtifactRequest { title };
+    operations::duplicate(state, actor, key, &artifact_id, revision, request).await
 }
 
 async fn read_file(

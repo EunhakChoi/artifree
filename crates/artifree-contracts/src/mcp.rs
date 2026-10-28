@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::{
-    Artifact, ArtifactList, CommitResponse, ContentEncoding, ErrorResponse, FileChange, FileUpload,
-    ListArtifactsQuery, Preview, Revision, RevisionList, UpdateArtifactResponse,
+    Artifact, ArtifactList, CommitResponse, ContentEncoding, DuplicateArtifactResponse,
+    ErrorResponse, FileChange, FileUpload, ListArtifactsQuery, Preview, Revision, RevisionList,
+    UpdateArtifactResponse,
 };
 
 /// Names one artifact.
@@ -89,6 +90,23 @@ pub struct RestoreRevisionArguments {
     /// The revision the restore was prepared against. The commit fails
     /// with `revision_conflict` unless it is still current.
     pub base_revision: u64,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
+/// Arguments of `duplicate_artifact`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateArtifactArguments {
+    /// Artifact identifier of the source.
+    pub artifact_id: String,
+    /// The source revision whose files become revision 1 of the copy.
+    pub revision: u64,
+    /// Display title of the copy, 1-200 characters. Without it the copy is
+    /// named after the source's current title followed by " (Copy)".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
@@ -195,7 +213,9 @@ create or save carries an idempotency_key. If a call times out or its result \
 is lost, resend the identical call with the same key: it returns the original \
 result with replayed true instead of committing twice. Use a new key for a \
 different change. restore_revision commits an earlier revision's files as the \
-next revision under the same base_revision and key rules. update_artifact renames or pins an artifact without a new \
+next revision under the same base_revision and key rules. duplicate_artifact \
+creates a new artifact from one revision's files, with its own history; it \
+needs no base_revision but carries a key like a create. update_artifact renames or pins an artifact without a new \
 revision; it names base_metadata_revision and fails with metadata_conflict and \
 current_metadata_revision in the same way. list_artifacts returns at most 500 \
 artifacts per call; pass next_page_token back as page_token for more. File \
@@ -275,7 +295,7 @@ pub fn tools() -> Vec<ToolDefinition> {
 }
 
 /// The tools that commit, after the two that read artifacts.
-fn commit_tools() -> [ToolDefinition; 4] {
+fn commit_tools() -> [ToolDefinition; 5] {
     [
         tool::<CreateArtifactArguments, CommitResponse>(
             "create_artifact",
@@ -310,6 +330,18 @@ fn commit_tools() -> [ToolDefinition; 4] {
                  they are. The restore succeeds only if base_revision is still current; \
                  otherwise it fails with revision_conflict and the current revision. Restoring \
                  the files base_revision already has fails with invalid_request. {KEY_RULE}"
+            ),
+            ToolEffect::Commit,
+        ),
+        tool::<DuplicateArtifactArguments, DuplicateArtifactResponse>(
+            "duplicate_artifact",
+            "Duplicate artifact",
+            format!(
+                "Create a new artifact you own whose revision 1 has the files of one revision of \
+                 an artifact, exactly as they were. The copy has its own history, is not \
+                 pinned, and is named title, or the source's title followed by \" (Copy)\". \
+                 Later changes to either artifact leave the other as it is. Only files are \
+                 copied (copied lists them). {KEY_RULE}"
             ),
             ToolEffect::Commit,
         ),

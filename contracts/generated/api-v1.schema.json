@@ -217,6 +217,16 @@
         }
       ]
     },
+    "CopiedPart": {
+      "description": "A part of an artifact that a duplicate copies.",
+      "oneOf": [
+        {
+          "const": "files",
+          "description": "The files of the chosen revision, byte for byte.",
+          "type": "string"
+        }
+      ]
+    },
     "CreateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts`.",
@@ -236,6 +246,52 @@
       "required": [
         "title",
         "files"
+      ],
+      "type": "object"
+    },
+    "DuplicateArtifactRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:\ncreates an artifact from the files of that revision.",
+      "properties": {
+        "title": {
+          "description": "Display title of the copy, 1-200 characters. Without it the copy is\nnamed after the source's current title followed by \" (Copy)\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DuplicateArtifactResponse": {
+      "additionalProperties": false,
+      "description": "Response of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/Artifact",
+          "description": "The copy as of the duplicate this request identifies, unpinned and\nwith its own history. On a replay it can be older than the copy's\ncurrent state."
+        },
+        "copied": {
+          "description": "What the copy received. This version has no application data or\nuploaded assets, so it copies files only.",
+          "items": {
+            "$ref": "#/$defs/CopiedPart"
+          },
+          "type": "array"
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key already created it.",
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Revision 1 of the copy."
+        }
+      },
+      "required": [
+        "artifact",
+        "revision",
+        "copied",
+        "replayed"
       ],
       "type": "object"
     },
@@ -716,6 +772,9 @@
     },
     {
       "$ref": "#/$defs/CommitResponse"
+    },
+    {
+      "$ref": "#/$defs/DuplicateArtifactResponse"
     },
     {
       "$ref": "#/$defs/UpdateArtifactResponse"

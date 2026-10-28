@@ -20,7 +20,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/web",
         ComponentStatus::Implemented,
-        "React/Vite workspace: search, page, create, rename, pin, edit, save, and preview HTML artifacts via the local API, following committed changes live.",
+        "React/Vite workspace: search, page, create, rename, pin, edit, save, compare, restore, duplicate, and preview HTML artifacts via the local API, following committed changes live.",
     ),
     (
         "cli",
@@ -29,7 +29,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/cli",
         ComponentStatus::Implemented,
-        "Artifact create, list (search, order, pages), show, rename, pin, save, cat, and preview over HTTP; build inventory.",
+        "Artifact create, list (search, order, pages), show, rename, pin, save, restore, duplicate, cat, and preview over HTTP; build inventory.",
     ),
     (
         "runtime",
@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions, restores, and metadata updates, retry keys, pinned reads with digests, list queries; publish/fork planned.",
+        "Create, conditional revisions, restores, duplicates (files only), and metadata updates, retry keys, pinned reads with digests, list queries; publish planned.",
     ),
     (
         "policy",

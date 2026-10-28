@@ -337,7 +337,16 @@ export async function checkHistory({
     await expect(
       workspace.getByText(/Reading the artifact again/),
     ).toBeVisible();
-    for (const control of [pin, renameButton, restoreButton(2)])
+    const duplicateButton = workspace.getByRole('button', {
+      name: 'Duplicate',
+      exact: true,
+    });
+    for (const control of [
+      pin,
+      renameButton,
+      restoreButton(2),
+      duplicateButton,
+    ])
       await expect(control).toBeDisabled();
     await expect(
       workspace.getByText(/is compared once the artifact is read again/),

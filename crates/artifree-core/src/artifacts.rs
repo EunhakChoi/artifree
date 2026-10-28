@@ -1,10 +1,12 @@
 //! HTML file-package artifacts: create, conditional revision commits and
-//! restores, conditional metadata updates, lists, and revision-pinned reads.
+//! restores, duplicates, conditional metadata updates, lists, and
+//! revision-pinned reads.
 //!
 //! Every operation checks the actor's authority against current stored
 //! metadata. Commit success means durable acceptance. Source history is kept
-//! separate from future application data and access policy. Publish and fork
-//! are not implemented.
+//! separate from future application data and access policy. A duplicate
+//! copies files only, since artifacts have no application data or uploaded
+//! assets yet. Publishing is not implemented.
 
 use std::fmt;
 
@@ -276,6 +278,60 @@ impl<S: ArtifactStore> ArtifactService<S> {
             },
             artifact: id,
             base,
+            package: &package,
+        })?;
+        Ok(receipt)
+    }
+
+    /// Creates an artifact owned by `actor` whose revision 1 has the files
+    /// of `revision` of `id`, byte for byte, with its own history. The title
+    /// is `title`, or the source's current title followed by " (Copy)"; the
+    /// copy is not pinned. Only files are copied. The source is not touched.
+    ///
+    /// Retrying with the same key returns the original receipt even after
+    /// the source was renamed or revised.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or
+    /// revision, [`ArtifactError::RequestKeyReused`], or
+    /// [`ArtifactError::Unavailable`].
+    pub fn duplicate(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        revision: SourceRevision,
+        title: Option<&Title>,
+    ) -> Result<CommitReceipt, ArtifactError> {
+        let record = self.authorized(actor, id)?;
+        // Checked here, as for a read, so that a number past every revision
+        // is missing rather than a storage failure.
+        if revision.0 == 0 || revision > record.current_revision {
+            return Err(ArtifactError::NotFound(Missing::Revision));
+        }
+        let mut hasher = Fingerprint::new("duplicate");
+        hasher.field(id.as_str().as_bytes());
+        hasher.field(&revision.0.to_be_bytes());
+        // The default title is hashed as such, not as the title it gives, so
+        // a retry after a rename of the source is still the same request.
+        match title {
+            Some(title) => {
+                hasher.field(b"title");
+                hasher.field(title.as_str().as_bytes());
+            }
+            None => hasher.field(b"copy title"),
+        }
+        let package = self.package(id, revision)?;
+        let title = title.cloned().unwrap_or_else(|| record.title.copy_of());
+        let receipt = self.store.create_artifact(NewArtifact {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
+            },
+            kind: record.kind,
+            title: &title,
             package: &package,
         })?;
         Ok(receipt)

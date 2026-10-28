@@ -32,6 +32,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { refusedFloor, useWriteGate } from './conditional-write';
 import { fromEditable, toEditable } from './editable-text';
+import { DuplicateDialog } from './duplicate-dialog';
 import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
 import { useChoice } from './use-choice';
@@ -72,7 +73,10 @@ interface ArtifactDetailProps {
   known: Version | undefined;
   /** Changes of a kind the client does not know; each reads again. */
   unknownChanges: number;
-  /** Called after a revision is committed so lists can refresh. */
+  /**
+   * Called with the artifact after this page committed a revision of it or
+   * created it as a copy; the workspace opens it and lists refresh.
+   */
   onSaved: (artifact: Artifact) => void;
   /** Called after this page renamed or pinned the artifact. */
   onMetadataChanged: (artifact: Artifact) => void;
@@ -210,6 +214,18 @@ export function ArtifactDetail({
               onUpdated={onMetadataChanged}
               onConflict={reload}
             />
+            <DuplicateDialog
+              client={client}
+              artifact={artifact}
+              revisions={revisions}
+              revision={
+                keptChoice(revisions, chosen) ?? artifact.current_revision
+              }
+              unsaved={unsaved}
+              resets={resets}
+              stale={stale}
+              onDuplicated={onSaved}
+            />
           </div>
         </CardAction>
       </CardHeader>
@@ -218,8 +234,8 @@ export function ArtifactDetail({
           {stale ? (
             <output className="text-sm text-muted-foreground">
               Reading the artifact again: the server&apos;s data may have
-              changed wholesale. Pin, rename, restore, previews, and comparisons
-              wait until it is read.
+              changed wholesale. Pin, rename, restore, duplicate, previews, and
+              comparisons wait until it is read.
             </output>
           ) : null}
           {details.status === 'error' ? (
@@ -305,6 +321,16 @@ export function ArtifactDetail({
   );
 }
 
+/** The revision chosen for the preview while it is listed. */
+function keptChoice(
+  revisions: Revision[],
+  chosen: number | undefined,
+): number | undefined {
+  return revisions.some((item) => item.revision === chosen)
+    ? chosen
+    : undefined;
+}
+
 interface PreviewPanelProps {
   client: ArtifreeClient;
   artifact: Artifact;
@@ -328,10 +354,7 @@ function PreviewPanel({
 }: PreviewPanelProps) {
   const latest = artifact.current_revision;
   // A chosen revision that is not listed falls back to the latest.
-  const kept =
-    chosen !== undefined && revisions.some((item) => item.revision === chosen)
-      ? chosen
-      : undefined;
+  const kept = keptChoice(revisions, chosen);
   const revision = kept ?? latest;
   // No preview is prepared for metadata that predates a possible data
   // replacement, and none prepared meanwhile is shown.
