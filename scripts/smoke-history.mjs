@@ -19,7 +19,7 @@ export async function checkHistory({
   const { artifact } = await api(server, 'POST', '/v1/artifacts', {
     title: 'Revision history',
     files: [
-      utf8('index.html', page('Opening', 'Old middle')),
+      utf8('index.html', page('Opening', 'Old middle', ...TAIL)),
       utf8('style.css', 'p { margin: 0; }\n'),
       utf8('endings.txt', 'one\r\ntwo\n'),
       bytes('mark.png', [0x89, 0x50, 0x4e, 0x47, 1, 2]),
@@ -29,10 +29,13 @@ export async function checkHistory({
   const save = (base, changes) =>
     api(server, 'POST', `${path}/revisions`, { base_revision: base, changes });
   await save(1, [
-    { op: 'put', ...utf8('index.html', page('Opening', 'New middle')) },
+    {
+      op: 'put',
+      ...utf8('index.html', page('Opening', 'New middle', ...TAIL)),
+    },
     { op: 'put', ...utf8('endings.txt', '\uFEFFone\ntwo') },
     { op: 'put', ...bytes('mark.png', [0x89, 0x50, 0x4e, 0x47, 1, 3]) },
-    { op: 'put', ...utf8('notes.txt', 'added\n') },
+    { op: 'put', ...utf8(LONG_PATH, 'added\n') },
     { op: 'delete', path: 'style.css' },
   ]);
   const digests = async (revision) =>
@@ -75,7 +78,7 @@ export async function checkHistory({
       'Changedendings.txt',
       'Changedindex.html',
       'Changedmark.png',
-      'Addednotes.txt',
+      `Added${LONG_PATH}`,
       'Removedstyle.css',
     ]);
     const lines = (name) =>
@@ -98,6 +101,39 @@ export async function checkHistory({
     await expect(
       index.locator('[data-kind="same"]').filter({ hasText: 'Opening' }),
     ).toHaveCount(1);
+    // Lines left out after the last change are marked, like those between
+    // changes; the file's first line is shown, so nothing precedes it.
+    await expect(index.locator('tbody tr')).toHaveText([
+      /doctype/,
+      /title/,
+      /Opening/,
+      /Old middle/,
+      /New middle/,
+      /Tail one/,
+      /Tail two/,
+      /Tail three/,
+      '⋯',
+    ]);
+    // The longest path fits a narrow window and is shown whole on choice.
+    const size = tab.viewportSize();
+    await tab.setViewportSize({ width: 360, height: 640 });
+    await files.getByRole('button', { name: /added\.txt/ }).click();
+    await expect(
+      workspace.getByRole('heading', { name: LONG_PATH }),
+    ).toBeVisible();
+    // Every control and the comparison lie within the window: nothing
+    // widens the page or is clipped by a scrolling card.
+    for (const box of [
+      ...(await files.getByRole('button').all()),
+      workspace.getByRole('heading', { name: LONG_PATH }),
+    ]) {
+      const { x, width } = await box.boundingBox();
+      assert.ok(
+        x >= 0 && x + width <= 360,
+        `Wider than the window: ${x}+${width}.`,
+      );
+    }
+    await tab.setViewportSize(size);
     await checkAccessibility('workspace-history', tab);
     await files.getByRole('button', { name: /mark\.png/ }).click();
     await expect(
@@ -292,6 +328,11 @@ export async function checkHistory({
     await context.close();
   }
 }
+
+// Unchanged paragraphs after the change: more than three lines of context.
+const TAIL = ['Tail one', 'Tail two', 'Tail three', 'Tail four', 'Tail five'];
+// A valid path near the 240-byte limit.
+const LONG_PATH = `notes/${'a-folder-name-long-enough-to-wrap-badly/'.repeat(5)}added.txt`;
 
 function page(...paragraphs) {
   return `<!doctype html>\n<title>History</title>\n${paragraphs

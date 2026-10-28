@@ -194,12 +194,16 @@ export function HistoryPanel({
               size="sm"
               variant={difference === shown ? 'secondary' : 'ghost'}
               aria-current={difference === shown ? 'true' : undefined}
+              // A path can be 240 bytes: it is cut short to fit, and shown
+              // whole with its comparison and on hover.
+              className="max-w-full"
+              title={difference.path}
               onClick={() => setPath(difference.path)}
             >
               <Badge variant={BADGES[difference.kind]}>
                 {KINDS[difference.kind]}
               </Badge>
-              {difference.path}
+              <span className="min-w-0 truncate">{difference.path}</span>
             </Button>
           ))}
         </nav>
@@ -336,13 +340,12 @@ function FileComparison({
     );
   const groups = hunks(lines);
   return (
-    <section aria-label={`Changes to ${path}`}>
+    <section aria-label={`Changes to ${path}`} className="flex flex-col gap-2">
+      <h3 className="text-sm font-medium break-all">{path}</h3>
       <Diff caption={`Changes to ${path}`}>
         {groups.map((group, index) => (
           <Fragment key={group[0]?.before ?? group[0]?.after ?? index}>
-            {index === 0 && (group[0]?.before ?? 1) === 1 ? null : (
-              <DiffGap>⋯</DiffGap>
-            )}
+            {group[0] === lines[0] ? null : <DiffGap>⋯</DiffGap>}
             {group.map((line) => (
               <DiffRow
                 key={`${line.kind}:${line.before}:${line.after}`}
@@ -355,6 +358,7 @@ function FileComparison({
             ))}
           </Fragment>
         ))}
+        {groups.at(-1)?.at(-1) === lines.at(-1) ? null : <DiffGap>⋯</DiffGap>}
       </Diff>
     </section>
   );
