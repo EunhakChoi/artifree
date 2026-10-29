@@ -345,6 +345,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 onStillInTrash={(metadata) =>
                   learnInTrash(epoch, selectedId, metadata)
                 }
+                isCurrent={isCurrent}
                 unsaved={unsaved}
                 onUnsavedChange={setUnsaved}
               />

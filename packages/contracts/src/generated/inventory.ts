@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.5.0",
+  "contract_version": "0.6.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -164,5 +164,40 @@ export const scaffoldDescription: ServiceDescription = {
       "status": "implemented",
       "summary": "Fetch-based HTTP API v1 client with structured errors and change feed following."
     }
-  ]
+  ],
+  "package_rules": {
+    "entry_path": "index.html",
+    "max_files": 256,
+    "max_file_bytes": 5242880,
+    "max_package_bytes": 26214400,
+    "max_path_bytes": 240,
+    "max_path_segments": 8,
+    "max_segment_bytes": 100,
+    "media_types": {
+      "avif": "image/avif",
+      "css": "text/css; charset=utf-8",
+      "csv": "text/csv; charset=utf-8",
+      "gif": "image/gif",
+      "htm": "text/html; charset=utf-8",
+      "html": "text/html; charset=utf-8",
+      "ico": "image/x-icon",
+      "jpeg": "image/jpeg",
+      "jpg": "image/jpeg",
+      "js": "text/javascript; charset=utf-8",
+      "json": "application/json",
+      "map": "application/json",
+      "md": "text/markdown; charset=utf-8",
+      "mjs": "text/javascript; charset=utf-8",
+      "otf": "font/otf",
+      "png": "image/png",
+      "svg": "image/svg+xml",
+      "ttf": "font/ttf",
+      "txt": "text/plain; charset=utf-8",
+      "wasm": "application/wasm",
+      "webp": "image/webp",
+      "woff": "font/woff",
+      "woff2": "font/woff2",
+      "xml": "application/xml"
+    }
+  }
 };

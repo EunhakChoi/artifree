@@ -116,29 +116,64 @@ pub enum MediaType {
 }
 
 impl MediaType {
+    /// Every media type a package accepts, so clients can list them.
+    pub const ALL: [Self; 20] = [
+        Self::Html,
+        Self::Css,
+        Self::JavaScript,
+        Self::Json,
+        Self::Svg,
+        Self::Png,
+        Self::Jpeg,
+        Self::Gif,
+        Self::Webp,
+        Self::Avif,
+        Self::Icon,
+        Self::Text,
+        Self::Markdown,
+        Self::Csv,
+        Self::Woff,
+        Self::Woff2,
+        Self::Ttf,
+        Self::Otf,
+        Self::Wasm,
+        Self::Xml,
+    ];
+
+    /// The lowercase file extensions that give a path this type. Case is
+    /// ignored when a path is checked.
+    #[must_use]
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Html => &["html", "htm"],
+            Self::Css => &["css"],
+            Self::JavaScript => &["js", "mjs"],
+            Self::Json => &["json", "map"],
+            Self::Svg => &["svg"],
+            Self::Png => &["png"],
+            Self::Jpeg => &["jpg", "jpeg"],
+            Self::Gif => &["gif"],
+            Self::Webp => &["webp"],
+            Self::Avif => &["avif"],
+            Self::Icon => &["ico"],
+            Self::Text => &["txt"],
+            Self::Markdown => &["md"],
+            Self::Csv => &["csv"],
+            Self::Woff => &["woff"],
+            Self::Woff2 => &["woff2"],
+            Self::Ttf => &["ttf"],
+            Self::Otf => &["otf"],
+            Self::Wasm => &["wasm"],
+            Self::Xml => &["xml"],
+        }
+    }
+
     fn from_extension(extension: &str) -> Option<Self> {
-        Some(match extension.to_ascii_lowercase().as_str() {
-            "html" | "htm" => Self::Html,
-            "css" => Self::Css,
-            "js" | "mjs" => Self::JavaScript,
-            "json" | "map" => Self::Json,
-            "svg" => Self::Svg,
-            "png" => Self::Png,
-            "jpg" | "jpeg" => Self::Jpeg,
-            "gif" => Self::Gif,
-            "webp" => Self::Webp,
-            "avif" => Self::Avif,
-            "ico" => Self::Icon,
-            "txt" => Self::Text,
-            "md" => Self::Markdown,
-            "csv" => Self::Csv,
-            "woff" => Self::Woff,
-            "woff2" => Self::Woff2,
-            "ttf" => Self::Ttf,
-            "otf" => Self::Otf,
-            "wasm" => Self::Wasm,
-            "xml" => Self::Xml,
-            _ => return None,
+        Self::ALL.into_iter().find(|media_type| {
+            media_type
+                .extensions()
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
         })
     }
 
@@ -487,6 +522,22 @@ mod tests {
                 .map(|value| (path(value), value.as_bytes().to_vec()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn each_listed_extension_gives_its_own_type_in_any_case() {
+        let mut claimed = BTreeSet::new();
+        for media_type in MediaType::ALL {
+            for extension in media_type.extensions() {
+                assert!(claimed.insert(*extension), "{extension} is listed twice");
+                for name in [
+                    format!("a.{extension}"),
+                    format!("a.{}", extension.to_ascii_uppercase()),
+                ] {
+                    assert_eq!(path(&name).media_type(), media_type, "{name}");
+                }
+            }
+        }
     }
 
     #[test]

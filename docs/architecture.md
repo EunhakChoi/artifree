@@ -197,8 +197,14 @@ confirmation, the trash is shown from the list and recovered from, and
 moves made elsewhere close the open artifact unless a draft holds it, which
 nothing then reads for; what the page knows of the trash, like the versions
 it knows, lasts one feed epoch, and answers to writes from an earlier epoch
-move nothing ([0014](decisions/0014-web-trash.md)). The next slice is A09,
-the code editing workspace.
+move nothing ([0014](decisions/0014-web-trash.md)). A09 edits an
+artifact's files in the web workspace: a draft spans files, adds, renames,
+and deletes them, and is saved as one revision against its base or not at
+all; every change passes one write point that decides by the state it
+lands in, renames carry the bytes they move, and paths are checked with
+the package rules the build inventory carries
+([0017](decisions/0017-code-workspace.md)). The next slice is A10,
+recovering a source draft.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

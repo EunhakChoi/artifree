@@ -234,8 +234,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   save, and reload requests held in flight keep the forms read-only and the
   dialog open; a response lost after commit is retried with the same key and
   replays; a failed load offers a retry; a failed list refresh keeps the open
-  draft; unsaved changes lock navigation;
-  non-UTF-8 files are not editable; an edit keeps a byte order mark and CRLF
+  draft; unsaved changes lock navigation, and a save in flight locks the
+  file tree; non-UTF-8 files are not shown; an edit keeps a byte order mark and CRLF
   line breaks; a rejected token also stops live updates; an empty workspace
   says so and still offers the trash.
 - `scripts/smoke-live.mjs`: pages in separate browser contexts follow commits
@@ -281,6 +281,30 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   to be in the trash closes unless a draft holds it, and the first listed
   one outside the trash opens; an empty list says the workspace is empty
   only when it read every artifact outside the trash.
+- `scripts/tests/source-draft.test.mjs` and `package_rules.rs`: the web's
+  path check and the domain judge every path of
+  `contracts/fixtures/package-paths.json` alike, and the build inventory's
+  package rules are the domain's. A rename of an unchanged file needs and
+  carries its base bytes, and moving them home is no change; moved text
+  keeps its text but not its original; text equal to its original is no
+  change, and CRLF and a byte order mark are saved as read; each reason the
+  server would refuse a draft is named until it is fixed, with sizes
+  counting moved bytes.
+- `scripts/smoke-editor.mjs`, in its own browser context: a draft spans
+  files while choosing another artifact stays locked; the path dialog
+  refuses an unserved extension and a case-only twin; a failed read of the
+  file to move moves nothing and says why; a binary file moves with its
+  exact bytes, and `index.html` moved away disables saving until it is
+  back; nothing is read between the click and the save, which makes one
+  revision that keeps CRLF; a lost save stays possibly committed after a
+  refused retry, shows no "saved elsewhere" notice, and replays; a save
+  elsewhere leaves the draft and "Load latest" replaces it; a rename read
+  answered before the artifact moved to the trash and delivered after it
+  moves nothing, an open path dialog cannot submit in the trash, the open
+  file stays editable, also back to its read text, and nothing is read
+  there; a save, a file read, and a rename read held across a forged
+  `reset` change nothing, and paths cannot change then while text can.
+  The draft and the replaced state are checked for accessibility.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest
   (a same-size binary file; a 215-byte path and a 100-byte name inside a
   360-pixel window) and shows text lines with visible carriage returns,

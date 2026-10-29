@@ -15,7 +15,10 @@ fn descriptor() -> Value {
         "phase": "early-development", "server_framework": null, "async_runtime": null,
         "http_api": false, "mcp_api": false,
         "components": [{ "id": "web", "name": "Web", "layer": "presentation",
-            "language": "TypeScript", "path": "apps/web", "status": "scaffold", "summary": "Development shell." }]
+            "language": "TypeScript", "path": "apps/web", "status": "scaffold", "summary": "Development shell." }],
+        "package_rules": { "entry_path": "index.html", "max_files": 2, "max_file_bytes": 10,
+            "max_package_bytes": 20, "max_path_bytes": 40, "max_path_segments": 2,
+            "max_segment_bytes": 20, "media_types": { "html": "text/html; charset=utf-8" } }
     })
 }
 
@@ -50,6 +53,13 @@ fn rejects_unknown_nested_field() {
     let mut invalid = descriptor();
     invalid["components"][0]["surprise"] = Value::Bool(true);
     assert_rejected(invalid, "unknown field `surprise`");
+}
+
+#[test]
+fn rejects_unknown_package_rule() {
+    let mut invalid = descriptor();
+    invalid["package_rules"]["max_folders"] = Value::from(1);
+    assert_rejected(invalid, "unknown field `max_folders`");
 }
 
 #[test]
