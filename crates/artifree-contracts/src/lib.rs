@@ -4,11 +4,13 @@
 pub mod api;
 pub mod mcp;
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version, independent from a future API transport version.
-pub const CONTRACT_VERSION: &str = "0.5.0";
+pub const CONTRACT_VERSION: &str = "0.6.0";
 
 /// How much of a module's responsibility exists in this build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -80,4 +82,31 @@ pub struct ServiceDescription {
     pub mcp_api: bool,
     /// Modules included in this build-time inventory.
     pub components: Vec<Component>,
+    /// The rules this build applies to an artifact's files.
+    pub package_rules: PackageRules,
+}
+
+/// The rules a server of this build applies to an artifact's file package.
+/// Clients may check a draft against them before sending it; the server
+/// checks every request regardless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageRules {
+    /// The document a preview opens. Every package has it.
+    pub entry_path: String,
+    /// Most files in one package.
+    pub max_files: u64,
+    /// Largest file, in bytes.
+    pub max_file_bytes: u64,
+    /// Largest sum of the sizes of a package's files, in bytes.
+    pub max_package_bytes: u64,
+    /// Longest path, in UTF-8 bytes.
+    pub max_path_bytes: u64,
+    /// Most `/`-separated segments in a path.
+    pub max_path_segments: u64,
+    /// Longest segment, in bytes.
+    pub max_segment_bytes: u64,
+    /// Each accepted file extension, lowercase, with the `Content-Type` a
+    /// file with it is served with. Case is ignored when a path is checked.
+    pub media_types: BTreeMap<String, String>,
 }

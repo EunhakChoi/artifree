@@ -30,6 +30,7 @@ export interface ServiceDescription {
    * Display name of the application.
    */
   name: string;
+  package_rules: PackageRules;
   /**
    * Product implementation stage.
    */
@@ -75,4 +76,44 @@ export interface Component {
    * Actual scaffold behavior or the proposed responsibility.
    */
   summary: string;
+}
+/**
+ * The rules this build applies to an artifact's files.
+ */
+export interface PackageRules {
+  /**
+   * The document a preview opens. Every package has it.
+   */
+  entry_path: string;
+  /**
+   * Largest file, in bytes.
+   */
+  max_file_bytes: number;
+  /**
+   * Most files in one package.
+   */
+  max_files: number;
+  /**
+   * Largest sum of the sizes of a package's files, in bytes.
+   */
+  max_package_bytes: number;
+  /**
+   * Longest path, in UTF-8 bytes.
+   */
+  max_path_bytes: number;
+  /**
+   * Most `/`-separated segments in a path.
+   */
+  max_path_segments: number;
+  /**
+   * Longest segment, in bytes.
+   */
+  max_segment_bytes: number;
+  /**
+   * Each accepted file extension, lowercase, with the `Content-Type` a
+   * file with it is served with. Case is ignored when a path is checked.
+   */
+  media_types: {
+    [k: string]: string;
+  };
 }

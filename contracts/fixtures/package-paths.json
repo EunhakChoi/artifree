@@ -1,0 +1,145 @@
+{
+  "description": "Package paths and why the server refuses them (null: accepted). A Rust test and a Node test judge each case alike (decision 0017).",
+  "cases": [
+    {
+      "path": "index.html",
+      "error": null
+    },
+    {
+      "path": "pages/about.html",
+      "error": null
+    },
+    {
+      "path": "a/b/c/d/e/f/g/h.css",
+      "error": null
+    },
+    {
+      "path": "Fonts/Inter_Var.WOFF2",
+      "error": null
+    },
+    {
+      "path": "data.JSON",
+      "error": null
+    },
+    {
+      "path": "x.htm",
+      "error": null
+    },
+    {
+      "path": "app.mjs",
+      "error": null
+    },
+    {
+      "path": "style.min.css",
+      "error": null
+    },
+    {
+      "path": "",
+      "error": "Length"
+    },
+    {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.css",
+      "error": "Length"
+    },
+    {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccccccc.txt",
+      "error": null
+    },
+    {
+      "path": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.txt",
+      "error": "Length"
+    },
+    {
+      "path": "é.txt",
+      "error": "Character"
+    },
+    {
+      "path": "a b.html",
+      "error": "Character"
+    },
+    {
+      "path": "a\\b.html",
+      "error": "Character"
+    },
+    {
+      "path": "C:/x.html",
+      "error": "Character"
+    },
+    {
+      "path": "a/b/c/d/e/f/g/h/i.css",
+      "error": "Depth"
+    },
+    {
+      "path": "/index.html",
+      "error": "Segment"
+    },
+    {
+      "path": "a//b.html",
+      "error": "Segment"
+    },
+    {
+      "path": "dir/",
+      "error": "Segment"
+    },
+    {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.js",
+      "error": "Segment"
+    },
+    {
+      "path": "../index.html",
+      "error": "Dot"
+    },
+    {
+      "path": "./index.html",
+      "error": "Dot"
+    },
+    {
+      "path": ".hidden.css",
+      "error": "Dot"
+    },
+    {
+      "path": "a/b./c.css",
+      "error": "Dot"
+    },
+    {
+      "path": "con.html",
+      "error": "Reserved"
+    },
+    {
+      "path": "NUL",
+      "error": "Reserved"
+    },
+    {
+      "path": "com1.txt",
+      "error": "Reserved"
+    },
+    {
+      "path": "assets/LPT9.png",
+      "error": "Reserved"
+    },
+    {
+      "path": "con1.txt",
+      "error": null
+    },
+    {
+      "path": "comx.txt",
+      "error": null
+    },
+    {
+      "path": "readme",
+      "error": "Extension"
+    },
+    {
+      "path": "script.ts",
+      "error": "Extension"
+    },
+    {
+      "path": "archive.tar.gz",
+      "error": "Extension"
+    },
+    {
+      "path": "x.html.",
+      "error": "Dot"
+    }
+  ]
+}

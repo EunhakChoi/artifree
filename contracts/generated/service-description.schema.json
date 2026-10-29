@@ -88,6 +88,70 @@
           "type": "string"
         }
       ]
+    },
+    "PackageRules": {
+      "additionalProperties": false,
+      "description": "The rules a server of this build applies to an artifact's file package.\nClients may check a draft against them before sending it; the server\nchecks every request regardless.",
+      "properties": {
+        "entry_path": {
+          "description": "The document a preview opens. Every package has it.",
+          "type": "string"
+        },
+        "max_file_bytes": {
+          "description": "Largest file, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_files": {
+          "description": "Most files in one package.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_package_bytes": {
+          "description": "Largest sum of the sizes of a package's files, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_path_bytes": {
+          "description": "Longest path, in UTF-8 bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_path_segments": {
+          "description": "Most `/`-separated segments in a path.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_segment_bytes": {
+          "description": "Longest segment, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "media_types": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Each accepted file extension, lowercase, with the `Content-Type` a\nfile with it is served with. Case is ignored when a path is checked.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "entry_path",
+        "max_files",
+        "max_file_bytes",
+        "max_package_bytes",
+        "max_path_bytes",
+        "max_path_segments",
+        "max_segment_bytes",
+        "media_types"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -124,6 +188,10 @@
       "description": "Display name of the application.",
       "type": "string"
     },
+    "package_rules": {
+      "$ref": "#/$defs/PackageRules",
+      "description": "The rules this build applies to an artifact's files."
+    },
     "phase": {
       "description": "Product implementation stage.",
       "type": "string"
@@ -147,7 +215,8 @@
     "phase",
     "http_api",
     "mcp_api",
-    "components"
+    "components",
+    "package_rules"
   ],
   "title": "ServiceDescription",
   "type": "object"
