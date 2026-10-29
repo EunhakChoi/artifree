@@ -68,7 +68,7 @@ import {
   startDraft,
 } from './source-draft';
 import type { Change, DraftPath, Source, SourceDraft } from './source-draft';
-import { createDraftKeeper } from './draft-keeper';
+import { discardKept, draftKeeper } from './draft-keeper';
 import type { DraftRecord, DraftStore, KeptDraft } from './draft-store';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
 
@@ -200,20 +200,24 @@ export function SourcePanel({
   const mayHaveSaved = useRef(false);
   const [keepFailure, setKeepFailure] = useState<string>();
   const keeper = useMemo(
-    () => createDraftKeeper(store, artifact.id, setKeepFailure),
+    () => draftKeeper(store, artifact.id),
     [store, artifact.id],
   );
   // A kept draft is offered once, before anything is edited here.
   const [recovery, setRecovery] = useState<'checking' | 'done'>('checking');
   const [checks, setChecks] = useState(0);
+  // Why discarding the offered draft failed, shown with the choice.
+  const [discardFailure, setDiscardFailure] = useState<string>();
   const kept = useRequest(
     recovery === 'checking' ? `${artifact.id}:${checks}` : undefined,
     async () => {
       await keeper.settled();
-      // Newest first: the draft written last on this artifact.
-      return (await store.list()).find(
+      // This tab's own draft first, which continuing another tab's would
+      // replace; otherwise the newest.
+      const records = (await store.list()).filter(
         (record) => record.artifactId === artifact.id,
       );
+      return records.find((record) => record.mine) ?? records[0];
     },
   );
   // Whatever replaces this panel discards its draft, so it must not leave
@@ -279,15 +283,23 @@ export function SourcePanel({
           Looking for a draft kept in this browser…
         </output>
       );
-    if (kept.status === 'error') {
-      setKeepFailure(kept.message);
-      setRecovery('done');
-    } else if (kept.value === undefined) setRecovery('done');
+    // Editing before the kept drafts were read could replace one unseen,
+    // so that waits for the user's choice too.
+    if (kept.status === 'error')
+      return (
+        <KeptLookupFailed
+          message={kept.message}
+          onRetry={() => setChecks((value) => value + 1)}
+          onSkip={() => setRecovery('done')}
+        />
+      );
+    if (kept.value === undefined) setRecovery('done');
     else {
       const record = kept.value;
       return (
         <KeptChoice
           record={record}
+          failure={discardFailure}
           onRecover={() => recover(record)}
           onDiscard={() => void forget(record)}
         />
@@ -353,11 +365,16 @@ export function SourcePanel({
     if (!dirty) markUncertain(false);
     onUnsavedChange(dirty);
     version.current += 1;
-    void keeper.keep(dirty ? keptRecord(after) : undefined);
+    keep(dirty ? keptRecord(after) : undefined);
     // Editing starts a draft of its own; one kept earlier is no longer
     // offered.
     setRecovery('done');
     return undefined;
+  }
+
+  /** Asks the keeper to write, and shows whether the last write failed. */
+  function keep(record: DraftRecord | undefined, continued?: KeptDraft): void {
+    void keeper.keep(record, continued).then(setKeepFailure);
   }
 
   function markUncertain(value: boolean): void {
@@ -417,21 +434,18 @@ export function SourcePanel({
     setRecovery('done');
     onUnsavedChange(true);
     // A closed tab's record is removed only with a write of this tab's.
-    void keeper.keep(
-      { ...record, keptAt: Date.now() },
-      record.mine ? undefined : record,
-    );
+    keep({ ...record, keptAt: Date.now() }, record.mine ? undefined : record);
   }
 
   /** Discards a kept draft, then looks for another. */
   async function forget(record: KeptDraft): Promise<void> {
     try {
-      await store.remove(record);
+      await discardKept(store, record);
     } catch (error: unknown) {
-      setKeepFailure(describeFailure(error));
-      setRecovery('done');
+      setDiscardFailure(describeFailure(error));
       return;
     }
+    setDiscardFailure(undefined);
     setChecks((value) => value + 1);
   }
 
@@ -457,7 +471,7 @@ export function SourcePanel({
   function end(): void {
     sent.current = undefined;
     markUncertain(false);
-    void keeper.keep(undefined);
+    keep(undefined);
   }
 
   function discard(): void {
@@ -488,7 +502,7 @@ export function SourcePanel({
     // Kept before it is sent: if the page closes before the answer, the
     // save may have committed, and the same key replays it (0018).
     sent.current = { key, version: version.current };
-    await keeper.keep(keptRecord(toSave, true));
+    setKeepFailure(await keeper.keep(keptRecord(toSave, true)));
     let saved: Artifact | undefined;
     let failure: unknown;
     try {
@@ -525,7 +539,7 @@ export function SourcePanel({
       if (mayHaveCommitted(failure)) markUncertain(true);
     }
     // A refusal committed nothing; an earlier save still may have.
-    void keeper.keep(keptRecord(latest.current ?? toSave));
+    keep(keptRecord(latest.current ?? toSave));
   }
 
   const free = allowance.level === 'all';
@@ -794,10 +808,13 @@ function sameFiles(
 /** Offers a kept draft: continue it, or discard it. */
 function KeptChoice({
   record,
+  failure,
   onRecover,
   onDiscard,
 }: {
   record: KeptDraft;
+  /** Why the last discard failed, if it did. */
+  failure: string | undefined;
   onRecover: () => void;
   onDiscard: () => void;
 }) {
@@ -821,6 +838,41 @@ function KeptChoice({
           <Button type="button" variant="outline" size="sm" onClick={onDiscard}>
             <Trash2Icon data-icon="inline-start" aria-hidden="true" />
             Discard kept draft
+          </Button>
+        </div>
+        {failure === undefined ? null : (
+          <p>The draft was not discarded. {failure}</p>
+        )}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+/** Says the kept drafts could not be read, before anything is edited. */
+function KeptLookupFailed({
+  message,
+  onRetry,
+  onSkip,
+}: {
+  message: string;
+  onRetry: () => void;
+  onSkip: () => void;
+}) {
+  return (
+    <Alert variant="destructive">
+      <AlertTitle>Drafts kept in this browser could not be read</AlertTitle>
+      <AlertDescription>
+        <p>
+          {message} Editing without them may replace a draft of this artifact
+          kept earlier in this tab.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" size="sm" onClick={onRetry}>
+            <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
+            Try again
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onSkip}>
+            Edit without them
           </Button>
         </div>
       </AlertDescription>

@@ -309,7 +309,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   one state at a time and only the last one asked for, so a late write
   never brings back an ended draft; a failed write is reported until one
   succeeds; a closed tab's draft this one continues is removed only with a
-  write that succeeds.
+  write that succeeds; a view that replaced another, and a discard, write
+  after the writes asked for before them.
 - `scripts/smoke-drafts.mjs`, in its own browser context: a draft with
   moved bytes outlives a reload, is named above the list when another
   artifact opens, is recovered by choice, and saves with its exact bytes;
@@ -320,7 +321,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   is adopted then, and while writes are refused the closed tab's record
   stays; a duplicated tab, with the first tab's owner id in its session
   storage, takes an id of its own; a reconnect still offers the page's
-  draft; "Load latest" ends a kept draft; a kept draft whose revision the
+  draft; with a newer draft of a closed tab on the same artifact, the
+  tab's own is offered first; kept drafts that cannot be read hold the
+  editor until "Try again"; "Load latest" ends a kept draft; a kept draft whose revision the
   server lists with other digests is text only; a refused write shows a
   warning, and the next change is kept. Before each reload or close, the
   smoke waits for the store to hold what the next page relies on. The

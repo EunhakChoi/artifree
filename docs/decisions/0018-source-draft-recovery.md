@@ -56,9 +56,12 @@ local, unpublished trace maps each to its evidence.
    after every change it applies, and the draft's end (a save, a discard,
    "Load latest") removes it. Writes run one at a time and only the last
    state asked for is written, so a write that finishes late never brings
-   back an ended draft. Before a save is sent, the draft, the key, and
-   "may have committed" are kept and that write is awaited; the request
-   follows even if the write failed. A refused save keeps what was known
+   back an ended draft. There is one such queue per page and artifact,
+   shared by every view of that draft and by discards of this tab's kept
+   drafts, so a view that replaced an earlier one writes after it. Before
+   a save is sent, the draft, the key, and "may have committed" are kept
+   and that write is awaited; the request follows even if the write
+   failed. A refused save keeps what was known
    before it; a success removes the record; an answer from an earlier feed
    epoch changes nothing (0017, item 6). A write the browser has not
    finished when the page closes is lost, and the record keeps the state
@@ -68,7 +71,10 @@ local, unpublished trace maps each to its evidence.
 4. **Recovering is chosen.** When the source view of an artifact has no
    draft, it looks for a draft this tab may continue and, if there is one,
    offers "Recover draft" or "Discard kept draft" before showing the
-   editor, which waits for the choice. Drafts
+   editor, which waits for the choice. This tab's own draft is offered
+   before another tab's, since continuing that one would replace it. If the
+   kept drafts cannot be read, the editor waits too, with "Try again" and
+   "Edit without them", which says a kept draft may be replaced. Drafts
    kept for other artifacts are named above the list, with a way to open
    or discard each, since a reload opens the first listed artifact.
 5. **The base revision is checked by its digests.** A recovered draft

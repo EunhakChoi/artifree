@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { FolderOpenIcon, Trash2Icon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { discardKept } from './draft-keeper';
 import type { DraftStore } from './draft-store';
 import { describeFailure, useRequest } from './use-request';
 
@@ -56,7 +57,7 @@ export function KeptDrafts({ store, openId, locked, onOpen }: KeptDraftsProps) {
                 variant="ghost"
                 size="sm"
                 onClick={() => {
-                  store.remove(record).then(
+                  discardKept(store, record).then(
                     () => setChecks((value) => value + 1),
                     (error: unknown) => setFailure(describeFailure(error)),
                   );

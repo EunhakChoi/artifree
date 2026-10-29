@@ -43,6 +43,22 @@ export async function checkDrafts({
       const tab = await context.newPage();
       tab.setDefaultTimeout(10_000);
       tab.on('pageerror', (error) => errors.push(error.message));
+      // While its session storage says so, the tab cannot read kept drafts.
+      await tab.addInitScript(() => {
+        if (window !== window.top) return;
+        if (sessionStorage.getItem('smoke.refuseReads') !== '1') return;
+        const getAll = IDBObjectStore.prototype.getAll;
+        IDBObjectStore.prototype.getAll = () => {
+          throw new DOMException(
+            'The drafts could not be read.',
+            'UnknownError',
+          );
+        };
+        globalThis.allowReads = () => {
+          sessionStorage.removeItem('smoke.refuseReads');
+          IDBObjectStore.prototype.getAll = getAll;
+        };
+      });
       if (copied !== undefined)
         await tab.addInitScript((owner) => {
           // Not in the sandboxed preview frames, which have no storage.
@@ -97,11 +113,13 @@ export async function checkDrafts({
               all.onsuccess = () => {
                 const me = sessionStorage.getItem('artifree.draftOwner');
                 resolve(
-                  all.result.map((record) => ({
-                    by: record.owner === me ? 'this tab' : 'another tab',
-                    paths: [...record.draft.changes.keys()].sort(),
-                    text: record.draft.changes.get('index.html')?.text,
-                  })),
+                  all.result
+                    .map((record) => ({
+                      by: record.owner === me ? 'this tab' : 'another tab',
+                      paths: [...record.draft.changes.keys()].sort(),
+                      text: record.draft.changes.get('index.html')?.text,
+                    }))
+                    .sort((left, right) => left.by.localeCompare(right.by)),
                 );
                 db.close();
               };
@@ -285,6 +303,63 @@ export async function checkDrafts({
     await expect(b.notKept).toBeHidden();
     await keeps(second.tab, text('<p>continued</p>'));
 
+    // With a newer draft of a closed tab on the same artifact, this tab's
+    // own is offered first, since continuing the other would replace it.
+    const closedTab = (write) =>
+      second.tab.evaluate(
+        (put) =>
+          new Promise((resolve, reject) => {
+            const opening = indexedDB.open('artifree-source-drafts', 1);
+            opening.onsuccess = () => {
+              const db = opening.result;
+              const transaction = db.transaction('drafts', 'readwrite');
+              const drafts = transaction.objectStore('drafts');
+              const all = drafts.getAll();
+              all.onsuccess = () => {
+                const [mine] = all.result;
+                if (put)
+                  drafts.put({
+                    ...mine,
+                    owner: 'a closed tab',
+                    keptAt: mine.keptAt + 60_000,
+                    draft: {
+                      ...mine.draft,
+                      changes: new Map([
+                        [
+                          'index.html',
+                          {
+                            ...mine.draft.changes.get('index.html'),
+                            text: '<p>other tab</p>',
+                          },
+                        ],
+                      ]),
+                    },
+                  });
+                else drafts.delete(['a closed tab', mine.artifactId]);
+              };
+              transaction.oncomplete = () => {
+                db.close();
+                resolve();
+              };
+              transaction.onerror = () => reject(transaction.error);
+            };
+            opening.onerror = () => reject(opening.error);
+          }),
+        write,
+      );
+    await closedTab(true);
+    await second.tab.reload();
+    await b.open('Kept');
+    await b.source();
+    await b.recover.click();
+    await expect(b.text('index.html')).toHaveValue('<p>continued</p>');
+    await keeps(second.tab, [
+      { by: 'another tab', paths: ['index.html'], text: '<p>other tab</p>' },
+      ...text('<p>continued</p>'),
+    ]);
+    await closedTab(false);
+    await keeps(second.tab, text('<p>continued</p>'));
+
     // A kept draft whose revision the server no longer lists with the same
     // files is kept as text: nothing is read or saved for it.
     await second.tab.evaluate(
@@ -350,9 +425,22 @@ export async function checkDrafts({
     await b.text('index.html').fill('<p>kept again</p>');
     await expect(b.notKept).toBeHidden();
     await keeps(second.tab, text('<p>kept again</p>'));
+    // When the kept drafts cannot be read, nothing is edited until the user
+    // tries again or chooses to edit without them.
+    await second.tab.evaluate(() =>
+      sessionStorage.setItem('smoke.refuseReads', '1'),
+    );
     await second.tab.reload();
     await b.open('Kept');
     await b.source();
+    await expect(
+      second.workspace.getByText(
+        'Drafts kept in this browser could not be read',
+      ),
+    ).toBeVisible();
+    await expect(b.text('index.html')).toHaveCount(0);
+    await second.tab.evaluate(() => globalThis.allowReads());
+    await second.workspace.getByRole('button', { name: 'Try again' }).click();
     await b.recover.click();
     await expect(b.text('index.html')).toHaveValue('<p>kept again</p>');
     await second.workspace
