@@ -23,7 +23,7 @@ import { START, navigate, opened } from './navigation';
 import type { NavigationEvent } from './navigation';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
-import { openDraftStore } from './draft-store';
+import { pageDraftStore } from './draft-store';
 import { KeptDrafts } from './kept-drafts';
 import { pageVisibility } from './page-visibility';
 import { RequestGate } from './request-gate';
@@ -104,8 +104,8 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   // While the editor holds unsaved changes, actions that would replace it are
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
-  // One per tab: it holds the tab's owner id and lock (decision 0018).
-  const [draftStore] = useState(openDraftStore);
+  // The page's, kept across reconnects with its owner id (decision 0018).
+  const draftStore = pageDraftStore();
   const shownQuery = queryKey(query);
   const artifacts = useRequest(
     live.canRead

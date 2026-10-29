@@ -76,6 +76,7 @@ export async function checkDrafts({
       choice: area.getByText(
         'A draft of this artifact was kept in this browser',
       ),
+      notKept: area.getByText('This draft is not kept in this browser'),
     });
     const a = ui(workspace);
     // What the store keeps: whose each draft is, the paths it changes, and
@@ -109,6 +110,23 @@ export async function checkDrafts({
             opening.onerror = () => reject(opening.error);
           }),
       );
+    // Makes the page's IndexedDB writes fail as over the quota, until the
+    // returned function allows them again.
+    const refuseWrites = async (page) => {
+      await page.evaluate(() => {
+        const put = IDBObjectStore.prototype.put;
+        globalThis.allowWrites = () => {
+          IDBObjectStore.prototype.put = put;
+        };
+        IDBObjectStore.prototype.put = () => {
+          throw new DOMException(
+            'The quota is exceeded.',
+            'QuotaExceededError',
+          );
+        };
+      });
+      return () => page.evaluate(() => globalThis.allowWrites());
+    };
     const keeps = (page, expected) =>
       expect.poll(() => keptIn(page)).toEqual(expected);
     const text = (value) => [
@@ -174,6 +192,10 @@ export async function checkDrafts({
     await a.text('index.html').fill('<p>to discard</p>');
     await keeps(tab, text('<p>to discard</p>'));
     await tab.reload();
+    // A reconnect keeps the page's owner id, so its draft is still offered.
+    await workspace.getByRole('button', { name: 'Disconnect' }).click();
+    await workspace.getByLabel('Access token').fill(server.token);
+    await workspace.getByRole('button', { name: 'Connect' }).click();
     await a.open('Kept');
     await a.source();
     await a.discardKept.click();
@@ -249,9 +271,19 @@ export async function checkDrafts({
     await second.tab.reload();
     await b.open('Kept');
     await b.source();
+    // Continuing it moves it to this tab's owner. While writes are refused,
+    // the closed tab's record, the only copy, stays.
+    const allow = await refuseWrites(second.tab);
     await b.recover.click();
     await expect(b.text('index.html')).toHaveValue('<p>first tab</p>');
-    await keeps(second.tab, text('<p>first tab</p>'));
+    await expect(b.notKept).toBeVisible();
+    await keeps(second.tab, [
+      { by: 'another tab', paths: ['index.html'], text: '<p>first tab</p>' },
+    ]);
+    await allow();
+    await b.text('index.html').fill('<p>continued</p>');
+    await expect(b.notKept).toBeHidden();
+    await keeps(second.tab, text('<p>continued</p>'));
 
     // A kept draft whose revision the server no longer lists with the same
     // files is kept as text: nothing is read or saved for it.
@@ -311,23 +343,12 @@ export async function checkDrafts({
 
     // When the browser refuses to keep a draft, the page says so and keeps
     // editing in memory; the next change is kept once it is allowed.
-    await second.tab.evaluate(() => {
-      const put = IDBObjectStore.prototype.put;
-      globalThis.restorePut = () => {
-        IDBObjectStore.prototype.put = put;
-      };
-      IDBObjectStore.prototype.put = () => {
-        throw new DOMException('The quota is exceeded.', 'QuotaExceededError');
-      };
-    });
+    const allowAgain = await refuseWrites(second.tab);
     await b.text('index.html').fill('<p>over quota</p>');
-    const notKept = second.workspace.getByText(
-      'This draft is not kept in this browser',
-    );
-    await expect(notKept).toBeVisible();
-    await second.tab.evaluate(() => globalThis.restorePut());
+    await expect(b.notKept).toBeVisible();
+    await allowAgain();
     await b.text('index.html').fill('<p>kept again</p>');
-    await expect(notKept).toBeHidden();
+    await expect(b.notKept).toBeHidden();
     await keeps(second.tab, text('<p>kept again</p>'));
     await second.tab.reload();
     await b.open('Kept');

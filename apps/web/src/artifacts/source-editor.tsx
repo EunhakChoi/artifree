@@ -416,10 +416,11 @@ export function SourcePanel({
     setHeld(recovered);
     setRecovery('done');
     onUnsavedChange(true);
-    void keeper.keep({ ...record, keptAt: Date.now() });
-    // A record of a closed tab that is not removed is offered again, where
-    // it can be discarded.
-    if (!record.mine) void store.remove(record).catch(() => {});
+    // A closed tab's record is removed only with a write of this tab's.
+    void keeper.keep(
+      { ...record, keptAt: Date.now() },
+      record.mine ? undefined : record,
+    );
   }
 
   /** Discards a kept draft, then looks for another. */

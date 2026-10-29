@@ -35,10 +35,14 @@ export interface DraftStore {
    * Locks outside a secure context). A draft of an open tab stays with it.
    */
   list(): Promise<KeptDraft[]>;
-  /** Keeps `record` as this tab's draft of its artifact. */
-  put(record: DraftRecord): Promise<void>;
-  /** Removes this tab's draft of an artifact. */
-  forget(artifactId: string): Promise<void>;
+  /**
+   * Keeps `record` as this tab's draft of its artifact. `replacing`, a
+   * listed draft of another tab that this one continues, is removed in the
+   * same transaction, so it stays if the write fails.
+   */
+  put(record: DraftRecord, replacing?: KeptDraft): Promise<void>;
+  /** Removes this tab's draft of an artifact, and `replacing` with it. */
+  forget(artifactId: string, replacing?: KeptDraft): Promise<void>;
   /** Removes a listed draft, of this tab or another. */
   remove(record: KeptDraft): Promise<void>;
 }
@@ -53,11 +57,22 @@ interface Stored extends DraftRecord {
   readonly owner: string;
 }
 
+let pageStore: DraftStore | undefined;
+
 /**
- * The store for this tab. Each call waits until the tab holds its owner
- * id, so no draft is written or listed under an id another tab holds.
+ * The store for this page. There is one per page, since the page holds one
+ * owner id and its lock until it closes; a reconnect keeps it.
  */
-export function openDraftStore(): DraftStore {
+export function pageDraftStore(): DraftStore {
+  pageStore ??= openDraftStore();
+  return pageStore;
+}
+
+/**
+ * Each call waits until the page holds its owner id, so no draft is
+ * written or listed under an id another tab holds.
+ */
+function openDraftStore(): DraftStore {
   const owner = claimOwner();
   // Each call reports a failed claim; none is left unhandled meanwhile.
   owner.catch(() => {});
@@ -70,11 +85,19 @@ export function openDraftStore(): DraftStore {
     });
     return database;
   };
-  const remove = async (recordOwner: string, artifactId: string) => {
+  /** Writes `stored`, or removes this tab's draft, with `replacing`. */
+  const write = async (
+    me: string,
+    stored: Stored | { readonly artifactId: string },
+    replacing: KeptDraft | undefined,
+  ) => {
     const db = await open();
-    await done(db, 'readwrite', (store) =>
-      store.delete([recordOwner, artifactId]),
-    );
+    await done(db, 'readwrite', (store) => {
+      if ('draft' in stored) store.put(stored);
+      else store.delete([me, stored.artifactId]);
+      if (replacing !== undefined && replacing.owner !== me)
+        store.delete([replacing.owner, replacing.artifactId]);
+    });
   };
   return {
     async list() {
@@ -92,9 +115,10 @@ export function openDraftStore(): DraftStore {
       }
       return records.sort((left, right) => right.keptAt - left.keptAt);
     },
-    async put(record) {
+    async put(record, replacing) {
+      const me = await owner;
       const stored: Stored = {
-        owner: await owner,
+        owner: me,
         artifactId: record.artifactId,
         title: record.title,
         keptAt: record.keptAt,
@@ -103,15 +127,17 @@ export function openDraftStore(): DraftStore {
         sent: record.sent,
         uncertain: record.uncertain,
       };
-      const db = await open();
-      await done(db, 'readwrite', (store) => store.put(stored));
+      await write(me, stored, replacing);
     },
-    async forget(artifactId) {
-      await remove(await owner, artifactId);
+    async forget(artifactId, replacing) {
+      await write(await owner, { artifactId }, replacing);
     },
     async remove(record) {
       await owner;
-      await remove(record.owner, record.artifactId);
+      const db = await open();
+      await done(db, 'readwrite', (store) =>
+        store.delete([record.owner, record.artifactId]),
+      );
     },
   };
 }

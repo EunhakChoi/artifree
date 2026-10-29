@@ -49,7 +49,9 @@ local, unpublished trace maps each to its evidence.
    lock is held is left to that tab. One whose lock is free, or where the
    browser cannot tell (no Web Locks outside a secure context), may be
    continued; continuing it rewrites it under this tab's owner and removes
-   the other record.
+   the other record in the same transaction, so the other record stays
+   until a write of this tab succeeds. The id and its lock belong to the
+   page, so disconnecting and connecting again keeps them.
 3. **What is kept, and when.** The write point of 0017 keeps the draft
    after every change it applies, and the draft's end (a save, a discard,
    "Load latest") removes it. Writes run one at a time and only the last
