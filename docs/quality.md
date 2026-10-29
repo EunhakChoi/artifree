@@ -286,8 +286,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   `contracts/fixtures/package-paths.json` alike, and the build inventory's
   package rules are the domain's. A rename of an unchanged file needs and
   carries its base bytes, and moving them home is no change; moved text
-  keeps its text but not its original; text equal to its original is no
-  change, and CRLF and a byte order mark are saved as read; each reason the
+  keeps its source, so it is a change elsewhere and none back home with
+  the source's text; text equal to its source is no change, and CRLF and a byte order mark are saved as read; each reason the
   server would refuse a draft is named until it is fixed, with sizes
   counting moved bytes.
 - `scripts/smoke-editor.mjs`, in its own browser context: a draft spans
@@ -301,8 +301,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   elsewhere leaves the draft and "Load latest" replaces it; a rename read
   answered before the artifact moved to the trash and delivered after it
   moves nothing, an open path dialog cannot submit in the trash, the open
-  file stays editable, also back to its read text, and nothing is read
-  there; a save, a file read, and a rename read held across a forged
+  file stays editable, also back to its read text, files the draft holds
+  still open, and nothing is read there; a save, a file read, and a rename read held across a forged
   `reset` change nothing, and paths cannot change then while text can.
   The draft and the replaced state are checked for accessibility.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest

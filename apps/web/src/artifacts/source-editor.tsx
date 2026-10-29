@@ -66,7 +66,7 @@ import {
   setText,
   startDraft,
 } from './source-draft';
-import type { Change, DraftPath, SourceDraft } from './source-draft';
+import type { Change, DraftPath, Source, SourceDraft } from './source-draft';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
 
 /** Types the editor shows as text; other files are moved or deleted only. */
@@ -401,9 +401,9 @@ export function SourcePanel({
               mediaType={mediaTypeAt(shownDraft, selected.path)}
               allowance={allowance}
               readBase={readBase}
-              onText={(text, crlf, original) =>
+              onText={(text, crlf, source) =>
                 write('text', made, (draft) =>
-                  setText(draft, selected.path, text, crlf, original),
+                  setText(draft, selected.path, text, crlf, source),
                 )
               }
               onRename={() => setDialog({ rename: selected.path })}
@@ -589,7 +589,7 @@ interface FileTreeProps {
   paths: DraftPath[];
   selected: string | undefined;
   problemPaths: ReadonlySet<string>;
-  /** Whether files can be opened and added: nothing holds the draft. */
+  /** Whether any file can be opened, and files added: nothing holds the draft. */
   free: boolean;
   onSelect: (path: string) => void;
   onAdd: () => void;
@@ -607,7 +607,7 @@ function FileTree({
   return (
     <nav aria-label="Files" className="flex flex-col gap-2">
       <ul className="flex flex-col gap-1">
-        {paths.map(({ path, state }) => {
+        {paths.map(({ path, state, change }) => {
           const label = STATE_LABELS[state];
           return (
             <li key={path}>
@@ -617,7 +617,9 @@ function FileTree({
                 size="sm"
                 className="w-full justify-between"
                 aria-current={path === selected ? 'true' : undefined}
-                disabled={!free}
+                // What the draft holds opens without a read, so it stays
+                // reachable, and copyable, when nothing may be read.
+                disabled={!free && change === undefined}
                 onClick={() => onSelect(path)}
               >
                 <span
@@ -660,11 +662,14 @@ interface FileViewProps {
   mediaType: string | undefined;
   allowance: Allowance;
   readBase: (path: string, signal: AbortSignal) => Promise<Uint8Array>;
-  /** Sets the file's text; returns why it was refused, if it was. */
+  /**
+   * Sets the file's text, read from `source` unless the draft holds text
+   * there; returns why it was refused, if it was.
+   */
   onText: (
     text: string,
     crlf: boolean,
-    original: string | undefined,
+    source: Source | undefined,
   ) => string | undefined;
   onRename: () => void;
   onDelete: () => string | undefined;
@@ -744,7 +749,7 @@ function FileView({
           }
         />
       ) : change === undefined ||
-        (change.kind === 'text' && change.original !== undefined) ? (
+        (change.kind === 'text' && change.source?.path === path) ? (
         <BaseText
           path={path}
           edited={change}
@@ -784,9 +789,9 @@ function BaseText({
   onText: FileViewProps['onText'];
 }) {
   const [known, setKnown] = useState<EditableText | undefined>(() =>
-    edited?.original === undefined
+    edited?.source === undefined
       ? undefined
-      : { editable: true, text: edited.original, crlf: edited.crlf },
+      : { editable: true, text: edited.source.text, crlf: edited.crlf },
   );
   const [attempt, setAttempt] = useState(0);
   const file = useRequest(
@@ -825,7 +830,7 @@ function BaseText({
       path={path}
       text={edited?.text ?? base.text}
       allowance={allowance}
-      onChange={(value) => onText(value, base.crlf, base.text)}
+      onChange={(value) => onText(value, base.crlf, { path, text: base.text })}
     />
   );
 }
@@ -842,8 +847,8 @@ function HeldFile({
   allowance: Allowance;
   onText: FileViewProps['onText'];
 }) {
-  // Moved bytes are shown as text when they round-trip; editing them makes
-  // text that has no original.
+  // Moved bytes are shown as text when they round-trip; edited, they are
+  // text read from the path they came from.
   const moved = useMemo<EditableText | undefined>(
     () => (change.kind === 'bytes' ? toEditable(change.bytes) : undefined),
     [change],
@@ -872,7 +877,9 @@ function HeldFile({
       text={moved.text}
       note={note}
       allowance={allowance}
-      onChange={(value) => onText(value, moved.crlf, undefined)}
+      onChange={(value) =>
+        onText(value, moved.crlf, { path: change.from, text: moved.text })
+      }
     />
   );
 }

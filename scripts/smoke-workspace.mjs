@@ -175,7 +175,6 @@ fetch('${origin}/v1/artifacts').then(
     workspace.getByRole('button', { name: 'Saving…' }),
   ).toBeVisible();
   await expect(editor).not.toBeEditable();
-  await expect(indexFile).toBeDisabled();
   await releaseSave();
   await expect(
     workspace.getByText('Revision 4', { exact: true }),

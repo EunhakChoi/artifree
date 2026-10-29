@@ -373,7 +373,7 @@ export async function checkEditor({
     ).toBeDisabled();
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(file('main.css')).toHaveCount(0);
-    await expect(file('index.html')).toBeDisabled();
+    await expect(file('notes.txt')).toBeDisabled();
     await expect(newFile).toBeDisabled();
     await expect(renameButton).toBeDisabled();
     await expect(deleteButton).toBeDisabled();
@@ -385,6 +385,12 @@ export async function checkEditor({
     await expect(file('style.css')).not.toContainText('edited');
     await expect(text('style.css')).toBeEditable();
     await text('style.css').fill('p { color: trash }');
+    // Files the draft holds still open without a read, so their edits
+    // stay reachable; the others would need one.
+    await file('index.html').click();
+    await expect(text('index.html')).toHaveValue('<p>kept</p>\n');
+    await expect(text('index.html')).toBeEditable();
+    await file('style.css').click();
     await expect(saveButton).toBeDisabled();
     assert.deepEqual(requests, [], 'Nothing is read in the trash.');
     await setDeleted(false);
@@ -411,6 +417,10 @@ export async function checkEditor({
     await expect(renameButton).toBeDisabled();
     await expect(deleteButton).toBeDisabled();
     await expect(newFile).toBeDisabled();
+    await expect(file('notes.txt')).toBeDisabled();
+    await file('index.html').click();
+    await expect(text('index.html')).toHaveValue('<p>kept</p>\n');
+    await file('style.css').click();
     await text('style.css').fill('p { color: after }');
     await loadLatest.click();
     await expect(

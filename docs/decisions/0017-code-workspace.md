@@ -55,10 +55,12 @@ its evidence.
 3. **A rename carries the bytes it moves.** Renaming `a` to `b` deletes
    `a` and puts at `b` what `a` holds in the draft. For a file the draft
    has not changed, the rename reads its bytes from the base revision when
-   it is made, and the draft holds them, so saving reads nothing. Bytes
-   moved back to their own path are no change. Edited text that moves
-   keeps its text but not its original, since a base file at `b` is
-   another file. Moved bytes that are text can be edited where they are.
+   it is made, and the draft holds them, so saving reads nothing. What
+   moves keeps its source, the base file it was read from and that file's
+   text. Elsewhere it is a change whatever its text, since a base file at
+   `b` is another file; back at its own path, bytes or text equal to the
+   source's are no change, also after it moved away and back. Moved bytes
+   that are text can be edited where they are.
 4. **One write point decides every change.** Each change states what it
    touches, the text of a file or the draft's paths, and the revision it
    was made on. The write point applies it to the draft as last written,
@@ -76,7 +78,9 @@ its evidence.
    paths cannot change, and cannot be submitted, and a rename whose read
    answers later is refused where it lands. What the page shows is the
    last rendered state, so a change that lands before the page shows the
-   trash was made before it, as for the user.
+   trash was made before it, as for the user. Files the draft holds stay
+   open to choose in every state, since showing them reads nothing: edits
+   to other files can still be copied when nothing may be read.
 
 5. **Reads name a revision the number still names.** A file of the base
    revision is read only while the page shows neither the trash, where

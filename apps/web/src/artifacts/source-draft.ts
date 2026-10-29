@@ -16,10 +16,10 @@ export type Change =
       /** Whether it is saved with CRLF line breaks. */
       readonly crlf: boolean;
       /**
-       * The text of the base file at this path when it was edited in
-       * place; equal text is no change. Text moved here has none.
+       * The base file the text was read from, and its text then. At that
+       * path, equal text is no change; a new file has none.
        */
-      readonly original?: string;
+      readonly source?: Source;
     }
   | {
       readonly kind: 'bytes';
@@ -29,6 +29,12 @@ export type Change =
       readonly from: string;
     }
   | { readonly kind: 'deleted' };
+
+/** A base file and the text it had in the base revision. */
+export interface Source {
+  readonly path: string;
+  readonly text: string;
+}
 
 /** Changes to the files of one revision, saved together or not at all. */
 export interface SourceDraft {
@@ -106,32 +112,33 @@ function withChange(
 }
 
 /**
- * Sets the text at `path`. Text equal to `original`, the base file's own
- * text, is no change.
+ * Sets the text at `path`. `source` names the base file the shown text
+ * was read from, unless the draft already holds text there, which keeps
+ * its own. Text equal to its source at the source's own path is no change.
  */
 export function setText(
   draft: SourceDraft,
   path: string,
   text: string,
   crlf: boolean,
-  original: string | undefined,
+  source: Source | undefined,
 ): SourceDraft {
   const held = draft.changes.get(path);
-  // Moved text and a new file keep having no original.
-  const own =
-    held === undefined
-      ? original
-      : held.kind === 'text'
-        ? held.original
-        : undefined;
-  if (own !== undefined && text === own)
-    return withChange(draft, path, undefined);
-  return withChange(
-    draft,
-    path,
-    own === undefined
+  const kept = held?.kind === 'text' ? held.source : source;
+  const change: Change =
+    kept === undefined
       ? { kind: 'text', text, crlf }
-      : { kind: 'text', text, crlf, original: own },
+      : { kind: 'text', text, crlf, source: kept };
+  return withChange(draft, path, isHome(change, path) ? undefined : change);
+}
+
+/** Whether `change` at `path` is what the base revision has there. */
+function isHome(change: Change, path: string): boolean {
+  if (change.kind === 'bytes') return change.from === path;
+  return (
+    change.kind === 'text' &&
+    change.source?.path === path &&
+    change.text === change.source.text
   );
 }
 
@@ -159,9 +166,8 @@ export function restoreFile(draft: SourceDraft, path: string): SourceDraft {
 /**
  * Moves what the draft holds at `from` to `to`, which must not exist.
  * `baseBytes` are `from`'s bytes in the base revision, needed when the
- * draft holds nothing for it. Edited text keeps its text but not its
- * original, since a base file at `to` is another file. Bytes moved back to
- * their own path are no change.
+ * draft holds nothing for it. What moves keeps its source, so bytes or
+ * unedited text moved back to their own path are no change.
  */
 export function renameFile(
   draft: SourceDraft,
@@ -177,13 +183,12 @@ export function renameFile(
     moved = { kind: 'bytes', bytes: baseBytes, from };
   } else if (held.kind === 'deleted')
     throw new Error(`${from} is deleted in this draft.`);
-  else
-    moved =
-      held.kind === 'text'
-        ? { kind: 'text', text: held.text, crlf: held.crlf }
-        : held;
-  const home = moved.kind === 'bytes' && moved.from === to;
-  return withChange(deleteFile(draft, from), to, home ? undefined : moved);
+  else moved = held;
+  return withChange(
+    deleteFile(draft, from),
+    to,
+    isHome(moved, to) ? undefined : moved,
+  );
 }
 
 /** Every path the draft has or deletes, in path order. */

@@ -92,25 +92,57 @@ test('A rename of an unchanged file carries its base bytes; moving them home is 
   assert.equal(isEmpty(draft), true);
 });
 
-test('Edited text that moves keeps its text but not its original', () => {
-  let draft = setText(base(), 'a.css', 'b {}', false, 'a {}');
+test('Moved text keeps its source: it is a change elsewhere, and none back home unedited', () => {
+  const css = { path: 'a.css', text: 'a {}' };
+  let draft = setText(base(), 'a.css', 'b {}', false, css);
   draft = renameFile(draft, 'a.css', 'b.css', undefined);
-  // Typing the old original again is still a change at the new path.
+  // The old text again is still a change at another path.
   draft = setText(draft, 'b.css', 'a {}', false, undefined);
   assert.deepEqual(sent(draft), ['delete a.css', 'put b.css a {}']);
+  // Back home with its source's text, it is no change.
+  draft = renameFile(draft, 'b.css', 'a.css', undefined);
+  assert.equal(isEmpty(draft), true);
+  // Moved home edited, then edited back, it is no change either.
+  draft = setText(base(), 'a.css', 'b {}', false, css);
+  draft = renameFile(draft, 'a.css', 'c.css', undefined);
+  draft = renameFile(draft, 'c.css', 'a.css', undefined);
+  assert.deepEqual(sent(draft), ['put a.css b {}']);
+  draft = setText(draft, 'a.css', 'a {}', false, undefined);
+  assert.equal(isEmpty(draft), true);
   // Moved onto a deleted base path, it replaces that file.
+  draft = setText(base(), 'a.css', 'b {}', false, css);
   draft = deleteFile(draft, 'index.html');
-  draft = renameFile(draft, 'b.css', 'index.html', undefined);
-  draft = setText(draft, 'index.html', 'a {}', false, 'base text');
-  assert.deepEqual(sent(draft), ['delete a.css', 'put index.html a {}']);
+  draft = renameFile(draft, 'a.css', 'index.html', undefined);
+  draft = setText(draft, 'index.html', 'b {}', false, undefined);
+  assert.deepEqual(sent(draft), ['delete a.css', 'put index.html b {}']);
+  // Edited bytes keep the path they were read from.
+  draft = renameFile(
+    base(),
+    'logo.png',
+    'x.txt',
+    new TextEncoder().encode('png'),
+  );
+  draft = setText(draft, 'x.txt', 'png!', false, {
+    path: 'logo.png',
+    text: 'png',
+  });
+  draft = renameFile(draft, 'x.txt', 'logo.png', undefined);
+  draft = setText(draft, 'logo.png', 'png', false, undefined);
+  assert.equal(isEmpty(draft), true);
 });
 
 test('Text equal to its own original is no change, and line breaks are saved as read', () => {
-  let draft = setText(base(), 'a.css', 'x\ny', true, '﻿a\nb');
+  let draft = setText(base(), 'a.css', 'x\ny', true, {
+    path: 'a.css',
+    text: '﻿a\nb',
+  });
   assert.deepEqual(sent(draft), ['put a.css x\r\ny']);
   draft = setText(draft, 'a.css', '﻿a\nb', true, undefined);
   assert.equal(isEmpty(draft), true);
-  draft = setText(draft, 'a.css', '﻿a\nc', true, '﻿a\nb');
+  draft = setText(draft, 'a.css', '﻿a\nc', true, {
+    path: 'a.css',
+    text: '﻿a\nb',
+  });
   assert.deepEqual(
     Array.from(plan(draft)[0].bytes.subarray(0, 3)),
     [0xef, 0xbb, 0xbf],
@@ -159,9 +191,9 @@ test('Each reason the server would refuse a draft is named until it is fixed', (
 
   // Sizes count text as saved and bytes a rename moved.
   const big = 'x'.repeat(rules.max_file_bytes);
-  draft = setText(base(), 'a.css', big, false, 'a');
+  draft = setText(base(), 'a.css', big, false, { path: 'a.css', text: 'a' });
   assert.deepEqual(messages(draft), []);
-  draft = setText(draft, 'a.css', `${big}\n`, true, 'a');
+  draft = setText(draft, 'a.css', `${big}\n`, true, undefined);
   assert.match(messages(draft).join(' '), /a\.css is larger than 5 MiB/);
   const full = startDraft(
     1,
