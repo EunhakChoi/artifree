@@ -305,6 +305,24 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   still open, and nothing is read there; a save, a file read, and a rename read held across a forged
   `reset` change nothing, and paths cannot change then while text can.
   The draft and the replaced state are checked for accessibility.
+- `scripts/tests/draft-keeper.test.mjs`: the keeper of a kept draft writes
+  one state at a time and only the last one asked for, so a late write
+  never brings back an ended draft; a failed write is reported until one
+  succeeds.
+- `scripts/smoke-drafts.mjs`, in its own browser context: a draft with
+  moved bytes outlives a reload, is named above the list when another
+  artifact opens, is recovered by choice, and saves with its exact bytes;
+  a saved or discarded draft is no longer offered; a save in flight when
+  the page reloads is offered as possibly committed, shows no "saved
+  elsewhere" notice, and saving it replays without a second revision; a
+  draft of an open tab is not offered to another tab until it closes, and
+  is adopted then; a duplicated tab, with the first tab's owner id in its
+  session storage, takes an id of its own; "Load latest" ends a kept draft;
+  a kept draft whose revision the server lists with other digests is text
+  only; a refused write shows a warning, and the next change is kept.
+  Before each reload or close, the smoke waits for the store to hold what
+  the next page relies on. The notice and the choice are checked for
+  accessibility.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest
   (a same-size binary file; a 215-byte path and a 100-byte name inside a
   360-pixel window) and shows text lines with visible carriage returns,

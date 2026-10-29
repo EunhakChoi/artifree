@@ -203,8 +203,13 @@ and deletes them, and is saved as one revision against its base or not at
 all; every change passes one write point that decides by the state it
 lands in, renames carry the bytes they move, and paths are checked with
 the package rules the build inventory carries
-([0017](decisions/0017-code-workspace.md)). The next slice is A10,
-recovering a source draft.
+([0017](decisions/0017-code-workspace.md)). A10 keeps that draft in the
+browser's IndexedDB, per tab and artifact, with the key of a save sent
+before the page closed; reopening offers to recover or discard it, a
+recovered draft counts as written on its revision only if the server lists
+it with the same digests, and a lost save replays with its key
+([0018](decisions/0018-source-draft-recovery.md)). The next slice is A08,
+after the minimal R04 and R05 groundwork it needs.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

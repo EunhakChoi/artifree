@@ -253,18 +253,18 @@ export async function checkEditor({
       workspace.getByText(/The save may have been committed/u),
     ).toBeVisible();
     await restoreLost();
-    await tab.route(
-      '**/v1/artifacts/*/revisions',
-      (route) =>
-        route.request().method() === 'POST'
-          ? route.fulfill({
-              status: 429,
-              headers: { 'retry-after': '0' },
-              json: { error: { code: 'rate_limited', message: 'Slow down.' } },
-            })
-          : route.fallback(),
-      { times: 1 },
-    );
+    // Only the next save is refused; reads of the history pass.
+    let refused = false;
+    await tab.route('**/v1/artifacts/*/revisions', (route) => {
+      if (refused || route.request().method() !== 'POST')
+        return route.fallback();
+      refused = true;
+      return route.fulfill({
+        status: 429,
+        headers: { 'retry-after': '0' },
+        json: { error: { code: 'rate_limited', message: 'Slow down.' } },
+      });
+    });
     await saveButton.click();
     await expect(
       workspace.getByText(/Slow down\..*may have been committed/u),

@@ -23,6 +23,8 @@ import { START, navigate, opened } from './navigation';
 import type { NavigationEvent } from './navigation';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
+import { openDraftStore } from './draft-store';
+import { KeptDrafts } from './kept-drafts';
 import { pageVisibility } from './page-visibility';
 import { RequestGate } from './request-gate';
 import { TrashNav } from './trash-list';
@@ -102,6 +104,8 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
   // While the editor holds unsaved changes, actions that would replace it are
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
+  // One per tab: it holds the tab's owner id and lock (decision 0018).
+  const [draftStore] = useState(openDraftStore);
   const shownQuery = queryKey(query);
   const artifacts = useRequest(
     live.canRead
@@ -267,6 +271,12 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
           )}
         </div>
       )}
+      <KeptDrafts
+        store={draftStore}
+        openId={selectedId}
+        locked={unsaved}
+        onOpen={(id) => dispatch({ type: 'choose', id })}
+      />
       {shownList === undefined && artifacts.status !== 'error' ? (
         <output className="text-sm text-muted-foreground">
           Loading artifacts…
@@ -347,6 +357,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 }
                 isCurrent={isCurrent}
                 unsaved={unsaved}
+                draftStore={draftStore}
                 onUnsavedChange={setUnsaved}
               />
             )}

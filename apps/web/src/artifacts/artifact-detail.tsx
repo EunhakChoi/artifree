@@ -29,6 +29,7 @@ import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { TrashState, Version } from './use-live-workspace';
 import { PreviewFrame } from './preview-frame';
+import type { DraftStore } from './draft-store';
 import { SourcePanel } from './source-editor';
 import { useRequest } from './use-request';
 
@@ -80,6 +81,8 @@ interface ArtifactDetailProps {
   isCurrent: (epoch: number) => boolean;
   /** Whether the editor holds changes that are not saved. */
   unsaved: boolean;
+  /** Where this tab keeps source drafts. */
+  draftStore: DraftStore;
   /** Reports when the editor gains or loses unsaved changes. */
   onUnsavedChange: (unsaved: boolean) => void;
 }
@@ -101,6 +104,7 @@ export function ArtifactDetail({
   onStillInTrash,
   isCurrent,
   unsaved,
+  draftStore,
   onUnsavedChange,
 }: ArtifactDetailProps) {
   // In the trash every read of the artifact answers as for one that does
@@ -356,6 +360,7 @@ export function ArtifactDetail({
                 onUnsavedChange={onUnsavedChange}
                 reloading={reloading}
                 inTrash={inTrash}
+                store={draftStore}
               />
             </TabsContent>
           </Tabs>
