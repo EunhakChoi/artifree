@@ -11,7 +11,8 @@ file-package artifacts are created, saved as immutable revisions with conflict
 detection and safe retries, and previewed in a sandbox on a separate origin —
 through the HTTP API, MCP tools for agents, the CLI, and the web workspace,
 stored in a local SQLite file. It is single-user and listens on loopback by
-default. Publishing, sharing, the runtime SDK bridge, build and conversion
+default. A runtime preview may read its own artifact metadata through a
+bound bridge. Runtime grants, publishing, sharing, build and conversion
 workers, and multi-user authentication are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
 
@@ -97,7 +98,8 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0015](docs/decisions/0015-source-exports.md),
 [0016](docs/decisions/0016-bounded-file-reads.md),
 [0017](docs/decisions/0017-code-workspace.md),
-[0018](docs/decisions/0018-source-draft-recovery.md)).
+[0018](docs/decisions/0018-source-draft-recovery.md), and
+[0019](docs/decisions/0019-runtime-metadata-bridge.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -113,9 +115,33 @@ exporting a revision's source as a ZIP archive with a manifest through the
 API, client, CLI, and web workspace (A07), and editing an artifact's files
 in the web workspace, saved as one revision (A09), with the draft kept in
 the browser and recovered by choice after a reload or a closed tab (A10);
-the browser must provide Web Locks to keep drafts safely. The next slice is
-A08, starting with the runtime bridge and grants it
-needs (R04, R05).
+the browser must provide Web Locks to keep drafts safely. R04 adds the first
+runtime metadata read; grants (R05) and agent handoff (A08) remain planned.
+
+An HTML artifact can opt into the metadata bridge by placing the marker as
+the first child of its head, before any script:
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- artifree-runtime -->
+    <script>
+      window.artifree.currentMetadata().then((metadata) => {
+        console.log(metadata.title);
+      });
+    </script>
+  </head>
+  <body></body>
+</html>
+```
+
+The opt-in prefix must use a doctype followed by `html` and `head` opening
+tags; attributes in these tags must have quoted values. Other source previews
+remain byte-for-byte ordinary previews. The bridge is available in the web
+workspace, requires that workspace and server, and is not included in source
+exports. A preview is isolated from the workspace, not the network: it can
+navigate its own frame elsewhere.
 
 ## Verification
 
@@ -141,6 +167,7 @@ After changing wire DTOs or the scaffold inventory:
 
 ```sh
 npm run generate:contracts
+npm run generate:runtime
 npm run build
 ```
 

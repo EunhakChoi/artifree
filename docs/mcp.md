@@ -205,8 +205,10 @@ committed. Change the limits with `--request-burst`,
 
 ## What the tools do not do
 
-Previews are sandboxed pages with no data, model, or file capabilities, and a
-preview URL works for anyone who holds it until it expires. An open web
+The MCP preview URL opens a sandboxed page without the workspace runtime
+bridge or app-data, model, or file capabilities. The URL works for anyone
+who holds it until it expires. A separate, opted-in workspace preview can
+read its own artifact metadata (decision [0019](decisions/0019-runtime-metadata-bridge.md)). An open web
 workspace shows an agent's saves as they are committed (decision
 [0007](decisions/0007-live-web-workspace.md)); an unsaved draft there is kept
 and marked as outdated. Sharing, publishing, structured documents, and builds

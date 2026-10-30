@@ -96,6 +96,19 @@ test('Requests are classified by what they change', () => {
     requestKind('POST', '/v1/artifacts/a/revisions/2/previews'),
     'read',
   );
+  assert.equal(
+    requestKind('POST', '/v1/artifacts/a/revisions/2/runtime-views'),
+    'read',
+  );
+  assert.equal(
+    requestKind(
+      'POST',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/metadata',
+    ),
+    'read',
+  );
+  assert.equal(requestKind('DELETE', '/v1/runtime-views/view/3'), 'write');
+  assert.equal(requestKind('POST', '/v1/other/runtime-views'), 'write');
   assert.equal(requestKind('GET', '/v1/changes'), 'stream');
   assert.equal(requestKind('POST', '/v1/artifacts'), 'write');
   assert.equal(requestKind('POST', '/v1/artifacts/a/revisions'), 'write');

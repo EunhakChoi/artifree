@@ -16,6 +16,10 @@ export type ApiBody =
   | Revision
   | RevisionList
   | Preview
+  | CreateRuntimeViewRequest
+  | RuntimeView
+  | RuntimeMetadataRequest
+  | RuntimeMetadata
   | ErrorResponse
   | ArtifactChange
   | FeedPosition
@@ -79,11 +83,11 @@ export type ChangeKind = 'created' | 'revised' | 'metadata_updated' | 'deleted' 
 /**
  * Version of a source export manifest.
  */
-export type SourceExportFormat = 'artifree.source-export.v1';
+export type SourceExportFormat = 'artifree.source-export.v1' | 'artifree.source-export.v2';
 /**
  * What exported files need from a host to run as they do in Artifree.
  */
-export type ExportRuntime = 'none';
+export type ExportRuntime = 'none' | 'metadata';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -325,6 +329,87 @@ export interface Preview {
    * URL of the revision's `index.html`; relative links resolve inside it.
    */
   url: string;
+}
+/**
+ * Requests a preview view whose frame can read its artifact metadata.
+ */
+export interface CreateRuntimeViewRequest {
+  /**
+   * A positive, increasing generation within this view.
+   */
+  generation: number;
+  /**
+   * A random 32-digit lowercase hexadecimal identifier for this view.
+   */
+  view_id: string;
+}
+/**
+ * A short-lived runtime view bound to one actor, artifact, and revision.
+ */
+export interface RuntimeView {
+  /**
+   * The artifact whose preview is shown.
+   */
+  artifact_id: string;
+  /**
+   * Whether the entry explicitly opts in to the metadata bridge.
+   */
+  enabled: boolean;
+  /**
+   * Expiry time in Unix milliseconds.
+   */
+  expires_at_ms: number;
+  /**
+   * This view's generation.
+   */
+  generation: number;
+  /**
+   * A frame initialization secret, distinct from the account token.
+   */
+  initialization: string;
+  /**
+   * The pinned source revision shown in the frame.
+   */
+  revision: number;
+  /**
+   * URL of the entry document on the content origin. An opted-in entry
+   * receives a runtime bootstrap; the stored source stays unchanged.
+   */
+  url: string;
+  /**
+   * The view identifier supplied when it was created.
+   */
+  view_id: string;
+}
+/**
+ * Proves that the parent is requesting metadata for its initialized view.
+ */
+export interface RuntimeMetadataRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+}
+/**
+ * Current metadata that a runtime frame may read for its own artifact.
+ */
+export interface RuntimeMetadata {
+  /**
+   * The bound artifact's identifier.
+   */
+  artifact_id: string;
+  /**
+   * Its current source revision.
+   */
+  current_revision: number;
+  /**
+   * Its current metadata revision.
+   */
+  metadata_revision: number;
+  /**
+   * Its current title.
+   */
+  title: string;
 }
 /**
  * Body of every non-2xx JSON response.

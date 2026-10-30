@@ -15,9 +15,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    Artifact, ArtifactList, CreateArtifactRequest, DuplicateArtifactRequest, ErrorCode,
-    ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest, Revision, RevisionList,
-    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
+    DuplicateArtifactRequest, ErrorCode, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
+    Revision, RevisionList, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::parts::{Boundary, ByteRange};
@@ -199,6 +200,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/artifacts/{id}/revisions/{revision}/previews",
             axum::routing::post(create_preview),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/runtime-views",
+            axum::routing::post(create_runtime_view),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/metadata",
+            axum::routing::post(runtime_metadata),
+        )
+        .route(
+            "/v1/runtime-views/{view}/{generation}",
+            axum::routing::delete(close_runtime_view),
         )
         .route("/v1/changes", get(changes::stream))
         .method_not_allowed_fallback(method_not_allowed)
@@ -648,6 +661,50 @@ async fn create_preview(
     let preview = operations::preview(&state, actor, &id, revision).await?;
     let url = preview.url.clone();
     Ok(created(&url, Json(preview)))
+}
+
+async fn create_runtime_view(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, u64)>, PathRejection>,
+    body: Result<Json<CreateRuntimeViewRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision)) = path?;
+    let Json(request) = body?;
+    let view = operations::create_runtime_view(&state, actor, &id, revision, request).await?;
+    let url = view.url.clone();
+    Ok(created(&url, Json(view)))
+}
+
+async fn runtime_metadata(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, u64, String, u64)>, PathRejection>,
+    body: Result<Json<RuntimeMetadataRequest>, JsonRejection>,
+) -> Result<Json<RuntimeMetadata>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body?;
+    operations::runtime_metadata(
+        &state,
+        actor,
+        &id,
+        revision,
+        &view,
+        generation,
+        &request.initialization,
+    )
+    .await
+    .map(Json)
+}
+
+async fn close_runtime_view(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, u64)>, PathRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Path((view, generation)) = path?;
+    operations::close_runtime_view(&state, &actor, &view, generation)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn created(location: &str, body: impl IntoResponse) -> Response {

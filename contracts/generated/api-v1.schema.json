@@ -268,6 +268,27 @@
       ],
       "type": "object"
     },
+    "CreateRuntimeViewRequest": {
+      "additionalProperties": false,
+      "description": "Requests a preview view whose frame can read its artifact metadata.",
+      "properties": {
+        "generation": {
+          "description": "A positive, increasing generation within this view.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "view_id": {
+          "description": "A random 32-digit lowercase hexadecimal identifier for this view.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "view_id",
+        "generation"
+      ],
+      "type": "object"
+    },
     "DuplicateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:\ncreates an artifact from the files of that revision.",
@@ -430,7 +451,12 @@
       "oneOf": [
         {
           "const": "none",
-          "description": "Nothing: previews give files no capabilities (decision 0003), so a\nbrowser is all they need. Resources they load from the network are\nnot part of the export and may be unavailable offline.",
+          "description": "No runtime is requested by the entry document. Network resources are\nnot part of the export and may be unavailable offline.",
+          "type": "string"
+        },
+        {
+          "const": "metadata",
+          "description": "The entry opts in to Artifree's metadata bridge, which is not bundled\nin the source export and requires an active Artifree workspace.",
           "type": "string"
         }
       ]
@@ -722,6 +748,107 @@
       ],
       "type": "object"
     },
+    "RuntimeMetadata": {
+      "additionalProperties": false,
+      "description": "Current metadata that a runtime frame may read for its own artifact.",
+      "properties": {
+        "artifact_id": {
+          "description": "The bound artifact's identifier.",
+          "type": "string"
+        },
+        "current_revision": {
+          "description": "Its current source revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "metadata_revision": {
+          "description": "Its current metadata revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "description": "Its current title.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "title",
+        "current_revision",
+        "metadata_revision"
+      ],
+      "type": "object"
+    },
+    "RuntimeMetadataRequest": {
+      "additionalProperties": false,
+      "description": "Proves that the parent is requesting metadata for its initialized view.",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization"
+      ],
+      "type": "object"
+    },
+    "RuntimeView": {
+      "additionalProperties": false,
+      "description": "A short-lived runtime view bound to one actor, artifact, and revision.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact whose preview is shown.",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Whether the entry explicitly opts in to the metadata bridge.",
+          "type": "boolean"
+        },
+        "expires_at_ms": {
+          "description": "Expiry time in Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "generation": {
+          "description": "This view's generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialization": {
+          "description": "A frame initialization secret, distinct from the account token.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The pinned source revision shown in the frame.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "url": {
+          "description": "URL of the entry document on the content origin. An opted-in entry\nreceives a runtime bootstrap; the stored source stays unchanged.",
+          "type": "string"
+        },
+        "view_id": {
+          "description": "The view identifier supplied when it was created.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "enabled",
+        "artifact_id",
+        "revision",
+        "view_id",
+        "generation",
+        "initialization",
+        "expires_at_ms"
+      ],
+      "type": "object"
+    },
     "SaveRevisionRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts/{id}/revisions`.",
@@ -752,6 +879,11 @@
         {
           "const": "artifree.source-export.v1",
           "description": "Version 1, described by [`SourceExportManifest`].",
+          "type": "string"
+        },
+        {
+          "const": "artifree.source-export.v2",
+          "description": "Version 2 records the metadata runtime dependency when requested.",
           "type": "string"
         }
       ]
@@ -906,6 +1038,18 @@
     },
     {
       "$ref": "#/$defs/Preview"
+    },
+    {
+      "$ref": "#/$defs/CreateRuntimeViewRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeView"
+    },
+    {
+      "$ref": "#/$defs/RuntimeMetadataRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeMetadata"
     },
     {
       "$ref": "#/$defs/ErrorResponse"

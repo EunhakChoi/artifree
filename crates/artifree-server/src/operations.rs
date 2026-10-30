@@ -6,9 +6,10 @@
 
 use artifree_contracts::api::{
     Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse, ContentEncoding, CopiedPart,
-    CreateArtifactRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody,
-    ErrorCode, ExportRuntime, FileChange as WireChange, FileUpload, ListArtifactsQuery, ListSort,
-    Preview, RestoreRevisionRequest, Revision, RevisionFile, RevisionList, SaveRevisionRequest,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime, FileChange as WireChange,
+    FileUpload, ListArtifactsQuery, ListSort, Preview, RestoreRevisionRequest, Revision,
+    RevisionFile, RevisionList, RuntimeMetadata, RuntimeView, SaveRevisionRequest,
     SourceExportFormat, SourceExportManifest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
@@ -29,6 +30,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::auth::hex;
 use crate::http::AppState;
+use crate::preview::{self, RuntimeIssueError};
 
 /// A failed operation: the HTTP status and the contract error body. MCP
 /// reports the same body in an error tool result.
@@ -437,14 +439,25 @@ pub(crate) async fn export(
 fn source_archive(export: RevisionExport) -> Result<Vec<u8>, String> {
     let modified = export.revision.created_at;
     let revision = revision_dto(export.revision);
+    let runtime = if export.files.files().any(|(path, content)| {
+        path.as_str() == ENTRY_PATH && preview::runtime_marker(content).is_some()
+    }) {
+        ExportRuntime::Metadata
+    } else {
+        ExportRuntime::None
+    };
     let manifest = SourceExportManifest {
-        format: SourceExportFormat::V1,
+        format: if runtime == ExportRuntime::Metadata {
+            SourceExportFormat::V2
+        } else {
+            SourceExportFormat::V1
+        },
         artifact_id: export.artifact.id.to_string(),
         title: export.artifact.title.as_str().to_owned(),
         revision: revision.revision,
         created_at_ms: revision.created_at_ms,
         entry: ENTRY_PATH.to_owned(),
-        runtime: ExportRuntime::None,
+        runtime,
         files: revision.files,
     };
     let mut manifest = serde_json::to_vec_pretty(&manifest)
@@ -493,6 +506,149 @@ pub(crate) async fn preview(
         revision: revision.0,
         expires_at_ms: ticket.expires_at_ms,
     })
+}
+
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn validate_view(view_id: &str, generation: u64) -> Result<(), ApiError> {
+    if view_id.len() != 32
+        || !view_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !(1..=MAX_SAFE_INTEGER).contains(&generation)
+    {
+        return Err(ApiError::invalid("invalid runtime view or generation"));
+    }
+    Ok(())
+}
+
+fn missing_view() -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        ErrorCode::NotFound,
+        "runtime view not found",
+    )
+}
+
+pub(crate) async fn create_runtime_view(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    revision: u64,
+    request: CreateRuntimeViewRequest,
+) -> Result<RuntimeView, ApiError> {
+    validate_view(&request.view_id, request.generation)?;
+    let id = artifact_id(id)?;
+    let revision = revision_number(revision)?;
+    let lookup_actor = actor.clone();
+    let lookup_id = id.clone();
+    let (record, enabled) = state
+        .run(move |artifacts| {
+            let record = artifacts.artifact(&lookup_actor, &lookup_id)?;
+            if revision > record.current_revision {
+                return Err(ArtifactError::NotFound(Missing::Revision));
+            }
+            let entry =
+                artifacts.read_file(&lookup_actor, &lookup_id, revision, &PackagePath::entry())?;
+            Ok((record, preview::runtime_marker(&entry).is_some()))
+        })
+        .await?;
+    let ticket = state
+        .previews()
+        .issue_runtime(
+            actor,
+            id.clone(),
+            revision,
+            record.current_revision,
+            request.view_id.clone(),
+            request.generation,
+        )
+        .map_err(|error| match error {
+            RuntimeIssueError::Stale => ApiError::new(
+                StatusCode::CONFLICT,
+                ErrorCode::InvalidRequest,
+                "a newer runtime view already exists",
+            ),
+            RuntimeIssueError::Unavailable => ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "runtime views are temporarily unavailable",
+            ),
+        })?;
+    Ok(RuntimeView {
+        url: format!(
+            "{}/{}/{}/",
+            state.settings().content_origin,
+            if enabled { "r" } else { "p" },
+            ticket.preview.secret
+        ),
+        enabled,
+        artifact_id: id.to_string(),
+        revision: revision.0,
+        view_id: request.view_id,
+        generation: request.generation,
+        initialization: ticket.initialization,
+        expires_at_ms: ticket.preview.expires_at_ms,
+    })
+}
+
+pub(crate) async fn runtime_metadata(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    revision: u64,
+    view_id: &str,
+    generation: u64,
+    initialization: &str,
+) -> Result<RuntimeMetadata, ApiError> {
+    validate_view(view_id, generation)?;
+    let id = artifact_id(id)?;
+    let revision = revision_number(revision)?;
+    let head = state
+        .previews()
+        .runtime_head(&actor, &id, revision, view_id, generation, initialization)
+        .ok_or_else(missing_view)?;
+    let lookup_actor = actor.clone();
+    let lookup_id = id.clone();
+    let record = state
+        .run(move |artifacts| artifacts.artifact(&lookup_actor, &lookup_id))
+        .await?;
+    // Access and current source are read from the service on every RPC. A
+    // concurrent view replacement or expiry is checked again after the read.
+    if record.current_revision != head
+        || state
+            .previews()
+            .runtime_head(&actor, &id, revision, view_id, generation, initialization)
+            != Some(head)
+    {
+        return Err(missing_view());
+    }
+    Ok(RuntimeMetadata {
+        artifact_id: record.id.to_string(),
+        title: record.title.as_str().to_owned(),
+        current_revision: record.current_revision.0,
+        metadata_revision: record.metadata_revision.0,
+    })
+}
+
+pub(crate) fn close_runtime_view(
+    state: &AppState,
+    actor: &ActorId,
+    view_id: &str,
+    generation: u64,
+) -> Result<(), ApiError> {
+    validate_view(view_id, generation)?;
+    state
+        .previews()
+        .close_runtime(actor, view_id, generation)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "runtime views are temporarily unavailable",
+            )
+        })?;
+    Ok(())
 }
 
 // An identifier that cannot exist is reported like one the actor cannot

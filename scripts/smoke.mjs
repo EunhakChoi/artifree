@@ -19,6 +19,7 @@ import { checkExport } from './smoke-export.mjs';
 import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
+import { checkRuntime } from './smoke-runtime.mjs';
 import { checkTrash } from './smoke-trash.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
 
@@ -299,6 +300,12 @@ try {
     server: api,
     checkAccessibility,
   });
+  const runtime = await checkRuntime({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -472,6 +479,7 @@ try {
     noLocks,
     incompleteLocks,
     strictRecovery,
+    runtime,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

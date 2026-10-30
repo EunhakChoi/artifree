@@ -1842,3 +1842,257 @@ async fn retries_replay_in_the_trash_and_a_recovery_brings_it_back() -> TestResu
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn runtime_metadata_requires_a_live_initialized_view_and_current_access() -> TestResult {
+    let harness = Harness::new();
+    let id = runtime_artifact(&harness).await?;
+    let view_id = "0123456789abcdef0123456789abcdef";
+    let create_path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
+    let create = |generation| {
+        post(
+            &create_path,
+            None,
+            &json!({"view_id": view_id, "generation": generation}),
+        )
+    };
+    assert_eq!(
+        harness.send(create(0)?).await?.status,
+        StatusCode::BAD_REQUEST
+    );
+    let first = harness.send(create(1)?).await?;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", error_code(&first));
+    let body = first.json()?;
+    assert_eq!(body["enabled"], true);
+    let url = body["url"].as_str().ok_or("missing runtime URL")?;
+    let initialization = body["initialization"]
+        .as_str()
+        .ok_or("missing initialization")?;
+    let metadata_path = format!("{create_path}/{view_id}/1/metadata");
+    let metadata = |initialization: &str| {
+        post(
+            &metadata_path,
+            None,
+            &json!({"initialization": initialization}),
+        )
+    };
+    assert_eq!(
+        harness.send(metadata(initialization)?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+
+    let document = harness.content(url).await?;
+    assert_eq!(document.status, StatusCode::OK);
+    let rendered = String::from_utf8(document.body)?;
+    assert!(rendered.contains(initialization));
+    assert!(!rendered.contains(TOKEN));
+    assert!(
+        rendered
+            .find("__ArtifreeBootstrap.start")
+            .ok_or("missing bootstrap")?
+            < rendered
+                .find("window.authorRan")
+                .ok_or("missing author script")?
+    );
+    assert_eq!(
+        harness.content(url).await?.status,
+        StatusCode::NOT_FOUND,
+        "a later document cannot receive the bootstrap"
+    );
+    assert_eq!(
+        harness.send(metadata("wrong")?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    let read = harness.send(metadata(initialization)?).await?;
+    assert_eq!(read.status, StatusCode::OK, "{}", error_code(&read));
+    assert_eq!(read.json()?["artifact_id"], id);
+    assert_eq!(read.json()?["title"], "Demo");
+    let unauthenticated = Request::post(&metadata_path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"initialization": initialization}).to_string(),
+        ))?;
+    assert_eq!(
+        harness.send(unauthenticated).await?.status,
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}
+
+async fn runtime_artifact(harness: &Harness) -> Result<String, Box<dyn std::error::Error>> {
+    let source = "<!doctype html><html lang=\"en\"><head><!-- artifree-runtime --><script>window.authorRan = true</script></head><body>Hello</body></html>";
+    let created = harness.create("runtime-create-1", &page(source)).await?;
+    Ok(created.json()?["artifact"]["id"]
+        .as_str()
+        .ok_or("missing id")?
+        .to_owned())
+}
+
+#[tokio::test]
+async fn runtime_rejects_replaced_generations_and_changed_source() -> TestResult {
+    let harness = Harness::new();
+    let id = runtime_artifact(&harness).await?;
+    let view_id = "0123456789abcdef0123456789abcdef";
+    let create_path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
+    let create = |generation| {
+        post(
+            &create_path,
+            None,
+            &json!({"view_id": view_id, "generation": generation}),
+        )
+    };
+    let first = harness.send(create(1)?).await?.json()?;
+    let first_url = first["url"].as_str().ok_or("missing URL")?;
+    let initialization = first["initialization"]
+        .as_str()
+        .ok_or("missing initialization")?;
+    let metadata_path = format!("{create_path}/{view_id}/1/metadata");
+    let metadata = |initialization: &str| {
+        post(
+            &metadata_path,
+            None,
+            &json!({"initialization": initialization}),
+        )
+    };
+    assert_eq!(harness.content(first_url).await?.status, StatusCode::OK);
+    assert_eq!(
+        harness.send(metadata(initialization)?).await?.status,
+        StatusCode::OK
+    );
+
+    let second = harness.send(create(2)?).await?.json()?;
+    let second_url = second["url"].as_str().ok_or("missing URL")?;
+    let second_initialization = second["initialization"]
+        .as_str()
+        .ok_or("missing initialization")?;
+    assert_eq!(harness.content(second_url).await?.status, StatusCode::OK);
+    assert_eq!(
+        harness.send(metadata(initialization)?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    let old_close =
+        authorized(Request::delete(format!("/v1/runtime-views/{view_id}/1"))).body(Body::empty())?;
+    assert_eq!(
+        harness.send(old_close).await?.status,
+        StatusCode::NO_CONTENT
+    );
+    let second_metadata_path = format!("{create_path}/{view_id}/2/metadata");
+    let second_read = || {
+        post(
+            &second_metadata_path,
+            None,
+            &json!({"initialization": second_initialization}),
+        )
+    };
+    assert_eq!(harness.send(second_read()?).await?.status, StatusCode::OK);
+    assert_eq!(harness.send(create(1)?).await?.status, StatusCode::CONFLICT);
+
+    let revised = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("runtime-save-1"),
+            &put_index(1, "<h1>new source</h1>"),
+        )?)
+        .await?;
+    assert_eq!(
+        revised.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&revised)
+    );
+    assert_eq!(
+        harness.send(second_read()?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_metadata_rechecks_trash_and_current_title() -> TestResult {
+    let harness = Harness::new();
+    let id = runtime_artifact(&harness).await?;
+    let view_id = "0123456789abcdef0123456789abcdef";
+    let path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
+    let view = harness
+        .send(post(
+            &path,
+            None,
+            &json!({"view_id": view_id, "generation": 1}),
+        )?)
+        .await?
+        .json()?;
+    assert_eq!(
+        harness
+            .content(view["url"].as_str().ok_or("missing URL")?)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    let metadata = || {
+        post(
+            &format!("{path}/{view_id}/1/metadata"),
+            None,
+            &json!({"initialization": view["initialization"]}),
+        )
+    };
+    let renamed = harness
+        .send(patch(
+            &format!("/v1/artifacts/{id}"),
+            Some("runtime-rename"),
+            &json!({"base_metadata_revision": 1, "title": "New title"}),
+        )?)
+        .await?;
+    assert_eq!(renamed.status, StatusCode::OK);
+    assert_eq!(
+        harness.send(metadata()?).await?.json()?["title"],
+        "New title"
+    );
+    assert_eq!(
+        harness
+            .send(set_deleted(&id, "runtime-delete", 2, true)?)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        harness.send(metadata()?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_previews_keep_their_source_and_cannot_use_the_runtime() -> TestResult {
+    let harness = Harness::new();
+    let source = "<h1>ordinary preview</h1>";
+    let created = harness.create("runtime-create-2", &page(source)).await?;
+    let id = created.json()?["artifact"]["id"]
+        .as_str()
+        .ok_or("missing id")?
+        .to_owned();
+    let view = "123456789abcdef0123456789abcdef0";
+    let path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
+    let response = harness
+        .send(post(
+            &path,
+            None,
+            &json!({"view_id": view, "generation": 1}),
+        )?)
+        .await?;
+    let body = response.json()?;
+    assert_eq!(body["enabled"], false);
+    let url = body["url"].as_str().ok_or("missing URL")?;
+    assert_eq!(harness.content(url).await?.body, source.as_bytes());
+    assert_eq!(
+        harness.content(url).await?.body,
+        source.as_bytes(),
+        "ordinary preview can reload"
+    );
+    let read = post(
+        &format!("{path}/{view}/1/metadata"),
+        None,
+        &json!({"initialization": body["initialization"]}),
+    )?;
+    assert_eq!(harness.send(read).await?.status, StatusCode::NOT_FOUND);
+    Ok(())
+}

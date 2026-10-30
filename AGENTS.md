@@ -1,9 +1,10 @@
 # Working on Artifree
 
 Artifree is in early development: local HTML artifacts work end to end
-(decision 0003), including MCP tools for agents (decision 0004); everything
-else is proposed. Keep implemented behavior and
-proposed behavior explicitly separate in code, UI, docs, and completion reports.
+(decision 0003), including MCP tools for agents (decision 0004), and an
+opted-in preview can read its own metadata (decision 0019). Other runtime
+capabilities remain proposed. Keep implemented and proposed behavior
+explicitly separate in code, UI, docs, and completion reports.
 
 Read `docs/roadmap.md` before starting the next feature. It records PR-sized
 scope, dependencies, acceptance checks, and the requirement to trace relevant
@@ -25,11 +26,11 @@ analysis back to original evidence. Keep private evidence outside public files.
   `contracts/generated` or `packages/contracts/src/generated`.
 - JSON Schema and generated TypeScript do not replace runtime input validation
   or authorization. The current inventory is not a live health response.
-- Previews run in a CSP/iframe sandbox on a separate origin with no
-  capabilities. They are isolated from the workspace, not from the network:
-  content can navigate its own frame elsewhere (decision 0003). Do not claim
-  network isolation, capability enforcement, or an iframe bridge until they
-  are implemented. The runtime SDK contains types only.
+- Previews run in a CSP/iframe sandbox on a separate origin. Opted-in
+  frames may read their own artifact metadata through the bound bridge
+  (decision 0019). They are isolated from the workspace, not from the
+  network: content can navigate its own frame elsewhere (decision 0003).
+  Grants, other capabilities, and network isolation remain unimplemented.
 - Mutations go through `ArtifactService` with a base revision and an
   idempotency key. Do not add a write path that bypasses either.
 

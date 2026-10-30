@@ -1,14 +1,8 @@
 import type { ArtifreeClient } from '@artifree/client';
+import { useRef, useState } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { RuntimeFrame } from './runtime-frame';
 import { useRequest } from './use-request';
-
-/**
- * Sandbox flags for previews, matching the content server's CSP: without
- * allow-same-origin the content is opaque, and without allow-popups it cannot
- * open windows that escape the content policy.
- */
-const PREVIEW_SANDBOX =
-  'allow-scripts allow-forms allow-modals allow-downloads';
 
 interface PreviewFrameProps {
   client: ArtifreeClient;
@@ -35,9 +29,18 @@ export function PreviewFrame({
   title,
   className,
 }: PreviewFrameProps) {
+  const [viewId] = useState(() => crypto.randomUUID().replaceAll('-', ''));
+  const generation = useRef(0);
   const preview = useRequest(
     stale ? undefined : `${artifactId}:${revision}:${epoch}`,
-    (signal) => client.createPreview(artifactId, revision, { signal }),
+    (signal) =>
+      client.createRuntimeView(
+        artifactId,
+        revision,
+        viewId,
+        ++generation.current,
+        { signal },
+      ),
   );
   if (preview.status === 'loading')
     return (
@@ -55,11 +58,11 @@ export function PreviewFrame({
       </Alert>
     );
   return (
-    <iframe
+    <RuntimeFrame
+      key={`${preview.value.view_id}:${preview.value.generation}`}
+      client={client}
+      view={preview.value}
       title={title}
-      src={preview.value.url}
-      sandbox={PREVIEW_SANDBOX}
-      referrerPolicy="no-referrer"
       className={className}
     />
   );

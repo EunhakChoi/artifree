@@ -606,6 +606,29 @@ test('CLI exports a revision byte for byte, with a manifest that lists it', asyn
     const usage = cli(server, ['export', id]);
     assert.equal(usage.status, 2);
     assert.equal(usage.stdout, '');
+
+    // A runtime-enabled entry exports its original bytes and declares that
+    // it needs the workspace, using the new manifest format from 0019.
+    const runtimeSite = await freshDirectory('cli-export-runtime');
+    const runtimeSource =
+      '<!doctype html><html><head><!-- artifree-runtime --></head><body>runtime</body></html>';
+    await writeFile(join(runtimeSite, 'index.html'), runtimeSource);
+    const runtimeId = json(
+      cli(server, ['create', '--title', 'Runtime', '--dir', runtimeSite]),
+    ).artifact.id;
+    const runtimeArchive = join(out, 'runtime.zip');
+    json(cli(server, ['export', runtimeId, '--output', runtimeArchive]));
+    const runtimeEntries = storedZipEntries(await readFile(runtimeArchive));
+    const runtimeManifest = JSON.parse(
+      runtimeEntries[0].content.toString('utf8'),
+    );
+    assert.ok(
+      manifestIsValid(runtimeManifest),
+      JSON.stringify(manifestIsValid.errors),
+    );
+    assert.equal(runtimeManifest.format, 'artifree.source-export.v2');
+    assert.equal(runtimeManifest.runtime, 'metadata');
+    assert.equal(runtimeEntries[1].content.toString('utf8'), runtimeSource);
   } finally {
     await server.stop();
   }

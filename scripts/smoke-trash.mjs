@@ -246,7 +246,10 @@ export async function checkTrash({
       const url = new URL(request.url());
       if (
         url.pathname.startsWith(path(two)) &&
-        (request.method() === 'GET' || url.pathname.endsWith('/previews'))
+        (request.method() === 'GET' ||
+          url.pathname.endsWith('/previews') ||
+          url.pathname.endsWith('/runtime-views') ||
+          url.pathname.includes('/runtime-views/'))
       )
         readsInTrash.push(`${request.method()} ${url.pathname}`);
     };

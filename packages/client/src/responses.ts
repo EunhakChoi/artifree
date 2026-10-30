@@ -12,6 +12,8 @@ import type {
   Preview,
   Revision,
   RevisionFile,
+  RuntimeMetadata,
+  RuntimeView,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
 import type { FeedChange } from './change-feed.js';
@@ -251,6 +253,70 @@ export function parsePreview(value: unknown): Preview | undefined {
   if (typeof url !== 'string' || !isCount(number) || !isTime(expires_at_ms))
     return undefined;
   return { url, revision: number, expires_at_ms };
+}
+
+/** Validates a runtime view before its values are used for frame binding. */
+export function parseRuntimeView(value: unknown): RuntimeView | undefined {
+  if (!isRecord(value)) return undefined;
+  const {
+    url,
+    enabled,
+    artifact_id,
+    revision,
+    view_id,
+    generation,
+    initialization,
+    expires_at_ms,
+  } = value;
+  if (
+    typeof url !== 'string' ||
+    typeof enabled !== 'boolean' ||
+    typeof artifact_id !== 'string' ||
+    !isCount(revision) ||
+    revision === 0 ||
+    typeof view_id !== 'string' ||
+    !/^[0-9a-f]{32}$/.test(view_id) ||
+    !isCount(generation) ||
+    generation === 0 ||
+    typeof initialization !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(initialization) ||
+    !isTime(expires_at_ms)
+  )
+    return undefined;
+  try {
+    const address = new URL(url);
+    if (!['http:', 'https:'].includes(address.protocol)) return undefined;
+  } catch {
+    return undefined;
+  }
+  return {
+    url,
+    enabled,
+    artifact_id,
+    revision,
+    view_id,
+    generation,
+    initialization,
+    expires_at_ms,
+  };
+}
+
+/** Validates metadata returned for a runtime view. */
+export function parseRuntimeMetadata(
+  value: unknown,
+): RuntimeMetadata | undefined {
+  if (!isRecord(value)) return undefined;
+  const { artifact_id, title, current_revision, metadata_revision } = value;
+  if (
+    typeof artifact_id !== 'string' ||
+    typeof title !== 'string' ||
+    !isCount(current_revision) ||
+    current_revision === 0 ||
+    !isCount(metadata_revision) ||
+    metadata_revision === 0
+  )
+    return undefined;
+  return { artifact_id, title, current_revision, metadata_revision };
 }
 
 /** Parses the data of a `ready` or `reset` feed event. */

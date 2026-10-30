@@ -15,7 +15,8 @@ export type RequestKind = 'read' | 'stream' | 'write';
 
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a
- * preview link. The feed is one long request. Everything else writes.
+ * preview or runtime view, and reading runtime metadata. The feed is one
+ * long request. Everything else, including closing a runtime view, writes.
  */
 export function requestKind(method: string, url: string): RequestKind {
   const { pathname } = new URL(url, 'http://gate.invalid');
@@ -23,6 +24,13 @@ export function requestKind(method: string, url: string): RequestKind {
   if (verb === 'GET')
     return pathname.endsWith('/v1/changes') ? 'stream' : 'read';
   if (verb === 'POST' && pathname.endsWith('/previews')) return 'read';
+  if (
+    verb === 'POST' &&
+    /^\/v1\/artifacts\/[^/]+\/revisions\/\d+\/runtime-views(?:\/[^/]+\/\d+\/metadata)?$/.test(
+      pathname,
+    )
+  )
+    return 'read';
   return 'write';
 }
 

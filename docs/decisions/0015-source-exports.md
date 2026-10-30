@@ -1,5 +1,8 @@
 # 0015: Exporting a revision's source
 
+Update: [0019](0019-runtime-metadata-bridge.md) adds a version 2 manifest
+for an entry that opts into the metadata bridge. Version 1 remains unchanged.
+
 Date: 2026-10-28. Status: accepted. Builds on
 [0003](0003-local-html-artifact-slice.md),
 [0010](0010-revision-restore-and-digests.md),

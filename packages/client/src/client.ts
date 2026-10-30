@@ -10,6 +10,8 @@ import type {
   Preview,
   RestoreRevisionRequest,
   Revision,
+  RuntimeMetadata,
+  RuntimeView,
   SaveRevisionRequest,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
@@ -29,6 +31,8 @@ import {
   parseError,
   parsePreview,
   parseRevisionList,
+  parseRuntimeMetadata,
+  parseRuntimeView,
   parseUpdate,
 } from './responses.js';
 
@@ -177,6 +181,7 @@ function statedPart(
 
 interface SendOptions {
   readonly mutation?: { body: unknown; idempotencyKey: string } | undefined;
+  readonly body?: unknown;
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal | undefined;
 }
@@ -484,6 +489,66 @@ export class ArtifreeClient {
     );
   }
 
+  /** Issues an ephemeral runtime view. The account token stays in this client. */
+  async createRuntimeView(
+    id: string,
+    revision: number,
+    viewId: string,
+    generation: number,
+    options: ReadOptions = {},
+  ): Promise<RuntimeView> {
+    const view = await this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
+      parseRuntimeView,
+      { body: { view_id: viewId, generation }, signal: options.signal },
+    );
+    if (
+      view.artifact_id !== id ||
+      view.revision !== revision ||
+      view.view_id !== viewId ||
+      view.generation !== generation
+    )
+      throw new ArtifreeApiError(
+        'The server returned a runtime view for different inputs.',
+        {
+          status: 201,
+          code: 'invalid_response',
+        },
+      );
+    return view;
+  }
+
+  /** Reads current metadata through the parent workspace, rechecking the binding. */
+  async runtimeMetadata(
+    view: RuntimeView,
+    options: ReadOptions = {},
+  ): Promise<RuntimeMetadata> {
+    const metadata = await this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/metadata`,
+      parseRuntimeMetadata,
+      { body: { initialization: view.initialization }, signal: options.signal },
+    );
+    if (metadata.artifact_id !== view.artifact_id)
+      throw new ArtifreeApiError(
+        'The server returned metadata for another artifact.',
+        {
+          status: 200,
+          code: 'invalid_response',
+        },
+      );
+    return metadata;
+  }
+
+  /** Closes one view generation; an older close cannot revoke its replacement. */
+  async closeRuntimeView(view: RuntimeView): Promise<void> {
+    await this.send(
+      'DELETE',
+      `/v1/runtime-views/${view.view_id}/${view.generation}`,
+    );
+  }
+
   /** The whole body; a failure while reading is a `network_error`. */
   private async bytes(
     response: Response,
@@ -518,7 +583,7 @@ export class ArtifreeClient {
   private async send(
     method: string,
     path: string,
-    { mutation, headers: extraHeaders, signal }: SendOptions = {},
+    { mutation, body, headers: extraHeaders, signal }: SendOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
       ...extraHeaders,
@@ -530,6 +595,9 @@ export class ArtifreeClient {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;
       init.body = JSON.stringify(mutation.body);
+    } else if (body !== undefined) {
+      headers['content-type'] = 'application/json';
+      init.body = JSON.stringify(body);
     }
     let response: Response;
     try {

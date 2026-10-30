@@ -70,6 +70,78 @@ test('A complete body that is not the contract is an invalid response', async ()
   assert.equal(error.code, 'invalid_response');
 });
 
+test('Runtime responses must match the requested view and valid metadata', async () => {
+  const viewId = 'a'.repeat(32);
+  const view = {
+    url: `http://127.0.0.1:7411/r/${'b'.repeat(64)}/`,
+    enabled: true,
+    artifact_id: artifact.id,
+    revision: 1,
+    view_id: viewId,
+    generation: 1,
+    initialization: 'c'.repeat(64),
+    expires_at_ms: 1_000_000,
+  };
+  let sent;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent = { url, init };
+      return Response.json(view, { status: 201 });
+    },
+  });
+  assert.deepEqual(
+    await client.createRuntimeView(artifact.id, 1, viewId, 1),
+    view,
+  );
+  assert.deepEqual(JSON.parse(sent.init.body), {
+    view_id: viewId,
+    generation: 1,
+  });
+  assert.equal(sent.init.headers.authorization, 'Bearer token');
+  for (const body of [
+    { ...view, url: 'javascript:alert(1)' },
+    { ...view, enabled: 'yes' },
+    { ...view, initialization: 'invalid' },
+    { ...view, artifact_id: `art_${'1'.repeat(32)}` },
+    { ...view, revision: 2 },
+    { ...view, view_id: 'd'.repeat(32) },
+    { ...view, generation: 2 },
+    { ...view, expires_at_ms: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    const error = await failure(
+      clientWith(() => Response.json(body)).createRuntimeView(
+        artifact.id,
+        1,
+        viewId,
+        1,
+      ),
+    );
+    assert.equal(error.code, 'invalid_response', JSON.stringify(body));
+  }
+  const valid = {
+    artifact_id: artifact.id,
+    title: 'New name',
+    current_revision: 1,
+    metadata_revision: 2,
+  };
+  assert.deepEqual(
+    await clientWith(() => Response.json(valid)).runtimeMetadata(view),
+    valid,
+  );
+  for (const body of [
+    { ...valid, artifact_id: `art_${'1'.repeat(32)}` },
+    { ...valid, current_revision: 0 },
+    { ...valid, metadata_revision: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    const error = await failure(
+      clientWith(() => Response.json(body)).runtimeMetadata(view),
+    );
+    assert.equal(error.code, 'invalid_response', JSON.stringify(body));
+  }
+});
+
 test('An export is a ZIP archive, whole, or a failure', async () => {
   // The end record of an empty archive.
   const zip = new Uint8Array(22);

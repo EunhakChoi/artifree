@@ -1,6 +1,6 @@
 # Quality gates
 
-Status: early development, 2026-10-28. The checks below protect the local HTML
+Status: early development, 2026-10-31. The checks below protect the local HTML
 artifact slice ([decision 0003](decisions/0003-local-html-artifact-slice.md))
 and the foundation around it. Passing them implies nothing about planned
 features.
@@ -229,6 +229,19 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   read, and the refused read is sent again first; a delay is never shortened,
   ended by the stall bound, or ended while hidden; a stalled read frees its
   turn once; and the gate listens to visibility only while reads wait.
+- Runtime metadata: the real HTTP routers and the ticket registry tests check
+  the view's actor, artifact,
+  source revision, generation, initialization, expiry, current access, and
+  replacement. An ordinary entry retains its bytes and reloads normally; an
+  opted-in entry receives its bootstrap once and its source export declares
+  the workspace dependency. A real storage read held across a generation
+  replacement must refuse its late result. The client refuses malformed or mismatched view
+  and metadata responses. The current server has one local actor.
+  `scripts/smoke-runtime.mjs` runs Chromium and
+  Firefox against a real server and sandboxed frame: metadata reaches the
+  frame without the account token, a wrong initialization and a different
+  opaque window are refused, an expired host message sends no RPC, and a
+  successful response held across frame navigation is not delivered afterwards.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
   read the parent page, use storage, open a popup, or reach the API; create,
   save, and reload requests held in flight keep the forms read-only and the
