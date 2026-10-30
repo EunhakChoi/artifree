@@ -346,6 +346,14 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   Before each reload or close the smoke waits for the
   store to hold what the next page relies on. The notice and the choice
   are checked for accessibility.
+- `scripts/smoke-draft-guards.mjs`: a live draft survives two copied-owner
+  pages without Web Locks, including their save and discard choices; the
+  pages see the lookup and keep failures. Incomplete lock snapshots fail the
+  lookup and cannot expose an active owner's draft; explicitly proceeding
+  uses a distinct owner. A real Vite development page also recovers and
+  discards a draft under React Strict Mode, retaining then releasing the
+  workspace lock. The lookup and recovery choices are checked for
+  accessibility.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest
   (a same-size binary file; a 215-byte path and a 100-byte name inside a
   360-pixel window) and shows text lines with visible carriage returns,

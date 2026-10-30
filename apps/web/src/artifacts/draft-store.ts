@@ -48,8 +48,8 @@ export interface KeptDraft extends DraftRecord {
 export interface DraftStore {
   /**
    * The drafts this tab may continue: its own, and those of tabs no longer
-   * open or whose state the browser cannot tell when Web Locks are absent.
-   * A draft of an open tab is left to that tab when locks are available.
+   * open. A draft of an open tab is left to that tab. When Web Locks are
+   * unavailable, the store refuses draft reads and writes for safety.
    */
   list(): Promise<KeptDraft[]>;
   /**
@@ -68,6 +68,8 @@ const DATABASE = 'artifree-source-drafts';
 const DRAFTS = 'drafts';
 const OWNER_KEY = 'artifree.draftOwner';
 const LOCK_PREFIX = 'artifree.draft-owner:';
+const LOCKS_REQUIRED =
+  'Web Locks are required to read or keep drafts safely in this browser.';
 
 /** A record as the object store holds it, under its owner and artifact. */
 interface Stored extends DraftRecord {
@@ -127,12 +129,9 @@ export function openDraftStore(): DraftStore {
       );
     };
     const locks = navigator.locks as LockManager | undefined;
-    if (
-      replacing === undefined ||
-      replacing.owner === heldOwner ||
-      locks === undefined
-    )
+    if (replacing === undefined || replacing.owner === heldOwner)
       return perform();
+    if (locks === undefined) throw new Error(LOCKS_REQUIRED);
     // A list is only a snapshot. Hold the other owner's lock through the
     // transaction so a tab that has returned cannot lose its draft.
     const failure = await locks.request(
@@ -197,7 +196,7 @@ export function openDraftStore(): DraftStore {
       const records: KeptDraft[] = [];
       for (const record of all) {
         const mine = record.owner === heldOwner;
-        if (!mine && others?.has(record.owner) === true) continue;
+        if (!mine && others.has(record.owner)) continue;
         records.push({ ...record, mine });
       }
       return records;
@@ -242,6 +241,8 @@ export function openDraftStore(): DraftStore {
  * it, whose drafts it may continue once that page is gone.
  */
 async function claimOwner(): Promise<string> {
+  const locks = navigator.locks as LockManager | undefined;
+  if (locks === undefined) throw new Error(LOCKS_REQUIRED);
   let owner: string | undefined;
   try {
     owner = sessionStorage.getItem(OWNER_KEY) ?? undefined;
@@ -249,9 +250,7 @@ async function claimOwner(): Promise<string> {
     // Without session storage the id lasts as long as the page.
   }
   owner ??= crypto.randomUUID();
-  const locks = navigator.locks as LockManager | undefined;
-  if (locks !== undefined)
-    while (!(await hold(locks, owner))) owner = crypto.randomUUID();
+  while (!(await hold(locks, owner))) owner = crypto.randomUUID();
   try {
     sessionStorage.setItem(OWNER_KEY, owner);
   } catch {
@@ -272,15 +271,20 @@ function hold(locks: LockManager, owner: string): Promise<boolean> {
   });
 }
 
-/** The owners whose pages are open now, or none where the browser cannot tell. */
-async function openOwners(): Promise<Set<string> | undefined> {
+/** The owners whose pages are open now. */
+async function openOwners(): Promise<Set<string>> {
   const locks = navigator.locks as LockManager | undefined;
-  if (locks === undefined) return undefined;
-  const { held = [] } = await locks.query();
+  if (locks === undefined) throw new Error(LOCKS_REQUIRED);
+  const { held } = await locks.query();
+  if (held === undefined)
+    throw new Error('The browser could not list active draft owners.');
   const owners = new Set<string>();
-  for (const lock of held)
-    if (lock.name?.startsWith(LOCK_PREFIX) === true)
+  for (const lock of held) {
+    if (lock.name === undefined)
+      throw new Error('The browser could not list active draft owners.');
+    if (lock.name.startsWith(LOCK_PREFIX))
       owners.add(lock.name.slice(LOCK_PREFIX.length));
+  }
   return owners;
 }
 

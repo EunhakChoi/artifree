@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { RotateCwIcon, Trash2Icon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -43,6 +43,11 @@ export function SourceRecovery({
   const [discardFailure, setDiscardFailure] = useState<string>();
   const [discarding, setDiscarding] = useState(false);
   const discardInFlight = useRef(false);
+  // The recovery view exists before its editor and owns the workspace lock
+  // until this whole view leaves. An editor mounted after a choice may have
+  // its effects replayed in development without ending that choice.
+  const release = useEffectEvent(() => onUnsavedChange(false));
+  useEffect(() => () => release(), []);
   const kept = useRequest(
     chosen === undefined ? `${artifactId}:${lookups}` : undefined,
     async () =>

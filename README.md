@@ -113,7 +113,8 @@ exporting a revision's source as a ZIP archive with a manifest through the
 API, client, CLI, and web workspace (A07), and editing an artifact's files
 in the web workspace, saved as one revision (A09), with the draft kept in
 the browser and recovered by choice after a reload or a closed tab (A10);
-the next slice is A08, starting with the runtime bridge and grants it
+the browser must provide Web Locks to keep drafts safely. The next slice is
+A08, starting with the runtime bridge and grants it
 needs (R04, R05).
 
 ## Verification

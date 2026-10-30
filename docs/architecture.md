@@ -209,7 +209,9 @@ Lock before anything renders and orders each artifact's writes, the source
 view offers a kept draft for recovery or discard before the editor
 starts, a recovered draft counts as written on its revision only if the
 server lists it with the same digests, and a save whose answer was lost
-replays with its kept key ([0018](decisions/0018-source-draft-recovery.md)).
+replays with its kept key. Without Web Locks, draft reads and writes are
+refused with an explicit warning to protect other tabs' records
+([0018](decisions/0018-source-draft-recovery.md)).
 The next slice is A08, starting with the runtime bridge and grants it
 needs (R04, R05).
 

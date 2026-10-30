@@ -8,6 +8,11 @@ import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
 import { checkDrafts } from './smoke-drafts.mjs';
+import {
+  checkDraftsWithoutLocks,
+  checkIncompleteLockSnapshot,
+  checkStrictDraftRecovery,
+} from './smoke-draft-guards.mjs';
 import { checkDuplicate } from './smoke-duplicate.mjs';
 import { checkEditor } from './smoke-editor.mjs';
 import { checkExport } from './smoke-export.mjs';
@@ -277,6 +282,23 @@ try {
     server: api,
     checkAccessibility,
   });
+  const noLocks = await checkDraftsWithoutLocks({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
+  const incompleteLocks = await checkIncompleteLockSnapshot({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
+  const strictRecovery = await checkStrictDraftRecovery({
+    browser,
+    server: api,
+    checkAccessibility,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -447,6 +469,9 @@ try {
     trash,
     editor,
     drafts,
+    noLocks,
+    incompleteLocks,
+    strictRecovery,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

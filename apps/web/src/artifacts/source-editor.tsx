@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useEffectEvent,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   FilePlusIcon,
@@ -223,11 +216,6 @@ export function SourcePanel({
   const sent = useRef(start?.sent);
   const attempts = useRef(start?.attempts ?? []);
   const mayHaveSaved = useRef(start?.uncertain === true);
-  // Whatever replaces this panel discards its draft, so it must not leave
-  // the workspace locked.
-  const release = useEffectEvent(() => onUnsavedChange(false));
-  useEffect(() => () => release(), []);
-
   const current = revisions.find(
     (item) => item.revision === artifact.current_revision,
   );
