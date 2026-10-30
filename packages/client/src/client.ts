@@ -584,7 +584,9 @@ export class ArtifreeClient {
   }
 
   /** Closes one view generation; an older close cannot revoke its replacement. */
-  async closeRuntimeView(view: RuntimeView): Promise<void> {
+  async closeRuntimeView(
+    view: Pick<RuntimeView, 'view_id' | 'generation'>,
+  ): Promise<void> {
     await this.send(
       'DELETE',
       `/v1/runtime-views/${view.view_id}/${view.generation}`,

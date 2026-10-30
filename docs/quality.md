@@ -232,7 +232,10 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
 - Runtime metadata: the real HTTP routers and the ticket registry tests check
   the view's actor, artifact,
   source revision, generation, initialization, expiry, current access, and
-  replacement. An ordinary entry retains its bytes and reloads normally; an
+  replacement. A close before issuance fences the generation, including an
+  actual storage lookup still in flight and a browser that leaves its preview
+  while the create is held. A fence remains while its create is pending even
+  after its ordinary lifetime. An ordinary entry retains its bytes and reloads normally; an
   opted-in entry receives its bootstrap once and its source export declares
   the workspace dependency. A real storage read held across a generation
   replacement must refuse its late result. The client refuses malformed or mismatched view

@@ -97,12 +97,52 @@ struct Bootstrap {
     lease_ms: u64,
 }
 
+#[derive(Debug)]
+struct Generation {
+    number: u64,
+    expires: Instant,
+}
+
+#[derive(Debug, Default)]
+struct TicketRegistry {
+    live: HashMap<String, Ticket>,
+    generations: HashMap<(ActorId, String), Generation>,
+    pending: HashMap<(ActorId, String), usize>,
+}
+
+impl TicketRegistry {
+    fn prune(&mut self, now: Instant) {
+        self.live.retain(|_, ticket| ticket.expires > now);
+        self.generations
+            .retain(|key, generation| generation.expires > now || self.pending.contains_key(key));
+    }
+}
+
+/// Keeps a generation fence until its outstanding create has finished.
+pub(crate) struct RuntimeCreation<'a> {
+    tickets: &'a PreviewTickets,
+    key: (ActorId, String),
+}
+
+impl Drop for RuntimeCreation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.tickets.registry.lock()
+            && let Some(count) = registry.pending.get_mut(&self.key)
+        {
+            *count -= 1;
+            if *count == 0 {
+                registry.pending.remove(&self.key);
+            }
+        }
+    }
+}
+
 /// Process-local preview tickets. They do not survive a restart; clients
 /// request a new preview link instead.
 #[derive(Debug)]
 pub struct PreviewTickets {
     ttl: Duration,
-    live: Mutex<HashMap<String, Ticket>>,
+    registry: Mutex<TicketRegistry>,
 }
 
 impl PreviewTickets {
@@ -111,7 +151,7 @@ impl PreviewTickets {
     pub fn new(ttl: Duration) -> Self {
         Self {
             ttl,
-            live: Mutex::new(HashMap::new()),
+            registry: Mutex::new(TicketRegistry::default()),
         }
     }
 
@@ -133,12 +173,12 @@ impl PreviewTickets {
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
-        let mut live = self.live.lock().ok()?;
-        live.retain(|_, ticket| ticket.expires > now);
-        if live.len() >= MAX_LIVE_TICKETS {
+        let mut registry = self.registry.lock().ok()?;
+        registry.prune(now);
+        if registry.live.len() >= MAX_LIVE_TICKETS {
             return None;
         }
-        live.insert(
+        registry.live.insert(
             secret.clone(),
             Ticket {
                 actor,
@@ -152,6 +192,23 @@ impl PreviewTickets {
             secret,
             expires_at_ms,
         })
+    }
+
+    /// Starts a create before its asynchronous artifact lookup.
+    pub(crate) fn begin_runtime(
+        &self,
+        actor: &ActorId,
+        view_id: &str,
+    ) -> Option<RuntimeCreation<'_>> {
+        let mut registry = self.registry.lock().ok()?;
+        registry.prune(Instant::now());
+        let key = (actor.clone(), view_id.to_owned());
+        if registry.pending.len() >= MAX_LIVE_TICKETS && !registry.pending.contains_key(&key) {
+            return None;
+        }
+        let count = registry.pending.entry(key.clone()).or_default();
+        *count = count.checked_add(1)?;
+        Some(RuntimeCreation { tickets: self, key })
     }
 
     /// Replaces an older generation of the same actor's view atomically.
@@ -181,11 +238,30 @@ impl PreviewTickets {
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
             .ok_or(RuntimeIssueError::Unavailable)?;
-        let mut live = self
-            .live
+        let mut registry = self
+            .registry
             .lock()
             .map_err(|_| RuntimeIssueError::Unavailable)?;
-        live.retain(|_, ticket| ticket.expires > now);
+        registry.prune(now);
+        let key = (actor.clone(), view_id.clone());
+        if registry
+            .generations
+            .get(&key)
+            .is_some_and(|previous| previous.number >= generation)
+        {
+            return Err(RuntimeIssueError::Stale);
+        }
+        if registry.generations.len() >= MAX_LIVE_TICKETS
+            && !registry.generations.contains_key(&key)
+        {
+            return Err(RuntimeIssueError::Unavailable);
+        }
+        // A close can acquire the lock after this request computed its
+        // expiry. Never shorten the earlier fence when a newer view wins.
+        let fence_expires = registry
+            .generations
+            .get(&key)
+            .map_or(expires, |previous| previous.expires.max(expires));
         let same_view = |ticket: &Ticket| {
             ticket.actor == actor
                 && ticket
@@ -193,7 +269,7 @@ impl PreviewTickets {
                     .as_ref()
                     .is_some_and(|view| view.view_id == view_id)
         };
-        if live.values().any(|ticket| {
+        if registry.live.values().any(|ticket| {
             same_view(ticket)
                 && ticket
                     .runtime
@@ -202,11 +278,18 @@ impl PreviewTickets {
         }) {
             return Err(RuntimeIssueError::Stale);
         }
-        if live.len() >= MAX_LIVE_TICKETS && !live.values().any(same_view) {
+        if registry.live.len() >= MAX_LIVE_TICKETS && !registry.live.values().any(same_view) {
             return Err(RuntimeIssueError::Unavailable);
         }
-        live.retain(|_, ticket| !same_view(ticket));
-        live.insert(
+        registry.live.retain(|_, ticket| !same_view(ticket));
+        registry.generations.insert(
+            key,
+            Generation {
+                number: generation,
+                expires: fence_expires,
+            },
+        );
+        registry.live.insert(
             secret.clone(),
             Ticket {
                 actor,
@@ -244,8 +327,8 @@ impl PreviewTickets {
         generation: u64,
         initialization: &str,
     ) -> Option<SourceRevision> {
-        let live = self.live.lock().ok()?;
-        live.values().find_map(|ticket| {
+        let registry = self.registry.lock().ok()?;
+        registry.live.values().find_map(|ticket| {
             let view = ticket.runtime.as_ref()?;
             (ticket.expires > Instant::now()
                 && &ticket.actor == actor
@@ -267,8 +350,28 @@ impl PreviewTickets {
         view_id: &str,
         generation: u64,
     ) -> Option<bool> {
-        let mut live = self.live.lock().ok()?;
-        let Some(view) = live.values_mut().find_map(|ticket| {
+        let now = Instant::now();
+        let expires = now.checked_add(self.ttl)?;
+        let mut registry = self.registry.lock().ok()?;
+        registry.prune(now);
+        let key = (actor.clone(), view_id.to_owned());
+        if registry.generations.len() >= MAX_LIVE_TICKETS
+            && !registry.generations.contains_key(&key)
+        {
+            return None;
+        }
+        registry
+            .generations
+            .entry(key)
+            .and_modify(|previous| {
+                previous.number = previous.number.max(generation);
+                previous.expires = previous.expires.max(expires);
+            })
+            .or_insert(Generation {
+                number: generation,
+                expires,
+            });
+        let Some(view) = registry.live.values_mut().find_map(|ticket| {
             if &ticket.actor != actor {
                 return None;
             }
@@ -285,8 +388,8 @@ impl PreviewTickets {
     }
 
     fn take_document(&self, secret: &str, enabled: bool) -> Option<Bootstrap> {
-        let mut live = self.live.lock().ok()?;
-        let ticket = live.get_mut(secret)?;
+        let mut registry = self.registry.lock().ok()?;
+        let ticket = registry.live.get_mut(secret)?;
         let now = Instant::now();
         if ticket.expires <= now {
             return None;
@@ -307,8 +410,10 @@ impl PreviewTickets {
     }
 
     fn resolve(&self, secret: &str) -> Option<Ticket> {
-        let live = self.live.lock().ok()?;
-        live.get(secret)
+        let registry = self.registry.lock().ok()?;
+        registry
+            .live
+            .get(secret)
             .filter(|ticket| {
                 ticket.expires > Instant::now()
                     && ticket.runtime.as_ref().is_none_or(|view| !view.revoked)
@@ -763,6 +868,160 @@ mod tests {
             ),
             Err(RuntimeIssueError::Stale)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_close_before_issue_rejects_the_late_generation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let other: ActorId = "other".parse()?;
+        let artifact = ArtifactId::from_random([1; 16]);
+        let view = "0123456789abcdef0123456789abcdef";
+        let tickets = PreviewTickets::new(Duration::from_secs(60));
+
+        assert_eq!(tickets.close_runtime(&actor, view, 2), Some(false));
+        assert!(
+            matches!(
+                tickets.issue_runtime(
+                    actor.clone(),
+                    artifact.clone(),
+                    SourceRevision(1),
+                    SourceRevision(1),
+                    view.into(),
+                    2,
+                ),
+                Err(RuntimeIssueError::Stale)
+            ),
+            "a close acknowledged before issuance must fence that generation"
+        );
+        assert!(
+            tickets
+                .issue_runtime(
+                    other,
+                    artifact.clone(),
+                    SourceRevision(1),
+                    SourceRevision(1),
+                    view.into(),
+                    1,
+                )
+                .is_ok(),
+            "one actor's close must not fence another actor"
+        );
+        assert!(
+            tickets
+                .issue_runtime(
+                    actor,
+                    artifact,
+                    SourceRevision(1),
+                    SourceRevision(1),
+                    view.into(),
+                    3,
+                )
+                .is_ok(),
+            "a newer generation may replace a closed one"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_close_refuses_when_fence_capacity_is_exhausted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let tickets = PreviewTickets::new(Duration::from_secs(60));
+        for number in 0..super::MAX_LIVE_TICKETS {
+            assert_eq!(
+                tickets.close_runtime(&actor, &format!("{number:032x}"), 1),
+                Some(false)
+            );
+        }
+        assert_eq!(
+            tickets.close_runtime(&actor, "ffffffffffffffffffffffffffffffff", 1),
+            None,
+            "a close cannot succeed without room to fence its generation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_fence_outlives_expiry_while_creation_is_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let artifact = ArtifactId::from_random([1; 16]);
+        let view = "0123456789abcdef0123456789abcdef";
+        let tickets = PreviewTickets::new(Duration::ZERO);
+        let pending = tickets
+            .begin_runtime(&actor, view)
+            .ok_or("could not reserve the pending create")?;
+        assert_eq!(tickets.close_runtime(&actor, view, 2), Some(false));
+        assert!(
+            matches!(
+                tickets.issue_runtime(
+                    actor.clone(),
+                    artifact.clone(),
+                    SourceRevision(1),
+                    SourceRevision(1),
+                    view.into(),
+                    2,
+                ),
+                Err(RuntimeIssueError::Stale)
+            ),
+            "expiry must not release a fence while its create is pending"
+        );
+        drop(pending);
+        assert!(
+            tickets
+                .issue_runtime(
+                    actor,
+                    artifact,
+                    SourceRevision(1),
+                    SourceRevision(1),
+                    view.into(),
+                    2,
+                )
+                .is_ok(),
+            "the expired fence can be collected after the create ends"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_replacement_does_not_shorten_an_existing_fence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let artifact = ArtifactId::from_random([1; 16]);
+        let view = "0123456789abcdef0123456789abcdef";
+        let mut tickets = PreviewTickets::new(Duration::from_secs(60));
+        assert_eq!(tickets.close_runtime(&actor, view, 2), Some(false));
+        // Model a newer create whose expiry was calculated before a close
+        // acquired the registry lock and extended the previous fence.
+        tickets.ttl = Duration::ZERO;
+        assert!(
+            tickets
+                .issue_runtime(
+                    actor.clone(),
+                    artifact.clone(),
+                    SourceRevision(1),
+                    SourceRevision(1),
+                    view.into(),
+                    3,
+                )
+                .is_ok()
+        );
+        assert!(
+            matches!(
+                tickets.issue_runtime(
+                    actor,
+                    artifact,
+                    SourceRevision(1),
+                    SourceRevision(1),
+                    view.into(),
+                    2,
+                ),
+                Err(RuntimeIssueError::Stale)
+            ),
+            "a newer view must not shorten the previous generation fence"
+        );
         Ok(())
     }
 

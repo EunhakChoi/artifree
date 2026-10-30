@@ -10,6 +10,7 @@ interface RuntimeFrameProps {
   readonly view: RuntimeView;
   /** Local monotonic deadline, conservatively measured from dispatch. */
   readonly deadline: number;
+  readonly onClose: () => void;
   readonly title: string;
   readonly className?: string | undefined;
 }
@@ -23,6 +24,7 @@ export function RuntimeFrame({
   client,
   view,
   deadline,
+  onClose,
   title,
   className,
 }: RuntimeFrameProps) {
@@ -124,13 +126,9 @@ export function RuntimeFrame({
       window.removeEventListener('message', connect);
       window.clearTimeout(expiry);
       stop();
-      revokeTimer.current = window.setTimeout(() => {
-        client.closeRuntimeView(view).catch((error: unknown) => {
-          console.error('Could not revoke the closed runtime view.', error);
-        });
-      }, 0);
+      revokeTimer.current = window.setTimeout(onClose, 0);
     };
-  }, [client, view, deadline]);
+  }, [client, view, deadline, onClose]);
 
   return (
     <iframe
@@ -144,12 +142,7 @@ export function RuntimeFrame({
         loads.current += 1;
         if (view.enabled && loads.current > 1) {
           close.current();
-          client.closeRuntimeView(view).catch((error: unknown) => {
-            console.error(
-              'Could not revoke the navigated runtime view.',
-              error,
-            );
-          });
+          onClose();
         }
       }}
     />

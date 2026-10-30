@@ -38,11 +38,25 @@ export function PreviewFrame({
       // A scheduler can hold reads while the page is hidden or rate-limited.
       // Time the lease from the actual attempt, not from entering that queue.
       let dispatchedAt = performance.now();
+      const currentGeneration = ++generation.current;
+      let closed = false;
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        client
+          .closeRuntimeView({ view_id: viewId, generation: currentGeneration })
+          .catch((error: unknown) => {
+            console.error('Could not revoke the runtime view.', error);
+          });
+      };
+      // An abandoned request can still finish at the server. Close its known
+      // generation even when no response reached this page.
+      signal.addEventListener('abort', close, { once: true });
       const view = await client.createRuntimeView(
         artifactId,
         revision,
         viewId,
-        ++generation.current,
+        currentGeneration,
         {
           signal,
           onDispatch: () => {
@@ -50,7 +64,7 @@ export function PreviewFrame({
           },
         },
       );
-      return { view, deadline: dispatchedAt + view.lease_ms };
+      return { view, deadline: dispatchedAt + view.lease_ms, close };
     },
   );
   if (preview.status === 'loading')
@@ -74,6 +88,7 @@ export function PreviewFrame({
       client={client}
       view={preview.value.view}
       deadline={preview.value.deadline}
+      onClose={preview.value.close}
       title={title}
       className={className}
     />

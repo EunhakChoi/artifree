@@ -318,6 +318,91 @@ async function checkExpiredReply(browser, origin, server, artifact) {
   }
 }
 
+async function checkAbandonedCreation(browser, origin, server, artifact) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  let captured;
+  let release = () => undefined;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  try {
+    await page.route('**/v1/artifacts/**/runtime-views', async (route) => {
+      if (captured !== undefined) {
+        await route.continue();
+        return;
+      }
+      captured = route.request().postDataJSON();
+      await held;
+      await route.continue();
+    });
+    await page.goto(origin);
+    const workspace = page.locator('#artifacts');
+    await workspace.getByLabel('Access token').fill(server.token);
+    await workspace.getByRole('button', { name: 'Connect' }).click();
+    await workspace.getByLabel('Search titles').fill(artifact.title);
+    await workspace
+      .getByRole('navigation', { name: 'Artifacts' })
+      .getByRole('button', { name: new RegExp(`^${artifact.title}`) })
+      .click();
+    await expect
+      .poll(() => captured !== undefined, {
+        message: 'The pending runtime create must reach the browser boundary.',
+        timeout: 10_000,
+      })
+      .toBe(true);
+    const closePath = `/v1/runtime-views/${captured.view_id}/${captured.generation}`;
+    let closeStatus;
+    page.on('response', (response) => {
+      if (
+        response.request().method() === 'DELETE' &&
+        new URL(response.url()).pathname === closePath
+      )
+        closeStatus = response.status();
+    });
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    await expect
+      .poll(() => closeStatus, {
+        message: 'An abandoned create must close its generation.',
+        timeout: 10_000,
+      })
+      .toBe(204);
+    const late = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname.endsWith('/runtime-views'),
+    );
+    release();
+    assert.equal(
+      (await late).status(),
+      409,
+      'A closed pending generation must not be issued later.',
+    );
+    await expect(workspace.locator('iframe[title^="Preview of"]')).toHaveCount(
+      0,
+    );
+    await expect(
+      workspace.getByRole('tab', { name: 'Source' }),
+    ).toHaveAttribute('aria-selected', 'true');
+    await expect(
+      workspace.getByRole('textbox', { name: 'index.html' }),
+    ).toBeVisible();
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    await expect(
+      workspace.getByRole('tab', { name: 'Preview' }),
+    ).toHaveAttribute('aria-selected', 'true');
+    await expect(
+      workspace.frameLocator('iframe[title^="Preview of"]').locator('#result'),
+    ).toContainText(artifact.id);
+    assert.deepEqual(errors, []);
+  } finally {
+    release();
+    await context.close();
+  }
+}
+
 /** Exercise the real server and an opaque-origin frame, including rejected messages. */
 export async function checkRuntime({
   browser,
@@ -332,6 +417,7 @@ export async function checkRuntime({
       { path: 'next.html', encoding: 'utf8', content: successor },
     ],
   });
+  await checkAbandonedCreation(browser, origin, server, artifact);
   // The workspace and sandbox can each have a wall clock different from
   // the server, or from each other. A valid server lease must still work.
   for (const skew of [

@@ -39,9 +39,14 @@ artifact is allowed to navigate its own frame elsewhere.
    view id and increasing generation. The server issues an independent
    initialization secret and ticket bound to actor, artifact, pinned
    revision, current head, generation and expiry. Newer generations replace
-   older ones atomically. Closed generations remain as bounded tombstones
-   until expiry so a delayed old create cannot resurrect them. A restart
-   invalidates all views; the workspace must prepare a new one.
+   older ones atomically. The server records the highest issued or closed
+   generation even when close arrives before issuance. A create registers
+   before its asynchronous source lookup, so its generation fence cannot be
+   collected while that lookup is pending. Otherwise fences expire after the
+   preview lifetime. Tickets, fences and outstanding view IDs are bounded;
+   exhausted capacity refuses the operation rather than acknowledging an
+   unfenced close. A restart invalidates all views and fences; the workspace
+   must prepare a new one.
 4. **Message and RPC.** The frame sends its initialization with a new
    `MessagePort`; the workspace accepts exactly one port only from the
    current frame's window, with the expected initialization and generation,
@@ -51,7 +56,11 @@ artifact is allowed to navigate its own frame elsewhere.
    access before the read and rechecks the binding after it. A newer source
    head, deletion, a replaced generation, or expiry refuses the read.
    Closing or navigating the frame closes the port and aborts outstanding
-   work; a result that finishes after close is not delivered.
+   work; a result that finishes after close is not delivered. The workspace
+   also closes the known generation if it stops waiting for a view before
+   its create response arrives. Closing the same generation twice is safe;
+   a failed close is reported to the console and its ticket can remain until
+   the server-side expiry.
    The server's monotonic clock remains authoritative for expiry. A view
    response carries its relative lease as well as the informational Unix
    expiry. The workspace times the lease with its own monotonic clock from

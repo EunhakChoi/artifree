@@ -540,6 +540,16 @@ pub(crate) async fn create_runtime_view(
     validate_view(&request.view_id, request.generation)?;
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
+    let _creation = state
+        .previews()
+        .begin_runtime(&actor, &request.view_id)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "runtime views are temporarily unavailable",
+            )
+        })?;
     let lookup_actor = actor.clone();
     let lookup_id = id.clone();
     let (record, enabled) = state
