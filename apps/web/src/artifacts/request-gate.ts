@@ -1,4 +1,4 @@
-import { parseRetryAfter } from '@artifree/client';
+import { notifyRequestDispatched, parseRetryAfter } from '@artifree/client';
 
 /** Whether the page is visible, and a way to hear when that changes. */
 export interface Visibility {
@@ -15,7 +15,8 @@ export type RequestKind = 'read' | 'stream' | 'write';
 
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a
- * preview link. The feed is one long request. Everything else writes.
+ * preview or runtime view, and reading runtime metadata. The feed is one
+ * long request. Everything else, including closing a runtime view, writes.
  */
 export function requestKind(method: string, url: string): RequestKind {
   const { pathname } = new URL(url, 'http://gate.invalid');
@@ -23,6 +24,13 @@ export function requestKind(method: string, url: string): RequestKind {
   if (verb === 'GET')
     return pathname.endsWith('/v1/changes') ? 'stream' : 'read';
   if (verb === 'POST' && pathname.endsWith('/previews')) return 'read';
+  if (
+    verb === 'POST' &&
+    /^\/v1\/artifacts\/[^/]+\/revisions\/\d+\/runtime-views(?:\/[^/]+\/\d+\/metadata)?$/.test(
+      pathname,
+    )
+  )
+    return 'read';
   return 'write';
 }
 
@@ -90,13 +98,20 @@ export class RequestGate {
       // A sent read is not cancelled: the server is working on it. It keeps
       // its slot until its answer has been read or cancelled, also when its
       // caller stops waiting.
-      const sent = this.#send(input, unsignalled(input, init)).then(
-        (response) => holding(this.#observe(response), release),
-        (error: unknown) => {
-          release();
-          throw error;
-        },
-      );
+      let sent: Promise<Response>;
+      try {
+        notifyRequestDispatched(init);
+        sent = this.#send(input, unsignalled(input, init)).then(
+          (response) => holding(this.#observe(response), release),
+          (error: unknown) => {
+            release();
+            throw error;
+          },
+        );
+      } catch (error: unknown) {
+        release();
+        throw error;
+      }
       const response = await abandonable(sent, request.signal);
       if (response.status !== 429) return response;
       // The refusal is consumed here; its body is not needed. Waiting for

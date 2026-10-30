@@ -10,6 +10,8 @@ import type {
   Preview,
   RestoreRevisionRequest,
   Revision,
+  RuntimeMetadata,
+  RuntimeView,
   SaveRevisionRequest,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
@@ -29,6 +31,8 @@ import {
   parseError,
   parsePreview,
   parseRevisionList,
+  parseRuntimeMetadata,
+  parseRuntimeView,
   parseUpdate,
 } from './responses.js';
 
@@ -49,6 +53,30 @@ export interface ClientConfiguration {
 export interface ReadOptions {
   /** Cancels the request, also while a `fetch` wrapper holds it back. */
   readonly signal?: AbortSignal;
+}
+
+/** Options for a runtime view request managed by a cooperating scheduler. */
+export interface RuntimeViewOptions extends ReadOptions {
+  /**
+   * Called immediately before each actual attempt by a scheduler that
+   * supports dispatch notifications. Without one, it is not called.
+   */
+  readonly onDispatch?: () => void;
+}
+
+// Symbol.for keeps the notification shared when a scheduler and client are
+// bundled separately. It is local to the request and is not sent over HTTP.
+const REQUEST_DISPATCH = Symbol.for('artifree.request-dispatch.v1');
+
+/** Notifies a request's observer just before a scheduler sends an attempt. */
+export function notifyRequestDispatched(init: RequestInit | undefined): void {
+  const callback: unknown =
+    init === undefined ? undefined : Reflect.get(init, REQUEST_DISPATCH);
+  if (typeof callback === 'function') callback();
+}
+
+interface DispatchRequestInit extends RequestInit {
+  [REQUEST_DISPATCH]?: () => void;
 }
 
 /** Which bytes of a file {@link ArtifreeClient.readFilePart} reads. */
@@ -78,9 +106,22 @@ export interface MutationOptions {
   readonly idempotencyKey: string;
 }
 
+/**
+ * A 128-bit random identifier in hexadecimal. `getRandomValues` is also
+ * available to HTTP pages outside a secure context; no weak fallback is used.
+ */
+export function newRandomId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(
+    '',
+  );
+}
+
 /** A random key suitable for `Idempotency-Key`. */
 export function newIdempotencyKey(): string {
-  return `key-${crypto.randomUUID()}`;
+  const id = newRandomId();
+  // Keep retry keys distinct from common API-token formats.
+  return `key-${id.slice(0, 8)}-${id.slice(8)}`;
 }
 
 /**
@@ -177,8 +218,10 @@ function statedPart(
 
 interface SendOptions {
   readonly mutation?: { body: unknown; idempotencyKey: string } | undefined;
+  readonly body?: unknown;
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal | undefined;
+  readonly onDispatch?: (() => void) | undefined;
 }
 
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
@@ -484,6 +527,72 @@ export class ArtifreeClient {
     );
   }
 
+  /** Issues an ephemeral runtime view. The account token stays in this client. */
+  async createRuntimeView(
+    id: string,
+    revision: number,
+    viewId: string,
+    generation: number,
+    options: RuntimeViewOptions = {},
+  ): Promise<RuntimeView> {
+    const view = await this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
+      parseRuntimeView,
+      {
+        body: { view_id: viewId, generation },
+        signal: options.signal,
+        onDispatch: options.onDispatch,
+      },
+    );
+    if (
+      view.artifact_id !== id ||
+      view.revision !== revision ||
+      view.view_id !== viewId ||
+      view.generation !== generation
+    )
+      throw new ArtifreeApiError(
+        'The server returned a runtime view for different inputs.',
+        {
+          status: 201,
+          code: 'invalid_response',
+        },
+      );
+    return view;
+  }
+
+  /** Reads current metadata through the parent workspace, rechecking the binding. */
+  async runtimeMetadata(
+    view: RuntimeView,
+    options: ReadOptions = {},
+  ): Promise<RuntimeMetadata> {
+    const metadata = await this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/metadata`,
+      parseRuntimeMetadata,
+      { body: { initialization: view.initialization }, signal: options.signal },
+    );
+    if (metadata.artifact_id !== view.artifact_id)
+      throw new ArtifreeApiError(
+        'The server returned metadata for another artifact.',
+        {
+          status: 200,
+          code: 'invalid_response',
+        },
+      );
+    return metadata;
+  }
+
+  /** Closes one view generation; an older close cannot revoke its replacement. */
+  async closeRuntimeView(
+    view: Pick<RuntimeView, 'view_id' | 'generation'>,
+  ): Promise<void> {
+    await this.send(
+      'DELETE',
+      `/v1/runtime-views/${view.view_id}/${view.generation}`,
+    );
+  }
+
   /** The whole body; a failure while reading is a `network_error`. */
   private async bytes(
     response: Response,
@@ -518,18 +627,28 @@ export class ArtifreeClient {
   private async send(
     method: string,
     path: string,
-    { mutation, headers: extraHeaders, signal }: SendOptions = {},
+    {
+      mutation,
+      body,
+      headers: extraHeaders,
+      signal,
+      onDispatch,
+    }: SendOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
       ...extraHeaders,
       authorization: `Bearer ${this.accessToken}`,
     };
-    const init: RequestInit = { method, headers };
+    const init: DispatchRequestInit = { method, headers };
     if (signal !== undefined) init.signal = signal;
+    if (onDispatch !== undefined) init[REQUEST_DISPATCH] = onDispatch;
     if (mutation !== undefined) {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;
       init.body = JSON.stringify(mutation.body);
+    } else if (body !== undefined) {
+      headers['content-type'] = 'application/json';
+      init.body = JSON.stringify(body);
     }
     let response: Response;
     try {

@@ -12,6 +12,9 @@ pub mod preview;
 mod ranges;
 pub mod serve;
 
+#[cfg(test)]
+mod runtime_tests;
+
 use std::collections::BTreeMap;
 
 use artifree_contracts::{Component, PackageRules, ServiceDescription};

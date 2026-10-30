@@ -16,9 +16,10 @@
 
 use artifree_contracts::api::{
     Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse, FeedPosition,
-    ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
-    SaveRevisionRequest, SourceExportManifest, UpdateArtifactRequest, UpdateArtifactResponse,
+    CreateRuntimeViewRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse,
+    FeedPosition, ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
+    RuntimeMetadata, RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest,
+    SourceExportManifest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -38,6 +39,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<Revision>(),
         generator.subschema_for::<RevisionList>(),
         generator.subschema_for::<Preview>(),
+        generator.subschema_for::<CreateRuntimeViewRequest>(),
+        generator.subschema_for::<RuntimeView>(),
+        generator.subschema_for::<RuntimeMetadataRequest>(),
+        generator.subschema_for::<RuntimeMetadata>(),
         generator.subschema_for::<ErrorResponse>(),
         generator.subschema_for::<ArtifactChange>(),
         generator.subschema_for::<FeedPosition>(),

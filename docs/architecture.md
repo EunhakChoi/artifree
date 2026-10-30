@@ -1,6 +1,6 @@
 # Artifree architecture
 
-Status: early development, 2026-10-28. Local HTML artifacts work end to end;
+Status: early development, 2026-10-31. Local HTML artifacts work end to end;
 see [decision 0003](decisions/0003-local-html-artifact-slice.md).
 
 The [interactive HTML design](architecture.html) maps the design to actual source
@@ -24,7 +24,7 @@ apps/
 packages/
   contracts/           generated TypeScript wire types and build inventory
   client/              HTTP API v1 client with runtime response checks
-  runtime-sdk/         proposed capability and session-binding types
+  runtime-sdk/         bound metadata read; other capability types proposed
 crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
   artifree-core/       artifact service and owner policy; documents, jobs, handoff planned
@@ -89,11 +89,12 @@ web (proxy) ───┘                       └─ content listener /p/<ticke
 Source rollback must not silently roll back app data or permissions. File
 packages and structured document models need different edit operations.
 
-The future runtime runs untrusted content separately from the account UI. Its
-session must bind actor, artifact, revision, and granted capabilities, and the
-server must check current authority. Separate ports alone do not isolate cookie
+The metadata runtime runs opted-in content separately from the account UI. Its
+short-lived view binds the actor, artifact, source revision, view generation,
+and initialization; the server checks access and the current source on each
+read ([0019](decisions/0019-runtime-metadata-bridge.md)). Grants and other
+capabilities remain proposed. Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
-No such runtime enforcement exists in this scaffold.
 
 ## Local and server operation
 
@@ -111,21 +112,24 @@ in the Rust core.
 
 ## HTTP API v1
 
-| Method and path                                     | Purpose                                           |
-| --------------------------------------------------- | ------------------------------------------------- |
-| `GET /v1/artifacts`                                 | Owned artifacts: search, pin filter, order, pages |
-| `POST /v1/artifacts`                                | Create revision 1 (`Idempotency-Key`)             |
-| `GET /v1/artifacts/{id}`                            | Metadata and current revision                     |
-| `PATCH /v1/artifacts/{id}`                          | Conditional rename or pin (`Idempotency-Key`)     |
-| `GET /v1/artifacts/{id}/revisions`                  | History, newest first                             |
-| `POST /v1/artifacts/{id}/revisions`                 | Conditional commit (`Idempotency-Key`)            |
-| `GET /v1/artifacts/{id}/revisions/{n}`              | One revision manifest                             |
-| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}` | Raw bytes of a pinned file, or one `Range`        |
-| `POST /v1/artifacts/{id}/revisions/{n}/previews`    | Short-lived preview URL on the content origin     |
-| `GET /v1/changes`                                   | Committed changes as server-sent events           |
+| Method and path                                                                    | Purpose                                           |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `GET /v1/artifacts`                                                                | Owned artifacts: search, pin filter, order, pages |
+| `POST /v1/artifacts`                                                               | Create revision 1 (`Idempotency-Key`)             |
+| `GET /v1/artifacts/{id}`                                                           | Metadata and current revision                     |
+| `PATCH /v1/artifacts/{id}`                                                         | Conditional rename or pin (`Idempotency-Key`)     |
+| `GET /v1/artifacts/{id}/revisions`                                                 | History, newest first                             |
+| `POST /v1/artifacts/{id}/revisions`                                                | Conditional commit (`Idempotency-Key`)            |
+| `GET /v1/artifacts/{id}/revisions/{n}`                                             | One revision manifest                             |
+| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}`                                | Raw bytes of a pinned file, or one `Range`        |
+| `POST /v1/artifacts/{id}/revisions/{n}/previews`                                   | Short-lived preview URL on the content origin     |
+| `POST /v1/artifacts/{id}/revisions/{n}/runtime-views`                              | Issue a bound, short-lived runtime view           |
+| `POST /v1/artifacts/{id}/revisions/{n}/runtime-views/{view}/{generation}/metadata` | Read the view's current metadata                  |
+| `DELETE /v1/runtime-views/{view}/{generation}`                                     | Close one runtime view generation                 |
+| `GET /v1/changes`                                                                  | Committed changes as server-sent events           |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
-`invalid_request` (400/405/422; 405 carries `Allow`), `unauthenticated` (401), `not_found` (404),
+`invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `not_found` (404),
 `revision_conflict` and `metadata_conflict` (409), `request_key_reused` (422), `payload_too_large`
 (413), `range_not_satisfiable` (416 with `Content-Range: bytes */{size}`), `rate_limited` (429 with
 `Retry-After`; this attempt was not processed),
@@ -212,8 +216,8 @@ server lists it with the same digests, and a save whose answer was lost
 replays with its kept key. Without Web Locks, draft reads and writes are
 refused with an explicit warning to protect other tabs' records
 ([0018](decisions/0018-source-draft-recovery.md)).
-The next slice is A08, starting with the runtime bridge and grants it
-needs (R04, R05).
+R04 adds the first bound runtime metadata read ([0019](decisions/0019-runtime-metadata-bridge.md)).
+Grants (R05) and the agent handoff (A08) remain planned.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

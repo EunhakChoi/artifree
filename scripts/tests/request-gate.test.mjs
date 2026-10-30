@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, mock, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { ArtifreeClient } from '../../packages/client/dist/index.js';
 
 // The gate is web code without DOM or React imports; bundle it as it ships.
 const bundle = await build({
@@ -96,6 +97,19 @@ test('Requests are classified by what they change', () => {
     requestKind('POST', '/v1/artifacts/a/revisions/2/previews'),
     'read',
   );
+  assert.equal(
+    requestKind('POST', '/v1/artifacts/a/revisions/2/runtime-views'),
+    'read',
+  );
+  assert.equal(
+    requestKind(
+      'POST',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/metadata',
+    ),
+    'read',
+  );
+  assert.equal(requestKind('DELETE', '/v1/runtime-views/view/3'), 'write');
+  assert.equal(requestKind('POST', '/v1/other/runtime-views'), 'write');
   assert.equal(requestKind('GET', '/v1/changes'), 'stream');
   assert.equal(requestKind('POST', '/v1/artifacts'), 'write');
   assert.equal(requestKind('POST', '/v1/artifacts/a/revisions'), 'write');
@@ -172,6 +186,71 @@ test('A hidden page sends no read, also one asked for before it was hidden', asy
   view.show(true);
   await settle();
   assert.deepEqual(api.paths(), ['GET /v1/artifacts', 'GET /v1/artifacts/a']);
+});
+
+test('A runtime view reports actual dispatch after a hidden-page wait', async () => {
+  const { view, api, gate } = setup();
+  view.show(false);
+  let dispatched = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: gate.fetch,
+  });
+  const viewId = 'a'.repeat(32);
+  const pending = client.createRuntimeView('art_1', 1, viewId, 1, {
+    onDispatch: () => {
+      dispatched += 1;
+    },
+  });
+  await settle();
+  assert.equal(dispatched, 0);
+  assert.deepEqual(api.paths(), []);
+  view.show(true);
+  await settle();
+  assert.equal(dispatched, 1, 'the actual dispatch must be reported');
+  api.answer(0, limited(1));
+  await settle();
+  await advance(1000);
+  assert.equal(dispatched, 2, 'a retry reports its own dispatch');
+  api.answer(
+    1,
+    Response.json(
+      {
+        url: 'http://127.0.0.1:7411/r/test/',
+        enabled: true,
+        artifact_id: 'art_1',
+        revision: 1,
+        view_id: viewId,
+        generation: 1,
+        initialization: 'c'.repeat(64),
+        expires_at_ms: 1_000_000,
+        lease_ms: 900_000,
+      },
+      { status: 201 },
+    ),
+  );
+  await pending;
+});
+
+test('A failing dispatch observer releases the read slot', async () => {
+  const { api, gate } = setup();
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: gate.fetch,
+  });
+  const failed = client.createRuntimeView('art_1', 1, 'a'.repeat(32), 1, {
+    onDispatch: () => {
+      throw new Error('dispatch observer failed');
+    },
+  });
+  const next = gate.fetch('/v1/artifacts');
+  await assert.rejects(failed, { code: 'network_error' });
+  await settle();
+  assert.deepEqual(api.paths(), ['GET /v1/artifacts']);
+  api.answer(0);
+  assert.equal((await next).status, 200);
 });
 
 test('A refused read holds every read for Retry-After, then is sent again first', async () => {

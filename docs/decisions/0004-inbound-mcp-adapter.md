@@ -1,5 +1,8 @@
 # 0004: Inbound MCP adapter for agents
 
+Update: [0019](0019-runtime-metadata-bridge.md) adds a separate, metadata-only
+workspace runtime bridge. The inbound MCP tools do not become page tools.
+
 Date: 2026-10-27. Status: accepted. Builds on
 [0003](0003-local-html-artifact-slice.md); its storage, revision, retry, and
 preview rules apply unchanged.

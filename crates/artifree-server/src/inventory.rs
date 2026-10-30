@@ -37,8 +37,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Presentation,
         "TypeScript",
         "packages/runtime-sdk",
-        ComponentStatus::Scaffold,
-        "Session and capability types; no iframe execution bridge.",
+        ComponentStatus::Implemented,
+        "An opted-in sandboxed frame reads its own artifact metadata through a bound runtime view; grants and other capabilities remain planned.",
     ),
     (
         "api",

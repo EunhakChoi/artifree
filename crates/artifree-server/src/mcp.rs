@@ -7,8 +7,8 @@
 //! sees a request, then serves statelessly: no MCP session outlives a request,
 //! so retries rely on the tools' idempotency keys, not on transport state.
 //!
-//! These tools are for agents. They are not runtime capabilities of a
-//! previewed page, which has none.
+//! These tools are for agents, separate from the metadata-only runtime
+//! bridge of an opted-in workspace preview.
 
 use std::sync::Arc;
 

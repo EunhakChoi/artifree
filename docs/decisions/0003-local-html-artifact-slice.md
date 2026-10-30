@@ -3,6 +3,9 @@
 Date: 2026-10-27. Status: accepted. Supersedes the deferred HTTP framework,
 async runtime, and local storage choices of [0001](0001-foundation.md).
 
+Update: [0019](0019-runtime-metadata-bridge.md) adds an opt-in metadata
+bridge. The original preview and its isolation limits remain as described.
+
 ## Context
 
 The first vertical slice connects an agent-facing API, durable storage, a web

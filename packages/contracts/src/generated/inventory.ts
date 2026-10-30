@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.6.0",
+  "contract_version": "0.7.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -35,8 +35,8 @@ export const scaffoldDescription: ServiceDescription = {
       "layer": "presentation",
       "language": "TypeScript",
       "path": "packages/runtime-sdk",
-      "status": "scaffold",
-      "summary": "Session and capability types; no iframe execution bridge."
+      "status": "implemented",
+      "summary": "An opted-in sandboxed frame reads its own artifact metadata through a bound runtime view; grants and other capabilities remain planned."
     },
     {
       "id": "api",

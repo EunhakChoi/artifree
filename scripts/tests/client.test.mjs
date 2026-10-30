@@ -4,6 +4,8 @@ import {
   ArtifreeApiError,
   ArtifreeClient,
   encodeFile,
+  newIdempotencyKey,
+  newRandomId,
 } from '../../packages/client/dist/index.js';
 
 const artifact = {
@@ -17,6 +19,43 @@ const artifact = {
   created_at_ms: 1,
   updated_at_ms: 1,
 };
+
+test('Random identifiers work without randomUUID and never use a weak fallback', () => {
+  const originalUuid = Object.getOwnPropertyDescriptor(crypto, 'randomUUID');
+  const originalValues = Object.getOwnPropertyDescriptor(
+    crypto,
+    'getRandomValues',
+  );
+  try {
+    Object.defineProperty(crypto, 'randomUUID', {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(crypto, 'getRandomValues', {
+      configurable: true,
+      value: (bytes) => {
+        assert.equal(bytes.length, 16);
+        bytes.set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        return bytes;
+      },
+    });
+    assert.equal(newRandomId(), '000102030405060708090a0b0c0d0e0f');
+    assert.equal(newIdempotencyKey(), 'key-00010203-0405060708090a0b0c0d0e0f');
+    Object.defineProperty(crypto, 'getRandomValues', {
+      configurable: true,
+      value: () => {
+        throw new Error('secure randomness unavailable');
+      },
+    });
+    assert.throws(newRandomId, /secure randomness unavailable/);
+    assert.throws(newIdempotencyKey, /secure randomness unavailable/);
+  } finally {
+    if (originalUuid === undefined) delete crypto.randomUUID;
+    else Object.defineProperty(crypto, 'randomUUID', originalUuid);
+    if (originalValues === undefined) delete crypto.getRandomValues;
+    else Object.defineProperty(crypto, 'getRandomValues', originalValues);
+  }
+});
 
 /** A client whose every request is answered by `respond`. */
 function clientWith(respond) {
@@ -68,6 +107,88 @@ test('A complete body that is not the contract is an invalid response', async ()
   );
   const error = await failure(client.getArtifact(artifact.id));
   assert.equal(error.code, 'invalid_response');
+});
+
+test('Runtime responses must match the requested view and valid metadata', async () => {
+  const viewId = 'a'.repeat(32);
+  const view = {
+    url: `http://127.0.0.1:7411/r/${'b'.repeat(64)}/`,
+    enabled: true,
+    artifact_id: artifact.id,
+    revision: 1,
+    view_id: viewId,
+    generation: 1,
+    initialization: 'c'.repeat(64),
+    expires_at_ms: 1_000_000,
+    lease_ms: 900_000,
+  };
+  let sent;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent = { url, init };
+      return Response.json(view, { status: 201 });
+    },
+  });
+  assert.deepEqual(
+    await client.createRuntimeView(artifact.id, 1, viewId, 1),
+    view,
+  );
+  assert.deepEqual(JSON.parse(sent.init.body), {
+    view_id: viewId,
+    generation: 1,
+  });
+  assert.equal(sent.init.headers.authorization, 'Bearer token');
+  assert.deepEqual(
+    await clientWith(() =>
+      Response.json({ ...view, lease_ms: 0 }),
+    ).createRuntimeView(artifact.id, 1, viewId, 1),
+    { ...view, lease_ms: 0 },
+  );
+  for (const body of [
+    { ...view, url: 'javascript:alert(1)' },
+    { ...view, enabled: 'yes' },
+    { ...view, initialization: 'invalid' },
+    { ...view, artifact_id: `art_${'1'.repeat(32)}` },
+    { ...view, revision: 2 },
+    { ...view, view_id: 'd'.repeat(32) },
+    { ...view, generation: 2 },
+    { ...view, expires_at_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { ...view, lease_ms: -1 },
+    { ...view, lease_ms: 0.5 },
+    { ...view, lease_ms: 2_147_483_648 },
+  ]) {
+    const error = await failure(
+      clientWith(() => Response.json(body)).createRuntimeView(
+        artifact.id,
+        1,
+        viewId,
+        1,
+      ),
+    );
+    assert.equal(error.code, 'invalid_response', JSON.stringify(body));
+  }
+  const valid = {
+    artifact_id: artifact.id,
+    title: 'New name',
+    current_revision: 1,
+    metadata_revision: 2,
+  };
+  assert.deepEqual(
+    await clientWith(() => Response.json(valid)).runtimeMetadata(view),
+    valid,
+  );
+  for (const body of [
+    { ...valid, artifact_id: `art_${'1'.repeat(32)}` },
+    { ...valid, current_revision: 0 },
+    { ...valid, metadata_revision: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    const error = await failure(
+      clientWith(() => Response.json(body)).runtimeMetadata(view),
+    );
+    assert.equal(error.code, 'invalid_response', JSON.stringify(body));
+  }
 });
 
 test('An export is a ZIP archive, whole, or a failure', async () => {

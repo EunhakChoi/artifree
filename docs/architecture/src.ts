@@ -27,26 +27,26 @@ const notes: Record<string, ModuleNote> = {
     purpose: '사용자가 결과물을 찾고, 편집하고, 실행하는 작업 화면입니다.',
     exists:
       'access token 연결, 아티팩트 목록(검색·정렬·pin 필터·더 보기)·생성·이름 변경·pin, 텍스트 파일 편집과 조건부 저장·충돌 표시, revision별 sandbox 미리보기. 변경 피드를 따라 목록·열린 아티팩트·최신 preview를 갱신하고, 고정 preview와 미저장 초안은 유지합니다. client 아래 request gate가 모든 요청의 가시성·429 지연·한 번에 한 읽기를 결정합니다. build-time module inventory.',
-    next: 'revision 비교·소스 복원, 복제, 파일 추가·삭제를 같은 HTTP client로 연결합니다.',
+    next: 'runtime grant와 선택 영역의 agent 전달을 연결합니다.',
   },
   cli: {
     purpose: '터미널과 외부 agent가 사용하는 작은 TypeScript client입니다.',
     exists:
-      'artifact create·list·show·history·save·cat·preview. stdout JSON, 재시도용 idempotency key, 충돌·인증·사용법 오류의 종료 코드 구분.',
-    next: 'publish·export 명령을 같은 HTTP client에 추가합니다. 별도 저장 규칙을 만들지 않습니다.',
+      'artifact create·list·show·history·save·cat·preview·export와 복제·삭제·복구. stdout JSON, 재시도용 idempotency key, 충돌·인증·사용법 오류의 종료 코드 구분.',
+    next: '게시 기능은 구현될 때 같은 HTTP client를 사용합니다.',
   },
   runtime: {
     purpose: '아티팩트 내부 코드에 허용된 기능을 제공하는 브라우저 SDK입니다.',
     exists:
-      'capability 이름과 세션 binding 타입만 있습니다. 실행·검증 코드는 없습니다.',
-    next: 'origin·송신 창·세션을 검증하는 통신과 서버의 최종 권한 검사부터 구현합니다.',
+      '명시적으로 켠 격리 frame이 서버에 묶인 view를 통해 자신의 artifact metadata를 읽습니다. 계정 token은 frame에 전달하지 않습니다.',
+    next: '선언과 SDK pin, 사용자 동의, grant·철회를 구분하고 각 RPC의 현재 권한을 검사합니다.',
   },
   api: {
     purpose:
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
-      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 8개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 커밋 변경 피드(GET /v1/changes SSE: cursor 재개·reset·사용자별 stream 수 제한), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
-    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. 웹 작업공간의 변경 피드 사용(A02)과 handoff는 별도 기능입니다.',
+      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 11개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 커밋 변경 피드(GET /v1/changes SSE: cursor 재개·reset·사용자별 stream 수 제한), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
+    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. Agent handoff는 별도 기능입니다.',
   },
   domain: {
     purpose:
@@ -118,13 +118,13 @@ const notes: Record<string, ModuleNote> = {
     purpose: 'Rust와 TypeScript가 같은 전송 데이터 형식을 사용하도록 합니다.',
     exists:
       'descriptor와 HTTP API v1 요청·응답 DTO → JSON Schema → TypeScript 생성, MCP 도구 catalog(인자·결과 schema) 생성, 잘못된 입력·drift 검증.',
-    next: 'runtime 메시지를 실제 기능 구현에 맞춰 추가합니다. 서버 입력 검증은 계약과 별도로 유지합니다.',
+    next: 'runtime grant와 권한 변경의 계약을 추가합니다. 서버 입력 검증은 계약과 별도로 유지합니다.',
   },
   client: {
     purpose: 'Web과 CLI가 같은 HTTP 계약을 사용하는 client package입니다.',
     exists:
       'fetch 기반 HTTP API v1 client. 응답을 runtime에 검증하고 오류를 code·HTTP status·current revision으로 구분하며, 본문과 무관하게 HTTP 429는 rate_limited입니다. 읽기 요청은 AbortSignal로 취소할 수 있습니다. 변경 피드를 WHATWG 규칙으로 해석하고, 연결 실패·429·5xx에서만 마지막 cursor부터 재연결하며 AbortSignal로 즉시 중단합니다.',
-    next: '목록 query·pagination과 메타데이터 수정 요청을 추가합니다.',
+    next: 'runtime grant와 agent handoff가 구현되면 같은 client 계약에 추가합니다.',
   },
 };
 

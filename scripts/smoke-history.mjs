@@ -64,7 +64,9 @@ export async function checkHistory({
     const contentReads = [];
     tab.on('request', (request) => {
       const url = new URL(request.url());
-      if (/\/revisions\/\d+\/(files\/|previews)/.test(url.pathname))
+      if (
+        /\/revisions\/\d+\/(files\/|previews|runtime-views)/.test(url.pathname)
+      )
         contentReads.push(url.pathname);
     });
     await tab.goto(origin);

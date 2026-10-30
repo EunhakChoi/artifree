@@ -3,12 +3,33 @@ export type RuntimeCapability =
   'model.generate' | 'data.read' | 'data.write' | 'files.read' | 'tools.call';
 
 /**
- * Future server-issued binding. Runtime verification and the iframe bridge are
- * not implemented. Never trust this object merely because it typechecks.
+ * Proposed capability binding for a future grant system. The implemented
+ * metadata view uses a different binding; this type grants no permission.
  */
 export interface RuntimeSessionBinding {
   readonly sessionId: string;
   readonly artifactId: string;
   readonly revisionId: string;
   readonly capabilities: readonly RuntimeCapability[];
+}
+
+/** Current metadata available to a frame for its own artifact. */
+export interface RuntimeMetadata {
+  readonly artifactId: string;
+  readonly title: string;
+  readonly currentRevision: number;
+  readonly metadataRevision: number;
+}
+
+/** The first runtime operation. It grants no data or model access. */
+export interface ArtifactRuntime {
+  /** Reads current metadata through the workspace's bound runtime view. */
+  currentMetadata(): Promise<RuntimeMetadata>;
+}
+
+declare global {
+  interface Window {
+    /** Present only after the artifact opts in to the runtime script. */
+    artifree?: ArtifactRuntime;
+  }
 }

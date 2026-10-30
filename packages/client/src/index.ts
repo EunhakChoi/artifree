@@ -3,6 +3,8 @@ export {
   ArtifreeClient,
   encodeFile,
   newIdempotencyKey,
+  newRandomId,
+  notifyRequestDispatched,
   parseRetryAfter,
 } from './client.js';
 export type {
@@ -11,6 +13,7 @@ export type {
   FileRange,
   MutationOptions,
   ReadOptions,
+  RuntimeViewOptions,
 } from './client.js';
 export { cursorOf } from './change-feed.js';
 export type {

@@ -627,7 +627,10 @@ function observeReads() {
     );
     const isRead =
       pathname.startsWith('/v1/artifacts') &&
-      (method === 'GET' || pathname.endsWith('/previews'));
+      (method === 'GET' ||
+        pathname.endsWith('/previews') ||
+        pathname.endsWith('/runtime-views') ||
+        /\/runtime-views\/[^/]+\/\d+\/metadata$/.test(pathname));
     if (!isRead) return send(input, init);
     if (outstanding > 0) overlapping.push(`${method} ${pathname}`);
     outstanding += 1;
@@ -684,8 +687,12 @@ function kind(request) {
   const { pathname } = new URL(request.url());
   const parts = pathname.split('/').filter(Boolean);
   if (parts[0] !== 'v1' || parts[1] !== 'artifacts') return undefined;
-  if (request.method() === 'POST')
-    return parts.at(-1) === 'previews' ? 'preview' : undefined;
+  if (request.method() === 'POST') {
+    if (['previews', 'runtime-views'].includes(parts.at(-1))) return 'preview';
+    if (parts[5] === 'runtime-views' && parts.at(-1) === 'metadata')
+      return 'runtimeMetadata';
+    return undefined;
+  }
   if (request.method() !== 'GET') return undefined;
   if (parts.length === 2) return 'list';
   if (parts.length === 3) return 'artifact';

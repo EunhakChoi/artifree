@@ -201,16 +201,21 @@ pub enum SourceExportFormat {
     /// Version 1, described by [`SourceExportManifest`].
     #[serde(rename = "artifree.source-export.v1")]
     V1,
+    /// Version 2 records the metadata runtime dependency when requested.
+    #[serde(rename = "artifree.source-export.v2")]
+    V2,
 }
 
 /// What exported files need from a host to run as they do in Artifree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportRuntime {
-    /// Nothing: previews give files no capabilities (decision 0003), so a
-    /// browser is all they need. Resources they load from the network are
+    /// No runtime is requested by the entry document. Network resources are
     /// not part of the export and may be unavailable offline.
     None,
+    /// The entry opts in to Artifree's metadata bridge, which is not bundled
+    /// in the source export and requires an active Artifree workspace.
+    Metadata,
 }
 
 /// The manifest of a source export: the file `.artifree-export.json`, first
@@ -360,6 +365,65 @@ pub struct Preview {
     pub revision: u64,
     /// Expiry time in Unix milliseconds. Access is also rechecked per request.
     pub expires_at_ms: i64,
+}
+
+/// Requests a preview view whose frame can read its artifact metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRuntimeViewRequest {
+    /// A random 32-digit lowercase hexadecimal identifier for this view.
+    pub view_id: String,
+    /// A positive, increasing generation within this view.
+    pub generation: u64,
+}
+
+/// A short-lived runtime view bound to one actor, artifact, and revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeView {
+    /// URL of the entry document on the content origin. An opted-in entry
+    /// receives a runtime bootstrap; the stored source stays unchanged.
+    pub url: String,
+    /// Whether the entry explicitly opts in to the metadata bridge.
+    pub enabled: bool,
+    /// The artifact whose preview is shown.
+    pub artifact_id: String,
+    /// The pinned source revision shown in the frame.
+    pub revision: u64,
+    /// The view identifier supplied when it was created.
+    pub view_id: String,
+    /// This view's generation.
+    pub generation: u64,
+    /// A frame initialization secret, distinct from the account token.
+    pub initialization: String,
+    /// Expiry time in Unix milliseconds.
+    pub expires_at_ms: i64,
+    /// Lease duration in milliseconds, at most 2,147,483,647. Clients must use
+    /// elapsed local time, not compare the server's Unix timestamp to theirs.
+    #[schemars(range(max = 2_147_483_647))]
+    pub lease_ms: u64,
+}
+
+/// Proves that the parent is requesting metadata for its initialized view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeMetadataRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+}
+
+/// Current metadata that a runtime frame may read for its own artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeMetadata {
+    /// The bound artifact's identifier.
+    pub artifact_id: String,
+    /// Its current title.
+    pub title: String,
+    /// Its current source revision.
+    pub current_revision: u64,
+    /// Its current metadata revision.
+    pub metadata_revision: u64,
 }
 
 /// What a commit did to an artifact. A kind that a client does not know

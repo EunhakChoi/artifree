@@ -1,14 +1,9 @@
+import { newRandomId } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
+import { useRef, useState } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { RuntimeFrame } from './runtime-frame';
 import { useRequest } from './use-request';
-
-/**
- * Sandbox flags for previews, matching the content server's CSP: without
- * allow-same-origin the content is opaque, and without allow-popups it cannot
- * open windows that escape the content policy.
- */
-const PREVIEW_SANDBOX =
-  'allow-scripts allow-forms allow-modals allow-downloads';
 
 interface PreviewFrameProps {
   client: ArtifreeClient;
@@ -35,9 +30,42 @@ export function PreviewFrame({
   title,
   className,
 }: PreviewFrameProps) {
+  const [viewId] = useState(newRandomId);
+  const generation = useRef(0);
   const preview = useRequest(
     stale ? undefined : `${artifactId}:${revision}:${epoch}`,
-    (signal) => client.createPreview(artifactId, revision, { signal }),
+    async (signal) => {
+      // A scheduler can hold reads while the page is hidden or rate-limited.
+      // Time the lease from the actual attempt, not from entering that queue.
+      let dispatchedAt = performance.now();
+      const currentGeneration = ++generation.current;
+      let closed = false;
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        client
+          .closeRuntimeView({ view_id: viewId, generation: currentGeneration })
+          .catch((error: unknown) => {
+            console.error('Could not revoke the runtime view.', error);
+          });
+      };
+      // An abandoned request can still finish at the server. Close its known
+      // generation even when no response reached this page.
+      signal.addEventListener('abort', close, { once: true });
+      const view = await client.createRuntimeView(
+        artifactId,
+        revision,
+        viewId,
+        currentGeneration,
+        {
+          signal,
+          onDispatch: () => {
+            dispatchedAt = performance.now();
+          },
+        },
+      );
+      return { view, deadline: dispatchedAt + view.lease_ms, close };
+    },
   );
   if (preview.status === 'loading')
     return (
@@ -55,11 +83,13 @@ export function PreviewFrame({
       </Alert>
     );
   return (
-    <iframe
+    <RuntimeFrame
+      key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
+      client={client}
+      view={preview.value.view}
+      deadline={preview.value.deadline}
+      onClose={preview.value.close}
       title={title}
-      src={preview.value.url}
-      sandbox={PREVIEW_SANDBOX}
-      referrerPolicy="no-referrer"
       className={className}
     />
   );
