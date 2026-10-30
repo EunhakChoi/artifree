@@ -159,6 +159,9 @@ export async function checkHistory({
     await restoreButton(1).click();
     let dialog = dialogFor(1);
     await expect(dialog).toBeVisible();
+    // Visibility starts during the opening fade; contrast must be measured
+    // after the dialog has reached its displayed opacity.
+    await expect(dialog).toHaveCSS('opacity', '1');
     await checkAccessibility('workspace-restore-dialog', tab);
     await confirm(dialog).click();
     await expect(dialog).toBeHidden();

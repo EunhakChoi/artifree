@@ -203,8 +203,15 @@ and deletes them, and is saved as one revision against its base or not at
 all; every change passes one write point that decides by the state it
 lands in, renames carry the bytes they move, and paths are checked with
 the package rules the build inventory carries
-([0017](decisions/0017-code-workspace.md)). The next slice is A10,
-recovering a source draft.
+([0017](decisions/0017-code-workspace.md)). A10 keeps that draft in the
+browser's IndexedDB: the page starts claiming a tab owner id and its Web
+Lock before anything renders and orders each artifact's writes, the source
+view offers a kept draft for recovery or discard before the editor
+starts, a recovered draft counts as written on its revision only if the
+server lists it with the same digests, and a save whose answer was lost
+replays with its kept key ([0018](decisions/0018-source-draft-recovery.md)).
+The next slice is A08, starting with the runtime bridge and grants it
+needs (R04, R05).
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

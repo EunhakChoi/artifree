@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import type { PageDrafts } from '@/artifacts/page-drafts';
 import { ArtifactWorkspace } from '@/artifacts/workspace';
 
 const repo = 'https://github.com/EunhakChoi/artifree';
@@ -110,7 +111,8 @@ function FoundationDialog() {
   );
 }
 
-export function App() {
+/** The management page; `drafts` keeps its source drafts in the browser. */
+export function App({ drafts }: { drafts: PageDrafts }) {
   const [dark, setDark] = useState(false);
   function toggleTheme(): void {
     const next = !dark;
@@ -238,7 +240,7 @@ export function App() {
           >
             Artifacts
           </h2>
-          <ArtifactWorkspace />
+          <ArtifactWorkspace drafts={drafts} />
         </section>
         <Separator />
         <section id="modules" className="py-8" aria-labelledby="modules-title">
