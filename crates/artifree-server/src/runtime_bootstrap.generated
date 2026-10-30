@@ -38,6 +38,7 @@ var __ArtifreeBootstrap = (() => {
     if (window.artifree !== void 0)
       throw new Error("The Artifree runtime was already installed.");
     const channel = new MessageChannel();
+    const deadline = performance.now() + config.lease_ms;
     const waiting = /* @__PURE__ */ new Map();
     let next = 0;
     let closed = false;
@@ -76,7 +77,7 @@ var __ArtifreeBootstrap = (() => {
     );
     window.artifree = Object.freeze({
       currentMetadata() {
-        if (closed || Date.now() >= config.expires_at_ms)
+        if (closed || performance.now() >= deadline)
           return Promise.reject(new Error("The runtime view has expired."));
         if (waiting.size >= 64)
           return Promise.reject(
@@ -93,7 +94,7 @@ var __ArtifreeBootstrap = (() => {
               waiting.delete(id);
               reject(new Error("The runtime metadata request timed out."));
             },
-            Math.min(1e4, Math.max(0, config.expires_at_ms - Date.now()))
+            Math.min(1e4, Math.max(0, deadline - performance.now()))
           );
           waiting.set(id, { resolve, reject, timeout });
           try {

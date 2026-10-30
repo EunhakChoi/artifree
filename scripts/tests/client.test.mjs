@@ -120,6 +120,7 @@ test('Runtime responses must match the requested view and valid metadata', async
     generation: 1,
     initialization: 'c'.repeat(64),
     expires_at_ms: 1_000_000,
+    lease_ms: 900_000,
   };
   let sent;
   const client = new ArtifreeClient({
@@ -139,6 +140,12 @@ test('Runtime responses must match the requested view and valid metadata', async
     generation: 1,
   });
   assert.equal(sent.init.headers.authorization, 'Bearer token');
+  assert.deepEqual(
+    await clientWith(() =>
+      Response.json({ ...view, lease_ms: 0 }),
+    ).createRuntimeView(artifact.id, 1, viewId, 1),
+    { ...view, lease_ms: 0 },
+  );
   for (const body of [
     { ...view, url: 'javascript:alert(1)' },
     { ...view, enabled: 'yes' },
@@ -148,6 +155,9 @@ test('Runtime responses must match the requested view and valid metadata', async
     { ...view, view_id: 'd'.repeat(32) },
     { ...view, generation: 2 },
     { ...view, expires_at_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { ...view, lease_ms: -1 },
+    { ...view, lease_ms: 0.5 },
+    { ...view, lease_ms: 2_147_483_648 },
   ]) {
     const error = await failure(
       clientWith(() => Response.json(body)).createRuntimeView(

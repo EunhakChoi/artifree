@@ -52,6 +52,14 @@ artifact is allowed to navigate its own frame elsewhere.
    head, deletion, a replaced generation, or expiry refuses the read.
    Closing or navigating the frame closes the port and aborts outstanding
    work; a result that finishes after close is not delivered.
+   The server's monotonic clock remains authoritative for expiry. A view
+   response carries its relative lease as well as the informational Unix
+   expiry. The workspace times the lease with its own monotonic clock from
+   the actual HTTP dispatch, including each retry, so a hidden or rate-limited
+   request does not spend its lease in the request gate. Measuring from
+   dispatch is conservative by the network and server delay. The bootstrap
+   separately receives the server's remaining lease and times it locally;
+   neither side compares the server's wall clock to the browser's.
 5. **Exports.** An opted-in source export retains the source bytes and uses
    manifest `artifree.source-export.v2` with `runtime: "metadata"`. The
    bootstrap and its workspace are not bundled. Ordinary exports retain

@@ -1,4 +1,4 @@
-import { parseRetryAfter } from '@artifree/client';
+import { notifyRequestDispatched, parseRetryAfter } from '@artifree/client';
 
 /** Whether the page is visible, and a way to hear when that changes. */
 export interface Visibility {
@@ -98,13 +98,20 @@ export class RequestGate {
       // A sent read is not cancelled: the server is working on it. It keeps
       // its slot until its answer has been read or cancelled, also when its
       // caller stops waiting.
-      const sent = this.#send(input, unsignalled(input, init)).then(
-        (response) => holding(this.#observe(response), release),
-        (error: unknown) => {
-          release();
-          throw error;
-        },
-      );
+      let sent: Promise<Response>;
+      try {
+        notifyRequestDispatched(init);
+        sent = this.#send(input, unsignalled(input, init)).then(
+          (response) => holding(this.#observe(response), release),
+          (error: unknown) => {
+            release();
+            throw error;
+          },
+        );
+      } catch (error: unknown) {
+        release();
+        throw error;
+      }
       const response = await abandonable(sent, request.signal);
       if (response.status !== 429) return response;
       // The refusal is consumed here; its body is not needed. Waiting for

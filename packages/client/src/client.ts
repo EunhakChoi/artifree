@@ -55,6 +55,30 @@ export interface ReadOptions {
   readonly signal?: AbortSignal;
 }
 
+/** Options for a runtime view request managed by a cooperating scheduler. */
+export interface RuntimeViewOptions extends ReadOptions {
+  /**
+   * Called immediately before each actual attempt by a scheduler that
+   * supports dispatch notifications. Without one, it is not called.
+   */
+  readonly onDispatch?: () => void;
+}
+
+// Symbol.for keeps the notification shared when a scheduler and client are
+// bundled separately. It is local to the request and is not sent over HTTP.
+const REQUEST_DISPATCH = Symbol.for('artifree.request-dispatch.v1');
+
+/** Notifies a request's observer just before a scheduler sends an attempt. */
+export function notifyRequestDispatched(init: RequestInit | undefined): void {
+  const callback: unknown =
+    init === undefined ? undefined : Reflect.get(init, REQUEST_DISPATCH);
+  if (typeof callback === 'function') callback();
+}
+
+interface DispatchRequestInit extends RequestInit {
+  [REQUEST_DISPATCH]?: () => void;
+}
+
 /** Which bytes of a file {@link ArtifreeClient.readFilePart} reads. */
 export interface FileRange {
   /** The first byte, counted from 0. */
@@ -197,6 +221,7 @@ interface SendOptions {
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal | undefined;
+  readonly onDispatch?: (() => void) | undefined;
 }
 
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
@@ -508,13 +533,17 @@ export class ArtifreeClient {
     revision: number,
     viewId: string,
     generation: number,
-    options: ReadOptions = {},
+    options: RuntimeViewOptions = {},
   ): Promise<RuntimeView> {
     const view = await this.json(
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
       parseRuntimeView,
-      { body: { view_id: viewId, generation }, signal: options.signal },
+      {
+        body: { view_id: viewId, generation },
+        signal: options.signal,
+        onDispatch: options.onDispatch,
+      },
     );
     if (
       view.artifact_id !== id ||
@@ -596,14 +625,21 @@ export class ArtifreeClient {
   private async send(
     method: string,
     path: string,
-    { mutation, body, headers: extraHeaders, signal }: SendOptions = {},
+    {
+      mutation,
+      body,
+      headers: extraHeaders,
+      signal,
+      onDispatch,
+    }: SendOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
       ...extraHeaders,
       authorization: `Bearer ${this.accessToken}`,
     };
-    const init: RequestInit = { method, headers };
+    const init: DispatchRequestInit = { method, headers };
     if (signal !== undefined) init.signal = signal;
+    if (onDispatch !== undefined) init[REQUEST_DISPATCH] = onDispatch;
     if (mutation !== undefined) {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;

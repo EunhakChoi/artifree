@@ -398,6 +398,10 @@ pub struct RuntimeView {
     pub initialization: String,
     /// Expiry time in Unix milliseconds.
     pub expires_at_ms: i64,
+    /// Lease duration in milliseconds, at most 2,147,483,647. Clients must use
+    /// elapsed local time, not compare the server's Unix timestamp to theirs.
+    #[schemars(range(max = 2_147_483_647))]
+    pub lease_ms: u64,
 }
 
 /// Proves that the parent is requesting metadata for its initialized view.

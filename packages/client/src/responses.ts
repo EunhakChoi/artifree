@@ -267,6 +267,7 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     generation,
     initialization,
     expires_at_ms,
+    lease_ms,
   } = value;
   if (
     typeof url !== 'string' ||
@@ -280,7 +281,9 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     generation === 0 ||
     typeof initialization !== 'string' ||
     !/^[0-9a-f]{64}$/.test(initialization) ||
-    !isTime(expires_at_ms)
+    !isTime(expires_at_ms) ||
+    !isCount(lease_ms) ||
+    lease_ms > 2_147_483_647
   )
     return undefined;
   try {
@@ -298,6 +301,7 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     generation,
     initialization,
     expires_at_ms,
+    lease_ms,
   };
 }
 

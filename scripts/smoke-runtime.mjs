@@ -26,17 +26,28 @@ async function open(
   origin,
   server,
   artifact,
-  corruptInitialization,
-  contextOptions = {},
+  {
+    corruptInitialization = false,
+    contextOptions = {},
+    clockSkew = { parent: 0, frame: 0 },
+    retrySkew = false,
+  } = {},
 ) {
   const context = await browser.newContext(contextOptions);
   try {
+    if (clockSkew.parent !== 0 || clockSkew.frame !== 0)
+      await context.addInitScript((skew) => {
+        const original = Date.now;
+        Date.now = () =>
+          original() + (window === window.top ? skew.parent : skew.frame);
+      }, clockSkew);
     return await openInContext(
       context,
       origin,
       server,
       artifact,
       corruptInitialization,
+      retrySkew,
     );
   } catch (error) {
     await context.close();
@@ -50,6 +61,7 @@ async function openInContext(
   server,
   artifact,
   corruptInitialization,
+  retrySkew,
 ) {
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
@@ -57,6 +69,35 @@ async function openInContext(
   const metadataRequests = [];
   const contentRequests = [];
   const errors = [];
+  let viewAttempts = 0;
+  if (retrySkew) {
+    await page.addInitScript(() => {
+      if (window !== window.top) return;
+      let advance = 0;
+      const original = performance.now.bind(performance);
+      Object.defineProperty(performance, 'now', {
+        configurable: true,
+        value: () => original() + advance,
+      });
+      globalThis.advanceViewClock = (milliseconds) => {
+        advance = milliseconds;
+      };
+    });
+    await page.route('**/v1/artifacts/**/runtime-views', async (route) => {
+      assert.equal(route.request().method(), 'POST');
+      viewAttempts += 1;
+      if (viewAttempts !== 1) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 429,
+        headers: { 'retry-after': '1', 'content-type': 'application/json' },
+        body: JSON.stringify({ error: { code: 'rate_limited' } }),
+      });
+      await page.evaluate(() => globalThis.advanceViewClock(2_147_483_648));
+    });
+  }
   await page.addInitScript(() => {
     if (window !== window.top) return;
     globalThis.runtimeConnects = [];
@@ -137,6 +178,7 @@ async function openInContext(
     metadataRequests,
     contentRequests,
     errors,
+    viewAttempts: () => viewAttempts,
   };
 }
 
@@ -184,6 +226,78 @@ async function insecureProxy(origin, contentOrigin) {
   };
 }
 
+async function checkExpiredReply(browser, origin, server, artifact) {
+  const opened = await open(browser, origin, server, artifact);
+  let release = () => undefined;
+  try {
+    const frame = opened.page.frameLocator('iframe[title^="Preview of"]');
+    await expect(frame.locator('#result')).toContainText(artifact.id);
+    let reached;
+    const arrived = new Promise((resolve) => {
+      reached = resolve;
+    });
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    let completed;
+    let failed;
+    const delivered = new Promise((resolve, reject) => {
+      completed = resolve;
+      failed = reject;
+    });
+    await opened.page.route('**/runtime-views/*/*/metadata', async (route) => {
+      try {
+        const response = await route.fetch();
+        assert.equal(response.status(), 200);
+        reached();
+        await held;
+        await route.fulfill({ response });
+        completed();
+      } catch (error) {
+        failed(error);
+      }
+    });
+    const before = await opened.page.evaluate(
+      () => globalThis.runtimeResponses.length,
+    );
+    await frame.locator('#read').click();
+    await Promise.race([
+      arrived,
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error('The metadata read was not sent.')),
+          10_000,
+        ),
+      ),
+    ]);
+    const finished = opened.page.waitForEvent('requestfinished', (request) =>
+      request.url().endsWith('/metadata'),
+    );
+    await opened.page.evaluate((advance) => {
+      const original = performance.now.bind(performance);
+      Object.defineProperty(performance, 'now', {
+        configurable: true,
+        value: () => original() + advance,
+      });
+    }, opened.view.lease_ms + 1);
+    release();
+    await delivered;
+    await finished;
+    await opened.page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(resolve)),
+    );
+    assert.equal(
+      await opened.page.evaluate(() => globalThis.runtimeResponses.length),
+      before,
+      'An expired metadata reply must not reach the frame.',
+    );
+    assert.deepEqual(opened.errors, []);
+  } finally {
+    release();
+    await opened.context.close();
+  }
+}
+
 /** Exercise the real server and an opaque-origin frame, including rejected messages. */
 export async function checkRuntime({
   browser,
@@ -198,6 +312,44 @@ export async function checkRuntime({
       { path: 'next.html', encoding: 'utf8', content: successor },
     ],
   });
+  // The workspace and sandbox can each have a wall clock different from
+  // the server, or from each other. A valid server lease must still work.
+  for (const skew of [
+    { parent: 86_400_000, frame: 0 },
+    { parent: 0, frame: 86_400_000 },
+    { parent: -86_400_000, frame: -86_400_000 },
+  ]) {
+    const shifted = await open(browser, origin, server, artifact, {
+      clockSkew: skew,
+    });
+    try {
+      await expect(
+        shifted.page
+          .frameLocator('iframe[title^="Preview of"]')
+          .locator('#result'),
+        `A valid lease must survive parent ${skew.parent} and frame ${skew.frame} clock offsets.`,
+      ).toContainText(artifact.id);
+      assert.deepEqual(shifted.errors, []);
+    } finally {
+      await shifted.context.close();
+    }
+  }
+  await checkExpiredReply(browser, origin, server, artifact);
+  const retried = await open(browser, origin, server, artifact, {
+    retrySkew: true,
+  });
+  try {
+    await expect(
+      retried.page
+        .frameLocator('iframe[title^="Preview of"]')
+        .locator('#result'),
+      'A queued retry must start its lease on actual dispatch.',
+    ).toContainText(artifact.id);
+    assert.equal(retried.viewAttempts(), 2);
+    assert.deepEqual(retried.errors, []);
+  } finally {
+    await retried.context.close();
+  }
   // A real non-loopback HTTP origin lacks randomUUID but has getRandomValues.
   // Test runtime and ordinary previews and a new mutation key there.
   const proxy = await insecureProxy(origin, server.content_origin);
@@ -208,8 +360,11 @@ export async function checkRuntime({
       'http://insecure.invalid',
       server,
       artifact,
-      false,
-      { proxy: { server: proxy.server, bypass: '127.0.0.1,localhost' } },
+      {
+        contextOptions: {
+          proxy: { server: proxy.server, bypass: '127.0.0.1,localhost' },
+        },
+      },
     );
     assert.equal(await compatible.page.evaluate(() => isSecureContext), false);
     assert.equal(
@@ -242,7 +397,7 @@ export async function checkRuntime({
     await compatible?.context.close();
     await proxy.close();
   }
-  const normal = await open(browser, origin, server, artifact, false);
+  const normal = await open(browser, origin, server, artifact);
   let release = () => undefined;
   try {
     const frame = normal.page.frameLocator('iframe[title^="Preview of"]');
@@ -262,16 +417,75 @@ export async function checkRuntime({
       assert.ok(!request.url().includes(server.token));
     }
 
-    // Advance only the host's clock. The frame still sends a message, but an
-    // expired host binding must not issue another authenticated request.
-    const beforeExpiry = normal.metadataRequests.length;
-    await normal.page.evaluate((expiredAt) => {
+    // A wall-clock correction after the view is live does not end its lease.
+    const beforeClockChange = await normal.page.evaluate(
+      () => globalThis.runtimeResponses.length,
+    );
+    await normal.page.evaluate(() => {
       const original = Date.now;
-      globalThis.restoreRuntimeClock = () => {
+      globalThis.restoreWallClock = () => {
         Date.now = original;
       };
-      Date.now = () => expiredAt;
-    }, normal.view.expires_at_ms + 1);
+      Date.now = () => original() + 86_400_000;
+    });
+    await frame.locator('#read').click();
+    await expect
+      .poll(() =>
+        normal.page.evaluate(() => globalThis.runtimeResponses.length),
+      )
+      .toBeGreaterThan(beforeClockChange);
+    const afterClockChange = await normal.page.evaluate(() =>
+      globalThis.runtimeResponses.at(-1),
+    );
+    assert.equal(afterClockChange.ok, true);
+    assert.equal(afterClockChange.metadata.artifactId, artifact.id);
+    await normal.page.evaluate(() => globalThis.restoreWallClock());
+
+    const beforeFrameExpiry = normal.metadataRequests.length;
+    await frame.locator('body').evaluate((element, advance) => {
+      const clock = element.ownerDocument.defaultView.performance;
+      const descriptor = Object.getOwnPropertyDescriptor(clock, 'now');
+      const original = clock.now.bind(clock);
+      element.ownerDocument.defaultView.restoreFrameClock = () => {
+        if (descriptor === undefined) delete clock.now;
+        else Object.defineProperty(clock, 'now', descriptor);
+      };
+      Object.defineProperty(clock, 'now', {
+        configurable: true,
+        value: () => original() + advance,
+      });
+    }, normal.view.lease_ms + 1);
+    await frame.locator('#read').click();
+    await expect(
+      frame.locator('#result'),
+      'An expired frame must reject before sending a request.',
+    ).toHaveText('The runtime view has expired.');
+    assert.equal(normal.metadataRequests.length, beforeFrameExpiry);
+    await frame
+      .locator('body')
+      .evaluate((element) =>
+        element.ownerDocument.defaultView.restoreFrameClock(),
+      );
+
+    // Advance only the host's monotonic clock. The frame still sends a
+    // message, but an expired binding must not issue another RPC, even
+    // when the host wall clock is behind the server.
+    const beforeExpiry = normal.metadataRequests.length;
+    await normal.page.evaluate((advance) => {
+      const descriptor = Object.getOwnPropertyDescriptor(performance, 'now');
+      const original = performance.now.bind(performance);
+      const wall = Date.now;
+      globalThis.restoreRuntimeClock = () => {
+        if (descriptor === undefined) delete performance.now;
+        else Object.defineProperty(performance, 'now', descriptor);
+        Date.now = wall;
+      };
+      Date.now = () => wall() - 86_400_000;
+      Object.defineProperty(performance, 'now', {
+        configurable: true,
+        value: () => original() + advance,
+      });
+    }, normal.view.lease_ms + 1);
     await frame.locator('#read').click();
     await normal.page.waitForTimeout(500);
     assert.equal(
@@ -354,7 +568,9 @@ export async function checkRuntime({
     await normal.context.close();
   }
 
-  const forged = await open(browser, origin, server, artifact, true);
+  const forged = await open(browser, origin, server, artifact, {
+    corruptInitialization: true,
+  });
   try {
     await expect
       .poll(() => forged.page.evaluate(() => globalThis.runtimeConnects.length))

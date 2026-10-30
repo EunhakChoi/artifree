@@ -58,7 +58,6 @@ struct Ticket {
     artifact: ArtifactId,
     revision: SourceRevision,
     expires: Instant,
-    expires_at_ms: i64,
     runtime: Option<RuntimeTicket>,
 }
 
@@ -87,6 +86,7 @@ pub(crate) enum RuntimeIssueError {
 pub(crate) struct IssuedRuntimeTicket {
     pub(crate) preview: IssuedTicket,
     pub(crate) initialization: String,
+    pub(crate) lease_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -94,7 +94,7 @@ struct Bootstrap {
     view_id: String,
     generation: u64,
     initialization: String,
-    expires_at_ms: i64,
+    lease_ms: u64,
 }
 
 /// Process-local preview tickets. They do not survive a restart; clients
@@ -145,7 +145,6 @@ impl PreviewTickets {
                 artifact,
                 revision,
                 expires,
-                expires_at_ms,
                 runtime: None,
             },
         );
@@ -167,6 +166,12 @@ impl PreviewTickets {
     ) -> Result<IssuedRuntimeTicket, RuntimeIssueError> {
         let secret = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
         let initialization = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
+        // The browser's timer accepts at most a signed 32-bit millisecond
+        // delay. The server CLI already limits leases to one day.
+        let lease_ms = u64::try_from(self.ttl.as_millis())
+            .ok()
+            .filter(|duration| *duration <= 2_147_483_647)
+            .ok_or(RuntimeIssueError::Unavailable)?;
         let now = Instant::now();
         let expires = now
             .checked_add(self.ttl)
@@ -208,7 +213,6 @@ impl PreviewTickets {
                 artifact,
                 revision,
                 expires,
-                expires_at_ms,
                 runtime: Some(RuntimeTicket {
                     view_id,
                     generation,
@@ -226,6 +230,7 @@ impl PreviewTickets {
                 expires_at_ms,
             },
             initialization,
+            lease_ms,
         })
     }
 
@@ -282,9 +287,11 @@ impl PreviewTickets {
     fn take_document(&self, secret: &str, enabled: bool) -> Option<Bootstrap> {
         let mut live = self.live.lock().ok()?;
         let ticket = live.get_mut(secret)?;
-        if ticket.expires <= Instant::now() {
+        let now = Instant::now();
+        if ticket.expires <= now {
             return None;
         }
+        let lease_ms = u64::try_from(ticket.expires.duration_since(now).as_millis()).ok()?;
         let view = ticket.runtime.as_mut()?;
         if view.document_served || view.revoked {
             return None;
@@ -295,7 +302,7 @@ impl PreviewTickets {
             view_id: view.view_id.clone(),
             generation: view.generation,
             initialization: view.initialization.clone(),
-            expires_at_ms: ticket.expires_at_ms,
+            lease_ms,
         })
     }
 
@@ -639,6 +646,7 @@ mod tests {
                 1,
             )
             .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(first.lease_ms, 60_000);
         let check = |actor: &ActorId,
                      artifact: &ArtifactId,
                      revision,
@@ -658,19 +666,27 @@ mod tests {
             check(&actor, &artifact, 1, view, 1, &first.initialization),
             None
         );
-        assert!(tickets.take_document(&first.preview.secret, true).is_some());
-        assert!(tickets.take_document(&first.preview.secret, true).is_none());
+        let bootstrap = tickets
+            .take_document(&first.preview.secret, true)
+            .ok_or("runtime bootstrap was not issued")?;
+        assert!(bootstrap.lease_ms > 0 && bootstrap.lease_ms <= first.lease_ms);
+        assert!(
+            tickets.take_document(&first.preview.secret, true).is_none(),
+            "the runtime document is served only once"
+        );
         assert_eq!(
             check(&actor, &artifact, 1, view, 1, &first.initialization),
             Some(SourceRevision(3))
         );
         assert_eq!(
             check(&other, &artifact, 1, view, 1, &first.initialization),
-            None
+            None,
+            "another actor cannot use the binding"
         );
         assert_eq!(
             check(&actor, &other_artifact, 1, view, 1, &first.initialization),
-            None
+            None,
+            "another artifact cannot use the binding"
         );
         assert_eq!(
             check(&actor, &artifact, 2, view, 1, &first.initialization),
@@ -682,7 +698,8 @@ mod tests {
         );
         assert_eq!(
             check(&actor, &artifact, 1, view, 2, &first.initialization),
-            None
+            None,
+            "another generation cannot use the binding"
         );
         assert_eq!(check(&actor, &artifact, 1, view, 1, "incorrect"), None);
         Ok(())
@@ -768,7 +785,8 @@ mod tests {
         assert!(
             expired
                 .take_document(&ticket.preview.secret, true)
-                .is_none()
+                .is_none(),
+            "an expired runtime document cannot be served"
         );
         assert_eq!(
             expired.runtime_head(
@@ -781,6 +799,38 @@ mod tests {
             ),
             None
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_rejects_a_lease_too_long_for_browser_timers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let artifact = ArtifactId::from_random([1; 16]);
+        let maximum = PreviewTickets::new(Duration::from_millis(2_147_483_647));
+        let allowed = maximum
+            .issue_runtime(
+                actor.clone(),
+                artifact.clone(),
+                SourceRevision(1),
+                SourceRevision(1),
+                "0123456789abcdef0123456789abcdef".into(),
+                1,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(allowed.lease_ms, 2_147_483_647);
+        let tickets = PreviewTickets::new(Duration::from_millis(2_147_483_648));
+        assert!(matches!(
+            tickets.issue_runtime(
+                actor,
+                artifact,
+                SourceRevision(1),
+                SourceRevision(1),
+                "0123456789abcdef0123456789abcdef".into(),
+                1
+            ),
+            Err(RuntimeIssueError::Unavailable)
+        ));
         Ok(())
     }
 }

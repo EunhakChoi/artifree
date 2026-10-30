@@ -822,6 +822,13 @@
           "description": "A frame initialization secret, distinct from the account token.",
           "type": "string"
         },
+        "lease_ms": {
+          "description": "Lease duration in milliseconds, at most 2,147,483,647. Clients must use\nelapsed local time, not compare the server's Unix timestamp to theirs.",
+          "format": "uint64",
+          "maximum": 2147483647,
+          "minimum": 0,
+          "type": "integer"
+        },
         "revision": {
           "description": "The pinned source revision shown in the frame.",
           "format": "uint64",
@@ -845,7 +852,8 @@
         "view_id",
         "generation",
         "initialization",
-        "expires_at_ms"
+        "expires_at_ms",
+        "lease_ms"
       ],
       "type": "object"
     },

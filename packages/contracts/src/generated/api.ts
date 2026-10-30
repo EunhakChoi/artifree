@@ -368,6 +368,11 @@ export interface RuntimeView {
    */
   initialization: string;
   /**
+   * Lease duration in milliseconds, at most 2,147,483,647. Clients must use
+   * elapsed local time, not compare the server's Unix timestamp to theirs.
+   */
+  lease_ms: number;
+  /**
    * The pinned source revision shown in the frame.
    */
   revision: number;

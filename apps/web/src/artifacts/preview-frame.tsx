@@ -34,14 +34,24 @@ export function PreviewFrame({
   const generation = useRef(0);
   const preview = useRequest(
     stale ? undefined : `${artifactId}:${revision}:${epoch}`,
-    (signal) =>
-      client.createRuntimeView(
+    async (signal) => {
+      // A scheduler can hold reads while the page is hidden or rate-limited.
+      // Time the lease from the actual attempt, not from entering that queue.
+      let dispatchedAt = performance.now();
+      const view = await client.createRuntimeView(
         artifactId,
         revision,
         viewId,
         ++generation.current,
-        { signal },
-      ),
+        {
+          signal,
+          onDispatch: () => {
+            dispatchedAt = performance.now();
+          },
+        },
+      );
+      return { view, deadline: dispatchedAt + view.lease_ms };
+    },
   );
   if (preview.status === 'loading')
     return (
@@ -60,9 +70,10 @@ export function PreviewFrame({
     );
   return (
     <RuntimeFrame
-      key={`${preview.value.view_id}:${preview.value.generation}`}
+      key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
       client={client}
-      view={preview.value}
+      view={preview.value.view}
+      deadline={preview.value.deadline}
       title={title}
       className={className}
     />

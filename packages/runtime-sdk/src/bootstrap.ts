@@ -5,7 +5,7 @@ export interface RuntimeInitialization {
   readonly view_id: string;
   readonly generation: number;
   readonly initialization: string;
-  readonly expires_at_ms: number;
+  readonly lease_ms: number;
 }
 
 interface Waiting {
@@ -40,6 +40,7 @@ export function start(config: RuntimeInitialization): void {
   if (window.artifree !== undefined)
     throw new Error('The Artifree runtime was already installed.');
   const channel = new MessageChannel();
+  const deadline = performance.now() + config.lease_ms;
   const waiting = new Map<number, Waiting>();
   let next = 0;
   let closed = false;
@@ -78,7 +79,7 @@ export function start(config: RuntimeInitialization): void {
   );
   window.artifree = Object.freeze({
     currentMetadata(): Promise<RuntimeMetadata> {
-      if (closed || Date.now() >= config.expires_at_ms)
+      if (closed || performance.now() >= deadline)
         return Promise.reject(new Error('The runtime view has expired.'));
       if (waiting.size >= 64)
         return Promise.reject(
@@ -95,7 +96,7 @@ export function start(config: RuntimeInitialization): void {
             waiting.delete(id);
             reject(new Error('The runtime metadata request timed out.'));
           },
-          Math.min(10_000, Math.max(0, config.expires_at_ms - Date.now())),
+          Math.min(10_000, Math.max(0, deadline - performance.now())),
         );
         waiting.set(id, { resolve, reject, timeout });
         try {

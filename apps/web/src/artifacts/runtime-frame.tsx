@@ -8,6 +8,8 @@ const PREVIEW_SANDBOX =
 interface RuntimeFrameProps {
   readonly client: ArtifreeClient;
   readonly view: RuntimeView;
+  /** Local monotonic deadline, conservatively measured from dispatch. */
+  readonly deadline: number;
   readonly title: string;
   readonly className?: string | undefined;
 }
@@ -20,6 +22,7 @@ function record(value: unknown): value is Record<string, unknown> {
 export function RuntimeFrame({
   client,
   view,
+  deadline,
   title,
   className,
 }: RuntimeFrameProps) {
@@ -45,8 +48,7 @@ export function RuntimeFrame({
     close.current = stop;
 
     const respond = (channel: MessagePort, message: unknown): void => {
-      if (!active || Date.now() >= view.expires_at_ms || !record(message))
-        return;
+      if (!active || performance.now() >= deadline || !record(message)) return;
       const { id, type } = message;
       if (
         type !== 'metadata' ||
@@ -65,7 +67,7 @@ export function RuntimeFrame({
         .runtimeMetadata(view, { signal: controller.signal })
         .then(
           (result) => {
-            if (!active || Date.now() >= view.expires_at_ms) return;
+            if (!active || performance.now() >= deadline) return;
             channel.postMessage({
               id,
               ok: true,
@@ -78,7 +80,7 @@ export function RuntimeFrame({
             });
           },
           () => {
-            if (active && Date.now() < view.expires_at_ms)
+            if (active && performance.now() < deadline)
               channel.postMessage({ id, ok: false });
           },
         )
@@ -97,7 +99,7 @@ export function RuntimeFrame({
         !active ||
         loads.current > 1 ||
         port !== undefined ||
-        Date.now() >= view.expires_at_ms ||
+        performance.now() >= deadline ||
         event.origin !== 'null' ||
         event.source !== frame.current?.contentWindow ||
         event.ports.length !== 1 ||
@@ -116,7 +118,7 @@ export function RuntimeFrame({
     window.addEventListener('message', connect);
     const expiry = window.setTimeout(
       stop,
-      Math.max(0, view.expires_at_ms - Date.now()),
+      Math.max(0, deadline - performance.now()),
     );
     return () => {
       window.removeEventListener('message', connect);
@@ -128,7 +130,7 @@ export function RuntimeFrame({
         });
       }, 0);
     };
-  }, [client, view]);
+  }, [client, view, deadline]);
 
   return (
     <iframe

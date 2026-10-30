@@ -589,6 +589,7 @@ pub(crate) async fn create_runtime_view(
         generation: request.generation,
         initialization: ticket.initialization,
         expires_at_ms: ticket.preview.expires_at_ms,
+        lease_ms: ticket.lease_ms,
     })
 }
 
