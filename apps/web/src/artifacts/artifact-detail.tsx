@@ -24,12 +24,14 @@ import { DuplicateDialog } from './duplicate-dialog';
 import { ExportButton } from './export-button';
 import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
+import type { PageDrafts } from './page-drafts';
 import { RecoverNotice } from './trash-list';
 import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { TrashState, Version } from './use-live-workspace';
 import { PreviewFrame } from './preview-frame';
 import { SourcePanel } from './source-editor';
+import { SourceRecovery } from './source-recovery';
 import { useRequest } from './use-request';
 
 /** An artifact's metadata and history, with when they were read. */
@@ -82,6 +84,8 @@ interface ArtifactDetailProps {
   unsaved: boolean;
   /** Reports when the editor gains or loses unsaved changes. */
   onUnsavedChange: (unsaved: boolean) => void;
+  /** Where the page keeps source drafts in the browser (decision 0018). */
+  drafts: PageDrafts;
 }
 
 /** Preview and source editing for one artifact. */
@@ -102,6 +106,7 @@ export function ArtifactDetail({
   isCurrent,
   unsaved,
   onUnsavedChange,
+  drafts,
 }: ArtifactDetailProps) {
   // In the trash every read of the artifact answers as for one that does
   // not exist, so nothing is read for it until it is recovered; what was
@@ -331,32 +336,41 @@ export function ArtifactDetail({
               )}
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
-              <SourcePanel
-                client={client}
-                read={shown}
-                resets={resets}
-                isCurrent={isCurrent}
-                known={known?.revision}
-                onRefused={(base, current) => {
-                  // A restore names the same source revision as a save.
-                  const floor = refusedFloor(base, current);
-                  if (floor !== undefined) sourceGate.refuse(floor);
-                }}
-                onSaved={(saved) => {
-                  onUnsavedChange(false);
-                  reload();
-                  onSaved(saved);
-                }}
-                onLoadLatest={() => {
-                  // Loading the latest revision replaces the draft.
-                  onUnsavedChange(false);
-                  reload();
-                }}
-                unsaved={unsaved}
+              <SourceRecovery
+                drafts={drafts}
+                artifactId={artifactId}
                 onUnsavedChange={onUnsavedChange}
-                reloading={reloading}
-                inTrash={inTrash}
-              />
+              >
+                {(keeping) => (
+                  <SourcePanel
+                    keeping={keeping}
+                    client={client}
+                    read={shown}
+                    resets={resets}
+                    isCurrent={isCurrent}
+                    known={known?.revision}
+                    onRefused={(base, current) => {
+                      // A restore names the same source revision as a save.
+                      const floor = refusedFloor(base, current);
+                      if (floor !== undefined) sourceGate.refuse(floor);
+                    }}
+                    onSaved={(saved) => {
+                      onUnsavedChange(false);
+                      reload();
+                      onSaved(saved);
+                    }}
+                    onLoadLatest={() => {
+                      // Loading the latest revision replaces the draft.
+                      onUnsavedChange(false);
+                      reload();
+                    }}
+                    unsaved={unsaved}
+                    onUnsavedChange={onUnsavedChange}
+                    reloading={reloading}
+                    inTrash={inTrash}
+                  />
+                )}
+              </SourceRecovery>
             </TabsContent>
           </Tabs>
         </div>

@@ -253,18 +253,19 @@ export async function checkEditor({
       workspace.getByText(/The save may have been committed/u),
     ).toBeVisible();
     await restoreLost();
-    await tab.route(
-      '**/v1/artifacts/*/revisions',
-      (route) =>
-        route.request().method() === 'POST'
-          ? route.fulfill({
-              status: 429,
-              headers: { 'retry-after': '0' },
-              json: { error: { code: 'rate_limited', message: 'Slow down.' } },
-            })
-          : route.fallback(),
-      { times: 1 },
-    );
+    // Only the next save is refused. A read of the history that passes
+    // first is not counted, as `{ times: 1 }` would count it.
+    let refused = false;
+    await tab.route('**/v1/artifacts/*/revisions', (route) => {
+      if (refused || route.request().method() !== 'POST')
+        return route.fallback();
+      refused = true;
+      return route.fulfill({
+        status: 429,
+        headers: { 'retry-after': '0' },
+        json: { error: { code: 'rate_limited', message: 'Slow down.' } },
+      });
+    });
     await saveButton.click();
     await expect(
       workspace.getByText(/Slow down\..*may have been committed/u),
@@ -309,6 +310,7 @@ export async function checkEditor({
     const loadLatest = workspace.getByRole('button', { name: 'Load latest' });
     const replacedNotice = workspace.getByText(
       "The server's data may have been replaced",
+      { exact: true },
     );
     const inTrash = workspace.getByText('Moved to the trash elsewhere');
     /** Opens a rename of `from` whose read of the file is held. */
@@ -451,6 +453,7 @@ export async function checkEditor({
       notRead.getByRole('button', { name: 'Try again' }),
     ).toHaveCount(0);
     await loadLatest.click();
+    await expect(notRead).toBeHidden();
     await expect(replacedNotice).toBeHidden();
 
     // So is a rename's read: nothing moves.

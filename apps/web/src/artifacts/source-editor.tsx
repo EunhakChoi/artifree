@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useEffectEvent,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   FilePlusIcon,
@@ -24,6 +17,7 @@ import type { ArtifreeClient } from '@artifree/client';
 import type {
   Artifact,
   Revision,
+  RevisionFile,
   SaveRevisionRequest,
 } from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -67,6 +61,8 @@ import {
   startDraft,
 } from './source-draft';
 import type { Change, DraftPath, Source, SourceDraft } from './source-draft';
+import type { DraftRecord, KeptDraft } from './draft-store';
+import type { Keeping } from './source-recovery';
 import { describeFailure, mayHaveCommitted, useRequest } from './use-request';
 
 /** Types the editor shows as text; other files are moved or deleted only. */
@@ -74,6 +70,9 @@ const TEXT_TYPES = /^(text\/|application\/json|application\/xml|image\/svg)/;
 
 const REPLACED =
   "The server's data may have been replaced since this draft's revision was read.";
+
+const UNMATCHED =
+  'The server no longer lists the revision this kept draft was written on with the same files.';
 
 /** An artifact's metadata and history, as the detail read them. */
 export interface SourceRead {
@@ -90,6 +89,11 @@ interface DraftBase {
   readonly revision: Revision;
   readonly epoch: number;
   readonly resets: number;
+  /**
+   * A kept draft's revision that the server does not list with the same
+   * files and digests (decision 0018, item 5): nothing of it is read.
+   */
+  readonly unmatched?: true;
 }
 
 /**
@@ -124,6 +128,8 @@ interface SourcePanelProps {
   reloading: boolean;
   /** The page shows the artifact in the trash, where nothing is read. */
   inTrash: boolean;
+  /** Where the draft is kept in the browser, and the one it continues. */
+  keeping: Keeping;
 }
 
 type SaveState =
@@ -131,6 +137,15 @@ type SaveState =
   | { readonly status: 'saving' }
   | { readonly status: 'conflict'; readonly current: number | undefined }
   | { readonly status: 'failed'; readonly message: string };
+
+type EndAction =
+  | { readonly kind: 'discard' }
+  | { readonly kind: 'latest' }
+  | {
+      readonly kind: 'saved';
+      readonly artifact: Artifact;
+      readonly draft: SourceDraft;
+    };
 
 /**
  * The files of one revision and a draft of changes to them, saved as one
@@ -149,25 +164,40 @@ export function SourcePanel({
   onUnsavedChange,
   reloading,
   inTrash,
+  keeping,
 }: SourcePanelProps) {
   const { artifact, revisions } = read;
+  const { start } = keeping;
   // While a draft exists it keeps the revision it was written against, also
   // when newer ones arrive or it is no longer listed (0007 decision 8).
-  const [held, setHeld] = useState<DraftBase>();
-  const [draft, setDraft] = useState<SourceDraft>();
+  const [held, setHeld] = useState(() =>
+    start === undefined ? undefined : keptBase(start, read),
+  );
+  const [draft, setDraft] = useState(start?.draft);
   // Whether a save of this draft may have committed although its answer
   // was lost. A later failure says nothing about the earlier request, so
   // only a success, or the draft's end, settles it.
-  const [uncertain, setUncertain] = useState(false);
+  const [uncertain, setUncertain] = useState(start?.uncertain === true);
   if (!unsaved && held !== undefined) setHeld(undefined);
   if (!unsaved && draft !== undefined) setDraft(undefined);
   if (!unsaved && uncertain) setUncertain(false);
   const [chosen, setChosen] = useState<string>();
   const [dialog, setDialog] = useState<{ readonly rename?: string }>();
   const [save, setSave] = useState<SaveState>({ status: 'idle' });
+  const [clearing, setClearing] = useState(false);
+  const [endFailure, setEndFailure] = useState<{
+    readonly action: EndAction;
+    readonly message: string;
+  }>();
   // The last request sent and its key. Sending the same request again
-  // reuses the key, so a retry after a lost answer cannot commit twice.
-  const [attempt, setAttempt] = useState<{ body: string; key: string }>();
+  // reuses the key, so a retry after a lost answer cannot commit twice. A
+  // continued draft kept as sent starts with its key, so a save that may
+  // have committed before the page closed replays (decision 0018, item 6).
+  const [attempt, setAttempt] = useState(() =>
+    start?.sent !== undefined && start.sent.version === start.version
+      ? { body: JSON.stringify(requestOf(start.draft)), key: start.sent.key }
+      : undefined,
+  );
   const [showPreview, setShowPreview] = useState(false);
   // What the write point reads when a change arrives: the draft as last
   // written, what the page last showed, and whether a save is being sent.
@@ -179,11 +209,13 @@ export function SourcePanel({
     unreadable: string | undefined;
   }>({ base: undefined, allowance: ALL, unreadable: undefined });
   const sending = useRef(false);
-  // Whatever replaces this panel discards its draft, so it must not leave
-  // the workspace locked.
-  const release = useEffectEvent(() => onUnsavedChange(false));
-  useEffect(() => () => release(), []);
-
+  const clearingDraft = useRef(false);
+  // What is kept with the draft: the count of its changes, the last save
+  // sent, and whether a save may have committed (decision 0018).
+  const version = useRef(start?.version ?? 0);
+  const sent = useRef(start?.sent);
+  const attempts = useRef(start?.attempts ?? []);
+  const mayHaveSaved = useRef(start?.uncertain === true);
   const current = revisions.find(
     (item) => item.revision === artifact.current_revision,
   );
@@ -192,21 +224,24 @@ export function SourcePanel({
     (current === undefined
       ? undefined
       : { revision: current, epoch: read.epoch, resets: read.resets });
-  const replaced = base !== undefined && base.resets !== resets;
+  const unmatched = base?.unmatched === true;
+  const replaced = base !== undefined && (unmatched || base.resets !== resets);
+  const stale = unmatched ? UNMATCHED : REPLACED;
   const saving = save.status === 'saving';
-  const allowance: Allowance = saving
-    ? { level: 'none', why: 'A save of this draft is in progress.' }
-    : reloading
-      ? { level: 'none', why: 'A newer revision is loading.' }
-      : replaced
-        ? { level: 'text', why: REPLACED }
-        : inTrash
-          ? { level: 'text', why: 'The artifact is in the trash.' }
-          : ALL;
+  const allowance: Allowance =
+    saving || clearing || endFailure !== undefined
+      ? { level: 'none', why: 'A save of this draft is in progress.' }
+      : reloading
+        ? { level: 'none', why: 'A newer revision is loading.' }
+        : replaced
+          ? { level: 'text', why: stale }
+          : inTrash
+            ? { level: 'text', why: 'The artifact is in the trash.' }
+            : ALL;
   // A file of the base revision is read unless the server refuses every
-  // read (0014) or the number may name other content (0011).
+  // read (0014) or the number may name other content (0011, 0018).
   const unreadable = replaced
-    ? REPLACED
+    ? stale
     : inTrash
       ? 'The artifact is in the trash.'
       : undefined;
@@ -262,7 +297,7 @@ export function SourcePanel({
         level: 'none',
         why: 'The draft now belongs to another revision.',
       };
-    if (sending.current)
+    if (sending.current || clearingDraft.current || endFailure !== undefined)
       return { level: 'none', why: 'A save of this draft is in progress.' };
     return shown.current.allowance;
   }
@@ -288,10 +323,80 @@ export function SourcePanel({
     setDraft(after);
     setSave({ status: 'idle' });
     const dirty = !isEmpty(after);
-    setHeld(dirty ? base : undefined);
-    if (!dirty) setUncertain(false);
-    onUnsavedChange(dirty);
+    setHeld(base);
+    onUnsavedChange(true);
+    version.current += 1;
+    if (dirty) void keeping.keep(kept(after));
+    else void finish({ kind: 'discard' });
     return undefined;
+  }
+
+  function markUncertain(value: boolean): void {
+    mayHaveSaved.current = value;
+    setUncertain(value);
+  }
+
+  /** The draft as this page keeps it now. */
+  function kept(
+    current: SourceDraft,
+    uncertainNow = mayHaveSaved.current,
+  ): DraftRecord {
+    return {
+      artifactId: artifact.id,
+      title: artifact.title,
+      keptAt: Date.now(),
+      draft: current,
+      version: version.current,
+      sent: sent.current,
+      attempts: attempts.current,
+      uncertain: uncertainNow,
+    };
+  }
+
+  /** Completes an end after the browser removed its kept draft, or by choice. */
+  function completeEnd(action: EndAction): void {
+    setEndFailure(undefined);
+    // A save answer can become stale while its kept record is being removed.
+    // Keep the draft again instead of applying that answer to replaced data.
+    if (action.kind === 'saved' && !isCurrent(baseEpoch)) {
+      markUncertain(true);
+      void keeping.keep(kept(action.draft, true));
+      setSave({ status: 'idle' });
+      return;
+    }
+    sent.current = undefined;
+    attempts.current = [];
+    setAttempt(undefined);
+    markUncertain(false);
+    if (action.kind === 'saved') onSaved(action.artifact);
+    else if (action.kind === 'latest') onLoadLatest();
+    else {
+      latest.current = undefined;
+      setDraft(undefined);
+      setHeld(undefined);
+      setSave({ status: 'idle' });
+      onUnsavedChange(false);
+    }
+  }
+
+  /** Removes the kept record before completing an end, or offers a choice. */
+  async function finish(action: EndAction): Promise<void> {
+    if (clearingDraft.current) return;
+    clearingDraft.current = true;
+    setClearing(true);
+    const failure = await keeping.keep(undefined);
+    clearingDraft.current = false;
+    setClearing(false);
+    if (action.kind === 'saved' && !isCurrent(baseEpoch)) {
+      completeEnd(action);
+      return;
+    }
+    if (failure !== undefined) {
+      if (action.kind === 'saved') markUncertain(true);
+      setEndFailure({ action, message: failure });
+      return;
+    }
+    completeEnd(action);
   }
 
   /** Reads a file of the draft's revision while its number names it. */
@@ -312,38 +417,78 @@ export function SourcePanel({
     return bytes;
   }
 
-  function discard(): void {
-    latest.current = undefined;
-    setDraft(undefined);
-    setHeld(undefined);
-    setUncertain(false);
-    setSave({ status: 'idle' });
-    onUnsavedChange(false);
-  }
-
   async function commit(made: number): Promise<void> {
     const now = allowanceNow(made);
-    const sent = latest.current;
-    if (now.level !== 'all' || sent === undefined || sent.base !== made) {
+    const toSave = latest.current;
+    if (now.level !== 'all' || toSave === undefined || toSave.base !== made) {
       setSave({
         status: 'failed',
         message: now.level === 'all' ? 'Nothing to save.' : now.why,
       });
       return;
     }
-    const request: SaveRevisionRequest = {
-      base_revision: made,
-      changes: plan(sent).map((change) =>
-        change.op === 'delete'
-          ? change
-          : { op: 'put', ...encodeFile(change.path, change.bytes) },
-      ),
-    };
+    const request = requestOf(toSave);
     const body = JSON.stringify(request);
-    const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
-    setAttempt({ body, key });
     setSave({ status: 'saving' });
     sending.current = true;
+    let digest: string;
+    let key: string;
+    let previousDigest: string | undefined;
+    try {
+      digest = await requestDigest(body);
+      previousDigest = sent.current?.requestDigest;
+      if (
+        previousDigest === undefined &&
+        sent.current !== undefined &&
+        attempt?.key === sent.current.key
+      )
+        previousDigest = await requestDigest(attempt.body);
+      key =
+        attempt?.body === body
+          ? attempt.key
+          : sent.current?.requestDigest === digest
+            ? sent.current.key
+            : (attempts.current.find((item) => item.requestDigest === digest)
+                ?.key ?? newIdempotencyKey());
+    } catch (error: unknown) {
+      sending.current = false;
+      setSave({ status: 'failed', message: describeFailure(error) });
+      return;
+    }
+    setAttempt({ body, key });
+    // Kept as sent before it is sent: if the page closes before the answer,
+    // the save may have committed and the same key replays it. The request
+    // follows even if the browser refused to keep it (decision 0018).
+    const previouslySent = sent.current;
+    const previousAttempts = attempts.current;
+    if (
+      previouslySent !== undefined &&
+      previousDigest !== undefined &&
+      !attempts.current.some((item) => item.requestDigest === previousDigest)
+    )
+      attempts.current = [
+        ...attempts.current,
+        { key: previouslySent.key, requestDigest: previousDigest },
+      ];
+    if (!attempts.current.some((item) => item.requestDigest === digest))
+      attempts.current = [...attempts.current, { key, requestDigest: digest }];
+    sent.current = { key, version: version.current, requestDigest: digest };
+    await keeping.keep(kept(toSave, true));
+    // Keeping the draft can wait for an earlier IndexedDB transaction. A
+    // reset or a move to the trash during that wait invalidates this base
+    // before the HTTP request has been sent.
+    if (
+      !isCurrent(baseEpoch) ||
+      shown.current.base !== made ||
+      shown.current.unreadable !== undefined
+    ) {
+      sending.current = false;
+      sent.current = previouslySent;
+      attempts.current = previousAttempts;
+      void keeping.keep(kept(toSave));
+      setSave({ status: 'idle' });
+      return;
+    }
     let saved: Artifact | undefined;
     let failure: unknown;
     try {
@@ -363,9 +508,10 @@ export function SourcePanel({
     }
     if (saved !== undefined) {
       setSave({ status: 'idle' });
-      setUncertain(false);
-      onSaved(saved);
-    } else if (
+      void finish({ kind: 'saved', artifact: saved, draft: toSave });
+      return;
+    }
+    if (
       failure instanceof ArtifreeApiError &&
       failure.code === 'revision_conflict'
     ) {
@@ -373,8 +519,10 @@ export function SourcePanel({
       onRefused(made, failure.currentRevision);
     } else {
       setSave({ status: 'failed', message: describeFailure(failure) });
-      if (mayHaveCommitted(failure)) setUncertain(true);
+      if (mayHaveCommitted(failure)) markUncertain(true);
     }
+    // A refusal committed nothing, though an earlier save still may have.
+    void keeping.keep(kept(latest.current ?? toSave));
   }
 
   const free = allowance.level === 'all';
@@ -444,7 +592,17 @@ export function SourcePanel({
           </AlertDescription>
         </Alert>
       ) : null}
-      {replaced ? (
+      {unmatched ? (
+        <Alert variant="destructive">
+          <AlertTitle>The kept draft&apos;s revision has changed</AlertTitle>
+          <AlertDescription>
+            This draft was kept for revision {made}, which the server no longer
+            lists with the same files. Its text can be edited and copied, but no
+            file of that revision is read or moved and saving is disabled. Copy
+            your changes if you need them, then load the latest revision.
+          </AlertDescription>
+        </Alert>
+      ) : replaced ? (
         <Alert variant="destructive">
           <AlertTitle>The server&apos;s data may have been replaced</AlertTitle>
           <AlertDescription>
@@ -473,6 +631,57 @@ export function SourcePanel({
             Revision {save.current ?? 'newer'} was saved elsewhere after you
             started editing. Copy your changes if you need them, then load the
             latest revision.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {keeping.failure !== undefined && changed && endFailure === undefined ? (
+        <Alert variant="destructive">
+          <AlertTitle>This draft is not kept in this browser</AlertTitle>
+          <AlertDescription>
+            {keeping.failure} Editing continues, but the draft is lost if this
+            page closes; the next change is kept once the browser allows it.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {endFailure === undefined ? null : (
+        <Alert variant="destructive">
+          <AlertTitle>Could not remove the kept draft</AlertTitle>
+          <AlertDescription>
+            <p>
+              {endFailure.message}{' '}
+              {endFailure.action.kind === 'saved'
+                ? 'The revision was saved. '
+                : null}
+              The kept draft may be offered again after a reload.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={clearing}
+                onClick={() => void finish(endFailure.action)}
+              >
+                Try again
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={clearing}
+                onClick={() => completeEnd(endFailure.action)}
+              >
+                Continue without removing it
+              </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+      {uncertain && save.status === 'idle' ? (
+        <Alert>
+          <AlertTitle>This draft may already be saved</AlertTitle>
+          <AlertDescription>
+            An earlier save&apos;s answer was not received. Retrying the same
+            changes reuses its key; different changes use a new key.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -507,7 +716,11 @@ export function SourcePanel({
           {/* In the trash, discarding is the way out: the latest revision
               cannot be read there. */}
           {changed && allowance.level !== 'none' && (!outdated || inTrash) ? (
-            <Button type="button" variant="outline" onClick={discard}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void finish({ kind: 'discard' })}
+            >
               <Undo2Icon data-icon="inline-start" aria-hidden="true" />
               Discard changes
             </Button>
@@ -516,8 +729,10 @@ export function SourcePanel({
             <Button
               type="button"
               variant="outline"
-              disabled={reloading}
-              onClick={onLoadLatest}
+              disabled={
+                reloading || saving || clearing || endFailure !== undefined
+              }
+              onClick={() => void finish({ kind: 'latest' })}
             >
               <RotateCwIcon data-icon="inline-start" aria-hidden="true" />
               {reloading ? 'Loading latest…' : 'Load latest'}
@@ -575,6 +790,68 @@ export function SourcePanel({
         }}
       />
     </div>
+  );
+}
+
+/** The save request for `draft`. */
+function requestOf(draft: SourceDraft): SaveRevisionRequest {
+  return {
+    base_revision: draft.base,
+    changes: plan(draft).map((change) =>
+      change.op === 'delete'
+        ? change
+        : { op: 'put', ...encodeFile(change.path, change.bytes) },
+    ),
+  };
+}
+
+/** Identifies the exact serialized request without storing a second copy. */
+async function requestDigest(body: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(body),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+}
+
+/**
+ * The revision a continued draft is written on. It counts as the listed
+ * revision only if the server lists it with the same paths and digests;
+ * otherwise it is kept as unmatched (decision 0018, item 5).
+ */
+function keptBase(start: KeptDraft, read: SourceRead): DraftBase {
+  const listed = read.revisions.find(
+    (item) => item.revision === start.draft.base,
+  );
+  if (listed !== undefined && sameFiles(listed.files, start.draft.files))
+    return { revision: listed, epoch: read.epoch, resets: read.resets };
+  return {
+    revision: {
+      revision: start.draft.base,
+      files: [...start.draft.files],
+      created_at_ms: 0,
+      created_by: '',
+    },
+    epoch: read.epoch,
+    resets: read.resets,
+    unmatched: true,
+  };
+}
+
+/** Whether two manifests list the same paths with the same digests. */
+function sameFiles(
+  left: readonly RevisionFile[],
+  right: readonly RevisionFile[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (file, index) =>
+        file.path === right[index]?.path &&
+        file.sha256 === right[index]?.sha256,
+    )
   );
 }
 

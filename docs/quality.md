@@ -305,6 +305,55 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   still open, and nothing is read there; a save, a file read, and a rename read held across a forged
   `reset` change nothing, and paths cannot change then while text can.
   The draft and the replaced state are checked for accessibility.
+- `scripts/tests/page-drafts.test.mjs`: the page's kept drafts against a
+  store that releases writes one by one. Only the last state asked for an
+  artifact is written, one write at a time, so a late write never brings
+  back an ended draft; artifacts do not wait for each other; a failed
+  write is reported until a later one succeeds; another tab's draft this
+  one continues stays until a write succeeds; a discard runs after the
+  writes asked for before it, and one that fails says so; a new list and a
+  later write wait for another tab's pending discard, including a failed
+  discard that can be retried; discarding after a failed adoption lets a
+  fresh draft be kept; the list waits for those writes and offers the page's
+  own drafts first.
+- `scripts/smoke-drafts.mjs`, in its own browser context, against the
+  browser's IndexedDB: a draft with moved bytes outlives a reload, is
+  named above the list, is recovered by choice, and saves with its exact
+  bytes; a saved, discarded, or reloaded ("Load latest") draft is no
+  longer offered; after a reconnect the page's draft is still offered; a
+  page disconnected and reloaded keeps its draft from another tab; a save
+  in flight when the page reloads is offered as possibly committed, shows
+  no "saved elsewhere" notice, and replays without a second revision, even
+  after a different request is refused and the original edits are restored;
+  different request bodies use different keys; an
+  open tab's draft is not offered to its duplicate, which takes an id of
+  its own, nor to another tab until it closes; while writes are refused,
+  continuing a closed tab's draft leaves its record; the page's own draft
+  is offered before a newer one of a closed tab; a draft whose revision
+  the server lists with other digests is text only; a refused write warns
+  and the next change is kept; drafts that cannot be read hold the editor
+  until "Try again", including after a failed owner claim. A save whose
+  preflight write is held across a feed reset sends no request. A returned
+  owner or a changed record rejects stale adoption and deletion. Pending
+  discards prevent competing choices. Failed deletes during save, discard,
+  undo, or "Load latest" leave a retry or an explicit continue choice; a
+  reset while a saved record is being removed leaves the draft available.
+  A view replaced during another owner's pending discard waits for its
+  result: a failed discard leaves the choice, and a successful one opens
+  the editor without offering the removed record. A discarded record is not
+  used again after an earlier failed adoption when a new draft is written.
+  A failed list of other artifacts' drafts is shown and can be retried.
+  Before each reload or close the smoke waits for the
+  store to hold what the next page relies on. The notice and the choice
+  are checked for accessibility.
+- `scripts/smoke-draft-guards.mjs`: a live draft survives two copied-owner
+  pages without Web Locks, including their save and discard choices; the
+  pages see the lookup and keep failures. Incomplete lock snapshots fail the
+  lookup and cannot expose an active owner's draft; explicitly proceeding
+  uses a distinct owner. A real Vite development page also recovers and
+  discards a draft under React Strict Mode, retaining then releasing the
+  workspace lock. The lookup and recovery choices are checked for
+  accessibility.
 - `scripts/smoke-history.mjs`: the history tab compares revisions by digest
   (a same-size binary file; a 215-byte path and a 100-byte name inside a
   360-pixel window) and shows text lines with visible carriage returns,

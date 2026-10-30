@@ -23,6 +23,8 @@ import { START, navigate, opened } from './navigation';
 import type { NavigationEvent } from './navigation';
 import { ConnectForm } from './connect-form';
 import { CreateDialog } from './create-dialog';
+import { KeptDrafts } from './kept-drafts';
+import type { PageDrafts } from './page-drafts';
 import { pageVisibility } from './page-visibility';
 import { RequestGate } from './request-gate';
 import { TrashNav } from './trash-list';
@@ -50,8 +52,11 @@ function storeToken(token: string | undefined): void {
   }
 }
 
-/** Lists, creates, previews, and edits artifacts on a connected server. */
-export function ArtifactWorkspace() {
+/**
+ * Lists, creates, previews, and edits artifacts on a connected server.
+ * `drafts` belongs to the page and outlives every connection.
+ */
+export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
   const [token, setToken] = useState(storedToken);
   function connect(next: string | undefined): void {
     storeToken(next);
@@ -62,6 +67,7 @@ export function ArtifactWorkspace() {
     <ConnectedWorkspace
       key={token}
       token={token}
+      drafts={drafts}
       onDisconnect={() => connect(undefined)}
     />
   );
@@ -69,6 +75,7 @@ export function ArtifactWorkspace() {
 
 interface ConnectedWorkspaceProps {
   token: string;
+  drafts: PageDrafts;
   onDisconnect: () => void;
 }
 
@@ -81,7 +88,11 @@ const FEED_MESSAGES: Record<FeedState, string> = {
   stopped: 'Live updates stopped; reconnect to try again.',
 };
 
-function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
+function ConnectedWorkspace({
+  token,
+  drafts,
+  onDisconnect,
+}: ConnectedWorkspaceProps) {
   // One gate per connection, under the client: every request this page
   // sends, whichever view asks for it, passes through it.
   const [client] = useState(
@@ -267,6 +278,12 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
           )}
         </div>
       )}
+      <KeptDrafts
+        drafts={drafts}
+        openId={selectedId}
+        locked={unsaved}
+        onOpen={(id) => dispatch({ type: 'choose', id })}
+      />
       {shownList === undefined && artifacts.status !== 'error' ? (
         <output className="text-sm text-muted-foreground">
           Loading artifacts…
@@ -348,6 +365,7 @@ function ConnectedWorkspace({ token, onDisconnect }: ConnectedWorkspaceProps) {
                 isCurrent={isCurrent}
                 unsaved={unsaved}
                 onUnsavedChange={setUnsaved}
+                drafts={drafts}
               />
             )}
           </div>
