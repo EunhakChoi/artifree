@@ -16,8 +16,11 @@ export type ApiBody =
   | Revision
   | RevisionList
   | Preview
+  | RuntimeConnection
   | CreateRuntimeViewRequest
   | RuntimeView
+  | SetRuntimeGrantRequest
+  | RuntimeGrant
   | RuntimeMetadataRequest
   | RuntimeMetadata
   | ErrorResponse
@@ -331,6 +334,15 @@ export interface Preview {
   url: string;
 }
 /**
+ * A server-issued ephemeral runtime connection.
+ */
+export interface RuntimeConnection {
+  /**
+   * Random 32-digit lowercase hexadecimal connection identifier.
+   */
+  session_id: string;
+}
+/**
  * Requests a preview view whose frame can read its artifact metadata.
  */
 export interface CreateRuntimeViewRequest {
@@ -338,6 +350,10 @@ export interface CreateRuntimeViewRequest {
    * A positive, increasing generation within this view.
    */
   generation: number;
+  /**
+   * Random identifier of the connected workspace session.
+   */
+  session_id: string;
   /**
    * A random 32-digit lowercase hexadecimal identifier for this view.
    */
@@ -352,6 +368,10 @@ export interface RuntimeView {
    */
   artifact_id: string;
   /**
+   * Capabilities declared by this pinned revision.
+   */
+  declared: string[];
+  /**
    * Whether the entry explicitly opts in to the metadata bridge.
    */
   enabled: boolean;
@@ -363,6 +383,18 @@ export interface RuntimeView {
    * This view's generation.
    */
   generation: number;
+  /**
+   * Version to supply when replacing this grant.
+   */
+  grant_version: number;
+  /**
+   * Capabilities granted for this connection and source binding.
+   */
+  granted: string[];
+  /**
+   * Current source head observed when this view was issued.
+   */
+  head_revision: number;
   /**
    * A frame initialization secret, distinct from the account token.
    */
@@ -377,6 +409,14 @@ export interface RuntimeView {
    */
   revision: number;
   /**
+   * Supported SDK pin, or null for an ordinary preview. Always present.
+   */
+  sdk: string | null;
+  /**
+   * Capabilities supported by this server for the entry's SDK pin.
+   */
+  supported: string[];
+  /**
    * URL of the entry document on the content origin. An opted-in entry
    * receives a runtime bootstrap; the stored source stays unchanged.
    */
@@ -385,6 +425,32 @@ export interface RuntimeView {
    * The view identifier supplied when it was created.
    */
   view_id: string;
+}
+/**
+ * Replaces the grant only if the user observed the same source and grant.
+ */
+export interface SetRuntimeGrantRequest {
+  /**
+   * Complete supported subset; an empty list revokes every capability.
+   */
+  capabilities: string[];
+  /**
+   * Version observed before the change.
+   */
+  expected_version: number;
+  /**
+   * The source head observed when choosing the grant.
+   */
+  head_revision: number;
+}
+/**
+ * The new version of a connection-scoped grant.
+ */
+export interface RuntimeGrant {
+  /**
+   * The grant version, used to guard the next change.
+   */
+  version: number;
 }
 /**
  * Proves that the parent is requesting metadata for its initialized view.

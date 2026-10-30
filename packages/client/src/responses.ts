@@ -12,7 +12,9 @@ import type {
   Preview,
   Revision,
   RevisionFile,
+  RuntimeConnection,
   RuntimeMetadata,
+  RuntimeGrant,
   RuntimeView,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
@@ -256,6 +258,17 @@ export function parsePreview(value: unknown): Preview | undefined {
 }
 
 /** Validates a runtime view before its values are used for frame binding. */
+export function parseRuntimeConnection(
+  value: unknown,
+): RuntimeConnection | undefined {
+  return isRecord(value) &&
+    typeof value.session_id === 'string' &&
+    /^[0-9a-f]{32}$/.test(value.session_id)
+    ? { session_id: value.session_id }
+    : undefined;
+}
+
+/** Validates a runtime view before its values are used for frame binding. */
 export function parseRuntimeView(value: unknown): RuntimeView | undefined {
   if (!isRecord(value)) return undefined;
   const {
@@ -263,6 +276,12 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     enabled,
     artifact_id,
     revision,
+    head_revision,
+    sdk,
+    declared,
+    supported,
+    granted,
+    grant_version,
     view_id,
     generation,
     initialization,
@@ -275,6 +294,23 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     typeof artifact_id !== 'string' ||
     !isCount(revision) ||
     revision === 0 ||
+    !isCount(head_revision) ||
+    head_revision < revision ||
+    !(sdk === null || typeof sdk === 'string') ||
+    (enabled ? sdk !== 'artifree.app.v1' : sdk !== null) ||
+    !Array.isArray(declared) ||
+    !declared.every((name: unknown) => typeof name === 'string') ||
+    !Array.isArray(supported) ||
+    !supported.every((name: unknown) => typeof name === 'string') ||
+    !Array.isArray(granted) ||
+    !granted.every(
+      (name: unknown) =>
+        typeof name === 'string' &&
+        supported.includes(name) &&
+        declared.includes(name),
+    ) ||
+    !isCount(grant_version) ||
+    (granted.length > 0 && grant_version === 0) ||
     typeof view_id !== 'string' ||
     !/^[0-9a-f]{32}$/.test(view_id) ||
     !isCount(generation) ||
@@ -297,12 +333,25 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     enabled,
     artifact_id,
     revision,
+    head_revision,
+    sdk,
+    declared,
+    supported,
+    granted,
+    grant_version,
     view_id,
     generation,
     initialization,
     expires_at_ms,
     lease_ms,
   };
+}
+
+/** Validates a grant's version before it can guard another change. */
+export function parseRuntimeGrant(value: unknown): RuntimeGrant | undefined {
+  return isRecord(value) && isCount(value.version)
+    ? { version: value.version }
+    : undefined;
 }
 
 /** Validates metadata returned for a runtime view. */

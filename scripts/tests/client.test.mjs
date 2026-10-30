@@ -66,6 +66,19 @@ function clientWith(respond) {
   });
 }
 
+async function runtimeClientWith(respond) {
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url) =>
+      url.endsWith('/v1/runtime-sessions')
+        ? Response.json({ session_id: 'e'.repeat(32) })
+        : respond(),
+  });
+  await client.openRuntimeSession();
+  return client;
+}
+
 /** A response whose body ends with a stream error after `prefix`. */
 function cutOff(status, prefix) {
   const body = new ReadableStream({
@@ -109,6 +122,140 @@ test('A complete body that is not the contract is an invalid response', async ()
   assert.equal(error.code, 'invalid_response');
 });
 
+test('An abandoned runtime open cannot replace a later connection', async () => {
+  const pending = [];
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: () => new Promise((resolve) => pending.push(resolve)),
+  });
+  const old = client.openRuntimeSession();
+  const current = client.openRuntimeSession();
+  pending[1](Response.json({ session_id: '2'.repeat(32) }));
+  await current;
+  pending[0](Response.json({ session_id: '1'.repeat(32) }));
+  assert.equal((await failure(old)).code, 'invalid_request');
+  assert.equal(client.runtimeSessionId, '2'.repeat(32));
+});
+
+test('Closing during an open cannot activate its late response', async () => {
+  let finish;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  });
+  const opening = client.openRuntimeSession();
+  await client.closeRuntimeSession();
+  finish(Response.json({ session_id: '1'.repeat(32) }));
+  assert.equal((await failure(opening)).code, 'invalid_request');
+  assert.throws(() => client.runtimeSessionId, { code: 'invalid_request' });
+});
+
+test('An unconfirmed close retains its connection identity for retry', async () => {
+  const paths = [];
+  let closeAttempts = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      paths.push(`${init.method} ${url}`);
+      if (init.method === 'POST')
+        return Response.json({ session_id: 'a'.repeat(32) });
+      closeAttempts += 1;
+      if (closeAttempts === 1) throw new Error('response lost');
+      if (closeAttempts === 2)
+        return new Response('proxy fallback', { status: 200 });
+      return new Response(null, { status: 204 });
+    },
+  });
+  await client.openRuntimeSession();
+  assert.equal(
+    (await failure(client.closeRuntimeSession())).code,
+    'network_error',
+  );
+  assert.equal(client.runtimeSessionId, 'a'.repeat(32));
+  assert.equal(
+    (await failure(client.closeRuntimeSession())).code,
+    'invalid_response',
+  );
+  assert.equal(client.runtimeSessionId, 'a'.repeat(32));
+  await client.closeRuntimeSession();
+  assert.equal(paths[1], paths[2]);
+  assert.equal(paths[2], paths[3]);
+  assert.throws(() => client.runtimeSessionId, { code: 'invalid_request' });
+});
+
+test('A runtime view close requires the no-content acknowledgement', async () => {
+  const view = { view_id: 'a'.repeat(32), generation: 1 };
+  const unconfirmed = clientWith(
+    () => new Response('proxy fallback', { status: 200 }),
+  );
+  assert.equal(
+    (await failure(unconfirmed.closeRuntimeView(view))).code,
+    'invalid_response',
+  );
+  const confirmed = clientWith(() => new Response(null, { status: 204 }));
+  await confirmed.closeRuntimeView(view);
+});
+
+test('An uncertain grant stays with its connection until a clear is confirmed', async () => {
+  let calls = 0;
+  const notifications = [];
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: 'a'.repeat(32) });
+      calls += 1;
+      if (calls === 1) throw new Error('answer lost');
+      assert.deepEqual(JSON.parse(init.body).capabilities, []);
+      return Response.json({ version: calls === 2 ? 0 : 1 });
+    },
+  });
+  await client.openRuntimeSession();
+  const view = {
+    artifact_id: artifact.id,
+    revision: 1,
+    head_revision: 1,
+    grant_version: 0,
+  };
+  const unsubscribe = client.subscribeRuntimeGrants(() =>
+    notifications.push(client.runtimeGrantStatus(view)),
+  );
+  const allow = client.setRuntimeGrant(view, ['metadata.read']);
+  assert.equal(client.runtimeGrantStatus(view), 'pending');
+  assert.equal((await failure(allow)).code, 'network_error');
+  // A newly mounted preview receives the same connection-owned state.
+  assert.equal(client.runtimeGrantStatus({ ...view }), 'unknown');
+  assert.equal(
+    (await failure(client.setRuntimeGrant(view, ['metadata.read']))).code,
+    'invalid_request',
+  );
+  assert.equal(client.runtimeGrantStatus(view), 'unknown');
+  assert.equal(
+    (await failure(client.setRuntimeGrant(view, []))).code,
+    'invalid_response',
+  );
+  assert.equal(client.runtimeGrantStatus(view), 'unknown');
+  assert.deepEqual(await client.setRuntimeGrant(view, []), { version: 1 });
+  assert.equal(client.runtimeGrantStatus(view), 'settled');
+  assert.equal(client.runtimeGrantRevision(artifact.id, 1), 3);
+  assert.deepEqual(notifications, [
+    'pending',
+    'unknown',
+    'pending',
+    'unknown',
+    'pending',
+    'settled',
+  ]);
+  unsubscribe();
+});
+
 test('Runtime responses must match the requested view and valid metadata', async () => {
   const viewId = 'a'.repeat(32);
   const view = {
@@ -116,6 +263,12 @@ test('Runtime responses must match the requested view and valid metadata', async
     enabled: true,
     artifact_id: artifact.id,
     revision: 1,
+    head_revision: 1,
+    sdk: 'artifree.app.v1',
+    declared: ['metadata.read'],
+    supported: ['metadata.read'],
+    granted: [],
+    grant_version: 0,
     view_id: viewId,
     generation: 1,
     initialization: 'c'.repeat(64),
@@ -127,28 +280,37 @@ test('Runtime responses must match the requested view and valid metadata', async
     baseUrl: 'http://127.0.0.1:7410',
     accessToken: 'token',
     fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: 'e'.repeat(32) });
       sent = { url, init };
       return Response.json(view, { status: 201 });
     },
   });
+  await client.openRuntimeSession();
   assert.deepEqual(
     await client.createRuntimeView(artifact.id, 1, viewId, 1),
     view,
   );
   assert.deepEqual(JSON.parse(sent.init.body), {
+    session_id: client.runtimeSessionId,
     view_id: viewId,
     generation: 1,
   });
   assert.equal(sent.init.headers.authorization, 'Bearer token');
   assert.deepEqual(
-    await clientWith(() =>
-      Response.json({ ...view, lease_ms: 0 }),
+    await (
+      await runtimeClientWith(() => Response.json({ ...view, lease_ms: 0 }))
     ).createRuntimeView(artifact.id, 1, viewId, 1),
     { ...view, lease_ms: 0 },
   );
   for (const body of [
     { ...view, url: 'javascript:alert(1)' },
     { ...view, enabled: 'yes' },
+    { ...view, sdk: 'other' },
+    { ...view, supported: [3] },
+    { ...view, granted: ['future.write'] },
+    { ...view, granted: ['metadata.read'], grant_version: 0 },
+    { ...view, grant_version: -1 },
     { ...view, initialization: 'invalid' },
     { ...view, artifact_id: `art_${'1'.repeat(32)}` },
     { ...view, revision: 2 },
@@ -160,7 +322,7 @@ test('Runtime responses must match the requested view and valid metadata', async
     { ...view, lease_ms: 2_147_483_648 },
   ]) {
     const error = await failure(
-      clientWith(() => Response.json(body)).createRuntimeView(
+      (await runtimeClientWith(() => Response.json(body))).createRuntimeView(
         artifact.id,
         1,
         viewId,

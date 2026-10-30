@@ -197,6 +197,11 @@ test('A runtime view reports actual dispatch after a hidden-page wait', async ()
     accessToken: 'token',
     fetch: gate.fetch,
   });
+  const opening = client.openRuntimeSession();
+  await settle();
+  api.answer(0, Response.json({ session_id: 'e'.repeat(32) }));
+  await opening;
+  api.sent.shift();
   const viewId = 'a'.repeat(32);
   const pending = client.createRuntimeView('art_1', 1, viewId, 1, {
     onDispatch: () => {
@@ -221,6 +226,12 @@ test('A runtime view reports actual dispatch after a hidden-page wait', async ()
         enabled: true,
         artifact_id: 'art_1',
         revision: 1,
+        head_revision: 1,
+        sdk: 'artifree.app.v1',
+        declared: ['metadata.read'],
+        supported: ['metadata.read'],
+        granted: [],
+        grant_version: 0,
         view_id: viewId,
         generation: 1,
         initialization: 'c'.repeat(64),
@@ -240,6 +251,11 @@ test('A failing dispatch observer releases the read slot', async () => {
     accessToken: 'token',
     fetch: gate.fetch,
   });
+  const opening = client.openRuntimeSession();
+  await settle();
+  api.answer(0, Response.json({ session_id: 'e'.repeat(32) }));
+  await opening;
+  api.sent.shift();
   const failed = client.createRuntimeView('art_1', 1, 'a'.repeat(32), 1, {
     onDispatch: () => {
       throw new Error('dispatch observer failed');

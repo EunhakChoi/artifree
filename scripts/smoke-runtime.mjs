@@ -196,6 +196,20 @@ async function openInContext(
     .getByRole('navigation', { name: 'Artifacts' })
     .getByRole('button', { name: new RegExp(`^${artifact.title}`) })
     .click();
+  const permissions = workspace.getByRole('region', {
+    name: 'Runtime permissions',
+  });
+  await expect(permissions.getByText('Declared: metadata.read')).toBeVisible();
+  await expect(permissions.getByText('Granted: none')).toBeVisible();
+  if (!corruptInitialization) {
+    await expect(
+      workspace.frameLocator('iframe[title^="Preview of"]').locator('#result'),
+    ).toHaveText('The runtime metadata request was refused.');
+  }
+  await permissions
+    .getByRole('button', { name: 'Allow metadata access' })
+    .click();
+  await expect(permissions.getByText('Granted: metadata.read')).toBeVisible();
   const element = workspace.locator('iframe[title^="Preview of"]');
   await expect(element).toHaveAttribute(
     'src',
@@ -393,6 +407,9 @@ async function checkAbandonedCreation(browser, origin, server, artifact) {
     await expect(
       workspace.getByRole('tab', { name: 'Preview' }),
     ).toHaveAttribute('aria-selected', 'true');
+    await workspace
+      .getByRole('button', { name: 'Allow metadata access' })
+      .click();
     await expect(
       workspace.frameLocator('iframe[title^="Preview of"]').locator('#result'),
     ).toContainText(artifact.id);
@@ -400,6 +417,163 @@ async function checkAbandonedCreation(browser, origin, server, artifact) {
   } finally {
     release();
     await context.close();
+  }
+}
+
+async function metadataStatus(server, view) {
+  const response = await fetch(
+    `${server.api_url}/v1/artifacts/${view.artifact_id}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/metadata`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${server.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ initialization: view.initialization }),
+    },
+  );
+  return response.status;
+}
+
+async function checkGrantLifecycle(
+  browser,
+  origin,
+  server,
+  artifact,
+  checkAccessibility,
+) {
+  const first = await open(browser, origin, server, artifact);
+  const second = await open(browser, origin, server, artifact);
+  try {
+    const firstFrame = first.page.frameLocator('iframe[title^="Preview of"]');
+    const secondFrame = second.page.frameLocator('iframe[title^="Preview of"]');
+    await expect(firstFrame.locator('#result')).toContainText(artifact.id);
+    await expect(secondFrame.locator('#result')).toContainText(artifact.id);
+    assert.equal(await metadataStatus(server, first.view), 200);
+    assert.equal(await metadataStatus(server, second.view), 200);
+    const permissions = first.page.getByRole('region', {
+      name: 'Runtime permissions',
+    });
+    await permissions
+      .getByRole('button', { name: 'Revoke metadata access' })
+      .click();
+    await expect(permissions.getByText('Granted: none')).toBeVisible();
+    await expect(firstFrame.locator('#result')).toHaveText(
+      'The runtime metadata request was refused.',
+    );
+    assert.equal(await metadataStatus(server, first.view), 404);
+    assert.equal(
+      await metadataStatus(server, second.view),
+      200,
+      'A separate connection retains its own grant.',
+    );
+    let delayedGrant;
+    const loseGrant = async (route) => {
+      delayedGrant = {
+        path: new URL(route.request().url()).pathname,
+        body: route.request().postDataJSON(),
+      };
+      await route.abort('failed');
+    };
+    const grantRoute = '**/v1/runtime-sessions/*/artifacts/*/revisions/*/grant';
+    await first.page.route(grantRoute, loseGrant);
+    await permissions
+      .getByRole('button', { name: 'Allow metadata access' })
+      .click();
+    await expect(
+      permissions.getByText('Permission status is unknown.', { exact: false }),
+    ).toBeVisible();
+    await expect(first.page.locator('iframe[title^="Preview of"]')).toHaveCount(
+      0,
+    );
+    assert.ok(delayedGrant);
+    await first.page.unroute(grantRoute, loseGrant);
+    await first.page.getByRole('tab', { name: 'Source' }).click();
+    await first.page.getByRole('tab', { name: 'Preview' }).click();
+    await expect(
+      permissions.getByText('Permission status is unknown.', { exact: false }),
+    ).toBeVisible();
+    await expect(first.page.locator('iframe[title^="Preview of"]')).toHaveCount(
+      0,
+    );
+    await checkAccessibility('runtime-permission-unknown', first.page);
+    await permissions
+      .getByRole('button', { name: 'Resolve by revoking access' })
+      .click();
+    await expect(permissions.getByText('Granted: none')).toBeVisible();
+    await expect(firstFrame.locator('#result')).toHaveText(
+      'The runtime metadata request was refused.',
+    );
+    const late = await fetch(`${server.api_url}${delayedGrant.path}`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${server.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(delayedGrant.body),
+    });
+    assert.equal(
+      late.status,
+      409,
+      'The confirmed clear must fence a late permission grant.',
+    );
+    assert.equal((await late.json()).error.code, 'invalid_request');
+    await permissions
+      .getByRole('button', { name: 'Allow metadata access' })
+      .click();
+    await expect(permissions.getByText('Granted: metadata.read')).toBeVisible();
+    await expect(firstFrame.locator('#result')).toContainText(artifact.id);
+    const src = await first.element.getAttribute('src');
+    const current = await first.page.evaluate(
+      (url) => globalThis.runtimeViews.find((view) => view.url === url),
+      src,
+    );
+    assert.ok(current);
+    assert.equal(
+      await metadataStatus(server, first.view),
+      404,
+      'Regrant cannot revive the old view.',
+    );
+    assert.equal(await metadataStatus(server, current), 200);
+
+    // Lose only the acknowledgement after the real close has succeeded.
+    const loseClose = async (route) => {
+      assert.equal(route.request().method(), 'DELETE');
+      const response = await route.fetch();
+      assert.equal(response.status(), 204);
+      await route.abort('failed');
+    };
+    await first.page.route('**/v1/runtime-sessions/*', loseClose);
+    await first.page.getByRole('button', { name: 'Disconnect' }).click();
+    await expect(
+      first.page.getByText('Disconnect not confirmed'),
+    ).toBeVisible();
+    const retryDisconnect = first.page.getByRole('button', {
+      name: 'Disconnect',
+    });
+    await expect(retryDisconnect).toBeEnabled();
+    assert.equal(
+      await retryDisconnect.evaluate(
+        (button) => getComputedStyle(button).opacity,
+      ),
+      '1',
+      'An enabled retry must not appear faded during the accessibility check.',
+    );
+    await checkAccessibility('runtime-disconnect-unknown', first.page);
+    await expect(first.page.getByLabel('Access token')).toHaveCount(0);
+    await expect(first.page.locator('iframe[title^="Preview of"]')).toHaveCount(
+      0,
+    );
+    assert.equal(await metadataStatus(server, current), 404);
+    assert.equal(await metadataStatus(server, second.view), 200);
+    await first.page.unroute('**/v1/runtime-sessions/*', loseClose);
+    await first.page.getByRole('button', { name: 'Disconnect' }).click();
+    await expect(first.page.getByLabel('Access token')).toBeVisible();
+    assert.deepEqual(first.errors, []);
+    assert.deepEqual(second.errors, []);
+  } finally {
+    await first.context.close();
+    await second.context.close();
   }
 }
 
@@ -417,6 +591,13 @@ export async function checkRuntime({
       { path: 'next.html', encoding: 'utf8', content: successor },
     ],
   });
+  await checkGrantLifecycle(
+    browser,
+    origin,
+    server,
+    artifact,
+    checkAccessibility,
+  );
   await checkAbandonedCreation(browser, origin, server, artifact);
   // The workspace and sandbox can each have a wall clock different from
   // the server, or from each other. A valid server lease must still work.
@@ -451,7 +632,7 @@ export async function checkRuntime({
         .locator('#result'),
       'A queued retry must start its lease on actual dispatch.',
     ).toContainText(artifact.id);
-    assert.equal(retried.viewAttempts(), 2);
+    assert.equal(retried.viewAttempts(), 3);
     assert.deepEqual(retried.errors, []);
   } finally {
     await retried.context.close();
@@ -729,6 +910,7 @@ export async function checkRuntime({
     await forged.context.close();
   }
   return {
+    consentAndReconciliation: 'passed',
     metadata: 'passed',
     navigationAndDelayedReply: 'passed',
     expiredMessage: 'passed',

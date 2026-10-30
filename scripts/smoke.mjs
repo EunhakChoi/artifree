@@ -453,8 +453,8 @@ try {
   if (browserName === 'chromium')
     assert.deepEqual(
       expectedApiFailures.sort(),
-      // The rejected token is refused twice: by the list and by the stream.
-      ['401', '401', '409', '503', '503', '503', '503'],
+      // The runtime connection rejects the token before list or stream start.
+      ['401', '409', '503', '503', '503', '503'],
       'Only the deliberate rejected token, stale save, lost responses, and failed load may fail.',
     );
   assert.deepEqual(

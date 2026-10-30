@@ -30,7 +30,7 @@ import { RequestGate } from './request-gate';
 import { TrashNav } from './trash-list';
 import { useLiveWorkspace } from './use-live-workspace';
 import type { FeedState } from './use-live-workspace';
-import { useRequest } from './use-request';
+import { describeFailure, useRequest } from './use-request';
 
 const TOKEN_KEY = 'artifree.accessToken';
 
@@ -103,6 +103,93 @@ function ConnectedWorkspace({
         fetch: new RequestGate(pageVisibility).fetch,
       }),
   );
+  const [attempt, setAttempt] = useState(0);
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string>();
+  const session = useRequest(`runtime-session:${attempt}`, async (signal) => {
+    await client.openRuntimeSession({ signal });
+    return true;
+  });
+  async function disconnect(): Promise<void> {
+    if (closing) return;
+    setClosing(true);
+    setCloseError(undefined);
+    try {
+      await client.closeRuntimeSession();
+      onDisconnect();
+    } catch (error: unknown) {
+      setCloseError(describeFailure(error));
+      setClosing(false);
+    }
+  }
+  const error =
+    closeError === undefined ? null : (
+      <Alert variant="destructive">
+        <AlertTitle>Disconnect not confirmed</AlertTitle>
+        <AlertDescription>
+          {closeError} Retry disconnect to revoke this connection. You can
+          forget the token locally, but any server grant may remain until it
+          expires.
+          <Button variant="outline" size="sm" onClick={onDisconnect}>
+            Forget token locally
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  if (closing || closeError !== undefined) {
+    return (
+      <div className="flex flex-col gap-3">
+        {error ?? <p>Closing connection…</p>}
+        {closing ? null : (
+          <Button variant="ghost" onClick={() => void disconnect()}>
+            Disconnect
+          </Button>
+        )}
+      </div>
+    );
+  }
+  if (session.status !== 'ready') {
+    return (
+      <div className="flex flex-col gap-3">
+        {session.status === 'loading' ? (
+          <p>Opening connection…</p>
+        ) : (
+          <Alert variant="destructive">
+            <AlertTitle>Connection unavailable</AlertTitle>
+            <AlertDescription>{session.message}</AlertDescription>
+          </Alert>
+        )}
+        <div className="flex gap-2">
+          {session.status === 'error' ? (
+            <Button onClick={() => setAttempt((value) => value + 1)}>
+              Retry connection
+            </Button>
+          ) : null}
+          <Button variant="ghost" onClick={() => void disconnect()}>
+            Disconnect
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <WorkspaceBody
+      client={client}
+      drafts={drafts}
+      onDisconnect={() => void disconnect()}
+    />
+  );
+}
+
+function WorkspaceBody({
+  client,
+  drafts,
+  onDisconnect,
+}: {
+  client: ArtifreeClient;
+  drafts: PageDrafts;
+  onDisconnect: () => void;
+}) {
   const live = useLiveWorkspace(client);
   const { epoch, resets, learn, learnInTrash, isCurrent } = live;
   const [generation, setGeneration] = useState(0);

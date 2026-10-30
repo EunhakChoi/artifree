@@ -278,12 +278,17 @@
           "minimum": 0,
           "type": "integer"
         },
+        "session_id": {
+          "description": "Random identifier of the connected workspace session.",
+          "type": "string"
+        },
         "view_id": {
           "description": "A random 32-digit lowercase hexadecimal identifier for this view.",
           "type": "string"
         }
       },
       "required": [
+        "session_id",
         "view_id",
         "generation"
       ],
@@ -748,6 +753,36 @@
       ],
       "type": "object"
     },
+    "RuntimeConnection": {
+      "additionalProperties": false,
+      "description": "A server-issued ephemeral runtime connection.",
+      "properties": {
+        "session_id": {
+          "description": "Random 32-digit lowercase hexadecimal connection identifier.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "RuntimeGrant": {
+      "additionalProperties": false,
+      "description": "The new version of a connection-scoped grant.",
+      "properties": {
+        "version": {
+          "description": "The grant version, used to guard the next change.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "type": "object"
+    },
     "RuntimeMetadata": {
       "additionalProperties": false,
       "description": "Current metadata that a runtime frame may read for its own artifact.",
@@ -803,6 +838,13 @@
           "description": "The artifact whose preview is shown.",
           "type": "string"
         },
+        "declared": {
+          "description": "Capabilities declared by this pinned revision.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "enabled": {
           "description": "Whether the entry explicitly opts in to the metadata bridge.",
           "type": "boolean"
@@ -814,6 +856,25 @@
         },
         "generation": {
           "description": "This view's generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grant_version": {
+          "description": "Version to supply when replacing this grant.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "granted": {
+          "description": "Capabilities granted for this connection and source binding.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "head_revision": {
+          "description": "Current source head observed when this view was issued.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -835,6 +896,20 @@
           "minimum": 0,
           "type": "integer"
         },
+        "sdk": {
+          "description": "Supported SDK pin, or null for an ordinary preview. Always present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supported": {
+          "description": "Capabilities supported by this server for the entry's SDK pin.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "url": {
           "description": "URL of the entry document on the content origin. An opted-in entry\nreceives a runtime bootstrap; the stored source stays unchanged.",
           "type": "string"
@@ -849,6 +924,12 @@
         "enabled",
         "artifact_id",
         "revision",
+        "head_revision",
+        "sdk",
+        "declared",
+        "supported",
+        "granted",
+        "grant_version",
         "view_id",
         "generation",
         "initialization",
@@ -878,6 +959,37 @@
       "required": [
         "base_revision",
         "changes"
+      ],
+      "type": "object"
+    },
+    "SetRuntimeGrantRequest": {
+      "additionalProperties": false,
+      "description": "Replaces the grant only if the user observed the same source and grant.",
+      "properties": {
+        "capabilities": {
+          "description": "Complete supported subset; an empty list revokes every capability.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_version": {
+          "description": "Version observed before the change.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head_revision": {
+          "description": "The source head observed when choosing the grant.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "head_revision",
+        "expected_version",
+        "capabilities"
       ],
       "type": "object"
     },
@@ -1048,10 +1160,19 @@
       "$ref": "#/$defs/Preview"
     },
     {
+      "$ref": "#/$defs/RuntimeConnection"
+    },
+    {
       "$ref": "#/$defs/CreateRuntimeViewRequest"
     },
     {
       "$ref": "#/$defs/RuntimeView"
+    },
+    {
+      "$ref": "#/$defs/SetRuntimeGrantRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeGrant"
     },
     {
       "$ref": "#/$defs/RuntimeMetadataRequest"

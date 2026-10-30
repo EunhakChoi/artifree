@@ -2,8 +2,9 @@
 //! wire conversion is shared with MCP in `operations`, and application
 //! behavior stays in `artifree-core`.
 //!
-//! Every route requires `Authorization: Bearer <token>`. Mutating routes
-//! require an `Idempotency-Key` header. Storage work runs on Tokio's blocking
+//! Every route requires `Authorization: Bearer <token>`. Artifact mutations
+//! require an `Idempotency-Key` header. Ephemeral runtime connections and
+//! version-guarded grants have their own retry contracts. Storage work runs on Tokio's blocking
 //! pool because the core and store are synchronous. The router also mounts
 //! the MCP endpoint (`crate::mcp`) and the change feed (`crate::changes`)
 //! behind the same token.
@@ -17,8 +18,9 @@ use std::time::Duration;
 use artifree_contracts::api::{
     Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
     DuplicateArtifactRequest, ErrorCode, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
-    Revision, RevisionList, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
-    UpdateArtifactRequest, UpdateArtifactResponse,
+    Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeMetadataRequest, SaveRevisionRequest, SetRuntimeGrantRequest, UpdateArtifactRequest,
+    UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::parts::{Boundary, ByteRange};
@@ -42,6 +44,7 @@ use crate::mcp;
 use crate::operations::{self, ApiError};
 use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
+use crate::runtime_sessions::RuntimeSessions;
 
 /// Largest accepted request body: a maximum package in base64 plus JSON
 /// framing. Clients send a file as UTF-8 text only when its JSON escaping is
@@ -76,6 +79,7 @@ struct Shared {
     token: AccessToken,
     owner: ActorId,
     previews: PreviewTickets,
+    runtime_sessions: RuntimeSessions,
     limiter: Limiter,
     feed: Feed,
     draining: AtomicUsize,
@@ -105,6 +109,7 @@ impl AppState {
                 token,
                 owner,
                 previews: PreviewTickets::new(settings.preview_ttl),
+                runtime_sessions: RuntimeSessions::new(Duration::from_secs(24 * 60 * 60)),
                 limiter: Limiter::new(settings.limits.validate()?),
                 feed: Feed::new(settings.change_streams),
                 draining: AtomicUsize::new(0),
@@ -126,6 +131,10 @@ impl AppState {
 
     pub(crate) fn previews(&self) -> &PreviewTickets {
         &self.shared.previews
+    }
+
+    pub(crate) fn runtime_sessions(&self) -> &RuntimeSessions {
+        &self.shared.runtime_sessions
     }
 
     pub(crate) fn settings(&self) -> &Settings {
@@ -212,6 +221,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/runtime-views/{view}/{generation}",
             axum::routing::delete(close_runtime_view),
+        )
+        .route(
+            "/v1/runtime-sessions",
+            axum::routing::post(open_runtime_session),
+        )
+        .route(
+            "/v1/runtime-sessions/{session}",
+            axum::routing::delete(close_runtime_session),
+        )
+        .route(
+            "/v1/runtime-sessions/{session}/artifacts/{id}/revisions/{revision}/grant",
+            axum::routing::put(set_runtime_grant),
         )
         .route("/v1/changes", get(changes::stream))
         .method_not_allowed_fallback(method_not_allowed)
@@ -705,6 +726,36 @@ async fn close_runtime_view(
     let Path((view, generation)) = path?;
     operations::close_runtime_view(&state, &actor, &view, generation)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn open_runtime_session(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+) -> Result<Json<RuntimeConnection>, ApiError> {
+    operations::open_runtime_session(&state, &actor).map(Json)
+}
+
+async fn close_runtime_session(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Path(session) = path?;
+    operations::close_runtime_session(&state, &actor, &session)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_runtime_grant(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, String, u64)>, PathRejection>,
+    body: Result<Json<SetRuntimeGrantRequest>, JsonRejection>,
+) -> Result<Json<RuntimeGrant>, ApiError> {
+    let Path((session, id, revision)) = path?;
+    let Json(request) = body?;
+    operations::set_runtime_grant(&state, actor, &session, &id, revision, request)
+        .await
+        .map(Json)
 }
 
 fn created(location: &str, body: impl IntoResponse) -> Response {

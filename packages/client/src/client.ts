@@ -11,6 +11,7 @@ import type {
   RestoreRevisionRequest,
   Revision,
   RuntimeMetadata,
+  RuntimeGrant,
   RuntimeView,
   SaveRevisionRequest,
   UpdateArtifactRequest,
@@ -31,7 +32,9 @@ import {
   parseError,
   parsePreview,
   parseRevisionList,
+  parseRuntimeConnection,
   parseRuntimeMetadata,
+  parseRuntimeGrant,
   parseRuntimeView,
   parseUpdate,
 } from './responses.js';
@@ -224,8 +227,100 @@ interface SendOptions {
   readonly onDispatch?: (() => void) | undefined;
 }
 
+type GrantState = 'settled' | 'pending' | 'unknown';
+type GrantView = Pick<
+  RuntimeView,
+  'artifact_id' | 'revision' | 'head_revision'
+>;
+
+/** Keeps uncertain writes with the connection, even when a preview unmounts. */
+class RuntimeGrantChanges {
+  private readonly states = new Map<string, Exclude<GrantState, 'settled'>>();
+  private readonly revisions = new Map<string, number>();
+  private readonly listeners = new Set<() => void>();
+  private epoch = 0;
+
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+  readonly snapshot = (): number => this.epoch;
+
+  private key(view: GrantView): string {
+    return JSON.stringify([
+      view.artifact_id,
+      view.revision,
+      view.head_revision,
+    ]);
+  }
+
+  private revisionKey(id: string, revision: number): string {
+    return JSON.stringify([id, revision]);
+  }
+
+  revision(id: string, revision: number): number {
+    return this.revisions.get(this.revisionKey(id, revision)) ?? 0;
+  }
+
+  status(view: GrantView): GrantState {
+    return this.states.get(this.key(view)) ?? 'settled';
+  }
+
+  begin(view: GrantView, capabilities: readonly string[]): boolean {
+    const previous = this.status(view);
+    if (
+      previous === 'pending' ||
+      (previous === 'unknown' && capabilities.length !== 0)
+    )
+      throw new ArtifreeApiError(
+        'Resolve the earlier permission change by clearing access first.',
+        {
+          status: 409,
+          code: 'invalid_request',
+        },
+      );
+    this.states.set(this.key(view), 'pending');
+    this.notify();
+    return previous === 'unknown';
+  }
+
+  finish(view: GrantView, unknown: boolean): void {
+    const key = this.key(view);
+    if (unknown) this.states.set(key, 'unknown');
+    else this.states.delete(key);
+    const revision = this.revisionKey(view.artifact_id, view.revision);
+    this.revisions.set(revision, (this.revisions.get(revision) ?? 0) + 1);
+    this.notify();
+  }
+
+  clear(): void {
+    this.states.clear();
+    this.revisions.clear();
+    this.notify();
+  }
+
+  private notify(): void {
+    this.epoch += 1;
+    for (const listener of this.listeners) listener();
+  }
+}
+
+function grantMayHaveChanged(error: unknown): boolean {
+  return (
+    !(error instanceof ArtifreeApiError) ||
+    error.code === 'network_error' ||
+    error.code === 'invalid_response' ||
+    error.status >= 500
+  );
+}
+
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
 export class ArtifreeClient {
+  private runtimeSession: string | undefined;
+  private runtimeOpenAttempt = 0;
+  private readonly runtimeGrants = new RuntimeGrantChanges();
+  readonly subscribeRuntimeGrants = this.runtimeGrants.subscribe;
+  readonly runtimeGrantSnapshot = this.runtimeGrants.snapshot;
   private readonly baseUrl: string;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
@@ -235,6 +330,26 @@ export class ArtifreeClient {
     this.accessToken = configuration.accessToken;
     this.fetchImpl =
       configuration.fetch ?? ((input, init) => fetch(input, init));
+  }
+
+  /** The active server-issued runtime identity. */
+  get runtimeSessionId(): string {
+    if (this.runtimeSession === undefined)
+      throw new ArtifreeApiError('The runtime connection is not open.', {
+        status: 0,
+        code: 'invalid_request',
+      });
+    return this.runtimeSession;
+  }
+
+  /** Signals permission changes for a preview's artifact and revision. */
+  runtimeGrantRevision(id: string, revision: number): number {
+    return this.runtimeGrants.revision(id, revision);
+  }
+
+  /** Whether this exact source binding has a pending or uncertain change. */
+  runtimeGrantStatus(view: GrantView): GrantState {
+    return this.runtimeGrants.status(view);
   }
 
   /**
@@ -540,7 +655,11 @@ export class ArtifreeClient {
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
       parseRuntimeView,
       {
-        body: { view_id: viewId, generation },
+        body: {
+          session_id: this.runtimeSessionId,
+          view_id: viewId,
+          generation,
+        },
         signal: options.signal,
         onDispatch: options.onDispatch,
       },
@@ -559,6 +678,78 @@ export class ArtifreeClient {
         },
       );
     return view;
+  }
+
+  /** Opens the runtime connection before requesting previews. */
+  async openRuntimeSession(options: ReadOptions = {}): Promise<void> {
+    if (this.runtimeSession !== undefined) return;
+    const attempt = ++this.runtimeOpenAttempt;
+    const connection = await this.json(
+      'POST',
+      '/v1/runtime-sessions',
+      parseRuntimeConnection,
+      { signal: options.signal },
+    );
+    options.signal?.throwIfAborted();
+    if (attempt !== this.runtimeOpenAttempt)
+      throw new ArtifreeApiError(
+        'The runtime connection attempt was replaced.',
+        { status: 0, code: 'invalid_request' },
+      );
+    this.runtimeSession = connection.session_id;
+  }
+
+  /** Closes the connection and its grants; retry until the server acknowledges. */
+  async closeRuntimeSession(): Promise<void> {
+    this.runtimeOpenAttempt += 1;
+    const session = this.runtimeSession;
+    if (session === undefined) return;
+    await this.close(`/v1/runtime-sessions/${session}`);
+    if (this.runtimeSession === session) {
+      this.runtimeSession = undefined;
+      this.runtimeGrants.clear();
+    }
+  }
+
+  /** Replace a grant against the source and version the user observed. */
+  async setRuntimeGrant(
+    view: RuntimeView,
+    capabilities: string[],
+  ): Promise<RuntimeGrant> {
+    const session = this.runtimeSessionId;
+    const wasUnknown = this.runtimeGrants.begin(view, capabilities);
+    try {
+      const grant = await this.json(
+        'PUT',
+        `/v1/runtime-sessions/${session}/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/grant`,
+        parseRuntimeGrant,
+        {
+          body: {
+            head_revision: view.head_revision,
+            expected_version: view.grant_version,
+            capabilities,
+          },
+        },
+      );
+      if (grant.version <= view.grant_version)
+        throw new ArtifreeApiError(
+          'The server did not advance the runtime grant version.',
+          {
+            status: 200,
+            code: 'invalid_response',
+          },
+        );
+      if (this.runtimeSession === session)
+        this.runtimeGrants.finish(view, false);
+      return grant;
+    } catch (error: unknown) {
+      if (this.runtimeSession === session)
+        this.runtimeGrants.finish(
+          view,
+          wasUnknown || grantMayHaveChanged(error),
+        );
+      throw error;
+    }
   }
 
   /** Reads current metadata through the parent workspace, rechecking the binding. */
@@ -587,10 +778,17 @@ export class ArtifreeClient {
   async closeRuntimeView(
     view: Pick<RuntimeView, 'view_id' | 'generation'>,
   ): Promise<void> {
-    await this.send(
-      'DELETE',
-      `/v1/runtime-views/${view.view_id}/${view.generation}`,
-    );
+    await this.close(`/v1/runtime-views/${view.view_id}/${view.generation}`);
+  }
+
+  /** A close is confirmed only by the contract's no-content response. */
+  private async close(path: string): Promise<void> {
+    const response = await this.send('DELETE', path);
+    if (response.status !== 204)
+      throw new ArtifreeApiError('The server did not confirm the close.', {
+        status: response.status,
+        code: 'invalid_response',
+      });
   }
 
   /** The whole body; a failure while reading is a `network_error`. */

@@ -36,7 +36,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/runtime-sdk",
       "status": "implemented",
-      "summary": "An opted-in sandboxed frame reads its own artifact metadata through a bound runtime view; grants and other capabilities remain planned."
+      "summary": "An opted-in sandboxed frame reads its own artifact metadata with a connection-scoped grant; other runtime capabilities remain planned."
     },
     {
       "id": "api",
@@ -72,7 +72,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/policy.rs",
       "status": "implemented",
-      "summary": "Owner-only access checked on every read; sharing and capabilities planned."
+      "summary": "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks runtime metadata grants."
     },
     {
       "id": "documents",

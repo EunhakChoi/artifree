@@ -38,7 +38,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/runtime-sdk",
         ComponentStatus::Implemented,
-        "An opted-in sandboxed frame reads its own artifact metadata through a bound runtime view; grants and other capabilities remain planned.",
+        "An opted-in sandboxed frame reads its own artifact metadata with a connection-scoped grant; other runtime capabilities remain planned.",
     ),
     (
         "api",
@@ -74,7 +74,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/policy.rs",
         ComponentStatus::Implemented,
-        "Owner-only access checked on every read; sharing and capabilities planned.",
+        "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks runtime metadata grants.",
     ),
     (
         "documents",

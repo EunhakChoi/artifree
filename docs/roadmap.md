@@ -1,12 +1,12 @@
 # Artifree PR 로드맵
 
-기준: 2026-10-31, A10 병합까지 반영한 계획이다. 목표는 외부 agent로
+기준: 2026-10-31, R04 병합까지 반영한 계획이다. 목표는 외부 agent로
 아티팩트를 만들고 편집하며, 로컬·사설 서버에서 계속 사용할 수 있는 작업공간이다.
 아래 ID는 계획 식별자이며 GitHub PR 번호가 아니다. 각 행의 상태는 구현과
 후속 범위를 구분한다. 각 행은 별도로 검토·병합할 구현 PR 한 개의 출발점이다.
 
 **A01 변경 알림 서버 → A02 웹 자동 반영 → A03 목록·메타데이터 → A04 이력 비교와 소스
-복원(API·웹) → A05 복제와 독립 이력 → A06 삭제와 휴지통(API·웹) → A07 소스 내보내기 → A11 부분 읽기 → A09 코드 편집 작업공간 → A10 초안 복구**를 완료했다. 다음은 A08의 선행 조건인 R04·R05의 최소 범위이다. 개인 서버 운영 경로는 O01–O04를 앞당길 수 있으며,
+복원(API·웹) → A05 복제와 독립 이력 → A06 삭제와 휴지통(API·웹) → A07 소스 내보내기 → A11 부분 읽기 → A09 코드 편집 작업공간 → A10 초안 복구 → R04 runtime metadata 읽기**를 완료했다. 다음은 A08의 선행 조건인 R05의 최소 범위이다. 개인 서버 운영 경로는 O01–O04를 앞당길 수 있으며,
 React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사이에는 순서를 바꿀 수 있다.
 
 ## 완료된 기반
@@ -29,7 +29,7 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | 검증            | 병합된 변경의 CI는 Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한다. 현재 변경의 실행 결과는 해당 PR과 검사 기록에서 확인한다.                                                                                                                                                                                                                                                                                                                                                                      |
 
 구현 결정은 [0001](decisions/0001-foundation.md)부터
-[0018](decisions/0018-source-draft-recovery.md)까지가 기준이다. Axum/Tokio와 SQLite는
+[0019](decisions/0019-runtime-metadata-bridge.md)까지가 기준이다. Axum/Tokio와 SQLite는
 이미 선택했다. 다른 DB·queue·editor·bundler·worker 도구는 해당 기능 PR에서 결정한다.
 
 ## 모든 구현 PR의 진입 조건과 완료 기준
@@ -111,20 +111,20 @@ R04(runtime bridge 첫 읽기)와 R05(선언·권한 부여/철회)를 선행한
 새 기능마다 실제 필요한 port만 정의한다. 생성된 앱의 스타일은 관리 UI의 shadcn 규칙과
 독립적이다.
 
-| ID  | PR 범위와 완료 기준                                                                                                                                                                                                                                                                                                                          | 선행          |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| R01 | **영속 job과 worker 프로세스.** 한 실제 검증 작업으로 enqueue·claim·진행·완료·실패·재시도·취소를 연결한다. actor·소스 리비전·요청 key를 고정하고 worker 중단 뒤 재획득과 결과 중복 방지를 검증한다. 취소 요청을 외부 효과 rollback으로 표시하지 않는다.                                                                                      | A01           |
-| R02 | **신뢰하지 않는 작업의 실행 제한.** worker의 파일·프로세스·CPU·메모리·시간·네트워크 정책과 산출물 회수를 구현한다. 범위 밖 읽기·쓰기·외부 연결·자원 초과·취소 후 잔여 프로세스를 검증하고 지원 OS별 실제 집행 한계를 명시한다. bundler를 API 프로세스에서 직접 실행하지 않는다.                                                              | R01           |
-| R03 | **React/TSX 빌드와 preview.** 한 고정 template/dependency 정책으로 입력 소스를 빌드하고 해당 리비전 산출물만 제공한다. 빌드 오류·늦은 결과·연속 저장에서 마지막 정상 실행본을 보존하고, agent·CLI·웹에서 상태와 오류를 확인한다. 패키지 설치도 R02의 정책 아래 둔다.                                                                         | R02, A02      |
-| R04 | **Runtime bridge의 첫 읽기 기능.** 별도 frame에서 현재 artifact metadata를 읽는 작은 기능부터 연결한다. 서버 발급 binding에 actor/artifact/revision/view generation을 묶고 송신 window·초기화 값을 검사한다. opaque origin의 문자열만으로 신뢰하지 않는다. 위조·이전 frame·기한 만료 메시지를 거절하고 계정 token을 frame에 전달하지 않는다. | A01           |
-| R05 | **선언·SDK pin·권한 부여/철회.** 지원 기능, 선언, 사용자 동의, 실제 grant를 구분한다. 타입별 계약 pin과 omission/subset/clear 의미를 결정하고 모든 RPC에서 현재 서버 권한을 검사한다. 철회·로그아웃·리비전 교체 뒤 이전 binding을 거절한다.                                                                                                  | R04           |
-| R06 | **앱 데이터 CRUD.** 소스와 별도 version을 가진 actor/artifact 범위의 get/set/update/delete를 영속화한다. object 병합·array 대체·경로/하위 collection 동작을 명세화하고 key replay를 검증한다. A05 복제에 허용된 데이터의 독립 복사를 추가하고 소스 복원이 데이터를 되돌리지 않음을 검증한다.                                                 | R05, A05      |
-| R07 | **Query와 데이터 구독.** query 검증·정규화·bounded 결과·변경 구독을 제공한다. pending/ack와 canonical 결과를 구분하고 재연결 후 snapshot/replay를 검증한다. 소스 revision과 데이터 version을 혼용하지 않는다.                                                                                                                                | R06, A01      |
-| R08 | **클라이언트 outbox와 crash 복구.** 미전송 intent·같은 tab owner·동일 key replay를 영속화한다. 재접속, 원래 tab 복구, quota 실패, ACK 후 trim 실패를 검증한다. 다른 tab이 무조건 큐를 인계하지 않고, 권한 clear를 모든 pending intent의 영구 삭제로 처리하지 않는다.                                                                         | R07           |
-| R09 | **Upload asset 저장소.** 앱이 올린 파일의 MIME·크기·수량·정제·scope·삭제를 처리한다. 소스 파일과 구분하고 비공개 주소/hash 추측으로 읽지 못하게 한다. A05 복제의 asset 복사를 확장하고 token·타인의 개인 데이터·연결 비밀정보를 복제하지 않는다.                                                                                             | R05, R06, A05 |
-| R10 | **View 교체와 hot lifecycle.** adopt/defer/restart 및 필요한 snapshot 전달을 구현한다. SDK pin/선언 변경, 진행 중 쓰기, 오래된 구독·늦은 응답을 교차 검증한다. 새 generation의 namespace/grant와 이전 heap을 구분한다.                                                                                                                       | R05, R08      |
-| R11 | **Runtime의 source·download 기능.** 명시적 편집 권한 아래 source 읽기/저장과 revision 고정 파일 다운로드를 제공한다. agent 도구와 runtime 권한을 분리하고, viewer·이전 generation의 쓰기를 거절한다. 브라우저 save 요청과 실제 생성·다운로드 파일의 바이트를 대조한다.                                                                       | R05, A04, A07 |
-| R12 | **Room과 presence.** participant·actor·tab을 구분해 presence와 일시적 event를 제공한다. 재연결 후 presence 회복과 `isMe`/`sameTab` 차이를 검증한다. Room event에 앱 데이터 outbox와 같은 영속 전달 보장을 붙이지 않는다.                                                                                                                     | R05, A01      |
+| ID  | PR 범위와 완료 기준                                                                                                                                                                                                                                                                          | 선행          |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| R01 | **영속 job과 worker 프로세스.** 한 실제 검증 작업으로 enqueue·claim·진행·완료·실패·재시도·취소를 연결한다. actor·소스 리비전·요청 key를 고정하고 worker 중단 뒤 재획득과 결과 중복 방지를 검증한다. 취소 요청을 외부 효과 rollback으로 표시하지 않는다.                                      | A01           |
+| R02 | **신뢰하지 않는 작업의 실행 제한.** worker의 파일·프로세스·CPU·메모리·시간·네트워크 정책과 산출물 회수를 구현한다. 범위 밖 읽기·쓰기·외부 연결·자원 초과·취소 후 잔여 프로세스를 검증하고 지원 OS별 실제 집행 한계를 명시한다. bundler를 API 프로세스에서 직접 실행하지 않는다.              | R01           |
+| R03 | **React/TSX 빌드와 preview.** 한 고정 template/dependency 정책으로 입력 소스를 빌드하고 해당 리비전 산출물만 제공한다. 빌드 오류·늦은 결과·연속 저장에서 마지막 정상 실행본을 보존하고, agent·CLI·웹에서 상태와 오류를 확인한다. 패키지 설치도 R02의 정책 아래 둔다.                         | R02, A02      |
+| R04 | **[완료: 0019] Runtime bridge의 첫 읽기 기능.** 별도 frame이 현재 artifact metadata를 읽는다. 서버 발급 binding에 actor/artifact/revision/view generation을 묶고 송신 window·초기화 값을 검사하며 위조·이전 frame·기한 만료 메시지를 거절한다. 계정 token은 frame에 전달하지 않는다.         | A01           |
+| R05 | **선언·SDK pin·권한 부여/철회.** 지원 기능, 선언, 사용자 동의, 실제 grant를 구분한다. 타입별 계약 pin과 omission/subset/clear 의미를 결정하고 모든 RPC에서 현재 서버 권한을 검사한다. 철회·로그아웃·리비전 교체 뒤 이전 binding을 거절한다.                                                  | R04           |
+| R06 | **앱 데이터 CRUD.** 소스와 별도 version을 가진 actor/artifact 범위의 get/set/update/delete를 영속화한다. object 병합·array 대체·경로/하위 collection 동작을 명세화하고 key replay를 검증한다. A05 복제에 허용된 데이터의 독립 복사를 추가하고 소스 복원이 데이터를 되돌리지 않음을 검증한다. | R05, A05      |
+| R07 | **Query와 데이터 구독.** query 검증·정규화·bounded 결과·변경 구독을 제공한다. pending/ack와 canonical 결과를 구분하고 재연결 후 snapshot/replay를 검증한다. 소스 revision과 데이터 version을 혼용하지 않는다.                                                                                | R06, A01      |
+| R08 | **클라이언트 outbox와 crash 복구.** 미전송 intent·같은 tab owner·동일 key replay를 영속화한다. 재접속, 원래 tab 복구, quota 실패, ACK 후 trim 실패를 검증한다. 다른 tab이 무조건 큐를 인계하지 않고, 권한 clear를 모든 pending intent의 영구 삭제로 처리하지 않는다.                         | R07           |
+| R09 | **Upload asset 저장소.** 앱이 올린 파일의 MIME·크기·수량·정제·scope·삭제를 처리한다. 소스 파일과 구분하고 비공개 주소/hash 추측으로 읽지 못하게 한다. A05 복제의 asset 복사를 확장하고 token·타인의 개인 데이터·연결 비밀정보를 복제하지 않는다.                                             | R05, R06, A05 |
+| R10 | **View 교체와 hot lifecycle.** adopt/defer/restart 및 필요한 snapshot 전달을 구현한다. SDK pin/선언 변경, 진행 중 쓰기, 오래된 구독·늦은 응답을 교차 검증한다. 새 generation의 namespace/grant와 이전 heap을 구분한다.                                                                       | R05, R08      |
+| R11 | **Runtime의 source·download 기능.** 명시적 편집 권한 아래 source 읽기/저장과 revision 고정 파일 다운로드를 제공한다. agent 도구와 runtime 권한을 분리하고, viewer·이전 generation의 쓰기를 거절한다. 브라우저 save 요청과 실제 생성·다운로드 파일의 바이트를 대조한다.                       | R05, A04, A07 |
+| R12 | **Room과 presence.** participant·actor·tab을 구분해 presence와 일시적 event를 제공한다. 재연결 후 presence 회복과 `isMe`/`sameTab` 차이를 검증한다. Room event에 앱 데이터 outbox와 같은 영속 전달 보장을 붙이지 않는다.                                                                     | R05, A01      |
 
 ## P 선택 가능한 provider 기능
 

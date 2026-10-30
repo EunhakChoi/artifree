@@ -14,7 +14,7 @@
 //! model access.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use artifree_core::artifacts::ArtifactError;
@@ -31,6 +31,7 @@ use serde::Serialize;
 
 use crate::auth::hex;
 use crate::http::AppState;
+use crate::runtime_sessions::{GrantScope, RuntimeSession};
 
 /// Upper bound on live tickets, which limits memory held by unused links.
 pub const MAX_LIVE_TICKETS: usize = 4096;
@@ -67,9 +68,17 @@ struct RuntimeTicket {
     generation: u64,
     initialization: String,
     head_revision: SourceRevision,
+    authority: Option<RuntimeAuthority>,
     revoked: bool,
     document_served: bool,
     bootstrap_served: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeAuthority {
+    pub(crate) session: Arc<RuntimeSession>,
+    pub(crate) scope: GrantScope,
+    pub(crate) version: u64,
 }
 
 /// A runtime ticket could not be issued.
@@ -301,6 +310,7 @@ impl PreviewTickets {
                     generation,
                     initialization: initialization.clone(),
                     head_revision,
+                    authority: None,
                     revoked: false,
                     document_served: false,
                     bootstrap_served: false,
@@ -317,8 +327,25 @@ impl PreviewTickets {
         })
     }
 
-    /// Checks every part of a live binding and returns its bound head.
-    pub(crate) fn runtime_head(
+    /// Attaches authority before the newly issued URL is returned to a caller.
+    pub(crate) fn bind_authority(&self, secret: &str, authority: RuntimeAuthority) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        let Some(ticket) = registry.live.get_mut(secret) else {
+            return false;
+        };
+        let Some(view) = ticket.runtime.as_mut() else {
+            return false;
+        };
+        if ticket.expires <= Instant::now() || view.revoked {
+            return false;
+        }
+        view.authority = Some(authority);
+        true
+    }
+
+    fn runtime_binding(
         &self,
         actor: &ActorId,
         artifact: &ArtifactId,
@@ -326,7 +353,7 @@ impl PreviewTickets {
         view_id: &str,
         generation: u64,
         initialization: &str,
-    ) -> Option<SourceRevision> {
+    ) -> Option<(SourceRevision, Option<RuntimeAuthority>)> {
         let registry = self.registry.lock().ok()?;
         registry.live.values().find_map(|ticket| {
             let view = ticket.runtime.as_ref()?;
@@ -339,8 +366,55 @@ impl PreviewTickets {
                 && !view.revoked
                 && view.bootstrap_served
                 && secret_matches(&view.initialization, initialization))
-            .then_some(view.head_revision)
+            .then(|| (view.head_revision, view.authority.clone()))
         })
+    }
+
+    /// Checks a live binding and the connection's current grant. The registry
+    /// lock is released before taking the session lock.
+    pub(crate) fn runtime_access(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+        revision: SourceRevision,
+        view_id: &str,
+        generation: u64,
+        initialization: &str,
+    ) -> Option<SourceRevision> {
+        let (head, authority) = self.runtime_binding(
+            actor,
+            artifact,
+            revision,
+            view_id,
+            generation,
+            initialization,
+        )?;
+        let authority = authority?;
+        authority
+            .session
+            .permits(&authority.scope, authority.version)
+            .then_some(head)
+    }
+
+    #[cfg(test)]
+    fn runtime_head(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+        revision: SourceRevision,
+        view_id: &str,
+        generation: u64,
+        initialization: &str,
+    ) -> Option<SourceRevision> {
+        self.runtime_binding(
+            actor,
+            artifact,
+            revision,
+            view_id,
+            generation,
+            initialization,
+        )
+        .map(|(head, _)| head)
     }
 
     /// Revokes only the named generation, never its replacement.

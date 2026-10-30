@@ -1,10 +1,15 @@
-/** Proposed capability vocabulary. A name is not a grant of permission. */
+/** Capability names; only `metadata.read` is currently supported. A name is not a grant. */
 export type RuntimeCapability =
-  'model.generate' | 'data.read' | 'data.write' | 'files.read' | 'tools.call';
+  | 'metadata.read'
+  | 'model.generate'
+  | 'data.read'
+  | 'data.write'
+  | 'files.read'
+  | 'tools.call';
 
 /**
- * Proposed capability binding for a future grant system. The implemented
- * metadata view uses a different binding; this type grants no permission.
+ * Proposed capability binding. The server uses its own connection and view
+ * binding for metadata grants; this type grants no permission.
  */
 export interface RuntimeSessionBinding {
   readonly sessionId: string;
@@ -21,7 +26,7 @@ export interface RuntimeMetadata {
   readonly metadataRevision: number;
 }
 
-/** The first runtime operation. It grants no data or model access. */
+/** The first runtime operation, subject to a current metadata grant. */
 export interface ArtifactRuntime {
   /** Reads current metadata through the workspace's bound runtime view. */
   currentMetadata(): Promise<RuntimeMetadata>;
