@@ -1,3 +1,4 @@
+import { newRandomId } from '@artifree/client';
 import type { SourceDraft } from './source-draft';
 
 /**
@@ -205,7 +206,7 @@ export function openDraftStore(): DraftStore {
       return write(replacing, (store, owner, refuse) => {
         const stored: Stored = {
           owner,
-          storageVersion: crypto.randomUUID(),
+          storageVersion: newRandomId(),
           artifactId: record.artifactId,
           title: record.title,
           keptAt: record.keptAt,
@@ -249,8 +250,8 @@ async function claimOwner(): Promise<string> {
   } catch {
     // Without session storage the id lasts as long as the page.
   }
-  owner ??= crypto.randomUUID();
-  while (!(await hold(locks, owner))) owner = crypto.randomUUID();
+  owner ??= newRandomId();
+  while (!(await hold(locks, owner))) owner = newRandomId();
   try {
     sessionStorage.setItem(OWNER_KEY, owner);
   } catch {

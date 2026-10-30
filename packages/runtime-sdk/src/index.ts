@@ -26,3 +26,10 @@ export interface ArtifactRuntime {
   /** Reads current metadata through the workspace's bound runtime view. */
   currentMetadata(): Promise<RuntimeMetadata>;
 }
+
+declare global {
+  interface Window {
+    /** Present only after the artifact opts in to the runtime script. */
+    artifree?: ArtifactRuntime;
+  }
+}

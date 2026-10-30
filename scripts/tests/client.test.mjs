@@ -4,6 +4,8 @@ import {
   ArtifreeApiError,
   ArtifreeClient,
   encodeFile,
+  newIdempotencyKey,
+  newRandomId,
 } from '../../packages/client/dist/index.js';
 
 const artifact = {
@@ -17,6 +19,43 @@ const artifact = {
   created_at_ms: 1,
   updated_at_ms: 1,
 };
+
+test('Random identifiers work without randomUUID and never use a weak fallback', () => {
+  const originalUuid = Object.getOwnPropertyDescriptor(crypto, 'randomUUID');
+  const originalValues = Object.getOwnPropertyDescriptor(
+    crypto,
+    'getRandomValues',
+  );
+  try {
+    Object.defineProperty(crypto, 'randomUUID', {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(crypto, 'getRandomValues', {
+      configurable: true,
+      value: (bytes) => {
+        assert.equal(bytes.length, 16);
+        bytes.set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        return bytes;
+      },
+    });
+    assert.equal(newRandomId(), '000102030405060708090a0b0c0d0e0f');
+    assert.equal(newIdempotencyKey(), 'key-00010203-0405060708090a0b0c0d0e0f');
+    Object.defineProperty(crypto, 'getRandomValues', {
+      configurable: true,
+      value: () => {
+        throw new Error('secure randomness unavailable');
+      },
+    });
+    assert.throws(newRandomId, /secure randomness unavailable/);
+    assert.throws(newIdempotencyKey, /secure randomness unavailable/);
+  } finally {
+    if (originalUuid === undefined) delete crypto.randomUUID;
+    else Object.defineProperty(crypto, 'randomUUID', originalUuid);
+    if (originalValues === undefined) delete crypto.getRandomValues;
+    else Object.defineProperty(crypto, 'getRandomValues', originalValues);
+  }
+});
 
 /** A client whose every request is answered by `respond`. */
 function clientWith(respond) {

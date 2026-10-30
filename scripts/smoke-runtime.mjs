@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createServer, request as httpRequest } from 'node:http';
 import { expect } from '@playwright/test';
 import { api } from './smoke-workspace.mjs';
 
@@ -20,8 +21,36 @@ const successor = `<!doctype html><html lang="en"><head><title>Successor</title>
 document.querySelector('#successor').textContent = window.artifree === undefined ? 'no runtime' : 'unexpected runtime';
 </script></body></html>`;
 
-async function open(browser, origin, server, artifact, corruptInitialization) {
-  const context = await browser.newContext();
+async function open(
+  browser,
+  origin,
+  server,
+  artifact,
+  corruptInitialization,
+  contextOptions = {},
+) {
+  const context = await browser.newContext(contextOptions);
+  try {
+    return await openInContext(
+      context,
+      origin,
+      server,
+      artifact,
+      corruptInitialization,
+    );
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
+}
+
+async function openInContext(
+  context,
+  origin,
+  server,
+  artifact,
+  corruptInitialization,
+) {
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const views = [];
@@ -55,10 +84,16 @@ async function open(browser, origin, server, artifact, corruptInitialization) {
     )
       metadataRequests.push(request.url());
   });
-  await page.route('**/v1/artifacts/**/runtime-views', async (route) => {
-    const response = await route.fetch();
-    if (response.ok()) views.push(await response.json());
-    await route.fulfill({ response });
+  page.on('response', (response) => {
+    if (
+      response.ok() &&
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname.endsWith('/runtime-views')
+    )
+      response
+        .json()
+        .then((body) => views.push(body))
+        .catch((error) => errors.push(String(error)));
   });
   if (corruptInitialization) {
     await page.route(`${server.content_origin}/r/*/`, async (route) => {
@@ -105,6 +140,50 @@ async function open(browser, origin, server, artifact, corruptInitialization) {
   };
 }
 
+// The test browser sees a non-loopback HTTP origin, while all traffic stays
+// on loopback. Only the workspace and its preview origin are forwarded.
+async function insecureProxy(origin, contentOrigin) {
+  const proxy = createServer((request, response) => {
+    const requested = new URL(request.url);
+    const target =
+      requested.origin === 'http://insecure.invalid'
+        ? new URL(`${requested.pathname}${requested.search}`, origin)
+        : requested.origin === contentOrigin
+          ? requested
+          : undefined;
+    if (target === undefined) {
+      response.writeHead(403).end();
+      return;
+    }
+    const upstream = httpRequest(
+      target,
+      {
+        method: request.method,
+        headers: { ...request.headers, host: target.host },
+      },
+      (reply) => {
+        response.writeHead(reply.statusCode ?? 502, reply.headers);
+        reply.pipe(response);
+      },
+    );
+    upstream.on('error', () => {
+      if (!response.headersSent) response.writeHead(502);
+      response.end();
+    });
+    response.on('close', () => {
+      if (!response.writableFinished) upstream.destroy();
+    });
+    request.pipe(upstream);
+  });
+  await new Promise((ready) => proxy.listen(0, '127.0.0.1', ready));
+  const address = proxy.address();
+  assert.ok(address && typeof address === 'object');
+  return {
+    server: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((done) => proxy.close(done)),
+  };
+}
+
 /** Exercise the real server and an opaque-origin frame, including rejected messages. */
 export async function checkRuntime({
   browser,
@@ -119,6 +198,50 @@ export async function checkRuntime({
       { path: 'next.html', encoding: 'utf8', content: successor },
     ],
   });
+  // A real non-loopback HTTP origin lacks randomUUID but has getRandomValues.
+  // Test runtime and ordinary previews and a new mutation key there.
+  const proxy = await insecureProxy(origin, server.content_origin);
+  let compatible;
+  try {
+    compatible = await open(
+      browser,
+      'http://insecure.invalid',
+      server,
+      artifact,
+      false,
+      { proxy: { server: proxy.server, bypass: '127.0.0.1,localhost' } },
+    );
+    assert.equal(await compatible.page.evaluate(() => isSecureContext), false);
+    assert.equal(
+      await compatible.page.evaluate(() => typeof crypto.randomUUID),
+      'undefined',
+    );
+    await expect(
+      compatible.page
+        .frameLocator('iframe[title^="Preview of"]')
+        .locator('#result'),
+    ).toContainText(artifact.id);
+    await checkAccessibility('runtime-insecure-preview', compatible.page);
+    const workspace = compatible.page.locator('#artifacts');
+    await workspace.getByRole('button', { name: 'New artifact' }).click();
+    const dialog = compatible.page.getByRole('dialog', {
+      name: 'New HTML artifact',
+    });
+    await dialog.getByLabel('Title').fill('Preview without randomUUID');
+    await dialog.getByLabel('index.html').fill('<p id="ordinary">ready</p>');
+    await dialog.getByRole('button', { name: 'Create' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(
+      compatible.page
+        .frameLocator('iframe[title^="Preview of"]')
+        .locator('#ordinary'),
+    ).toHaveText('ready');
+    await checkAccessibility('runtime-insecure-ordinary', compatible.page);
+    assert.deepEqual(compatible.errors, []);
+  } finally {
+    await compatible?.context.close();
+    await proxy.close();
+  }
   const normal = await open(browser, origin, server, artifact, false);
   let release = () => undefined;
   try {
@@ -290,5 +413,6 @@ export async function checkRuntime({
     wrongInitialization: 'passed',
     wrongWindow: 'passed',
     accountTokenIsolation: 'passed',
+    withoutRandomUUID: 'passed',
   };
 }

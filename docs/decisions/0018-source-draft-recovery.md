@@ -72,7 +72,8 @@ local, unpublished trace maps each to its evidence.
      risking another tab's record. The lookup warns and offers an explicit
      choice to edit without kept drafts; edits then warn that they are not
      kept. Existing records are left untouched. The same choice is offered
-     if `crypto.randomUUID` is unavailable and a new owner id is needed.
+     if cryptographically secure randomness is unavailable and a new owner id
+     is needed.
      An incomplete lock snapshot also fails the lookup: it cannot establish
      which owners are open. The user may explicitly edit without the lookup,
      using this page's separately held owner.
@@ -192,9 +193,10 @@ local, unpublished trace maps each to its evidence.
   or saved; clearing site data removes them. They are not encrypted beyond
   what the profile offers.
 - Draft recovery requires Web Locks. An insecure, non-loopback HTTP origin
-  may lack both Web Locks and `crypto.randomUUID`; the latter also prevents
-  the existing client from generating save keys. Use a secure context for
-  durable editing.
+  may lack Web Locks and Web Crypto's digest API; use a secure context to
+  keep drafts and save source, including when editing without kept drafts.
+  Identifiers and retry keys use `crypto.getRandomValues`, without a weak
+  fallback.
 - A draft is kept per browser profile, not per user account, and per
   origin, which serves one server. The server still checks every save.
 - A record holds the draft's moved bytes, so a large draft uses that much

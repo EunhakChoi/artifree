@@ -141,7 +141,9 @@ tags; attributes in these tags must have quoted values. Other source previews
 remain byte-for-byte ordinary previews. The bridge is available in the web
 workspace, requires that workspace and server, and is not included in source
 exports. A preview is isolated from the workspace, not the network: it can
-navigate its own frame elsewhere.
+navigate its own frame elsewhere. TypeScript consumers can import the runtime
+SDK for its types and should check that `window.artifree` is present; ordinary
+previews do not install it.
 
 ## Verification
 

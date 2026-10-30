@@ -3,6 +3,7 @@ export {
   ArtifreeClient,
   encodeFile,
   newIdempotencyKey,
+  newRandomId,
   parseRetryAfter,
 } from './client.js';
 export type {

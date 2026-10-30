@@ -1,3 +1,4 @@
+import { newRandomId } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
 import { useRef, useState } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -29,7 +30,7 @@ export function PreviewFrame({
   title,
   className,
 }: PreviewFrameProps) {
-  const [viewId] = useState(() => crypto.randomUUID().replaceAll('-', ''));
+  const [viewId] = useState(newRandomId);
   const generation = useRef(0);
   const preview = useRequest(
     stale ? undefined : `${artifactId}:${revision}:${epoch}`,

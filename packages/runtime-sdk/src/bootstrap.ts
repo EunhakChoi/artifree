@@ -1,4 +1,4 @@
-import type { ArtifactRuntime, RuntimeMetadata } from './index.js';
+import type { RuntimeMetadata } from './index.js';
 
 /** Server-issued initialization of a single frame and view generation. */
 export interface RuntimeInitialization {
@@ -6,13 +6,6 @@ export interface RuntimeInitialization {
   readonly generation: number;
   readonly initialization: string;
   readonly expires_at_ms: number;
-}
-
-declare global {
-  interface Window {
-    /** Present only after the artifact opts in to the runtime script. */
-    artifree?: ArtifactRuntime;
-  }
 }
 
 interface Waiting {

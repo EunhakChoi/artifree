@@ -45,7 +45,12 @@ const serverBinary =
     ? buildServer(root)
     : resolve(root, process.env.ARTIFREE_SERVER_BIN);
 const dataDir = await mkdtemp(join(tmpdir(), 'artifree-smoke-'));
-const api = await startServer(serverBinary, dataDir);
+// The runtime smoke also uses a deliberately insecure origin through a
+// loopback proxy; allow exactly that test origin to embed its preview.
+const api = await startServer(serverBinary, dataDir, [
+  '--frame-ancestors',
+  'http://127.0.0.1:* http://localhost:* http://insecure.invalid',
+]);
 
 const webRoot = resolve(root, 'apps/web/dist');
 const mime = {

@@ -82,9 +82,22 @@ export interface MutationOptions {
   readonly idempotencyKey: string;
 }
 
+/**
+ * A 128-bit random identifier in hexadecimal. `getRandomValues` is also
+ * available to HTTP pages outside a secure context; no weak fallback is used.
+ */
+export function newRandomId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(
+    '',
+  );
+}
+
 /** A random key suitable for `Idempotency-Key`. */
 export function newIdempotencyKey(): string {
-  return `key-${crypto.randomUUID()}`;
+  const id = newRandomId();
+  // Keep retry keys distinct from common API-token formats.
+  return `key-${id.slice(0, 8)}-${id.slice(8)}`;
 }
 
 /**
