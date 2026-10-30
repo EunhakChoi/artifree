@@ -65,7 +65,6 @@ async function openInContext(
 ) {
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  const views = [];
   const metadataRequests = [];
   const contentRequests = [];
   const errors = [];
@@ -102,6 +101,53 @@ async function openInContext(
     if (window !== window.top) return;
     globalThis.runtimeConnects = [];
     globalThis.runtimeResponses = [];
+    globalThis.runtimeViews = [];
+    // Observe real responses before the application receives them. Holding
+    // the next metadata body lets the expiry test release a successful read
+    // only after advancing the workspace clock.
+    globalThis.metadataHold = { phase: 'idle' };
+    let heldMetadata = Promise.resolve();
+    let releaseMetadata = () => undefined;
+    globalThis.armMetadataHold = () => {
+      globalThis.metadataHold = { phase: 'armed' };
+      heldMetadata = new Promise((resolve) => {
+        releaseMetadata = resolve;
+      });
+    };
+    globalThis.releaseMetadataHold = () => releaseMetadata();
+    const sendRequest = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const response = await sendRequest(input, init);
+      if (typeof input === 'string' && init?.method === 'POST') {
+        const path = new URL(input, location.href).pathname;
+        if (response.ok && path.endsWith('/runtime-views'))
+          globalThis.runtimeViews.push(await response.clone().json());
+        if (
+          path.endsWith('/metadata') &&
+          globalThis.metadataHold.phase === 'armed'
+        ) {
+          const body = await response.clone().text();
+          globalThis.metadataHold = {
+            phase: 'held',
+            status: response.status,
+            body,
+          };
+          await heldMetadata;
+          globalThis.metadataHold.phase = 'released';
+        }
+      }
+      return response;
+    };
+    const readText = Response.prototype.text;
+    Response.prototype.text = async function () {
+      const body = await readText.call(this);
+      if (
+        globalThis.metadataHold.phase === 'released' &&
+        body === globalThis.metadataHold.body
+      )
+        globalThis.metadataHold.phase = 'parsed';
+      return body;
+    };
     window.addEventListener('message', (event) => {
       if (event.data?.type === 'artifree-runtime-connect')
         globalThis.runtimeConnects.push(event.data);
@@ -124,17 +170,6 @@ async function openInContext(
       )
     )
       metadataRequests.push(request.url());
-  });
-  page.on('response', (response) => {
-    if (
-      response.ok() &&
-      response.request().method() === 'POST' &&
-      new URL(response.url()).pathname.endsWith('/runtime-views')
-    )
-      response
-        .json()
-        .then((body) => views.push(body))
-        .catch((error) => errors.push(String(error)));
   });
   if (corruptInitialization) {
     await page.route(`${server.content_origin}/r/*/`, async (route) => {
@@ -166,9 +201,15 @@ async function openInContext(
     'src',
     new RegExp(`^${server.content_origin}/r/`),
   );
-  const src = await element.getAttribute('src');
-  await expect.poll(() => views.some((view) => view.url === src)).toBe(true);
-  const view = views.find((candidate) => candidate.url === src);
+  let view;
+  await expect
+    .poll(async () => {
+      const src = await element.getAttribute('src');
+      const views = await page.evaluate(() => globalThis.runtimeViews);
+      view = views.find((candidate) => candidate.url === src);
+      return view !== undefined;
+    })
+    .toBe(true);
   assert.ok(view, 'The shown view must be one actually issued by the server.');
   return {
     context,
@@ -228,51 +269,23 @@ async function insecureProxy(origin, contentOrigin) {
 
 async function checkExpiredReply(browser, origin, server, artifact) {
   const opened = await open(browser, origin, server, artifact);
-  let release = () => undefined;
   try {
     const frame = opened.page.frameLocator('iframe[title^="Preview of"]');
     await expect(frame.locator('#result')).toContainText(artifact.id);
-    let reached;
-    const arrived = new Promise((resolve) => {
-      reached = resolve;
-    });
-    const held = new Promise((resolve) => {
-      release = resolve;
-    });
-    let completed;
-    let failed;
-    const delivered = new Promise((resolve, reject) => {
-      completed = resolve;
-      failed = reject;
-    });
-    await opened.page.route('**/runtime-views/*/*/metadata', async (route) => {
-      try {
-        const response = await route.fetch();
-        assert.equal(response.status(), 200);
-        reached();
-        await held;
-        await route.fulfill({ response });
-        completed();
-      } catch (error) {
-        failed(error);
-      }
-    });
     const before = await opened.page.evaluate(
       () => globalThis.runtimeResponses.length,
     );
+    await opened.page.evaluate(() => globalThis.armMetadataHold());
     await frame.locator('#read').click();
-    await Promise.race([
-      arrived,
-      new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error('The metadata read was not sent.')),
-          10_000,
-        ),
-      ),
-    ]);
-    const finished = opened.page.waitForEvent('requestfinished', (request) =>
-      request.url().endsWith('/metadata'),
-    );
+    await expect
+      .poll(() => opened.page.evaluate(() => globalThis.metadataHold.phase), {
+        message: 'The real metadata response must reach the workspace.',
+        timeout: 10_000,
+      })
+      .toBe('held');
+    const held = await opened.page.evaluate(() => globalThis.metadataHold);
+    assert.equal(held.status, 200);
+    assert.equal(JSON.parse(held.body).artifact_id, artifact.id);
     await opened.page.evaluate((advance) => {
       const original = performance.now.bind(performance);
       Object.defineProperty(performance, 'now', {
@@ -280,9 +293,13 @@ async function checkExpiredReply(browser, origin, server, artifact) {
         value: () => original() + advance,
       });
     }, opened.view.lease_ms + 1);
-    release();
-    await delivered;
-    await finished;
+    await opened.page.evaluate(() => globalThis.releaseMetadataHold());
+    await expect
+      .poll(() => opened.page.evaluate(() => globalThis.metadataHold.phase), {
+        message: 'The workspace must read the held metadata response.',
+        timeout: 10_000,
+      })
+      .toBe('parsed');
     await opened.page.evaluate(
       () => new Promise((resolve) => requestAnimationFrame(resolve)),
     );
@@ -293,8 +310,11 @@ async function checkExpiredReply(browser, origin, server, artifact) {
     );
     assert.deepEqual(opened.errors, []);
   } finally {
-    release();
-    await opened.context.close();
+    try {
+      await opened.page.evaluate(() => globalThis.releaseMetadataHold());
+    } finally {
+      await opened.context.close();
+    }
   }
 }
 
