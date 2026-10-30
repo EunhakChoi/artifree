@@ -418,17 +418,21 @@ export async function checkHistory({
     const answered = new Promise((resolve) => {
       answer = resolve;
     });
-    await tab.route(
-      '**/restore',
-      async (route) => {
-        await answered;
-        return route.fulfill({
-          status: 503,
-          json: { error: { code: 'unavailable', message: 'Answer lost.' } },
-        });
-      },
-      { times: 1 },
-    );
+    let restoreRequests = 0;
+    const loseRestore = async (route) => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      restoreRequests += 1;
+      if (restoreRequests > 1) return route.fallback();
+      await answered;
+      return route.fulfill({
+        status: 503,
+        json: { error: { code: 'unavailable', message: 'Answer lost.' } },
+      });
+    };
+    // Keep interception installed until the delayed response settles. A
+    // one-shot route disappears while it waits; a concurrent one-shot feed
+    // route can then disable interception and release the restore itself.
+    await tab.route('**/restore', loseRestore);
     await restoreButton(9).click();
     dialog = dialogFor(9);
     await confirm(dialog).click();
@@ -439,7 +443,9 @@ export async function checkHistory({
     ).toBeVisible();
     await expect(dialog.getByText(/so it is not sent again/)).toBeVisible();
     await expect(confirm(dialog)).toBeDisabled();
+    assert.equal(restoreRequests, 1, 'The restore was not sent again.');
     await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await tab.unroute('**/restore', loseRestore);
 
     // A save the server refused names the revision it found: a restore
     // waits for it, also once the draft is gone.
