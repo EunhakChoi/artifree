@@ -208,6 +208,26 @@ async fn path_traversal_and_symlink_escape_are_prevented() -> TestResult {
         let req = Request::get("/symlink_escape.txt").body(Body::empty())?;
         let res = harness.router.clone().oneshot(req).await?;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Replacing index.html after startup with a symlink escaping web root is safely rejected
+        let index_path = harness.web_dir.join("index.html");
+        std::fs::remove_file(&index_path)?;
+        std::os::unix::fs::symlink(&outside_file, &index_path)?;
+
+        // Root request must NOT serve the external secret!
+        let root_request = Request::get("/").body(Body::empty())?;
+        let root_response = harness.router.clone().oneshot(root_request).await?;
+        assert_eq!(root_response.status(), StatusCode::NOT_FOUND);
+
+        // Direct /index.html must also return NOT_FOUND
+        let direct_request = Request::get("/index.html").body(Body::empty())?;
+        let direct_response = harness.router.clone().oneshot(direct_request).await?;
+        assert_eq!(direct_response.status(), StatusCode::NOT_FOUND);
+
+        // SPA route must also return NOT_FOUND
+        let spa_request = Request::get("/artifacts/test").body(Body::empty())?;
+        let spa_response = harness.router.clone().oneshot(spa_request).await?;
+        assert_eq!(spa_response.status(), StatusCode::NOT_FOUND);
     }
     Ok(())
 }
@@ -277,27 +297,56 @@ async fn cors_origin_normalization_and_preview_isolation() -> TestResult {
     let res = ipv6_harness.router.clone().oneshot(req).await?;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
+    // 4b. Expanded IPv6 preview origin matches compressed browser Origin
+    let ipv6_expanded_harness = WebTestHarness::new("http://[0:0:0:0:0:0:0:1]:80/")?;
+    let req = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/v1/artifacts")
+        .header(header::ORIGIN, "http://[::1]")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .body(Body::empty())?;
+    let res = ipv6_expanded_harness.router.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
     // 5. Exact normalize_origin behavior across IPv4 and IPv6 variations
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[::1]:80/"),
-        "http://[::1]"
+        artifree_server::http::normalize_origin("http://[::1]:80/").as_deref(),
+        Ok("http://[::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[::1]"),
-        "http://[::1]"
+        artifree_server::http::normalize_origin("http://[::1]").as_deref(),
+        Ok("http://[::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[::1]:7411/"),
-        "http://[::1]:7411"
+        artifree_server::http::normalize_origin("http://[0:0:0:0:0:0:0:1]:80/").as_deref(),
+        Ok("http://[::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("https://[2001:db8::1]:443/"),
-        "https://[2001:db8::1]"
+        artifree_server::http::normalize_origin("http://[0:0:0:0:0:0:0:1]:7411/").as_deref(),
+        Ok("http://[::1]:7411")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://localhost:80/"),
-        "http://localhost"
+        artifree_server::http::normalize_origin("http://[::1]:7411/").as_deref(),
+        Ok("http://[::1]:7411")
     );
+    assert_eq!(
+        artifree_server::http::normalize_origin("https://[2001:db8::1]:443/").as_deref(),
+        Ok("https://[2001:db8::1]")
+    );
+    assert_eq!(
+        artifree_server::http::normalize_origin(
+            "https://[2001:0db8:0000:0000:0000:0000:0000:0001]:443/"
+        )
+        .as_deref(),
+        Ok("https://[2001:db8::1]")
+    );
+    assert_eq!(
+        artifree_server::http::normalize_origin("http://localhost:80/").as_deref(),
+        Ok("http://localhost")
+    );
+    assert!(artifree_server::http::normalize_origin("invalid-origin").is_err());
+    assert!(artifree_server::http::normalize_origin("data:text/html,secret").is_err());
+    assert!(artifree_server::http::normalize_origin("file:///etc/passwd").is_err());
     Ok(())
 }
 
