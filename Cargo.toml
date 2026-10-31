@@ -29,7 +29,7 @@ sha2 = "0.11"
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.4"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "macros", "sync", "time", "fs", "io-util"] }
 base64 = "0.23"
 http-body = "1"
 futures-core = "0.3"
