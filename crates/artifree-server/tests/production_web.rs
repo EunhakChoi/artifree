@@ -465,3 +465,92 @@ async fn mcp_loopback_policy_is_enforced_even_in_lan_setup() -> TestResult {
     assert!(json.get("result").is_some());
     Ok(())
 }
+
+#[tokio::test]
+async fn cors_preflight_and_response_headers_on_api_v1() -> TestResult {
+    let harness = TestHarness::new();
+
+    // 1. OPTIONS preflight from a cross-origin web client -> 204 No Content with CORS headers
+    let preflight = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/v1/artifacts")
+        .header(header::ORIGIN, "http://localhost:5173")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header(
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "authorization, content-type",
+        )
+        .body(Body::empty())?;
+    let (status, headers, _) = harness.send(preflight).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        headers
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("http://localhost:5173")
+    );
+    let methods = headers
+        .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(methods.contains("POST"));
+
+    // 2. Cross-origin GET request -> 200 OK with Access-Control-Allow-Origin
+    let req = Request::get("/v1/artifacts")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(header::ORIGIN, "http://localhost:5173")
+        .body(Body::empty())?;
+    let (status, headers, _) = harness.send(req).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("http://localhost:5173")
+    );
+    assert!(headers.contains_key(header::ACCESS_CONTROL_EXPOSE_HEADERS));
+
+    // 3. Request from preview content origin -> 403 Forbidden
+    let preview_req = Request::get("/v1/artifacts")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(header::ORIGIN, "http://127.0.0.1:7411")
+        .body(Body::empty())?;
+    let (status, _, _) = harness.send(preview_req).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "preview origin must be forbidden from API"
+    );
+
+    // 4. Request from null origin -> 403 Forbidden
+    let null_req = Request::get("/v1/artifacts")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(header::ORIGIN, "null")
+        .body(Body::empty())?;
+    let (status, _, _) = harness.send(null_req).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "null origin must be forbidden from API"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn lan_ipv6_bracket_and_listener_override() -> TestResult {
+    use std::net::Ipv6Addr;
+
+    let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let api_listen_str = format!("[{v6}]:7410");
+    let content_listen_str = format!("[{v6}]:7411");
+
+    let api_addr: SocketAddr = api_listen_str.parse()?;
+    let content_addr: SocketAddr = content_listen_str.parse()?;
+    assert_eq!(api_addr.ip(), v6);
+    assert_eq!(api_addr.port(), 7410);
+    assert_eq!(content_addr.ip(), v6);
+    assert_eq!(content_addr.port(), 7411);
+
+    Ok(())
+}

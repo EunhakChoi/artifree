@@ -140,9 +140,9 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         }
         if !explicit_content_listen {
             content_address = defaults.content_address;
-        }
-        if content_origin.is_none() {
-            content_origin = defaults.content_origin;
+            if content_origin.is_none() {
+                content_origin = defaults.content_origin;
+            }
         }
         if !explicit_frame_ancestors {
             frame_ancestors = defaults.frame_ancestors;
@@ -210,6 +210,10 @@ struct LanAddresses {
 
 impl LanAddresses {
     fn from_ip(ip: IpAddr) -> Self {
+        let (api_address, content_address) = match ip {
+            IpAddr::V4(v4) => (format!("{v4}:7410"), format!("{v4}:7411")),
+            IpAddr::V6(v6) => (format!("[{v6}]:7410"), format!("[{v6}]:7411")),
+        };
         let origin = match ip {
             IpAddr::V4(v4) => format!("http://{v4}:7411"),
             IpAddr::V6(v6) => format!("http://[{v6}]:7411"),
@@ -219,8 +223,8 @@ impl LanAddresses {
             IpAddr::V6(v6) => format!("http://127.0.0.1:* http://localhost:* http://[{v6}]:*"),
         };
         Self {
-            api_address: format!("{ip}:7410"),
-            content_address: format!("{ip}:7411"),
+            api_address,
+            content_address,
             content_origin: Some(origin),
             frame_ancestors,
         }

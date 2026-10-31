@@ -45,10 +45,14 @@ immutable`. Missing paths with a file extension return `404 Not Found`,
    Passing `--lan <ip>` configures the server for local network accessibility by
    deriving the API listen socket (`<ip>:7410`), preview content listen socket
    (`<ip>:7411`), preview content origin (`http://<ip>:7411`), and CSP frame
-   ancestors (`http://127.0.0.1:* http://localhost:* http://<ip>:*`).
+   ancestors (`http://127.0.0.1:* http://localhost:* http://<ip>:*`). IPv6
+   addresses are properly bracketed (`[<v6>]:port`) for socket parsing.
    Explicit flags (`--api-listen`, `--content-listen`, `--content-origin`,
    `--frame-ancestors`) retain higher precedence over derived LAN defaults.
-4. **Preserved Sandbox Isolation and MCP Loopback Policy.**
+   When `--content-listen` is overridden without an explicit `--content-origin`,
+   the preview origin is derived from the actual listener port rather than forced
+   to 7411.
+4. **Preserved Sandbox Isolation, MCP Loopback Policy, and CORS.**
    Previews continue to be hosted on an isolated origin (port 7411 by default)
    and rendered inside an iframe CSP sandbox (`allow-scripts allow-forms
 allow-modals allow-downloads` without `allow-same-origin`).
@@ -56,6 +60,11 @@ allow-modals allow-downloads` without `allow-same-origin`).
    external `Host` headers and any `Origin` header are rejected with `403
 Forbidden`. LAN clients access the system through the REST API and Web UI;
    inbound MCP remains reserved for local loopback agents.
+   For cross-origin web workspace clients (such as local dev servers or LAN
+   portals accessing `/v1/*`), the server handles CORS `OPTIONS` preflights
+   before authentication and includes standard CORS headers, while explicitly
+   rejecting requests from the preview sandbox origin (`content_origin`) or
+   `null` origin with `403 Forbidden`.
 5. **CLI Server Address and Profile Precedence.**
    The CLI resolves connection configuration using strict precedence:
    - Base URL: `--server <url>` > `ARTIFREE_URL` > profile `server` >
@@ -66,11 +75,13 @@ Forbidden`. LAN clients access the system through the REST API and Web UI;
    - Config file: `--config <path>` > `ARTIFREE_CONFIG_FILE` >
      `./.artifree/profiles.json` > `./.artifree/config.json` >
      `~/.config/artifree/profiles.json`.
-6. **Web Workspace Connection Priority.**
+6. **Web Workspace Connection Priority and Token Isolation.**
    The Web UI resolves the server address via URL query parameter (`?server=<url>`),
    followed by session storage (`artifree.serverUrl`), connect form input, and
    defaults to the page's current origin (`""`). Access tokens are stored per
-   browser session in session storage.
+   server origin in session storage (`artifree.accessToken.<origin>`), and external
+   servers specified via `?server=` never reuse stored credentials to prevent
+   token exfiltration attacks from crafted links.
 7. **Draft Recovery in Non-Secure LAN Contexts.**
    Plain HTTP connections over LAN IP addresses are non-secure contexts in
    browsers, where the Web Locks API (`navigator.locks`) is disabled. Under

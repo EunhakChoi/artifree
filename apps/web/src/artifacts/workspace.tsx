@@ -32,8 +32,24 @@ import { useLiveWorkspace } from './use-live-workspace';
 import type { FeedState } from './use-live-workspace';
 import { describeFailure, useRequest } from './use-request';
 
-const TOKEN_KEY = 'artifree.accessToken';
 const SERVER_KEY = 'artifree.serverUrl';
+
+function serverOrigin(url: string): string {
+  if (!url) return '';
+  try {
+    return new URL(url, window.location.origin).origin;
+  } catch {
+    return '';
+  }
+}
+
+function tokenStorageKey(serverUrl: string): string {
+  const origin = serverOrigin(serverUrl);
+  if (!origin || origin === window.location.origin) {
+    return 'artifree.accessToken';
+  }
+  return `artifree.accessToken.${origin}`;
+}
 
 function readInitialServerUrl(): string {
   try {
@@ -50,11 +66,21 @@ function readInitialServerUrl(): string {
   }
 }
 
-function storedToken(): string | undefined {
+function readInitialToken(initialServerUrl: string): string | undefined {
   try {
-    return sessionStorage.getItem(TOKEN_KEY) ?? undefined;
+    // If a cross-origin server was provided in the query string, do NOT reuse
+    // any stored credentials. Require the user to explicitly authenticate to
+    // prevent token exfiltration from crafted URLs.
+    const fromQuery = new URLSearchParams(window.location.search).get('server');
+    if (fromQuery !== null && fromQuery.trim() !== '') {
+      const queryOrigin = serverOrigin(fromQuery.trim());
+      if (queryOrigin && queryOrigin !== window.location.origin) {
+        return undefined;
+      }
+    }
+    const key = tokenStorageKey(initialServerUrl);
+    return sessionStorage.getItem(key) ?? undefined;
   } catch {
-    // Storage can be unavailable (privacy modes); the user reconnects.
     return undefined;
   }
 }
@@ -64,10 +90,11 @@ function storeConnection(
   serverUrl: string | undefined,
 ): void {
   try {
+    const key = tokenStorageKey(serverUrl ?? '');
     if (token === undefined) {
-      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(key);
     } else {
-      sessionStorage.setItem(TOKEN_KEY, token);
+      sessionStorage.setItem(key, token);
     }
     if (serverUrl === undefined || serverUrl === '') {
       sessionStorage.removeItem(SERVER_KEY);
@@ -84,8 +111,8 @@ function storeConnection(
  * `drafts` belongs to the page and outlives every connection.
  */
 export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
-  const [token, setToken] = useState(storedToken);
   const [serverUrl, setServerUrl] = useState(readInitialServerUrl);
+  const [token, setToken] = useState(() => readInitialToken(serverUrl));
 
   function connect(next: {
     token: string | undefined;

@@ -31,7 +31,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -274,13 +274,88 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/changes", get(changes::stream))
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::map_response(no_store))
         .layer(middleware::from_fn_with_state(state.clone(), admit))
-        .layer(middleware::map_response(no_store));
+        .layer(middleware::from_fn_with_state(state.clone(), cors));
 
     Router::new()
         .merge(api_routes)
         .fallback(fallback_handler)
         .with_state(state)
+}
+
+/// Adds CORS headers to API v1 responses and handles CORS preflight `OPTIONS`
+/// requests for cross-origin web workspace clients.
+///
+/// Previews run on `content_origin` and are explicitly rejected to prevent
+/// sandboxed preview content from accessing the API. MCP endpoints reject any
+/// `Origin` header under their loopback policy.
+async fn cors(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with("/v1/") {
+        return next.run(request).await;
+    }
+
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    if let Some(ref origin_str) = origin
+        && (origin_str == "null" || origin_str == state.settings().content_origin.as_str())
+    {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "cross-origin access from this origin is forbidden",
+        )
+        .into_response();
+    }
+
+    if request.method() == Method::OPTIONS {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        let headers = response.headers_mut();
+        if let Some(ref origin_str) = origin {
+            if let Ok(val) = HeaderValue::from_str(origin_str) {
+                headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, val);
+            }
+        } else {
+            headers.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_static("*"),
+            );
+        }
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Authorization, Content-Type, Idempotency-Key, Range"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("86400"),
+        );
+        return response;
+    }
+
+    let mut response = next.run(request).await;
+    if let Some(ref origin_str) = origin
+        && let Ok(val) = HeaderValue::from_str(origin_str)
+    {
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, val);
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static(
+                "Content-Type, Content-Range, Accept-Ranges, ETag, Retry-After, Idempotency-Key",
+            ),
+        );
+    }
+    response
 }
 
 /// Authenticates the request, then admits it under the actor's limits. A

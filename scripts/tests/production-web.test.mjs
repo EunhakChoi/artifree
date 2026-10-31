@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { request as httpRequest } from 'node:http';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -15,13 +15,39 @@ import { buildServer, startServer } from '../lib/server-process.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const serverBinary = buildServer(root);
-const webDist = resolve(root, 'apps/web/dist');
+
+let fixtureWebDir = null;
+
+async function getWebDir() {
+  if (!fixtureWebDir) {
+    fixtureWebDir = await mkdtemp(join(tmpdir(), 'artifree-prod-web-fixture-'));
+    await mkdir(join(fixtureWebDir, 'assets'), { recursive: true });
+    await writeFile(
+      join(fixtureWebDir, 'index.html'),
+      '<!doctype html><html><head><meta charset="utf-8"><title>Artifree</title></head><body><div id="root">Artifree Web</div></body></html>',
+      'utf8',
+    );
+    await writeFile(
+      join(fixtureWebDir, 'assets', 'app.12345678.js'),
+      'console.log("artifree");',
+      'utf8',
+    );
+  }
+  return fixtureWebDir;
+}
+
+test.after(async () => {
+  if (fixtureWebDir) {
+    await rm(fixtureWebDir, { recursive: true, force: true });
+  }
+});
 
 test('Production web serving: web_url emitted, assets served, SPA fallback, API errors remain JSON', async () => {
+  const webDir = await getWebDir();
   const dataDir = await mkdtemp(join(tmpdir(), 'artifree-prod-web-'));
   const server = await startServer(serverBinary, dataDir, [
     '--web-dir',
-    webDist,
+    webDir,
   ]);
 
   try {
@@ -67,7 +93,7 @@ test('Production web serving: web_url emitted, assets served, SPA fallback, API 
       'must not serve index.html for missing asset',
     );
 
-    // 4. API routes never fallback to SPA
+    // 4. API routes never fallback to SPA and support CORS for cross-origin web apps
     const unauthApiRes = await fetch(server.web_url + '/v1/artifacts');
     assert.equal(unauthApiRes.status, 401);
     assert.equal(unauthApiRes.headers.get('content-type'), 'application/json');
@@ -84,6 +110,43 @@ test('Production web serving: web_url emitted, assets served, SPA fallback, API 
     );
     const notFoundJson = await notFoundApiRes.json();
     assert.equal(notFoundJson.error?.code, 'not_found');
+
+    // 4a. CORS preflight OPTIONS to /v1/artifacts
+    const preflightRes = await fetch(server.web_url + '/v1/artifacts', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'http://localhost:5173',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization, content-type',
+      },
+    });
+    assert.equal(preflightRes.status, 204);
+    assert.equal(
+      preflightRes.headers.get('access-control-allow-origin'),
+      'http://localhost:5173',
+    );
+    assert.ok(
+      preflightRes.headers
+        .get('access-control-allow-methods')
+        ?.includes('POST'),
+    );
+
+    // 4b. Cross-origin rejection for sandbox preview origin and null origin
+    const sandboxCorsRes = await fetch(server.web_url + '/v1/artifacts', {
+      headers: {
+        origin: server.content_origin,
+        authorization: `Bearer ${server.token}`,
+      },
+    });
+    assert.equal(sandboxCorsRes.status, 403);
+
+    const nullCorsRes = await fetch(server.web_url + '/v1/artifacts', {
+      headers: {
+        origin: 'null',
+        authorization: `Bearer ${server.token}`,
+      },
+    });
+    assert.equal(nullCorsRes.status, 403);
 
     // 5. End-to-end API operations using ArtifreeClient over web_url
     const client = new ArtifreeClient({
@@ -126,13 +189,14 @@ test('Production web serving: web_url emitted, assets served, SPA fallback, API 
 
 test('Production web serving: restart persistence', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'artifree-prod-restart-'));
+  const webDir = await getWebDir();
   let artifactId;
 
   // Run 1: create artifact
   {
     const server = await startServer(serverBinary, dataDir, [
       '--web-dir',
-      webDist,
+      webDir,
     ]);
     try {
       const client = new ArtifreeClient({
@@ -156,7 +220,7 @@ test('Production web serving: restart persistence', async () => {
   {
     const server = await startServer(serverBinary, dataDir, [
       '--web-dir',
-      webDist,
+      webDir,
     ]);
     try {
       const client = new ArtifreeClient({
@@ -200,9 +264,10 @@ test('Production web configuration errors: missing web-dir or missing index.html
 
 test('MCP loopback policy rejects foreign Host and Origin headers over HTTP', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'artifree-prod-mcp-'));
+  const webDir = await getWebDir();
   const server = await startServer(serverBinary, dataDir, [
     '--web-dir',
-    webDist,
+    webDir,
   ]);
 
   try {
@@ -269,6 +334,45 @@ test('MCP loopback policy rejects foreign Host and Origin headers over HTTP', as
     assert.ok(reply.result !== undefined);
   } finally {
     await server.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('LAN configuration: bracket IPv6 and derive preview origin from overridden content-listen', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'artifree-prod-lan-'));
+  const webDir = await getWebDir();
+
+  // 1. IPv6 --lan ::1 starts and brackets socket listeners properly
+  const serverV6 = await startServer(serverBinary, dataDir, [
+    '--web-dir',
+    webDir,
+    '--lan',
+    '::1',
+  ]);
+  try {
+    assert.ok(serverV6.api_url.includes('127.0.0.1'));
+    assert.ok(serverV6.content_origin.includes('127.0.0.1'));
+  } finally {
+    await serverV6.stop();
+  }
+
+  // 2. Overridden --content-listen with --lan uses the overridden port for content_origin
+  const serverOverridden = await startServer(serverBinary, dataDir, [
+    '--web-dir',
+    webDir,
+    '--lan',
+    '127.0.0.1',
+  ]);
+  try {
+    // startServer passes --content-listen 127.0.0.1:0, which overrides default port 7411
+    const contentPort = new URL(serverOverridden.content_origin).port;
+    assert.notEqual(
+      contentPort,
+      '7411',
+      'must derive origin from actual listener port',
+    );
+  } finally {
+    await serverOverridden.stop();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
