@@ -185,7 +185,7 @@ async function loadProfileConfig(options: ConnectionCliOptions): Promise<{
   if (explicitProfile !== undefined) {
     if (
       parsed.profiles === undefined ||
-      !(explicitProfile in parsed.profiles)
+      !Object.hasOwn(parsed.profiles, explicitProfile)
     ) {
       throw new UsageError(
         `Profile "${explicitProfile}" not found in ${configPath}`,
@@ -195,7 +195,7 @@ async function loadProfileConfig(options: ConnectionCliOptions): Promise<{
   } else if (parsed.default_profile !== undefined) {
     if (
       parsed.profiles === undefined ||
-      !(parsed.default_profile in parsed.profiles)
+      !Object.hasOwn(parsed.profiles, parsed.default_profile)
     ) {
       throw new UsageError(
         `Profile "${parsed.default_profile}" not found in ${configPath}`,

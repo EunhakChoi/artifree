@@ -19,7 +19,7 @@ pub const DEFAULT_API_ADDRESS: &str = "127.0.0.1:7410";
 /// Default preview content address; loopback only.
 pub const DEFAULT_CONTENT_ADDRESS: &str = "127.0.0.1:7411";
 /// Default CSP `frame-ancestors`: web UIs on loopback.
-pub const DEFAULT_FRAME_ANCESTORS: &str = "http://127.0.0.1:* http://localhost:*";
+pub const DEFAULT_FRAME_ANCESTORS: &str = "http://127.0.0.1:* http://localhost:* http://[::1]:*";
 /// Default preview link lifetime.
 pub const DEFAULT_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
 /// Longest accepted preview link lifetime. Links are bearer credentials, and

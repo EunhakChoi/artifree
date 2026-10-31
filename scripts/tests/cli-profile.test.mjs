@@ -269,4 +269,33 @@ test('CLI profile and connection resolution precedence', async (t) => {
       },
     );
   }
+
+  // 11. Prototype property names (toString, constructor) are not treated as profiles
+  {
+    await assert.rejects(
+      async () => {
+        await resolveConnection({
+          config: multiConfig,
+          profile: 'toString',
+        });
+      },
+      {
+        name: 'UsageError',
+        message: /Profile "toString" not found/i,
+      },
+    );
+
+    await assert.rejects(
+      async () => {
+        await resolveConnection({
+          config: multiConfig,
+          profile: 'constructor',
+        });
+      },
+      {
+        name: 'UsageError',
+        message: /Profile "constructor" not found/i,
+      },
+    );
+  }
 });

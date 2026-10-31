@@ -39,9 +39,23 @@ impl WebAssets {
         }
 
         let index = canonical.join("index.html");
-        if !index.is_file() {
+        let canon_index = index.canonicalize().map_err(|e| {
+            format!(
+                "web directory {} must contain an index.html file: {e}",
+                root.display()
+            )
+        })?;
+
+        if !canon_index.is_file() {
             return Err(format!(
                 "web directory {} must contain an index.html file",
+                root.display()
+            ));
+        }
+
+        if !canon_index.starts_with(&canonical) {
+            return Err(format!(
+                "index.html in {} must be contained within the web directory",
                 root.display()
             ));
         }
@@ -99,7 +113,14 @@ impl WebAssets {
 
         // Fall back to index.html for client SPA routes
         let index_path = self.root.join("index.html");
-        self.serve_file(&index_path, req.method())
+        if let Ok(canon_index) = index_path.canonicalize()
+            && canon_index.starts_with(&self.root)
+            && canon_index.is_file()
+        {
+            self.serve_file(&canon_index, req.method())
+        } else {
+            (StatusCode::NOT_FOUND, Body::from("404 Not Found")).into_response()
+        }
     }
 
     fn serve_file(&self, path: &Path, method: &Method) -> Response<Body> {

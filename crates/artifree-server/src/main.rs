@@ -278,6 +278,7 @@ mod tests {
             derive_frame_ancestors("[::1]:7410"),
             serve::DEFAULT_FRAME_ANCESTORS
         );
+        assert!(serve::DEFAULT_FRAME_ANCESTORS.contains("http://[::1]:*"));
     }
 
     #[test]

@@ -513,6 +513,31 @@ async fn web_assets_validation_fails_on_missing_dir_or_index() {
     let _ = fs::remove_dir_all(&temp);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn index_symlink_pointing_outside_web_root_is_rejected() {
+    use std::os::unix::fs::symlink;
+    let temp = std::env::temp_dir().join(format!("artifree-symlink-web-{}", std::process::id()));
+    let target = std::env::temp_dir().join(format!(
+        "artifree-symlink-target-{}.html",
+        std::process::id()
+    ));
+    let _ = fs::create_dir_all(&temp);
+    let _ = fs::write(&target, "secret content outside root");
+
+    let symlink_path = temp.join("index.html");
+    let _ = symlink(&target, &symlink_path);
+
+    let res = WebAssets::new(&temp);
+    match res {
+        Err(err) => assert!(err.contains("must be contained within the web directory")),
+        Ok(_) => panic!("expected WebAssets::new to fail on outward symlink"),
+    }
+
+    let _ = fs::remove_dir_all(&temp);
+    let _ = fs::remove_file(&target);
+}
+
 #[tokio::test]
 async fn healthz_returns_200_ok_and_does_not_fallback_to_spa() -> TestResult {
     let harness = Harness::new();
