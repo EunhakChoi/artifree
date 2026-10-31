@@ -125,7 +125,8 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
   );
 
   function connect(newToken: string | undefined, newServerUrl?: string): void {
-    const effectiveServer = newServerUrl ?? serverUrl;
+    const effectiveServer =
+      newServerUrl !== undefined ? newServerUrl : serverUrl;
     setServerUrl(effectiveServer);
     storeServerUrl(effectiveServer);
     storeToken(newToken, effectiveServer);

@@ -145,8 +145,7 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         }
     }
 
-    let (default_api, default_content, default_origin, default_ancestors) =
-        resolve_lan_defaults(lan_ip);
+    let (default_api, default_content, default_origin) = resolve_lan_defaults(lan_ip);
 
     let api_address = explicit_api_listen.unwrap_or(default_api);
     let content_address = explicit_content_listen
@@ -162,7 +161,8 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         None
     };
 
-    let frame_ancestors = explicit_frame_ancestors.unwrap_or(default_ancestors);
+    let frame_ancestors =
+        explicit_frame_ancestors.unwrap_or_else(|| derive_frame_ancestors(&api_address));
 
     let address = |flag: &str, value: &str| {
         value
@@ -183,24 +183,31 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     })
 }
 
-fn resolve_lan_defaults(
-    lan_ip: Option<std::net::IpAddr>,
-) -> (String, String, Option<String>, String) {
+fn resolve_lan_defaults(lan_ip: Option<std::net::IpAddr>) -> (String, String, Option<String>) {
     if let Some(ip) = lan_ip {
         let (api_str, content_str) = match ip {
             std::net::IpAddr::V4(v4) => (format!("{v4}:7410"), format!("{v4}:7411")),
             std::net::IpAddr::V6(v6) => (format!("[{v6}]:7410"), format!("[{v6}]:7411")),
         };
         let origin = format!("http://{content_str}");
-        let ancestors = format!("{} http://{api_str}", serve::DEFAULT_FRAME_ANCESTORS);
-        (api_str, content_str, Some(origin), ancestors)
+        (api_str, content_str, Some(origin))
     } else {
         (
             serve::DEFAULT_API_ADDRESS.to_owned(),
             serve::DEFAULT_CONTENT_ADDRESS.to_owned(),
             None,
-            serve::DEFAULT_FRAME_ANCESTORS.to_owned(),
         )
+    }
+}
+
+fn derive_frame_ancestors(api_address: &str) -> String {
+    if api_address.starts_with("127.0.0.1:")
+        || api_address.starts_with("localhost:")
+        || api_address.starts_with("[::1]:")
+    {
+        serve::DEFAULT_FRAME_ANCESTORS.to_owned()
+    } else {
+        format!("{} http://{api_address}", serve::DEFAULT_FRAME_ANCESTORS)
     }
 }
 
@@ -256,4 +263,75 @@ running server.",
         concurrent = RequestLimits::default().concurrent,
         streams = changes::DEFAULT_STREAMS_PER_ACTOR,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_frame_ancestors_for_loopback() {
+        assert_eq!(
+            derive_frame_ancestors("127.0.0.1:7410"),
+            serve::DEFAULT_FRAME_ANCESTORS
+        );
+        assert_eq!(
+            derive_frame_ancestors("localhost:7410"),
+            serve::DEFAULT_FRAME_ANCESTORS
+        );
+        assert_eq!(
+            derive_frame_ancestors("[::1]:7410"),
+            serve::DEFAULT_FRAME_ANCESTORS
+        );
+    }
+
+    #[test]
+    fn derives_frame_ancestors_for_lan_and_custom_ports() {
+        assert_eq!(
+            derive_frame_ancestors("192.168.1.50:7410"),
+            format!(
+                "{} http://192.168.1.50:7410",
+                serve::DEFAULT_FRAME_ANCESTORS
+            )
+        );
+        assert_eq!(
+            derive_frame_ancestors("192.168.1.50:9000"),
+            format!(
+                "{} http://192.168.1.50:9000",
+                serve::DEFAULT_FRAME_ANCESTORS
+            )
+        );
+    }
+
+    #[test]
+    fn parse_serve_overrides_frame_ancestors_correctly() -> Result<(), Box<dyn std::error::Error>> {
+        let opts = parse_serve(&[
+            "--data-dir".into(),
+            "/tmp/test-data".into(),
+            "--lan".into(),
+            "192.168.1.50".into(),
+            "--api-listen".into(),
+            "192.168.1.50:9000".into(),
+        ])?;
+
+        assert_eq!(
+            opts.frame_ancestors,
+            format!(
+                "{} http://192.168.1.50:9000",
+                serve::DEFAULT_FRAME_ANCESTORS
+            )
+        );
+
+        let explicit = parse_serve(&[
+            "--data-dir".into(),
+            "/tmp/test-data".into(),
+            "--lan".into(),
+            "192.168.1.50".into(),
+            "--frame-ancestors".into(),
+            "https://custom.app".into(),
+        ])?;
+
+        assert_eq!(explicit.frame_ancestors, "https://custom.app");
+        Ok(())
+    }
 }

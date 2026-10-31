@@ -172,6 +172,11 @@ test('Production web serving: assets, SPA fallback, CORS, restart persistence, L
       corsPreflight.headers.get('access-control-allow-origin'),
       'http://localhost:5173',
     );
+    assert.ok(
+      corsPreflight.headers
+        .get('access-control-allow-methods')
+        .includes('PATCH'),
+    );
 
     // 5b. Preflight on unrecognized API endpoint -> 204 with CORS headers
     const unrecPreflight = await fetch(ready.web_url + '/v1/unrecognized', {

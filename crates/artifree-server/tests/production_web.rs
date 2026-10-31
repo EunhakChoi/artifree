@@ -338,7 +338,16 @@ async fn cors_preflight_and_response_headers_on_api_v1() -> TestResult {
             .and_then(|v| v.to_str().ok()),
         Some("http://localhost:5173")
     );
-    assert!(headers.get(header::ACCESS_CONTROL_ALLOW_METHODS).is_some());
+    let methods = headers
+        .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(methods.contains("PATCH"));
+    assert!(methods.contains("HEAD"));
+    assert!(methods.contains("GET"));
+    assert!(methods.contains("POST"));
+    assert!(methods.contains("PUT"));
+    assert!(methods.contains("DELETE"));
 
     // 2. Preflight on unrecognized API endpoint -> 204 No Content with CORS headers
     let unrec_preflight = Request::builder()

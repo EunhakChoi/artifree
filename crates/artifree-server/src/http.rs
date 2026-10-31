@@ -326,7 +326,7 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin_val)
             .header(
                 header::ACCESS_CONTROL_ALLOW_METHODS,
-                "GET, POST, PUT, DELETE, OPTIONS",
+                "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
             )
             .header(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,

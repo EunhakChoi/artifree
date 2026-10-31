@@ -20,8 +20,8 @@ import { Input } from '@/components/ui/input';
 interface ConnectFormProps {
   /** Optional initial server URL (defaults to empty string for current origin). */
   initialServerUrl?: string;
-  /** Receives a non-empty token and optional server URL; the caller verifies it with the server. */
-  onConnect: (token: string, serverUrl?: string) => void;
+  /** Receives a non-empty token and server URL (empty string for current origin); the caller verifies it with the server. */
+  onConnect: (token: string, serverUrl: string) => void;
 }
 
 /** Asks for the access token printed into the server's data directory. */
@@ -34,8 +34,7 @@ export function ConnectForm({
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     const trimmedToken = token.trim();
-    if (trimmedToken !== '')
-      onConnect(trimmedToken, serverUrl.trim() || undefined);
+    if (trimmedToken !== '') onConnect(trimmedToken, serverUrl.trim());
   }
   return (
     <Card>

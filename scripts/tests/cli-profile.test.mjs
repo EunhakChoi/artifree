@@ -129,4 +129,27 @@ test('CLI profile and connection resolution precedence', async (t) => {
       },
     );
   }
+
+  // 8. Requesting a profile when no config file exists throws UsageError
+  {
+    const originalEnv = process.env.ARTIFREE_CONFIG_FILE;
+    delete process.env.ARTIFREE_CONFIG_FILE;
+    try {
+      await assert.rejects(
+        async () => {
+          await resolveConnection({
+            profile: 'nonexistent-environment-profile',
+          });
+        },
+        {
+          name: 'UsageError',
+          message: /no configuration file was found/i,
+        },
+      );
+    } finally {
+      if (originalEnv !== undefined) {
+        process.env.ARTIFREE_CONFIG_FILE = originalEnv;
+      }
+    }
+  }
 });

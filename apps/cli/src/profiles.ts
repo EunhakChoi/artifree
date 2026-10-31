@@ -66,7 +66,14 @@ async function loadProfileConfig(options: ConnectionCliOptions): Promise<{
     }
   }
 
+  const explicitProfile = options.profile ?? process.env.ARTIFREE_PROFILE;
+
   if (configPath === undefined || rawContent === undefined) {
+    if (explicitProfile !== undefined) {
+      throw new UsageError(
+        `Profile "${explicitProfile}" requested, but no configuration file was found`,
+      );
+    }
     return {};
   }
 
@@ -80,7 +87,6 @@ async function loadProfileConfig(options: ConnectionCliOptions): Promise<{
   }
 
   const configDir = dirname(configPath);
-  const explicitProfile = options.profile ?? process.env.ARTIFREE_PROFILE;
 
   if (
     parsed.profiles !== undefined &&
