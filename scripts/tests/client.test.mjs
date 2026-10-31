@@ -229,6 +229,765 @@ function expiredSession() {
   );
 }
 
+test('Agent sessions replace an expired connection and retry the read once', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const sessions = [{ id: 'c'.repeat(32), name: 'Editor' }];
+  const reads = [];
+  let opens = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      reads.push(session);
+      return session === old ? expiredSession() : Response.json({ sessions });
+    },
+  });
+  await client.openRuntimeSession();
+  assert.deepEqual(await client.agentSessions(), sessions);
+  assert.equal(client.runtimeSessionId, fresh);
+  assert.equal(opens, 2);
+  assert.deepEqual(reads, [old, fresh]);
+});
+
+test('An aborted agent-session retry preserves the caller’s cancellation reason', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const reads = [];
+  let opens = 0;
+  let dispatched;
+  const retrySent = new Promise((resolve) => (dispatched = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      reads.push(session);
+      if (session === old) return expiredSession();
+      return new Promise((resolve, reject) => {
+        init.signal.addEventListener(
+          'abort',
+          () => reject(init.signal.reason),
+          {
+            once: true,
+          },
+        );
+        dispatched();
+      });
+    },
+  });
+  await client.openRuntimeSession();
+  const controller = new AbortController();
+  const reason = new Error('The caller cancelled the retry.');
+  const result = client.agentSessions({ signal: controller.signal }).then(
+    () => undefined,
+    (error) => error,
+  );
+  await retrySent;
+  controller.abort(reason);
+  assert.strictEqual(await result, reason);
+  assert.deepEqual(reads, [old, fresh]);
+  assert.equal(opens, 2);
+});
+
+test('An agent-session retry aborted while reading its response preserves the reason', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const reads = [];
+  let opens = 0;
+  let started;
+  const bodyStarted = new Promise((resolve) => (started = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      reads.push(session);
+      if (session === old) return expiredSession();
+      return new Response(
+        new ReadableStream({
+          start(body) {
+            init.signal.addEventListener(
+              'abort',
+              () => body.error(init.signal.reason),
+              {
+                once: true,
+              },
+            );
+            started();
+          },
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    },
+  });
+  await client.openRuntimeSession();
+  const controller = new AbortController();
+  const reason = new Error('The caller stopped reading.');
+  const result = client.agentSessions({ signal: controller.signal }).then(
+    () => undefined,
+    (error) => error,
+  );
+  await bodyStarted;
+  controller.abort(reason);
+  assert.strictEqual(await result, reason);
+  assert.deepEqual(reads, [old, fresh]);
+  assert.equal(opens, 2);
+});
+
+test('A late successful agent-session retry cannot resolve after cancellation', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const reads = [];
+  let opens = 0;
+  let dispatched;
+  let release;
+  const sent = new Promise((resolve) => (dispatched = resolve));
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      reads.push(session);
+      if (session === old) return expiredSession();
+      dispatched();
+      await held;
+      return Response.json({
+        sessions: [{ id: 'c'.repeat(32), name: 'Editor' }],
+      });
+    },
+  });
+  await client.openRuntimeSession();
+  const controller = new AbortController();
+  const reason = new Error('The caller no longer needs the list.');
+  const result = client.agentSessions({ signal: controller.signal }).then(
+    () => undefined,
+    (error) => error,
+  );
+  await sent;
+  controller.abort(reason);
+  release();
+  assert.strictEqual(await result, reason);
+  assert.deepEqual(reads, [old, fresh]);
+  assert.equal(opens, 2);
+});
+
+test('An aborted initial agent-session fetch preserves its reason without recovery', async () => {
+  let opens = 0;
+  let reads = 0;
+  let started;
+  const dispatched = new Promise((resolve) => (started = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        return Response.json({ session_id: 'a'.repeat(32) });
+      }
+      reads += 1;
+      return new Promise((resolve, reject) => {
+        init.signal.addEventListener(
+          'abort',
+          () => reject(init.signal.reason),
+          {
+            once: true,
+          },
+        );
+        started();
+      });
+    },
+  });
+  await client.openRuntimeSession();
+  const controller = new AbortController();
+  const reason = new Error('The caller stopped the first read.');
+  const result = client.agentSessions({ signal: controller.signal }).then(
+    () => undefined,
+    (error) => error,
+  );
+  await dispatched;
+  controller.abort(reason);
+  assert.strictEqual(await result, reason);
+  assert.equal(reads, 1);
+  assert.equal(opens, 1);
+});
+
+test('A cancelled recovery waiter keeps its reason when the shared replacement fails', async () => {
+  const old = 'a'.repeat(32);
+  let opens = 0;
+  let reads = 0;
+  let started;
+  let rejectReplacement;
+  const opening = new Promise((resolve) => (started = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        if (opens === 1) return Response.json({ session_id: old });
+        return new Promise((resolve, reject) => {
+          rejectReplacement = reject;
+          started();
+        });
+      }
+      reads += 1;
+      return expiredSession();
+    },
+  });
+  await client.openRuntimeSession();
+  const controller = new AbortController();
+  const reason = new Error('The caller abandoned the replacement.');
+  const cancelled = client.agentSessions({ signal: controller.signal }).then(
+    () => undefined,
+    (error) => error,
+  );
+  await opening;
+  const other = failure(client.agentSessions());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, 2);
+  controller.abort(reason);
+  rejectReplacement(new Error('Replacement connection failed.'));
+  assert.strictEqual(await cancelled, reason);
+  assert.equal((await other).code, 'network_error');
+  assert.equal(opens, 2);
+  assert.equal(client.runtimeSessionId, old);
+});
+
+test('An unrelated failure from an agent-session retry is not retried', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const reads = [];
+  let opens = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      reads.push(session);
+      if (session === old) return expiredSession();
+      return Response.json(
+        { error: { code: 'not_found', message: 'Inbox unavailable.' } },
+        { status: 404 },
+      );
+    },
+  });
+  await client.openRuntimeSession();
+  const error = await failure(client.agentSessions());
+  assert.deepEqual([error.status, error.code], [404, 'not_found']);
+  assert.deepEqual(reads, [old, fresh]);
+  assert.equal(opens, 2);
+});
+
+test('A network failure from an agent-session retry keeps its cause and is not retried', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const reads = [];
+  const cause = new Error('Connection reset.');
+  let opens = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      reads.push(session);
+      if (session === old) return expiredSession();
+      throw cause;
+    },
+  });
+  await client.openRuntimeSession();
+  const error = await failure(client.agentSessions());
+  assert.deepEqual([error.status, error.code], [0, 'network_error']);
+  assert.strictEqual(error.cause, cause);
+  assert.deepEqual(reads, [old, fresh]);
+  assert.equal(opens, 2);
+});
+
+test('Agent sessions do not retry a second expiry or an unrelated failure', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  let opens = 0;
+  let reads = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      reads += 1;
+      return expiredSession();
+    },
+  });
+  await client.openRuntimeSession();
+  assert.equal(
+    (await failure(client.agentSessions())).code,
+    'runtime_session_expired',
+  );
+  assert.equal(client.runtimeSessionId, fresh);
+  assert.deepEqual([opens, reads], [2, 2]);
+
+  for (const [status, code] of [
+    [404, 'not_found'],
+    [503, 'runtime_session_expired'],
+    [401, 'unauthenticated'],
+    [503, 'unavailable'],
+  ]) {
+    let attempts = 0;
+    const other = new ArtifreeClient({
+      baseUrl: '',
+      accessToken: 'token',
+      fetch: async (url) => {
+        if (url.endsWith('/v1/runtime-sessions')) {
+          attempts += 1;
+          return Response.json({ session_id: old });
+        }
+        return Response.json(
+          { error: { code, message: 'refused' } },
+          { status },
+        );
+      },
+    });
+    await other.openRuntimeSession();
+    const error = await failure(other.agentSessions());
+    assert.deepEqual([error.status, error.code], [status, code]);
+    assert.equal(attempts, 1);
+    assert.equal(other.runtimeSessionId, old);
+  }
+});
+
+test('Agent sessions share replacement with views while an abandoned read stays cancelled', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const inboxes = [{ id: 'c'.repeat(32), name: 'Editor' }];
+  const reads = [];
+  let opens = 0;
+  let oldRequests = 0;
+  let release;
+  let started;
+  let allStarted;
+  const opening = new Promise((resolve) => (started = resolve));
+  const allOldRequests = new Promise((resolve) => (allStarted = resolve));
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        if (opens === 1) return Response.json({ session_id: old });
+        started();
+        await held;
+        return Response.json({ session_id: fresh });
+      }
+      const view = url.endsWith('/runtime-views');
+      const body = view ? JSON.parse(init.body) : undefined;
+      const session = view
+        ? body.session_id
+        : new URL(url, 'http://localhost').searchParams.get(
+            'workspace_session_id',
+          );
+      if (!view) reads.push(session);
+      if (session === old) {
+        oldRequests += 1;
+        if (oldRequests === 3) allStarted();
+        return expiredSession();
+      }
+      return view
+        ? Response.json(runtimeView(fresh, body.view_id, body.generation))
+        : Response.json({ sessions: inboxes });
+    },
+  });
+  await client.openRuntimeSession();
+  const controller = new AbortController();
+  const cancelled = assert.rejects(
+    client.agentSessions({ signal: controller.signal }),
+    {
+      name: 'AbortError',
+    },
+  );
+  await opening;
+  const list = client.agentSessions();
+  const view = client.createRuntimeView(artifact.id, 1, 'd'.repeat(32), 1);
+  await allOldRequests;
+  controller.abort();
+  release();
+  await cancelled;
+  assert.deepEqual(await list, inboxes);
+  assert.equal((await view).session_id, fresh);
+  assert.equal(opens, 2);
+  assert.deepEqual(reads, [old, old, fresh]);
+});
+
+test('Agent sessions ignore late aborted replies and do not reopen for them', async () => {
+  for (const response of [
+    () => expiredSession(),
+    () => Response.json({ sessions: [{ id: 'c'.repeat(32), name: 'Editor' }] }),
+  ]) {
+    let opens = 0;
+    let release;
+    let dispatched;
+    const sent = new Promise((resolve) => (dispatched = resolve));
+    const held = new Promise((resolve) => (release = resolve));
+    const client = new ArtifreeClient({
+      baseUrl: '',
+      accessToken: 'token',
+      fetch: async (url) => {
+        if (url.endsWith('/v1/runtime-sessions')) {
+          opens += 1;
+          return Response.json({ session_id: 'a'.repeat(32) });
+        }
+        dispatched();
+        await held;
+        return response();
+      },
+    });
+    await client.openRuntimeSession();
+    const controller = new AbortController();
+    const pending = assert.rejects(
+      client.agentSessions({ signal: controller.signal }),
+      {
+        name: 'AbortError',
+      },
+    );
+    await sent;
+    controller.abort();
+    release();
+    await pending;
+    assert.equal(opens, 1);
+  }
+});
+
+test('An already cancelled agent-session read does not dispatch', async () => {
+  let reads = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: 'a'.repeat(32) });
+      reads += 1;
+      return Response.json({ sessions: [] });
+    },
+  });
+  await client.openRuntimeSession();
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(client.agentSessions({ signal: controller.signal }), {
+    name: 'AbortError',
+  });
+  assert.equal(reads, 0);
+});
+
+test('Agent sessions reject an old successful read after another view replaces its connection', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  let opens = 0;
+  let release;
+  let dispatched;
+  const sent = new Promise((resolve) => (dispatched = resolve));
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      if (url.includes('/v1/agent-sessions?')) {
+        dispatched();
+        await held;
+        return Response.json({
+          sessions: [{ id: 'c'.repeat(32), name: 'Editor' }],
+        });
+      }
+      const body = JSON.parse(init.body);
+      return body.session_id === old
+        ? expiredSession()
+        : Response.json(runtimeView(fresh, body.view_id, body.generation));
+    },
+  });
+  await client.openRuntimeSession();
+  const pending = failure(client.agentSessions());
+  await sent;
+  await client.createRuntimeView(artifact.id, 1, 'd'.repeat(32), 1);
+  release();
+  assert.equal((await pending).code, 'invalid_request');
+  assert.equal(client.runtimeSessionId, fresh);
+});
+
+test('Logout fences a pending agent-session replacement and late expiry', async () => {
+  const old = 'a'.repeat(32);
+  let opens = 0;
+  let release;
+  let started;
+  const opening = new Promise((resolve) => (started = resolve));
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        if (opens === 1) return Response.json({ session_id: old });
+        started();
+        await held;
+        return Response.json({ session_id: 'b'.repeat(32) });
+      }
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      return expiredSession();
+    },
+  });
+  await client.openRuntimeSession();
+  const pending = failure(client.agentSessions());
+  await opening;
+  await client.closeRuntimeSession();
+  release();
+  assert.equal((await pending).code, 'invalid_request');
+  assert.throws(() => client.runtimeSessionId, { code: 'invalid_request' });
+  assert.equal(opens, 2);
+
+  let releaseRead;
+  let dispatched;
+  const sent = new Promise((resolve) => (dispatched = resolve));
+  const heldRead = new Promise((resolve) => (releaseRead = resolve));
+  let retries = 0;
+  const closing = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        retries += 1;
+        return Response.json({ session_id: old });
+      }
+      if (init.method === 'DELETE') throw new Error('close response lost');
+      dispatched();
+      await heldRead;
+      return expiredSession();
+    },
+  });
+  await closing.openRuntimeSession();
+  const late = failure(closing.agentSessions());
+  await sent;
+  assert.equal(
+    (await failure(closing.closeRuntimeSession())).code,
+    'network_error',
+  );
+  releaseRead();
+  assert.equal((await late).code, 'invalid_request');
+  assert.equal(retries, 1);
+});
+
+test('An agent-session read from before logout cannot run on a later connection', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const reads = [];
+  let opens = 0;
+  let release;
+  let dispatched;
+  const sent = new Promise((resolve) => (dispatched = resolve));
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      reads.push(session);
+      if (session === old) {
+        dispatched();
+        await held;
+        return expiredSession();
+      }
+      return Response.json({ sessions: [] });
+    },
+  });
+  await client.openRuntimeSession();
+  const pending = failure(client.agentSessions());
+  await sent;
+  await client.closeRuntimeSession();
+  await client.openRuntimeSession();
+  release();
+  assert.equal((await pending).code, 'invalid_request');
+  assert.equal(client.runtimeSessionId, fresh);
+  assert.deepEqual(reads, [old]);
+  assert.equal(opens, 2);
+});
+
+test('An expired stage is not replayed when a later agent-session read reconnects', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const agent = 'c'.repeat(32);
+  const proposal = {
+    workspace_session_id: old,
+    agent_session_id: agent,
+    artifact_id: artifact.id,
+    revision: 1,
+    path: 'index.html',
+    file_sha256: 'f'.repeat(64),
+    start: 0,
+    end: 4,
+    intent: 'Edit this',
+  };
+  const staged = {
+    id: 'd'.repeat(32),
+    agent_session_id: agent,
+    agent_name: 'Editor',
+    state: 'staged',
+    selection: {
+      artifact_id: artifact.id,
+      revision: 1,
+      path: 'index.html',
+      file_sha256: 'f'.repeat(64),
+      start: 0,
+      end: 4,
+      text: 'test',
+    },
+    intent: 'Edit this',
+  };
+  const stages = [];
+  let opens = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      if (url === '/v1/handoffs') {
+        const body = JSON.parse(init.body);
+        stages.push(body.workspace_session_id);
+        return body.workspace_session_id === old
+          ? expiredSession()
+          : Response.json(staged, { status: 201 });
+      }
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      return session === old
+        ? expiredSession()
+        : Response.json({ sessions: [{ id: agent, name: 'Editor' }] });
+    },
+  });
+  await client.openRuntimeSession();
+  assert.equal(
+    (await failure(client.stageHandoff(proposal))).code,
+    'runtime_session_expired',
+  );
+  assert.deepEqual(stages, [old]);
+  assert.equal(opens, 1);
+  assert.deepEqual(await client.agentSessions(), [
+    { id: agent, name: 'Editor' },
+  ]);
+  assert.deepEqual(stages, [old]);
+  assert.equal(
+    (await failure(client.stageHandoff(proposal))).code,
+    'invalid_request',
+  );
+  assert.deepEqual(stages, [old]);
+  assert.deepEqual(
+    await client.stageHandoff({ ...proposal, workspace_session_id: fresh }),
+    staged,
+  );
+  assert.deepEqual(stages, [old, fresh]);
+});
+
+test('A late staged response cannot be confirmed on a replacement connection', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  const agent = 'c'.repeat(32);
+  const proposal = {
+    workspace_session_id: old,
+    agent_session_id: agent,
+    artifact_id: artifact.id,
+    revision: 1,
+    path: 'index.html',
+    file_sha256: 'f'.repeat(64),
+    start: 0,
+    end: 4,
+    intent: 'Edit this',
+  };
+  let opens = 0;
+  let stages = 0;
+  let release;
+  let dispatched;
+  const sent = new Promise((resolve) => (dispatched = resolve));
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      if (url === '/v1/handoffs') {
+        stages += 1;
+        dispatched();
+        await held;
+        return Response.json(
+          {
+            id: 'd'.repeat(32),
+            agent_session_id: agent,
+            agent_name: 'Editor',
+            state: 'staged',
+            selection: {
+              artifact_id: artifact.id,
+              revision: 1,
+              path: 'index.html',
+              file_sha256: 'f'.repeat(64),
+              start: 0,
+              end: 4,
+              text: 'test',
+            },
+            intent: 'Edit this',
+          },
+          { status: 201 },
+        );
+      }
+      const session = new URL(url, 'http://localhost').searchParams.get(
+        'workspace_session_id',
+      );
+      return session === old
+        ? expiredSession()
+        : Response.json({ sessions: [] });
+    },
+  });
+  await client.openRuntimeSession();
+  const stage = failure(client.stageHandoff(proposal));
+  await sent;
+  assert.deepEqual(await client.agentSessions(), []);
+  release();
+  assert.equal((await stage).code, 'invalid_response');
+  assert.equal(stages, 1);
+  assert.equal(client.runtimeSessionId, fresh);
+});
+
 test('A body cut off mid-stream is a network error, not a contract error', async () => {
   // The outcome of a mutation is unknown, so callers must be told to retry.
   for (const status of [200, 201, 503]) {

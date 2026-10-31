@@ -64,7 +64,13 @@ below; they do not establish an external agent transport for Artifree.
    offer after a source lookup, so a lookup delayed across logout cannot
    produce a later delivery. A status read reports an unoffered stage or
    queued item as expired when its connection or agent session has ended,
-   without waiting for an agent to poll.
+   without waiting for an agent to poll. When the inbox list specifically
+   reports an expired workspace connection, the client shares the existing
+   replacement attempt and reads the list once more. Unrelated failures do
+   not trigger replacement, and logout fences an earlier list request even
+   if the client subsequently connects again. Stage and send are not replayed
+   on the replacement. If staging reports an expired connection, the user
+   cancels the dialog and selects the source again to start a new proposal.
    The inbox and handoff states are bounded and process-local, expire, and
    disappear on server restart. They are not source mutations or a durable
    job queue; artifact writes still use `ArtifactService`, a base revision,

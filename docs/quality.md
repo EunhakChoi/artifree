@@ -261,7 +261,12 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   deletion. Rust tests check concurrent cancel and poll, a source lookup held
   across logout, and send or cancellation while a source check fails. Chromium and Firefox exercise the source editor, trusted
   user actions, an unconfirmed send retried with the same ID, cancellation,
-  receipt-only status, and the dialog's accessibility. The blocked-status
+  receipt-only status, and the dialog's accessibility. A closed connection
+  while listing inboxes is replaced in Source; a close before stage requires
+  the user to select source again, with no automatic stage or send. Client
+  tests cover the exact expiry error, one read retry, unrelated failures,
+  shared replacement, cancellation, late replies and logout across a new
+  connection. The blocked-status
   presentation uses an injected HTTP response; the missing-source transition
   and later delivery use the real MCP/HTTP service. These checks use an MCP
   client, not a live model performing the requested edit.
