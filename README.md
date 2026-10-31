@@ -24,22 +24,24 @@ pins its tested Rust toolchain in `rust-toolchain.toml`.
 ```sh
 npm ci
 npm run build
-cargo run -p artifree-server -- serve --data-dir .artifree/data
+cargo run -p artifree-server -- serve --data-dir .artifree/data --web-dir apps/web/dist
 ```
 
 The server prints one JSON readiness line with the API URL (default
-`http://127.0.0.1:7410`), the preview origin (`http://127.0.0.1:7411`), and the
-token file. On Unix the server creates the data directory readable only by
-you and refuses an existing one that other users can access. Keep it running
-and, in another terminal:
+`http://127.0.0.1:7410`), the preview origin (`http://127.0.0.1:7411`),
+the web URL (`http://127.0.0.1:7410`), and the token file. Open the web URL in
+a browser and paste the token from `.artifree/data/access-token`.
+
+For local frontend development with hot module reloading, run Vite instead:
 
 ```sh
 npm run dev
 ```
 
-Open the URL printed by Vite and paste the token from
-`.artifree/data/access-token`. Vite forwards `/v1` to the API
-(`ARTIFREE_API_URL` overrides the target). Agents and scripts use the CLI:
+Vite forwards `/v1` to the API (`ARTIFREE_API_URL` overrides the target).
+To serve over LAN, specify `--lan <ip>` (e.g. `--lan 192.168.1.100`), which
+binds the API/Web to port 7410 and the preview content server to port 7411.
+Agents and scripts use the CLI:
 
 ```sh
 export ARTIFREE_TOKEN_FILE=.artifree/data/access-token
@@ -99,8 +101,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0016](docs/decisions/0016-bounded-file-reads.md),
 [0017](docs/decisions/0017-code-workspace.md),
 [0018](docs/decisions/0018-source-draft-recovery.md),
-[0019](docs/decisions/0019-runtime-metadata-bridge.md), and
-[0020](docs/decisions/0020-runtime-grants.md)).
+[0019](docs/decisions/0019-runtime-metadata-bridge.md),
+[0020](docs/decisions/0020-runtime-grants.md), and
+[0022](docs/decisions/0022-production-web-and-api-serving.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

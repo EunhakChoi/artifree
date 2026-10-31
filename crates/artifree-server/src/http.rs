@@ -31,7 +31,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -182,7 +182,12 @@ impl AppState {
 /// unmatched one, is authenticated and admitted by the actor's request limits
 /// before anything else runs.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    router_with_web(state, None)
+}
+
+/// Builds the API router, optionally serving production web assets from `web_assets`.
+pub fn router_with_web(state: AppState, web_assets: Option<crate::web::WebAssets>) -> Router {
+    let api_routes = Router::new()
         .merge(mcp::routes(state.clone()))
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
         .route(
@@ -251,11 +256,99 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/changes", get(changes::stream))
         .method_not_allowed_fallback(method_not_allowed)
-        .fallback(no_such_route)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(middleware::from_fn_with_state(state.clone(), admit))
         .layer(middleware::map_response(no_store))
+        .layer(middleware::from_fn_with_state(state.clone(), admit));
+
+    let fallback_state = state.clone();
+    let fallback_assets = web_assets;
+    let fallback_handler = move |req: Request| {
+        let state = fallback_state.clone();
+        let assets = fallback_assets.clone();
+        async move {
+            let path = req.uri().path();
+            if path.starts_with("/v1/") || path == "/v1" {
+                if let Err(auth_error) = state.authenticate(req.headers()) {
+                    return auth_error.into_response();
+                }
+                return no_such_route().into_response();
+            }
+            if let Some(assets) = assets {
+                assets.handle(&req)
+            } else {
+                no_such_route().into_response()
+            }
+        }
+    };
+
+    Router::new()
+        .merge(api_routes)
+        .fallback(fallback_handler)
+        .layer(middleware::from_fn_with_state(state.clone(), cors))
         .with_state(state)
+}
+
+/// CORS middleware handling preflights and response headers on `/v1/*` API endpoints.
+async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let is_api = path.starts_with("/v1/") || path == "/v1";
+
+    if !is_api {
+        return next.run(req).await;
+    }
+
+    let origin = req.headers().get(header::ORIGIN).cloned();
+
+    let Some(origin_val) = origin else {
+        return next.run(req).await;
+    };
+
+    let Ok(origin_str) = origin_val.to_str() else {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "origin header is not valid ASCII",
+        )
+        .into_response();
+    };
+
+    if origin_str == "null" || origin_str == state.shared.settings.content_origin {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "origin is not allowed to access this resource",
+        )
+        .into_response();
+    }
+
+    if req.method() == Method::OPTIONS {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin_val)
+            .header(
+                header::ACCESS_CONTROL_ALLOW_METHODS,
+                "GET, POST, PUT, DELETE, OPTIONS",
+            )
+            .header(
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                "Authorization, Content-Type, If-Match, Idempotency-Key",
+            )
+            .header(header::ACCESS_CONTROL_MAX_AGE, "86400")
+            .body(Body::empty())
+            .unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal Error").into_response()
+            });
+    }
+
+    let mut response = next.run(req).await;
+    response
+        .headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin_val);
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("etag"),
+    );
+    response
 }
 
 /// Authenticates the request, then admits it under the actor's limits. A
@@ -366,9 +459,8 @@ fn refused(refusal: Refusal) -> Response {
     response
 }
 
-// Unmatched requests authenticate first, like every route, so that callers
-// without the token cannot probe which routes and methods exist.
-async fn no_such_route(_: Authenticated) -> ApiError {
+// Unmatched API requests return 404 JSON.
+fn no_such_route() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "no such route")
 }
 

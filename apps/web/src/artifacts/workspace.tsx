@@ -32,23 +32,84 @@ import { useLiveWorkspace } from './use-live-workspace';
 import type { FeedState } from './use-live-workspace';
 import { describeFailure, useRequest } from './use-request';
 
-const TOKEN_KEY = 'artifree.accessToken';
+const TOKEN_KEY_PREFIX = 'artifree.accessToken';
+const SERVER_KEY = 'artifree.serverUrl';
 
-function storedToken(): string | undefined {
+function tokenKeyForServer(serverUrl: string): string {
+  if (!serverUrl) return TOKEN_KEY_PREFIX;
   try {
-    return sessionStorage.getItem(TOKEN_KEY) ?? undefined;
+    const origin = new URL(serverUrl).origin;
+    if (typeof window !== 'undefined' && origin === window.location.origin) {
+      return TOKEN_KEY_PREFIX;
+    }
+    return `${TOKEN_KEY_PREFIX}.${origin}`;
   } catch {
-    // Storage can be unavailable (privacy modes); the user reconnects.
+    return TOKEN_KEY_PREFIX;
+  }
+}
+
+function readInitialServerUrl(): { url: string; fromQuery: boolean } {
+  try {
+    const fromQuery = new URLSearchParams(window.location.search).get('server');
+    if (fromQuery !== null && fromQuery.trim() !== '') {
+      const parsed = new URL(fromQuery.trim());
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return { url: parsed.origin, fromQuery: true };
+      }
+    }
+  } catch {
+    // Malformed query param ignored
+  }
+
+  try {
+    const fromStorage = sessionStorage.getItem(SERVER_KEY);
+    if (fromStorage !== null && fromStorage.trim() !== '') {
+      const parsed = new URL(fromStorage.trim());
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return { url: parsed.origin, fromQuery: false };
+      }
+    }
+  } catch {
+    // Session storage unavailable
+  }
+
+  return { url: '', fromQuery: false };
+}
+
+function storedToken(
+  serverUrl: string,
+  fromQuery: boolean,
+): string | undefined {
+  // Security guard against token exfiltration:
+  // If an external server was specified via URL query ?server=..., do not automatically
+  // reuse tokens stored for that origin or current origin. The user must explicitly connect.
+  if (fromQuery) {
+    return undefined;
+  }
+  const key = tokenKeyForServer(serverUrl);
+  try {
+    return sessionStorage.getItem(key) ?? undefined;
+  } catch {
     return undefined;
   }
 }
 
-function storeToken(token: string | undefined): void {
+function storeToken(token: string | undefined, serverUrl: string): void {
+  const key = tokenKeyForServer(serverUrl);
   try {
-    if (token === undefined) sessionStorage.removeItem(TOKEN_KEY);
-    else sessionStorage.setItem(TOKEN_KEY, token);
+    if (token === undefined) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key, token);
   } catch {
     // Without storage the token lives only in memory for this page.
+  }
+}
+
+function storeServerUrl(serverUrl: string): void {
+  try {
+    if (!serverUrl) sessionStorage.removeItem(SERVER_KEY);
+    else sessionStorage.setItem(SERVER_KEY, serverUrl);
+  } catch {
+    // Without storage the server lives only in memory for this page.
   }
 }
 
@@ -57,16 +118,34 @@ function storeToken(token: string | undefined): void {
  * `drafts` belongs to the page and outlives every connection.
  */
 export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
-  const [token, setToken] = useState(storedToken);
-  function connect(next: string | undefined): void {
-    storeToken(next);
-    setToken(next);
+  const [initialConfig] = useState(readInitialServerUrl);
+  const [serverUrl, setServerUrl] = useState<string>(initialConfig.url);
+  const [token, setToken] = useState<string | undefined>(() =>
+    storedToken(initialConfig.url, initialConfig.fromQuery),
+  );
+
+  function connect(newToken: string | undefined, newServerUrl?: string): void {
+    const effectiveServer = newServerUrl ?? serverUrl;
+    setServerUrl(effectiveServer);
+    storeServerUrl(effectiveServer);
+    storeToken(newToken, effectiveServer);
+    setToken(newToken);
   }
-  if (token === undefined) return <ConnectForm onConnect={connect} />;
+
+  if (token === undefined) {
+    return (
+      <ConnectForm
+        initialServerUrl={serverUrl}
+        onConnect={(tok, srv) => connect(tok, srv)}
+      />
+    );
+  }
+
   return (
     <ConnectedWorkspace
-      key={token}
+      key={`${serverUrl}:${token}`}
       token={token}
+      serverUrl={serverUrl}
       drafts={drafts}
       onDisconnect={() => connect(undefined)}
     />
@@ -75,6 +154,7 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
 
 interface ConnectedWorkspaceProps {
   token: string;
+  serverUrl: string;
   drafts: PageDrafts;
   onDisconnect: () => void;
 }
@@ -90,6 +170,7 @@ const FEED_MESSAGES: Record<FeedState, string> = {
 
 function ConnectedWorkspace({
   token,
+  serverUrl,
   drafts,
   onDisconnect,
 }: ConnectedWorkspaceProps) {
@@ -98,7 +179,7 @@ function ConnectedWorkspace({
   const [client] = useState(
     () =>
       new ArtifreeClient({
-        baseUrl: '',
+        baseUrl: serverUrl,
         accessToken: token,
         fetch: new RequestGate(pageVisibility).fetch,
       }),
