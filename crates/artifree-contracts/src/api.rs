@@ -423,6 +423,8 @@ pub enum HandoffState {
     Queued,
     /// The registered agent may have received it; it cannot be recalled.
     Offered,
+    /// The pinned source became unavailable after an offer; receipt is unknown.
+    Blocked,
     /// The registered agent acknowledged receipt.
     Acknowledged,
     /// Cancelled before it was offered.

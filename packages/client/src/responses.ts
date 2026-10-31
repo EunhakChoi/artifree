@@ -285,6 +285,7 @@ const HANDOFF_STATES: readonly HandoffState[] = [
   'staged',
   'queued',
   'offered',
+  'blocked',
   'acknowledged',
   'cancelled',
   'expired',

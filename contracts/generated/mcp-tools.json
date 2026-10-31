@@ -3363,6 +3363,11 @@
                           "type": "string"
                         },
                         {
+                          "const": "blocked",
+                          "description": "The pinned source became unavailable after an offer; receipt is unknown.",
+                          "type": "string"
+                        },
+                        {
                           "const": "acknowledged",
                           "description": "The registered agent acknowledged receipt.",
                           "type": "string"
@@ -3567,6 +3572,11 @@
                   {
                     "const": "offered",
                     "description": "The registered agent may have received it; it cannot be recalled.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "blocked",
+                    "description": "The pinned source became unavailable after an offer; receipt is unknown.",
                     "type": "string"
                   },
                   {

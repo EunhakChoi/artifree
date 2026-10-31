@@ -169,6 +169,12 @@ test('Handoff replies must confirm the exact proposal and transition', async () 
   );
   body = { ...staged, state: 'queued' };
   assert.equal((await client.sendHandoff(staged, session)).state, 'queued');
+  body = { ...staged, state: 'blocked' };
+  assert.equal((await client.sendHandoff(staged, session)).state, 'blocked');
+  assert.equal(
+    (await failure(client.cancelHandoff(staged, session))).code,
+    'invalid_response',
+  );
   body = { ...staged, state: 'offered' };
   assert.equal(
     (await failure(client.cancelHandoff(staged, session))).code,

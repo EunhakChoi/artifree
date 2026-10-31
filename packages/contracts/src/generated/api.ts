@@ -70,7 +70,7 @@ export type CopiedPart = 'files';
 /**
  * Delivery state; acknowledgement is receipt, not model completion.
  */
-export type HandoffState = 'staged' | 'queued' | 'offered' | 'acknowledged' | 'cancelled' | 'expired';
+export type HandoffState = 'staged' | 'queued' | 'offered' | 'blocked' | 'acknowledged' | 'cancelled' | 'expired';
 /**
  * Machine-readable error category.
  */

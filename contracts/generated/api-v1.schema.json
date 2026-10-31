@@ -720,6 +720,11 @@
           "type": "string"
         },
         {
+          "const": "blocked",
+          "description": "The pinned source became unavailable after an offer; receipt is unknown.",
+          "type": "string"
+        },
+        {
           "const": "acknowledged",
           "description": "The registered agent acknowledged receipt.",
           "type": "string"

@@ -256,10 +256,13 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the tests do not claim multi-user authentication.
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
-  polling, acknowledgement and workspace logout. Rust tests check concurrent
+  polling, acknowledgement, a missing source followed by another delivery,
+  and workspace logout. Rust tests check concurrent
   cancel and poll and a source lookup held across logout. Chromium and Firefox exercise the source editor, trusted
   user actions, an unconfirmed send retried with the same ID, cancellation,
-  receipt-only status, and the dialog's accessibility. These checks use an MCP
+  receipt-only status, and the dialog's accessibility. The blocked-status
+  presentation uses an injected HTTP response; the missing-source transition
+  and later delivery use the real MCP/HTTP service. These checks use an MCP
   client, not a live model performing the requested edit.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
   read the parent page, use storage, open a popup, or reach the API; create,

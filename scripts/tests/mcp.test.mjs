@@ -312,7 +312,7 @@ test('a user stages a pinned selection for one registered MCP inbox', async () =
         .state,
       'queued',
     );
-    await ok(client, 'update_artifact', {
+    const deleted = await ok(client, 'update_artifact', {
       artifact_id: created.artifact.id,
       base_metadata_revision: created.artifact.metadata_revision,
       deleted: true,
@@ -323,6 +323,99 @@ test('a user stages a pinned selection for one registered MCP inbox', async () =
       404,
     );
     await refused(client, 'poll_handoffs', agent, 'not_found');
+
+    // An unreachable source cannot starve other confirmed deliveries for
+    // this same registered inbox, even if a poll may have offered it before.
+    const goodSource = '<p>valid source</p>';
+    const good = await ok(client, 'create_artifact', {
+      title: 'Other selectable source',
+      files: [utf8('index.html', goodSource)],
+      idempotency_key: freshKey(),
+    });
+    const goodProposal = {
+      ...currentProposal,
+      artifact_id: good.artifact.id,
+      file_sha256: createHash('sha256').update(goodSource).digest('hex'),
+      start: 0,
+      end: 3,
+    };
+    const following = await post('/v1/handoffs', goodProposal);
+    assert.equal(following.status, 201);
+    assert.equal(
+      (await post(`/v1/handoffs/${following.body.id}/send`, activeAction)).body
+        .state,
+      'queued',
+    );
+    const next = (await poll(agent)).deliveries;
+    assert.equal(next.length, 1, 'A missing source must not starve the inbox.');
+    assert.equal(next[0].id, following.body.id);
+    const blockedPath = `/v1/handoffs/${queued.body.id}?workspace_session_id=${active}`;
+    assert.equal((await api(blockedPath)).body.state, 'blocked');
+    assert.equal(
+      (await post(`/v1/handoffs/${queued.body.id}/cancel`, activeAction))
+        .status,
+      409,
+    );
+    await ok(client, 'update_artifact', {
+      artifact_id: created.artifact.id,
+      base_metadata_revision: deleted.artifact.metadata_revision,
+      deleted: false,
+      idempotency_key: freshKey(),
+    });
+    assert.deepEqual((await poll(agent)).deliveries, next);
+    assert.equal((await api(blockedPath)).body.state, 'blocked');
+    const blockedReceipt = await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: queued.body.id,
+    });
+    assert.equal(blockedReceipt.state, 'acknowledged');
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: following.body.id,
+    });
+    assert.deepEqual((await poll(agent)).deliveries, []);
+
+    // A replay can fail after an earlier poll may already have delivered it.
+    const previouslyOffered = await post('/v1/handoffs', currentProposal);
+    await post(`/v1/handoffs/${previouslyOffered.body.id}/send`, activeAction);
+    assert.equal(
+      (await poll(agent)).deliveries[0].id,
+      previouslyOffered.body.id,
+    );
+    const current = await ok(client, 'get_artifact', {
+      artifact_id: created.artifact.id,
+    });
+    await ok(client, 'update_artifact', {
+      artifact_id: created.artifact.id,
+      base_metadata_revision: current.metadata_revision,
+      deleted: true,
+      idempotency_key: freshKey(),
+    });
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+    const afterOffered = await post('/v1/handoffs', goodProposal);
+    await post(`/v1/handoffs/${afterOffered.body.id}/send`, activeAction);
+    assert.equal((await poll(agent)).deliveries[0].id, afterOffered.body.id);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${previouslyOffered.body.id}?workspace_session_id=${active}`,
+        )
+      ).body.state,
+      'blocked',
+    );
+    assert.equal(
+      (
+        await ok(client, 'acknowledge_handoff', {
+          ...agent,
+          delivery_id: previouslyOffered.body.id,
+        })
+      ).state,
+      'acknowledged',
+    );
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: afterOffered.body.id,
+    });
   });
 });
 

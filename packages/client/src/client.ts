@@ -770,7 +770,7 @@ export class ArtifreeClient {
     if (
       this.runtimeClosing ||
       this.runtimeSession !== workspace ||
-      !['queued', 'offered', 'acknowledged'].includes(result.state)
+      !['queued', 'offered', 'blocked', 'acknowledged'].includes(result.state)
     )
       throw new ArtifreeApiError('The handoff send was not confirmed.', {
         status: 200,

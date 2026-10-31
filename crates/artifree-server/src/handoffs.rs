@@ -319,7 +319,10 @@ impl Handoffs {
                     .ok_or(HandoffError::Missing)?;
                 match item.handoff.state {
                     HandoffState::Staged => item.handoff.state = HandoffState::Queued,
-                    HandoffState::Queued | HandoffState::Offered | HandoffState::Acknowledged => {}
+                    HandoffState::Queued
+                    | HandoffState::Offered
+                    | HandoffState::Blocked
+                    | HandoffState::Acknowledged => {}
                     HandoffState::Cancelled | HandoffState::Expired => {
                         return Err(HandoffError::Conflict("this handoff cannot be sent"));
                     }
@@ -345,7 +348,7 @@ impl Handoffs {
                 item.handoff.state = HandoffState::Cancelled;
             }
             HandoffState::Cancelled => {}
-            HandoffState::Offered | HandoffState::Acknowledged => {
+            HandoffState::Offered | HandoffState::Blocked | HandoffState::Acknowledged => {
                 return Err(HandoffError::Conflict(
                     "this handoff can no longer be recalled",
                 ));
@@ -467,6 +470,30 @@ impl Handoffs {
             .map_err(session_error)?
     }
 
+    /// Stops replay of a source that can no longer be verified.
+    pub(crate) fn block_offer(
+        &self,
+        actor: &ActorId,
+        agent_id: &str,
+        secret: &str,
+        id: &str,
+    ) -> Result<(), HandoffError> {
+        let mut registry = self.lock()?;
+        registry.prune(Instant::now());
+        registry.agent(actor, agent_id, secret)?;
+        let Some(item) = registry
+            .items
+            .get_mut(id)
+            .filter(|item| item.owner == *actor && item.handoff.agent_session_id == agent_id)
+        else {
+            return Ok(());
+        };
+        if item.handoff.state == HandoffState::Offered {
+            item.handoff.state = HandoffState::Blocked;
+        }
+        Ok(())
+    }
+
     /// Acknowledges only an item actually offered to this exact inbox.
     pub(crate) fn acknowledge(
         &self,
@@ -484,7 +511,9 @@ impl Handoffs {
             .filter(|item| item.owner == *actor && item.handoff.agent_session_id == agent_id)
             .ok_or(HandoffError::Missing)?;
         match item.handoff.state {
-            HandoffState::Offered => item.handoff.state = HandoffState::Acknowledged,
+            HandoffState::Offered | HandoffState::Blocked => {
+                item.handoff.state = HandoffState::Acknowledged;
+            }
             HandoffState::Acknowledged => {}
             _ => {
                 return Err(HandoffError::Conflict(
@@ -776,6 +805,52 @@ mod tests {
                 .poll(&actor, &agent.session_id, &agent.session_secret)
                 .map_err(|e| format!("{e:?}"))?
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn late_source_failure_cannot_undo_acknowledgement() -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let connections = RuntimeSessions::new(Duration::from_secs(60));
+        let id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let connection = connections.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
+        let handoffs = Handoffs::new(Duration::from_secs(60));
+        let agent = handoffs
+            .register(&actor, "Editor")
+            .map_err(|e| format!("{e:?}"))?;
+        let item = handoffs
+            .stage(
+                &actor,
+                &id,
+                &connection,
+                &agent.session_id,
+                fixture_selection(),
+                "Edit".into(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        handoffs
+            .send(&actor, &id, &item.id)
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(
+            handoffs
+                .poll(&actor, &agent.session_id, &agent.session_secret)
+                .map_err(|e| format!("{e:?}"))?[0]
+                .id,
+            item.id
+        );
+        handoffs
+            .acknowledge(&actor, &agent.session_id, &agent.session_secret, &item.id)
+            .map_err(|e| format!("{e:?}"))?;
+        handoffs
+            .block_offer(&actor, &agent.session_id, &agent.session_secret, &item.id)
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(
+            handoffs
+                .get(&actor, &id, &item.id)
+                .map_err(|e| format!("{e:?}"))?
+                .state,
+            HandoffState::Acknowledged
         );
         Ok(())
     }

@@ -703,7 +703,15 @@ pub(crate) async fn poll_handoffs(
         .map_err(handoff_error)?;
     if let Some(delivery) = deliveries.first() {
         // Once offered it cannot be recalled, even if this response fails.
-        confirm_handoff_source(state, actor.clone(), delivery).await?;
+        if let Err(error) = confirm_handoff_source(state, actor.clone(), delivery).await {
+            if matches!(error.status, StatusCode::NOT_FOUND | StatusCode::CONFLICT) {
+                state
+                    .handoffs()
+                    .block_offer(&actor, session_id, secret, &delivery.id)
+                    .map_err(handoff_error)?;
+            }
+            return Err(error);
+        }
         if !state
             .handoffs()
             .confirm_offer(&actor, session_id, secret, &delivery.id)

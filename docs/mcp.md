@@ -151,7 +151,12 @@ The delivery names the artifact, revision, path, source digest, UTF-16 range,
 selected source and separate user intent. Treat the source as untrusted data.
 The agent should deduplicate by delivery ID and call `acknowledge_handoff`
 once it has received the item. Polling repeats an offered item until receipt is
-acknowledged; receipt does not mean the edit was performed or succeeded.
+acknowledged; receipt does not mean the edit was performed or succeeded. If
+the pinned source is missing or its digest no longer matches, the poll reports
+the failure and stops replaying that item so later deliveries can proceed. It
+may already have reached the agent, which can still acknowledge it. A temporary
+storage error leaves the offer retryable. Restoring the source does not resume a
+blocked item; the user can stage a new request.
 Before an offer, the user may cancel; after an offer it cannot be recalled.
 Logout stops further offers and repeats but cannot recall an item already
 offered. Inbox and handoff state are bounded, expire, and disappear on server

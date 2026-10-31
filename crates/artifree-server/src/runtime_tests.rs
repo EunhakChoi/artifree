@@ -1,4 +1,4 @@
-//! Runtime view races across the real registry and artifact service.
+//! Runtime and handoff races across the real registry and artifact service.
 
 use std::error::Error;
 use std::future::{Future, poll_fn};
@@ -9,8 +9,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
     ContentEncoding, CreateArtifactRequest, CreateRuntimeViewRequest, FileChange, FileUpload,
-    RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
+    Handoff, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
+    UpdateArtifactRequest,
 };
+use artifree_contracts::mcp::RegisteredHandoffSession;
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
 use artifree_providers::storage::SqliteStore;
@@ -490,6 +492,291 @@ fn acknowledgement_while_handoff_source_waits_stops_its_replay() -> Result<(), B
     handoff_source_recheck(false)
 }
 
+async fn queued_handoff(
+    state: &AppState,
+    actor: &ActorId,
+) -> Result<(String, RegisteredHandoffSession, Handoff), Box<dyn Error>> {
+    let artifact = create_runtime_artifact(state, actor).await?;
+    let revision = operations::revision(state, actor.clone(), &artifact, 1)
+        .await
+        .map_err(|error| error.body.message)?;
+    let workspace = operations::open_runtime_session(state, actor)
+        .map_err(|error| error.body.message)?
+        .session_id;
+    let agent = operations::register_handoff_session(state, actor, "Editor")
+        .map_err(|error| error.body.message)?;
+    let staged = operations::stage_handoff(
+        state,
+        actor.clone(),
+        StageHandoffRequest {
+            workspace_session_id: workspace.clone(),
+            agent_session_id: agent.session_id.clone(),
+            artifact_id: artifact,
+            revision: 1,
+            path: "index.html".into(),
+            file_sha256: revision
+                .files
+                .first()
+                .ok_or("missing source")?
+                .sha256
+                .clone(),
+            start: 0,
+            end: 4,
+            intent: "Edit".into(),
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    operations::send_handoff(state, actor.clone(), &workspace, &staged.id)
+        .await
+        .map_err(|error| error.body.message)?;
+    Ok((workspace, agent, staged))
+}
+
+#[test]
+fn temporary_storage_failure_keeps_an_offer_retryable() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, agent, queued) = queued_handoff(&state, &actor).await?;
+        let database = directory.0.join("runtime.sqlite3");
+        let backup = directory.0.join("runtime-backup.sqlite3");
+        // Each storage operation opens the database anew. A directory at its
+        // path makes the real read unavailable until the file is restored.
+        std::fs::rename(&database, &backup)?;
+        std::fs::create_dir(&database)?;
+        let failure = operations::poll_handoffs(
+            &state,
+            actor.clone(),
+            &agent.session_id,
+            &agent.session_secret,
+        )
+        .await;
+        std::fs::remove_dir(&database)?;
+        std::fs::rename(&backup, &database)?;
+        assert!(matches!(failure, Err(error) if error.status == StatusCode::SERVICE_UNAVAILABLE));
+        let status = operations::get_handoff(&state, &actor, &workspace, &queued.id)
+            .map_err(|error| error.body.message)?;
+        assert_eq!(status.state, artifree_contracts::api::HandoffState::Offered);
+        let retried =
+            operations::poll_handoffs(&state, actor, &agent.session_id, &agent.session_secret)
+                .await
+                .map_err(|error| error.body.message)?;
+        assert_eq!(retried.deliveries.len(), 1);
+        assert_eq!(retried.deliveries[0].id, queued.id);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+async fn queued_second_handoff(
+    state: &AppState,
+    actor: &ActorId,
+    workspace: &str,
+    agent: &RegisteredHandoffSession,
+) -> Result<Handoff, Box<dyn Error>> {
+    let next_artifact = operations::create(
+        state,
+        actor.clone(),
+        "next-handoff".parse()?,
+        CreateArtifactRequest {
+            title: "Another source".into(),
+            files: vec![FileUpload {
+                path: "index.html".into(),
+                encoding: ContentEncoding::Utf8,
+                content: "<p>next</p>".into(),
+            }],
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    let next = operations::stage_handoff(
+        state,
+        actor.clone(),
+        StageHandoffRequest {
+            workspace_session_id: workspace.to_owned(),
+            agent_session_id: agent.session_id.clone(),
+            artifact_id: next_artifact.artifact.id,
+            revision: 1,
+            path: "index.html".into(),
+            file_sha256: next_artifact
+                .revision
+                .files
+                .first()
+                .ok_or("missing source")?
+                .sha256
+                .clone(),
+            start: 0,
+            end: 3,
+            intent: "Edit".into(),
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    operations::send_handoff(state, actor.clone(), workspace, &next.id)
+        .await
+        .map_err(|error| error.body.message)?;
+    Ok(next)
+}
+
+#[test]
+fn missing_source_does_not_starve_another_offer() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, agent, first) = queued_handoff(&state, &actor).await?;
+        let next = queued_second_handoff(&state, &actor, &workspace, &agent).await?;
+        operations::update(
+            &state,
+            actor.clone(),
+            "trash-handoff".parse()?,
+            &first.selection.artifact_id,
+            UpdateArtifactRequest {
+                base_metadata_revision: 1,
+                title: None,
+                pinned: None,
+                deleted: Some(true),
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        let failure = operations::poll_handoffs(
+            &state,
+            actor.clone(),
+            &agent.session_id,
+            &agent.session_secret,
+        )
+        .await;
+        assert!(matches!(failure, Err(error) if error.status == StatusCode::NOT_FOUND));
+        assert_eq!(
+            operations::get_handoff(&state, &actor, &workspace, &first.id)
+                .map_err(|error| error.body.message)?
+                .state,
+            artifree_contracts::api::HandoffState::Blocked
+        );
+        let following = operations::poll_handoffs(
+            &state,
+            actor.clone(),
+            &agent.session_id,
+            &agent.session_secret,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!(following.deliveries.len(), 1);
+        assert_eq!(following.deliveries[0].id, next.id);
+        assert_eq!(
+            operations::acknowledge_handoff(
+                &state,
+                &actor,
+                &agent.session_id,
+                &agent.session_secret,
+                &first.id
+            )
+            .map_err(|error| error.body.message)?
+            .state,
+            artifree_contracts::api::HandoffState::Acknowledged
+        );
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn changed_source_digest_blocks_only_that_offer() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, agent, valid) = queued_handoff(&state, &actor).await?;
+        state
+            .handoffs()
+            .cancel(&actor, &workspace, &valid.id)
+            .map_err(|error| format!("{error:?}"))?;
+        let connection = state
+            .runtime_sessions()
+            .get(&actor, &workspace)
+            .map_err(|error| format!("{error:?}"))?;
+        // Model an already queued selection whose pinned digest no longer
+        // matches the actual file; the real source read detects the change.
+        let mut mismatched_selection = valid.selection.clone();
+        mismatched_selection.file_sha256 = "0".repeat(64);
+        let old = state
+            .handoffs()
+            .stage(
+                &actor,
+                &workspace,
+                &connection,
+                &agent.session_id,
+                mismatched_selection,
+                "Edit".into(),
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        state
+            .handoffs()
+            .send(&actor, &workspace, &old.id)
+            .map_err(|error| format!("{error:?}"))?;
+        let failure = operations::poll_handoffs(
+            &state,
+            actor.clone(),
+            &agent.session_id,
+            &agent.session_secret,
+        )
+        .await;
+        assert!(matches!(failure, Err(error) if error.status == StatusCode::CONFLICT));
+        assert_eq!(
+            operations::get_handoff(&state, &actor, &workspace, &old.id)
+                .map_err(|error| error.body.message)?
+                .state,
+            artifree_contracts::api::HandoffState::Blocked
+        );
+        let following = state
+            .handoffs()
+            .stage(
+                &actor,
+                &workspace,
+                &connection,
+                &agent.session_id,
+                valid.selection,
+                "Edit".into(),
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        state
+            .handoffs()
+            .send(&actor, &workspace, &following.id)
+            .map_err(|error| format!("{error:?}"))?;
+        let next = operations::poll_handoffs(
+            &state,
+            actor.clone(),
+            &agent.session_id,
+            &agent.session_secret,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!(next.deliveries.len(), 1);
+        assert_eq!(next.deliveries[0].id, following.id);
+        assert!(matches!(
+            operations::acknowledge_handoff(
+                &state,
+                &actor,
+                &agent.session_id,
+                &agent.session_secret,
+                &old.id
+            ),
+            Ok(receipt) if receipt.state == artifree_contracts::api::HandoffState::Acknowledged
+        ));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
 fn handoff_source_recheck(logout: bool) -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let state = test_state(&directory)?;
@@ -499,40 +786,7 @@ fn handoff_source_recheck(logout: bool) -> Result<(), Box<dyn Error>> {
         .build()?;
     runtime.block_on(async {
         let actor: ActorId = "local".parse()?;
-        let artifact = create_runtime_artifact(&state, &actor).await?;
-        let revision = operations::revision(&state, actor.clone(), &artifact, 1)
-            .await
-            .map_err(|error| error.body.message)?;
-        let workspace = operations::open_runtime_session(&state, &actor)
-            .map_err(|error| error.body.message)?
-            .session_id;
-        let agent = operations::register_handoff_session(&state, &actor, "Editor")
-            .map_err(|error| error.body.message)?;
-        let staged = operations::stage_handoff(
-            &state,
-            actor.clone(),
-            StageHandoffRequest {
-                workspace_session_id: workspace.clone(),
-                agent_session_id: agent.session_id.clone(),
-                artifact_id: artifact,
-                revision: 1,
-                path: "index.html".into(),
-                file_sha256: revision
-                    .files
-                    .first()
-                    .ok_or("missing source")?
-                    .sha256
-                    .clone(),
-                start: 0,
-                end: 4,
-                intent: "Edit".into(),
-            },
-        )
-        .await
-        .map_err(|error| error.body.message)?;
-        operations::send_handoff(&state, actor.clone(), &workspace, &staged.id)
-            .await
-            .map_err(|error| error.body.message)?;
+        let (workspace, agent, staged) = queued_handoff(&state, &actor).await?;
         let (started, ready) = tokio::sync::oneshot::channel();
         let (release, waiting) = mpsc::channel();
         let blocker = tokio::task::spawn_blocking(move || {

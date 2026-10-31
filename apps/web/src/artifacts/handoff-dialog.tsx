@@ -276,6 +276,9 @@ export function HandoffDialog({
               {handoff.state === 'offered'
                 ? 'The agent may have received it. It can no longer be recalled.'
                 : null}
+              {handoff.state === 'blocked'
+                ? 'The saved source is unavailable. The agent may have received it; retries have stopped.'
+                : null}
               {handoff.state === 'acknowledged'
                 ? 'The agent acknowledged receipt. Model work is not confirmed.'
                 : null}

@@ -197,6 +197,57 @@ export async function checkHandoff({
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(dialog).toBeHidden();
 
+    // The MCP integration exercises the real unavailable source. Inject its
+    // status here to check presentation while the editor remains open.
+    await select();
+    await open.click();
+    await dialog.getByLabel('Agent session').selectOption(inbox.session_id);
+    await dialog.getByLabel('Edit intent').fill('Explain a blocked selection');
+    const stagedResponse = page.waitForResponse(
+      (item) =>
+        new URL(item.url()).pathname === '/v1/handoffs' &&
+        item.request().method() === 'POST',
+    );
+    await dialog
+      .getByRole('button', { name: 'Stage selection', exact: true })
+      .click();
+    const blockedStage = await (await stagedResponse).json();
+    await dialog.getByRole('button', { name: 'Send to agent' }).click();
+    await expect(
+      dialog.getByText(
+        'Sent to the inbox; waiting for the agent to receive it.',
+      ),
+    ).toBeVisible();
+    const statusPath = (url) =>
+      url.pathname === `/v1/handoffs/${blockedStage.id}`;
+    const blockedStatus = async (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      const response = await route.fetch();
+      const body = await response.json();
+      return route.fulfill({ response, json: { ...body, state: 'blocked' } });
+    };
+    await page.route(statusPath, blockedStatus);
+    await dialog.getByRole('button', { name: 'Check status' }).click();
+    await expect(
+      dialog.getByText(
+        'The saved source is unavailable. The agent may have received it; retries have stopped.',
+      ),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole('button', { name: 'Cancel handoff' }),
+    ).toHaveCount(0);
+    await checkAccessibility('handoff-blocked', page);
+    await page.unroute(statusPath, blockedStatus);
+    const cancelled = await api(
+      server,
+      'POST',
+      `/v1/handoffs/${blockedStage.id}/cancel`,
+      { workspace_session_id: connection },
+    );
+    assert.equal(cancelled.state, 'cancelled');
+    await dialog.getByRole('button', { name: 'Close' }).click();
+    await expect(dialog).toBeHidden();
+
     // A disconnected workspace must report expiry without requiring an agent
     // to poll; otherwise a delivery that cannot arrive appears to be waiting.
     await select();

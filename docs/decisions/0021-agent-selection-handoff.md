@@ -40,10 +40,15 @@ below; they do not establish an external agent transport for Artifree.
    cannot claim to recall it. These transitions are atomic with polling.
 4. **Delivery and receipt.** Polling offers a queued item to its registered
    session and repeats the same item until that session acknowledges receipt.
-   Agents must deduplicate by delivery ID. Receipt is not model completion;
-   this slice does not run a model or report its success. An expired inbox,
-   an unavailable server or a lost answer is reported rather than treated as
-   successful delivery.
+   Agents must deduplicate by delivery ID. If a source lookup proves the pinned
+   file is missing or its digest changed, the offered item becomes blocked and
+   is skipped by later polls, so it cannot starve other deliveries. It may
+   already have been received: it cannot be recalled and the agent may still
+   acknowledge it. Restoring the source does not silently resume it; the user
+   can stage a new request. A temporary storage failure leaves the offer
+   retryable. Receipt is not model completion; this slice does not run a model
+   or report its success. An expired inbox, an unavailable server or a lost
+   answer is reported rather than treated as successful delivery.
 5. **Connection and lifetime.** A staged item is bound to the actor and the
    current workspace connection. Logout or connection expiry stops new offers
    and further replays. It cannot recall an item already offered; the agent
