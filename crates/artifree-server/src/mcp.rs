@@ -29,7 +29,7 @@ use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::ActorId;
 use axum::Router;
-use axum::extract::ConnectInfo;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
@@ -67,31 +67,59 @@ const TOOL_LIST_TTL_MS: u64 = 5 * 60 * 1000;
 /// rebinding, and any request carrying an `Origin`: MCP clients are not web
 /// pages, and the web workspace does not use this endpoint.
 pub(crate) fn routes(state: AppState) -> Router<AppState> {
-    let config = StreamableHttpServerConfig::default()
+    let mut config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
         .with_max_request_body_bytes(MAX_BODY_BYTES)
         .enforce_origin_validation();
+
+    if state.settings().allow_remote_mcp || !state.settings().allowed_hosts.is_empty() {
+        let mut hosts = config.allowed_hosts.clone();
+        for host in &state.settings().allowed_hosts {
+            let normalized = crate::proxy::normalize_host(host);
+            if !hosts.contains(&normalized) {
+                hosts.push(normalized);
+            }
+        }
+        config = config.with_allowed_hosts(hosts);
+    }
+
     let service = StreamableHttpService::new(
-        move || {
-            Ok(ArtifactTools {
-                state: state.clone(),
-            })
+        {
+            let state = state.clone();
+            move || {
+                Ok(ArtifactTools {
+                    state: state.clone(),
+                })
+            }
         },
         Arc::new(NeverSessionManager::default()),
         config,
     );
     Router::new()
         .route_service(MCP_PATH, service)
-        .route_layer(middleware::from_fn(enforce_loopback_peer))
+        .route_layer(middleware::from_fn_with_state(state, enforce_mcp_access))
 }
 
-/// Enforces that connections to the MCP endpoint originate from a loopback peer socket.
-async fn enforce_loopback_peer(req: axum::extract::Request, next: Next) -> Response {
-    if req
+/// Enforces loopback or explicitly enabled remote access to the MCP endpoint.
+async fn enforce_mcp_access(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let client_ip = req
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|connect| !connect.ip().is_loopback())
+        .get::<crate::proxy::ClientConnectionInfo>()
+        .map(|info| info.client_ip)
+        .or_else(|| {
+            req.extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|connect| connect.ip())
+        });
+
+    if let Some(ip) = client_ip
+        && !state.settings().allow_remote_mcp
+        && !ip.is_loopback()
     {
         return ApiError::new(
             StatusCode::FORBIDDEN,

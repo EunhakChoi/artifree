@@ -22,9 +22,10 @@ use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 use artifree_domain::package::PackagePath;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use serde::Serialize;
@@ -661,7 +662,35 @@ pub fn router(state: AppState) -> Router {
         .route("/r/{ticket}/", get(serve_runtime_entry))
         .route("/r/{ticket}/{*path}", get(serve_file))
         .fallback(|| async { plain(StatusCode::NOT_FOUND, "Not found") })
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            proxy_inspection_content,
+        ))
         .with_state(state)
+}
+
+/// Evaluates request connection info on the preview listener against trusted reverse proxies.
+async fn proxy_inspection_content(
+    State(state): State<AppState>,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let peer_addr = req
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 0)), |c| c.0);
+
+    let connection_info = match crate::proxy::evaluate_connection(
+        req.headers(),
+        peer_addr.ip(),
+        &state.settings().trusted_proxies,
+    ) {
+        Ok(info) => info,
+        Err(err) => return err.into_response(),
+    };
+
+    req.extensions_mut().insert(connection_info);
+    next.run(req).await
 }
 
 async fn redirect_to_directory(Path(ticket): Path<String>) -> Response {

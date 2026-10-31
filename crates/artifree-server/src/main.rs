@@ -76,18 +76,44 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
-    let mut data_dir = None;
-    let mut cli_web_dir = None;
-    let mut cli_lan = None;
-    let mut explicit_api_listen = None;
-    let mut explicit_loopback_listen = None;
-    let mut explicit_content_listen = None;
-    let mut explicit_content_origin = None;
-    let mut explicit_frame_ancestors = None;
-    let mut preview_ttl = serve::DEFAULT_PREVIEW_TTL;
-    let mut limits = RequestLimits::default();
-    let mut change_streams = changes::DEFAULT_STREAMS_PER_ACTOR;
+struct CliServeFlags {
+    data_dir: Option<PathBuf>,
+    cli_web_dir: Option<PathBuf>,
+    cli_lan: Option<String>,
+    explicit_api_listen: Option<String>,
+    explicit_loopback_listen: Option<String>,
+    explicit_content_listen: Option<String>,
+    explicit_content_origin: Option<String>,
+    explicit_api_origin: Option<String>,
+    cli_trusted_proxies: Vec<String>,
+    cli_allowed_hosts: Vec<String>,
+    cli_allowed_origins: Vec<String>,
+    cli_allow_remote_mcp: bool,
+    explicit_frame_ancestors: Option<String>,
+    preview_ttl: Duration,
+    limits: RequestLimits,
+    change_streams: u32,
+}
+
+fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
+    let mut flags = CliServeFlags {
+        data_dir: None,
+        cli_web_dir: None,
+        cli_lan: None,
+        explicit_api_listen: None,
+        explicit_loopback_listen: None,
+        explicit_content_listen: None,
+        explicit_content_origin: None,
+        explicit_api_origin: None,
+        cli_trusted_proxies: Vec::new(),
+        cli_allowed_hosts: Vec::new(),
+        cli_allowed_origins: Vec::new(),
+        cli_allow_remote_mcp: false,
+        explicit_frame_ancestors: None,
+        preview_ttl: serve::DEFAULT_PREVIEW_TTL,
+        limits: RequestLimits::default(),
+        change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+    };
     let mut remaining = arguments.iter();
     while let Some(flag) = remaining.next() {
         let mut value = || {
@@ -97,19 +123,24 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
                 .ok_or_else(|| format!("Unknown arguments. {flag} requires a value; use --help."))
         };
         match flag.as_str() {
-            "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
-            "--web-dir" => cli_web_dir = Some(PathBuf::from(value()?)),
-            "--lan" => cli_lan = Some(value()?),
-            "--api-listen" => explicit_api_listen = Some(value()?),
-            "--loopback-listen" => explicit_loopback_listen = Some(value()?),
-            "--content-listen" => explicit_content_listen = Some(value()?),
-            "--content-origin" => explicit_content_origin = Some(value()?),
-            "--frame-ancestors" => explicit_frame_ancestors = Some(value()?),
-            "--preview-ttl-seconds" => preview_ttl = parse_preview_ttl(&value()?)?,
-            "--request-burst" => limits.burst = limit(flag, &value()?)?,
-            "--requests-per-minute" => limits.per_minute = limit(flag, &value()?)?,
-            "--concurrent-requests" => limits.concurrent = limit(flag, &value()?)?,
-            "--change-streams" => change_streams = limit(flag, &value()?)?,
+            "--data-dir" => flags.data_dir = Some(PathBuf::from(value()?)),
+            "--web-dir" => flags.cli_web_dir = Some(PathBuf::from(value()?)),
+            "--lan" => flags.cli_lan = Some(value()?),
+            "--api-listen" => flags.explicit_api_listen = Some(value()?),
+            "--loopback-listen" => flags.explicit_loopback_listen = Some(value()?),
+            "--content-listen" => flags.explicit_content_listen = Some(value()?),
+            "--content-origin" => flags.explicit_content_origin = Some(value()?),
+            "--api-origin" => flags.explicit_api_origin = Some(value()?),
+            "--trusted-proxy" => flags.cli_trusted_proxies.push(value()?),
+            "--allowed-host" => flags.cli_allowed_hosts.push(value()?),
+            "--allowed-origin" => flags.cli_allowed_origins.push(value()?),
+            "--allow-remote-mcp" => flags.cli_allow_remote_mcp = true,
+            "--frame-ancestors" => flags.explicit_frame_ancestors = Some(value()?),
+            "--preview-ttl-seconds" => flags.preview_ttl = parse_preview_ttl(&value()?)?,
+            "--request-burst" => flags.limits.burst = limit(flag, &value()?)?,
+            "--requests-per-minute" => flags.limits.per_minute = limit(flag, &value()?)?,
+            "--concurrent-requests" => flags.limits.concurrent = limit(flag, &value()?)?,
+            "--change-streams" => flags.change_streams = limit(flag, &value()?)?,
             other => {
                 return Err(format!(
                     "Unknown arguments. Unrecognized serve option {other}; use --help."
@@ -117,8 +148,13 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             }
         }
     }
+    Ok(flags)
+}
 
-    let explicit_web_dir = match cli_web_dir {
+fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
+    let flags = parse_serve_flags(arguments)?;
+
+    let explicit_web_dir = match flags.cli_web_dir {
         Some(dir) => Some(dir),
         None => std::env::var("ARTIFREE_WEB_DIR")
             .ok()
@@ -126,18 +162,46 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             .map(PathBuf::from),
     };
 
-    let lan_ip = resolve_lan_ip(cli_lan)?;
+    let lan_ip = resolve_lan_ip(flags.cli_lan)?;
     let (default_api, default_content, default_origin) = resolve_lan_defaults(lan_ip);
 
-    let api_str = explicit_api_listen.unwrap_or(default_api);
-    let content_str = explicit_content_listen.clone().unwrap_or(default_content);
+    let api_str = flags.explicit_api_listen.unwrap_or(default_api);
+    let content_str = flags
+        .explicit_content_listen
+        .clone()
+        .unwrap_or(default_content);
     let resolved_content_origin = resolve_content_origin(
-        explicit_content_origin,
-        explicit_content_listen.is_some(),
+        flags.explicit_content_origin,
+        flags.explicit_content_listen.is_some(),
         default_origin,
     )?;
+    let resolved_api_origin = resolve_api_origin(flags.explicit_api_origin)?;
 
-    let frame_ancestors = derive_frame_ancestors(explicit_frame_ancestors, &api_str);
+    if let (Some(api_orig), Some(content_orig)) = (&resolved_api_origin, &resolved_content_origin)
+        && api_orig == content_orig
+    {
+        return Err(
+            "--content-origin must differ from --api-origin to maintain preview sandbox isolation"
+                .to_owned(),
+        );
+    }
+
+    let trusted_proxies = resolve_trusted_proxies(flags.cli_trusted_proxies)?;
+    let allowed_hosts = resolve_allowed_hosts(
+        flags.cli_allowed_hosts,
+        resolved_api_origin.as_deref(),
+        lan_ip,
+    );
+    let allowed_origins =
+        resolve_allowed_origins(flags.cli_allowed_origins, resolved_api_origin.as_deref());
+    let allow_remote_mcp = flags.cli_allow_remote_mcp
+        || std::env::var("ARTIFREE_ALLOW_REMOTE_MCP").is_ok_and(|v| v == "true" || v == "1");
+
+    let frame_ancestors = derive_frame_ancestors(
+        flags.explicit_frame_ancestors,
+        &api_str,
+        resolved_api_origin.as_deref(),
+    );
 
     let address = |flag: &str, value: &str| {
         value
@@ -145,19 +209,26 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             .map_err(|_| format!("{flag} must be an IP address and port, such as 127.0.0.1:7410."))
     };
 
-    let loopback_api_address = resolve_loopback_listen(explicit_loopback_listen)?;
+    let loopback_api_address = resolve_loopback_listen(flags.explicit_loopback_listen)?;
 
     Ok(ServeOptions {
-        data_dir: data_dir.ok_or("serve requires --data-dir <directory>.")?,
+        data_dir: flags
+            .data_dir
+            .ok_or("serve requires --data-dir <directory>.")?,
         web_dir: explicit_web_dir,
         api_address: address("--api-listen", &api_str)?,
         loopback_api_address,
         content_address: address("--content-listen", &content_str)?,
         content_origin: resolved_content_origin,
+        api_origin: resolved_api_origin,
+        trusted_proxies,
+        allowed_hosts,
+        allowed_origins,
+        allow_remote_mcp,
         frame_ancestors,
-        preview_ttl,
-        limits,
-        change_streams,
+        preview_ttl: flags.preview_ttl,
+        limits: flags.limits,
+        change_streams: flags.change_streams,
     })
 }
 
@@ -277,10 +348,17 @@ fn resolve_lan_defaults(lan_ip: Option<IpAddr>) -> (String, String, Option<Strin
     }
 }
 
-/// Derives CSP frame-ancestors based on explicit setting or the API listener address.
-fn derive_frame_ancestors(explicit: Option<String>, api_address: &str) -> String {
+/// Derives CSP frame-ancestors based on explicit setting, API listener address, or public API origin.
+fn derive_frame_ancestors(
+    explicit: Option<String>,
+    api_address: &str,
+    api_origin: Option<&str>,
+) -> String {
     if let Some(ancestors) = explicit {
         return ancestors;
+    }
+    if let Some(origin) = api_origin {
+        return format!("{origin} {}", serve::DEFAULT_FRAME_ANCESTORS);
     }
     let Ok(addr) = api_address.parse::<SocketAddr>() else {
         return serve::DEFAULT_FRAME_ANCESTORS.to_owned();
@@ -296,6 +374,144 @@ fn derive_frame_ancestors(explicit: Option<String>, api_address: &str) -> String
         };
         format!("http://{formatted_ip}:* {}", serve::DEFAULT_FRAME_ANCESTORS)
     }
+}
+
+/// Resolves public API origin, validating and normalizing explicit origin.
+fn resolve_api_origin(explicit: Option<String>) -> Result<Option<String>, String> {
+    let raw = match explicit {
+        Some(origin) => Some(origin),
+        None => std::env::var("ARTIFREE_API_ORIGIN")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    };
+    match raw {
+        Some(origin) => {
+            let canon = artifree_server::http::normalize_origin(&origin).map_err(|e| {
+                format!("--api-origin must be a valid HTTP or HTTPS origin, got {origin:?}: {e}")
+            })?;
+            Ok(Some(canon))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Resolves trusted proxy IP/CIDR list from CLI arguments and environment variables.
+fn resolve_trusted_proxies(
+    cli_proxies: Vec<String>,
+) -> Result<Vec<artifree_server::proxy::IpNetwork>, String> {
+    let mut result = Vec::new();
+    for entry in cli_proxies {
+        for part in entry.split(',') {
+            let part = part.trim();
+            if !part.is_empty() {
+                let net: artifree_server::proxy::IpNetwork = part.parse()?;
+                result.push(net);
+            }
+        }
+    }
+    if let Ok(env_proxies) = std::env::var("ARTIFREE_TRUSTED_PROXIES") {
+        for part in env_proxies.split(',') {
+            let part = part.trim();
+            if !part.is_empty() {
+                let net: artifree_server::proxy::IpNetwork = part.parse()?;
+                result.push(net);
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Resolves allowed hosts, incorporating explicit hosts, environment variables, API origin host, and LAN IP.
+fn resolve_allowed_hosts(
+    cli_hosts: Vec<String>,
+    api_origin: Option<&str>,
+    lan_ip: Option<IpAddr>,
+) -> Vec<String> {
+    let mut result = Vec::new();
+    for entry in cli_hosts {
+        for part in entry.split(',') {
+            let part = part.trim();
+            if !part.is_empty() && !result.iter().any(|h: &String| h.eq_ignore_ascii_case(part)) {
+                result.push(part.to_owned());
+            }
+        }
+    }
+    if let Ok(env_hosts) = std::env::var("ARTIFREE_ALLOWED_HOSTS") {
+        for part in env_hosts.split(',') {
+            let part = part.trim();
+            if !part.is_empty() && !result.iter().any(|h: &String| h.eq_ignore_ascii_case(part)) {
+                result.push(part.to_owned());
+            }
+        }
+    }
+    if let Some(origin) = api_origin
+        && let Some(host) = artifree_server::http::origin_host(origin)
+        && !result
+            .iter()
+            .any(|h: &String| h.eq_ignore_ascii_case(&host))
+    {
+        result.push(host);
+    }
+    if let Some(ip) = lan_ip {
+        let ip_str = if ip.is_ipv6() {
+            format!("[{ip}]")
+        } else {
+            format!("{ip}")
+        };
+        let host_port = format!("{ip_str}:7410");
+        if !result
+            .iter()
+            .any(|h: &String| h.eq_ignore_ascii_case(&ip_str))
+        {
+            result.push(ip_str);
+        }
+        if !result
+            .iter()
+            .any(|h: &String| h.eq_ignore_ascii_case(&host_port))
+        {
+            result.push(host_port);
+        }
+    }
+    for lb in &[
+        "localhost",
+        "127.0.0.1",
+        "[::1]",
+        "localhost:7410",
+        "127.0.0.1:7410",
+        "[::1]:7410",
+    ] {
+        if !result.iter().any(|h: &String| h.eq_ignore_ascii_case(lb)) {
+            result.push((*lb).to_owned());
+        }
+    }
+    result
+}
+
+/// Resolves allowed CORS origins, incorporating explicit origins, environment variables, and API origin.
+fn resolve_allowed_origins(cli_origins: Vec<String>, api_origin: Option<&str>) -> Vec<String> {
+    let mut result = Vec::new();
+    for entry in cli_origins {
+        for part in entry.split(',') {
+            let part = part.trim();
+            if !part.is_empty() && !result.contains(&part.to_owned()) {
+                result.push(part.to_owned());
+            }
+        }
+    }
+    if let Ok(env_origins) = std::env::var("ARTIFREE_ALLOWED_ORIGINS") {
+        for part in env_origins.split(',') {
+            let part = part.trim();
+            if !part.is_empty() && !result.contains(&part.to_owned()) {
+                result.push(part.to_owned());
+            }
+        }
+    }
+    if let Some(origin) = api_origin
+        && !result.contains(&origin.to_owned())
+    {
+        result.push(origin.to_owned());
+    }
+    result
 }
 
 /// A request limit: a whole number from 1 to 100000.
@@ -329,6 +545,11 @@ Options:
   --loopback-listen <addr:port> Dedicated loopback API address for MCP in LAN mode
   --content-listen <addr:port>  Preview address [default: {content}]
   --content-origin <origin>     Public preview origin, if proxied
+  --api-origin <origin>         Public API and web origin, if proxied (or ARTIFREE_API_ORIGIN)
+  --trusted-proxy <cidr>        Trusted reverse proxy IP or CIDR (or ARTIFREE_TRUSTED_PROXIES)
+  --allowed-host <host>         Permitted Host header value (or ARTIFREE_ALLOWED_HOSTS)
+  --allowed-origin <origin>     Permitted CORS origin (or ARTIFREE_ALLOWED_ORIGINS)
+  --allow-remote-mcp            Permit remote authenticated MCP connections
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
   --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
   --request-burst <n>           Requests accepted at once [default: {burst}]
@@ -427,6 +648,55 @@ mod tests {
         ]));
         let err = res.err().unwrap_or_default();
         assert!(err.contains("--content-origin must be a valid HTTP or HTTPS origin"));
+        Ok(())
+    }
+
+    #[test]
+    fn api_origin_and_content_origin_separation() -> Result<(), Box<dyn std::error::Error>> {
+        // Differing origins are accepted
+        let opts = parse_serve(&args(&[
+            "--data-dir",
+            "/tmp",
+            "--api-origin",
+            "https://artifree.example.com",
+            "--content-origin",
+            "https://preview.example.com",
+            "--trusted-proxy",
+            "127.0.0.1,10.0.0.0/8",
+            "--allow-remote-mcp",
+        ]))
+        .map_err(|e| format!("valid remote proxy options: {e}"))?;
+
+        assert_eq!(
+            opts.api_origin.as_deref(),
+            Some("https://artifree.example.com")
+        );
+        assert_eq!(
+            opts.content_origin.as_deref(),
+            Some("https://preview.example.com")
+        );
+        assert!(opts.allow_remote_mcp);
+        assert_eq!(opts.trusted_proxies.len(), 2);
+        assert!(
+            opts.allowed_hosts
+                .iter()
+                .any(|h| h == "artifree.example.com")
+        );
+
+        // Identical origins are strictly rejected to maintain sandbox isolation
+        let conflict = parse_serve(&args(&[
+            "--data-dir",
+            "/tmp",
+            "--api-origin",
+            "https://artifree.example.com",
+            "--content-origin",
+            "https://artifree.example.com",
+        ]));
+        let err = conflict.err().unwrap_or_default();
+        assert!(err.contains(
+            "--content-origin must differ from --api-origin to maintain preview sandbox isolation"
+        ));
+
         Ok(())
     }
 }

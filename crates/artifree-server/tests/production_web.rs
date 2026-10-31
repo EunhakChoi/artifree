@@ -69,6 +69,7 @@ impl WebTestHarness {
                 frame_ancestors: "http://127.0.0.1:*".into(),
                 limits: RequestLimits::default(),
                 change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+                ..Settings::default()
             },
         )
         .map_err(|e| format!("cannot create app state: {e}"))?;
@@ -431,6 +432,11 @@ fn dummy_options(
         preview_ttl: Duration::from_secs(60),
         limits: RequestLimits::default(),
         change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+        api_origin: None,
+        trusted_proxies: Vec::new(),
+        allowed_hosts: Vec::new(),
+        allowed_origins: Vec::new(),
+        allow_remote_mcp: false,
     })
 }
 

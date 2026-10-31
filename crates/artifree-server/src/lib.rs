@@ -10,6 +10,7 @@ pub mod limits;
 pub mod mcp;
 mod operations;
 pub mod preview;
+pub mod proxy;
 mod ranges;
 mod runtime_policy;
 mod runtime_sessions;
