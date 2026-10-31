@@ -360,6 +360,7 @@ function sameHandoff(left: Handoff, right: Handoff): boolean {
 export class ArtifreeClient {
   private runtimeSession: string | undefined;
   private runtimeOpenAttempt = 0;
+  private runtimeCloseAttempt = 0;
   private runtimeConnectionEpoch = 0;
   private runtimeClosing = false;
   private runtimeRecovery:
@@ -696,14 +697,37 @@ export class ArtifreeClient {
   /** Lists registered agent inboxes for the current workspace connection. */
   async agentSessions(options: ReadOptions = {}): Promise<AgentSession[]> {
     if (this.runtimeClosing) throw connectionReplaced();
-    const session = this.runtimeSessionId;
-    const sessions = await this.json(
-      'GET',
-      `/v1/agent-sessions?workspace_session_id=${encodeURIComponent(session)}`,
-      parseAgentSessions,
-      { signal: options.signal },
-    );
-    if (this.runtimeClosing || this.runtimeSession !== session)
+    options.signal?.throwIfAborted();
+    const closeAttempt = this.runtimeCloseAttempt;
+    const request = (session: string): Promise<AgentSession[]> =>
+      this.json(
+        'GET',
+        `/v1/agent-sessions?workspace_session_id=${encodeURIComponent(session)}`,
+        parseAgentSessions,
+        { signal: options.signal },
+      );
+    let session = this.runtimeSessionId;
+    let sessions: AgentSession[];
+    try {
+      sessions = await request(session);
+    } catch (error: unknown) {
+      options.signal?.throwIfAborted();
+      if (this.runtimeClosing || this.runtimeCloseAttempt !== closeAttempt)
+        throw connectionReplaced();
+      if (!sessionExpired(error)) throw error;
+      await this.recoverRuntimeSession(session);
+      options.signal?.throwIfAborted();
+      if (this.runtimeClosing || this.runtimeCloseAttempt !== closeAttempt)
+        throw connectionReplaced();
+      session = this.runtimeSessionId;
+      sessions = await request(session);
+    }
+    options.signal?.throwIfAborted();
+    if (
+      this.runtimeClosing ||
+      this.runtimeCloseAttempt !== closeAttempt ||
+      this.runtimeSession !== session
+    )
       throw connectionReplaced();
     return sessions;
   }
@@ -920,6 +944,7 @@ export class ArtifreeClient {
   /** Closes the connection and its grants; retry until the server acknowledges. */
   async closeRuntimeSession(): Promise<void> {
     this.runtimeOpenAttempt += 1;
+    this.runtimeCloseAttempt += 1;
     this.runtimeClosing = true;
     const session = this.runtimeSession;
     if (session !== undefined)

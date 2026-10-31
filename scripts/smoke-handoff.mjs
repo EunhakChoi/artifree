@@ -279,6 +279,132 @@ export async function checkHandoff({
     assert.deepEqual((await poll()).deliveries, []);
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(dialog).toBeHidden();
+
+    // Expiry while opening the source handoff list must replace the
+    // connection without a trip through Preview or a replay of any action.
+    const sessionReads = [];
+    const replacements = [];
+    const rememberSessionResponse = (item) => {
+      const url = new URL(item.url());
+      if (url.pathname === '/v1/agent-sessions') sessionReads.push(item);
+      if (
+        url.pathname === '/v1/runtime-sessions' &&
+        item.request().method() === 'POST'
+      )
+        replacements.push(item);
+    };
+    page.on('response', rememberSessionResponse);
+    const stagesBeforeRecovery = stages.length;
+    const sendsBeforeRecovery = sends.length;
+    await select();
+    await open.click();
+    await expect(
+      dialog
+        .getByLabel('Agent session')
+        .locator(`option[value="${inbox.session_id}"]`),
+    ).toHaveCount(1);
+    await expect(
+      dialog
+        .getByLabel('Agent session')
+        .locator(`option[value="${sameName.session_id}"]`),
+    ).toHaveCount(1);
+    await expect(
+      dialog.getByLabel('Agent session').locator('option'),
+    ).toHaveCount(2);
+    const expiredList = sessionReads.find(
+      (item) =>
+        new URL(item.url()).searchParams.get('workspace_session_id') ===
+        connection,
+    );
+    assert.ok(expiredList, 'The previous connection must be queried.');
+    assert.equal(expiredList.status(), 404);
+    assert.equal(
+      (await expiredList.json()).error.code,
+      'runtime_session_expired',
+    );
+    assert.equal(replacements.length, 1);
+    const replacement = (await replacements[0].json()).session_id;
+    assert.notEqual(replacement, connection);
+    assert.ok(
+      sessionReads.some(
+        (item) =>
+          new URL(item.url()).searchParams.get('workspace_session_id') ===
+            replacement && item.status() === 200,
+      ),
+      'The replacement must supply the inbox list.',
+    );
+    assert.equal(stages.length, stagesBeforeRecovery);
+    assert.equal(sends.length, sendsBeforeRecovery);
+
+    // If the connection expires after the list read, staging is refused. The
+    // user returns to the source selection and explicitly starts over.
+    await dialog.getByLabel('Agent session').selectOption(inbox.session_id);
+    await dialog.getByLabel('Edit intent').fill('Explain after reconnecting');
+    const closeReplacement = await fetch(
+      `${server.api_url}/v1/runtime-sessions/${replacement}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${server.token}` },
+      },
+    );
+    assert.equal(closeReplacement.status, 204);
+    const refusedStage = page.waitForResponse(
+      (item) =>
+        new URL(item.url()).pathname === '/v1/handoffs' &&
+        item.request().method() === 'POST',
+    );
+    await dialog
+      .getByRole('button', { name: 'Stage selection', exact: true })
+      .click();
+    assert.equal((await refusedStage).status(), 404);
+    assert.equal(
+      (await (await refusedStage).json()).error.code,
+      'runtime_session_expired',
+    );
+    await expect(
+      dialog.getByText(
+        'The workspace connection expired before staging. Cancel and select the source again to reconnect.',
+      ),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole('button', { name: 'Stage selection', exact: true }),
+    ).toHaveCount(0);
+    assert.equal(replacements.length, 1);
+    assert.equal(stages.length, stagesBeforeRecovery + 1);
+    assert.equal(sends.length, sendsBeforeRecovery);
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await select();
+    await open.click();
+    await expect(
+      dialog.getByLabel('Agent session').locator('option'),
+    ).toHaveCount(2);
+    assert.equal(replacements.length, 2);
+    const next = (await replacements[1].json()).session_id;
+    assert.notEqual(next, replacement);
+    assert.ok(
+      sessionReads.some(
+        (item) =>
+          new URL(item.url()).searchParams.get('workspace_session_id') ===
+            next && item.status() === 200,
+      ),
+      'The new connection must supply the inbox list.',
+    );
+    page.off('response', rememberSessionResponse);
+    assert.equal(stages.length, stagesBeforeRecovery + 1);
+    await dialog.getByLabel('Agent session').selectOption(inbox.session_id);
+    await dialog.getByLabel('Edit intent').fill('Explain after reconnecting');
+    await dialog
+      .getByRole('button', { name: 'Stage selection', exact: true })
+      .click();
+    await expect(
+      dialog.getByText('Staged. Nothing has been sent to the agent.'),
+    ).toBeVisible();
+    assert.equal(stages.length, stagesBeforeRecovery + 2);
+    assert.equal(sends.length, sendsBeforeRecovery);
+    assert.deepEqual((await poll()).deliveries, []);
+    await dialog.getByRole('button', { name: 'Cancel handoff' }).click();
+    await expect(dialog).toBeHidden();
     await editor.fill('<p>unsaved</p>');
     await expect(open).toHaveCount(0);
     assert.deepEqual(errors, []);
@@ -287,6 +413,8 @@ export async function checkHandoff({
       cancelled: true,
       retriedSameDelivery: true,
       receiptOnly: true,
+      reconnectedExpiredSource: true,
+      restagedAfterExplicitSelection: true,
     };
   } finally {
     await context.close();

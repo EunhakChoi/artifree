@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { MouseEvent } from 'react';
+import { ArtifreeApiError } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Handoff, HandoffSelection } from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -39,6 +40,7 @@ export function HandoffDialog({
   const [handoff, setHandoff] = useState<Handoff>();
   const [busy, setBusy] = useState(false);
   const [sendUncertain, setSendUncertain] = useState(false);
+  const [stageExpired, setStageExpired] = useState(false);
   const [error, setError] = useState<string>();
   const [statusAttempt, setStatusAttempt] = useState(0);
   const sessions = useRequest(`agent-sessions:${attempt}`, (signal) =>
@@ -107,7 +109,18 @@ export function HandoffDialog({
       setWorkspace(connection);
       setHandoff(result);
     } catch (failure: unknown) {
-      setError(`Could not stage the selection: ${describeFailure(failure)}`);
+      if (
+        failure instanceof ArtifreeApiError &&
+        failure.status === 404 &&
+        failure.code === 'runtime_session_expired'
+      ) {
+        setStageExpired(true);
+        setError(
+          'The workspace connection expired before staging. Cancel and select the source again to reconnect.',
+        );
+      } else {
+        setError(`Could not stage the selection: ${describeFailure(failure)}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -309,7 +322,7 @@ export function HandoffDialog({
               >
                 Cancel
               </Button>
-              {agent !== undefined && intent.trim() !== '' ? (
+              {!stageExpired && agent !== undefined && intent.trim() !== '' ? (
                 <Button type="button" onClick={(event) => void stage(event)}>
                   Stage selection
                 </Button>
