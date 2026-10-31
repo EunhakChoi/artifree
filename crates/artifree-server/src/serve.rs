@@ -13,13 +13,14 @@ use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
 use crate::preview;
+use crate::web::WebAssets;
 
 /// Default API address; loopback only.
 pub const DEFAULT_API_ADDRESS: &str = "127.0.0.1:7410";
 /// Default preview content address; loopback only.
 pub const DEFAULT_CONTENT_ADDRESS: &str = "127.0.0.1:7411";
 /// Default CSP `frame-ancestors`: web UIs on loopback.
-pub const DEFAULT_FRAME_ANCESTORS: &str = "http://127.0.0.1:* http://localhost:*";
+pub const DEFAULT_FRAME_ANCESTORS: &str = "http://127.0.0.1:* http://localhost:* http://[::1]:*";
 /// Default preview link lifetime.
 pub const DEFAULT_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
 /// Longest accepted preview link lifetime. Links are bearer credentials, and
@@ -31,6 +32,8 @@ pub const MAX_PREVIEW_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct ServeOptions {
     /// Directory holding the database and access token.
     pub data_dir: PathBuf,
+    /// Directory holding production web assets to serve alongside the API.
+    pub web_dir: Option<PathBuf>,
     /// API listen address. Port 0 picks a free port.
     pub api_address: SocketAddr,
     /// Preview content listen address. Port 0 picks a free port.
@@ -53,6 +56,8 @@ pub struct ServeOptions {
 pub struct Ready {
     /// Base URL of the API.
     pub api_url: String,
+    /// Base URL of the web workspace, if web assets are served.
+    pub web_url: Option<String>,
     /// Origin of preview content.
     pub content_origin: String,
     /// File holding the access token.
@@ -97,18 +102,29 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
                 change_streams: options.change_streams,
             },
         )?;
+        let web_assets = options.web_dir.as_deref().map(WebAssets::new).transpose()?;
+        let web_url = if web_assets.is_some() {
+            Some(api_url.clone())
+        } else {
+            None
+        };
         on_ready(&Ready {
             api_url,
+            web_url,
             content_origin,
             token_file,
         });
         let streams = state.clone();
-        let api_server =
-            axum::serve(api, http::router(state.clone())).with_graceful_shutdown(async move {
-                shutdown_signal().await;
-                // Open change streams would otherwise keep the server running.
-                streams.close_streams();
-            });
+        let api_server = axum::serve(
+            api,
+            http::router_with_web(state.clone(), web_assets)
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Open change streams would otherwise keep the server running.
+            streams.close_streams();
+        });
         let content_server =
             axum::serve(content, preview::router(state)).with_graceful_shutdown(shutdown_signal());
         tokio::try_join!(

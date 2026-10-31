@@ -10,7 +10,7 @@
 )]
 
 use std::io::Write;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -53,12 +53,15 @@ fn run() -> Result<(), String> {
         [command, options @ ..] if command == "serve" => {
             let options = parse_serve(options)?;
             serve::run(options, |ready| {
-                let line = serde_json::json!({
+                let mut line = serde_json::json!({
                     "event": "ready",
                     "api_url": ready.api_url,
                     "content_origin": ready.content_origin,
                     "token_file": ready.token_file,
                 });
+                if let Some(ref web_url) = ready.web_url {
+                    line["web_url"] = serde_json::json!(web_url);
+                }
                 println!("{line}");
                 // A supervisor waits for this line; a failed flush only delays it.
                 if std::io::stdout().flush().is_err() {
@@ -72,10 +75,12 @@ fn run() -> Result<(), String> {
 
 fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     let mut data_dir = None;
-    let mut api_address = serve::DEFAULT_API_ADDRESS.to_owned();
-    let mut content_address = serve::DEFAULT_CONTENT_ADDRESS.to_owned();
-    let mut content_origin = None;
-    let mut frame_ancestors = serve::DEFAULT_FRAME_ANCESTORS.to_owned();
+    let mut cli_web_dir = None;
+    let mut cli_lan = None;
+    let mut explicit_api_listen = None;
+    let mut explicit_content_listen = None;
+    let mut explicit_content_origin = None;
+    let mut explicit_frame_ancestors = None;
     let mut preview_ttl = serve::DEFAULT_PREVIEW_TTL;
     let mut limits = RequestLimits::default();
     let mut change_streams = changes::DEFAULT_STREAMS_PER_ACTOR;
@@ -89,10 +94,12 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         };
         match flag.as_str() {
             "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
-            "--api-listen" => api_address = value()?,
-            "--content-listen" => content_address = value()?,
-            "--content-origin" => content_origin = Some(value()?),
-            "--frame-ancestors" => frame_ancestors = value()?,
+            "--web-dir" => cli_web_dir = Some(PathBuf::from(value()?)),
+            "--lan" => cli_lan = Some(value()?),
+            "--api-listen" => explicit_api_listen = Some(value()?),
+            "--content-listen" => explicit_content_listen = Some(value()?),
+            "--content-origin" => explicit_content_origin = Some(value()?),
+            "--frame-ancestors" => explicit_frame_ancestors = Some(value()?),
             "--preview-ttl-seconds" => {
                 let range = || {
                     format!(
@@ -117,21 +124,108 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             }
         }
     }
+
+    let explicit_web_dir = match cli_web_dir {
+        Some(dir) => Some(dir),
+        None => std::env::var("ARTIFREE_WEB_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
+    };
+
+    let explicit_lan = match cli_lan {
+        Some(lan) => Some(lan),
+        None => std::env::var("ARTIFREE_LAN").ok().filter(|s| !s.is_empty()),
+    };
+
+    let lan_ip: Option<IpAddr> = match explicit_lan {
+        Some(val) => {
+            let ip: IpAddr = val
+                .parse()
+                .map_err(|_| format!("--lan must be an IP address (IPv4 or IPv6), got {val:?}"))?;
+            Some(ip)
+        }
+        None => None,
+    };
+
+    let (default_api, default_content, default_origin) = resolve_lan_defaults(lan_ip);
+
+    let api_str = explicit_api_listen.unwrap_or(default_api);
+    let content_str = explicit_content_listen.clone().unwrap_or(default_content);
+    let resolved_content_origin = match explicit_content_origin {
+        Some(origin) => Some(origin),
+        None => {
+            if explicit_content_listen.is_some() {
+                None
+            } else {
+                default_origin
+            }
+        }
+    };
+
+    let frame_ancestors = derive_frame_ancestors(explicit_frame_ancestors, &api_str);
+
     let address = |flag: &str, value: &str| {
         value
             .parse::<SocketAddr>()
             .map_err(|_| format!("{flag} must be an IP address and port, such as 127.0.0.1:7410."))
     };
+
     Ok(ServeOptions {
         data_dir: data_dir.ok_or("serve requires --data-dir <directory>.")?,
-        api_address: address("--api-listen", &api_address)?,
-        content_address: address("--content-listen", &content_address)?,
-        content_origin,
+        web_dir: explicit_web_dir,
+        api_address: address("--api-listen", &api_str)?,
+        content_address: address("--content-listen", &content_str)?,
+        content_origin: resolved_content_origin,
         frame_ancestors,
         preview_ttl,
         limits,
         change_streams,
     })
+}
+
+/// Resolves default listen addresses and preview origin for a given optional LAN IP.
+fn resolve_lan_defaults(lan_ip: Option<IpAddr>) -> (String, String, Option<String>) {
+    match lan_ip {
+        Some(ip) => {
+            let formatted_ip = if ip.is_ipv6() {
+                format!("[{ip}]")
+            } else {
+                format!("{ip}")
+            };
+            (
+                format!("{formatted_ip}:7410"),
+                format!("{formatted_ip}:7411"),
+                Some(format!("http://{formatted_ip}:7411")),
+            )
+        }
+        None => (
+            serve::DEFAULT_API_ADDRESS.to_owned(),
+            serve::DEFAULT_CONTENT_ADDRESS.to_owned(),
+            None,
+        ),
+    }
+}
+
+/// Derives CSP frame-ancestors based on explicit setting or the API listener address.
+fn derive_frame_ancestors(explicit: Option<String>, api_address: &str) -> String {
+    if let Some(ancestors) = explicit {
+        return ancestors;
+    }
+    let Ok(addr) = api_address.parse::<SocketAddr>() else {
+        return serve::DEFAULT_FRAME_ANCESTORS.to_owned();
+    };
+    let ip = addr.ip();
+    if ip.is_loopback() {
+        serve::DEFAULT_FRAME_ANCESTORS.to_owned()
+    } else {
+        let formatted_ip = if ip.is_ipv6() {
+            format!("[{ip}]")
+        } else {
+            format!("{ip}")
+        };
+        format!("http://{formatted_ip}:* {}", serve::DEFAULT_FRAME_ANCESTORS)
+    }
 }
 
 /// A request limit: a whole number from 1 to 100000.
@@ -159,6 +253,8 @@ Options:
   --data-dir <dir>              SQLite database and access token (required).
                                 On Unix it is created with mode 700, and a
                                 directory other users can access is refused.
+  --web-dir <dir>               Directory holding production web assets (or ARTIFREE_WEB_DIR)
+  --lan <ip>                    Bind listeners to explicit LAN IP (or ARTIFREE_LAN)
   --api-listen <addr:port>      API address [default: {api}]
   --content-listen <addr:port>  Preview address [default: {content}]
   --content-origin <origin>     Public preview origin, if proxied

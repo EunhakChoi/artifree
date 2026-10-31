@@ -24,22 +24,25 @@ pins its tested Rust toolchain in `rust-toolchain.toml`.
 ```sh
 npm ci
 npm run build
-cargo run -p artifree-server -- serve --data-dir .artifree/data
+cargo run -p artifree-server -- serve --data-dir .artifree/data --web-dir apps/web/dist
 ```
 
 The server prints one JSON readiness line with the API URL (default
-`http://127.0.0.1:7410`), the preview origin (`http://127.0.0.1:7411`), and the
-token file. On Unix the server creates the data directory readable only by
-you and refuses an existing one that other users can access. Keep it running
-and, in another terminal:
+`http://127.0.0.1:7410`), the web workspace URL (`web_url`), the preview origin
+(`http://127.0.0.1:7411`), and the token file. To make the server accessible
+across your local network, specify `--lan <ip>` (e.g. `--lan 192.168.1.100`).
+On Unix the server creates the data directory readable only by you and refuses
+an existing one that other users can access.
+
+Open `http://127.0.0.1:7410` (or the reported `web_url`) and paste the token from
+`.artifree/data/access-token`. Alternatively, for frontend development with HMR:
 
 ```sh
 npm run dev
 ```
 
-Open the URL printed by Vite and paste the token from
-`.artifree/data/access-token`. Vite forwards `/v1` to the API
-(`ARTIFREE_API_URL` overrides the target). Agents and scripts use the CLI:
+Vite forwards `/v1` to the API (`ARTIFREE_API_URL` overrides the target).
+Agents and scripts use the CLI:
 
 ```sh
 export ARTIFREE_TOKEN_FILE=.artifree/data/access-token
@@ -48,6 +51,9 @@ node apps/cli/dist/main.js artifact save <id> --base 1 --put index.html=./site/i
 node apps/cli/dist/main.js artifact preview <id>
 node apps/cli/dist/main.js artifact --help
 ```
+
+The CLI also supports connection profiles in `artifree-profiles.json` or
+`~/.artifree/profiles.json` via `--profile <name>` (or `ARTIFREE_PROFILE`).
 
 Results are JSON on stdout; failures go to stderr with exit code 1 (API) or 2
 (usage). A save names its base revision and fails with `revision_conflict` if

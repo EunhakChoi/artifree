@@ -10,12 +10,13 @@
 //! These tools are for agents, separate from the metadata-only runtime
 //! bridge of an opted-in workspace preview.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use artifree_contracts::api::{
     CommitResponse, ContentEncoding, CreateArtifactRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
-    SaveRevisionRequest, UpdateArtifactRequest,
+    DuplicateArtifactResponse, ErrorCode, ErrorResponse, ListArtifactsQuery,
+    RestoreRevisionRequest, SaveRevisionRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, CreateArtifactArguments,
@@ -27,7 +28,11 @@ use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::ActorId;
 use axum::Router;
+use axum::extract::{ConnectInfo, Request};
+use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use rmcp::model::{
@@ -75,7 +80,31 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
         Arc::new(NeverSessionManager::default()),
         config,
     );
-    Router::new().route_service(MCP_PATH, service)
+    Router::new()
+        .route_service(MCP_PATH, service)
+        .layer(middleware::from_fn(enforce_loopback_peer))
+}
+
+/// Enforces that requests to `/mcp` originate from a loopback peer socket address.
+///
+/// When serving over TCP via `into_make_service_with_connect_info`, Axum attaches
+/// `ConnectInfo<SocketAddr>` representing the remote peer TCP address. If a remote
+/// LAN client connects and attempts to forge `Host: 127.0.0.1:7410`, its peer socket IP
+/// is not loopback, so this middleware rejects it with `403 Forbidden`.
+async fn enforce_loopback_peer(request: Request, next: Next) -> Response {
+    let is_remote = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| !peer.ip().is_loopback());
+    if is_remote {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "MCP is only accessible from loopback",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 /// The MCP server for one request.
