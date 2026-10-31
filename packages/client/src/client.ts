@@ -715,12 +715,17 @@ export class ArtifreeClient {
       if (this.runtimeClosing || this.runtimeCloseAttempt !== closeAttempt)
         throw connectionReplaced();
       if (!sessionExpired(error)) throw error;
-      await this.recoverRuntimeSession(session);
-      options.signal?.throwIfAborted();
-      if (this.runtimeClosing || this.runtimeCloseAttempt !== closeAttempt)
-        throw connectionReplaced();
-      session = this.runtimeSessionId;
-      sessions = await request(session);
+      try {
+        await this.recoverRuntimeSession(session);
+        options.signal?.throwIfAborted();
+        if (this.runtimeClosing || this.runtimeCloseAttempt !== closeAttempt)
+          throw connectionReplaced();
+        session = this.runtimeSessionId;
+        sessions = await request(session);
+      } catch (retryError: unknown) {
+        options.signal?.throwIfAborted();
+        throw retryError;
+      }
     }
     options.signal?.throwIfAborted();
     if (

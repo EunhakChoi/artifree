@@ -472,6 +472,24 @@ export async function checkEditor({
     ).toBeVisible();
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(file('main.css')).toHaveCount(0);
+    // A reset's metadata read can finish after the dialog closes. These
+    // actions transition out of their disabled opacity; measure the usable,
+    // settled workspace rather than the middle of that transition.
+    const pin = workspace.getByRole('button', { name: 'Pin', exact: true });
+    const renameArtifact = workspace.getByRole('button', {
+      name: 'Rename',
+      exact: true,
+    });
+    const download = workspace.getByRole('button', {
+      name: 'Download revision 6',
+      exact: true,
+    });
+    await expect(pin).toBeEnabled();
+    await expect(renameArtifact).toBeEnabled();
+    await expect(download).toBeEnabled();
+    await expect(pin).toHaveCSS('opacity', '1');
+    await expect(renameArtifact).toHaveCSS('opacity', '1');
+    await expect(download).toHaveCSS('opacity', '1');
     await checkAccessibility('editor-replaced', tab);
     assert.deepEqual(
       (await api(server, 'GET', `/v1/artifacts/${id}/revisions`)).revisions.map(
