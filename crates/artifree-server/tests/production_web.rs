@@ -31,6 +31,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_limits(RequestLimits::default())
+    }
+
+    fn with_limits(limits: RequestLimits) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_dir =
@@ -65,7 +69,7 @@ impl Harness {
             content_origin: "http://127.0.0.1:7411".to_string(),
             preview_ttl: Duration::from_secs(900),
             frame_ancestors: serve::DEFAULT_FRAME_ANCESTORS.to_string(),
-            limits: RequestLimits::default(),
+            limits,
             change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
         };
 
@@ -415,6 +419,36 @@ async fn mcp_loopback_policy_is_enforced_even_in_lan_setup() -> TestResult {
         ))?;
     let (status_host, _, _) = harness.send(host_req).await?;
     assert_eq!(status_host, StatusCode::FORBIDDEN);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn unmatched_api_routes_are_subject_to_admission_limits() -> TestResult {
+    let limits = RequestLimits {
+        per_minute: 1,
+        burst: 1,
+        concurrent: 10,
+    };
+    let harness = Harness::with_limits(limits);
+
+    // 1. First unmatched API route succeeds in reaching admission, returning 404 Not Found
+    let req1 = Request::get("/v1/nonexistent-route-1")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .body(Body::empty())?;
+    let (status1, _, body1) = harness.send(req1).await?;
+    assert_eq!(status1, StatusCode::NOT_FOUND);
+    let val1: Value = serde_json::from_slice(&body1)?;
+    assert_eq!(val1["error"]["code"], "not_found");
+
+    // 2. Second request immediately exceeds the burst of 1, so admission refuses with 429 RateLimited
+    let req2 = Request::get("/v1/nonexistent-route-2")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .body(Body::empty())?;
+    let (status2, _, body2) = harness.send(req2).await?;
+    assert_eq!(status2, StatusCode::TOO_MANY_REQUESTS);
+    let val2: Value = serde_json::from_slice(&body2)?;
+    assert_eq!(val2["error"]["code"], "rate_limited");
 
     Ok(())
 }

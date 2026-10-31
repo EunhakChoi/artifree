@@ -267,11 +267,10 @@ pub fn router_with_web(state: AppState, web_assets: Option<crate::web::WebAssets
         let assets = fallback_assets.clone();
         async move {
             let path = req.uri().path();
-            if path.starts_with("/v1/") || path == "/v1" {
-                if let Err(auth_error) = state.authenticate(req.headers()) {
-                    return auth_error.into_response();
-                }
-                return no_such_route().into_response();
+            let is_api = path.starts_with("/v1/") || path == "/v1" || path.starts_with("/mcp");
+            if is_api || assets.is_none() {
+                return run_admitted(&state, req, |_| async { no_such_route().into_response() })
+                    .await;
             }
             if let Some(assets) = assets {
                 assets.handle(&req)
@@ -354,7 +353,11 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
 /// Authenticates the request, then admits it under the actor's limits. A
 /// refused request never reaches the application, so this attempt commits
 /// nothing; its idempotency key is free unless an earlier attempt used it.
-async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+async fn run_admitted<F, Fut>(state: &AppState, mut request: Request, action: F) -> Response
+where
+    F: FnOnce(Request) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Response> + Send + 'static,
+{
     let actor = match state.authenticate(request.headers()) {
         Ok(actor) => actor,
         Err(error) => return error.into_response(),
@@ -362,7 +365,7 @@ async fn admit(State(state): State<AppState>, mut request: Request, next: Next) 
     let permit = match state.shared.limiter.admit(&actor) {
         Ok(permit) => permit,
         Err(refusal) => {
-            discard(&state, request.into_body()).await;
+            discard(state, request.into_body()).await;
             return refused(refusal);
         }
     };
@@ -371,7 +374,7 @@ async fn admit(State(state): State<AppState>, mut request: Request, next: Next) 
     // handler finishes. A client that disconnects cancels only this wait, so
     // it cannot free the slot while storage work continues.
     let task = tokio::spawn(async move {
-        let response = next.run(request).await;
+        let response = action(request).await;
         drop(permit);
         response
     });
@@ -383,6 +386,15 @@ async fn admit(State(state): State<AppState>, mut request: Request, next: Next) 
         )
         .into_response()
     })
+}
+
+async fn admit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    run_admitted(
+        &state,
+        request,
+        move |req| async move { next.run(req).await },
+    )
+    .await
 }
 
 /// How long a refused request's body is read before the refusal is sent.

@@ -90,4 +90,43 @@ test('CLI profile and connection resolution precedence', async (t) => {
       },
     );
   }
+
+  // 6. Non-existent profile requested via --profile throws UsageError
+  {
+    await assert.rejects(
+      async () => {
+        await resolveConnection({
+          config: configPath,
+          profile: 'nonexistent',
+        });
+      },
+      {
+        name: 'UsageError',
+        message: /Profile "nonexistent" not found/i,
+      },
+    );
+  }
+
+  // 7. Non-existent default profile throws UsageError
+  {
+    const brokenConfigPath = join(tempDir, 'broken-default.json');
+    await writeFile(
+      brokenConfigPath,
+      JSON.stringify({
+        default_profile: 'missing',
+        profiles: {
+          prod: { server: 'http://127.0.0.1:7410', token: 'prod-token' },
+        },
+      }),
+    );
+    await assert.rejects(
+      async () => {
+        await resolveConnection({ config: brokenConfigPath });
+      },
+      {
+        name: 'UsageError',
+        message: /Profile "missing" not found/i,
+      },
+    );
+  }
 });

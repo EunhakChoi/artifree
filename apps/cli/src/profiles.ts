@@ -80,14 +80,28 @@ async function loadProfileConfig(options: ConnectionCliOptions): Promise<{
   }
 
   const configDir = dirname(configPath);
-  const profileName =
-    options.profile ??
-    process.env.ARTIFREE_PROFILE ??
-    parsed.default_profile ??
-    'default';
+  const explicitProfile = options.profile ?? process.env.ARTIFREE_PROFILE;
 
-  if (parsed.profiles && profileName in parsed.profiles) {
-    return { config: parsed.profiles[profileName], configDir };
+  if (
+    parsed.profiles !== undefined &&
+    parsed.profiles !== null &&
+    typeof parsed.profiles === 'object' &&
+    !Array.isArray(parsed.profiles)
+  ) {
+    const profileName = explicitProfile ?? parsed.default_profile ?? 'default';
+    const profile = parsed.profiles[profileName];
+    if (profile === undefined) {
+      throw new UsageError(
+        `Profile "${profileName}" not found in configuration file ${configPath}`,
+      );
+    }
+    return { config: profile, configDir };
+  }
+
+  if (explicitProfile !== undefined) {
+    throw new UsageError(
+      `Profile "${explicitProfile}" not found in configuration file ${configPath}`,
+    );
   }
 
   if (
