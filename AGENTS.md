@@ -11,6 +11,9 @@ Read `docs/roadmap.md` before starting the next feature. It records PR-sized
 scope, dependencies, acceptance checks, and the requirement to trace relevant
 analysis back to original evidence. Keep private evidence outside public files.
 
+Follow [the contribution guide](.github/CONTRIBUTING.md) for the verification
+workflow and PR review rules, and use `.github/PULL_REQUEST_TEMPLATE.md`.
+
 ## Decisions and boundaries
 
 - Presentation code is TypeScript. Logic code is Rust.
