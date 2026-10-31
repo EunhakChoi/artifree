@@ -10,6 +10,7 @@
 //! behind the same token.
 
 use std::future::poll_fn;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,7 +32,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -99,7 +100,9 @@ impl AppState {
     /// a limit is zero.
     pub fn new(store: SqliteStore, token: AccessToken, settings: Settings) -> Result<Self, String> {
         let mut settings = settings;
-        settings.content_origin = normalize_origin(&settings.content_origin);
+        if !settings.content_origin.is_empty() {
+            settings.content_origin = normalize_origin(&settings.content_origin)?;
+        }
         let owner: ActorId = "local"
             .parse()
             .map_err(|error| format!("built-in owner actor: {error}"))?;
@@ -490,11 +493,25 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
         .into_response();
     };
 
-    let normalized_origin = normalize_origin(origin_str);
-    if origin_str == "null"
-        || normalized_origin == "null"
-        || normalized_origin == state.shared.settings.content_origin
-    {
+    if origin_str == "null" {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "requests from preview origin or null origin are forbidden",
+        )
+        .into_response();
+    }
+
+    let Ok(normalized_origin) = normalize_origin(origin_str) else {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "origin header is not a valid HTTP or HTTPS origin",
+        )
+        .into_response();
+    };
+
+    if normalized_origin == state.shared.settings.content_origin {
         return ApiError::new(
             StatusCode::FORBIDDEN,
             ErrorCode::InvalidRequest,
@@ -535,42 +552,63 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
     response
 }
 
-/// Normalizes an origin URL into canonical `<scheme>://<host>[:<port>]` format.
-#[must_use]
-pub fn normalize_origin(raw: &str) -> String {
-    let trimmed = raw.trim().trim_end_matches('/');
-    let Some((scheme, rest)) = trimmed.split_once("://") else {
-        return trimmed.to_ascii_lowercase();
+/// Normalizes an origin URL into canonical `<scheme>://<host>[:<port>]` format
+/// per standard URL origin serialization (RFC 5952 canonical compressed IPv6 and omitted default ports).
+///
+/// # Errors
+/// Returns an error if `raw` is not a valid absolute HTTP or HTTPS URL, or represents an opaque origin.
+pub fn normalize_origin(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("origin must not be empty".to_owned());
+    }
+    let uri: Uri = trimmed
+        .parse()
+        .map_err(|e| format!("invalid URL {raw:?}: {e}"))?;
+
+    let Some(scheme) = uri.scheme_str() else {
+        return Err(format!("origin {raw:?} must include an absolute scheme"));
     };
     let scheme_lower = scheme.to_ascii_lowercase();
-    let authority = rest.split('/').next().unwrap_or(rest);
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
+    if scheme_lower != "http" && scheme_lower != "https" {
+        return Err(format!(
+            "origin {raw:?} must use http or https scheme, got {scheme:?}"
+        ));
+    }
 
-    let (host, port) = if authority.starts_with('[') {
-        if let Some(close_idx) = authority.find(']') {
-            let host_part = &authority[..=close_idx];
-            let after = &authority[close_idx + 1..];
-            let port_part = if let Some(p) = after.strip_prefix(':') {
-                p.parse::<u16>().ok()
-            } else {
-                None
-            };
-            (host_part, port_part)
-        } else {
-            (authority, None)
-        }
-    } else if let Some((h, p)) = authority.rsplit_once(':') {
-        (h, p.parse::<u16>().ok())
-    } else {
-        (authority, None)
+    let Some(authority) = uri.authority() else {
+        return Err(format!("origin {raw:?} must include an authority/host"));
     };
 
-    let host_lower = host.to_ascii_lowercase();
-    match (scheme_lower.as_str(), port) {
-        ("http", Some(80)) | ("https", Some(443)) | (_, None) => {
-            format!("{scheme_lower}://{host_lower}")
-        }
-        (_, Some(p)) => format!("{scheme_lower}://{host_lower}:{p}"),
+    let host = authority.host();
+    if host.is_empty() {
+        return Err(format!("origin {raw:?} host must not be empty"));
+    }
+
+    let canonical_host =
+        if let Some(v6_str) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            let ip: Ipv6Addr = v6_str
+                .parse()
+                .map_err(|e| format!("invalid IPv6 host {host:?} in origin {raw:?}: {e}"))?;
+            format!("[{ip}]")
+        } else if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            ip.to_string()
+        } else {
+            host.to_ascii_lowercase()
+        };
+
+    let port = authority.port_u16();
+    let is_default_port = matches!(
+        (scheme_lower.as_str(), port),
+        ("http", Some(80)) | ("https", Some(443)) | (_, None)
+    );
+
+    if is_default_port {
+        Ok(format!("{scheme_lower}://{canonical_host}"))
+    } else if let Some(p) = port {
+        Ok(format!("{scheme_lower}://{canonical_host}:{p}"))
+    } else {
+        Ok(format!("{scheme_lower}://{canonical_host}"))
     }
 }
 

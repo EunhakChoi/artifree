@@ -134,3 +134,104 @@ test('production web assets serve alongside API with SPA fallback and CORS prote
     await server.stop();
   }
 });
+
+test('runtime replacement of index.html outside web root is rejected with 404', async () => {
+  const webDir = join(scratch, 'swap-dist');
+  const dataDir = join(scratch, 'swap-data');
+  const outsideSecret = join(scratch, 'external-secret.txt');
+  await mkdir(webDir, { recursive: true });
+  await writeFile(join(webDir, 'index.html'), '<p>original safe</p>', 'utf8');
+  await writeFile(outsideSecret, 'SYNTHETIC_EXTERNAL_SECRET', 'utf8');
+
+  const server = await startServer(binary, dataDir, ['--web-dir', webDir]);
+  try {
+    const { unlink, symlink } = await import('node:fs/promises');
+    await unlink(join(webDir, 'index.html'));
+    await symlink(outsideSecret, join(webDir, 'index.html'));
+
+    const rootRes = await fetch(`${server.web_url}/`);
+    assert.equal(rootRes.status, 404);
+
+    const directRes = await fetch(`${server.web_url}/index.html`);
+    assert.equal(directRes.status, 404);
+
+    const spaRes = await fetch(`${server.web_url}/artifacts/test`);
+    assert.equal(spaRes.status, 404);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('unspecified lan addresses are rejected and bracketed lan is accepted', async () => {
+  const { spawnSync } = await import('node:child_process');
+
+  // 1. Unspecified IPv4 0.0.0.0
+  const v4Result = spawnSync(
+    binary,
+    ['serve', '--data-dir', join(scratch, 'unused-data-1'), '--lan', '0.0.0.0'],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.notEqual(v4Result.status, 0);
+  assert.match(v4Result.stderr, /not an unspecified address \(0\.0\.0\.0\)/);
+
+  // 2. Unspecified IPv6 ::
+  const v6Result = spawnSync(
+    binary,
+    ['serve', '--data-dir', join(scratch, 'unused-data-2'), '--lan', '::'],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.notEqual(v6Result.status, 0);
+  assert.match(v6Result.stderr, /not an unspecified address \(::\)/);
+
+  // 3. Unspecified bracketed IPv6 [::]
+  const v6BracketResult = spawnSync(
+    binary,
+    ['serve', '--data-dir', join(scratch, 'unused-data-3'), '--lan', '[::]'],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.notEqual(v6BracketResult.status, 0);
+  assert.match(v6BracketResult.stderr, /not an unspecified address \(\[::\]\)/);
+
+  // 4. Bracketed loopback IPv6 [::1] is accepted
+  const bracketV6Server = await startServer(
+    binary,
+    join(scratch, 'bracket-v6-data'),
+    [
+      '--lan',
+      '[::1]',
+      '--api-listen',
+      '[::1]:0',
+      '--content-listen',
+      '[::1]:0',
+    ],
+  );
+  try {
+    assert.ok(bracketV6Server.api_url);
+    assert.match(bracketV6Server.api_url, /http:\/\/\[::1\]:\d+/);
+    assert.match(bracketV6Server.content_origin, /http:\/\/\[::1\]:\d+/);
+  } finally {
+    await bracketV6Server.stop();
+  }
+});
+
+test('expanded IPv6 content-origin canonicalization matches compressed browser origin', async () => {
+  const dataDir = join(scratch, 'ipv6-canonical-data');
+  const server = await startServer(binary, dataDir, [
+    '--content-origin',
+    'http://[0:0:0:0:0:0:0:1]:80/',
+  ]);
+  try {
+    // Browser sends canonical WHATWG origin http://[::1]
+    const preflight = await fetch(`${server.api_url}/v1/artifacts`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'http://[::1]',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    // Server must reject with 403 Forbidden because content origin canonicalized to http://[::1]
+    assert.equal(preflight.status, 403);
+  } finally {
+    await server.stop();
+  }
+});

@@ -126,35 +126,16 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             .map(PathBuf::from),
     };
 
-    let explicit_lan = match cli_lan {
-        Some(lan) => Some(lan),
-        None => std::env::var("ARTIFREE_LAN").ok().filter(|s| !s.is_empty()),
-    };
-
-    let lan_ip: Option<IpAddr> = match explicit_lan {
-        Some(val) => {
-            let ip: IpAddr = val
-                .parse()
-                .map_err(|_| format!("--lan must be an IP address (IPv4 or IPv6), got {val:?}"))?;
-            Some(ip)
-        }
-        None => None,
-    };
-
+    let lan_ip = resolve_lan_ip(cli_lan)?;
     let (default_api, default_content, default_origin) = resolve_lan_defaults(lan_ip);
 
     let api_str = explicit_api_listen.unwrap_or(default_api);
     let content_str = explicit_content_listen.clone().unwrap_or(default_content);
-    let resolved_content_origin = match explicit_content_origin {
-        Some(origin) => Some(origin),
-        None => {
-            if explicit_content_listen.is_some() {
-                None
-            } else {
-                default_origin
-            }
-        }
-    };
+    let resolved_content_origin = resolve_content_origin(
+        explicit_content_origin,
+        explicit_content_listen.is_some(),
+        default_origin,
+    )?;
 
     let frame_ancestors = derive_frame_ancestors(explicit_frame_ancestors, &api_str);
 
@@ -194,6 +175,57 @@ fn parse_preview_ttl(value: &str) -> Result<Duration, String> {
         return Err(range());
     }
     Ok(ttl)
+}
+
+/// Resolves an optional LAN IP address from CLI flag or environment variable.
+fn resolve_lan_ip(cli_lan: Option<String>) -> Result<Option<IpAddr>, String> {
+    let explicit_lan = match cli_lan {
+        Some(lan) => Some(lan),
+        None => std::env::var("ARTIFREE_LAN").ok().filter(|s| !s.is_empty()),
+    };
+    match explicit_lan {
+        Some(val) => {
+            let unbracketed = val
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(&val);
+            let ip: IpAddr = unbracketed
+                .parse()
+                .map_err(|_| format!("--lan must be an IP address (IPv4 or IPv6), got {val:?}"))?;
+            if ip.is_unspecified() {
+                return Err(format!(
+                    "--lan must be a specific IP address (IPv4 or IPv6), not an unspecified address ({val}). Use --api-listen and --content-listen to bind to wildcard addresses."
+                ));
+            }
+            Ok(Some(ip))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Resolves preview content origin, validating and normalizing explicit origin.
+fn resolve_content_origin(
+    explicit: Option<String>,
+    explicit_content_listen: bool,
+    default_origin: Option<String>,
+) -> Result<Option<String>, String> {
+    match explicit {
+        Some(origin) => {
+            let canon = artifree_server::http::normalize_origin(&origin).map_err(|e| {
+                format!(
+                    "--content-origin must be a valid HTTP or HTTPS origin, got {origin:?}: {e}"
+                )
+            })?;
+            Ok(Some(canon))
+        }
+        None => {
+            if explicit_content_listen {
+                Ok(None)
+            } else {
+                Ok(default_origin)
+            }
+        }
+    }
 }
 
 /// Resolves an optional loopback listener for MCP peer isolation in LAN mode.
@@ -319,4 +351,82 @@ running server.",
         concurrent = RequestLimits::default().concurrent,
         streams = changes::DEFAULT_STREAMS_PER_ACTOR,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn unspecified_lan_is_rejected() {
+        let res_v4 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "0.0.0.0"]));
+        let err_v4 = res_v4.err().unwrap_or_default();
+        assert!(err_v4.contains("not an unspecified address (0.0.0.0)"));
+
+        let res_v6 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "::"]));
+        let err_v6 = res_v6.err().unwrap_or_default();
+        assert!(err_v6.contains("not an unspecified address (::)"));
+
+        let res_v6_bracket = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "[::]"]));
+        let err_v6_bracket = res_v6_bracket.err().unwrap_or_default();
+        assert!(err_v6_bracket.contains("not an unspecified address ([::])"));
+    }
+
+    #[test]
+    fn bracketed_and_unbracketed_lan_are_accepted() -> Result<(), Box<dyn std::error::Error>> {
+        let opts_bracket_v6 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "[::1]"]))
+            .map_err(|e| format!("bracketed loopback: {e}"))?;
+        assert_eq!(opts_bracket_v6.api_address.to_string(), "[::1]:7410");
+        assert_eq!(
+            opts_bracket_v6.content_origin.as_deref(),
+            Some("http://[::1]:7411")
+        );
+
+        let opts_bracket_lan =
+            parse_serve(&args(&["--data-dir", "/tmp", "--lan", "[2001:db8::1]"]))
+                .map_err(|e| format!("bracketed LAN: {e}"))?;
+        assert_eq!(
+            opts_bracket_lan.api_address.to_string(),
+            "[2001:db8::1]:7410"
+        );
+        assert_eq!(
+            opts_bracket_lan.content_origin.as_deref(),
+            Some("http://[2001:db8::1]:7411")
+        );
+
+        let opts_v4 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "192.168.1.50"]))
+            .map_err(|e| format!("LAN IPv4: {e}"))?;
+        assert_eq!(opts_v4.api_address.to_string(), "192.168.1.50:7410");
+        assert_eq!(
+            opts_v4.content_origin.as_deref(),
+            Some("http://192.168.1.50:7411")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn content_origin_validation_and_normalization() -> Result<(), Box<dyn std::error::Error>> {
+        let opts = parse_serve(&args(&[
+            "--data-dir",
+            "/tmp",
+            "--content-origin",
+            "http://[0:0:0:0:0:0:0:1]:80/",
+        ]))
+        .map_err(|e| format!("expanded IPv6 origin: {e}"))?;
+        assert_eq!(opts.content_origin.as_deref(), Some("http://[::1]"));
+
+        let res = parse_serve(&args(&[
+            "--data-dir",
+            "/tmp",
+            "--content-origin",
+            "not-a-valid-url",
+        ]));
+        let err = res.err().unwrap_or_default();
+        assert!(err.contains("--content-origin must be a valid HTTP or HTTPS origin"));
+        Ok(())
+    }
 }

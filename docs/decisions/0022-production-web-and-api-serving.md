@@ -38,22 +38,31 @@ boundaries established in earlier decisions:
 3. **Path traversal and symlink guards.** Asset file resolution canonicalizes
    paths and strictly rejects requests attempting to escape `web_dir`, whether
    via `..` traversal segments or symlinks pointing outside the configured
-   directory.
+   directory. Index resolution dynamically verifies containment on every
+   request so that replacing or symlinking `index.html` outside the web root
+   after server initialization is rejected with 404 Not Found across root
+   (`GET /`), direct (`GET /index.html`), and SPA client routes.
 4. **Default loopback and explicit LAN mode.** The server defaults to loopback
    interfaces (`127.0.0.1:7410` for API, `127.0.0.1:7411` for preview). Explicit
    LAN binding is configured via `--lan <ip>` (or `ARTIFREE_LAN`), supporting
-   both IPv4 and IPv6 addresses. When LAN binding is enabled, a secondary
-   loopback listener is automatically bound so local CLI and agent workflows
-   continue unhindered on `127.0.0.1` (or `[::1]`). If the primary listen
-   address is an unspecified wildcard (`0.0.0.0` or `::`), loopback derivation
-   is skipped to prevent `EADDRINUSE` port collision.
+   both IPv4 and IPv6 addresses (bracketed or unbracketed). `--lan` strictly
+   requires a specific, routable IP address and rejects unspecified wildcard
+   addresses (`0.0.0.0` or `::`), which cannot advertise usable preview origins.
+   Wildcard socket binding remains supported via `--api-listen` and
+   `--content-listen`. When LAN binding is enabled, a secondary loopback
+   listener is automatically bound so local CLI and agent workflows continue
+   unhindered on `127.0.0.1` (or `[::1]`). If the primary listen address is an
+   unspecified wildcard (`0.0.0.0` or `::`), loopback derivation is skipped to
+   prevent `EADDRINUSE` port collision.
 5. **Origin isolation and canonicalization.** The preview origin remains on a
    distinct port (default 7411). When LAN mode is enabled, `frame-ancestors` and
    CORS rules are derived to admit the LAN web origin while preserving IPv4/IPv6
    loopback origins. Both the configured content origin and incoming `Origin`
-   headers are canonicalized (stripping default ports 80/443 and trailing slashes,
-   normalizing scheme and host case) before validation. API CORS rejects `null`
-   and cross-origin requests originating from the preview origin.
+   headers are canonicalized per standard URL origin serialization (RFC 5952
+   canonical compressed IPv6, omitted default ports 80/443, normalized scheme
+   and host case). Invalid origin configurations and opaque origins are
+   rejected at startup and runtime. API CORS rejects `null` and cross-origin
+   requests originating from the preview origin.
 6. **MCP loopback confinement.** Inbound MCP endpoints (`/mcp` and tools) enforce
    loopback peer connection verification (`peer.ip().is_loopback()`). Remote
    network clients requesting MCP tools receive 403 Forbidden, preserving local

@@ -56,7 +56,6 @@ impl Stream for FileStream {
 #[derive(Debug, Clone)]
 pub struct WebAssets {
     root: PathBuf,
-    canonical_index: PathBuf,
 }
 
 impl WebAssets {
@@ -77,7 +76,7 @@ impl WebAssets {
             )
         })?;
 
-        if !canonical_index.starts_with(&canonical_root) {
+        if !canonical_index.starts_with(&canonical_root) || !canonical_index.is_file() {
             return Err(format!(
                 "index.html {} escapes web directory {}",
                 canonical_index.display(),
@@ -87,8 +86,15 @@ impl WebAssets {
 
         Ok(Self {
             root: canonical_root,
-            canonical_index,
         })
+    }
+
+    /// Resolves `index.html` within the web root, verifying containment and regular file status.
+    ///
+    /// Protects against cases where `index.html` is replaced or symlinked outside the web root
+    /// after server initialization.
+    fn resolve_index(&self) -> Option<PathBuf> {
+        self.safe_resolve("index.html").filter(|p| p.is_file())
     }
 
     /// Serves a static file from the web directory or falls back to `index.html`
@@ -103,13 +109,10 @@ impl WebAssets {
 
         // 1. Root index.html request
         if path == "/" || path.is_empty() {
-            return serve_file(
-                &self.canonical_index,
-                "text/html; charset=utf-8",
-                false,
-                is_head,
-            )
-            .await;
+            if let Some(target) = self.resolve_index() {
+                return serve_file(&target, "text/html; charset=utf-8", false, is_head).await;
+            }
+            return StatusCode::NOT_FOUND.into_response();
         }
 
         // 2. Safe relative path traversal check
@@ -131,17 +134,11 @@ impl WebAssets {
 
         // 4. SPA client route fallback: serve index.html for client routes,
         // excluding paths that look like missing static assets or system paths.
-        if is_spa_route(path)
-            && fs::canonicalize(&self.canonical_index)
-                .is_ok_and(|canon| canon.starts_with(&self.root))
-        {
-            return serve_file(
-                &self.canonical_index,
-                "text/html; charset=utf-8",
-                false,
-                is_head,
-            )
-            .await;
+        if is_spa_route(path) {
+            let Some(target) = self.resolve_index() else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            return serve_file(&target, "text/html; charset=utf-8", false, is_head).await;
         }
 
         StatusCode::NOT_FOUND.into_response()
