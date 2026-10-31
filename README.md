@@ -181,7 +181,7 @@ real server, probe the preview sandbox, and exercise keyboard and dialog focus,
 light/dark accessibility, desktop/mobile layouts, and standalone HTML.
 CI also checks Windows, Rust's minimum version, known dependency vulnerabilities,
 licenses, and workflow syntax. See [the quality policy](docs/quality.md) and
-[contributor instructions](CONTRIBUTING.md) for commands and limits.
+[contributor instructions](.github/CONTRIBUTING.md) for commands and limits.
 
 After changing wire DTOs or the scaffold inventory:
 
