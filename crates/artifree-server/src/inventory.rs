@@ -99,9 +99,9 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Agent handoff",
         Layer::Logic,
         "Rust",
-        "crates/artifree-core/src/agent_handoff.rs",
-        ComponentStatus::Planned,
-        "Selection and edit intent delivered to external agent sessions.",
+        "crates/artifree-server/src/handoffs.rs",
+        ComponentStatus::Implemented,
+        "Saved source selection and user intent sent to an explicitly registered MCP inbox; receipt is not model completion.",
     ),
     (
         "storage",

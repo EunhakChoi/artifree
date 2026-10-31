@@ -45,8 +45,8 @@ const notes: Record<string, ModuleNote> = {
     purpose:
       'HTTP와 MCP 요청을 동일한 application command로 전달하는 진입점입니다.',
     exists:
-      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구 11개(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 커밋 변경 피드(GET /v1/changes SSE: cursor 재개·reset·사용자별 stream 수 제한), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
-    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다. Agent handoff는 별도 기능입니다.',
+      'Axum/Tokio HTTP API v1(bearer token, Idempotency-Key, JSON 오류), 같은 token과 공통 operations를 쓰는 MCP Streamable HTTP 도구(/mcp, 공식 rmcp SDK, stateless), HTTP·MCP 합산 사용자별 요청 빈도·동시 실행 제한(429 rate_limited), 커밋 변경 피드(GET /v1/changes SSE: cursor 재개·reset·사용자별 stream 수 제한), 별도 origin의 미리보기 서버. ticket은 짧게 유지되고 요청마다 권한을 다시 확인합니다.',
+    next: '다중 사용자 인증·OAuth와 원격 공개용 Host 정책을 결정합니다.',
   },
   domain: {
     purpose:
@@ -82,8 +82,8 @@ const notes: Record<string, ModuleNote> = {
     purpose:
       '사용자가 선택한 영역과 수정 의도를 외부 agent session으로 전달합니다.',
     exists:
-      '모듈 책임 정의. 내장 agent 실행기나 모델 계정은 필요하지 않습니다.',
-    next: 'agent별 연결 adapter보다 먼저 선택 영역·기준 revision·요청의 공통 형식을 정의합니다.',
+      '저장된 파일의 선택 영역과 수정 의도를 별도로 준비하고, 사용자 확인 뒤 등록된 MCP 세션의 inbox로 전달합니다. 취소와 수신 확인을 구분하며, 수신은 모델 작업 완료를 뜻하지 않습니다.',
+    next: '다른 종류의 agent 연결이나 내장 모델 실행은 이 기능에 포함되지 않습니다.',
   },
   storage: {
     purpose: '메타데이터와 파일 bytes를 환경에 맞게 보관하는 adapter입니다.',
@@ -124,7 +124,7 @@ const notes: Record<string, ModuleNote> = {
     purpose: 'Web과 CLI가 같은 HTTP 계약을 사용하는 client package입니다.',
     exists:
       'fetch 기반 HTTP API v1 client. 응답을 runtime에 검증하고 오류를 code·HTTP status·current revision으로 구분하며, 본문과 무관하게 HTTP 429는 rate_limited입니다. 읽기 요청은 AbortSignal로 취소할 수 있습니다. 변경 피드를 WHATWG 규칙으로 해석하고, 연결 실패·429·5xx에서만 마지막 cursor부터 재연결하며 AbortSignal로 즉시 중단합니다.',
-    next: 'runtime grant와 agent handoff가 구현되면 같은 client 계약에 추가합니다.',
+    next: '새 기능도 같은 client 계약과 응답 검증을 사용합니다.',
   },
 };
 

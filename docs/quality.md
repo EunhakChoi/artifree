@@ -254,6 +254,17 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   acknowledgement, and an unknown grant carried across a view change until a
   confirmed clear fences its delayed request. A connection created after server restart has a fresh ID;
   the tests do not claim multi-user authentication.
+- Source handoff: the real server and official MCP client exercise stage,
+  cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
+  polling, acknowledgement, a missing source followed by another delivery,
+  the created resource's Location, and retrying a confirmed send after source
+  deletion. Rust tests check concurrent cancel and poll, a source lookup held
+  across logout, and send or cancellation while a source check fails. Chromium and Firefox exercise the source editor, trusted
+  user actions, an unconfirmed send retried with the same ID, cancellation,
+  receipt-only status, and the dialog's accessibility. The blocked-status
+  presentation uses an injected HTTP response; the missing-source transition
+  and later delivery use the real MCP/HTTP service. These checks use an MCP
+  client, not a live model performing the requested edit.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
   read the parent page, use storage, open a popup, or reach the API; create,
   save, and reload requests held in flight keep the forms read-only and the
@@ -473,7 +484,7 @@ scaffold's automated accessibility checks cannot establish every accessibility
 requirement. Npm/Cargo advisory scans detect known reports, not all vulnerabilities.
 
 Not yet covered, because the behavior does not exist: multi-user roles and
-revocation, runtime capabilities, publishing, and resource limits for artifact
+revocation, broader runtime capabilities, publishing, and resource limits for artifact
 scripts. Agent runs with Codex and Pi are manual checks, not CI: they need an
 agent account and model calls. The single-owner token is not a multi-user authentication test. The
 crash test kills the process after a commit; it does not simulate power loss
@@ -490,7 +501,7 @@ replay, and content sharing, and the preview module hides tickets and CSP.
 HTTP, CLI, and web share one client contract and one application service.
 
 The remaining diagnostic is that every module hides a design decision: the
-documents, jobs, handoff, models, tools, build, and export modules are still
+documents, jobs, models, tools, build, and export modules are still
 placeholders. The `ArtifactStore` port also deliberately exposes request
 fingerprints, because replay must commit atomically with the revision. Reach
 10/10 by giving each placeholder a narrow behavioral interface only when its

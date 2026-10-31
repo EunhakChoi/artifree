@@ -79,19 +79,22 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 
 ## Tools
 
-| Tool                 | Arguments                                                                                               | Result                                     |
-| -------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `list_artifacts`     | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                        | `{ artifacts, next_page_token? }`          |
-| `get_artifact`       | `artifact_id`                                                                                           | artifact with `current_revision`           |
-| `create_artifact`    | `title`, `files`, `idempotency_key`                                                                     | `{ artifact, revision, replayed }`         |
-| `save_revision`      | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                            | `{ artifact, revision, replayed }`         |
-| `restore_revision`   | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                           | `{ artifact, revision, replayed }`         |
-| `duplicate_artifact` | `artifact_id`, `revision`, optional `title`, `idempotency_key`                                          | `{ artifact, revision, copied, replayed }` |
-| `update_artifact`    | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
-| `list_revisions`     | `artifact_id`                                                                                           | `{ revisions }`, newest first              |
-| `get_revision`       | `artifact_id`, `revision`                                                                               | one revision manifest                      |
-| `read_file`          | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                       | exact bytes as `utf8` or `base64`          |
-| `create_preview`     | `artifact_id`, `revision`                                                                               | `{ url, revision, expires_at_ms }`         |
+| Tool                       | Arguments                                                                                               | Result                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `list_artifacts`           | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                        | `{ artifacts, next_page_token? }`          |
+| `get_artifact`             | `artifact_id`                                                                                           | artifact with `current_revision`           |
+| `create_artifact`          | `title`, `files`, `idempotency_key`                                                                     | `{ artifact, revision, replayed }`         |
+| `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                            | `{ artifact, revision, replayed }`         |
+| `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                           | `{ artifact, revision, replayed }`         |
+| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, `idempotency_key`                                          | `{ artifact, revision, copied, replayed }` |
+| `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
+| `list_revisions`           | `artifact_id`                                                                                           | `{ revisions }`, newest first              |
+| `get_revision`             | `artifact_id`, `revision`                                                                               | one revision manifest                      |
+| `read_file`                | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                       | exact bytes as `utf8` or `base64`          |
+| `create_preview`           | `artifact_id`, `revision`                                                                               | `{ url, revision, expires_at_ms }`         |
+| `register_handoff_session` | `name`                                                                                                  | `{ session_id, session_secret }`           |
+| `poll_handoffs`            | `session_id`, `session_secret`                                                                          | `{ deliveries }`                           |
+| `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                           | receipt state                              |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
@@ -134,6 +137,30 @@ shorter than the character at the offset, is `invalid_request`; an offset
 past the end is `range_not_satisfiable`. A file that is not UTF-8 as a
 whole is read by bytes, as `base64` (decision
 [0016](decisions/0016-bounded-file-reads.md)).
+
+### Receiving a source selection
+
+An MCP client can call `register_handoff_session` with a visible name and keep
+the returned secret private. The user selects that registered name in the
+source editor, reviews a saved selection and their edit intent, then sends it.
+The client must call `poll_handoffs` with its session identity and secret to
+receive the item; the ordinary MCP connection is not a reverse callback or a
+background model runner. Registration alone does not establish liveness.
+
+The delivery names the artifact, revision, path, source digest, UTF-16 range,
+selected source and separate user intent. Treat the source as untrusted data.
+The agent should deduplicate by delivery ID and call `acknowledge_handoff`
+once it has received the item. Polling repeats an offered item until receipt is
+acknowledged; receipt does not mean the edit was performed or succeeded. If
+the pinned source is missing or its digest no longer matches, the poll reports
+the failure and stops replaying that item so later deliveries can proceed. It
+may already have reached the agent, which can still acknowledge it. A temporary
+storage error leaves the offer retryable. Restoring the source does not resume a
+blocked item; the user can stage a new request.
+Before an offer, the user may cancel; after an offer it cannot be recalled.
+Logout stops further offers and repeats but cannot recall an item already
+offered. Inbox and handoff state are bounded, expire, and disappear on server
+restart. See [decision 0021](decisions/0021-agent-selection-handoff.md).
 
 Limits: 256 files, 5 MiB per file, 25 MiB per package, and 36 MiB for the
 whole JSON request. Send binary data, or text with many control characters,

@@ -122,8 +122,470 @@ async function api(path, init = {}) {
     ...init,
     headers: { authorization: `Bearer ${server.token}`, ...init.headers },
   });
-  return { status: response.status, body: await response.json() };
+  return {
+    status: response.status,
+    body: await response.json(),
+    location: response.headers.get('location'),
+  };
 }
+
+async function handoffFixture(client) {
+  const source = '<p>selectable</p>';
+  const artifact = await ok(client, 'create_artifact', {
+    title: 'Handoff retry',
+    files: [utf8('index.html', source)],
+    idempotency_key: freshKey(),
+  });
+  const agent = await ok(client, 'register_handoff_session', {
+    name: 'Retry editor',
+  });
+  const connection = await api('/v1/runtime-sessions', { method: 'POST' });
+  assert.equal(connection.status, 200);
+  const workspace = connection.body.session_id;
+  const proposal = {
+    workspace_session_id: workspace,
+    agent_session_id: agent.session_id,
+    artifact_id: artifact.artifact.id,
+    revision: 1,
+    path: 'index.html',
+    file_sha256: createHash('sha256').update(source).digest('hex'),
+    start: 0,
+    end: 3,
+    intent: 'Edit',
+  };
+  return { agent, artifact, proposal, workspace };
+}
+
+function postHandoff(path, body) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+test('a handoff creation Location retrieves the staged resource', async () => {
+  await withClient(async (client) => {
+    const { proposal } = await handoffFixture(client);
+    const created = await postHandoff('/v1/handoffs', proposal);
+    assert.equal(created.status, 201);
+    assert.ok(created.location, 'The created handoff must have a Location.');
+    const location = new URL(created.location, server.api_url);
+    assert.equal(location.origin, server.api_url);
+    assert.equal(location.pathname, `/v1/handoffs/${created.body.id}`);
+    assert.deepEqual(
+      [...location.searchParams.keys()],
+      ['workspace_session_id'],
+    );
+    assert.equal(
+      location.searchParams.get('workspace_session_id'),
+      proposal.workspace_session_id,
+    );
+    const retrieved = await api(created.location);
+    assert.equal(retrieved.status, 200, 'Following Location must retrieve it.');
+    assert.deepEqual(retrieved.body, created.body);
+  });
+});
+
+test('a committed handoff can be retried after its source is deleted', async () => {
+  await withClient(async (client) => {
+    const { agent, artifact, proposal, workspace } =
+      await handoffFixture(client);
+    const action = { workspace_session_id: workspace };
+    const stage = () => postHandoff('/v1/handoffs', proposal);
+    const send = (item) =>
+      postHandoff(`/v1/handoffs/${item.body.id}/send`, action);
+    async function assertRetry(item, expectedState) {
+      const result = await send(item);
+      assert.equal(
+        result.status,
+        200,
+        `${expectedState} retry must be confirmed.`,
+      );
+      assert.equal(result.body.state, expectedState);
+    }
+    const acknowledged = await stage();
+    assert.equal((await send(acknowledged)).body.state, 'queued');
+    assert.equal(
+      (await ok(client, 'poll_handoffs', agent)).deliveries[0].id,
+      acknowledged.body.id,
+    );
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: acknowledged.body.id,
+    });
+    const offered = await stage();
+    assert.equal((await send(offered)).body.state, 'queued');
+    assert.equal(
+      (await ok(client, 'poll_handoffs', agent)).deliveries[0].id,
+      offered.body.id,
+    );
+    const queued = await stage();
+    // Commit the send, then discard its answer before the client can read it.
+    const lost = await fetch(
+      `${server.api_url}/v1/handoffs/${queued.body.id}/send`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${server.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(action),
+      },
+    );
+    assert.equal(lost.status, 200);
+    await lost.body.cancel();
+    const unsent = await stage();
+    const cancelled = await stage();
+    assert.equal(
+      (await postHandoff(`/v1/handoffs/${cancelled.body.id}/cancel`, action))
+        .body.state,
+      'cancelled',
+    );
+    await ok(client, 'update_artifact', {
+      artifact_id: artifact.artifact.id,
+      base_metadata_revision: artifact.artifact.metadata_revision,
+      deleted: true,
+      idempotency_key: freshKey(),
+    });
+    await assertRetry(acknowledged, 'acknowledged');
+    await assertRetry(offered, 'offered');
+    await assertRetry(queued, 'queued');
+    assert.equal((await send(unsent)).status, 404);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${unsent.body.id}?workspace_session_id=${workspace}`,
+        )
+      ).body.state,
+      'staged',
+    );
+    assert.equal((await send(cancelled)).status, 409);
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+    await assertRetry(offered, 'blocked');
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: offered.body.id,
+    });
+    await assertRetry(offered, 'acknowledged');
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+    await assertRetry(queued, 'blocked');
+    const other = await api('/v1/runtime-sessions', { method: 'POST' });
+    assert.equal(
+      (
+        await postHandoff(`/v1/handoffs/${queued.body.id}/send`, {
+          workspace_session_id: other.body.session_id,
+        })
+      ).status,
+      404,
+    );
+    const closed = await fetch(
+      `${server.api_url}/v1/runtime-sessions/${workspace}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${server.token}` },
+      },
+    );
+    assert.equal(closed.status, 204);
+    await assertRetry(acknowledged, 'acknowledged');
+    await assertRetry(queued, 'blocked');
+    assert.equal((await send(unsent)).status, 409);
+  });
+});
+
+test('a user stages a pinned selection for one registered MCP inbox', async () => {
+  await withClient(async (client) => {
+    const source = '\uFEFFa😀\r\nb';
+    const created = await ok(client, 'create_artifact', {
+      title: 'Selection handoff',
+      files: [utf8('index.html', source)],
+      idempotency_key: freshKey(),
+    });
+    const agent = await ok(client, 'register_handoff_session', {
+      name: 'Editor',
+    });
+    const other = await ok(client, 'register_handoff_session', {
+      name: 'Other',
+    });
+    const poll = (identity) => ok(client, 'poll_handoffs', identity);
+    const workspace = await api('/v1/runtime-sessions', { method: 'POST' });
+    assert.equal(workspace.status, 200);
+    const connection = workspace.body.session_id;
+    const otherWorkspace = await api('/v1/runtime-sessions', {
+      method: 'POST',
+    });
+    const listing = await api(
+      `/v1/agent-sessions?workspace_session_id=${connection}`,
+    );
+    assert.equal(listing.status, 200);
+    assert.ok(
+      listing.body.sessions.some(
+        ({ id, name }) => id === agent.session_id && name === 'Editor',
+      ),
+    );
+    assert.equal(
+      JSON.stringify(listing.body).includes(agent.session_secret),
+      false,
+    );
+    await refused(
+      client,
+      'poll_handoffs',
+      {
+        session_id: agent.session_id,
+        session_secret: other.session_secret,
+      },
+      'not_found',
+    );
+
+    const proposal = {
+      workspace_session_id: connection,
+      agent_session_id: agent.session_id,
+      artifact_id: created.artifact.id,
+      revision: 1,
+      path: 'index.html',
+      file_sha256: createHash('sha256').update(source).digest('hex'),
+      start: 2,
+      end: 5,
+      intent: '\uFEFF Clarify the selection \uFEFF',
+    };
+    const post = (path, body) =>
+      api(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    assert.equal(
+      (await post('/v1/handoffs', { ...proposal, file_sha256: '0'.repeat(64) }))
+        .status,
+      409,
+    );
+    assert.equal(
+      (await post('/v1/handoffs', { ...proposal, start: 3 })).status,
+      422,
+    );
+    const first = await post('/v1/handoffs', proposal);
+    assert.equal(first.status, 201);
+    assert.equal(first.body.state, 'staged');
+    assert.deepEqual(first.body.selection, {
+      artifact_id: created.artifact.id,
+      revision: 1,
+      path: 'index.html',
+      file_sha256: proposal.file_sha256,
+      start: 2,
+      end: 5,
+      text: '😀\n',
+    });
+    assert.equal(first.body.intent, proposal.intent);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${first.body.id}?workspace_session_id=${otherWorkspace.body.session_id}`,
+        )
+      ).status,
+      404,
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+    await refused(
+      client,
+      'acknowledge_handoff',
+      { ...agent, delivery_id: first.body.id },
+      'invalid_request',
+    );
+    const action = { workspace_session_id: connection };
+    assert.equal(
+      (await post(`/v1/handoffs/${first.body.id}/cancel`, action)).body.state,
+      'cancelled',
+    );
+    assert.equal(
+      (await post(`/v1/handoffs/${first.body.id}/send`, action)).status,
+      409,
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+
+    const staged = await post('/v1/handoffs', proposal);
+    assert.equal(staged.status, 201);
+    const send = () => post(`/v1/handoffs/${staged.body.id}/send`, action);
+    assert.equal((await send()).body.state, 'queued');
+    assert.equal((await send()).body.state, 'queued');
+    assert.deepEqual((await poll(other)).deliveries, []);
+    const offered = (await poll(agent)).deliveries;
+    assert.equal(offered.length, 1);
+    assert.equal(offered[0].id, staged.body.id);
+    assert.equal(offered[0].state, 'offered');
+    assert.equal(offered[0].selection.text, '😀\n');
+    assert.equal(offered[0].intent, proposal.intent);
+    assert.deepEqual((await poll(agent)).deliveries, offered);
+    assert.equal(
+      (await post(`/v1/handoffs/${staged.body.id}/cancel`, action)).status,
+      409,
+    );
+    await refused(
+      client,
+      'acknowledge_handoff',
+      { ...other, delivery_id: staged.body.id },
+      'not_found',
+    );
+    const receipt = await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: staged.body.id,
+    });
+    assert.equal(receipt.state, 'acknowledged');
+    assert.deepEqual(
+      await ok(client, 'acknowledge_handoff', {
+        ...agent,
+        delivery_id: staged.body.id,
+      }),
+      receipt,
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${staged.body.id}?workspace_session_id=${connection}`,
+        )
+      ).body.state,
+      'acknowledged',
+    );
+
+    const pending = await post('/v1/handoffs', proposal);
+    assert.equal(
+      (await post(`/v1/handoffs/${pending.body.id}/send`, action)).body.state,
+      'queued',
+    );
+    const close = await fetch(
+      `${server.api_url}/v1/runtime-sessions/${connection}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${server.token}` },
+      },
+    );
+    assert.equal(close.status, 204);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${pending.body.id}?workspace_session_id=${connection}`,
+        )
+      ).body.state,
+      'expired',
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+
+    const active = otherWorkspace.body.session_id;
+    const currentProposal = { ...proposal, workspace_session_id: active };
+    const unsent = await post('/v1/handoffs', currentProposal);
+    const queued = await post('/v1/handoffs', currentProposal);
+    const activeAction = { workspace_session_id: active };
+    assert.equal(
+      (await post(`/v1/handoffs/${queued.body.id}/send`, activeAction)).body
+        .state,
+      'queued',
+    );
+    const deleted = await ok(client, 'update_artifact', {
+      artifact_id: created.artifact.id,
+      base_metadata_revision: created.artifact.metadata_revision,
+      deleted: true,
+      idempotency_key: freshKey(),
+    });
+    assert.equal(
+      (await post(`/v1/handoffs/${unsent.body.id}/send`, activeAction)).status,
+      404,
+    );
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+
+    // An unreachable source cannot starve other confirmed deliveries for
+    // this same registered inbox, even if a poll may have offered it before.
+    const goodSource = '<p>valid source</p>';
+    const good = await ok(client, 'create_artifact', {
+      title: 'Other selectable source',
+      files: [utf8('index.html', goodSource)],
+      idempotency_key: freshKey(),
+    });
+    const goodProposal = {
+      ...currentProposal,
+      artifact_id: good.artifact.id,
+      file_sha256: createHash('sha256').update(goodSource).digest('hex'),
+      start: 0,
+      end: 3,
+    };
+    const following = await post('/v1/handoffs', goodProposal);
+    assert.equal(following.status, 201);
+    assert.equal(
+      (await post(`/v1/handoffs/${following.body.id}/send`, activeAction)).body
+        .state,
+      'queued',
+    );
+    const next = (await poll(agent)).deliveries;
+    assert.equal(next.length, 1, 'A missing source must not starve the inbox.');
+    assert.equal(next[0].id, following.body.id);
+    const blockedPath = `/v1/handoffs/${queued.body.id}?workspace_session_id=${active}`;
+    assert.equal((await api(blockedPath)).body.state, 'blocked');
+    assert.equal(
+      (await post(`/v1/handoffs/${queued.body.id}/cancel`, activeAction))
+        .status,
+      409,
+    );
+    await ok(client, 'update_artifact', {
+      artifact_id: created.artifact.id,
+      base_metadata_revision: deleted.artifact.metadata_revision,
+      deleted: false,
+      idempotency_key: freshKey(),
+    });
+    assert.deepEqual((await poll(agent)).deliveries, next);
+    assert.equal((await api(blockedPath)).body.state, 'blocked');
+    const blockedReceipt = await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: queued.body.id,
+    });
+    assert.equal(blockedReceipt.state, 'acknowledged');
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: following.body.id,
+    });
+    assert.deepEqual((await poll(agent)).deliveries, []);
+
+    // A replay can fail after an earlier poll may already have delivered it.
+    const previouslyOffered = await post('/v1/handoffs', currentProposal);
+    await post(`/v1/handoffs/${previouslyOffered.body.id}/send`, activeAction);
+    assert.equal(
+      (await poll(agent)).deliveries[0].id,
+      previouslyOffered.body.id,
+    );
+    const current = await ok(client, 'get_artifact', {
+      artifact_id: created.artifact.id,
+    });
+    await ok(client, 'update_artifact', {
+      artifact_id: created.artifact.id,
+      base_metadata_revision: current.metadata_revision,
+      deleted: true,
+      idempotency_key: freshKey(),
+    });
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+    const afterOffered = await post('/v1/handoffs', goodProposal);
+    await post(`/v1/handoffs/${afterOffered.body.id}/send`, activeAction);
+    assert.equal((await poll(agent)).deliveries[0].id, afterOffered.body.id);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${previouslyOffered.body.id}?workspace_session_id=${active}`,
+        )
+      ).body.state,
+      'blocked',
+    );
+    assert.equal(
+      (
+        await ok(client, 'acknowledge_handoff', {
+          ...agent,
+          delivery_id: previouslyOffered.body.id,
+        })
+      ).state,
+      'acknowledged',
+    );
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: afterOffered.body.id,
+    });
+  });
+});
 
 test('tools/list serves the generated catalog in both protocol eras', async () => {
   for (const era of Object.keys(ERAS)) {
@@ -148,7 +610,9 @@ test('tools/list serves the generated catalog in both protocol eras', async () =
         assert.deepEqual(tool.annotations, {
           readOnlyHint: expected.effect === 'read',
           destructiveHint: false,
-          idempotentHint: expected.effect !== 'issue_link',
+          idempotentHint: !['issue_link', 'issue_session'].includes(
+            expected.effect,
+          ),
           openWorldHint: false,
         });
       }

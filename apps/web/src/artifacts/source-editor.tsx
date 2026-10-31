@@ -16,6 +16,7 @@ import {
 import type { ArtifreeClient } from '@artifree/client';
 import type {
   Artifact,
+  HandoffSelection,
   Revision,
   RevisionFile,
   SaveRevisionRequest,
@@ -43,6 +44,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { toEditable } from './editable-text';
 import type { EditableText } from './editable-text';
+import { HandoffDialog } from './handoff-dialog';
 import { explainPathError, pathError } from './package-path';
 import { PreviewFrame } from './preview-frame';
 import {
@@ -182,6 +184,7 @@ export function SourcePanel({
   if (!unsaved && draft !== undefined) setDraft(undefined);
   if (!unsaved && uncertain) setUncertain(false);
   const [chosen, setChosen] = useState<string>();
+  const [handoffSelection, setHandoffSelection] = useState<HandoffSelection>();
   const [dialog, setDialog] = useState<{ readonly rename?: string }>();
   const [save, setSave] = useState<SaveState>({ status: 'idle' });
   const [clearing, setClearing] = useState(false);
@@ -284,6 +287,9 @@ export function SourcePanel({
   // revision may be that save: no notice then.
   const newer = !replaced && latestKnown > baseNumber && !saving && !uncertain;
   const outdated = replaced || newer || save.status === 'conflict';
+  const selectedFile = base.revision.files.find(
+    (file) => file.path === selected?.path,
+  );
 
   /**
    * What may change a draft written on `made` now: what the page last
@@ -549,6 +555,24 @@ export function SourcePanel({
               mediaType={mediaTypeAt(shownDraft, selected.path)}
               allowance={allowance}
               readBase={readBase}
+              onStage={
+                !changed &&
+                !unsaved &&
+                free &&
+                !outdated &&
+                !reloading &&
+                selected.change === undefined &&
+                selectedFile !== undefined
+                  ? (range) =>
+                      setHandoffSelection({
+                        artifact_id: artifact.id,
+                        revision: made,
+                        path: selected.path,
+                        file_sha256: selectedFile.sha256,
+                        ...range,
+                      })
+                  : undefined
+              }
               onText={(text, crlf, source) =>
                 write('text', made, (draft) =>
                   setText(draft, selected.path, text, crlf, source),
@@ -789,6 +813,13 @@ export function SourcePanel({
             : `${from} was not moved. ${refused}`;
         }}
       />
+      {handoffSelection === undefined ? null : (
+        <HandoffDialog
+          client={client}
+          selection={handoffSelection}
+          onClose={() => setHandoffSelection(undefined)}
+        />
+      )}
     </div>
   );
 }
@@ -939,6 +970,9 @@ interface FileViewProps {
   mediaType: string | undefined;
   allowance: Allowance;
   readBase: (path: string, signal: AbortSignal) => Promise<Uint8Array>;
+  onStage?:
+    | ((range: Pick<HandoffSelection, 'start' | 'end' | 'text'>) => void)
+    | undefined;
   /**
    * Sets the file's text, read from `source` unless the draft holds text
    * there; returns why it was refused, if it was.
@@ -959,6 +993,7 @@ function FileView({
   mediaType,
   allowance,
   readBase,
+  onStage,
   onText,
   onRename,
   onDelete,
@@ -1033,6 +1068,7 @@ function FileView({
           allowance={allowance}
           readBase={readBase}
           onText={onText}
+          onStage={onStage}
         />
       ) : (
         <HeldFile
@@ -1058,12 +1094,14 @@ function BaseText({
   allowance,
   readBase,
   onText,
+  onStage,
 }: {
   path: string;
   edited: Extract<Change, { kind: 'text' }> | undefined;
   allowance: Allowance;
   readBase: FileViewProps['readBase'];
   onText: FileViewProps['onText'];
+  onStage: FileViewProps['onStage'];
 }) {
   const [known, setKnown] = useState<EditableText | undefined>(() =>
     edited?.source === undefined
@@ -1107,6 +1145,7 @@ function BaseText({
       path={path}
       text={edited?.text ?? base.text}
       allowance={allowance}
+      onStage={onStage}
       onChange={(value) => onText(value, base.crlf, { path, text: base.text })}
     />
   );
@@ -1167,6 +1206,7 @@ function TextEditor({
   note,
   allowance,
   onChange,
+  onStage,
 }: {
   path: string;
   text: string;
@@ -1174,13 +1214,16 @@ function TextEditor({
   allowance: Allowance;
   /** Returns why the change was refused, if it was. */
   onChange: (text: string) => string | undefined;
+  onStage?: FileViewProps['onStage'];
 }) {
   const [refusal, setRefusal] = useState<string>();
+  const editor = useRef<HTMLTextAreaElement>(null);
   const locked = allowance.level === 'none';
   return (
     <Field>
       <FieldLabel htmlFor="source-editor">{path}</FieldLabel>
       <Textarea
+        ref={editor}
         id="source-editor"
         variant="code"
         className="max-h-128 min-h-64"
@@ -1190,6 +1233,30 @@ function TextEditor({
         aria-busy={locked}
         onChange={(event) => setRefusal(onChange(event.target.value))}
       />
+      {onStage === undefined ? null : (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={(event) => {
+            if (!event.isTrusted) return;
+            const input = editor.current;
+            if (input === null || input.value !== text) {
+              setRefusal('The source changed. Select the text again.');
+              return;
+            }
+            const { selectionStart: start, selectionEnd: end } = input;
+            if (start === end) {
+              setRefusal('Select some saved source text first.');
+              return;
+            }
+            setRefusal(undefined);
+            onStage({ start, end, text: input.value.slice(start, end) });
+          }}
+        >
+          Stage selection for agent
+        </Button>
+      )}
       {note === undefined ? null : <FieldDescription>{note}</FieldDescription>}
       {refusal === undefined ? null : <FieldError>{refusal}</FieldError>}
     </Field>

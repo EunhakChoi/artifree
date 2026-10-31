@@ -97,9 +97,9 @@ export const scaffoldDescription: ServiceDescription = {
       "name": "Agent handoff",
       "layer": "logic",
       "language": "Rust",
-      "path": "crates/artifree-core/src/agent_handoff.rs",
-      "status": "planned",
-      "summary": "Selection and edit intent delivered to external agent sessions."
+      "path": "crates/artifree-server/src/handoffs.rs",
+      "status": "implemented",
+      "summary": "Saved source selection and user intent sent to an explicitly registered MCP inbox; receipt is not model completion."
     },
     {
       "id": "storage",

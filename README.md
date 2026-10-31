@@ -117,8 +117,10 @@ API, client, CLI, and web workspace (A07), and editing an artifact's files
 in the web workspace, saved as one revision (A09), with the draft kept in
 the browser and recovered by choice after a reload or a closed tab (A10);
 the browser must provide Web Locks to keep drafts safely. R04 adds the first
-runtime metadata read and R05 adds an explicit connection-scoped metadata grant;
-agent handoff (A08) remains planned.
+runtime metadata read and R05 adds an explicit connection-scoped metadata grant.
+The source editor can stage a saved selection and, after review, send it to a
+registered MCP agent inbox (A08). The agent must poll and acknowledge; receipt
+does not establish that a model completed the requested work.
 
 An HTML artifact can opt into the metadata bridge by placing the marker as
 the first child of its head, before any script:
