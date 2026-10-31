@@ -177,7 +177,8 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
 /// Determines the loopback address to bind for local MCP peer isolation in LAN mode.
 fn derive_loopback_address(options: &ServeOptions) -> Option<SocketAddr> {
     options.loopback_api_address.or_else(|| {
-        if options.api_address.ip().is_loopback() {
+        let ip = options.api_address.ip();
+        if ip.is_loopback() || ip.is_unspecified() {
             None
         } else {
             let loopback_ip = if options.api_address.is_ipv6() {

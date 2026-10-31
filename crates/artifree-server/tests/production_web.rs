@@ -550,3 +550,43 @@ fn serve_options_loopback_listener_in_lan_mode() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn wildcard_api_bind_does_not_derive_loopback_listener() {
+    use artifree_server::serve::{self, ServeOptions};
+    static WILDCARD_COUNTER: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "artifree-wildcard-test-{}-{}",
+        std::process::id(),
+        WILDCARD_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+
+    let options = ServeOptions {
+        data_dir: dir.clone(),
+        web_dir: None,
+        api_address: SocketAddr::from(([0, 0, 0, 0], 0)),
+        loopback_api_address: None,
+        content_address: SocketAddr::from(([127, 0, 0, 1], 0)),
+        content_origin: None,
+        frame_ancestors: serve::DEFAULT_FRAME_ANCESTORS.to_owned(),
+        preview_ttl: serve::DEFAULT_PREVIEW_TTL,
+        limits: RequestLimits::default(),
+        change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _thread = std::thread::spawn(move || {
+        let _ = serve::run(options, |ready| {
+            let _ = tx.send(ready.clone());
+        });
+    });
+
+    let Ok(ready) = rx.recv_timeout(Duration::from_secs(5)) else {
+        panic!("server did not report ready");
+    };
+    assert!(ready.api_url.starts_with("http://0.0.0.0:"));
+    assert!(ready.loopback_api_url.is_none());
+
+    let _ = fs::remove_dir_all(&dir);
+}

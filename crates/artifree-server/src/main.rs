@@ -254,7 +254,7 @@ fn derive_frame_ancestors(explicit: Option<String>, api_address: &str) -> String
         return serve::DEFAULT_FRAME_ANCESTORS.to_owned();
     };
     let ip = addr.ip();
-    if ip.is_loopback() {
+    if ip.is_loopback() || ip.is_unspecified() {
         serve::DEFAULT_FRAME_ANCESTORS.to_owned()
     } else {
         let formatted_ip = if ip.is_ipv6() {
