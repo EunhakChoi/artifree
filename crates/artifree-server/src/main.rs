@@ -62,6 +62,9 @@ fn run() -> Result<(), String> {
                 if let Some(ref web_url) = ready.web_url {
                     line["web_url"] = serde_json::json!(web_url);
                 }
+                if let Some(ref loopback_url) = ready.loopback_api_url {
+                    line["loopback_api_url"] = serde_json::json!(loopback_url);
+                }
                 println!("{line}");
                 // A supervisor waits for this line; a failed flush only delays it.
                 if std::io::stdout().flush().is_err() {
@@ -78,6 +81,7 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     let mut cli_web_dir = None;
     let mut cli_lan = None;
     let mut explicit_api_listen = None;
+    let mut explicit_loopback_listen = None;
     let mut explicit_content_listen = None;
     let mut explicit_content_origin = None;
     let mut explicit_frame_ancestors = None;
@@ -97,22 +101,11 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             "--web-dir" => cli_web_dir = Some(PathBuf::from(value()?)),
             "--lan" => cli_lan = Some(value()?),
             "--api-listen" => explicit_api_listen = Some(value()?),
+            "--loopback-listen" => explicit_loopback_listen = Some(value()?),
             "--content-listen" => explicit_content_listen = Some(value()?),
             "--content-origin" => explicit_content_origin = Some(value()?),
             "--frame-ancestors" => explicit_frame_ancestors = Some(value()?),
-            "--preview-ttl-seconds" => {
-                let range = || {
-                    format!(
-                        "--preview-ttl-seconds must be a whole number from 1 to {}.",
-                        serve::MAX_PREVIEW_TTL.as_secs()
-                    )
-                };
-                let seconds: u64 = value()?.parse().map_err(|_| range())?;
-                preview_ttl = Duration::from_secs(seconds);
-                if seconds == 0 || preview_ttl > serve::MAX_PREVIEW_TTL {
-                    return Err(range());
-                }
-            }
+            "--preview-ttl-seconds" => preview_ttl = parse_preview_ttl(&value()?)?,
             "--request-burst" => limits.burst = limit(flag, &value()?)?,
             "--requests-per-minute" => limits.per_minute = limit(flag, &value()?)?,
             "--concurrent-requests" => limits.concurrent = limit(flag, &value()?)?,
@@ -171,10 +164,13 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             .map_err(|_| format!("{flag} must be an IP address and port, such as 127.0.0.1:7410."))
     };
 
+    let loopback_api_address = resolve_loopback_listen(explicit_loopback_listen)?;
+
     Ok(ServeOptions {
         data_dir: data_dir.ok_or("serve requires --data-dir <directory>.")?,
         web_dir: explicit_web_dir,
         api_address: address("--api-listen", &api_str)?,
+        loopback_api_address,
         content_address: address("--content-listen", &content_str)?,
         content_origin: resolved_content_origin,
         frame_ancestors,
@@ -182,6 +178,48 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         limits,
         change_streams,
     })
+}
+
+/// Parses the preview link lifetime from a CLI argument.
+fn parse_preview_ttl(value: &str) -> Result<Duration, String> {
+    let range = || {
+        format!(
+            "--preview-ttl-seconds must be a whole number from 1 to {}.",
+            serve::MAX_PREVIEW_TTL.as_secs()
+        )
+    };
+    let seconds: u64 = value.parse().map_err(|_| range())?;
+    let ttl = Duration::from_secs(seconds);
+    if seconds == 0 || ttl > serve::MAX_PREVIEW_TTL {
+        return Err(range());
+    }
+    Ok(ttl)
+}
+
+/// Resolves an optional loopback listener for MCP peer isolation in LAN mode.
+fn resolve_loopback_listen(explicit: Option<String>) -> Result<Option<SocketAddr>, String> {
+    let raw = match explicit {
+        Some(addr) => Some(addr),
+        None => std::env::var("ARTIFREE_LOOPBACK_LISTEN")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    };
+    match raw {
+        Some(val) => {
+            let addr = val.parse::<SocketAddr>().map_err(|_| {
+                "--loopback-listen must be an IP address and port, such as 127.0.0.1:7410."
+                    .to_owned()
+            })?;
+            if !addr.ip().is_loopback() {
+                return Err(
+                    "--loopback-listen must be a loopback IP address, such as 127.0.0.1 or ::1."
+                        .to_owned(),
+                );
+            }
+            Ok(Some(addr))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Resolves default listen addresses and preview origin for a given optional LAN IP.
@@ -256,6 +294,7 @@ Options:
   --web-dir <dir>               Directory holding production web assets (or ARTIFREE_WEB_DIR)
   --lan <ip>                    Bind listeners to explicit LAN IP (or ARTIFREE_LAN)
   --api-listen <addr:port>      API address [default: {api}]
+  --loopback-listen <addr:port> Dedicated loopback API address for MCP in LAN mode
   --content-listen <addr:port>  Preview address [default: {content}]
   --content-origin <origin>     Public preview origin, if proxied
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]

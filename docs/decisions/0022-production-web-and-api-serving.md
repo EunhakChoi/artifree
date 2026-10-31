@@ -33,6 +33,9 @@ configuration and preserving existing security boundaries:
    directory, contains `index.html`, and that `index.html` does not resolve
    outside the root via symlinks. The readiness event includes `web_url`
    matching the API URL when web assets are enabled.
+   Files are streamed asynchronously using non-blocking asynchronous file I/O
+   (`tokio::fs::File` with `FileStream`) in 64 KiB chunks via Axum's `Body::from_stream`,
+   preventing Tokio worker thread blocking and unbounded memory consumption.
    Path traversal is prevented using path component inspection and canonical
    containment verification. Files under `/assets/*` are served with
    `Cache-Control: public, max-age=31536000, immutable`; other assets and
@@ -71,10 +74,15 @@ configuration and preserving existing security boundaries:
      Explicit flags (`--api-listen`, `--content-listen`, `--content-origin`,
      `--frame-ancestors`) retain higher precedence over derived LAN defaults.
 
-6. **MCP Loopback Confinement via Peer Socket Address.**
+6. **MCP Loopback Confinement and Dual Loopback Listener in LAN Mode.**
    To prevent LAN peers from reaching `/mcp` by forging the `Host: 127.0.0.1:7410`
    header, the `/mcp` handler extracts `ConnectInfo<SocketAddr>` and verifies
    that `peer.ip().is_loopback()`. Non-loopback peers are rejected with `403 Forbidden`.
+   When LAN mode is enabled on a non-loopback IP, `artifree-server` automatically
+   binds an additional dedicated loopback listener (`127.0.0.1:<port>` or `[::1]:<port>`,
+   configurable via `--loopback-listen` / `ARTIFREE_LOOPBACK_LISTEN`). Local agents on
+   the server machine connect to the loopback listener for MCP access, preserving
+   agent connectivity while maintaining absolute isolation from LAN peers.
 
 7. **CLI Connection Profiles.**
    The CLI resolves connection configuration using strict precedence:

@@ -3,11 +3,54 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use axum::body::Body;
 use axum::http::header::{self, HeaderValue};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_core::Stream;
+use tokio::io::{AsyncRead, ReadBuf};
+
+const CHUNK_SIZE: usize = 64 * 1024;
+
+/// Stream of bytes chunked from an open asynchronous file.
+#[derive(Debug)]
+struct FileStream {
+    file: tokio::fs::File,
+    buf: Box<[u8]>,
+}
+
+impl FileStream {
+    fn new(file: tokio::fs::File) -> Self {
+        Self {
+            file,
+            buf: vec![0u8; CHUNK_SIZE].into_boxed_slice(),
+        }
+    }
+}
+
+impl Stream for FileStream {
+    type Item = Result<axum::body::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let mut read_buf = ReadBuf::new(&mut this.buf);
+        match Pin::new(&mut this.file).poll_read(cx, &mut read_buf) {
+            Poll::Ready(Ok(())) => {
+                let filled = read_buf.filled();
+                if filled.is_empty() {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Ready(Some(Ok(axum::body::Bytes::copy_from_slice(filled))))
+                }
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 /// Production web assets served alongside the API.
 #[derive(Debug, Clone)]
@@ -51,13 +94,12 @@ impl WebAssets {
     /// Serves a static file from the web directory or falls back to `index.html`
     /// for SPA client routes.
     #[must_use]
-    pub fn handle(&self, req: &Request<Body>) -> Response {
-        if req.method() != Method::GET && req.method() != Method::HEAD {
+    pub async fn handle(&self, method: &Method, path: &str) -> Response {
+        if method != Method::GET && method != Method::HEAD {
             return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
 
-        let is_head = req.method() == Method::HEAD;
-        let path = req.uri().path();
+        let is_head = method == Method::HEAD;
 
         // 1. Root index.html request
         if path == "/" || path.is_empty() {
@@ -66,7 +108,8 @@ impl WebAssets {
                 "text/html; charset=utf-8",
                 false,
                 is_head,
-            );
+            )
+            .await;
         }
 
         // 2. Safe relative path traversal check
@@ -74,7 +117,7 @@ impl WebAssets {
         if let Some(target) = self.safe_resolve(trimmed).filter(|p| p.is_file()) {
             let content_type = mime_for_path(&target);
             let is_immutable = trimmed.starts_with("assets/");
-            return serve_file(&target, content_type, is_immutable, is_head);
+            return serve_file(&target, content_type, is_immutable, is_head).await;
         }
 
         // 3. Subpath asset recovery: handle nested SPA routes requesting assets
@@ -82,7 +125,7 @@ impl WebAssets {
             let asset_subpath = &path[assets_idx + 1..];
             if let Some(target) = self.safe_resolve(asset_subpath).filter(|p| p.is_file()) {
                 let content_type = mime_for_path(&target);
-                return serve_file(&target, content_type, true, is_head);
+                return serve_file(&target, content_type, true, is_head).await;
             }
         }
 
@@ -97,7 +140,8 @@ impl WebAssets {
                 "text/html; charset=utf-8",
                 false,
                 is_head,
-            );
+            )
+            .await;
         }
 
         StatusCode::NOT_FOUND.into_response()
@@ -122,11 +166,22 @@ impl WebAssets {
     }
 }
 
-/// Reads a file and returns an HTTP response with appropriate caching headers.
-fn serve_file(path: &Path, content_type: &'static str, immutable: bool, is_head: bool) -> Response {
-    let Ok(contents) = fs::read(path) else {
+/// Reads a file asynchronously and returns an HTTP response streaming the contents with appropriate caching headers.
+async fn serve_file(
+    path: &Path,
+    content_type: &'static str,
+    immutable: bool,
+    is_head: bool,
+) -> Response {
+    let Ok(file) = tokio::fs::File::open(path).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let Ok(metadata) = file.metadata().await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !metadata.is_file() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
 
     let cache_control = if immutable {
         HeaderValue::from_static("public, max-age=31536000, immutable")
@@ -137,7 +192,7 @@ fn serve_file(path: &Path, content_type: &'static str, immutable: bool, is_head:
     let builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, contents.len().to_string())
+        .header(header::CONTENT_LENGTH, metadata.len().to_string())
         .header(header::CACHE_CONTROL, cache_control);
 
     if is_head {
@@ -146,7 +201,7 @@ fn serve_file(path: &Path, content_type: &'static str, immutable: bool, is_head:
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     } else {
         builder
-            .body(Body::from(contents))
+            .body(Body::from_stream(FileStream::new(file)))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     }
 }

@@ -23,7 +23,7 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 const PROTOCOL: &str = "2025-11-25";
 
 struct Harness {
-    _directory: PathBuf,
+    directory: PathBuf,
     router: Router,
 }
 
@@ -79,10 +79,11 @@ impl Harness {
 
         let router = http::router_with_web(state, Some(assets));
 
-        Self {
-            _directory: directory,
-            router,
-        }
+        Self { directory, router }
+    }
+
+    fn web_dir(&self) -> PathBuf {
+        self.directory.join("web")
     }
 
     async fn send(&self, request: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
@@ -453,4 +454,99 @@ async fn mcp_loopback_peer_enforcement() {
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
     let (loopback_status, _, _) = harness.send(loopback_req).await;
     assert_eq!(loopback_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn streaming_large_asset_serves_complete_bytes() {
+    let harness = Harness::new();
+    let large_file = harness.web_dir().join("assets").join("large.js");
+    let content: Vec<u8> = vec![b'x'; 150 * 1024];
+    fs::write(&large_file, &content).unwrap_or_else(|error| panic!("write: {error}"));
+
+    // GET request streams full body
+    let req = Request::builder()
+        .uri("/assets/large.js")
+        .method(Method::GET)
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("req: {error}"));
+    let (status, headers, body) = harness.send(req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok()),
+        Some((150 * 1024).to_string().as_str())
+    );
+    assert_eq!(body, content);
+
+    // HEAD request returns length with empty body
+    let head_req = Request::builder()
+        .uri("/assets/large.js")
+        .method(Method::HEAD)
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("head_req: {error}"));
+    let (head_status, head_headers, head_body) = harness.send(head_req).await;
+    assert_eq!(head_status, StatusCode::OK);
+    assert_eq!(
+        head_headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok()),
+        Some((150 * 1024).to_string().as_str())
+    );
+    assert!(head_body.is_empty());
+}
+
+#[test]
+fn serve_options_loopback_listener_in_lan_mode() {
+    use artifree_server::serve::{self, ServeOptions};
+    static SERVE_COUNTER: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "artifree-serve-test-{}-{}",
+        std::process::id(),
+        SERVE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+
+    let options = ServeOptions {
+        data_dir: dir.clone(),
+        web_dir: None,
+        api_address: SocketAddr::from(([127, 0, 0, 1], 0)),
+        loopback_api_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        content_address: SocketAddr::from(([127, 0, 0, 1], 0)),
+        content_origin: None,
+        frame_ancestors: serve::DEFAULT_FRAME_ANCESTORS.to_owned(),
+        preview_ttl: serve::DEFAULT_PREVIEW_TTL,
+        limits: RequestLimits::default(),
+        change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _thread = std::thread::spawn(move || {
+        let _ = serve::run(options, |ready| {
+            let _ = tx.send(ready.clone());
+        });
+    });
+
+    let Ok(ready) = rx.recv_timeout(Duration::from_secs(5)) else {
+        panic!("server did not report ready");
+    };
+    assert!(ready.api_url.starts_with("http://127.0.0.1:"));
+    let Some(loopback) = ready.loopback_api_url else {
+        panic!("missing loopback_api_url");
+    };
+    assert!(loopback.starts_with("http://127.0.0.1:"));
+
+    // Verify both listeners accept TCP connections
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("rt: {error}"));
+    rt.block_on(async {
+        let api_addr = ready.api_url.trim_start_matches("http://");
+        let loopback_addr = loopback.trim_start_matches("http://");
+        assert!(tokio::net::TcpStream::connect(api_addr).await.is_ok());
+        assert!(tokio::net::TcpStream::connect(loopback_addr).await.is_ok());
+    });
+
+    let _ = fs::remove_dir_all(&dir);
 }

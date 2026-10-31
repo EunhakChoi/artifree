@@ -270,7 +270,7 @@ pub fn router_with_web(state: AppState, web_assets: Option<WebAssets>) -> Router
         let state = fallback_state.clone();
         let assets = fallback_assets.clone();
         async move {
-            let path = req.uri().path();
+            let path = req.uri().path().to_owned();
             if path == "/healthz" {
                 return StatusCode::METHOD_NOT_ALLOWED.into_response();
             }
@@ -287,8 +287,9 @@ pub fn router_with_web(state: AppState, web_assets: Option<WebAssets>) -> Router
                 })
                 .await;
             }
+            let method = req.method().clone();
             if let Some(assets) = assets {
-                assets.handle(&req)
+                assets.handle(&method, &path).await
             } else {
                 no_such_route(&Authenticated(owner)).into_response()
             }
