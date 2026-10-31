@@ -678,7 +678,7 @@ async fn proxy_inspection_content(
     let peer_addr = req
         .extensions()
         .get::<ConnectInfo<std::net::SocketAddr>>()
-        .map_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 0)), |c| c.0);
+        .map_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)), |c| c.0);
 
     let connection_info = match crate::proxy::evaluate_connection(
         req.headers(),

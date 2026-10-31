@@ -320,6 +320,40 @@ async fn mcp_loopback_confinement_behind_trusted_proxy() -> TestResult {
     let res = harness_local_mcp.api.clone().oneshot(req).await?;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
+    // Injected/prepended leftmost loopback IP (127.0.0.1, 203.0.113.195) is rejected:
+    // right-to-left traversal identifies 203.0.113.195 as untrusted client IP
+    let mut req = Request::post("/mcp")
+        .header(header::HOST, "artifree.example.com")
+        .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-11-25")
+        .header("x-forwarded-for", "127.0.0.1, 203.0.113.195")
+        .header("x-forwarded-host", "artifree.example.com")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        ))?;
+    req.extensions_mut()
+        .insert(ConnectInfo(loopback_proxy_peer));
+
+    let res = harness_local_mcp.api.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // Direct non-loopback client (198.51.100.5) is rejected
+    let non_loopback_peer: SocketAddr = "198.51.100.5:12345".parse()?;
+    let mut req = Request::post("/mcp")
+        .header(header::HOST, "artifree.example.com")
+        .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-11-25")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        ))?;
+    req.extensions_mut().insert(ConnectInfo(non_loopback_peer));
+    let res = harness_local_mcp.api.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
     // Local client (127.0.0.1) forwarded via local proxy is accepted
     let mut req = Request::post("/mcp")
         .header(header::HOST, "artifree.example.com")

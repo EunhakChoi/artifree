@@ -117,10 +117,12 @@ async fn enforce_mcp_access(
                 .map(|connect| connect.ip())
         });
 
-    if let Some(ip) = client_ip
-        && !state.settings().allow_remote_mcp
-        && !ip.is_loopback()
-    {
+    let is_allowed = match client_ip {
+        Some(ip) => state.settings().allow_remote_mcp || ip.is_loopback(),
+        None => state.settings().allow_remote_mcp,
+    };
+
+    if !is_allowed {
         return ApiError::new(
             StatusCode::FORBIDDEN,
             ErrorCode::InvalidRequest,

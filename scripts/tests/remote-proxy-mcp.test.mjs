@@ -109,12 +109,24 @@ before(async () => {
         },
       };
       const proxyReq = http.request(options, (proxyRes) => {
-        clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+        }
         proxyRes.pipe(clientRes);
       });
       proxyReq.on('error', (err) => {
-        clientRes.writeHead(502);
-        clientRes.end(`API Proxy error: ${err.message}`);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502);
+          clientRes.end(`API Proxy error: ${err.message}`);
+        } else {
+          clientRes.destroy();
+        }
+      });
+      clientReq.on('error', () => {
+        proxyReq.destroy();
+      });
+      clientRes.on('error', () => {
+        proxyReq.destroy();
       });
       clientReq.pipe(proxyReq);
     },
@@ -143,12 +155,24 @@ before(async () => {
         },
       };
       const proxyReq = http.request(options, (proxyRes) => {
-        clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+        }
         proxyRes.pipe(clientRes);
       });
       proxyReq.on('error', (err) => {
-        clientRes.writeHead(502);
-        clientRes.end(`Content Proxy error: ${err.message}`);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502);
+          clientRes.end(`Content Proxy error: ${err.message}`);
+        } else {
+          clientRes.destroy();
+        }
+      });
+      clientReq.on('error', () => {
+        proxyReq.destroy();
+      });
+      clientRes.on('error', () => {
+        proxyReq.destroy();
       });
       clientReq.pipe(proxyReq);
     },
@@ -159,6 +183,7 @@ before(async () => {
 });
 
 after(async () => {
+  if (server) await server.stop();
   if (apiProxy) {
     apiProxy.closeAllConnections?.();
     await new Promise((resolve) => apiProxy.close(resolve));
@@ -167,7 +192,6 @@ after(async () => {
     contentProxy.closeAllConnections?.();
     await new Promise((resolve) => contentProxy.close(resolve));
   }
-  if (server) await server.stop();
   if (scratch) await rm(scratch, { recursive: true, force: true });
 });
 

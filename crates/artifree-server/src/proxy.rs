@@ -32,7 +32,8 @@ impl IpNetwork {
     /// Returns whether the network contains the given IP address.
     #[must_use]
     pub fn contains(&self, ip: &IpAddr) -> bool {
-        match (self, ip) {
+        let canonical = ip.to_canonical();
+        match (self, &canonical) {
             (Self::V4 { addr, prefix }, IpAddr::V4(target)) => {
                 if *prefix == 0 {
                     return true;
@@ -154,7 +155,7 @@ pub(crate) fn evaluate_connection(
         });
     }
 
-    let client_ip = parse_trusted_client_ip(headers, peer_ip)?;
+    let client_ip = parse_trusted_client_ip(headers, peer_ip, trusted_proxies)?;
     let host = parse_trusted_host(headers)?;
     let proto = parse_trusted_proto(headers);
 
@@ -166,7 +167,11 @@ pub(crate) fn evaluate_connection(
     })
 }
 
-fn parse_trusted_client_ip(headers: &HeaderMap, peer_ip: IpAddr) -> Result<IpAddr, ApiError> {
+fn parse_trusted_client_ip(
+    headers: &HeaderMap,
+    peer_ip: IpAddr,
+    trusted_proxies: &[IpNetwork],
+) -> Result<IpAddr, ApiError> {
     if let Some(xff) = headers.get("x-forwarded-for") {
         let xff_str = xff.to_str().map_err(|_| {
             ApiError::new(
@@ -175,18 +180,42 @@ fn parse_trusted_client_ip(headers: &HeaderMap, peer_ip: IpAddr) -> Result<IpAdd
                 "x-forwarded-for header is not valid ASCII",
             )
         })?;
-        let first_entry = xff_str.split(',').next().map_or("", str::trim);
-        let unbracketed = first_entry
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(first_entry);
-        unbracketed.parse::<IpAddr>().map_err(|_| {
-            ApiError::new(
+        let ips = xff_str
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                let unbracketed = s
+                    .strip_prefix('[')
+                    .and_then(|t| t.strip_suffix(']'))
+                    .unwrap_or(s);
+                unbracketed.parse::<IpAddr>().map_err(|_| {
+                    ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        ErrorCode::InvalidRequest,
+                        "x-forwarded-for header contains an invalid IP address",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if ips.is_empty() {
+            return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
                 ErrorCode::InvalidRequest,
                 "x-forwarded-for header contains an invalid IP address",
-            )
-        })
+            ));
+        }
+
+        // Right-to-left traversal: find the first IP that is NOT in trusted_proxies.
+        // This prevents untrusted clients from injecting spoofed leftmost IPs.
+        for ip in ips.iter().rev() {
+            if !trusted_proxies.iter().any(|net| net.contains(ip)) {
+                return Ok(*ip);
+            }
+        }
+        // If all forwarded IPs are trusted proxies, fall back to the leftmost IP.
+        Ok(*ips.first().unwrap_or(&peer_ip))
     } else if let Some(fwd) = headers.get("forwarded") {
         let fwd_str = fwd.to_str().map_err(|_| {
             ApiError::new(
@@ -195,13 +224,13 @@ fn parse_trusted_client_ip(headers: &HeaderMap, peer_ip: IpAddr) -> Result<IpAdd
                 "forwarded header is not valid ASCII",
             )
         })?;
-        extract_forwarded_for(fwd_str).ok_or_else(|| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                "forwarded header does not specify a valid for parameter",
-            )
-        })
+        let ips = extract_forwarded_for_hops(fwd_str)?;
+        for ip in ips.iter().rev() {
+            if !trusted_proxies.iter().any(|net| net.contains(ip)) {
+                return Ok(*ip);
+            }
+        }
+        Ok(*ips.first().unwrap_or(&peer_ip))
     } else {
         Ok(peer_ip)
     }
@@ -250,32 +279,57 @@ fn parse_trusted_proto(headers: &HeaderMap) -> String {
     }
 }
 
-/// Extracts the client IP from a standard RFC 7239 `Forwarded` header string.
-fn extract_forwarded_for(header_value: &str) -> Option<IpAddr> {
-    for part in header_value.split(';') {
-        let trimmed = part.trim();
-        if let Some(rest) = trimmed.strip_prefix("for=") {
-            let val = rest.trim_matches('"');
-            let unbracketed = val
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
-                .unwrap_or(val);
-            if let Ok(ip) = unbracketed.parse::<IpAddr>() {
-                return Some(ip);
+/// Extracts the client IP hops from a standard RFC 7239 `Forwarded` header string.
+fn extract_forwarded_for_hops(header_value: &str) -> Result<Vec<IpAddr>, ApiError> {
+    let mut ips = Vec::new();
+    for hop in header_value.split(',') {
+        for part in hop.split(';') {
+            let trimmed = part.trim();
+            if let Some(rest) = trimmed.strip_prefix("for=") {
+                let val = rest.trim_matches('"').trim();
+                let without_port = if val.starts_with('[') {
+                    if let Some(end) = val.find(']') {
+                        &val[1..end]
+                    } else {
+                        val.trim_matches(|c| c == '[' || c == ']')
+                    }
+                } else if val.matches(':').count() == 1 {
+                    let colon = val.find(':').unwrap_or(val.len());
+                    &val[..colon]
+                } else {
+                    val
+                };
+                let ip = without_port.parse::<IpAddr>().map_err(|_| {
+                    ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        ErrorCode::InvalidRequest,
+                        "forwarded header does not specify a valid for parameter",
+                    )
+                })?;
+                ips.push(ip);
             }
         }
     }
-    None
+    if ips.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "forwarded header does not specify a valid for parameter",
+        ));
+    }
+    Ok(ips)
 }
 
 /// Extracts the host from a standard RFC 7239 `Forwarded` header string.
 fn extract_forwarded_host(header_value: &str) -> Option<String> {
-    for part in header_value.split(';') {
-        let trimmed = part.trim();
-        if let Some(rest) = trimmed.strip_prefix("host=") {
-            let val = rest.trim_matches('"').trim();
-            if !val.is_empty() {
-                return Some(val.to_owned());
+    for hop in header_value.split(',') {
+        for part in hop.split(';') {
+            let trimmed = part.trim();
+            if let Some(rest) = trimmed.strip_prefix("host=") {
+                let val = rest.trim_matches('"').trim();
+                if !val.is_empty() {
+                    return Some(val.to_owned());
+                }
             }
         }
     }
@@ -284,12 +338,14 @@ fn extract_forwarded_host(header_value: &str) -> Option<String> {
 
 /// Extracts the protocol from a standard RFC 7239 `Forwarded` header string.
 fn extract_forwarded_proto(header_value: &str) -> Option<String> {
-    for part in header_value.split(';') {
-        let trimmed = part.trim();
-        if let Some(rest) = trimmed.strip_prefix("proto=") {
-            let val = rest.trim_matches('"').trim().to_ascii_lowercase();
-            if !val.is_empty() {
-                return Some(val);
+    for hop in header_value.split(',') {
+        for part in hop.split(';') {
+            let trimmed = part.trim();
+            if let Some(rest) = trimmed.strip_prefix("proto=") {
+                let val = rest.trim_matches('"').trim().to_ascii_lowercase();
+                if !val.is_empty() {
+                    return Some(val);
+                }
             }
         }
     }
@@ -318,7 +374,7 @@ pub fn is_host_allowed(host: &str, allowed_hosts: &[String]) -> bool {
         {
             return true;
         }
-        if is_loopback_host(&normalized) && normalized.eq_ignore_ascii_case(incoming_name) {
+        if is_loopback_host(&normalized) && is_loopback_host(incoming_name) {
             return true;
         }
     }
@@ -329,7 +385,8 @@ pub fn is_host_allowed(host: &str, allowed_hosts: &[String]) -> bool {
 fn host_name(host: &str) -> &str {
     if let Some(bracket_end) = host.find(']') {
         &host[..=bracket_end]
-    } else if let Some(colon) = host.find(':') {
+    } else if host.matches(':').count() == 1 {
+        let colon = host.find(':').unwrap_or(host.len());
         &host[..colon]
     } else {
         host
@@ -406,15 +463,25 @@ mod tests {
     #[test]
     fn trusted_proxy_forwarded_headers_extracted() -> Result<(), Box<dyn std::error::Error>> {
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "203.0.113.195, 10.0.0.1".parse()?);
+        // Client injected 127.0.0.1, but intermediate proxy added 203.0.113.195, and trusted proxy added 10.0.0.1
+        headers.insert(
+            "x-forwarded-for",
+            "127.0.0.1, 203.0.113.195, 10.0.0.1".parse()?,
+        );
         headers.insert("x-forwarded-host", "artifree.example.com:8443".parse()?);
         headers.insert("x-forwarded-proto", "https".parse()?);
 
         let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
-        let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
+        let trusted = vec![
+            "127.0.0.1".parse::<IpNetwork>()?,
+            "10.0.0.1".parse::<IpNetwork>()?,
+        ];
 
         let info =
             evaluate_connection(&headers, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        // Right-to-left: 10.0.0.1 is trusted proxy -> skipped.
+        // Next: 203.0.113.195 is untrusted -> chosen as real client IP.
+        // Injected 127.0.0.1 on the left is ignored!
         assert_eq!(info.client_ip, "203.0.113.195".parse::<IpAddr>()?);
         assert_eq!(info.host, "artifree.example.com:8443");
         assert_eq!(info.proto, "https");
@@ -424,16 +491,40 @@ mod tests {
     }
 
     #[test]
+    fn rfc7239_forwarded_multi_hop_and_ports() -> Result<(), Box<dyn std::error::Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            "for=127.0.0.1, for=\"203.0.113.195:8080\";proto=https;host=artifree.example.com"
+                .parse()?,
+        );
+
+        let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
+        let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
+
+        let info =
+            evaluate_connection(&headers, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, "203.0.113.195".parse::<IpAddr>()?);
+        assert_eq!(info.host, "artifree.example.com");
+        assert_eq!(info.proto, "https");
+
+        Ok(())
+    }
+
+    #[test]
     fn host_normalization_and_allowlist() {
         let allowed = vec![
             "artifree.example.com".to_owned(),
             "localhost:7410".to_owned(),
+            "::1".to_owned(),
         ];
 
         assert!(is_host_allowed("artifree.example.com", &allowed));
         assert!(is_host_allowed("ARTIFREE.EXAMPLE.COM", &allowed));
         assert!(is_host_allowed("artifree.example.com:443", &allowed));
         assert!(is_host_allowed("localhost:7410", &allowed));
+        assert!(is_host_allowed("::1", &allowed));
+        assert!(is_host_allowed("[::1]:7410", &allowed));
         assert!(!is_host_allowed("evil.example.com", &allowed));
         assert!(!is_host_allowed("artifree.example.com:8443", &allowed));
     }

@@ -137,32 +137,8 @@ async fn serve_listeners(
         None => format!("http://{}", local_address(&content)?),
     };
 
-    let mut allowed_hosts = options.allowed_hosts;
-    let bound_api_host = format!("{}", local_address(&api)?);
-    if !allowed_hosts
-        .iter()
-        .any(|h| h.eq_ignore_ascii_case(&bound_api_host))
-    {
-        allowed_hosts.push(bound_api_host);
-    }
-
-    let state = AppState::new(
-        store,
-        token_store,
-        token,
-        Settings {
-            content_origin: content_origin.clone(),
-            preview_ttl: options.preview_ttl,
-            frame_ancestors: options.frame_ancestors,
-            limits: options.limits,
-            change_streams: options.change_streams,
-            api_origin: options.api_origin,
-            trusted_proxies: options.trusted_proxies,
-            allowed_hosts,
-            allowed_origins: options.allowed_origins,
-            allow_remote_mcp: options.allow_remote_mcp,
-        },
-    )?;
+    let settings = build_settings(&options, local_address(&api)?, content_origin.clone());
+    let state = AppState::new(store, token_store, token, settings)?;
     let web_assets = options.web_dir.as_deref().map(WebAssets::new).transpose()?;
     let web_url = if web_assets.is_some() {
         Some(api_url.clone())
@@ -195,8 +171,11 @@ async fn serve_listeners(
         )
         .with_graceful_shutdown(shutdown_signal())
     });
-    let content_server =
-        axum::serve(content, preview::router(state)).with_graceful_shutdown(shutdown_signal());
+    let content_server = axum::serve(
+        content,
+        preview::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
     tokio::try_join!(
         async {
             api_server
@@ -219,6 +198,33 @@ async fn serve_listeners(
         },
     )?;
     Ok(())
+}
+
+fn build_settings(
+    options: &ServeOptions,
+    bound_api_addr: SocketAddr,
+    content_origin: String,
+) -> Settings {
+    let mut allowed_hosts = options.allowed_hosts.clone();
+    let bound_api_host = bound_api_addr.to_string();
+    if !allowed_hosts
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(&bound_api_host))
+    {
+        allowed_hosts.push(bound_api_host);
+    }
+    Settings {
+        content_origin,
+        preview_ttl: options.preview_ttl,
+        frame_ancestors: options.frame_ancestors.clone(),
+        limits: options.limits,
+        change_streams: options.change_streams,
+        api_origin: options.api_origin.clone(),
+        trusted_proxies: options.trusted_proxies.clone(),
+        allowed_hosts,
+        allowed_origins: options.allowed_origins.clone(),
+        allow_remote_mcp: options.allow_remote_mcp,
+    }
 }
 
 /// Determines the loopback address to bind for local MCP peer isolation in LAN mode.
