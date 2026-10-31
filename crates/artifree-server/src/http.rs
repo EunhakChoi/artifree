@@ -275,12 +275,12 @@ pub fn router(state: AppState) -> Router {
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::map_response(no_store))
-        .layer(middleware::from_fn_with_state(state.clone(), admit))
-        .layer(middleware::from_fn_with_state(state.clone(), cors));
+        .layer(middleware::from_fn_with_state(state.clone(), admit));
 
     Router::new()
         .merge(api_routes)
         .fallback(fallback_handler)
+        .layer(middleware::from_fn_with_state(state.clone(), cors))
         .with_state(state)
 }
 

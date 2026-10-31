@@ -534,6 +534,38 @@ async fn cors_preflight_and_response_headers_on_api_v1() -> TestResult {
         "null origin must be forbidden from API"
     );
 
+    // 5. Preflight on unrecognized API endpoint -> 204 No Content with CORS headers
+    let unrec_preflight = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/v1/nonexistent-endpoint")
+        .header(header::ORIGIN, "http://localhost:5173")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .body(Body::empty())?;
+    let (status, headers, _) = harness.send(unrec_preflight).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        headers
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("http://localhost:5173")
+    );
+
+    // 6. Cross-origin request to unrecognized API endpoint -> 404 with CORS headers
+    let unrec_req = Request::get("/v1/nonexistent-endpoint")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(header::ORIGIN, "http://localhost:5173")
+        .body(Body::empty())?;
+    let (status, headers, body) = harness.send(unrec_req).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        headers
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("http://localhost:5173")
+    );
+    let json: Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["error"]["code"], "not_found");
+
     Ok(())
 }
 

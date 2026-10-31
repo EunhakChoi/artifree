@@ -148,6 +148,35 @@ test('Production web serving: web_url emitted, assets served, SPA fallback, API 
     });
     assert.equal(nullCorsRes.status, 403);
 
+    // 4c. Preflight on unrecognized API endpoint -> 204 with CORS headers
+    const unrecPreflight = await fetch(server.web_url + '/v1/unrecognized', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'http://localhost:5173',
+        'access-control-request-method': 'GET',
+      },
+    });
+    assert.equal(unrecPreflight.status, 204);
+    assert.equal(
+      unrecPreflight.headers.get('access-control-allow-origin'),
+      'http://localhost:5173',
+    );
+
+    // 4d. Cross-origin request to unrecognized API endpoint -> 404 JSON with CORS headers
+    const unrecRes = await fetch(server.web_url + '/v1/unrecognized', {
+      headers: {
+        origin: 'http://localhost:5173',
+        authorization: `Bearer ${server.token}`,
+      },
+    });
+    assert.equal(unrecRes.status, 404);
+    assert.equal(
+      unrecRes.headers.get('access-control-allow-origin'),
+      'http://localhost:5173',
+    );
+    const unrecJson = await unrecRes.json();
+    assert.equal(unrecJson.error?.code, 'not_found');
+
     // 5. End-to-end API operations using ArtifreeClient over web_url
     const client = new ArtifreeClient({
       baseUrl: server.web_url,
