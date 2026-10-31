@@ -67,6 +67,7 @@ async function openInContext(
   page.setDefaultTimeout(10_000);
   const metadataRequests = [];
   const contentRequests = [];
+  const runtimeSessions = [];
   const errors = [];
   let viewAttempts = 0;
   if (retrySkew) {
@@ -161,6 +162,11 @@ async function openInContext(
   });
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('request', (request) => {
+    if (
+      request.method() === 'POST' &&
+      new URL(request.url()).pathname.endsWith('/runtime-views')
+    )
+      runtimeSessions.push(request.postDataJSON().session_id);
     if (request.url().startsWith(server.content_origin))
       contentRequests.push(request);
     if (
@@ -232,9 +238,93 @@ async function openInContext(
     view,
     metadataRequests,
     contentRequests,
+    runtimeSessions,
     errors,
     viewAttempts: () => viewAttempts,
   };
+}
+
+async function checkSessionRecovery(
+  browser,
+  origin,
+  server,
+  artifact,
+  checkAccessibility,
+) {
+  const opened = await open(browser, origin, server, artifact);
+  try {
+    const workspace = opened.page.locator('#artifacts');
+    const expire = async () => {
+      const session = opened.runtimeSessions.at(-1);
+      assert.ok(session, 'The real view request must name its connection.');
+      const closed = await fetch(
+        `${server.api_url}/v1/runtime-sessions/${session}`,
+        {
+          method: 'DELETE',
+          headers: { authorization: `Bearer ${server.token}` },
+        },
+      );
+      assert.equal(closed.status, 204);
+      return session;
+    };
+    const old = await expire();
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    const permissions = workspace.getByRole('region', {
+      name: 'Runtime permissions',
+    });
+    await expect(permissions.getByText('Granted: none')).toBeVisible();
+    assert.notEqual(opened.runtimeSessions.at(-1), old);
+    await expect(
+      workspace.frameLocator('iframe[title^="Preview of"]').locator('#result'),
+    ).toHaveText('The runtime metadata request was refused.');
+    await permissions
+      .getByRole('button', { name: 'Allow metadata access' })
+      .click();
+    await expect(
+      workspace.frameLocator('iframe[title^="Preview of"]').locator('#result'),
+    ).toContainText(artifact.id);
+
+    // A session can expire during a permission change while the source
+    // editor holds an unsaved draft and its own saved preview.
+    await workspace.getByRole('tab', { name: 'Source' }).click();
+    const editor = workspace.getByRole('textbox', { name: 'index.html' });
+    const edited = `${entry}\n<!-- unsaved draft -->`;
+    await editor.fill(edited);
+    await workspace.getByRole('button', { name: 'Show saved preview' }).click();
+    await expect(permissions.getByText('Granted: metadata.read')).toBeVisible();
+    const beforeGrant = await expire();
+    await permissions
+      .getByRole('button', { name: 'Revoke metadata access' })
+      .click();
+    await expect(permissions.getByText('Granted: none')).toBeVisible();
+    assert.notEqual(opened.runtimeSessions.at(-1), beforeGrant);
+    await expect(editor).toHaveValue(edited);
+    await checkAccessibility('runtime-session-recovery', opened.page);
+
+    // Refresh is available even when a live frame has only observed a
+    // missing view, so a lost session can recover without entering the token.
+    const beforeRefresh = await expire();
+    const savedFrame = workspace.locator('iframe[title^="Saved preview"]');
+    const oldSource = await savedFrame.getAttribute('src');
+    await workspace.getByRole('button', { name: 'Refresh preview' }).click();
+    await expect
+      .poll(() => opened.runtimeSessions.at(-1))
+      .not.toBe(beforeRefresh);
+    await expect.poll(() => savedFrame.getAttribute('src')).not.toBe(oldSource);
+    await expect(permissions.getByText('Granted: none')).toBeVisible();
+    assert.notEqual(opened.runtimeSessions.at(-1), beforeRefresh);
+    await expect(editor).toHaveValue(edited);
+    await permissions
+      .getByRole('button', { name: 'Allow metadata access' })
+      .click();
+    await expect(permissions.getByText('Granted: metadata.read')).toBeVisible();
+    await expect(editor).toHaveValue(edited);
+    await workspace.getByRole('button', { name: 'Discard changes' }).click();
+    assert.deepEqual(opened.errors, []);
+  } finally {
+    await opened.context.close();
+  }
 }
 
 // The test browser sees a non-loopback HTTP origin, while all traffic stays
@@ -598,6 +688,13 @@ export async function checkRuntime({
     artifact,
     checkAccessibility,
   );
+  await checkSessionRecovery(
+    browser,
+    origin,
+    server,
+    artifact,
+    checkAccessibility,
+  );
   await checkAbandonedCreation(browser, origin, server, artifact);
   // The workspace and sandbox can each have a wall clock different from
   // the server, or from each other. A valid server lease must still work.
@@ -911,6 +1008,7 @@ export async function checkRuntime({
   }
   return {
     consentAndReconciliation: 'passed',
+    sessionRecovery: 'passed',
     metadata: 'passed',
     navigationAndDelayedReply: 'passed',
     expiredMessage: 'passed',

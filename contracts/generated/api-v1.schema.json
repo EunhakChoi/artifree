@@ -396,6 +396,11 @@
           "type": "string"
         },
         {
+          "const": "runtime_session_expired",
+          "description": "The runtime connection is missing, closed, or expired; open a new one.",
+          "type": "string"
+        },
+        {
           "const": "revision_conflict",
           "description": "The base revision is not current; reload and reapply the change.",
           "type": "string"
@@ -903,6 +908,10 @@
             "null"
           ]
         },
+        "session_id": {
+          "description": "The server-issued connection this view belongs to.",
+          "type": "string"
+        },
         "supported": {
           "description": "Capabilities supported by this server for the entry's SDK pin.",
           "items": {
@@ -922,6 +931,7 @@
       "required": [
         "url",
         "enabled",
+        "session_id",
         "artifact_id",
         "revision",
         "head_revision",

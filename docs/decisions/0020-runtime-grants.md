@@ -69,8 +69,18 @@ the original evidence and the limits of that observation.
    may remain until expiry; this is not a confirmed server-side disconnect.
 5. **Lifetime.** Connections and grants are held only in the running server,
    expire after a bounded lifetime and disappear on restart. A disconnected
-   or expired connection cannot be reopened with the same ID. A page must
-   reconnect and obtain consent again after expiry or restart.
+   or expired connection cannot be reopened with the same ID. When the server
+   specifically reports a missing or expired connection, the client shares
+   one replacement attempt across concurrent views. It does not treat an
+   unrelated missing artifact or view as a missing connection. The new
+   connection starts without grants and asks for consent again; a permission
+   change prepared on an old view is never replayed on the replacement.
+   Every view names its connection so late results and old controls cannot
+   affect the new one. Logout fences a pending replacement, and an
+   unconfirmed logout prevents another replacement until the close is retried.
+   The workspace keeps its source editor mounted during recovery. A user can
+   also refresh the preview when an existing frame encounters an unavailable
+   view; this lets it detect an expired connection without re-entering a token.
 
 ## Limits
 

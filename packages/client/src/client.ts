@@ -314,10 +314,32 @@ function grantMayHaveChanged(error: unknown): boolean {
   );
 }
 
+function sessionExpired(error: unknown): boolean {
+  return (
+    error instanceof ArtifreeApiError &&
+    error.status === 404 &&
+    error.code === 'runtime_session_expired'
+  );
+}
+
+function connectionReplaced(): ArtifreeApiError {
+  return new ArtifreeApiError(
+    'The runtime connection was closed or replaced.',
+    {
+      status: 0,
+      code: 'invalid_request',
+    },
+  );
+}
+
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
 export class ArtifreeClient {
   private runtimeSession: string | undefined;
   private runtimeOpenAttempt = 0;
+  private runtimeConnectionEpoch = 0;
+  private runtimeClosing = false;
+  private runtimeRecovery:
+    { readonly session: string; readonly promise: Promise<void> } | undefined;
   private readonly runtimeGrants = new RuntimeGrantChanges();
   readonly subscribeRuntimeGrants = this.runtimeGrants.subscribe;
   readonly runtimeGrantSnapshot = this.runtimeGrants.snapshot;
@@ -340,6 +362,11 @@ export class ArtifreeClient {
         code: 'invalid_request',
       });
     return this.runtimeSession;
+  }
+
+  /** Changes whenever a new connection replaces the previous one. */
+  runtimeConnectionRevision(): number {
+    return this.runtimeConnectionEpoch;
   }
 
   /** Signals permission changes for a preview's artifact and revision. */
@@ -650,21 +677,37 @@ export class ArtifreeClient {
     generation: number,
     options: RuntimeViewOptions = {},
   ): Promise<RuntimeView> {
-    const view = await this.json(
-      'POST',
-      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
-      parseRuntimeView,
-      {
-        body: {
-          session_id: this.runtimeSessionId,
-          view_id: viewId,
-          generation,
+    if (this.runtimeClosing) throw connectionReplaced();
+    const request = (session: string): Promise<RuntimeView> =>
+      this.json(
+        'POST',
+        `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
+        parseRuntimeView,
+        {
+          body: {
+            session_id: session,
+            view_id: viewId,
+            generation,
+          },
+          signal: options.signal,
+          onDispatch: options.onDispatch,
         },
-        signal: options.signal,
-        onDispatch: options.onDispatch,
-      },
-    );
+      );
+    let session = this.runtimeSessionId;
+    let view: RuntimeView;
+    try {
+      view = await request(session);
+    } catch (error: unknown) {
+      if (!sessionExpired(error)) throw error;
+      await this.recoverRuntimeSession(session);
+      options.signal?.throwIfAborted();
+      session = this.runtimeSessionId;
+      view = await request(session);
+    }
     if (
+      view.session_id !== session ||
+      this.runtimeSession !== session ||
+      this.runtimeClosing ||
       view.artifact_id !== id ||
       view.revision !== revision ||
       view.view_id !== viewId ||
@@ -682,7 +725,15 @@ export class ArtifreeClient {
 
   /** Opens the runtime connection before requesting previews. */
   async openRuntimeSession(options: ReadOptions = {}): Promise<void> {
+    if (this.runtimeClosing) throw connectionReplaced();
     if (this.runtimeSession !== undefined) return;
+    await this.establishRuntimeSession(undefined, options);
+  }
+
+  private async establishRuntimeSession(
+    previous: string | undefined,
+    options: ReadOptions,
+  ): Promise<void> {
     const attempt = ++this.runtimeOpenAttempt;
     const connection = await this.json(
       'POST',
@@ -691,24 +742,61 @@ export class ArtifreeClient {
       { signal: options.signal },
     );
     options.signal?.throwIfAborted();
-    if (attempt !== this.runtimeOpenAttempt)
+    if (
+      attempt !== this.runtimeOpenAttempt ||
+      this.runtimeSession !== previous ||
+      this.runtimeClosing
+    )
+      throw connectionReplaced();
+    if (previous !== undefined && connection.session_id === previous)
       throw new ArtifreeApiError(
-        'The runtime connection attempt was replaced.',
-        { status: 0, code: 'invalid_request' },
+        'The server returned the expired runtime connection again.',
+        { status: 200, code: 'invalid_response' },
       );
     this.runtimeSession = connection.session_id;
+    this.runtimeConnectionEpoch += 1;
+    this.runtimeGrants.clear();
+  }
+
+  /** Replaces only a confirmed expired connection, once for all its views. */
+  private async recoverRuntimeSession(previous: string): Promise<void> {
+    if (this.runtimeClosing) throw connectionReplaced();
+    if (this.runtimeSession !== previous) {
+      if (this.runtimeSession === undefined) throw connectionReplaced();
+      return;
+    }
+    if (this.runtimeRecovery?.session === previous)
+      return this.runtimeRecovery.promise;
+    const promise: Promise<void> = this.establishRuntimeSession(
+      previous,
+      {},
+    ).finally(() => {
+      if (this.runtimeRecovery?.promise === promise)
+        this.runtimeRecovery = undefined;
+    });
+    this.runtimeRecovery = { session: previous, promise };
+    return promise;
   }
 
   /** Closes the connection and its grants; retry until the server acknowledges. */
   async closeRuntimeSession(): Promise<void> {
     this.runtimeOpenAttempt += 1;
+    this.runtimeClosing = true;
     const session = this.runtimeSession;
-    if (session === undefined) return;
-    await this.close(`/v1/runtime-sessions/${session}`);
+    if (session !== undefined)
+      await this.close(`/v1/runtime-sessions/${session}`);
     if (this.runtimeSession === session) {
       this.runtimeSession = undefined;
       this.runtimeGrants.clear();
     }
+    this.runtimeClosing = false;
+  }
+
+  private requireViewSession(view: RuntimeView): string {
+    const session = this.runtimeSessionId;
+    if (this.runtimeClosing || view.session_id !== session)
+      throw connectionReplaced();
+    return session;
   }
 
   /** Replace a grant against the source and version the user observed. */
@@ -716,7 +804,7 @@ export class ArtifreeClient {
     view: RuntimeView,
     capabilities: string[],
   ): Promise<RuntimeGrant> {
-    const session = this.runtimeSessionId;
+    const session = this.requireViewSession(view);
     const wasUnknown = this.runtimeGrants.begin(view, capabilities);
     try {
       const grant = await this.json(
@@ -739,16 +827,24 @@ export class ArtifreeClient {
             code: 'invalid_response',
           },
         );
-      if (this.runtimeSession === session)
-        this.runtimeGrants.finish(view, false);
+      this.requireViewSession(view);
+      this.runtimeGrants.finish(view, false);
       return grant;
     } catch (error: unknown) {
+      let failure = error;
+      if (sessionExpired(error)) {
+        try {
+          await this.recoverRuntimeSession(session);
+        } catch (recoveryError: unknown) {
+          failure = recoveryError;
+        }
+      }
       if (this.runtimeSession === session)
         this.runtimeGrants.finish(
           view,
           wasUnknown || grantMayHaveChanged(error),
         );
-      throw error;
+      throw failure;
     }
   }
 
@@ -757,12 +853,14 @@ export class ArtifreeClient {
     view: RuntimeView,
     options: ReadOptions = {},
   ): Promise<RuntimeMetadata> {
+    this.requireViewSession(view);
     const metadata = await this.json(
       'POST',
       `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/metadata`,
       parseRuntimeMetadata,
       { body: { initialization: view.initialization }, signal: options.signal },
     );
+    this.requireViewSession(view);
     if (metadata.artifact_id !== view.artifact_id)
       throw new ArtifreeApiError(
         'The server returned metadata for another artifact.',

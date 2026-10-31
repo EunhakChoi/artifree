@@ -26,6 +26,11 @@
                 "type": "string"
               },
               {
+                "const": "runtime_session_expired",
+                "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                "type": "string"
+              },
+              {
                 "const": "revision_conflict",
                 "description": "The base revision is not current; reload and reapply the change.",
                 "type": "string"
@@ -315,6 +320,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -532,6 +542,11 @@
                       {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
                         "type": "string"
                       },
                       {
@@ -873,6 +888,11 @@
                       {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
                         "type": "string"
                       },
                       {
@@ -1252,6 +1272,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -1562,6 +1587,11 @@
                       {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
                         "type": "string"
                       },
                       {
@@ -1894,6 +1924,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -2161,6 +2196,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -2365,6 +2405,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -2558,6 +2603,11 @@
                       {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
                         "type": "string"
                       },
                       {
@@ -2789,6 +2839,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -2947,6 +3002,11 @@
                       {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "runtime_session_expired",
+                        "description": "The runtime connection is missing, closed, or expired; open a new one.",
                         "type": "string"
                       },
                       {

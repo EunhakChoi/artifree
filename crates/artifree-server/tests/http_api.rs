@@ -2025,13 +2025,14 @@ async fn runtime_grants_are_explicit_revocable_and_connection_scoped_over_http()
             .status,
         StatusCode::NO_CONTENT
     );
-    assert_eq!(
-        harness
-            .send(grant(version, json!(["metadata.read"]))?)
-            .await?
-            .status,
-        StatusCode::NOT_FOUND
-    );
+    let expired = harness
+        .send(grant(version, json!(["metadata.read"]))?)
+        .await?;
+    assert_eq!(expired.status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&expired), "runtime_session_expired");
+    let expired_view = harness.send(create(3)?).await?;
+    assert_eq!(expired_view.status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&expired_view), "runtime_session_expired");
     let reopen =
         authorized(Request::put(format!("/v1/runtime-sessions/{session}"))).body(Body::empty())?;
     assert_eq!(

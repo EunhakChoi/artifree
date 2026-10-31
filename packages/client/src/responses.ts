@@ -55,6 +55,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   invalid_request: true,
   unauthenticated: true,
   not_found: true,
+  runtime_session_expired: true,
   revision_conflict: true,
   metadata_conflict: true,
   request_key_reused: true,
@@ -274,6 +275,7 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
   const {
     url,
     enabled,
+    session_id,
     artifact_id,
     revision,
     head_revision,
@@ -291,6 +293,8 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
   if (
     typeof url !== 'string' ||
     typeof enabled !== 'boolean' ||
+    typeof session_id !== 'string' ||
+    !/^[0-9a-f]{32}$/.test(session_id) ||
     typeof artifact_id !== 'string' ||
     !isCount(revision) ||
     revision === 0 ||
@@ -331,6 +335,7 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
   return {
     url,
     enabled,
+    session_id,
     artifact_id,
     revision,
     head_revision,

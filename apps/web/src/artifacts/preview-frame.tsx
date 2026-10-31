@@ -40,11 +40,12 @@ export function PreviewFrame({
     client.runtimeGrantSnapshot,
   );
   const grantRevision = client.runtimeGrantRevision(artifactId, revision);
+  const connectionRevision = client.runtimeConnectionRevision();
   const generation = useRef(0);
   const preview = useRequest(
     stale
       ? undefined
-      : `${artifactId}:${revision}:${epoch}:${grantRevision}:${attempt}`,
+      : `${artifactId}:${revision}:${epoch}:${connectionRevision}:${grantRevision}:${attempt}`,
     async (signal) => {
       // A scheduler can hold reads while the page is hidden or rate-limited.
       // Time the lease from the actual attempt, not from entering that queue.
@@ -168,6 +169,14 @@ export function PreviewFrame({
           ) : null}
         </section>
       )}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => setAttempt((value) => value + 1)}
+      >
+        Refresh preview
+      </Button>
       {grantStatus === 'settled' ? (
         <RuntimeFrame
           key={`${preview.value.view.view_id}:${preview.value.view.generation}`}

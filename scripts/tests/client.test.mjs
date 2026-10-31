@@ -102,6 +102,39 @@ async function failure(promise) {
   return error;
 }
 
+function runtimeView(session, viewId = 'd'.repeat(32), generation = 1) {
+  return {
+    url: `http://127.0.0.1:7411/r/${'b'.repeat(64)}/`,
+    enabled: true,
+    session_id: session,
+    artifact_id: artifact.id,
+    revision: 1,
+    head_revision: 1,
+    sdk: 'artifree.app.v1',
+    declared: ['metadata.read'],
+    supported: ['metadata.read'],
+    granted: [],
+    grant_version: 0,
+    view_id: viewId,
+    generation,
+    initialization: 'c'.repeat(64),
+    expires_at_ms: 1_000_000,
+    lease_ms: 900_000,
+  };
+}
+
+function expiredSession() {
+  return Response.json(
+    {
+      error: {
+        code: 'runtime_session_expired',
+        message: 'Connection expired.',
+      },
+    },
+    { status: 404 },
+  );
+}
+
 test('A body cut off mid-stream is a network error, not a contract error', async () => {
   // The outcome of a mutation is unknown, so callers must be told to retry.
   for (const status of [200, 201, 503]) {
@@ -219,6 +252,7 @@ test('An uncertain grant stays with its connection until a clear is confirmed', 
   });
   await client.openRuntimeSession();
   const view = {
+    session_id: 'a'.repeat(32),
     artifact_id: artifact.id,
     revision: 1,
     head_revision: 1,
@@ -256,11 +290,320 @@ test('An uncertain grant stays with its connection until a clear is confirmed', 
   unsubscribe();
 });
 
+test('Concurrent views replace an expired connection once and require new consent', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  let opens = 0;
+  let grantRequests = 0;
+  let release;
+  let started;
+  const opening = new Promise((resolve) => (started = resolve));
+  const delayed = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        if (opens === 1) return Response.json({ session_id: old });
+        started();
+        await delayed;
+        return Response.json({ session_id: fresh });
+      }
+      if (url.endsWith('/runtime-views')) {
+        const body = JSON.parse(init.body);
+        return body.session_id === old
+          ? expiredSession()
+          : Response.json(runtimeView(fresh, body.view_id, body.generation));
+      }
+      grantRequests += 1;
+      assert.match(url, new RegExp(`/runtime-sessions/${fresh}/`));
+      return Response.json({ version: 1 });
+    },
+  });
+  await client.openRuntimeSession();
+  const first = client.createRuntimeView(artifact.id, 1, '1'.repeat(32), 1);
+  const second = client.createRuntimeView(artifact.id, 1, '2'.repeat(32), 1);
+  const both = Promise.allSettled([first, second]);
+  await opening;
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  const results = await both;
+  assert.equal(opens, 2, 'Concurrent views must share one replacement.');
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ['fulfilled', 'fulfilled'],
+  );
+  const [one, two] = results.map((result) => result.value);
+  assert.equal(client.runtimeSessionId, fresh);
+  assert.deepEqual([one.granted, two.granted], [[], []]);
+  assert.equal(
+    (await failure(client.setRuntimeGrant(runtimeView(old), ['metadata.read'])))
+      .code,
+    'invalid_request',
+  );
+  assert.equal(grantRequests, 0);
+  await client.setRuntimeGrant(one, ['metadata.read']);
+  assert.equal(grantRequests, 1);
+});
+
+test('A grant rejected for expiry is never replayed on the new connection', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  let opens = 0;
+  let grants = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      grants += 1;
+      return expiredSession();
+    },
+  });
+  await client.openRuntimeSession();
+  assert.equal(
+    (await failure(client.setRuntimeGrant(runtimeView(old), ['metadata.read'])))
+      .code,
+    'runtime_session_expired',
+  );
+  assert.equal(client.runtimeSessionId, fresh);
+  assert.equal(grants, 1);
+  assert.equal(
+    (await failure(client.setRuntimeGrant(runtimeView(old), ['metadata.read'])))
+      .code,
+    'invalid_request',
+  );
+  assert.equal(grants, 1);
+});
+
+test('A failed replacement stays retryable and never reuses an expired ID', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  let opens = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        if (opens === 2)
+          return Response.json(
+            { error: { code: 'unavailable', message: 'Try again.' } },
+            { status: 503 },
+          );
+        if (opens === 3) return Response.json({ session_id: old });
+        return Response.json({ session_id: opens === 1 ? old : fresh });
+      }
+      const body = JSON.parse(init.body);
+      return body.session_id === old
+        ? expiredSession()
+        : Response.json(runtimeView(fresh, body.view_id, body.generation));
+    },
+  });
+  await client.openRuntimeSession();
+  const create = () =>
+    client.createRuntimeView(artifact.id, 1, 'd'.repeat(32), 1);
+  assert.equal((await failure(create())).code, 'unavailable');
+  assert.equal(client.runtimeSessionId, old);
+  assert.equal((await failure(create())).code, 'invalid_response');
+  assert.equal(client.runtimeSessionId, old);
+  assert.deepEqual((await create()).granted, []);
+  assert.equal(client.runtimeSessionId, fresh);
+  assert.equal(opens, 4);
+});
+
+test('Logout fences a pending expired-connection replacement', async () => {
+  const old = 'a'.repeat(32);
+  let opens = 0;
+  let release;
+  let started;
+  const opening = new Promise((resolve) => (started = resolve));
+  const delayed = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        if (opens === 1) return Response.json({ session_id: old });
+        started();
+        await delayed;
+        return Response.json({ session_id: 'b'.repeat(32) });
+      }
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      return expiredSession();
+    },
+  });
+  await client.openRuntimeSession();
+  const pending = client.createRuntimeView(artifact.id, 1, 'd'.repeat(32), 1);
+  await opening;
+  await client.closeRuntimeSession();
+  release();
+  assert.equal((await failure(pending)).code, 'invalid_request');
+  assert.throws(() => client.runtimeSessionId, { code: 'invalid_request' });
+});
+
+test('An unconfirmed logout prevents a late expired-view response reopening it', async () => {
+  const old = 'a'.repeat(32);
+  let opens = 0;
+  let closes = 0;
+  let release;
+  let dispatched;
+  const sent = new Promise((resolve) => (dispatched = resolve));
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        return Response.json({ session_id: old });
+      }
+      if (init.method === 'DELETE') {
+        closes += 1;
+        if (closes === 1) throw new Error('close response lost');
+        return new Response(null, { status: 204 });
+      }
+      dispatched();
+      await held;
+      return expiredSession();
+    },
+  });
+  await client.openRuntimeSession();
+  const pending = failure(
+    client.createRuntimeView(artifact.id, 1, 'd'.repeat(32), 1),
+  );
+  await sent;
+  assert.equal(
+    (await failure(client.closeRuntimeSession())).code,
+    'network_error',
+  );
+  assert.equal(
+    (await failure(client.createRuntimeView(artifact.id, 1, 'e'.repeat(32), 1)))
+      .code,
+    'invalid_request',
+  );
+  release();
+  assert.equal((await pending).code, 'invalid_request');
+  assert.equal(opens, 1);
+  assert.equal(client.runtimeSessionId, old);
+  await client.closeRuntimeSession();
+  assert.throws(() => client.runtimeSessionId, { code: 'invalid_request' });
+});
+
+test('Late grant and metadata replies cannot cross to a replacement connection', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  let opens = 0;
+  let finishGrant;
+  let finishMetadata;
+  const grantReply = new Promise((resolve) => (finishGrant = resolve));
+  const metadataReply = new Promise((resolve) => (finishMetadata = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      if (url.endsWith('/grant')) return grantReply;
+      if (url.endsWith('/metadata')) return metadataReply;
+      const body = JSON.parse(init.body);
+      return body.session_id === old
+        ? expiredSession()
+        : Response.json(runtimeView(fresh, body.view_id, body.generation));
+    },
+  });
+  await client.openRuntimeSession();
+  const view = runtimeView(old);
+  const grant = assert.rejects(
+    client.setRuntimeGrant(view, ['metadata.read']),
+    { code: 'invalid_request' },
+    'A late grant must not reach the replacement.',
+  );
+  const metadata = assert.rejects(
+    client.runtimeMetadata(view),
+    { code: 'invalid_request' },
+    'Late metadata must not reach the replacement.',
+  );
+  await client.createRuntimeView(artifact.id, 1, '1'.repeat(32), 1);
+  assert.equal(client.runtimeSessionId, fresh);
+  finishGrant(Response.json({ version: 1 }));
+  finishMetadata(
+    Response.json({
+      artifact_id: artifact.id,
+      title: 'Demo',
+      current_revision: 1,
+      metadata_revision: 1,
+    }),
+  );
+  await Promise.all([grant, metadata]);
+});
+
+test('A late view response cannot be adopted by a replacement connection', async () => {
+  const old = 'a'.repeat(32);
+  const fresh = 'b'.repeat(32);
+  let opens = 0;
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: ++opens === 1 ? old : fresh });
+      const body = JSON.parse(init.body);
+      if (body.view_id === '1'.repeat(32)) {
+        await held;
+        return Response.json(runtimeView(old, body.view_id, body.generation));
+      }
+      return body.session_id === old
+        ? expiredSession()
+        : Response.json(runtimeView(fresh, body.view_id, body.generation));
+    },
+  });
+  await client.openRuntimeSession();
+  const late = failure(
+    client.createRuntimeView(artifact.id, 1, '1'.repeat(32), 1),
+  );
+  await client.createRuntimeView(artifact.id, 1, '2'.repeat(32), 1);
+  assert.equal(client.runtimeSessionId, fresh);
+  release();
+  assert.equal((await late).code, 'invalid_response');
+});
+
+test('Unrelated missing artifacts do not replace a runtime connection', async () => {
+  let opens = 0;
+  const client = new ArtifreeClient({
+    baseUrl: '',
+    accessToken: 'token',
+    fetch: async (url) => {
+      if (url.endsWith('/v1/runtime-sessions')) {
+        opens += 1;
+        return Response.json({ session_id: 'a'.repeat(32) });
+      }
+      return Response.json(
+        { error: { code: 'not_found', message: 'Artifact not found.' } },
+        { status: 404 },
+      );
+    },
+  });
+  await client.openRuntimeSession();
+  assert.equal(
+    (await failure(client.createRuntimeView(artifact.id, 1, 'd'.repeat(32), 1)))
+      .code,
+    'not_found',
+  );
+  assert.equal(opens, 1);
+});
+
 test('Runtime responses must match the requested view and valid metadata', async () => {
   const viewId = 'a'.repeat(32);
   const view = {
     url: `http://127.0.0.1:7411/r/${'b'.repeat(64)}/`,
     enabled: true,
+    session_id: 'e'.repeat(32),
     artifact_id: artifact.id,
     revision: 1,
     head_revision: 1,
@@ -306,6 +649,7 @@ test('Runtime responses must match the requested view and valid metadata', async
   for (const body of [
     { ...view, url: 'javascript:alert(1)' },
     { ...view, enabled: 'yes' },
+    { ...view, session_id: 'd'.repeat(32) },
     { ...view, sdk: 'other' },
     { ...view, supported: [3] },
     { ...view, granted: ['future.write'] },
@@ -338,7 +682,9 @@ test('Runtime responses must match the requested view and valid metadata', async
     metadata_revision: 2,
   };
   assert.deepEqual(
-    await clientWith(() => Response.json(valid)).runtimeMetadata(view),
+    await (
+      await runtimeClientWith(() => Response.json(valid))
+    ).runtimeMetadata(view),
     valid,
   );
   for (const body of [
@@ -347,7 +693,9 @@ test('Runtime responses must match the requested view and valid metadata', async
     { ...valid, metadata_revision: Number.MAX_SAFE_INTEGER + 1 },
   ]) {
     const error = await failure(
-      clientWith(() => Response.json(body)).runtimeMetadata(view),
+      (await runtimeClientWith(() => Response.json(body))).runtimeMetadata(
+        view,
+      ),
     );
     assert.equal(error.code, 'invalid_response', JSON.stringify(body));
   }

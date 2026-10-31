@@ -224,6 +224,7 @@ test('A runtime view reports actual dispatch after a hidden-page wait', async ()
       {
         url: 'http://127.0.0.1:7411/r/test/',
         enabled: true,
+        session_id: 'e'.repeat(32),
         artifact_id: 'art_1',
         revision: 1,
         head_revision: 1,

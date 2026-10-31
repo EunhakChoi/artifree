@@ -140,6 +140,7 @@ test('A runtime view always states its SDK pin, including null for ordinary prev
   const view = {
     url: 'http://127.0.0.1:7411/p/example/',
     enabled: false,
+    session_id: 'e'.repeat(32),
     artifact_id: 'art_0',
     revision: 1,
     head_revision: 1,
@@ -159,5 +160,8 @@ test('A runtime view always states its SDK pin, including null for ordinary prev
   const missing = { ...view };
   delete missing.sdk;
   assert.equal(check(missing), false, 'A missing SDK field must not validate.');
+  const missingSession = { ...view };
+  delete missingSession.session_id;
+  assert.equal(check(missingSession), false, 'A view must name its session.');
   assert.equal(check({ ...view, sdk: 12 }), false);
 });

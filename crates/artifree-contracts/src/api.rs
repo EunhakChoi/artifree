@@ -396,6 +396,8 @@ pub struct RuntimeView {
     pub url: String,
     /// Whether the entry explicitly opts in to the metadata bridge.
     pub enabled: bool,
+    /// The server-issued connection this view belongs to.
+    pub session_id: String,
     /// The artifact whose preview is shown.
     pub artifact_id: String,
     /// The pinned source revision shown in the frame.
@@ -530,6 +532,8 @@ pub enum ErrorCode {
     Unauthenticated,
     /// The resource does not exist or is not accessible.
     NotFound,
+    /// The runtime connection is missing, closed, or expired; open a new one.
+    RuntimeSessionExpired,
     /// The base revision is not current; reload and reapply the change.
     RevisionConflict,
     /// The base metadata revision is not current; reload and reapply the

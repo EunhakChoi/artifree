@@ -70,6 +70,7 @@ export type ErrorCode =
   | 'invalid_request'
   | 'unauthenticated'
   | 'not_found'
+  | 'runtime_session_expired'
   | 'revision_conflict'
   | 'metadata_conflict'
   | 'request_key_reused'
@@ -412,6 +413,10 @@ export interface RuntimeView {
    * Supported SDK pin, or null for an ordinary preview. Always present.
    */
   sdk: string | null;
+  /**
+   * The server-issued connection this view belongs to.
+   */
+  session_id: string;
   /**
    * Capabilities supported by this server for the entry's SDK pin.
    */

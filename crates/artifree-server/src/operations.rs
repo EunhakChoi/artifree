@@ -537,7 +537,7 @@ fn session_error(error: SessionError) -> ApiError {
     match error {
         SessionError::Missing | SessionError::Closed => ApiError::new(
             StatusCode::NOT_FOUND,
-            ErrorCode::NotFound,
+            ErrorCode::RuntimeSessionExpired,
             "runtime connection is closed or expired",
         ),
         SessionError::Conflict => ApiError::new(
@@ -722,6 +722,7 @@ pub(crate) async fn create_runtime_view(
             ticket.preview.secret
         ),
         enabled,
+        session_id: request.session_id,
         artifact_id: id.to_string(),
         revision: revision.0,
         head_revision: record.current_revision.0,
