@@ -788,9 +788,13 @@ async fn stage_handoff(
     body: Result<Json<StageHandoffRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = body?;
+    let workspace = request.workspace_session_id.clone();
     let handoff = operations::stage_handoff(&state, actor, request).await?;
     Ok(created(
-        &format!("/v1/handoffs/{}", handoff.id),
+        &format!(
+            "/v1/handoffs/{}?workspace_session_id={workspace}",
+            handoff.id
+        ),
         Json(handoff),
     ))
 }

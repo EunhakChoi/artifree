@@ -35,9 +35,17 @@ below; they do not establish an external agent transport for Artifree.
 3. **Consent and state.** Stage records the proposed delivery without making
    it available to the agent. The workspace shows the selected session,
    revision, path, range, source text and intent before a separate trusted
-   user send. Send retries use the same server-issued stage ID. A staged or
-   queued delivery can be cancelled; after it is offered to an agent, cancel
-   cannot claim to recall it. These transitions are atomic with polling.
+   user send. The first send rechecks the pinned source before changing the
+   stage to queued. A retry with the same server-issued ID returns the recorded
+   delivery state without requiring the source to remain available. A recorded
+   offer, block or acknowledgement can still be read after that workspace
+   closes; an unoffered item becomes expired and cannot be sent. If another
+   send or cancellation commits while that first source check fails, the
+   transition is checked again before reporting an error. A staged or queued
+   delivery can be cancelled; after it is offered to an agent, cancel cannot
+   claim to recall it. These transitions are atomic with polling. A successful
+   HTTP stage returns a Location that includes the workspace session ID needed
+   to retrieve that handoff; access still requires the actor's bearer token.
 4. **Delivery and receipt.** Polling offers a queued item to its registered
    session and repeats the same item until that session acknowledges receipt.
    Agents must deduplicate by delivery ID. If a source lookup proves the pinned

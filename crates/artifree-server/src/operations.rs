@@ -8,10 +8,11 @@ use artifree_contracts::api::{
     AgentSessionList, Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse,
     ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
     DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime,
-    FileChange as WireChange, FileUpload, Handoff, ListArtifactsQuery, ListSort, Preview,
-    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
-    RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat,
-    SourceExportManifest, StageHandoffRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    FileChange as WireChange, FileUpload, Handoff, HandoffState, ListArtifactsQuery, ListSort,
+    Preview, RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection,
+    RuntimeGrant, RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
+    SourceExportFormat, SourceExportManifest, StageHandoffRequest, UpdateArtifactRequest,
+    UpdateArtifactResponse,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
@@ -669,11 +670,43 @@ pub(crate) async fn send_handoff(
     id: &str,
 ) -> Result<Handoff, ApiError> {
     let handoff = get_handoff(state, &actor, workspace_id, id)?;
-    confirm_handoff_source(state, actor.clone(), &handoff).await?;
-    state
-        .handoffs()
-        .send(&actor, workspace_id, id)
-        .map_err(handoff_error)
+    if handoff_was_sent(&handoff)? {
+        return Ok(handoff);
+    }
+    if let Err(error) = confirm_handoff_source(state, actor.clone(), &handoff).await {
+        // A concurrent send may have committed while this lookup ran.
+        let current = get_handoff(state, &actor, workspace_id, id)?;
+        if handoff_was_sent(&current)? {
+            return Ok(current);
+        }
+        return Err(error);
+    }
+    match state.handoffs().send(&actor, workspace_id, id) {
+        Ok(sent) => Ok(sent),
+        Err(error) => {
+            // Closing a connection or inbox after a concurrent send must not
+            // hide an outcome that is already readable by this workspace.
+            let current = get_handoff(state, &actor, workspace_id, id)?;
+            if handoff_was_sent(&current)? {
+                Ok(current)
+            } else {
+                Err(handoff_error(error))
+            }
+        }
+    }
+}
+
+fn handoff_was_sent(handoff: &Handoff) -> Result<bool, ApiError> {
+    match handoff.state {
+        HandoffState::Staged => Ok(false),
+        HandoffState::Queued
+        | HandoffState::Offered
+        | HandoffState::Blocked
+        | HandoffState::Acknowledged => Ok(true),
+        HandoffState::Cancelled | HandoffState::Expired => Err(handoff_error(
+            HandoffError::Conflict("this handoff cannot be sent"),
+        )),
+    }
 }
 
 pub(crate) fn cancel_handoff(

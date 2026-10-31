@@ -17,11 +17,11 @@ use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
 use artifree_providers::storage::SqliteStore;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use tower::ServiceExt;
 
 use crate::auth::AccessToken;
-use crate::http::{AppState, Settings};
+use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
 use crate::{changes, operations, preview};
 
@@ -533,6 +533,65 @@ async fn queued_handoff(
     Ok((workspace, agent, staged))
 }
 
+async fn staged_handoff(
+    state: &AppState,
+    actor: &ActorId,
+) -> Result<(String, RegisteredHandoffSession, Handoff), Box<dyn Error>> {
+    let (workspace, agent, existing) = queued_handoff(state, actor).await?;
+    state
+        .handoffs()
+        .cancel(actor, &workspace, &existing.id)
+        .map_err(|error| format!("{error:?}"))?;
+    let connection = state
+        .runtime_sessions()
+        .get(actor, &workspace)
+        .map_err(|error| format!("{error:?}"))?;
+    let staged = state
+        .handoffs()
+        .stage(
+            actor,
+            &workspace,
+            &connection,
+            &agent.session_id,
+            existing.selection,
+            "Edit".into(),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+    Ok((workspace, agent, staged))
+}
+
+#[test]
+fn first_send_storage_failure_keeps_stage_retryable() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, _agent, staged) = staged_handoff(&state, &actor).await?;
+        let database = directory.0.join("runtime.sqlite3");
+        let backup = directory.0.join("runtime-backup.sqlite3");
+        std::fs::rename(&database, &backup)?;
+        std::fs::create_dir(&database)?;
+        let failure = operations::send_handoff(&state, actor.clone(), &workspace, &staged.id).await;
+        std::fs::remove_dir(&database)?;
+        std::fs::rename(&backup, &database)?;
+        assert!(matches!(failure, Err(error) if error.status == StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(
+            operations::get_handoff(&state, &actor, &workspace, &staged.id)
+                .map_err(|error| error.body.message)?
+                .state,
+            artifree_contracts::api::HandoffState::Staged
+        );
+        assert!(matches!(
+            operations::send_handoff(&state, actor, &workspace, &staged.id).await,
+            Ok(handoff) if handoff.state == artifree_contracts::api::HandoffState::Queued
+        ));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
 #[test]
 fn temporary_storage_failure_keeps_an_offer_retryable() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
@@ -661,6 +720,10 @@ fn missing_source_does_not_starve_another_offer() -> Result<(), Box<dyn Error>> 
                 .state,
             artifree_contracts::api::HandoffState::Blocked
         );
+        assert!(matches!(
+            operations::send_handoff(&state, actor.clone(), &workspace, &first.id).await,
+            Ok(handoff) if handoff.state == artifree_contracts::api::HandoffState::Blocked
+        ));
         let following = operations::poll_handoffs(
             &state,
             actor.clone(),
@@ -682,6 +745,93 @@ fn missing_source_does_not_starve_another_offer() -> Result<(), Box<dyn Error>> 
             .map_err(|error| error.body.message)?
             .state,
             artifree_contracts::api::HandoffState::Acknowledged
+        );
+        operations::close_runtime_session(&state, &actor, &workspace)
+            .map_err(|error| error.body.message)?;
+        assert!(matches!(
+            operations::send_handoff(&state, actor, &workspace, &first.id).await,
+            Ok(handoff) if handoff.state == artifree_contracts::api::HandoffState::Acknowledged
+        ));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn closed_workspace_cannot_send_an_unoffered_item() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, _agent, queued) = queued_handoff(&state, &actor).await?;
+        operations::close_runtime_session(&state, &actor, &workspace)
+            .map_err(|error| error.body.message)?;
+        assert!(matches!(
+            operations::send_handoff(&state, actor, &workspace, &queued.id).await,
+            Err(error) if error.status == StatusCode::CONFLICT
+        ));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn created_handoff_location_retrieves_the_same_resource() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, agent, existing) = queued_handoff(&state, &actor).await?;
+        let selection = existing.selection;
+        let proposal = StageHandoffRequest {
+            workspace_session_id: workspace,
+            agent_session_id: agent.session_id,
+            artifact_id: selection.artifact_id,
+            revision: selection.revision,
+            path: selection.path,
+            file_sha256: selection.file_sha256,
+            start: selection.start,
+            end: selection.end,
+            intent: "Edit".into(),
+        };
+        let authorization = format!("Bearer {}", "0".repeat(64));
+        let app = http::router(state);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/handoffs")
+                    .header(header::AUTHORIZATION, &authorization)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&proposal)?))?,
+            )
+            .await?;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let location = created
+            .headers()
+            .get(header::LOCATION)
+            .ok_or("missing Location")?
+            .to_str()?
+            .to_owned();
+        let original = axum::body::to_bytes(created.into_body(), usize::MAX).await?;
+        let retrieved = app
+            .oneshot(
+                Request::get(location)
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(
+            retrieved.status(),
+            StatusCode::OK,
+            "the created Location must be retrievable"
+        );
+        assert_eq!(
+            axum::body::to_bytes(retrieved.into_body(), usize::MAX).await?,
+            original
         );
         Ok::<(), Box<dyn Error>>(())
     })
@@ -775,6 +925,159 @@ fn changed_source_digest_blocks_only_that_offer() -> Result<(), Box<dyn Error>> 
         ));
         Ok::<(), Box<dyn Error>>(())
     })
+}
+
+#[derive(Clone, Copy)]
+enum ConcurrentSendChange {
+    Sent,
+    Cancelled,
+}
+
+fn send_during_failed_source_lookup(change: ConcurrentSendChange) -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, _agent, staged) = staged_handoff(&state, &actor).await?;
+        operations::update(
+            &state,
+            actor.clone(),
+            "trash-before-send-race".parse()?,
+            &staged.selection.artifact_id,
+            UpdateArtifactRequest {
+                base_metadata_revision: 1,
+                title: None,
+                pinned: None,
+                deleted: Some(true),
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _sent = started.send(());
+            let _released = waiting.recv();
+        });
+        ready.await?;
+        let mut request = Box::pin(operations::send_handoff(
+            &state,
+            actor.clone(),
+            &workspace,
+            &staged.id,
+        ));
+        assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await);
+        // Model the other request completing its already validated transition
+        // or the user cancelling while this source read is waiting.
+        match change {
+            ConcurrentSendChange::Sent => state.handoffs().send(&actor, &workspace, &staged.id),
+            ConcurrentSendChange::Cancelled => {
+                state.handoffs().cancel(&actor, &workspace, &staged.id)
+            }
+        }
+        .map_err(|error| format!("{error:?}"))?;
+        release.send(())?;
+        let result = request.await;
+        match change {
+            ConcurrentSendChange::Sent => assert!(
+                matches!(result, Ok(handoff) if handoff.state == artifree_contracts::api::HandoffState::Queued),
+                "a concurrent committed send must be recoverable despite the late lookup failure"
+            ),
+            ConcurrentSendChange::Cancelled => assert!(
+                matches!(result, Err(error) if error.status == StatusCode::CONFLICT),
+                "a concurrent cancel must not be turned into a send"
+            ),
+        }
+        blocker.await?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn concurrent_send_is_returned_after_source_lookup_fails() -> Result<(), Box<dyn Error>> {
+    send_during_failed_source_lookup(ConcurrentSendChange::Sent)
+}
+
+#[test]
+fn concurrent_cancel_wins_after_source_lookup_fails() -> Result<(), Box<dyn Error>> {
+    send_during_failed_source_lookup(ConcurrentSendChange::Cancelled)
+}
+
+fn send_during_logout(already_offered: bool) -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (workspace, agent, staged) = staged_handoff(&state, &actor).await?;
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _sent = started.send(());
+            let _released = waiting.recv();
+        });
+        ready.await?;
+        let mut request = Box::pin(operations::send_handoff(
+            &state,
+            actor.clone(),
+            &workspace,
+            &staged.id,
+        ));
+        assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await);
+        if already_offered {
+            state
+                .handoffs()
+                .send(&actor, &workspace, &staged.id)
+                .map_err(|error| format!("{error:?}"))?;
+            let offers = state
+                .handoffs()
+                .poll(&actor, &agent.session_id, &agent.session_secret)
+                .map_err(|error| format!("{error:?}"))?;
+            assert!(matches!(offers.as_slice(), [offer] if offer.id == staged.id));
+        }
+        operations::close_runtime_session(&state, &actor, &workspace)
+            .map_err(|error| error.body.message)?;
+        release.send(())?;
+        let result = request.await;
+        if already_offered {
+            assert!(
+                matches!(result, Ok(handoff) if handoff.state == artifree_contracts::api::HandoffState::Offered),
+                "a prior offer remains a readable outcome after logout"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(error) if error.status == StatusCode::CONFLICT),
+                "logout must prevent a stage from being sent after its source check"
+            );
+        }
+        assert!(
+            state
+                .handoffs()
+                .poll(&actor, &agent.session_id, &agent.session_secret)
+                .map_err(|error| format!("{error:?}"))?
+                .is_empty(),
+            "logout must stop later delivery or replay"
+        );
+        blocker.await?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn prior_offer_is_readable_after_logout_during_source_check() -> Result<(), Box<dyn Error>> {
+    send_during_logout(true)
+}
+
+#[test]
+fn logout_fences_unoffered_send_during_source_check() -> Result<(), Box<dyn Error>> {
+    send_during_logout(false)
 }
 
 fn handoff_source_recheck(logout: bool) -> Result<(), Box<dyn Error>> {

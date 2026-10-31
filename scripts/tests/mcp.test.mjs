@@ -122,8 +122,176 @@ async function api(path, init = {}) {
     ...init,
     headers: { authorization: `Bearer ${server.token}`, ...init.headers },
   });
-  return { status: response.status, body: await response.json() };
+  return {
+    status: response.status,
+    body: await response.json(),
+    location: response.headers.get('location'),
+  };
 }
+
+async function handoffFixture(client) {
+  const source = '<p>selectable</p>';
+  const artifact = await ok(client, 'create_artifact', {
+    title: 'Handoff retry',
+    files: [utf8('index.html', source)],
+    idempotency_key: freshKey(),
+  });
+  const agent = await ok(client, 'register_handoff_session', {
+    name: 'Retry editor',
+  });
+  const connection = await api('/v1/runtime-sessions', { method: 'POST' });
+  assert.equal(connection.status, 200);
+  const workspace = connection.body.session_id;
+  const proposal = {
+    workspace_session_id: workspace,
+    agent_session_id: agent.session_id,
+    artifact_id: artifact.artifact.id,
+    revision: 1,
+    path: 'index.html',
+    file_sha256: createHash('sha256').update(source).digest('hex'),
+    start: 0,
+    end: 3,
+    intent: 'Edit',
+  };
+  return { agent, artifact, proposal, workspace };
+}
+
+function postHandoff(path, body) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+test('a handoff creation Location retrieves the staged resource', async () => {
+  await withClient(async (client) => {
+    const { proposal } = await handoffFixture(client);
+    const created = await postHandoff('/v1/handoffs', proposal);
+    assert.equal(created.status, 201);
+    assert.ok(created.location, 'The created handoff must have a Location.');
+    const location = new URL(created.location, server.api_url);
+    assert.equal(location.origin, server.api_url);
+    assert.equal(location.pathname, `/v1/handoffs/${created.body.id}`);
+    assert.deepEqual(
+      [...location.searchParams.keys()],
+      ['workspace_session_id'],
+    );
+    assert.equal(
+      location.searchParams.get('workspace_session_id'),
+      proposal.workspace_session_id,
+    );
+    const retrieved = await api(created.location);
+    assert.equal(retrieved.status, 200, 'Following Location must retrieve it.');
+    assert.deepEqual(retrieved.body, created.body);
+  });
+});
+
+test('a committed handoff can be retried after its source is deleted', async () => {
+  await withClient(async (client) => {
+    const { agent, artifact, proposal, workspace } =
+      await handoffFixture(client);
+    const action = { workspace_session_id: workspace };
+    const stage = () => postHandoff('/v1/handoffs', proposal);
+    const send = (item) =>
+      postHandoff(`/v1/handoffs/${item.body.id}/send`, action);
+    async function assertRetry(item, expectedState) {
+      const result = await send(item);
+      assert.equal(
+        result.status,
+        200,
+        `${expectedState} retry must be confirmed.`,
+      );
+      assert.equal(result.body.state, expectedState);
+    }
+    const acknowledged = await stage();
+    assert.equal((await send(acknowledged)).body.state, 'queued');
+    assert.equal(
+      (await ok(client, 'poll_handoffs', agent)).deliveries[0].id,
+      acknowledged.body.id,
+    );
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: acknowledged.body.id,
+    });
+    const offered = await stage();
+    assert.equal((await send(offered)).body.state, 'queued');
+    assert.equal(
+      (await ok(client, 'poll_handoffs', agent)).deliveries[0].id,
+      offered.body.id,
+    );
+    const queued = await stage();
+    // Commit the send, then discard its answer before the client can read it.
+    const lost = await fetch(
+      `${server.api_url}/v1/handoffs/${queued.body.id}/send`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${server.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(action),
+      },
+    );
+    assert.equal(lost.status, 200);
+    await lost.body.cancel();
+    const unsent = await stage();
+    const cancelled = await stage();
+    assert.equal(
+      (await postHandoff(`/v1/handoffs/${cancelled.body.id}/cancel`, action))
+        .body.state,
+      'cancelled',
+    );
+    await ok(client, 'update_artifact', {
+      artifact_id: artifact.artifact.id,
+      base_metadata_revision: artifact.artifact.metadata_revision,
+      deleted: true,
+      idempotency_key: freshKey(),
+    });
+    await assertRetry(acknowledged, 'acknowledged');
+    await assertRetry(offered, 'offered');
+    await assertRetry(queued, 'queued');
+    assert.equal((await send(unsent)).status, 404);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${unsent.body.id}?workspace_session_id=${workspace}`,
+        )
+      ).body.state,
+      'staged',
+    );
+    assert.equal((await send(cancelled)).status, 409);
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+    await assertRetry(offered, 'blocked');
+    await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: offered.body.id,
+    });
+    await assertRetry(offered, 'acknowledged');
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+    await assertRetry(queued, 'blocked');
+    const other = await api('/v1/runtime-sessions', { method: 'POST' });
+    assert.equal(
+      (
+        await postHandoff(`/v1/handoffs/${queued.body.id}/send`, {
+          workspace_session_id: other.body.session_id,
+        })
+      ).status,
+      404,
+    );
+    const closed = await fetch(
+      `${server.api_url}/v1/runtime-sessions/${workspace}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${server.token}` },
+      },
+    );
+    assert.equal(closed.status, 204);
+    await assertRetry(acknowledged, 'acknowledged');
+    await assertRetry(queued, 'blocked');
+    assert.equal((await send(unsent)).status, 409);
+  });
+});
 
 test('a user stages a pinned selection for one registered MCP inbox', async () => {
   await withClient(async (client) => {
