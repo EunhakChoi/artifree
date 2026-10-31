@@ -10,8 +10,10 @@
 //! These tools are for agents, separate from the metadata-only runtime
 //! bridge of an opted-in workspace preview.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
     CommitResponse, ContentEncoding, CreateArtifactRequest, DuplicateArtifactRequest,
     DuplicateArtifactResponse, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
@@ -27,7 +29,11 @@ use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::ActorId;
 use axum::Router;
+use axum::extract::ConnectInfo;
+use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use rmcp::model::{
@@ -75,7 +81,27 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
         Arc::new(NeverSessionManager::default()),
         config,
     );
-    Router::new().route_service(MCP_PATH, service)
+    Router::new()
+        .route_service(MCP_PATH, service)
+        .route_layer(middleware::from_fn(enforce_loopback_peer))
+}
+
+/// Enforces that connections to the MCP endpoint originate from a loopback peer socket.
+async fn enforce_loopback_peer(req: axum::extract::Request, next: Next) -> Response {
+    if req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|connect| !connect.ip().is_loopback())
+    {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "MCP endpoint is restricted to loopback clients only",
+        )
+        .into_response();
+    }
+
+    next.run(req).await
 }
 
 /// The MCP server for one request.

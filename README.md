@@ -24,14 +24,18 @@ pins its tested Rust toolchain in `rust-toolchain.toml`.
 ```sh
 npm ci
 npm run build
-cargo run -p artifree-server -- serve --data-dir .artifree/data
+cargo run -p artifree-server -- serve --data-dir .artifree/data --web-dir apps/web/dist
 ```
 
-The server prints one JSON readiness line with the API URL (default
+The server prints one JSON readiness line with the API and web URL (default
 `http://127.0.0.1:7410`), the preview origin (`http://127.0.0.1:7411`), and the
 token file. On Unix the server creates the data directory readable only by
-you and refuses an existing one that other users can access. Keep it running
-and, in another terminal:
+you and refuses an existing one that other users can access.
+
+Open `http://127.0.0.1:7410` in a browser and paste the token from
+`.artifree/data/access-token` to use the workspace directly without Vite.
+
+For development with live reloading, Vite is still available:
 
 ```sh
 npm run dev
@@ -99,8 +103,10 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0016](docs/decisions/0016-bounded-file-reads.md),
 [0017](docs/decisions/0017-code-workspace.md),
 [0018](docs/decisions/0018-source-draft-recovery.md),
-[0019](docs/decisions/0019-runtime-metadata-bridge.md), and
-[0020](docs/decisions/0020-runtime-grants.md)).
+[0019](docs/decisions/0019-runtime-metadata-bridge.md),
+[0020](docs/decisions/0020-runtime-grants.md),
+[0021](docs/decisions/0021-agent-selection-handoff.md), and
+[0022](docs/decisions/0022-production-web-and-api-serving.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

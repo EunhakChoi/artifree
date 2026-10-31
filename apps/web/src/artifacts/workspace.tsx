@@ -32,23 +32,64 @@ import { useLiveWorkspace } from './use-live-workspace';
 import type { FeedState } from './use-live-workspace';
 import { describeFailure, useRequest } from './use-request';
 
-const TOKEN_KEY = 'artifree.accessToken';
+const SERVER_KEY = 'artifree.serverUrl';
 
-function storedToken(): string | undefined {
+function readInitialServerUrl(): { url: string; fromQuery: boolean } {
   try {
-    return sessionStorage.getItem(TOKEN_KEY) ?? undefined;
+    const params = new URLSearchParams(window.location.search);
+    const queryServer = params.get('server');
+    if (queryServer !== null && queryServer.trim() !== '') {
+      return { url: queryServer.trim(), fromQuery: true };
+    }
+    const stored = sessionStorage.getItem(SERVER_KEY);
+    return { url: stored ?? '', fromQuery: false };
   } catch {
-    // Storage can be unavailable (privacy modes); the user reconnects.
+    return { url: '', fromQuery: false };
+  }
+}
+
+function tokenKeyForServer(serverUrl: string): string {
+  try {
+    const origin = serverUrl
+      ? new URL(serverUrl, window.location.origin).origin
+      : window.location.origin;
+    return `artifree.accessToken.${origin}`;
+  } catch {
+    return `artifree.accessToken.${serverUrl || 'default'}`;
+  }
+}
+
+function storedToken(
+  serverUrl: string,
+  fromQuery: boolean,
+): string | undefined {
+  if (fromQuery) {
+    return undefined;
+  }
+  const key = tokenKeyForServer(serverUrl);
+  try {
+    return sessionStorage.getItem(key) ?? undefined;
+  } catch {
     return undefined;
   }
 }
 
-function storeToken(token: string | undefined): void {
+function storeToken(token: string | undefined, serverUrl: string): void {
+  const key = tokenKeyForServer(serverUrl);
   try {
-    if (token === undefined) sessionStorage.removeItem(TOKEN_KEY);
-    else sessionStorage.setItem(TOKEN_KEY, token);
+    if (token === undefined) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key, token);
   } catch {
     // Without storage the token lives only in memory for this page.
+  }
+}
+
+function storeServerUrl(serverUrl: string): void {
+  try {
+    if (!serverUrl) sessionStorage.removeItem(SERVER_KEY);
+    else sessionStorage.setItem(SERVER_KEY, serverUrl);
+  } catch {
+    // Without storage the server lives only in memory for this page.
   }
 }
 
@@ -57,16 +98,35 @@ function storeToken(token: string | undefined): void {
  * `drafts` belongs to the page and outlives every connection.
  */
 export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
-  const [token, setToken] = useState(storedToken);
-  function connect(next: string | undefined): void {
-    storeToken(next);
-    setToken(next);
+  const [initialConfig] = useState(readInitialServerUrl);
+  const [serverUrl, setServerUrl] = useState<string>(initialConfig.url);
+  const [token, setToken] = useState<string | undefined>(() =>
+    storedToken(initialConfig.url, initialConfig.fromQuery),
+  );
+
+  function connect(newToken: string | undefined, newServerUrl?: string): void {
+    const effectiveServer =
+      newServerUrl !== undefined ? newServerUrl : serverUrl;
+    setServerUrl(effectiveServer);
+    storeServerUrl(effectiveServer);
+    storeToken(newToken, effectiveServer);
+    setToken(newToken);
   }
-  if (token === undefined) return <ConnectForm onConnect={connect} />;
+
+  if (token === undefined) {
+    return (
+      <ConnectForm
+        initialServerUrl={serverUrl}
+        onConnect={(tok, srv) => connect(tok, srv)}
+      />
+    );
+  }
+
   return (
     <ConnectedWorkspace
-      key={token}
+      key={`${serverUrl}:${token}`}
       token={token}
+      serverUrl={serverUrl}
       drafts={drafts}
       onDisconnect={() => connect(undefined)}
     />
@@ -75,6 +135,7 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
 
 interface ConnectedWorkspaceProps {
   token: string;
+  serverUrl: string;
   drafts: PageDrafts;
   onDisconnect: () => void;
 }
@@ -90,6 +151,7 @@ const FEED_MESSAGES: Record<FeedState, string> = {
 
 function ConnectedWorkspace({
   token,
+  serverUrl,
   drafts,
   onDisconnect,
 }: ConnectedWorkspaceProps) {
@@ -98,7 +160,7 @@ function ConnectedWorkspace({
   const [client] = useState(
     () =>
       new ArtifreeClient({
-        baseUrl: '',
+        baseUrl: serverUrl,
         accessToken: token,
         fetch: new RequestGate(pageVisibility).fetch,
       }),
