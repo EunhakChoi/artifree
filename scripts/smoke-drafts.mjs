@@ -397,6 +397,8 @@ export async function checkDrafts({
     await keeps(a.tab, [text('<p>while away</p>')]);
     await a.tab.reload();
     await a.workspace.getByRole('button', { name: 'Disconnect' }).click();
+    // Runtime disconnect is complete only after the server acknowledges it.
+    await expect(a.workspace.getByLabel('Access token')).toBeVisible();
     await a.tab.reload();
     await expect(a.workspace.getByLabel('Access token')).toBeVisible();
     const b = await openTab();

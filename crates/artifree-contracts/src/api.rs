@@ -367,10 +367,20 @@ pub struct Preview {
     pub expires_at_ms: i64,
 }
 
+/// A server-issued ephemeral runtime connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConnection {
+    /// Random 32-digit lowercase hexadecimal connection identifier.
+    pub session_id: String,
+}
+
 /// Requests a preview view whose frame can read its artifact metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRuntimeViewRequest {
+    /// Random identifier of the connected workspace session.
+    pub session_id: String,
     /// A random 32-digit lowercase hexadecimal identifier for this view.
     pub view_id: String,
     /// A positive, increasing generation within this view.
@@ -386,10 +396,25 @@ pub struct RuntimeView {
     pub url: String,
     /// Whether the entry explicitly opts in to the metadata bridge.
     pub enabled: bool,
+    /// The server-issued connection this view belongs to.
+    pub session_id: String,
     /// The artifact whose preview is shown.
     pub artifact_id: String,
     /// The pinned source revision shown in the frame.
     pub revision: u64,
+    /// Current source head observed when this view was issued.
+    pub head_revision: u64,
+    /// Supported SDK pin, or null for an ordinary preview. Always present.
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub sdk: Option<String>,
+    /// Capabilities declared by this pinned revision.
+    pub declared: Vec<String>,
+    /// Capabilities supported by this server for the entry's SDK pin.
+    pub supported: Vec<String>,
+    /// Capabilities granted for this connection and source binding.
+    pub granted: Vec<String>,
+    /// Version to supply when replacing this grant.
+    pub grant_version: u64,
     /// The view identifier supplied when it was created.
     pub view_id: String,
     /// This view's generation.
@@ -402,6 +427,26 @@ pub struct RuntimeView {
     /// elapsed local time, not compare the server's Unix timestamp to theirs.
     #[schemars(range(max = 2_147_483_647))]
     pub lease_ms: u64,
+}
+
+/// Replaces the grant only if the user observed the same source and grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetRuntimeGrantRequest {
+    /// The source head observed when choosing the grant.
+    pub head_revision: u64,
+    /// Version observed before the change.
+    pub expected_version: u64,
+    /// Complete supported subset; an empty list revokes every capability.
+    pub capabilities: Vec<String>,
+}
+
+/// The new version of a connection-scoped grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeGrant {
+    /// The grant version, used to guard the next change.
+    pub version: u64,
 }
 
 /// Proves that the parent is requesting metadata for its initialized view.
@@ -487,6 +532,8 @@ pub enum ErrorCode {
     Unauthenticated,
     /// The resource does not exist or is not accessible.
     NotFound,
+    /// The runtime connection is missing, closed, or expired; open a new one.
+    RuntimeSessionExpired,
     /// The base revision is not current; reload and reapply the change.
     RevisionConflict,
     /// The base metadata revision is not current; reload and reapply the

@@ -245,6 +245,15 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   frame without the account token, a wrong initialization and a different
   opaque window are refused, an expired host message sends no RPC, and a
   successful response held across frame navigation is not delivered afterwards.
+- Runtime grants: tests exercise declarations and SDK pins, unsupported and
+  undeclared grants, a user choice before metadata access, compare-and-set
+  conflicts, revocation and regrant, source head changes, session expiry and
+  logout. The real service tests hold grant, view and metadata reads across
+  revocation or close, and HTTP tests exercise the same authorization through
+  the router. Browser checks cover separate connections, a lost close
+  acknowledgement, and an unknown grant carried across a view change until a
+  confirmed clear fences its delayed request. A connection created after server restart has a fresh ID;
+  the tests do not claim multi-user authentication.
 - `scripts/smoke-workspace.mjs`: a probe inside the preview iframe must fail to
   read the parent page, use storage, open a popup, or reach the API; create,
   save, and reload requests held in flight keep the forms read-only and the

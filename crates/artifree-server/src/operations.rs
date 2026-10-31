@@ -9,8 +9,9 @@ use artifree_contracts::api::{
     CreateArtifactRequest, CreateRuntimeViewRequest, DuplicateArtifactRequest,
     DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime, FileChange as WireChange,
     FileUpload, ListArtifactsQuery, ListSort, Preview, RestoreRevisionRequest, Revision,
-    RevisionFile, RevisionList, RuntimeMetadata, RuntimeView, SaveRevisionRequest,
-    SourceExportFormat, SourceExportManifest, UpdateArtifactRequest, UpdateArtifactResponse,
+    RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat, SourceExportManifest,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
@@ -30,7 +31,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::auth::hex;
 use crate::http::AppState;
-use crate::preview::{self, RuntimeIssueError};
+use crate::preview::{self, RuntimeAuthority, RuntimeIssueError};
+use crate::runtime_policy::{MANIFEST_PATH, METADATA_READ, RuntimePolicy, SDK_PIN};
+use crate::runtime_sessions::{GrantScope, SessionError};
 
 /// A failed operation: the HTTP status and the contract error body. MCP
 /// reports the same body in an error tool result.
@@ -530,6 +533,124 @@ fn missing_view() -> ApiError {
     )
 }
 
+fn session_error(error: SessionError) -> ApiError {
+    match error {
+        SessionError::Missing | SessionError::Closed => ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::RuntimeSessionExpired,
+            "runtime connection is closed or expired",
+        ),
+        SessionError::Conflict => ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::InvalidRequest,
+            "runtime grant changed; refresh before trying again",
+        ),
+        SessionError::Unavailable => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "runtime connections are temporarily unavailable",
+        ),
+    }
+}
+
+pub(crate) fn open_runtime_session(
+    state: &AppState,
+    actor: &ActorId,
+) -> Result<RuntimeConnection, ApiError> {
+    let session_id = state
+        .runtime_sessions()
+        .create(actor)
+        .map_err(session_error)?;
+    Ok(RuntimeConnection { session_id })
+}
+
+pub(crate) fn close_runtime_session(
+    state: &AppState,
+    actor: &ActorId,
+    id: &str,
+) -> Result<(), ApiError> {
+    validate_view(id, 1)?;
+    state
+        .runtime_sessions()
+        .close(actor, id)
+        .map_err(session_error)
+}
+
+async fn runtime_source(
+    state: &AppState,
+    actor: &ActorId,
+    id: &ArtifactId,
+    revision: SourceRevision,
+) -> Result<(ArtifactRecord, bool, RuntimePolicy), ApiError> {
+    let actor = actor.clone();
+    let id = id.clone();
+    let manifest_path: PackagePath = MANIFEST_PATH.parse().map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            "invalid runtime manifest path",
+        )
+    })?;
+    let (record, enabled, manifest) = state
+        .run(move |artifacts| {
+            let record = artifacts.artifact(&actor, &id)?;
+            if revision > record.current_revision {
+                return Err(ArtifactError::NotFound(Missing::Revision));
+            }
+            let entry = artifacts.read_file(&actor, &id, revision, &PackagePath::entry())?;
+            let enabled = preview::runtime_marker(&entry).is_some();
+            let manifest = if enabled {
+                match artifacts.read_file(&actor, &id, revision, &manifest_path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(ArtifactError::NotFound(Missing::File)) => None,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            Ok((record, enabled, manifest))
+        })
+        .await?;
+    let policy = RuntimePolicy::from_source(enabled, manifest.as_deref())
+        .map_err(ApiError::unprocessable)?;
+    Ok((record, enabled, policy))
+}
+
+pub(crate) async fn set_runtime_grant(
+    state: &AppState,
+    actor: ActorId,
+    session_id: &str,
+    id: &str,
+    revision: u64,
+    request: SetRuntimeGrantRequest,
+) -> Result<RuntimeGrant, ApiError> {
+    validate_view(session_id, 1)?;
+    let session = state
+        .runtime_sessions()
+        .get(&actor, session_id)
+        .map_err(session_error)?;
+    let id = artifact_id(id)?;
+    let revision = revision_number(revision)?;
+    let (record, _, policy) = runtime_source(state, &actor, &id, revision).await?;
+    if record.current_revision.0 != request.head_revision {
+        return Err(session_error(SessionError::Conflict));
+    }
+    if !policy.supports_grant(&request.capabilities) {
+        return Err(ApiError::unprocessable(
+            "grant must be a supported, declared subset",
+        ));
+    }
+    let scope = GrantScope::new(id, revision, record.current_revision);
+    let version = session
+        .set_grant(
+            scope,
+            !request.capabilities.is_empty(),
+            request.expected_version,
+        )
+        .map_err(session_error)?;
+    Ok(RuntimeGrant { version })
+}
+
 pub(crate) async fn create_runtime_view(
     state: &AppState,
     actor: ActorId,
@@ -538,6 +659,11 @@ pub(crate) async fn create_runtime_view(
     request: CreateRuntimeViewRequest,
 ) -> Result<RuntimeView, ApiError> {
     validate_view(&request.view_id, request.generation)?;
+    validate_view(&request.session_id, 1)?;
+    let session = state
+        .runtime_sessions()
+        .get(&actor, &request.session_id)
+        .map_err(session_error)?;
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
     let _creation = state
@@ -550,29 +676,32 @@ pub(crate) async fn create_runtime_view(
                 "runtime views are temporarily unavailable",
             )
         })?;
-    let lookup_actor = actor.clone();
-    let lookup_id = id.clone();
-    let (record, enabled) = state
-        .run(move |artifacts| {
-            let record = artifacts.artifact(&lookup_actor, &lookup_id)?;
-            if revision > record.current_revision {
-                return Err(ArtifactError::NotFound(Missing::Revision));
+    let (record, enabled, policy) = runtime_source(state, &actor, &id, revision).await?;
+    let scope = GrantScope::new(id.clone(), revision, record.current_revision);
+    let (ticket, grant_version, allowed) = session
+        .with_grant(&scope, |version, allowed| {
+            let ticket = state.previews().issue_runtime(
+                actor,
+                id.clone(),
+                revision,
+                record.current_revision,
+                request.view_id.clone(),
+                request.generation,
+            )?;
+            let authority = RuntimeAuthority {
+                session: session.clone(),
+                scope: scope.clone(),
+                version,
+            };
+            if !state
+                .previews()
+                .bind_authority(&ticket.preview.secret, authority)
+            {
+                return Err(RuntimeIssueError::Unavailable);
             }
-            let entry =
-                artifacts.read_file(&lookup_actor, &lookup_id, revision, &PackagePath::entry())?;
-            Ok((record, preview::runtime_marker(&entry).is_some()))
+            Ok((ticket, version, allowed))
         })
-        .await?;
-    let ticket = state
-        .previews()
-        .issue_runtime(
-            actor,
-            id.clone(),
-            revision,
-            record.current_revision,
-            request.view_id.clone(),
-            request.generation,
-        )
+        .map_err(session_error)?
         .map_err(|error| match error {
             RuntimeIssueError::Stale => ApiError::new(
                 StatusCode::CONFLICT,
@@ -593,8 +722,23 @@ pub(crate) async fn create_runtime_view(
             ticket.preview.secret
         ),
         enabled,
+        session_id: request.session_id,
         artifact_id: id.to_string(),
         revision: revision.0,
+        head_revision: record.current_revision.0,
+        sdk: enabled.then(|| SDK_PIN.to_owned()),
+        declared: policy.declared(),
+        supported: if enabled {
+            RuntimePolicy::supported()
+        } else {
+            Vec::new()
+        },
+        granted: if allowed {
+            vec![METADATA_READ.to_owned()]
+        } else {
+            Vec::new()
+        },
+        grant_version,
         view_id: request.view_id,
         generation: request.generation,
         initialization: ticket.initialization,
@@ -617,7 +761,7 @@ pub(crate) async fn runtime_metadata(
     let revision = revision_number(revision)?;
     let head = state
         .previews()
-        .runtime_head(&actor, &id, revision, view_id, generation, initialization)
+        .runtime_access(&actor, &id, revision, view_id, generation, initialization)
         .ok_or_else(missing_view)?;
     let lookup_actor = actor.clone();
     let lookup_id = id.clone();
@@ -627,10 +771,14 @@ pub(crate) async fn runtime_metadata(
     // Access and current source are read from the service on every RPC. A
     // concurrent view replacement or expiry is checked again after the read.
     if record.current_revision != head
-        || state
-            .previews()
-            .runtime_head(&actor, &id, revision, view_id, generation, initialization)
-            != Some(head)
+        || state.previews().runtime_access(
+            &actor,
+            &id,
+            revision,
+            view_id,
+            generation,
+            initialization,
+        ) != Some(head)
     {
         return Err(missing_view());
     }

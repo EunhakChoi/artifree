@@ -94,14 +94,15 @@ function FoundationDialog() {
           <li>HTML artifacts saved as immutable revisions in local SQLite</li>
           <li>Conditional saves with conflict detection and retry keys</li>
           <li>Sandboxed previews on a separate origin</li>
+          <li>Opted-in preview metadata with connection-scoped consent</li>
           <li>
             The same operations from the HTTP API, MCP agents, the CLI, and this
             page
           </li>
         </ul>
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Sharing, publishing, structured documents, the runtime SDK, and model
-          access are planned.
+          Sharing, publishing, structured documents, other runtime capabilities,
+          and model access are planned.
         </p>
         <DialogFooter>
           <DialogClose render={<Button />}>Got it</DialogClose>

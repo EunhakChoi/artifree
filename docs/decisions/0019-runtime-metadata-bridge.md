@@ -1,6 +1,6 @@
 # 0019: A bound runtime metadata read
 
-Date: 2026-10-31. Status: proposed for this change. Builds on
+Date: 2026-10-31. Status: accepted. Builds on
 [0003](0003-local-html-artifact-slice.md),
 [0007](0007-live-web-workspace.md), and
 [0015](0015-source-exports.md).

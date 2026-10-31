@@ -92,8 +92,10 @@ packages and structured document models need different edit operations.
 The metadata runtime runs opted-in content separately from the account UI. Its
 short-lived view binds the actor, artifact, source revision, view generation,
 and initialization; the server checks access and the current source on each
-read ([0019](decisions/0019-runtime-metadata-bridge.md)). Grants and other
-capabilities remain proposed. Separate ports alone do not isolate cookie
+read ([0019](decisions/0019-runtime-metadata-bridge.md)). A process-local
+connection grant requires explicit consent for `metadata.read` and is checked
+again on every call; other capabilities remain proposed
+([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
 ## Local and server operation
@@ -126,6 +128,9 @@ in the Rust core.
 | `POST /v1/artifacts/{id}/revisions/{n}/runtime-views`                              | Issue a bound, short-lived runtime view           |
 | `POST /v1/artifacts/{id}/revisions/{n}/runtime-views/{view}/{generation}/metadata` | Read the view's current metadata                  |
 | `DELETE /v1/runtime-views/{view}/{generation}`                                     | Close one runtime view generation                 |
+| `POST /v1/runtime-sessions`                                                        | Open an ephemeral runtime connection              |
+| `DELETE /v1/runtime-sessions/{session}`                                            | Close the connection and revoke its grants        |
+| `PUT /v1/runtime-sessions/{session}/artifacts/{id}/revisions/{n}/grant`            | Replace an observed connection grant              |
 | `GET /v1/changes`                                                                  | Committed changes as server-sent events           |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
@@ -216,8 +221,9 @@ server lists it with the same digests, and a save whose answer was lost
 replays with its kept key. Without Web Locks, draft reads and writes are
 refused with an explicit warning to protect other tabs' records
 ([0018](decisions/0018-source-draft-recovery.md)).
-R04 adds the first bound runtime metadata read ([0019](decisions/0019-runtime-metadata-bridge.md)).
-Grants (R05) and the agent handoff (A08) remain planned.
+R04 adds the first bound runtime metadata read ([0019](decisions/0019-runtime-metadata-bridge.md)),
+and R05 adds connection-scoped metadata consent and grants
+([0020](decisions/0020-runtime-grants.md)). The agent handoff (A08) remains planned.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

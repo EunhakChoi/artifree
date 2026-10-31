@@ -11,6 +11,7 @@ import type {
   RestoreRevisionRequest,
   Revision,
   RuntimeMetadata,
+  RuntimeGrant,
   RuntimeView,
   SaveRevisionRequest,
   UpdateArtifactRequest,
@@ -31,7 +32,9 @@ import {
   parseError,
   parsePreview,
   parseRevisionList,
+  parseRuntimeConnection,
   parseRuntimeMetadata,
+  parseRuntimeGrant,
   parseRuntimeView,
   parseUpdate,
 } from './responses.js';
@@ -224,8 +227,122 @@ interface SendOptions {
   readonly onDispatch?: (() => void) | undefined;
 }
 
+type GrantState = 'settled' | 'pending' | 'unknown';
+type GrantView = Pick<
+  RuntimeView,
+  'artifact_id' | 'revision' | 'head_revision'
+>;
+
+/** Keeps uncertain writes with the connection, even when a preview unmounts. */
+class RuntimeGrantChanges {
+  private readonly states = new Map<string, Exclude<GrantState, 'settled'>>();
+  private readonly revisions = new Map<string, number>();
+  private readonly listeners = new Set<() => void>();
+  private epoch = 0;
+
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+  readonly snapshot = (): number => this.epoch;
+
+  private key(view: GrantView): string {
+    return JSON.stringify([
+      view.artifact_id,
+      view.revision,
+      view.head_revision,
+    ]);
+  }
+
+  private revisionKey(id: string, revision: number): string {
+    return JSON.stringify([id, revision]);
+  }
+
+  revision(id: string, revision: number): number {
+    return this.revisions.get(this.revisionKey(id, revision)) ?? 0;
+  }
+
+  status(view: GrantView): GrantState {
+    return this.states.get(this.key(view)) ?? 'settled';
+  }
+
+  begin(view: GrantView, capabilities: readonly string[]): boolean {
+    const previous = this.status(view);
+    if (
+      previous === 'pending' ||
+      (previous === 'unknown' && capabilities.length !== 0)
+    )
+      throw new ArtifreeApiError(
+        'Resolve the earlier permission change by clearing access first.',
+        {
+          status: 409,
+          code: 'invalid_request',
+        },
+      );
+    this.states.set(this.key(view), 'pending');
+    this.notify();
+    return previous === 'unknown';
+  }
+
+  finish(view: GrantView, unknown: boolean): void {
+    const key = this.key(view);
+    if (unknown) this.states.set(key, 'unknown');
+    else this.states.delete(key);
+    const revision = this.revisionKey(view.artifact_id, view.revision);
+    this.revisions.set(revision, (this.revisions.get(revision) ?? 0) + 1);
+    this.notify();
+  }
+
+  clear(): void {
+    this.states.clear();
+    this.revisions.clear();
+    this.notify();
+  }
+
+  private notify(): void {
+    this.epoch += 1;
+    for (const listener of this.listeners) listener();
+  }
+}
+
+function grantMayHaveChanged(error: unknown): boolean {
+  return (
+    !(error instanceof ArtifreeApiError) ||
+    error.code === 'network_error' ||
+    error.code === 'invalid_response' ||
+    error.status >= 500
+  );
+}
+
+function sessionExpired(error: unknown): boolean {
+  return (
+    error instanceof ArtifreeApiError &&
+    error.status === 404 &&
+    error.code === 'runtime_session_expired'
+  );
+}
+
+function connectionReplaced(): ArtifreeApiError {
+  return new ArtifreeApiError(
+    'The runtime connection was closed or replaced.',
+    {
+      status: 0,
+      code: 'invalid_request',
+    },
+  );
+}
+
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
 export class ArtifreeClient {
+  private runtimeSession: string | undefined;
+  private runtimeOpenAttempt = 0;
+  private runtimeConnectionEpoch = 0;
+  private runtimeClosing = false;
+  private runtimeRecovery:
+    { readonly session: string; readonly promise: Promise<void> } | undefined;
+  private readonly runtimeGrants = new RuntimeGrantChanges();
+  readonly subscribeRuntimeGrants = this.runtimeGrants.subscribe;
+  readonly runtimeGrantSnapshot = this.runtimeGrants.snapshot;
   private readonly baseUrl: string;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
@@ -235,6 +352,31 @@ export class ArtifreeClient {
     this.accessToken = configuration.accessToken;
     this.fetchImpl =
       configuration.fetch ?? ((input, init) => fetch(input, init));
+  }
+
+  /** The active server-issued runtime identity. */
+  get runtimeSessionId(): string {
+    if (this.runtimeSession === undefined)
+      throw new ArtifreeApiError('The runtime connection is not open.', {
+        status: 0,
+        code: 'invalid_request',
+      });
+    return this.runtimeSession;
+  }
+
+  /** Changes whenever a new connection replaces the previous one. */
+  runtimeConnectionRevision(): number {
+    return this.runtimeConnectionEpoch;
+  }
+
+  /** Signals permission changes for a preview's artifact and revision. */
+  runtimeGrantRevision(id: string, revision: number): number {
+    return this.runtimeGrants.revision(id, revision);
+  }
+
+  /** Whether this exact source binding has a pending or uncertain change. */
+  runtimeGrantStatus(view: GrantView): GrantState {
+    return this.runtimeGrants.status(view);
   }
 
   /**
@@ -535,17 +677,37 @@ export class ArtifreeClient {
     generation: number,
     options: RuntimeViewOptions = {},
   ): Promise<RuntimeView> {
-    const view = await this.json(
-      'POST',
-      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
-      parseRuntimeView,
-      {
-        body: { view_id: viewId, generation },
-        signal: options.signal,
-        onDispatch: options.onDispatch,
-      },
-    );
+    if (this.runtimeClosing) throw connectionReplaced();
+    const request = (session: string): Promise<RuntimeView> =>
+      this.json(
+        'POST',
+        `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
+        parseRuntimeView,
+        {
+          body: {
+            session_id: session,
+            view_id: viewId,
+            generation,
+          },
+          signal: options.signal,
+          onDispatch: options.onDispatch,
+        },
+      );
+    let session = this.runtimeSessionId;
+    let view: RuntimeView;
+    try {
+      view = await request(session);
+    } catch (error: unknown) {
+      if (!sessionExpired(error)) throw error;
+      await this.recoverRuntimeSession(session);
+      options.signal?.throwIfAborted();
+      session = this.runtimeSessionId;
+      view = await request(session);
+    }
     if (
+      view.session_id !== session ||
+      this.runtimeSession !== session ||
+      this.runtimeClosing ||
       view.artifact_id !== id ||
       view.revision !== revision ||
       view.view_id !== viewId ||
@@ -561,17 +723,144 @@ export class ArtifreeClient {
     return view;
   }
 
+  /** Opens the runtime connection before requesting previews. */
+  async openRuntimeSession(options: ReadOptions = {}): Promise<void> {
+    if (this.runtimeClosing) throw connectionReplaced();
+    if (this.runtimeSession !== undefined) return;
+    await this.establishRuntimeSession(undefined, options);
+  }
+
+  private async establishRuntimeSession(
+    previous: string | undefined,
+    options: ReadOptions,
+  ): Promise<void> {
+    const attempt = ++this.runtimeOpenAttempt;
+    const connection = await this.json(
+      'POST',
+      '/v1/runtime-sessions',
+      parseRuntimeConnection,
+      { signal: options.signal },
+    );
+    options.signal?.throwIfAborted();
+    if (
+      attempt !== this.runtimeOpenAttempt ||
+      this.runtimeSession !== previous ||
+      this.runtimeClosing
+    )
+      throw connectionReplaced();
+    if (previous !== undefined && connection.session_id === previous)
+      throw new ArtifreeApiError(
+        'The server returned the expired runtime connection again.',
+        { status: 200, code: 'invalid_response' },
+      );
+    this.runtimeSession = connection.session_id;
+    this.runtimeConnectionEpoch += 1;
+    this.runtimeGrants.clear();
+  }
+
+  /** Replaces only a confirmed expired connection, once for all its views. */
+  private async recoverRuntimeSession(previous: string): Promise<void> {
+    if (this.runtimeClosing) throw connectionReplaced();
+    if (this.runtimeSession !== previous) {
+      if (this.runtimeSession === undefined) throw connectionReplaced();
+      return;
+    }
+    if (this.runtimeRecovery?.session === previous)
+      return this.runtimeRecovery.promise;
+    const promise: Promise<void> = this.establishRuntimeSession(
+      previous,
+      {},
+    ).finally(() => {
+      if (this.runtimeRecovery?.promise === promise)
+        this.runtimeRecovery = undefined;
+    });
+    this.runtimeRecovery = { session: previous, promise };
+    return promise;
+  }
+
+  /** Closes the connection and its grants; retry until the server acknowledges. */
+  async closeRuntimeSession(): Promise<void> {
+    this.runtimeOpenAttempt += 1;
+    this.runtimeClosing = true;
+    const session = this.runtimeSession;
+    if (session !== undefined)
+      await this.close(`/v1/runtime-sessions/${session}`);
+    if (this.runtimeSession === session) {
+      this.runtimeSession = undefined;
+      this.runtimeGrants.clear();
+    }
+    this.runtimeClosing = false;
+  }
+
+  private requireViewSession(view: RuntimeView): string {
+    const session = this.runtimeSessionId;
+    if (this.runtimeClosing || view.session_id !== session)
+      throw connectionReplaced();
+    return session;
+  }
+
+  /** Replace a grant against the source and version the user observed. */
+  async setRuntimeGrant(
+    view: RuntimeView,
+    capabilities: string[],
+  ): Promise<RuntimeGrant> {
+    const session = this.requireViewSession(view);
+    const wasUnknown = this.runtimeGrants.begin(view, capabilities);
+    try {
+      const grant = await this.json(
+        'PUT',
+        `/v1/runtime-sessions/${session}/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/grant`,
+        parseRuntimeGrant,
+        {
+          body: {
+            head_revision: view.head_revision,
+            expected_version: view.grant_version,
+            capabilities,
+          },
+        },
+      );
+      if (grant.version <= view.grant_version)
+        throw new ArtifreeApiError(
+          'The server did not advance the runtime grant version.',
+          {
+            status: 200,
+            code: 'invalid_response',
+          },
+        );
+      this.requireViewSession(view);
+      this.runtimeGrants.finish(view, false);
+      return grant;
+    } catch (error: unknown) {
+      let failure = error;
+      if (sessionExpired(error)) {
+        try {
+          await this.recoverRuntimeSession(session);
+        } catch (recoveryError: unknown) {
+          failure = recoveryError;
+        }
+      }
+      if (this.runtimeSession === session)
+        this.runtimeGrants.finish(
+          view,
+          wasUnknown || grantMayHaveChanged(error),
+        );
+      throw failure;
+    }
+  }
+
   /** Reads current metadata through the parent workspace, rechecking the binding. */
   async runtimeMetadata(
     view: RuntimeView,
     options: ReadOptions = {},
   ): Promise<RuntimeMetadata> {
+    this.requireViewSession(view);
     const metadata = await this.json(
       'POST',
       `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/metadata`,
       parseRuntimeMetadata,
       { body: { initialization: view.initialization }, signal: options.signal },
     );
+    this.requireViewSession(view);
     if (metadata.artifact_id !== view.artifact_id)
       throw new ArtifreeApiError(
         'The server returned metadata for another artifact.',
@@ -587,10 +876,17 @@ export class ArtifreeClient {
   async closeRuntimeView(
     view: Pick<RuntimeView, 'view_id' | 'generation'>,
   ): Promise<void> {
-    await this.send(
-      'DELETE',
-      `/v1/runtime-views/${view.view_id}/${view.generation}`,
-    );
+    await this.close(`/v1/runtime-views/${view.view_id}/${view.generation}`);
+  }
+
+  /** A close is confirmed only by the contract's no-content response. */
+  private async close(path: string): Promise<void> {
+    const response = await this.send('DELETE', path);
+    if (response.status !== 204)
+      throw new ArtifreeApiError('The server did not confirm the close.', {
+        status: response.status,
+        code: 'invalid_response',
+      });
   }
 
   /** The whole body; a failure while reading is a `network_error`. */

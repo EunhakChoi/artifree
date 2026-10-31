@@ -196,6 +196,15 @@ async fn every_api_route_requires_the_bearer_token() -> TestResult {
             format!("/v1/artifacts/{id}/revisions/1/files/index.html"),
         ),
         ("POST", format!("/v1/artifacts/{id}/revisions/1/previews")),
+        ("POST", "/v1/runtime-sessions".to_owned()),
+        ("DELETE", format!("/v1/runtime-sessions/{}", "a".repeat(32))),
+        (
+            "PUT",
+            format!(
+                "/v1/runtime-sessions/{}/artifacts/{id}/revisions/1/grant",
+                "a".repeat(32)
+            ),
+        ),
         ("GET", format!("/v1/artifacts/{id}/revisions/1/export")),
         ("DELETE", "/v1/artifacts".to_owned()),
         ("GET", "/v1/no-such-route".to_owned()),
@@ -1847,13 +1856,14 @@ async fn retries_replay_in_the_trash_and_a_recovery_brings_it_back() -> TestResu
 async fn runtime_metadata_requires_a_live_initialized_view_and_current_access() -> TestResult {
     let harness = Harness::new();
     let id = runtime_artifact(&harness).await?;
+    let session = runtime_session(&harness, Some(&id)).await?;
     let view_id = "0123456789abcdef0123456789abcdef";
     let create_path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
     let create = |generation| {
         post(
             &create_path,
             None,
-            &json!({"view_id": view_id, "generation": generation}),
+            &json!({"session_id": session, "view_id": view_id, "generation": generation}),
         )
     };
     assert_eq!(
@@ -1929,16 +1939,144 @@ async fn runtime_artifact(harness: &Harness) -> Result<String, Box<dyn std::erro
 }
 
 #[tokio::test]
+async fn runtime_grants_are_explicit_revocable_and_connection_scoped_over_http() -> TestResult {
+    let harness = Harness::new();
+    let artifact = runtime_artifact(&harness).await?;
+    let session = runtime_session(&harness, None).await?;
+    let view_id = "a".repeat(32);
+    let path = format!("/v1/artifacts/{artifact}/revisions/1/runtime-views");
+    let create = |generation| {
+        post(
+            &path,
+            None,
+            &json!({"session_id": session, "view_id": view_id, "generation": generation}),
+        )
+    };
+    let first = harness.send(create(1)?).await?.json()?;
+    assert_eq!(first["declared"], json!(["metadata.read"]));
+    assert_eq!(first["granted"], json!([]));
+    assert_eq!(
+        harness
+            .content(first["url"].as_str().ok_or("missing URL")?)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    let metadata = |view: &Value, generation| {
+        post(
+            &format!("{path}/{view_id}/{generation}/metadata"),
+            None,
+            &json!({"initialization": view["initialization"]}),
+        )
+    };
+    assert_eq!(
+        harness.send(metadata(&first, 1)?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    let grant_path =
+        format!("/v1/runtime-sessions/{session}/artifacts/{artifact}/revisions/1/grant");
+    let grant = |expected_version, capabilities: Value| {
+        authorized(Request::put(&grant_path)).header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({"head_revision": 1, "expected_version": expected_version, "capabilities": capabilities}).to_string()))
+    };
+    let result = harness.send(grant(0, json!(["metadata.read"]))?).await?;
+    assert_eq!(result.status, StatusCode::OK);
+    let version = result.json()?["version"]
+        .as_u64()
+        .ok_or("missing grant version")?;
+    assert_eq!(
+        harness.send(metadata(&first, 1)?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    let second = harness.send(create(2)?).await?.json()?;
+    assert_eq!(
+        harness
+            .content(second["url"].as_str().ok_or("missing URL")?)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        harness.send(metadata(&second, 2)?).await?.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        harness.send(grant(version, json!([]))?).await?.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        harness.send(metadata(&second, 2)?).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        harness
+            .send(grant(version, json!(["metadata.read"]))?)
+            .await?
+            .status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        harness
+            .send(
+                authorized(Request::delete(format!("/v1/runtime-sessions/{session}")))
+                    .body(Body::empty())?
+            )
+            .await?
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    let expired = harness
+        .send(grant(version, json!(["metadata.read"]))?)
+        .await?;
+    assert_eq!(expired.status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&expired), "runtime_session_expired");
+    let expired_view = harness.send(create(3)?).await?;
+    assert_eq!(expired_view.status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&expired_view), "runtime_session_expired");
+    let reopen =
+        authorized(Request::put(format!("/v1/runtime-sessions/{session}"))).body(Body::empty())?;
+    assert_eq!(
+        harness.send(reopen).await?.status,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    Ok(())
+}
+
+async fn runtime_session(
+    harness: &Harness,
+    artifact: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let created = harness
+        .send(post("/v1/runtime-sessions", None, &json!({}))?)
+        .await?;
+    assert_eq!(created.status, StatusCode::OK, "{}", error_code(&created));
+    let id = created.json()?["session_id"]
+        .as_str()
+        .ok_or("missing session id")?
+        .to_owned();
+    if let Some(artifact) = artifact {
+        let path = format!("/v1/runtime-sessions/{id}/artifacts/{artifact}/revisions/1/grant");
+        let request = authorized(Request::put(path))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({"head_revision": 1, "expected_version": 0, "capabilities": ["metadata.read"]}).to_string()))?;
+        let grant = harness.send(request).await?;
+        assert_eq!(grant.status, StatusCode::OK, "{}", error_code(&grant));
+    }
+    Ok(id)
+}
+
+#[tokio::test]
 async fn runtime_rejects_replaced_generations_and_changed_source() -> TestResult {
     let harness = Harness::new();
     let id = runtime_artifact(&harness).await?;
+    let session = runtime_session(&harness, Some(&id)).await?;
     let view_id = "0123456789abcdef0123456789abcdef";
     let create_path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
     let create = |generation| {
         post(
             &create_path,
             None,
-            &json!({"view_id": view_id, "generation": generation}),
+            &json!({"session_id": session, "view_id": view_id, "generation": generation}),
         )
     };
     let first = harness.send(create(1)?).await?.json()?;
@@ -2011,13 +2149,14 @@ async fn runtime_rejects_replaced_generations_and_changed_source() -> TestResult
 async fn runtime_metadata_rechecks_trash_and_current_title() -> TestResult {
     let harness = Harness::new();
     let id = runtime_artifact(&harness).await?;
+    let session = runtime_session(&harness, Some(&id)).await?;
     let view_id = "0123456789abcdef0123456789abcdef";
     let path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
     let view = harness
         .send(post(
             &path,
             None,
-            &json!({"view_id": view_id, "generation": 1}),
+            &json!({"session_id": session, "view_id": view_id, "generation": 1}),
         )?)
         .await?
         .json()?;
@@ -2070,13 +2209,14 @@ async fn ordinary_previews_keep_their_source_and_cannot_use_the_runtime() -> Tes
         .as_str()
         .ok_or("missing id")?
         .to_owned();
+    let session = runtime_session(&harness, None).await?;
     let view = "123456789abcdef0123456789abcdef0";
     let path = format!("/v1/artifacts/{id}/revisions/1/runtime-views");
     let response = harness
         .send(post(
             &path,
             None,
-            &json!({"view_id": view, "generation": 1}),
+            &json!({"session_id": session, "view_id": view, "generation": 1}),
         )?)
         .await?;
     let body = response.json()?;

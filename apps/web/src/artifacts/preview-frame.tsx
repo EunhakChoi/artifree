@@ -1,9 +1,10 @@
 import { newRandomId } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
-import { useRef, useState } from 'react';
+import { useRef, useState, useSyncExternalStore } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import { RuntimeFrame } from './runtime-frame';
-import { useRequest } from './use-request';
+import { describeFailure, useRequest } from './use-request';
 
 interface PreviewFrameProps {
   client: ArtifreeClient;
@@ -31,9 +32,20 @@ export function PreviewFrame({
   className,
 }: PreviewFrameProps) {
   const [viewId] = useState(newRandomId);
+  const [grantError, setGrantError] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  useSyncExternalStore(
+    client.subscribeRuntimeGrants,
+    client.runtimeGrantSnapshot,
+    client.runtimeGrantSnapshot,
+  );
+  const grantRevision = client.runtimeGrantRevision(artifactId, revision);
+  const connectionRevision = client.runtimeConnectionRevision();
   const generation = useRef(0);
   const preview = useRequest(
-    stale ? undefined : `${artifactId}:${revision}:${epoch}`,
+    stale
+      ? undefined
+      : `${artifactId}:${revision}:${epoch}:${connectionRevision}:${grantRevision}:${attempt}`,
     async (signal) => {
       // A scheduler can hold reads while the page is hidden or rate-limited.
       // Time the lease from the actual attempt, not from entering that queue.
@@ -79,18 +91,107 @@ export function PreviewFrame({
     return (
       <Alert variant="destructive">
         <AlertTitle>Preview unavailable</AlertTitle>
-        <AlertDescription>{preview.message}</AlertDescription>
+        <AlertDescription>
+          <p>{preview.message}</p>
+          {grantError === undefined ? null : <p>{grantError}</p>}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            Retry preview
+          </Button>
+        </AlertDescription>
       </Alert>
     );
+  const view = preview.value.view;
+  const grantStatus = client.runtimeGrantStatus(view);
+  async function changeGrant(allowed: boolean): Promise<void> {
+    setGrantError(undefined);
+    try {
+      await client.setRuntimeGrant(view, allowed ? ['metadata.read'] : []);
+    } catch (error: unknown) {
+      setGrantError(
+        `Permission change was not confirmed: ${describeFailure(error)}`,
+      );
+    }
+  }
   return (
-    <RuntimeFrame
-      key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
-      client={client}
-      view={preview.value.view}
-      deadline={preview.value.deadline}
-      onClose={preview.value.close}
-      title={title}
-      className={className}
-    />
+    <div className="flex flex-col gap-3">
+      {grantError === undefined ? null : (
+        <Alert variant="destructive">
+          <AlertTitle>Permission change</AlertTitle>
+          <AlertDescription>{grantError}</AlertDescription>
+        </Alert>
+      )}
+      {!view.enabled ? null : (
+        <section
+          aria-label="Runtime permissions"
+          className="flex flex-col gap-2 rounded-lg border p-3 text-sm"
+        >
+          <p>SDK: {view.sdk}</p>
+          <p>Declared: {view.declared.join(', ') || 'none'}</p>
+          <p>Supported: {view.supported.join(', ') || 'none'}</p>
+          {grantStatus === 'settled' ? (
+            <p>Granted: {view.granted.join(', ') || 'none'}</p>
+          ) : (
+            <p>
+              {grantStatus === 'pending'
+                ? 'Permission change pending.'
+                : 'Permission status is unknown. Clear access to resolve it.'}
+            </p>
+          )}
+          {grantStatus === 'unknown' ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void changeGrant(false)}
+            >
+              Resolve by revoking access
+            </Button>
+          ) : grantStatus === 'settled' &&
+            view.supported.includes('metadata.read') &&
+            view.declared.includes('metadata.read') ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                void changeGrant(!view.granted.includes('metadata.read'))
+              }
+            >
+              {view.granted.includes('metadata.read')
+                ? 'Revoke metadata access'
+                : 'Allow metadata access'}
+            </Button>
+          ) : null}
+        </section>
+      )}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => setAttempt((value) => value + 1)}
+      >
+        Refresh preview
+      </Button>
+      {grantStatus === 'settled' ? (
+        <RuntimeFrame
+          key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
+          client={client}
+          view={preview.value.view}
+          deadline={preview.value.deadline}
+          onClose={preview.value.close}
+          title={title}
+          className={className}
+        />
+      ) : (
+        <output className="text-sm text-muted-foreground">
+          Preview paused while permission is unresolved.
+        </output>
+      )}
+    </div>
   );
 }

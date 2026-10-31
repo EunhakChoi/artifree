@@ -12,7 +12,7 @@ detection and safe retries, and previewed in a sandbox on a separate origin —
 through the HTTP API, MCP tools for agents, the CLI, and the web workspace,
 stored in a local SQLite file. It is single-user and listens on loopback by
 default. A runtime preview may read its own artifact metadata through a
-bound bridge. Runtime grants, publishing, sharing, build and conversion
+bound bridge after a connection-scoped user grant. Publishing, sharing, build and conversion
 workers, and multi-user authentication are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
 
@@ -98,8 +98,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0015](docs/decisions/0015-source-exports.md),
 [0016](docs/decisions/0016-bounded-file-reads.md),
 [0017](docs/decisions/0017-code-workspace.md),
-[0018](docs/decisions/0018-source-draft-recovery.md), and
-[0019](docs/decisions/0019-runtime-metadata-bridge.md)).
+[0018](docs/decisions/0018-source-draft-recovery.md),
+[0019](docs/decisions/0019-runtime-metadata-bridge.md), and
+[0020](docs/decisions/0020-runtime-grants.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -116,7 +117,8 @@ API, client, CLI, and web workspace (A07), and editing an artifact's files
 in the web workspace, saved as one revision (A09), with the draft kept in
 the browser and recovered by choice after a reload or a closed tab (A10);
 the browser must provide Web Locks to keep drafts safely. R04 adds the first
-runtime metadata read; grants (R05) and agent handoff (A08) remain planned.
+runtime metadata read and R05 adds an explicit connection-scoped metadata grant;
+agent handoff (A08) remains planned.
 
 An HTML artifact can opt into the metadata bridge by placing the marker as
 the first child of its head, before any script:
@@ -139,11 +141,25 @@ the first child of its head, before any script:
 The opt-in prefix must use a doctype followed by `html` and `head` opening
 tags; attributes in these tags must have quoted values. Other source previews
 remain byte-for-byte ordinary previews. The bridge is available in the web
-workspace, requires that workspace and server, and is not included in source
+workspace, requires explicit metadata access consent, that workspace and server,
+and is not included in source
 exports. A preview is isolated from the workspace, not the network: it can
 navigate its own frame elsewhere. TypeScript consumers can import the runtime
 SDK for its types and should check that `window.artifree` is present; ordinary
 previews do not install it.
+
+An opted-in entry without a manifest declares `metadata.read` for compatibility;
+this is a declaration, not a grant. An optional `artifree-runtime.json` source
+file specifies a complete declaration, for example:
+
+```json
+{ "sdk": "artifree.app.v1", "capabilities": ["metadata.read"] }
+```
+
+An omitted `capabilities` field or an empty list declares none. The workspace
+shows declared, supported and granted capabilities separately. Grants apply to
+one connection and source binding, can be revoked, and expire or disappear on
+server restart. No other runtime capability is implemented.
 
 ## Verification
 

@@ -25,10 +25,7 @@ export async function checkWorkspace({
   await expect(
     workspace.getByText('The access token was rejected.', { exact: false }),
   ).toBeVisible();
-  // The stream is refused too, and reconnecting would not help.
-  await expect(
-    workspace.getByText('Live updates stopped; reconnect to try again.'),
-  ).toBeVisible();
+  await expect(workspace.getByText('Connection unavailable')).toBeVisible();
   await workspace.getByRole('button', { name: 'Disconnect' }).click();
   await workspace.getByLabel('Access token').fill(server.token);
   await workspace.getByRole('button', { name: 'Connect' }).click();

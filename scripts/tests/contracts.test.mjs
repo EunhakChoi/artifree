@@ -134,3 +134,34 @@ test('API error bodies carry a known code and optional current revision', () => 
     'Unknown error codes must not validate.',
   );
 });
+
+test('A runtime view always states its SDK pin, including null for ordinary previews', () => {
+  const check = body('RuntimeView');
+  const view = {
+    url: 'http://127.0.0.1:7411/p/example/',
+    enabled: false,
+    session_id: 'e'.repeat(32),
+    artifact_id: 'art_0',
+    revision: 1,
+    head_revision: 1,
+    sdk: null,
+    declared: [],
+    supported: [],
+    granted: [],
+    grant_version: 0,
+    view_id: 'a'.repeat(32),
+    generation: 1,
+    initialization: 'b'.repeat(64),
+    expires_at_ms: 1,
+    lease_ms: 1,
+  };
+  assert.equal(check(view), true, JSON.stringify(check.errors));
+  assert.equal(check({ ...view, sdk: 'artifree.app.v1' }), true);
+  const missing = { ...view };
+  delete missing.sdk;
+  assert.equal(check(missing), false, 'A missing SDK field must not validate.');
+  const missingSession = { ...view };
+  delete missingSession.session_id;
+  assert.equal(check(missingSession), false, 'A view must name its session.');
+  assert.equal(check({ ...view, sdk: 12 }), false);
+});
