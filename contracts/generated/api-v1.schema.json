@@ -330,6 +330,39 @@
       ],
       "type": "object"
     },
+    "CreateTokenRequest": {
+      "additionalProperties": false,
+      "description": "Request to issue a new agent access token.",
+      "properties": {
+        "name": {
+          "description": "Human-readable name or label (1-64 characters).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "CreateTokenResponse": {
+      "additionalProperties": false,
+      "description": "Response returned when a new token is created.\nThe `secret` is displayed only once.",
+      "properties": {
+        "secret": {
+          "description": "The secret bearer token plaintext. Displayed only once.",
+          "type": "string"
+        },
+        "token": {
+          "$ref": "#/$defs/TokenInfo",
+          "description": "The token metadata."
+        }
+      },
+      "required": [
+        "token",
+        "secret"
+      ],
+      "type": "object"
+    },
     "DuplicateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:\ncreates an artifact from the files of that revision.",
@@ -424,6 +457,11 @@
         {
           "const": "unauthenticated",
           "description": "Missing or unknown access token.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden",
+          "description": "Caller lacks authority to perform this operation.",
           "type": "string"
         },
         {
@@ -937,6 +975,25 @@
       ],
       "type": "object"
     },
+    "RotateTokenResponse": {
+      "additionalProperties": false,
+      "description": "Response returned when a token is rotated.\nThe new `secret` is displayed only once.",
+      "properties": {
+        "secret": {
+          "description": "The new secret bearer token plaintext. Displayed only once.",
+          "type": "string"
+        },
+        "token": {
+          "$ref": "#/$defs/TokenInfo",
+          "description": "The updated token metadata."
+        }
+      },
+      "required": [
+        "token",
+        "secret"
+      ],
+      "type": "object"
+    },
     "RuntimeConnection": {
       "additionalProperties": false,
       "description": "A server-issued ephemeral runtime connection.",
@@ -1312,6 +1369,71 @@
       ],
       "type": "object"
     },
+    "TokenInfo": {
+      "additionalProperties": false,
+      "description": "Summary information for an access token.\nSecret plaintext is never exposed here.",
+      "properties": {
+        "created_at": {
+          "description": "ISO 8601 creation timestamp.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Opaque token identifier.",
+          "type": "string"
+        },
+        "is_admin": {
+          "description": "Whether this is an administrative owner token.",
+          "type": "boolean"
+        },
+        "last_used_at": {
+          "description": "ISO 8601 last-used timestamp, if used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Human-readable label for this token.",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "Masked prefix for identification.",
+          "type": "string"
+        },
+        "revoked_at": {
+          "description": "ISO 8601 revocation timestamp, if revoked.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prefix",
+        "created_at",
+        "is_admin"
+      ],
+      "type": "object"
+    },
+    "TokenList": {
+      "additionalProperties": false,
+      "description": "List of tokens.",
+      "properties": {
+        "tokens": {
+          "description": "The tokens.",
+          "items": {
+            "$ref": "#/$defs/TokenInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tokens"
+      ],
+      "type": "object"
+    },
     "UpdateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or\nseveral of them. Source revisions are not touched.",
@@ -1452,6 +1574,21 @@
     },
     {
       "$ref": "#/$defs/SourceExportManifest"
+    },
+    {
+      "$ref": "#/$defs/CreateTokenRequest"
+    },
+    {
+      "$ref": "#/$defs/CreateTokenResponse"
+    },
+    {
+      "$ref": "#/$defs/RotateTokenResponse"
+    },
+    {
+      "$ref": "#/$defs/TokenList"
+    },
+    {
+      "$ref": "#/$defs/TokenInfo"
     }
   ],
   "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",

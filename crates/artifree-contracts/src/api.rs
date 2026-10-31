@@ -596,6 +596,67 @@ pub enum ChangeKind {
     Recovered,
 }
 
+/// Summary information for an access token.
+/// Secret plaintext is never exposed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TokenInfo {
+    /// Opaque token identifier.
+    pub id: String,
+    /// Human-readable label for this token.
+    pub name: String,
+    /// Masked prefix for identification.
+    pub prefix: String,
+    /// ISO 8601 creation timestamp.
+    pub created_at: String,
+    /// ISO 8601 last-used timestamp, if used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    /// ISO 8601 revocation timestamp, if revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<String>,
+    /// Whether this is an administrative owner token.
+    pub is_admin: bool,
+}
+
+/// Request to issue a new agent access token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTokenRequest {
+    /// Human-readable name or label (1-64 characters).
+    pub name: String,
+}
+
+/// Response returned when a new token is created.
+/// The `secret` is displayed only once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTokenResponse {
+    /// The token metadata.
+    pub token: TokenInfo,
+    /// The secret bearer token plaintext. Displayed only once.
+    pub secret: String,
+}
+
+/// Response returned when a token is rotated.
+/// The new `secret` is displayed only once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RotateTokenResponse {
+    /// The updated token metadata.
+    pub token: TokenInfo,
+    /// The new secret bearer token plaintext. Displayed only once.
+    pub secret: String,
+}
+
+/// List of tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TokenList {
+    /// The tokens.
+    pub tokens: Vec<TokenInfo>,
+}
+
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
 /// revision or changed metadata. Retries that replay a commit, failed
 /// commits, and updates that changed nothing have none.
@@ -638,6 +699,8 @@ pub enum ErrorCode {
     InvalidRequest,
     /// Missing or unknown access token.
     Unauthenticated,
+    /// Caller lacks authority to perform this operation.
+    Forbidden,
     /// The resource does not exist or is not accessible.
     NotFound,
     /// The runtime connection is missing, closed, or expired; open a new one.

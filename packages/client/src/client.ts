@@ -4,6 +4,8 @@ import type {
   ArtifactList,
   CommitResponse,
   CreateArtifactRequest,
+  CreateTokenRequest,
+  CreateTokenResponse,
   DuplicateArtifactRequest,
   DuplicateArtifactResponse,
   FileUpload,
@@ -12,11 +14,13 @@ import type {
   Preview,
   RestoreRevisionRequest,
   Revision,
+  RotateTokenResponse,
   RuntimeMetadata,
   RuntimeGrant,
   RuntimeView,
   SaveRevisionRequest,
   StageHandoffRequest,
+  TokenList,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
@@ -32,15 +36,18 @@ import {
   parseArtifact,
   parseArtifactList,
   parseCommit,
+  parseCreateToken,
   parseDuplicate,
   parseError,
   parseHandoff,
   parsePreview,
   parseRevisionList,
+  parseRotateToken,
   parseRuntimeConnection,
   parseRuntimeMetadata,
   parseRuntimeGrant,
   parseRuntimeView,
+  parseTokenList,
   parseUpdate,
 } from './responses.js';
 
@@ -692,6 +699,53 @@ export class ArtifreeClient {
       parsePreview,
       { signal: options.signal },
     );
+  }
+
+  /** Lists access tokens. Requires administrative privileges. */
+  async listTokens(options: ReadOptions = {}): Promise<TokenList> {
+    return this.json('GET', '/v1/tokens', parseTokenList, {
+      signal: options.signal,
+    });
+  }
+
+  /** Creates a new agent access token. Requires administrative privileges. */
+  async createToken(
+    request: CreateTokenRequest,
+    options: ReadOptions = {},
+  ): Promise<CreateTokenResponse> {
+    return this.json('POST', '/v1/tokens', parseCreateToken, {
+      body: request,
+      signal: options.signal,
+    });
+  }
+
+  /** Rotates an agent access token. Requires administrative privileges. */
+  async rotateToken(
+    id: string,
+    options: ReadOptions = {},
+  ): Promise<RotateTokenResponse> {
+    return this.json(
+      'POST',
+      `/v1/tokens/${encodeURIComponent(id)}/rotate`,
+      parseRotateToken,
+      {
+        signal: options.signal,
+      },
+    );
+  }
+
+  /** Revokes an agent access token. Requires administrative privileges. */
+  async revokeToken(id: string, options: ReadOptions = {}): Promise<void> {
+    const response = await this.send(
+      'DELETE',
+      `/v1/tokens/${encodeURIComponent(id)}`,
+      { signal: options.signal },
+    );
+    if (response.status !== 204)
+      throw new ArtifreeApiError('The server did not confirm the revocation.', {
+        status: response.status,
+        code: 'invalid_response',
+      });
   }
 
   /** Lists registered agent inboxes for the current workspace connection. */

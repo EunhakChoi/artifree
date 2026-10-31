@@ -26,7 +26,9 @@ use artifree_contracts::api::{
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::{ActorId, RequestKey};
+use artifree_ports::token_store::TokenStore;
 use artifree_providers::storage::SqliteStore;
+use artifree_providers::tokens::{SqliteTokenStore, hash_token_secret};
 use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
@@ -38,7 +40,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
-use crate::auth::AccessToken;
+use crate::auth::{AccessToken, AuthContext};
 use crate::changes::{self, Feed};
 use crate::handoffs::Handoffs;
 use crate::limits::{Limiter, Refusal, RequestLimits};
@@ -47,6 +49,7 @@ use crate::operations::{self, ApiError};
 use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::runtime_sessions::RuntimeSessions;
+use crate::tokens;
 use crate::web::WebAssets;
 
 /// Largest accepted request body: a maximum package in base64 plus JSON
@@ -79,7 +82,9 @@ pub struct AppState {
 #[derive(Debug)]
 struct Shared {
     artifacts: ArtifactService<SqliteStore>,
+    token_store: Arc<SqliteTokenStore>,
     token: AccessToken,
+    started_at: String,
     owner: ActorId,
     previews: PreviewTickets,
     runtime_sessions: RuntimeSessions,
@@ -92,13 +97,18 @@ struct Shared {
 }
 
 impl AppState {
-    /// Combines the application service, the local token, and settings.
+    /// Combines the application service, the token store, the local token, and settings.
     ///
     /// # Errors
     ///
     /// When the content origin or frame ancestors cannot form a header, or
     /// a limit is zero.
-    pub fn new(store: SqliteStore, token: AccessToken, settings: Settings) -> Result<Self, String> {
+    pub fn new(
+        store: SqliteStore,
+        token_store: SqliteTokenStore,
+        token: AccessToken,
+        settings: Settings,
+    ) -> Result<Self, String> {
         let mut settings = settings;
         if !settings.content_origin.is_empty() {
             settings.content_origin = normalize_origin(&settings.content_origin)?;
@@ -111,10 +121,13 @@ impl AppState {
         if settings.change_streams == 0 {
             return Err("change streams per actor must be at least 1".into());
         }
+        let started_at = crate::tokens::iso_now();
         Ok(Self {
             shared: Arc::new(Shared {
                 artifacts: ArtifactService::new(store),
+                token_store: Arc::new(token_store),
                 token,
+                started_at,
                 owner,
                 previews: PreviewTickets::new(settings.preview_ttl),
                 runtime_sessions: RuntimeSessions::new(Duration::from_secs(24 * 60 * 60)),
@@ -132,6 +145,18 @@ impl AppState {
     /// for their readers. Streams opened afterwards end at once.
     pub fn close_streams(&self) {
         self.shared.feed.close();
+    }
+
+    pub(crate) fn token_store(&self) -> &SqliteTokenStore {
+        &self.shared.token_store
+    }
+
+    pub(crate) fn owner_token(&self) -> &AccessToken {
+        &self.shared.token
+    }
+
+    pub(crate) fn started_at(&self) -> &str {
+        &self.shared.started_at
     }
 
     pub(crate) fn feed(&self) -> &Feed {
@@ -158,15 +183,45 @@ impl AppState {
         &self.shared.content_policy
     }
 
-    /// The actor whose bearer token is in `headers`. Every HTTP route and
-    /// the MCP endpoint authenticate through this one check.
-    pub(crate) fn authenticate(&self, headers: &HeaderMap) -> Result<ActorId, ApiError> {
+    /// Authenticates the bearer token from request headers. Checks the bootstrap
+    /// token first, then queries the active token store. Every HTTP route and
+    /// the MCP endpoint authenticate through this check.
+    pub(crate) async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
         let presented = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(bearer_token);
-        match presented {
-            Some(token) if self.shared.token.matches(token) => Ok(self.shared.owner.clone()),
+        let Some(token) = presented else {
+            return Err(ApiError::unauthenticated());
+        };
+        if self.shared.token.matches(token) {
+            return Ok(AuthContext {
+                actor: self.shared.owner.clone(),
+                token_id: None,
+                is_admin: true,
+            });
+        }
+        let hash = hash_token_secret(token);
+        let token_store = Arc::clone(&self.shared.token_store);
+        let record = tokio::task::spawn_blocking(move || token_store.find_by_hash(&hash))
+            .await
+            .map_err(|_| ApiError::unavailable("token lookup failed"))?
+            .map_err(|err| ApiError::unavailable(err.to_string()))?;
+
+        match record {
+            Some(record) if record.is_active() => {
+                let token_store = Arc::clone(&self.shared.token_store);
+                let id = record.id.clone();
+                let now = crate::tokens::iso_now();
+                tokio::task::spawn_blocking(move || {
+                    let _ = token_store.touch(&id, &now);
+                });
+                Ok(AuthContext {
+                    actor: self.shared.owner.clone(),
+                    token_id: Some(record.id),
+                    is_admin: false,
+                })
+            }
             _ => Err(ApiError::unauthenticated()),
         }
     }
@@ -193,6 +248,7 @@ pub fn router(state: AppState) -> Router {
 fn api_v1_routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .merge(mcp::routes(state.clone()))
+        .merge(tokens::routes())
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
         .route(
             "/v1/artifacts/{id}",
@@ -327,18 +383,21 @@ async fn healthz_head() -> impl IntoResponse {
 /// refused request never reaches the application, so this attempt commits
 /// nothing; its idempotency key is free unless an earlier attempt used it.
 async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let actor = match state.authenticate(request.headers()) {
-        Ok(actor) => actor,
+    let auth = match state.authenticate(request.headers()).await {
+        Ok(auth) => auth,
         Err(error) => return error.into_response(),
     };
-    let permit = match state.shared.limiter.admit(&actor) {
+    let permit = match state.shared.limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
             discard(&state, request.into_body()).await;
             return refused(refusal);
         }
     };
-    request.extensions_mut().insert(Authenticated(actor));
+    request
+        .extensions_mut()
+        .insert(Authenticated(auth.actor.clone()));
+    request.extensions_mut().insert(auth);
     // The request runs in its own task, which keeps the permit until the
     // handler finishes. A client that disconnects cancels only this wait, so
     // it cannot free the slot while storage work continues.
@@ -452,18 +511,21 @@ where
     F: FnOnce(Request) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
-    let actor = match state.authenticate(request.headers()) {
-        Ok(actor) => actor,
+    let auth = match state.authenticate(request.headers()).await {
+        Ok(auth) => auth,
         Err(error) => return error.into_response(),
     };
-    let permit = match state.shared.limiter.admit(&actor) {
+    let permit = match state.shared.limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
             discard(state, request.into_body()).await;
             return refused(refusal);
         }
     };
-    request.extensions_mut().insert(Authenticated(actor));
+    request
+        .extensions_mut()
+        .insert(Authenticated(auth.actor.clone()));
+    request.extensions_mut().insert(auth);
     let response = inner(request).await;
     drop(permit);
     response
@@ -682,6 +744,45 @@ impl<S: Sync> FromRequestParts<S> for Authenticated {
             .get::<Self>()
             .cloned()
             .ok_or_else(ApiError::unauthenticated)
+    }
+}
+
+impl<S: Sync> FromRequestParts<S> for AuthContext {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, ApiError> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or_else(ApiError::unauthenticated)
+    }
+}
+
+/// An extractor that ensures the caller has administrative privileges (bootstrap owner token).
+/// Agent tokens attempting to access an administrative endpoint receive 403 Forbidden.
+#[derive(Debug, Clone)]
+pub(crate) struct RequireAdmin(
+    #[expect(
+        dead_code,
+        reason = "wrapped AuthContext is retained for future administrative context"
+    )]
+    pub(crate) AuthContext,
+);
+
+impl<S: Sync> FromRequestParts<S> for RequireAdmin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, ApiError> {
+        let auth = parts
+            .extensions
+            .get::<AuthContext>()
+            .cloned()
+            .ok_or_else(ApiError::unauthenticated)?;
+        if !auth.is_admin {
+            return Err(ApiError::forbidden("administrative privileges required"));
+        }
+        Ok(RequireAdmin(auth))
     }
 }
 
@@ -921,24 +1022,26 @@ async fn export_revision(
 
 async fn create_preview(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
     path: Result<Path<(String, u64)>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision)) = path?;
-    let preview = operations::preview(&state, actor, &id, revision).await?;
+    let preview = operations::preview(&state, auth.actor, auth.token_id, &id, revision).await?;
     let url = preview.url.clone();
     Ok(created(&url, Json(preview)))
 }
 
 async fn create_runtime_view(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
     path: Result<Path<(String, u64)>, PathRejection>,
     body: Result<Json<CreateRuntimeViewRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision)) = path?;
     let Json(request) = body?;
-    let view = operations::create_runtime_view(&state, actor, &id, revision, request).await?;
+    let view =
+        operations::create_runtime_view(&state, auth.actor, auth.token_id, &id, revision, request)
+            .await?;
     let url = view.url.clone();
     Ok(created(&url, Json(view)))
 }
@@ -976,9 +1079,9 @@ async fn close_runtime_view(
 
 async fn open_runtime_session(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
 ) -> Result<Json<RuntimeConnection>, ApiError> {
-    operations::open_runtime_session(&state, &actor).map(Json)
+    operations::open_runtime_session(&state, &auth.actor, auth.token_id).map(Json)
 }
 
 async fn close_runtime_session(

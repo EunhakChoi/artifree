@@ -653,7 +653,9 @@ mod tests {
         let actor: ActorId = "local".parse()?;
         let other: ActorId = "other".parse()?;
         let connections = RuntimeSessions::new(Duration::from_secs(60));
-        let connection_id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let connection_id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections
             .get(&actor, &connection_id)
             .map_err(|e| format!("{e:?}"))?;
@@ -732,7 +734,9 @@ mod tests {
     {
         let actor: ActorId = "local".parse()?;
         let connections = RuntimeSessions::new(Duration::from_secs(60));
-        let connection_id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let connection_id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections
             .get(&actor, &connection_id)
             .map_err(|e| format!("{e:?}"))?;
@@ -813,7 +817,9 @@ mod tests {
     fn late_source_failure_cannot_undo_acknowledgement() -> Result<(), Box<dyn std::error::Error>> {
         let actor: ActorId = "local".parse()?;
         let connections = RuntimeSessions::new(Duration::from_secs(60));
-        let id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         let handoffs = Handoffs::new(Duration::from_secs(60));
         let agent = handoffs
@@ -860,7 +866,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let actor: ActorId = "local".parse()?;
         let connections = RuntimeSessions::new(Duration::from_secs(60));
-        let id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         let handoffs = Handoffs::new(Duration::from_secs(60));
         let agent = handoffs
@@ -1044,7 +1052,9 @@ mod tests {
         let actor: ActorId = "local".parse()?;
         let other: ActorId = "other".parse()?;
         let connections = RuntimeSessions::new(Duration::from_secs(60));
-        let id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         let registry = Handoffs::new(Duration::from_secs(60));
         let agent = registry
@@ -1092,7 +1102,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let actor: ActorId = "local".parse()?;
         let connections = RuntimeSessions::new(Duration::from_secs(60));
-        let id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         let handoffs = Handoffs::new(Duration::from_secs(60));
         let agent = handoffs
@@ -1149,7 +1161,9 @@ mod tests {
     {
         let actor: ActorId = "local".parse()?;
         let connections = Arc::new(RuntimeSessions::new(Duration::from_secs(60)));
-        let id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         let registry = Arc::new(Handoffs::new(Duration::from_secs(60)));
         let agent = registry
@@ -1229,7 +1243,9 @@ mod tests {
     fn cancel_and_poll_choose_one_atomic_outcome() -> Result<(), Box<dyn std::error::Error>> {
         let actor: ActorId = "local".parse()?;
         let connections = RuntimeSessions::new(Duration::from_secs(60));
-        let id = connections.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = connections
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let connection = connections.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         let registry = Arc::new(Handoffs::new(Duration::from_secs(60)));
         let agent = registry

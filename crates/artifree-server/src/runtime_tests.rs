@@ -16,6 +16,7 @@ use artifree_contracts::mcp::RegisteredHandoffSession;
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
 use artifree_providers::storage::SqliteStore;
+use artifree_providers::tokens::SqliteTokenStore;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use tower::ServiceExt;
@@ -54,9 +55,11 @@ fn test_state_with_ttl(
     preview_ttl: Duration,
 ) -> Result<AppState, Box<dyn Error>> {
     let store = SqliteStore::open(&directory.0.join("runtime.sqlite3"))?;
+    let token_store = SqliteTokenStore::open(&directory.0.join("runtime.sqlite3"))?;
     let token = AccessToken::parse(&"0".repeat(64)).ok_or("invalid fixture token")?;
     Ok(AppState::new(
         store,
+        token_store,
         token,
         Settings {
             content_origin: "http://127.0.0.1:7411".into(),
@@ -73,7 +76,7 @@ async fn initialized_view(
     actor: &ActorId,
 ) -> Result<(RuntimeView, String), Box<dyn Error>> {
     let artifact_id = create_runtime_artifact(state, actor).await?;
-    let session_id = operations::open_runtime_session(state, actor)
+    let session_id = operations::open_runtime_session(state, actor, None)
         .map_err(|error| error.body.message)?
         .session_id;
     operations::set_runtime_grant(
@@ -93,6 +96,7 @@ async fn initialized_view(
     let view = operations::create_runtime_view(
         state,
         actor.clone(),
+        None,
         &artifact_id,
         1,
         CreateRuntimeViewRequest {
@@ -146,6 +150,7 @@ async fn issue_and_initialize(
     let view = operations::create_runtime_view(
         state,
         actor.clone(),
+        None,
         artifact,
         1,
         CreateRuntimeViewRequest {
@@ -251,6 +256,7 @@ async fn manifest_view(
     operations::create_runtime_view(
         state,
         actor.clone(),
+        None,
         artifact,
         revision,
         CreateRuntimeViewRequest {
@@ -269,7 +275,7 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
     let state = test_state(&directory)?;
     let actor: ActorId = "local".parse()?;
     let artifact = create_runtime_artifact(&state, &actor).await?;
-    let session = operations::open_runtime_session(&state, &actor)
+    let session = operations::open_runtime_session(&state, &actor, None)
         .map_err(|error| error.body.message)?
         .session_id;
     save_fixture_file(
@@ -346,7 +352,7 @@ async fn consent_revoke_regrant_revision_and_logout_gate_real_metadata()
     let state = test_state(&directory)?;
     let actor: ActorId = "local".parse()?;
     let artifact = create_runtime_artifact(&state, &actor).await?;
-    let session = operations::open_runtime_session(&state, &actor)
+    let session = operations::open_runtime_session(&state, &actor, None)
         .map_err(|error| error.body.message)?
         .session_id;
     let before = issue_and_initialize(&state, &actor, &artifact, &session, 1).await?;
@@ -500,7 +506,7 @@ async fn queued_handoff(
     let revision = operations::revision(state, actor.clone(), &artifact, 1)
         .await
         .map_err(|error| error.body.message)?;
-    let workspace = operations::open_runtime_session(state, actor)
+    let workspace = operations::open_runtime_session(state, actor, None)
         .map_err(|error| error.body.message)?
         .session_id;
     let agent = operations::register_handoff_session(state, actor, "Editor")
@@ -1161,7 +1167,7 @@ fn logout_fences_pending_grant_and_view_lookups() -> Result<(), Box<dyn Error>> 
     runtime.block_on(async {
         let actor: ActorId = "local".parse()?;
         let artifact = create_runtime_artifact(&state, &actor).await?;
-        let session = operations::open_runtime_session(&state, &actor)
+        let session = operations::open_runtime_session(&state, &actor, None)
             .map_err(|error| error.body.message)?
             .session_id;
         let (started, ready) = tokio::sync::oneshot::channel();
@@ -1174,6 +1180,7 @@ fn logout_fences_pending_grant_and_view_lookups() -> Result<(), Box<dyn Error>> 
         let mut view = Box::pin(operations::create_runtime_view(
             &state,
             actor.clone(),
+            None,
             &artifact,
             1,
             CreateRuntimeViewRequest {
@@ -1247,7 +1254,7 @@ fn replacement_while_metadata_waits_for_storage_rejects_the_late_result()
             pending,
             "the service read must be queued before replacement"
         );
-        let replacement = state.previews().issue_runtime(
+        let replacement = state.previews().issue_test_runtime(
             actor,
             artifact,
             SourceRevision(1),
@@ -1282,7 +1289,7 @@ fn close_while_creation_waits_for_storage_rejects_the_late_view() -> Result<(), 
     runtime.block_on(async {
         let actor: ActorId = "local".parse()?;
         let artifact_id = create_runtime_artifact(&state, &actor).await?;
-        let session_id = operations::open_runtime_session(&state, &actor)
+        let session_id = operations::open_runtime_session(&state, &actor, None)
             .map_err(|error| error.body.message)?
             .session_id;
         let view_id = "a".repeat(32);
@@ -1296,6 +1303,7 @@ fn close_while_creation_waits_for_storage_rejects_the_late_view() -> Result<(), 
         let mut request = Box::pin(operations::create_runtime_view(
             &state,
             actor.clone(),
+            None,
             &artifact_id,
             1,
             CreateRuntimeViewRequest {

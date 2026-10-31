@@ -30,7 +30,12 @@ export type ApiBody =
   | ErrorResponse
   | ArtifactChange
   | FeedPosition
-  | SourceExportManifest;
+  | SourceExportManifest
+  | CreateTokenRequest
+  | CreateTokenResponse
+  | RotateTokenResponse
+  | TokenList
+  | TokenInfo;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -77,6 +82,7 @@ export type HandoffState = 'staged' | 'queued' | 'offered' | 'blocked' | 'acknow
 export type ErrorCode =
   | 'invalid_request'
   | 'unauthenticated'
+  | 'forbidden'
   | 'not_found'
   | 'runtime_session_expired'
   | 'revision_conflict'
@@ -725,6 +731,80 @@ export interface SourceExportManifest {
    * revision.
    */
   title: string;
+}
+/**
+ * Request to issue a new agent access token.
+ */
+export interface CreateTokenRequest {
+  /**
+   * Human-readable name or label (1-64 characters).
+   */
+  name: string;
+}
+/**
+ * Response returned when a new token is created.
+ * The `secret` is displayed only once.
+ */
+export interface CreateTokenResponse {
+  /**
+   * The secret bearer token plaintext. Displayed only once.
+   */
+  secret: string;
+  token: TokenInfo;
+}
+/**
+ * Summary information for an access token.
+ * Secret plaintext is never exposed here.
+ */
+export interface TokenInfo {
+  /**
+   * ISO 8601 creation timestamp.
+   */
+  created_at: string;
+  /**
+   * Opaque token identifier.
+   */
+  id: string;
+  /**
+   * Whether this is an administrative owner token.
+   */
+  is_admin: boolean;
+  /**
+   * ISO 8601 last-used timestamp, if used.
+   */
+  last_used_at?: string | null;
+  /**
+   * Human-readable label for this token.
+   */
+  name: string;
+  /**
+   * Masked prefix for identification.
+   */
+  prefix: string;
+  /**
+   * ISO 8601 revocation timestamp, if revoked.
+   */
+  revoked_at?: string | null;
+}
+/**
+ * Response returned when a token is rotated.
+ * The new `secret` is displayed only once.
+ */
+export interface RotateTokenResponse {
+  /**
+   * The new secret bearer token plaintext. Displayed only once.
+   */
+  secret: string;
+  token: TokenInfo;
+}
+/**
+ * List of tokens.
+ */
+export interface TokenList {
+  /**
+   * The tokens.
+   */
+  tokens: TokenInfo[];
 }
 
 /**

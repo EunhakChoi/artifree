@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use artifree_providers::storage::SqliteStore;
+use artifree_providers::tokens::SqliteTokenStore;
 use tokio::net::TcpListener;
 
 use crate::auth::AccessToken;
@@ -78,8 +79,9 @@ pub struct Ready {
 /// when a listener fails while serving.
 pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
     prepare_data_dir(&options.data_dir)?;
-    let store = SqliteStore::open(&options.data_dir.join("artifree.sqlite3"))
-        .map_err(|error| error.to_string())?;
+    let db_path = options.data_dir.join("artifree.sqlite3");
+    let store = SqliteStore::open(&db_path).map_err(|error| error.to_string())?;
+    let token_store = SqliteTokenStore::open(&db_path).map_err(|error| error.to_string())?;
     let token_file = options.data_dir.join("access-token");
     let token = AccessToken::load_or_create(&token_file)
         .map_err(|error| format!("access token {}: {error}", token_file.display()))?;
@@ -107,6 +109,7 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
 
         let state = AppState::new(
             store,
+            token_store,
             token,
             Settings {
                 content_origin: content_origin.clone(),

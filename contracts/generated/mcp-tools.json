@@ -21,6 +21,11 @@
                 "type": "string"
               },
               {
+                "const": "forbidden",
+                "description": "Caller lacks authority to perform this operation.",
+                "type": "string"
+              },
+              {
                 "const": "not_found",
                 "description": "The resource does not exist or is not accessible.",
                 "type": "string"
@@ -315,6 +320,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -537,6 +547,11 @@
                       {
                         "const": "unauthenticated",
                         "description": "Missing or unknown access token.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
                         "type": "string"
                       },
                       {
@@ -883,6 +898,11 @@
                       {
                         "const": "unauthenticated",
                         "description": "Missing or unknown access token.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
                         "type": "string"
                       },
                       {
@@ -1267,6 +1287,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -1582,6 +1607,11 @@
                       {
                         "const": "unauthenticated",
                         "description": "Missing or unknown access token.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
                         "type": "string"
                       },
                       {
@@ -1919,6 +1949,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -2191,6 +2226,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -2400,6 +2440,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -2598,6 +2643,11 @@
                       {
                         "const": "unauthenticated",
                         "description": "Missing or unknown access token.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
                         "type": "string"
                       },
                       {
@@ -2834,6 +2884,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -3000,6 +3055,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -3151,6 +3211,11 @@
                       {
                         "const": "unauthenticated",
                         "description": "Missing or unknown access token.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
                         "type": "string"
                       },
                       {
@@ -3426,6 +3491,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
+                        "type": "string"
+                      },
+                      {
                         "const": "not_found",
                         "description": "The resource does not exist or is not accessible.",
                         "type": "string"
@@ -3623,6 +3693,11 @@
                       {
                         "const": "unauthenticated",
                         "description": "Missing or unknown access token.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "forbidden",
+                        "description": "Caller lacks authority to perform this operation.",
                         "type": "string"
                       },
                       {

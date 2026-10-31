@@ -3,16 +3,19 @@ import { parseArgs } from 'node:util';
 import { ArtifreeApiError } from '@artifree/client';
 import { scaffoldDescription } from '@artifree/contracts';
 import { runArtifact, UsageError } from './artifact.js';
+import { runToken } from './tokens.js';
 
 const help = `Artifree — open artifacts, any agent.
 
 Usage:
   artifree artifact <command>  Create, read, save, rename, pin, and preview artifacts
+  artifree token <command>     Manage agent access tokens (list, create, rotate, revoke)
   artifree describe [--json]  Inspect the build-time module inventory
   artifree --version         Print the version
   artifree --help            Show this help
 
 Artifact commands talk to a running artifree-server; see artifree artifact --help.
+Token commands talk to a running artifree-server; see artifree token --help.
 describe prints an inventory bundled at build time; it does not probe a server.
 `;
 
@@ -82,6 +85,7 @@ function isUsageError(error: unknown): boolean {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === 'artifact') await runArtifact(args.slice(1));
+  else if (args[0] === 'token') await runToken(args.slice(1));
   else describe(args);
 }
 

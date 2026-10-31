@@ -23,6 +23,60 @@ impl std::error::Error for InvalidValue {}
 const ARTIFACT_PREFIX: &str = "art_";
 const ARTIFACT_HEX_LEN: usize = 32;
 
+const TOKEN_ID_PREFIX: &str = "tok_";
+const TOKEN_ID_HEX_LEN: usize = 32;
+
+/// An opaque token identifier: `tok_` followed by 32 lowercase hex digits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TokenId(String);
+
+impl TokenId {
+    /// Builds an identifier from caller-supplied random bytes.
+    #[must_use]
+    pub fn from_random(bytes: [u8; 16]) -> Self {
+        let mut value = String::with_capacity(TOKEN_ID_PREFIX.len() + TOKEN_ID_HEX_LEN);
+        value.push_str(TOKEN_ID_PREFIX);
+        for byte in bytes {
+            value.push(hex_digit(byte >> 4));
+            value.push(hex_digit(byte & 0x0f));
+        }
+        Self(value)
+    }
+
+    /// The canonical string form.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for TokenId {
+    type Err = InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let valid = value.strip_prefix(TOKEN_ID_PREFIX).is_some_and(|hex| {
+            hex.len() == TOKEN_ID_HEX_LEN
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        if valid {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(InvalidValue {
+                what: "token id",
+                rule: "expected tok_ followed by 32 lowercase hexadecimal digits",
+            })
+        }
+    }
+}
+
+impl fmt::Display for TokenId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 /// An opaque artifact identifier: `art_` followed by 32 lowercase hex digits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ArtifactId(String);
@@ -221,6 +275,26 @@ mod tests {
         let id = ArtifactId::from_random([0xab; 16]);
         assert_eq!(id.as_str(), format!("art_{}", "ab".repeat(16)));
         assert_eq!(id.as_str().parse::<ArtifactId>(), Ok(id));
+    }
+
+    #[test]
+    fn token_id_formatting_and_validation() {
+        let id = TokenId::from_random([0xab; 16]);
+        assert_eq!(id.as_str(), &format!("tok_{}", "ab".repeat(16)));
+        assert_eq!(id.to_string(), format!("tok_{}", "ab".repeat(16)));
+        assert_eq!(id.as_str().parse::<TokenId>(), Ok(id));
+
+        for value in [
+            "",
+            "tok_",
+            &format!("tok_{}", "AB".repeat(16)),
+            &format!("tok_{}", "a".repeat(31)),
+            &format!("tok_{}", "a".repeat(33)),
+            &format!("TOK_{}", "a".repeat(32)),
+            &format!("tok_{}/", "a".repeat(31)),
+        ] {
+            assert!(value.parse::<TokenId>().is_err(), "accepted {value:?}");
+        }
     }
 
     #[test]

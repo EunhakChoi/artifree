@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use artifree_contracts::api::{ArtifactChange, ChangeKind as WireKind, ErrorCode, FeedPosition};
 use artifree_domain::change::{ChangeCursor, ChangeSequence, FeedId};
-use artifree_domain::identity::ActorId;
+use artifree_domain::identity::{ActorId, TokenId};
 use artifree_ports::artifact_store::{ChangeKind, ChangePage, ChangeRecord};
 use axum::extract::State;
 use axum::http::header::{self, HeaderValue};
@@ -26,7 +26,8 @@ use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
 use tokio::sync::{mpsc, watch};
 
-use crate::http::{AppState, Authenticated};
+use crate::auth::AuthContext;
+use crate::http::AppState;
 use crate::operations::ApiError;
 
 /// Idle time after which a stream sends a comment line, and after which it
@@ -45,6 +46,7 @@ const STREAM_RETRY_SECONDS: u32 = 5;
 pub(crate) struct Feed {
     commits: watch::Sender<()>,
     closing: watch::Sender<bool>,
+    revocations: watch::Sender<Option<TokenId>>,
     per_actor: u32,
     open: Arc<Mutex<HashMap<ActorId, u32>>>,
 }
@@ -54,6 +56,7 @@ impl Feed {
         Self {
             commits: watch::Sender::new(()),
             closing: watch::Sender::new(false),
+            revocations: watch::Sender::new(None),
             per_actor,
             open: Arc::default(),
         }
@@ -67,6 +70,11 @@ impl Feed {
     /// Ends every open stream and every stream opened later.
     pub(crate) fn close(&self) {
         self.closing.send_replace(true);
+    }
+
+    /// Ends every open stream associated with `token_id`.
+    pub(crate) fn revoke_token(&self, token_id: &TokenId) {
+        self.revocations.send_replace(Some(token_id.clone()));
     }
 
     /// Takes one of the actor's stream slots, or `None` when all are taken
@@ -109,18 +117,19 @@ impl Drop for Slot {
 /// `reset` when the cursor belongs to another feed or lies beyond the head.
 pub(crate) async fn stream(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let resume = last_event_id(&headers)?;
     let feed = state.feed();
-    let Some(slot) = feed.open(&actor) else {
+    let Some(slot) = feed.open(&auth.actor) else {
         return Ok(too_many_streams());
     };
     // Subscribe before the first read, so a commit after it wakes the stream.
     let commits = feed.commits.subscribe();
     let closing = feed.closing.subscribe();
-    let reader = actor.clone();
+    let revocations = feed.revocations.subscribe();
+    let reader = auth.actor.clone();
     let start = state
         .run(move |artifacts| artifacts.changes(&reader, ChangeSequence(0), 0))
         .await?;
@@ -134,12 +143,14 @@ pub(crate) async fn stream(
     let (sender, receiver) = mpsc::channel(1);
     let producer = Producer {
         state,
-        actor,
+        actor: auth.actor,
+        token_id: auth.token_id,
         feed: start.feed,
         position,
         sender,
         commits,
         closing,
+        revocations,
         _slot: slot,
     };
     tokio::spawn(producer.run(first));
@@ -183,12 +194,14 @@ struct Stopped;
 struct Producer {
     state: AppState,
     actor: ActorId,
+    token_id: Option<TokenId>,
     feed: FeedId,
     /// The last sequence sent or known to hold no change for the actor.
     position: ChangeSequence,
     sender: mpsc::Sender<Result<Event, Infallible>>,
     commits: watch::Receiver<()>,
     closing: watch::Receiver<bool>,
+    revocations: watch::Receiver<Option<TokenId>>,
     /// Held until the producer ends.
     _slot: Slot,
 }
@@ -246,6 +259,12 @@ impl Producer {
         tokio::select! {
             biased;
             _ = self.closing.wait_for(|closing| *closing) => Err(Stopped),
+            _ = self.revocations.wait_for(|revoked| {
+                match (&self.token_id, revoked) {
+                    (Some(my_token), Some(target)) => my_token == target,
+                    _ => false,
+                }
+            }) => Err(Stopped),
             () = self.sender.closed() => Err(Stopped),
             changed = self.commits.changed() => changed.map_err(|_| Stopped),
             () = tokio::time::sleep(HEARTBEAT) => Ok(()),
@@ -257,6 +276,12 @@ impl Producer {
         tokio::select! {
             biased;
             _ = self.closing.wait_for(|closing| *closing) => Err(Stopped),
+            _ = self.revocations.wait_for(|revoked| {
+                match (&self.token_id, revoked) {
+                    (Some(my_token), Some(target)) => my_token == target,
+                    _ => false,
+                }
+            }) => Err(Stopped),
             sent = self.sender.send(Ok(event)) => sent.map_err(|_| Stopped),
         }
     }

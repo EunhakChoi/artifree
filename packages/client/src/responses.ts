@@ -19,6 +19,10 @@ import type {
   RuntimeMetadata,
   RuntimeGrant,
   RuntimeView,
+  CreateTokenResponse,
+  RotateTokenResponse,
+  TokenInfo,
+  TokenList,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
 import type { FeedChange } from './change-feed.js';
@@ -57,6 +61,7 @@ const ARTIFACT_KINDS: readonly ArtifactKind[] = [
 const ERROR_CODES: Record<ErrorCode, true> = {
   invalid_request: true,
   unauthenticated: true,
+  forbidden: true,
   not_found: true,
   runtime_session_expired: true,
   revision_conflict: true,
@@ -509,4 +514,76 @@ export function parseError(value: unknown): ErrorBody | undefined {
     body[name] = count;
   }
   return body;
+}
+
+/** Parses a TokenInfo object. */
+export function parseTokenInfo(value: unknown): TokenInfo | undefined {
+  if (!isRecord(value)) return undefined;
+  const { id, name, prefix, created_at, is_admin, last_used_at, revoked_at } =
+    value;
+  if (
+    typeof id !== 'string' ||
+    typeof name !== 'string' ||
+    typeof prefix !== 'string' ||
+    typeof created_at !== 'string' ||
+    typeof is_admin !== 'boolean'
+  ) {
+    return undefined;
+  }
+  if (
+    last_used_at !== undefined &&
+    last_used_at !== null &&
+    typeof last_used_at !== 'string'
+  ) {
+    return undefined;
+  }
+  if (
+    revoked_at !== undefined &&
+    revoked_at !== null &&
+    typeof revoked_at !== 'string'
+  ) {
+    return undefined;
+  }
+  const token: TokenInfo = {
+    id,
+    name,
+    prefix,
+    created_at,
+    is_admin,
+  };
+  if (last_used_at !== undefined) token.last_used_at = last_used_at;
+  if (revoked_at !== undefined) token.revoked_at = revoked_at;
+  return token;
+}
+
+/** Parses a TokenList object. */
+export function parseTokenList(value: unknown): TokenList | undefined {
+  if (!isRecord(value) || !Array.isArray(value.tokens)) return undefined;
+  const tokens: TokenInfo[] = [];
+  for (const item of value.tokens) {
+    const info = parseTokenInfo(item);
+    if (info === undefined) return undefined;
+    tokens.push(info);
+  }
+  return { tokens };
+}
+
+/** Parses a CreateTokenResponse object. */
+export function parseCreateToken(
+  value: unknown,
+): CreateTokenResponse | undefined {
+  if (!isRecord(value) || typeof value.secret !== 'string') return undefined;
+  const token = parseTokenInfo(value.token);
+  if (token === undefined) return undefined;
+  return { secret: value.secret, token };
+}
+
+/** Parses a RotateTokenResponse object. */
+export function parseRotateToken(
+  value: unknown,
+): RotateTokenResponse | undefined {
+  if (!isRecord(value) || typeof value.secret !== 'string') return undefined;
+  const token = parseTokenInfo(value.token);
+  if (token === undefined) return undefined;
+  return { secret: value.secret, token };
 }

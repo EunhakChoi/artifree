@@ -43,9 +43,13 @@ impl Harness {
             .unwrap_or_else(|error| panic!("cannot create test directory: {error}"));
         let store = SqliteStore::open(&directory.join("db.sqlite3"))
             .unwrap_or_else(|error| panic!("cannot open store: {error}"));
+        let token_store =
+            artifree_providers::tokens::SqliteTokenStore::open(&directory.join("db.sqlite3"))
+                .unwrap_or_else(|error| panic!("cannot open token store: {error}"));
         let token = AccessToken::parse(TOKEN).unwrap_or_else(|| panic!("fixture token is invalid"));
         let state = AppState::new(
             store,
+            token_store,
             token,
             Settings {
                 content_origin: "http://127.0.0.1:7411".into(),
