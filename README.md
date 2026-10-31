@@ -35,6 +35,20 @@ you and refuses an existing one that other users can access.
 Open `http://127.0.0.1:7410` in a browser and paste the token from
 `.artifree/data/access-token` to use the workspace directly without Vite.
 
+When running behind an HTTPS reverse proxy (e.g. Caddy, Nginx, or Traefik terminating TLS),
+configure external origins and trusted proxy networks explicitly:
+
+```sh
+cargo run -p artifree-server -- serve \
+  --data-dir .artifree/data \
+  --web-dir apps/web/dist \
+  --api-origin https://artifree.example.com \
+  --content-origin https://preview.example.com \
+  --trusted-proxy 127.0.0.1/32 \
+  --allowed-host artifree.example.com \
+  --allow-remote-mcp
+```
+
 For development with live reloading, Vite is still available:
 
 ```sh

@@ -67,6 +67,7 @@ fn test_state_with_ttl(
             frame_ancestors: "http://127.0.0.1:*".into(),
             limits: RequestLimits::default(),
             change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+            ..Settings::default()
         },
     )?)
 }

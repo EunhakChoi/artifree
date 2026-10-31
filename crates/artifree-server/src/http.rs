@@ -10,7 +10,7 @@
 //! behind the same token.
 
 use std::future::poll_fn;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,7 +31,7 @@ use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::{SqliteTokenStore, hash_token_secret};
 use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -71,6 +71,33 @@ pub struct Settings {
     pub limits: RequestLimits,
     /// Change streams one actor may keep open, at least 1.
     pub change_streams: u32,
+    /// Optional public API and web origin, such as `https://artifree.example.com`.
+    pub api_origin: Option<String>,
+    /// Trusted reverse proxy networks.
+    pub trusted_proxies: Vec<crate::proxy::IpNetwork>,
+    /// Allowed Host header values.
+    pub allowed_hosts: Vec<String>,
+    /// Additional allowed CORS origins for the web interface.
+    pub allowed_origins: Vec<String>,
+    /// Whether remote MCP access is permitted.
+    pub allow_remote_mcp: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            content_origin: "http://127.0.0.1:7411".into(),
+            preview_ttl: Duration::from_secs(15 * 60),
+            frame_ancestors: "http://127.0.0.1:* http://localhost:* http://[::1]:*".into(),
+            limits: RequestLimits::default(),
+            change_streams: crate::changes::DEFAULT_STREAMS_PER_ACTOR,
+            api_origin: None,
+            trusted_proxies: Vec::new(),
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            allow_remote_mcp: false,
+        }
+    }
 }
 
 /// Shared request state for the API and content routers.
@@ -112,6 +139,16 @@ impl AppState {
         let mut settings = settings;
         if !settings.content_origin.is_empty() {
             settings.content_origin = normalize_origin(&settings.content_origin)?;
+        }
+        if let Some(ref api_origin) = settings.api_origin {
+            let canon = normalize_origin(api_origin)?;
+            if !settings.content_origin.is_empty() && canon == settings.content_origin {
+                return Err(
+                    "preview content origin must differ from API origin to maintain sandbox isolation"
+                        .into(),
+                );
+            }
+            settings.api_origin = Some(canon);
         }
         let owner: ActorId = "local"
             .parse()
@@ -362,6 +399,10 @@ pub fn router_with_web(state: AppState, web_assets: Option<WebAssets>) -> Router
         .route("/healthz", get(healthz_get).head(healthz_head))
         .fallback(fallback_handler)
         .layer(middleware::from_fn_with_state(state.clone(), cors))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            proxy_inspection,
+        ))
         .with_state(state)
 }
 
@@ -531,6 +572,63 @@ where
     response
 }
 
+/// Evaluates client connection info, rejects untrusted forwarded headers,
+/// and validates the Host header against the allowed hosts.
+async fn proxy_inspection(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let peer_addr = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)), |c| c.0);
+
+    let connection_info = match crate::proxy::evaluate_connection(
+        req.headers(),
+        peer_addr.ip(),
+        &state.shared.settings.trusted_proxies,
+    ) {
+        Ok(info) => info,
+        Err(err) => return err.into_response(),
+    };
+
+    if !crate::proxy::is_host_allowed(&connection_info.host, &state.shared.settings.allowed_hosts) {
+        return ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "host header is not allowed",
+        )
+        .into_response();
+    }
+
+    req.extensions_mut().insert(connection_info);
+    next.run(req).await
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("http://localhost:")
+        || origin.starts_with("http://[::1]:")
+        || origin == "http://127.0.0.1"
+        || origin == "http://localhost"
+        || origin == "http://[::1]"
+}
+
+fn is_origin_permitted(normalized_origin: &str, settings: &Settings) -> bool {
+    if let Some(ref api_origin) = settings.api_origin
+        && normalized_origin == api_origin
+    {
+        return true;
+    }
+    for allowed in &settings.allowed_origins {
+        if normalized_origin == allowed {
+            return true;
+        }
+    }
+    if is_loopback_origin(normalized_origin) {
+        return true;
+    }
+    // In local dev mode without explicit api_origin or allowed_origins, preserve permissive local behavior
+    settings.api_origin.is_none() && settings.allowed_origins.is_empty()
+}
+
 /// CORS middleware handling preflights and response headers on `/v1/*` API endpoints.
 async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
@@ -578,6 +676,15 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
             StatusCode::FORBIDDEN,
             ErrorCode::InvalidRequest,
             "requests from preview origin or null origin are forbidden",
+        )
+        .into_response();
+    }
+
+    if !is_origin_permitted(&normalized_origin, &state.shared.settings) {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidRequest,
+            "origin header is not permitted",
         )
         .into_response();
     }
@@ -672,6 +779,13 @@ pub fn normalize_origin(raw: &str) -> Result<String, String> {
     } else {
         Ok(format!("{scheme_lower}://{canonical_host}"))
     }
+}
+
+/// Extracts the host authority from a valid HTTP or HTTPS origin string.
+#[must_use]
+pub fn origin_host(origin: &str) -> Option<String> {
+    let uri: axum::http::Uri = origin.parse().ok()?;
+    uri.authority().map(|a| a.as_str().to_owned())
 }
 
 async fn no_store(mut response: Response) -> Response {

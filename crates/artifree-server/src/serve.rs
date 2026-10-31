@@ -52,6 +52,16 @@ pub struct ServeOptions {
     pub limits: RequestLimits,
     /// Change streams one actor may keep open.
     pub change_streams: u32,
+    /// Public origin of the API and web workspace (e.g. `https://artifree.example.com`).
+    pub api_origin: Option<String>,
+    /// Trusted reverse proxy networks.
+    pub trusted_proxies: Vec<crate::proxy::IpNetwork>,
+    /// Allowed Host header values.
+    pub allowed_hosts: Vec<String>,
+    /// Additional allowed CORS origins for the web interface.
+    pub allowed_origins: Vec<String>,
+    /// Whether remote MCP access is permitted.
+    pub allow_remote_mcp: bool,
 }
 
 /// Addresses reported once both listeners accept connections.
@@ -89,93 +99,132 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
         .enable_all()
         .build()
         .map_err(|error| format!("cannot start the async runtime: {error}"))?;
-    runtime.block_on(async move {
-        let api = bind(options.api_address).await?;
-        let content = bind(options.content_address).await?;
-        let api_url = format!("http://{}", local_address(&api)?);
+    runtime.block_on(serve_listeners(
+        options,
+        store,
+        token_store,
+        token,
+        token_file,
+        on_ready,
+    ))
+}
 
-        let loopback = match derive_loopback_address(&options) {
-            Some(addr) => Some(bind(addr).await?),
-            None => None,
-        };
-        let loopback_api_url = match loopback {
-            Some(ref listener) => Some(format!("http://{}", local_address(listener)?)),
-            None => None,
-        };
-        let content_origin = match options.content_origin {
-            Some(origin) => origin,
-            None => format!("http://{}", local_address(&content)?),
-        };
+async fn serve_listeners(
+    options: ServeOptions,
+    store: SqliteStore,
+    token_store: SqliteTokenStore,
+    token: AccessToken,
+    token_file: PathBuf,
+    on_ready: impl FnOnce(&Ready),
+) -> Result<(), String> {
+    let api = bind(options.api_address).await?;
+    let content = bind(options.content_address).await?;
+    let api_url = match options.api_origin.as_deref() {
+        Some(origin) => origin.to_owned(),
+        None => format!("http://{}", local_address(&api)?),
+    };
 
-        let state = AppState::new(
-            store,
-            token_store,
-            token,
-            Settings {
-                content_origin: content_origin.clone(),
-                preview_ttl: options.preview_ttl,
-                frame_ancestors: options.frame_ancestors,
-                limits: options.limits,
-                change_streams: options.change_streams,
-            },
-        )?;
-        let web_assets = options.web_dir.as_deref().map(WebAssets::new).transpose()?;
-        let web_url = if web_assets.is_some() {
-            Some(api_url.clone())
-        } else {
-            None
-        };
-        on_ready(&Ready {
-            api_url,
-            web_url,
-            loopback_api_url,
-            content_origin,
-            token_file,
-        });
-        let streams = state.clone();
-        let api_server = axum::serve(
-            api,
-            http::router_with_web(state.clone(), web_assets.clone())
+    let loopback = match derive_loopback_address(&options) {
+        Some(addr) => Some(bind(addr).await?),
+        None => None,
+    };
+    let loopback_api_url = match loopback {
+        Some(ref listener) => Some(format!("http://{}", local_address(listener)?)),
+        None => None,
+    };
+    let content_origin = match options.content_origin.as_deref() {
+        Some(origin) => origin.to_owned(),
+        None => format!("http://{}", local_address(&content)?),
+    };
+
+    let settings = build_settings(&options, local_address(&api)?, content_origin.clone());
+    let state = AppState::new(store, token_store, token, settings)?;
+    let web_assets = options.web_dir.as_deref().map(WebAssets::new).transpose()?;
+    let web_url = if web_assets.is_some() {
+        Some(api_url.clone())
+    } else {
+        None
+    };
+    on_ready(&Ready {
+        api_url,
+        web_url,
+        loopback_api_url,
+        content_origin,
+        token_file,
+    });
+    let streams = state.clone();
+    let api_server = axum::serve(
+        api,
+        http::router_with_web(state.clone(), web_assets.clone())
+            .into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        // Open change streams would otherwise keep the server running.
+        streams.close_streams();
+    });
+    let loopback_server = loopback.map(|loopback_listener| {
+        axum::serve(
+            loopback_listener,
+            http::router_with_web(state.clone(), web_assets)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            // Open change streams would otherwise keep the server running.
-            streams.close_streams();
-        });
-        let loopback_server = loopback.map(|loopback_listener| {
-            axum::serve(
-                loopback_listener,
-                http::router_with_web(state.clone(), web_assets)
-                    .into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(shutdown_signal())
-        });
-        let content_server =
-            axum::serve(content, preview::router(state)).with_graceful_shutdown(shutdown_signal());
-        tokio::try_join!(
-            async {
-                api_server
+        .with_graceful_shutdown(shutdown_signal())
+    });
+    let content_server = axum::serve(
+        content,
+        preview::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
+    tokio::try_join!(
+        async {
+            api_server
+                .await
+                .map_err(|error| format!("API listener failed: {error}"))
+        },
+        async {
+            content_server
+                .await
+                .map_err(|error| format!("content listener failed: {error}"))
+        },
+        async {
+            if let Some(server) = loopback_server {
+                server
                     .await
-                    .map_err(|error| format!("API listener failed: {error}"))
-            },
-            async {
-                content_server
-                    .await
-                    .map_err(|error| format!("content listener failed: {error}"))
-            },
-            async {
-                if let Some(server) = loopback_server {
-                    server
-                        .await
-                        .map_err(|error| format!("loopback API listener failed: {error}"))
-                } else {
-                    Ok(())
-                }
-            },
-        )?;
-        Ok(())
-    })
+                    .map_err(|error| format!("loopback API listener failed: {error}"))
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+    Ok(())
+}
+
+fn build_settings(
+    options: &ServeOptions,
+    bound_api_addr: SocketAddr,
+    content_origin: String,
+) -> Settings {
+    let mut allowed_hosts = options.allowed_hosts.clone();
+    let bound_api_host = bound_api_addr.to_string();
+    if !allowed_hosts
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(&bound_api_host))
+    {
+        allowed_hosts.push(bound_api_host);
+    }
+    Settings {
+        content_origin,
+        preview_ttl: options.preview_ttl,
+        frame_ancestors: options.frame_ancestors.clone(),
+        limits: options.limits,
+        change_streams: options.change_streams,
+        api_origin: options.api_origin.clone(),
+        trusted_proxies: options.trusted_proxies.clone(),
+        allowed_hosts,
+        allowed_origins: options.allowed_origins.clone(),
+        allow_remote_mcp: options.allow_remote_mcp,
+    }
 }
 
 /// Determines the loopback address to bind for local MCP peer isolation in LAN mode.

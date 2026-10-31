@@ -57,6 +57,7 @@ impl Harness {
                 frame_ancestors: "http://127.0.0.1:*".into(),
                 limits: RequestLimits::default(),
                 change_streams,
+                ..Settings::default()
             },
         )
         .unwrap_or_else(|error| panic!("cannot build state: {error}"));
