@@ -267,7 +267,7 @@ mod tests {
     use std::time::Duration;
 
     use artifree_domain::SourceRevision;
-    use artifree_domain::identity::{ActorId, ArtifactId};
+    use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
     use super::{GrantScope, RuntimeSessions, SessionError};
 
@@ -412,6 +412,39 @@ mod tests {
             .set_grant(scope.clone(), true, barrier)
             .map_err(|error| format!("{error:?}"))?;
         assert!(session.permits(&scope, allowed));
+        Ok(())
+    }
+
+    #[test]
+    fn token_revocation_closes_associated_sessions() -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let token_1: TokenId = "tok_0123456789abcdef0123456789abcdef".parse()?;
+        let token_2: TokenId = "tok_fedcba9876543210fedcba9876543210".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+
+        let s1 = sessions
+            .create(&actor, Some(token_1.clone()))
+            .map_err(|e| format!("{e:?}"))?;
+        let s2 = sessions
+            .create(&actor, Some(token_2))
+            .map_err(|e| format!("{e:?}"))?;
+        let s_bootstrap = sessions
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
+
+        assert!(sessions.get(&actor, &s1).is_ok());
+        assert!(sessions.get(&actor, &s2).is_ok());
+        assert!(sessions.get(&actor, &s_bootstrap).is_ok());
+
+        sessions.revoke_token(&token_1);
+
+        assert!(matches!(
+            sessions.get(&actor, &s1),
+            Err(SessionError::Closed)
+        ));
+        assert!(sessions.get(&actor, &s2).is_ok());
+        assert!(sessions.get(&actor, &s_bootstrap).is_ok());
+
         Ok(())
     }
 }

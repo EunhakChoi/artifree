@@ -72,7 +72,7 @@ async fn create_token(
     Json(body): Json<CreateTokenRequest>,
 ) -> Result<Response, ApiError> {
     let name = body.name.trim();
-    if name.is_empty() || name.len() > 64 {
+    if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
         return Err(ApiError::invalid(
             "token name must be between 1 and 64 characters",
         ));

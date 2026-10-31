@@ -4,6 +4,7 @@
 //! never stored in the database.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use artifree_domain::identity::TokenId;
 use artifree_ports::token_store::{NewTokenRecord, TokenRecord, TokenStore, TokenStoreError};
@@ -11,6 +12,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 const DIGITS: &[u8; 16] = b"0123456789abcdef";
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tokens (
@@ -64,7 +66,12 @@ impl SqliteTokenStore {
     }
 
     fn connect(&self) -> Result<Connection, TokenStoreError> {
-        Connection::open(&self.path).map_err(unavailable)
+        let connection = Connection::open(&self.path).map_err(unavailable)?;
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(unavailable)?;
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(unavailable)?;
+        Ok(connection)
     }
 }
 

@@ -18,6 +18,7 @@ use artifree_server::{changes, preview};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
+use http_body::Body as _;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -77,6 +78,13 @@ impl Harness {
 
     async fn send(&self, request: Request<Body>) -> Result<Reply, Box<dyn Error>> {
         Reply::from(self.api.clone().oneshot(request).await?).await
+    }
+
+    async fn oneshot(
+        &self,
+        request: Request<Body>,
+    ) -> Result<axum::response::Response, Box<dyn Error>> {
+        Ok(self.api.clone().oneshot(request).await?)
     }
 
     async fn content(&self, url: &str) -> Result<Reply, Box<dyn Error>> {
@@ -465,5 +473,146 @@ async fn persistence_across_restart() -> Result<(), Box<dyn Error>> {
     assert!(revoked_entry.revoked_at.is_some());
 
     let _ = std::fs::remove_dir_all(&directory);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cascading_revocation_closes_active_change_stream() -> Result<(), Box<dyn Error>> {
+    use std::future::poll_fn;
+    use std::pin::Pin;
+
+    let harness = Harness::new()?;
+
+    // Create an agent token
+    let create_tok = request(
+        "POST",
+        "/v1/tokens",
+        OWNER_TOKEN,
+        Some(&serde_json::json!({ "name": "Stream Agent" })),
+    )?;
+    let created: CreateTokenResponse = harness.send(create_tok).await?.json()?;
+
+    // Open change stream with the agent token
+    let stream_req = Request::get("/v1/changes")
+        .header(header::AUTHORIZATION, format!("Bearer {}", created.secret))
+        .body(Body::empty())?;
+    let response = harness.oneshot(stream_req).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+
+    // Read the initial ready event frame
+    let initial_frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)),
+    )
+    .await
+    .map_err(|_| "stream timed out waiting for initial frame")?;
+    assert!(initial_frame.is_some());
+
+    // Revoke the agent token with owner token
+    let rev_req = request(
+        "DELETE",
+        &format!("/v1/tokens/{}", created.token.id),
+        OWNER_TOKEN,
+        None,
+    )?;
+    assert_eq!(harness.send(rev_req).await?.status, StatusCode::NO_CONTENT);
+
+    // Active change stream must terminate promptly
+    let next_frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)),
+    )
+    .await
+    .map_err(|_| "stream timed out waiting for stream closure")?;
+    assert!(
+        next_frame.is_none(),
+        "stream must be closed after token revocation"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cascading_revocation_closes_active_runtime_session() -> Result<(), Box<dyn Error>> {
+    let harness = Harness::new()?;
+
+    // Create an agent token
+    let create_tok = request(
+        "POST",
+        "/v1/tokens",
+        OWNER_TOKEN,
+        Some(&serde_json::json!({ "name": "Runtime Agent" })),
+    )?;
+    let created: CreateTokenResponse = harness.send(create_tok).await?.json()?;
+
+    // Open a runtime session using the agent token
+    let open_req = Request::post("/v1/runtime-sessions")
+        .header(header::AUTHORIZATION, format!("Bearer {}", created.secret))
+        .body(Body::empty())?;
+    let open_reply = harness.send(open_req).await?;
+    assert_eq!(open_reply.status, StatusCode::OK);
+    let session_body: Value = open_reply.json()?;
+    let session_id = session_body["session_id"]
+        .as_str()
+        .ok_or("missing session_id")?;
+
+    // Create an artifact to test grant operations
+    let mut create_art = request(
+        "POST",
+        "/v1/artifacts",
+        OWNER_TOKEN,
+        Some(&serde_json::json!({
+            "title": "Session Test",
+            "files": [{ "path": "index.html", "encoding": "utf8", "content": "<!doctype html><html><head><!-- artifree-runtime --></head><body><h1>Session</h1></body></html>" }]
+        })),
+    )?;
+    create_art
+        .headers_mut()
+        .insert("idempotency-key", "key-session-1".parse()?);
+    let art_reply = harness.send(create_art).await?;
+    assert_eq!(art_reply.status, StatusCode::CREATED);
+    let art_body: Value = art_reply.json()?;
+    let artifact_id = art_body["artifact"]["id"]
+        .as_str()
+        .ok_or("missing artifact_id")?;
+
+    // Setting a grant initially succeeds
+    let grant_req = Request::put(format!(
+        "/v1/runtime-sessions/{session_id}/artifacts/{artifact_id}/revisions/1/grant"
+    ))
+    .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
+    .header(header::CONTENT_TYPE, "application/json")
+    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+        "head_revision": 1,
+        "expected_version": 0,
+        "capabilities": ["metadata.read"]
+    }))?))?;
+    let grant_reply = harness.send(grant_req).await?;
+    assert_eq!(grant_reply.status, StatusCode::OK);
+
+    // Revoke the agent token with owner token
+    let rev_req = request(
+        "DELETE",
+        &format!("/v1/tokens/{}", created.token.id),
+        OWNER_TOKEN,
+        None,
+    )?;
+    assert_eq!(harness.send(rev_req).await?.status, StatusCode::NO_CONTENT);
+
+    // Setting a grant on the revoked session now fails with 404 Not Found!
+    let grant_after_revoke = Request::put(format!(
+        "/v1/runtime-sessions/{session_id}/artifacts/{artifact_id}/revisions/1/grant"
+    ))
+    .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
+    .header(header::CONTENT_TYPE, "application/json")
+    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+        "head_revision": 1,
+        "expected_version": 1,
+        "capabilities": ["metadata.read"]
+    }))?))?;
+    let reply_after_revoke = harness.send(grant_after_revoke).await?;
+    assert_eq!(reply_after_revoke.status, StatusCode::NOT_FOUND);
+
     Ok(())
 }
