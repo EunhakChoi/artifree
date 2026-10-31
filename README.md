@@ -51,6 +51,8 @@ node apps/cli/dist/main.js artifact create --title "Demo" --dir ./site
 node apps/cli/dist/main.js artifact save <id> --base 1 --put index.html=./site/index.html
 node apps/cli/dist/main.js artifact preview <id>
 node apps/cli/dist/main.js artifact --help
+node apps/cli/dist/main.js token list
+node apps/cli/dist/main.js token create "My Agent"
 ```
 
 Results are JSON on stdout; failures go to stderr with exit code 1 (API) or 2
@@ -105,8 +107,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0018](docs/decisions/0018-source-draft-recovery.md),
 [0019](docs/decisions/0019-runtime-metadata-bridge.md),
 [0020](docs/decisions/0020-runtime-grants.md),
-[0021](docs/decisions/0021-agent-selection-handoff.md), and
-[0022](docs/decisions/0022-production-web-and-api-serving.md)).
+[0021](docs/decisions/0021-agent-selection-handoff.md),
+[0022](docs/decisions/0022-production-web-and-api-serving.md), and
+[0023](docs/decisions/0023-single-owner-token-management.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

@@ -17,7 +17,7 @@ use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
     CommitResponse, ContentEncoding, CreateArtifactRequest, DuplicateArtifactRequest,
     DuplicateArtifactResponse, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
-    SaveRevisionRequest, UpdateArtifactRequest,
+    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, CreateArtifactArguments,
@@ -49,8 +49,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::auth::hex;
-use crate::http::{AppState, Authenticated, MAX_BODY_BYTES};
+use crate::auth::{AuthContext, hex};
+use crate::http::{AppState, MAX_BODY_BYTES};
 use crate::operations::{self, ApiError};
 
 /// Path of the MCP endpoint on the API listener.
@@ -138,16 +138,16 @@ impl ServerHandler for ArtifactTools {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        // The API router's admission layer inserts the actor; the SDK
+        // The API router's admission layer inserts the auth context; the SDK
         // forwards the HTTP request parts. Without both, nothing may run.
-        let actor = context
+        let auth = context
             .extensions
             .get::<Parts>()
-            .and_then(|parts| parts.extensions.get::<Authenticated>())
-            .map(|Authenticated(actor)| actor.clone())
+            .and_then(|parts| parts.extensions.get::<AuthContext>())
+            .cloned()
             .ok_or_else(|| ErrorData::internal_error("unauthenticated tool call", None))?;
         let arguments = Value::Object(request.arguments.unwrap_or_default());
-        match dispatch(&self.state, actor, &request.name, arguments).await {
+        match dispatch(&self.state, auth, &request.name, arguments).await {
             Some(Ok(value)) => Ok(CallToolResult::structured(value).into()),
             Some(Err(error)) => Ok(failure(&error).into()),
             // An unknown tool is a protocol error; everything a tool rejects
@@ -163,10 +163,11 @@ impl ServerHandler for ArtifactTools {
 /// Runs the named tool, or returns `None` for an unknown name.
 async fn dispatch(
     state: &AppState,
-    actor: ActorId,
+    auth: AuthContext,
     name: &str,
     arguments: Value,
 ) -> Option<Result<Value, ApiError>> {
+    let actor = auth.actor.clone();
     let outcome = match name {
         "list_artifacts" => {
             json(async {
@@ -182,58 +183,11 @@ async fn dispatch(
             })
             .await
         }
-        "create_artifact" => {
-            json(async {
-                let CreateArtifactArguments {
-                    title,
-                    files,
-                    idempotency_key,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                operations::create(state, actor, key, CreateArtifactRequest { title, files }).await
-            })
-            .await
-        }
-        "save_revision" => {
-            json(async {
-                let SaveRevisionArguments {
-                    artifact_id,
-                    base_revision,
-                    changes,
-                    idempotency_key,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                let request = SaveRevisionRequest {
-                    base_revision,
-                    changes,
-                };
-                operations::save(state, actor, key, &artifact_id, request).await
-            })
-            .await
-        }
+        "create_artifact" => json(create_artifact(state, actor, arguments)).await,
+        "save_revision" => json(save_revision(state, actor, arguments)).await,
         "restore_revision" => json(restore_revision(state, actor, arguments)).await,
         "duplicate_artifact" => json(duplicate_artifact(state, actor, arguments)).await,
-        "update_artifact" => {
-            json(async {
-                let UpdateArtifactArguments {
-                    artifact_id,
-                    base_metadata_revision,
-                    title,
-                    pinned,
-                    deleted,
-                    idempotency_key,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                let request = UpdateArtifactRequest {
-                    base_metadata_revision,
-                    title,
-                    pinned,
-                    deleted,
-                };
-                operations::update(state, actor, key, &artifact_id, request).await
-            })
-            .await
-        }
+        "update_artifact" => json(update_artifact(state, actor, arguments)).await,
         "list_revisions" => {
             json(async {
                 let ArtifactArguments { artifact_id } = parse(arguments)?;
@@ -258,7 +212,7 @@ async fn dispatch(
                     artifact_id,
                     revision,
                 } = parse(arguments)?;
-                operations::preview(state, actor, &artifact_id, revision).await
+                operations::preview(state, actor, auth.token_id, &artifact_id, revision).await
             })
             .await
         }
@@ -327,6 +281,62 @@ async fn json<T: Serialize>(
     let value = outcome.await?;
     serde_json::to_value(value)
         .map_err(|error| ArtifactError::Unavailable(format!("result encoding: {error}")).into())
+}
+
+async fn create_artifact(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<CommitResponse, ApiError> {
+    let CreateArtifactArguments {
+        title,
+        files,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    operations::create(state, actor, key, CreateArtifactRequest { title, files }).await
+}
+
+async fn save_revision(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<CommitResponse, ApiError> {
+    let SaveRevisionArguments {
+        artifact_id,
+        base_revision,
+        changes,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = SaveRevisionRequest {
+        base_revision,
+        changes,
+    };
+    operations::save(state, actor, key, &artifact_id, request).await
+}
+
+async fn update_artifact(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<UpdateArtifactResponse, ApiError> {
+    let UpdateArtifactArguments {
+        artifact_id,
+        base_metadata_revision,
+        title,
+        pinned,
+        deleted,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = UpdateArtifactRequest {
+        base_metadata_revision,
+        title,
+        pinned,
+        deleted,
+    };
+    operations::update(state, actor, key, &artifact_id, request).await
 }
 
 async fn restore_revision(

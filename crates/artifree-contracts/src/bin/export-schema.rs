@@ -16,11 +16,12 @@
 
 use artifree_contracts::api::{
     AgentSessionList, Artifact, ArtifactChange, ArtifactList, CommitResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest,
-    ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList, RuntimeConnection,
-    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest,
-    SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, UpdateArtifactRequest,
+    CreateArtifactRequest, CreateRuntimeViewRequest, CreateTokenRequest, CreateTokenResponse,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse, FeedPosition, Handoff,
+    HandoffActionRequest, ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision,
+    RevisionList, RotateTokenResponse, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
+    SourceExportManifest, StageHandoffRequest, TokenInfo, TokenList, UpdateArtifactRequest,
     UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
@@ -56,6 +57,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<ArtifactChange>(),
         generator.subschema_for::<FeedPosition>(),
         generator.subschema_for::<SourceExportManifest>(),
+        generator.subschema_for::<CreateTokenRequest>(),
+        generator.subschema_for::<CreateTokenResponse>(),
+        generator.subschema_for::<RotateTokenResponse>(),
+        generator.subschema_for::<TokenList>(),
+        generator.subschema_for::<TokenInfo>(),
     ];
     // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();

@@ -57,9 +57,11 @@ impl WebTestHarness {
 
         let db_path = data_dir.join("db.sqlite3");
         let store = SqliteStore::open(&db_path)?;
+        let token_store = artifree_providers::tokens::SqliteTokenStore::open(&db_path)?;
         let token = AccessToken::parse(TOKEN).ok_or("invalid token")?;
         let state = AppState::new(
             store,
+            token_store,
             token,
             Settings {
                 content_origin: content_origin.to_owned(),

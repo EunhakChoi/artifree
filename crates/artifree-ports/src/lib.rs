@@ -4,6 +4,7 @@
 //! storage has one so far.
 
 pub mod artifact_store;
+pub mod token_store;
 
 /// Capability families; listing a family does not grant runtime permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

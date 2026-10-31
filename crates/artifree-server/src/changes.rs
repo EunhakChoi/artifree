@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use artifree_contracts::api::{ArtifactChange, ChangeKind as WireKind, ErrorCode, FeedPosition};
 use artifree_domain::change::{ChangeCursor, ChangeSequence, FeedId};
-use artifree_domain::identity::ActorId;
+use artifree_domain::identity::{ActorId, TokenId};
 use artifree_ports::artifact_store::{ChangeKind, ChangePage, ChangeRecord};
 use axum::extract::State;
 use axum::http::header::{self, HeaderValue};
@@ -26,7 +26,8 @@ use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
 use tokio::sync::{mpsc, watch};
 
-use crate::http::{AppState, Authenticated};
+use crate::auth::AuthContext;
+use crate::http::AppState;
 use crate::operations::ApiError;
 
 /// Idle time after which a stream sends a comment line, and after which it
@@ -39,12 +40,33 @@ const PAGE: usize = 100;
 /// `Retry-After` seconds when an actor has too many streams open.
 const STREAM_RETRY_SECONDS: u32 = 5;
 
+#[derive(Debug, Default)]
+struct StreamRegistrations {
+    next_id: u64,
+    streams: Vec<(u64, TokenId, watch::Sender<bool>)>,
+}
+
+#[derive(Debug)]
+struct TokenStreamRegistration {
+    id: u64,
+    registrations: Arc<Mutex<StreamRegistrations>>,
+}
+
+impl Drop for TokenStreamRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut reg) = self.registrations.lock() {
+            reg.streams.retain(|(entry_id, _, _)| *entry_id != self.id);
+        }
+    }
+}
+
 /// What all change streams of the process share: commit wake-ups, the
 /// shutdown signal, and the per-actor stream count.
 #[derive(Debug)]
 pub(crate) struct Feed {
     commits: watch::Sender<()>,
     closing: watch::Sender<bool>,
+    registrations: Arc<Mutex<StreamRegistrations>>,
     per_actor: u32,
     open: Arc<Mutex<HashMap<ActorId, u32>>>,
 }
@@ -54,6 +76,7 @@ impl Feed {
         Self {
             commits: watch::Sender::new(()),
             closing: watch::Sender::new(false),
+            registrations: Arc::default(),
             per_actor,
             open: Arc::default(),
         }
@@ -67,6 +90,32 @@ impl Feed {
     /// Ends every open stream and every stream opened later.
     pub(crate) fn close(&self) {
         self.closing.send_replace(true);
+    }
+
+    /// Ends every open stream associated with `token_id`.
+    pub(crate) fn revoke_token(&self, token_id: &TokenId) {
+        if let Ok(reg) = self.registrations.lock() {
+            for (_, tok, sender) in &reg.streams {
+                if tok == token_id {
+                    sender.send_replace(true);
+                }
+            }
+        }
+    }
+
+    fn register_token_stream(
+        &self,
+        token_id: &TokenId,
+        sender: watch::Sender<bool>,
+    ) -> Option<TokenStreamRegistration> {
+        let mut reg = self.registrations.lock().ok()?;
+        let id = reg.next_id;
+        reg.next_id = reg.next_id.wrapping_add(1);
+        reg.streams.push((id, token_id.clone(), sender));
+        Some(TokenStreamRegistration {
+            id,
+            registrations: Arc::clone(&self.registrations),
+        })
     }
 
     /// Takes one of the actor's stream slots, or `None` when all are taken
@@ -109,18 +158,25 @@ impl Drop for Slot {
 /// `reset` when the cursor belongs to another feed or lies beyond the head.
 pub(crate) async fn stream(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let resume = last_event_id(&headers)?;
     let feed = state.feed();
-    let Some(slot) = feed.open(&actor) else {
+    let Some(slot) = feed.open(&auth.actor) else {
         return Ok(too_many_streams());
     };
     // Subscribe before the first read, so a commit after it wakes the stream.
     let commits = feed.commits.subscribe();
     let closing = feed.closing.subscribe();
-    let reader = actor.clone();
+    let (revoked, registration) = if let Some(token_id) = &auth.token_id {
+        let (tx, rx) = watch::channel(false);
+        let reg = feed.register_token_stream(token_id, tx);
+        (Some(rx), reg)
+    } else {
+        (None, None)
+    };
+    let reader = auth.actor.clone();
     let start = state
         .run(move |artifacts| artifacts.changes(&reader, ChangeSequence(0), 0))
         .await?;
@@ -134,13 +190,15 @@ pub(crate) async fn stream(
     let (sender, receiver) = mpsc::channel(1);
     let producer = Producer {
         state,
-        actor,
+        actor: auth.actor,
         feed: start.feed,
         position,
         sender,
         commits,
         closing,
+        revoked,
         _slot: slot,
+        _registration: registration,
     };
     tokio::spawn(producer.run(first));
     Ok(Sse::new(Events(receiver))
@@ -189,8 +247,10 @@ struct Producer {
     sender: mpsc::Sender<Result<Event, Infallible>>,
     commits: watch::Receiver<()>,
     closing: watch::Receiver<bool>,
+    revoked: Option<watch::Receiver<bool>>,
     /// Held until the producer ends.
     _slot: Slot,
+    _registration: Option<TokenStreamRegistration>,
 }
 
 impl Producer {
@@ -246,6 +306,7 @@ impl Producer {
         tokio::select! {
             biased;
             _ = self.closing.wait_for(|closing| *closing) => Err(Stopped),
+            () = wait_for_revocation(&mut self.revoked) => Err(Stopped),
             () = self.sender.closed() => Err(Stopped),
             changed = self.commits.changed() => changed.map_err(|_| Stopped),
             () = tokio::time::sleep(HEARTBEAT) => Ok(()),
@@ -257,6 +318,7 @@ impl Producer {
         tokio::select! {
             biased;
             _ = self.closing.wait_for(|closing| *closing) => Err(Stopped),
+            () = wait_for_revocation(&mut self.revoked) => Err(Stopped),
             sent = self.sender.send(Ok(event)) => sent.map_err(|_| Stopped),
         }
     }
@@ -285,6 +347,14 @@ impl Producer {
             metadata_revision: record.metadata_revision.0,
             committed_at_ms: record.committed_at.0,
         }
+    }
+}
+
+async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
+    if let Some(rx) = receiver {
+        let _ = rx.wait_for(|revoked| *revoked).await;
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 

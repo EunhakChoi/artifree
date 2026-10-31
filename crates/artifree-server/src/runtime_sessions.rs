@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::auth::hex;
 use artifree_domain::SourceRevision;
-use artifree_domain::identity::{ActorId, ArtifactId};
+use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
 const MAX_SESSIONS: usize = 4096;
 const MAX_GRANTS: usize = 256;
@@ -49,6 +49,7 @@ struct Grant {
 #[derive(Debug)]
 struct SessionState {
     closed: bool,
+    token_id: Option<TokenId>,
     expires: Instant,
     next_version: u64,
     grants: HashMap<GrantScope, Grant>,
@@ -167,7 +168,11 @@ impl RuntimeSessions {
     }
 
     /// Allocates a new random identity. No API can recreate a chosen identity.
-    pub(crate) fn create(&self, actor: &ActorId) -> Result<String, SessionError> {
+    pub(crate) fn create(
+        &self,
+        actor: &ActorId,
+        token_id: Option<TokenId>,
+    ) -> Result<String, SessionError> {
         let now = Instant::now();
         let expires = now
             .checked_add(self.lifetime)
@@ -190,6 +195,7 @@ impl RuntimeSessions {
         let session = Arc::new(RuntimeSession {
             state: Mutex::new(SessionState {
                 closed: false,
+                token_id,
                 expires,
                 next_version: 0,
                 grants: HashMap::new(),
@@ -197,6 +203,17 @@ impl RuntimeSessions {
         });
         sessions.insert(key, Arc::clone(&session));
         Ok(id)
+    }
+
+    /// Closes all runtime sessions created under `token_id`.
+    pub(crate) fn revoke_token(&self, token_id: &TokenId) {
+        if let Ok(sessions) = self.sessions.lock() {
+            for session in sessions.values() {
+                if let Ok(mut state) = session.state.lock() {
+                    state.closed = state.closed || state.token_id.as_ref() == Some(token_id);
+                }
+            }
+        }
     }
 
     pub(crate) fn get(
@@ -250,7 +267,7 @@ mod tests {
     use std::time::Duration;
 
     use artifree_domain::SourceRevision;
-    use artifree_domain::identity::{ActorId, ArtifactId};
+    use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
     use super::{GrantScope, RuntimeSessions, SessionError};
 
@@ -260,7 +277,9 @@ mod tests {
         let actor: ActorId = "local".parse()?;
         let other: ActorId = "other".parse()?;
         let sessions = RuntimeSessions::new(Duration::from_secs(60));
-        let id = sessions.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let session = sessions.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         assert!(matches!(
             sessions.get(&other, &id),
@@ -314,11 +333,15 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let actor: ActorId = "local".parse()?;
         let sessions = RuntimeSessions::new(Duration::from_secs(60));
-        let id = sessions.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         let session = sessions.get(&actor, &id).map_err(|e| format!("{e:?}"))?;
         let pending = Arc::clone(&session);
         sessions.close(&actor, &id).map_err(|e| format!("{e:?}"))?;
-        let next = sessions.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let next = sessions
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         assert_ne!(id, next);
         assert!(matches!(
             sessions.get(&actor, &id),
@@ -350,7 +373,9 @@ mod tests {
     fn an_expired_session_cannot_be_used() -> Result<(), Box<dyn std::error::Error>> {
         let actor: ActorId = "local".parse()?;
         let sessions = RuntimeSessions::new(Duration::ZERO);
-        let id = sessions.create(&actor).map_err(|e| format!("{e:?}"))?;
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
         assert!(matches!(
             sessions.get(&actor, &id),
             Err(SessionError::Closed)
@@ -364,7 +389,7 @@ mod tests {
         let actor: ActorId = "local".parse()?;
         let sessions = RuntimeSessions::new(Duration::from_secs(60));
         let id = sessions
-            .create(&actor)
+            .create(&actor, None)
             .map_err(|error| format!("{error:?}"))?;
         let session = sessions
             .get(&actor, &id)
@@ -387,6 +412,39 @@ mod tests {
             .set_grant(scope.clone(), true, barrier)
             .map_err(|error| format!("{error:?}"))?;
         assert!(session.permits(&scope, allowed));
+        Ok(())
+    }
+
+    #[test]
+    fn token_revocation_closes_associated_sessions() -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let token_1: TokenId = "tok_0123456789abcdef0123456789abcdef".parse()?;
+        let token_2: TokenId = "tok_fedcba9876543210fedcba9876543210".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+
+        let s1 = sessions
+            .create(&actor, Some(token_1.clone()))
+            .map_err(|e| format!("{e:?}"))?;
+        let s2 = sessions
+            .create(&actor, Some(token_2))
+            .map_err(|e| format!("{e:?}"))?;
+        let s_bootstrap = sessions
+            .create(&actor, None)
+            .map_err(|e| format!("{e:?}"))?;
+
+        assert!(sessions.get(&actor, &s1).is_ok());
+        assert!(sessions.get(&actor, &s2).is_ok());
+        assert!(sessions.get(&actor, &s_bootstrap).is_ok());
+
+        sessions.revoke_token(&token_1);
+
+        assert!(matches!(
+            sessions.get(&actor, &s1),
+            Err(SessionError::Closed)
+        ));
+        assert!(sessions.get(&actor, &s2).is_ok());
+        assert!(sessions.get(&actor, &s_bootstrap).is_ok());
+
         Ok(())
     }
 }

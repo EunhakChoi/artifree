@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use artifree_core::artifacts::ArtifactError;
 use artifree_domain::SourceRevision;
-use artifree_domain::identity::{ActorId, ArtifactId};
+use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 use artifree_domain::package::PackagePath;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -54,8 +54,20 @@ pub struct IssuedTicket {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct RuntimeTicketRequest {
+    pub(crate) actor: ActorId,
+    pub(crate) token_id: Option<TokenId>,
+    pub(crate) artifact: ArtifactId,
+    pub(crate) revision: SourceRevision,
+    pub(crate) head_revision: SourceRevision,
+    pub(crate) view_id: String,
+    pub(crate) generation: u64,
+}
+
+#[derive(Debug, Clone)]
 struct Ticket {
     actor: ActorId,
+    token_id: Option<TokenId>,
     artifact: ArtifactId,
     revision: SourceRevision,
     expires: Instant,
@@ -169,6 +181,7 @@ impl PreviewTickets {
     pub fn issue(
         &self,
         actor: ActorId,
+        token_id: Option<TokenId>,
         artifact: ArtifactId,
         revision: SourceRevision,
     ) -> Option<IssuedTicket> {
@@ -191,6 +204,7 @@ impl PreviewTickets {
             secret.clone(),
             Ticket {
                 actor,
+                token_id,
                 artifact,
                 revision,
                 expires,
@@ -201,6 +215,15 @@ impl PreviewTickets {
             secret,
             expires_at_ms,
         })
+    }
+
+    /// Invalidates all live preview tickets issued under `token_id`.
+    pub fn revoke_token(&self, token_id: &TokenId) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry
+                .live
+                .retain(|_, ticket| ticket.token_id.as_ref() != Some(token_id));
+        }
     }
 
     /// Starts a create before its asynchronous artifact lookup.
@@ -223,30 +246,20 @@ impl PreviewTickets {
     /// Replaces an older generation of the same actor's view atomically.
     pub(crate) fn issue_runtime(
         &self,
-        actor: ActorId,
-        artifact: ArtifactId,
-        revision: SourceRevision,
-        head_revision: SourceRevision,
-        view_id: String,
-        generation: u64,
+        request: RuntimeTicketRequest,
     ) -> Result<IssuedRuntimeTicket, RuntimeIssueError> {
+        let RuntimeTicketRequest {
+            actor,
+            token_id,
+            artifact,
+            revision,
+            head_revision,
+            view_id,
+            generation,
+        } = request;
         let secret = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
         let initialization = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
-        // The browser's timer accepts at most a signed 32-bit millisecond
-        // delay. The server CLI already limits leases to one day.
-        let lease_ms = u64::try_from(self.ttl.as_millis())
-            .ok()
-            .filter(|duration| *duration <= 2_147_483_647)
-            .ok_or(RuntimeIssueError::Unavailable)?;
-        let now = Instant::now();
-        let expires = now
-            .checked_add(self.ttl)
-            .ok_or(RuntimeIssueError::Unavailable)?;
-        let expires_at_ms = SystemTime::now()
-            .checked_add(self.ttl)
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
-            .ok_or(RuntimeIssueError::Unavailable)?;
+        let (lease_ms, now, expires, expires_at_ms) = runtime_expiries(self.ttl)?;
         let mut registry = self
             .registry
             .lock()
@@ -302,6 +315,7 @@ impl PreviewTickets {
             secret.clone(),
             Ticket {
                 actor,
+                token_id,
                 artifact,
                 revision,
                 expires,
@@ -324,6 +338,27 @@ impl PreviewTickets {
             },
             initialization,
             lease_ms,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn issue_test_runtime(
+        &self,
+        actor: ActorId,
+        artifact: ArtifactId,
+        revision: SourceRevision,
+        head_revision: SourceRevision,
+        view_id: String,
+        generation: u64,
+    ) -> Result<IssuedRuntimeTicket, RuntimeIssueError> {
+        self.issue_runtime(RuntimeTicketRequest {
+            actor,
+            token_id: None,
+            artifact,
+            revision,
+            head_revision,
+            view_id,
+            generation,
         })
     }
 
@@ -500,6 +535,21 @@ fn random_secret() -> Option<String> {
     let mut bytes = [0; 32];
     getrandom::fill(&mut bytes).ok()?;
     Some(hex(&bytes))
+}
+
+fn runtime_expiries(ttl: Duration) -> Result<(u64, Instant, Instant, i64), RuntimeIssueError> {
+    let lease_ms = u64::try_from(ttl.as_millis())
+        .ok()
+        .filter(|duration| *duration <= 2_147_483_647)
+        .ok_or(RuntimeIssueError::Unavailable)?;
+    let now = Instant::now();
+    let expires = now.checked_add(ttl).ok_or(RuntimeIssueError::Unavailable)?;
+    let expires_at_ms = SystemTime::now()
+        .checked_add(ttl)
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .ok_or(RuntimeIssueError::Unavailable)?;
+    Ok((lease_ms, now, expires, expires_at_ms))
 }
 
 fn secret_matches(expected: &str, presented: &str) -> bool {
@@ -816,7 +866,7 @@ mod tests {
         let view = "0123456789abcdef0123456789abcdef";
         let tickets = PreviewTickets::new(Duration::from_secs(60));
         let first = tickets
-            .issue_runtime(
+            .issue_test_runtime(
                 actor.clone(),
                 artifact.clone(),
                 SourceRevision(1),
@@ -892,7 +942,7 @@ mod tests {
         let view = "0123456789abcdef0123456789abcdef";
         let tickets = PreviewTickets::new(Duration::from_secs(60));
         let first = tickets
-            .issue_runtime(
+            .issue_test_runtime(
                 actor.clone(),
                 artifact.clone(),
                 SourceRevision(1),
@@ -913,7 +963,7 @@ mod tests {
             )
         };
         let second = tickets
-            .issue_runtime(
+            .issue_test_runtime(
                 actor.clone(),
                 artifact.clone(),
                 SourceRevision(1),
@@ -932,7 +982,7 @@ mod tests {
         assert_eq!(tickets.close_runtime(&actor, view, 2), Some(true));
         assert_eq!(check(2, &second.initialization), None);
         assert!(matches!(
-            tickets.issue_runtime(
+            tickets.issue_test_runtime(
                 actor.clone(),
                 artifact.clone(),
                 SourceRevision(1),
@@ -957,7 +1007,7 @@ mod tests {
         assert_eq!(tickets.close_runtime(&actor, view, 2), Some(false));
         assert!(
             matches!(
-                tickets.issue_runtime(
+                tickets.issue_test_runtime(
                     actor.clone(),
                     artifact.clone(),
                     SourceRevision(1),
@@ -971,7 +1021,7 @@ mod tests {
         );
         assert!(
             tickets
-                .issue_runtime(
+                .issue_test_runtime(
                     other,
                     artifact.clone(),
                     SourceRevision(1),
@@ -984,7 +1034,7 @@ mod tests {
         );
         assert!(
             tickets
-                .issue_runtime(
+                .issue_test_runtime(
                     actor,
                     artifact,
                     SourceRevision(1),
@@ -1030,7 +1080,7 @@ mod tests {
         assert_eq!(tickets.close_runtime(&actor, view, 2), Some(false));
         assert!(
             matches!(
-                tickets.issue_runtime(
+                tickets.issue_test_runtime(
                     actor.clone(),
                     artifact.clone(),
                     SourceRevision(1),
@@ -1045,7 +1095,7 @@ mod tests {
         drop(pending);
         assert!(
             tickets
-                .issue_runtime(
+                .issue_test_runtime(
                     actor,
                     artifact,
                     SourceRevision(1),
@@ -1072,7 +1122,7 @@ mod tests {
         tickets.ttl = Duration::ZERO;
         assert!(
             tickets
-                .issue_runtime(
+                .issue_test_runtime(
                     actor.clone(),
                     artifact.clone(),
                     SourceRevision(1),
@@ -1084,7 +1134,7 @@ mod tests {
         );
         assert!(
             matches!(
-                tickets.issue_runtime(
+                tickets.issue_test_runtime(
                     actor,
                     artifact,
                     SourceRevision(1),
@@ -1106,7 +1156,7 @@ mod tests {
         let view = "0123456789abcdef0123456789abcdef";
         let expired = PreviewTickets::new(Duration::ZERO);
         let ticket = expired
-            .issue_runtime(
+            .issue_test_runtime(
                 actor.clone(),
                 artifact.clone(),
                 SourceRevision(1),
@@ -1142,7 +1192,7 @@ mod tests {
         let artifact = ArtifactId::from_random([1; 16]);
         let maximum = PreviewTickets::new(Duration::from_millis(2_147_483_647));
         let allowed = maximum
-            .issue_runtime(
+            .issue_test_runtime(
                 actor.clone(),
                 artifact.clone(),
                 SourceRevision(1),
@@ -1154,7 +1204,7 @@ mod tests {
         assert_eq!(allowed.lease_ms, 2_147_483_647);
         let tickets = PreviewTickets::new(Duration::from_millis(2_147_483_648));
         assert!(matches!(
-            tickets.issue_runtime(
+            tickets.issue_test_runtime(
                 actor,
                 artifact,
                 SourceRevision(1),

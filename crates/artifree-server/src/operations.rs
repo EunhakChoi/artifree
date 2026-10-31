@@ -18,7 +18,7 @@ use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSes
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
-use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, TokenId};
 use artifree_domain::package::{
     ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
 };
@@ -34,7 +34,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use crate::auth::hex;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
-use crate::preview::{self, RuntimeAuthority, RuntimeIssueError};
+use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest};
 use crate::runtime_policy::{MANIFEST_PATH, METADATA_READ, RuntimePolicy, SDK_PIN};
 use crate::runtime_sessions::{GrantScope, SessionError};
 
@@ -91,6 +91,26 @@ impl ApiError {
             StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthenticated,
             "a valid bearer access token is required",
+        )
+    }
+
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, message)
+    }
+
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
+    }
+
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, ErrorCode::InvalidRequest, message)
+    }
+
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            message,
         )
     }
 }
@@ -487,6 +507,7 @@ fn source_archive(export: RevisionExport) -> Result<Vec<u8>, String> {
 pub(crate) async fn preview(
     state: &AppState,
     actor: ActorId,
+    token_id: Option<TokenId>,
     id: &str,
     revision: u64,
 ) -> Result<Preview, ApiError> {
@@ -500,13 +521,16 @@ pub(crate) async fn preview(
     if revision > record.current_revision {
         return Err(ArtifactError::NotFound(Missing::Revision).into());
     }
-    let ticket = state.previews().issue(actor, id, revision).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            ErrorCode::Unavailable,
-            "too many live previews; retry shortly",
-        )
-    })?;
+    let ticket = state
+        .previews()
+        .issue(actor, token_id, id, revision)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "too many live previews; retry shortly",
+            )
+        })?;
     Ok(Preview {
         url: format!("{}/p/{}/", state.settings().content_origin, ticket.secret),
         revision: revision.0,
@@ -798,10 +822,11 @@ pub(crate) fn acknowledge_handoff(
 pub(crate) fn open_runtime_session(
     state: &AppState,
     actor: &ActorId,
+    token_id: Option<TokenId>,
 ) -> Result<RuntimeConnection, ApiError> {
     let session_id = state
         .runtime_sessions()
-        .create(actor)
+        .create(actor, token_id)
         .map_err(session_error)?;
     Ok(RuntimeConnection { session_id })
 }
@@ -896,6 +921,7 @@ pub(crate) async fn set_runtime_grant(
 pub(crate) async fn create_runtime_view(
     state: &AppState,
     actor: ActorId,
+    token_id: Option<TokenId>,
     id: &str,
     revision: u64,
     request: CreateRuntimeViewRequest,
@@ -922,14 +948,15 @@ pub(crate) async fn create_runtime_view(
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
     let (ticket, grant_version, allowed) = session
         .with_grant(&scope, |version, allowed| {
-            let ticket = state.previews().issue_runtime(
+            let ticket = state.previews().issue_runtime(RuntimeTicketRequest {
                 actor,
-                id.clone(),
+                token_id,
+                artifact: id.clone(),
                 revision,
-                record.current_revision,
-                request.view_id.clone(),
-                request.generation,
-            )?;
+                head_revision: record.current_revision,
+                view_id: request.view_id.clone(),
+                generation: request.generation,
+            })?;
             let authority = RuntimeAuthority {
                 session: session.clone(),
                 scope: scope.clone(),
