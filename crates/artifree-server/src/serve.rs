@@ -2,7 +2,7 @@
 //! preview content listener.
 
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
 use crate::preview;
+use crate::web::WebAssets;
 
 /// Default API address; loopback only.
 pub const DEFAULT_API_ADDRESS: &str = "127.0.0.1:7410";
@@ -31,6 +32,10 @@ pub const MAX_PREVIEW_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct ServeOptions {
     /// Directory holding the database and access token.
     pub data_dir: PathBuf,
+    /// Directory holding production web assets, if served.
+    pub web_dir: Option<PathBuf>,
+    /// Explicit LAN IP address, if configured.
+    pub lan: Option<IpAddr>,
     /// API listen address. Port 0 picks a free port.
     pub api_address: SocketAddr,
     /// Preview content listen address. Port 0 picks a free port.
@@ -57,6 +62,8 @@ pub struct Ready {
     pub content_origin: String,
     /// File holding the access token.
     pub token_file: PathBuf,
+    /// Base URL of the production web workspace, if web serving is enabled.
+    pub web_url: Option<String>,
 }
 
 /// Opens storage, binds both listeners, reports readiness, and serves until
@@ -69,6 +76,10 @@ pub struct Ready {
 /// when a listener fails while serving.
 pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
     prepare_data_dir(&options.data_dir)?;
+    let web_assets = match options.web_dir {
+        Some(ref dir) => Some(WebAssets::try_new(dir)?),
+        None => None,
+    };
     let store = SqliteStore::open(&options.data_dir.join("artifree.sqlite3"))
         .map_err(|error| error.to_string())?;
     let token_file = options.data_dir.join("access-token");
@@ -82,11 +93,12 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
         let api = bind(options.api_address).await?;
         let content = bind(options.content_address).await?;
         let api_url = format!("http://{}", local_address(&api)?);
+        let web_url = web_assets.as_ref().map(|_| api_url.clone());
         let content_origin = match options.content_origin {
             Some(origin) => origin,
             None => format!("http://{}", local_address(&content)?),
         };
-        let state = AppState::new(
+        let state = AppState::with_web_assets(
             store,
             token,
             Settings {
@@ -96,11 +108,13 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
                 limits: options.limits,
                 change_streams: options.change_streams,
             },
+            web_assets,
         )?;
         on_ready(&Ready {
             api_url,
             content_origin,
             token_file,
+            web_url,
         });
         let streams = state.clone();
         let api_server =

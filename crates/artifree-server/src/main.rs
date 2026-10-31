@@ -10,7 +10,7 @@
 )]
 
 use std::io::Write;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -58,6 +58,7 @@ fn run() -> Result<(), String> {
                     "api_url": ready.api_url,
                     "content_origin": ready.content_origin,
                     "token_file": ready.token_file,
+                    "web_url": ready.web_url,
                 });
                 println!("{line}");
                 // A supervisor waits for this line; a failed flush only delays it.
@@ -72,10 +73,15 @@ fn run() -> Result<(), String> {
 
 fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     let mut data_dir = None;
+    let mut web_dir = None;
+    let mut lan = None;
     let mut api_address = serve::DEFAULT_API_ADDRESS.to_owned();
     let mut content_address = serve::DEFAULT_CONTENT_ADDRESS.to_owned();
     let mut content_origin = None;
     let mut frame_ancestors = serve::DEFAULT_FRAME_ANCESTORS.to_owned();
+    let mut explicit_api_listen = false;
+    let mut explicit_content_listen = false;
+    let mut explicit_frame_ancestors = false;
     let mut preview_ttl = serve::DEFAULT_PREVIEW_TTL;
     let mut limits = RequestLimits::default();
     let mut change_streams = changes::DEFAULT_STREAMS_PER_ACTOR;
@@ -89,23 +95,28 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         };
         match flag.as_str() {
             "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
-            "--api-listen" => api_address = value()?,
-            "--content-listen" => content_address = value()?,
-            "--content-origin" => content_origin = Some(value()?),
-            "--frame-ancestors" => frame_ancestors = value()?,
-            "--preview-ttl-seconds" => {
-                let range = || {
-                    format!(
-                        "--preview-ttl-seconds must be a whole number from 1 to {}.",
-                        serve::MAX_PREVIEW_TTL.as_secs()
-                    )
-                };
-                let seconds: u64 = value()?.parse().map_err(|_| range())?;
-                preview_ttl = Duration::from_secs(seconds);
-                if seconds == 0 || preview_ttl > serve::MAX_PREVIEW_TTL {
-                    return Err(range());
-                }
+            "--web-dir" => web_dir = Some(PathBuf::from(value()?)),
+            "--lan" => {
+                let ip_str = value()?;
+                let parsed: IpAddr = ip_str
+                    .parse()
+                    .map_err(|_| "--lan must be an IP address, such as 192.168.1.50.")?;
+                lan = Some(parsed);
             }
+            "--api-listen" => {
+                api_address = value()?;
+                explicit_api_listen = true;
+            }
+            "--content-listen" => {
+                content_address = value()?;
+                explicit_content_listen = true;
+            }
+            "--content-origin" => content_origin = Some(value()?),
+            "--frame-ancestors" => {
+                frame_ancestors = value()?;
+                explicit_frame_ancestors = true;
+            }
+            "--preview-ttl-seconds" => preview_ttl = parse_preview_ttl(&value()?)?,
             "--request-burst" => limits.burst = limit(flag, &value()?)?,
             "--requests-per-minute" => limits.per_minute = limit(flag, &value()?)?,
             "--concurrent-requests" => limits.concurrent = limit(flag, &value()?)?,
@@ -117,6 +128,26 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             }
         }
     }
+    let web_dir = web_dir.or_else(env_web_dir);
+    let lan = match lan {
+        Some(lan) => Some(lan),
+        None => env_lan()?,
+    };
+    if let Some(ip) = lan {
+        let defaults = LanAddresses::from_ip(ip);
+        if !explicit_api_listen {
+            api_address = defaults.api_address;
+        }
+        if !explicit_content_listen {
+            content_address = defaults.content_address;
+        }
+        if content_origin.is_none() {
+            content_origin = defaults.content_origin;
+        }
+        if !explicit_frame_ancestors {
+            frame_ancestors = defaults.frame_ancestors;
+        }
+    }
     let address = |flag: &str, value: &str| {
         value
             .parse::<SocketAddr>()
@@ -124,6 +155,8 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     };
     Ok(ServeOptions {
         data_dir: data_dir.ok_or("serve requires --data-dir <directory>.")?,
+        web_dir,
+        lan,
         api_address: address("--api-listen", &api_address)?,
         content_address: address("--content-listen", &content_address)?,
         content_origin,
@@ -132,6 +165,66 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         limits,
         change_streams,
     })
+}
+
+fn parse_preview_ttl(raw: &str) -> Result<Duration, String> {
+    let range = || {
+        format!(
+            "--preview-ttl-seconds must be a whole number from 1 to {}.",
+            serve::MAX_PREVIEW_TTL.as_secs()
+        )
+    };
+    let seconds: u64 = raw.parse().map_err(|_| range())?;
+    let duration = Duration::from_secs(seconds);
+    if seconds == 0 || duration > serve::MAX_PREVIEW_TTL {
+        return Err(range());
+    }
+    Ok(duration)
+}
+
+fn env_web_dir() -> Option<PathBuf> {
+    std::env::var("ARTIFREE_WEB_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+fn env_lan() -> Result<Option<IpAddr>, String> {
+    let Some(raw) = std::env::var("ARTIFREE_LAN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    raw.parse()
+        .map(Some)
+        .map_err(|_| "ARTIFREE_LAN must be an IP address, such as 192.168.1.50.".into())
+}
+
+struct LanAddresses {
+    api_address: String,
+    content_address: String,
+    content_origin: Option<String>,
+    frame_ancestors: String,
+}
+
+impl LanAddresses {
+    fn from_ip(ip: IpAddr) -> Self {
+        let origin = match ip {
+            IpAddr::V4(v4) => format!("http://{v4}:7411"),
+            IpAddr::V6(v6) => format!("http://[{v6}]:7411"),
+        };
+        let frame_ancestors = match ip {
+            IpAddr::V4(v4) => format!("http://127.0.0.1:* http://localhost:* http://{v4}:*"),
+            IpAddr::V6(v6) => format!("http://127.0.0.1:* http://localhost:* http://[{v6}]:*"),
+        };
+        Self {
+            api_address: format!("{ip}:7410"),
+            content_address: format!("{ip}:7411"),
+            content_origin: Some(origin),
+            frame_ancestors,
+        }
+    }
 }
 
 /// A request limit: a whole number from 1 to 100000.
@@ -159,6 +252,8 @@ Options:
   --data-dir <dir>              SQLite database and access token (required).
                                 On Unix it is created with mode 700, and a
                                 directory other users can access is refused.
+  --web-dir <dir>               Production web assets directory (serves web UI and SPA fallback)
+  --lan <ip>                    Serve on local network IP address (sets default listeners, origin, frame-ancestors)
   --api-listen <addr:port>      API address [default: {api}]
   --content-listen <addr:port>  Preview address [default: {content}]
   --content-origin <origin>     Public preview origin, if proxied

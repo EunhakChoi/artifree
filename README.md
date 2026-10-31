@@ -24,22 +24,27 @@ pins its tested Rust toolchain in `rust-toolchain.toml`.
 ```sh
 npm ci
 npm run build
-cargo run -p artifree-server -- serve --data-dir .artifree/data
+cargo run -p artifree-server -- serve --data-dir .artifree/data --web-dir apps/web/dist
 ```
 
-The server prints one JSON readiness line with the API URL (default
-`http://127.0.0.1:7410`), the preview origin (`http://127.0.0.1:7411`), and the
-token file. On Unix the server creates the data directory readable only by
-you and refuses an existing one that other users can access. Keep it running
-and, in another terminal:
+The server prints one JSON readiness line with the API URL, the preview origin (`http://127.0.0.1:7411`), the web URL (`http://127.0.0.1:7410`), and the token file. Open the web URL directly in your browser and enter the token from `.artifree/data/access-token` — no separate Vite dev server is required.
+
+To allow other devices on your local network to connect, pass `--lan <ip>`:
 
 ```sh
+cargo run -p artifree-server -- serve --data-dir .artifree/data --web-dir apps/web/dist --lan 192.168.1.50
+```
+
+This derives the API address (`192.168.1.50:7410`), the isolated preview origin (`http://192.168.1.50:7411`), and the CSP `frame-ancestors` policy. MCP tool access (`/mcp`) remains strictly restricted to local loopback clients for safety.
+
+For frontend development with live hot-reloading:
+
+```sh
+cargo run -p artifree-server -- serve --data-dir .artifree/data
 npm run dev
 ```
 
-Open the URL printed by Vite and paste the token from
-`.artifree/data/access-token`. Vite forwards `/v1` to the API
-(`ARTIFREE_API_URL` overrides the target). Agents and scripts use the CLI:
+Agents and scripts use the CLI:
 
 ```sh
 export ARTIFREE_TOKEN_FILE=.artifree/data/access-token
@@ -48,6 +53,8 @@ node apps/cli/dist/main.js artifact save <id> --base 1 --put index.html=./site/i
 node apps/cli/dist/main.js artifact preview <id>
 node apps/cli/dist/main.js artifact --help
 ```
+
+You can also pass `--server <url>` and `--token <token>` directly, or manage connections with profiles in `.artifree/profiles.json` or `~/.config/artifree/profiles.json` (`--profile <name>`).
 
 Results are JSON on stdout; failures go to stderr with exit code 1 (API) or 2
 (usage). A save names its base revision and fails with `revision_conflict` if
@@ -99,8 +106,10 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0016](docs/decisions/0016-bounded-file-reads.md),
 [0017](docs/decisions/0017-code-workspace.md),
 [0018](docs/decisions/0018-source-draft-recovery.md),
-[0019](docs/decisions/0019-runtime-metadata-bridge.md), and
-[0020](docs/decisions/0020-runtime-grants.md)).
+[0019](docs/decisions/0019-runtime-metadata-bridge.md),
+[0020](docs/decisions/0020-runtime-grants.md),
+[0021](docs/decisions/0021-agent-selection-handoff.md), and
+[0022](docs/decisions/0022-production-web-and-api-serving.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

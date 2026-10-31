@@ -46,6 +46,7 @@ use crate::operations::{self, ApiError};
 use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::runtime_sessions::RuntimeSessions;
+use crate::web::WebAssets;
 
 /// Largest accepted request body: a maximum package in base64 plus JSON
 /// framing. Clients send a file as UTF-8 text only when its JSON escaping is
@@ -87,6 +88,7 @@ struct Shared {
     draining: AtomicUsize,
     settings: Settings,
     content_policy: HeaderValue,
+    web_assets: Option<WebAssets>,
 }
 
 impl AppState {
@@ -97,6 +99,21 @@ impl AppState {
     /// When the content origin or frame ancestors cannot form a header, or
     /// a limit is zero.
     pub fn new(store: SqliteStore, token: AccessToken, settings: Settings) -> Result<Self, String> {
+        Self::with_web_assets(store, token, settings, None)
+    }
+
+    /// Combines the application service, token, settings, and optional web assets.
+    ///
+    /// # Errors
+    ///
+    /// When the content origin or frame ancestors cannot form a header, or
+    /// a limit is zero.
+    pub fn with_web_assets(
+        store: SqliteStore,
+        token: AccessToken,
+        settings: Settings,
+        web_assets: Option<WebAssets>,
+    ) -> Result<Self, String> {
         let owner: ActorId = "local"
             .parse()
             .map_err(|error| format!("built-in owner actor: {error}"))?;
@@ -118,6 +135,7 @@ impl AppState {
                 draining: AtomicUsize::new(0),
                 settings,
                 content_policy,
+                web_assets,
             }),
         })
     }
@@ -126,6 +144,10 @@ impl AppState {
     /// for their readers. Streams opened afterwards end at once.
     pub fn close_streams(&self) {
         self.shared.feed.close();
+    }
+
+    pub(crate) fn web_assets(&self) -> Option<&WebAssets> {
+        self.shared.web_assets.as_ref()
     }
 
     pub(crate) fn feed(&self) -> &Feed {
@@ -182,7 +204,7 @@ impl AppState {
 /// unmatched one, is authenticated and admitted by the actor's request limits
 /// before anything else runs.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let api_routes = Router::new()
         .merge(mcp::routes(state.clone()))
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
         .route(
@@ -251,10 +273,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/changes", get(changes::stream))
         .method_not_allowed_fallback(method_not_allowed)
-        .fallback(no_such_route)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), admit))
-        .layer(middleware::map_response(no_store))
+        .layer(middleware::map_response(no_store));
+
+    Router::new()
+        .merge(api_routes)
+        .fallback(fallback_handler)
         .with_state(state)
 }
 
@@ -367,8 +392,29 @@ fn refused(refusal: Refusal) -> Response {
 }
 
 // Unmatched requests authenticate first, like every route, so that callers
-// without the token cannot probe which routes and methods exist.
-async fn no_such_route(_: Authenticated) -> ApiError {
+// without the token cannot probe which routes and methods exist. When web assets
+// are configured, non-API routes serve static files or the SPA fallback without
+// requiring authentication.
+async fn fallback_handler(State(state): State<AppState>, request: Request) -> Response {
+    let path = request.uri().path();
+    if path.starts_with("/v1/") || path == "/v1" || path == "/mcp" {
+        let _ = match state.authenticate(request.headers()) {
+            Ok(actor) => actor,
+            Err(error) => return error.into_response(),
+        };
+        no_such_route().into_response()
+    } else if let Some(web) = state.web_assets() {
+        web.serve(request.method(), request.uri().path())
+    } else {
+        let _ = match state.authenticate(request.headers()) {
+            Ok(actor) => actor,
+            Err(error) => return error.into_response(),
+        };
+        no_such_route().into_response()
+    }
+}
+
+fn no_such_route() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "no such route")
 }
 

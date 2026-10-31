@@ -6,7 +6,7 @@
 후속 범위를 구분한다. 각 행은 별도로 검토·병합할 구현 PR 한 개의 출발점이다.
 
 **A01 변경 알림 서버 → A02 웹 자동 반영 → A03 목록·메타데이터 → A04 이력 비교와 소스
-복원(API·웹) → A05 복제와 독립 이력 → A06 삭제와 휴지통(API·웹) → A07 소스 내보내기 → A11 부분 읽기 → A09 코드 편집 작업공간 → A10 초안 복구 → R04 runtime metadata 읽기 → R05 최소 권한 부여/철회**를 완료했다. A08은 등록된 MCP inbox로 선택 영역을 전달한다. 개인 서버 운영 경로는 O01–O04를 앞당길 수 있으며,
+복원(API·웹) → A05 복제와 독립 이력 → A06 삭제와 휴지통(API·웹) → A07 소스 내보내기 → A11 부분 읽기 → A09 코드 편집 작업공간 → A10 초안 복구 → R04 runtime metadata 읽기 → R05 최소 권한 부여/철회 → O01 제품 실행**을 완료했다. A08은 등록된 MCP inbox로 선택 영역을 전달한다. 개인 서버 운영 경로는 O01–O04를 앞당길 수 있으며,
 React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사이에는 순서를 바꿀 수 있다.
 
 ## 완료된 기반
@@ -26,6 +26,7 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | 내보내기        | A07: 리비전의 파일을 결정적 stored ZIP과 manifest(`.artifree-export.json`: 경로·크기·SHA-256·media type)로 API·client·CLI·웹에서 내보냄. 일반 소스는 v1 `runtime: "none"`, runtime metadata를 켠 소스는 v2 `runtime: "metadata"`. 읽기와 같은 권한·휴지통 규칙. MCP 도구 없음. 서비스 전체 이전(백업)은 O04                                                                                                                                                                                            |
 | 부분 읽기       | A11: 고정 리비전 파일의 byte 범위를 API(`Range` 한 개, `206`·`416`)·client·CLI·MCP에서 읽음. HTTP는 RFC 9110 `Range` 해석 하나, MCP는 UTF-8 문자 경계에서 자르고 `next_offset`·파일 전체 `size`·`sha256`을 반환. client는 요청한 정확한 부분만 수락. 전체 읽기 바이트 의미 불변                                                                                                                                                                                                                        |
 | 코드 편집       | A09: 웹에서 여러 파일 초안(파일 트리·추가·이름 변경·삭제·바이너리 이동)을 한 base revision에 한 요청으로 저장. 모든 변경은 초안의 쓰기 지점 하나가 도달 시점 상태로 판정(휴지통·데이터 교체 의심 시 텍스트만, 저장·재로드 중 없음). 이름 변경은 옮길 바이트를 그때 읽어 보관해 저장 중 읽기 없음. build inventory의 `package_rules`와 공유 경로 fixture로 경로 사전 검사. editor는 기존 textarea, CodeMirror 보류                                                                                      |
+| 제품 실행       | O01: Vite 개발 서버 없이 production 웹 자산과 API를 통합 실행. `--web-dir` 옵션/환경변수, 기본 localhost 및 명시적 `--lan <ip>` 설정, 별도 preview origin(7411) 및 iframe CSP sandbox 유지. SPA fallback(index.html)과 API JSON 오류 분리. CLI profile/서버 주소 우선순위(`--server` > `ARTIFREE_URL` > profile > default) 및 웹의 server query/sessionStorage 연결. MCP의 loopback 전용 정책 유지                                                                                                     |
 | 검증            | 병합된 변경의 CI는 Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한다. 현재 변경의 실행 결과는 해당 PR과 검사 기록에서 확인한다.                                                                                                                                                                                                                                                                                                                                                                      |
 
 구현 결정은 [0001](decisions/0001-foundation.md)부터
@@ -104,7 +105,7 @@ R04(runtime metadata 읽기)와 R05(최소 권한 부여·철회)도 구현했�
 
 | ID  | PR 범위와 완료 기준                                                                                                                                                                                                                                                                                                                             | 선행          |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| O01 | **개발 서버 없는 제품 실행.** production 웹 자산과 API를 실행하고 preview는 별도 origin으로 유지한다. 웹·CLI의 서버 주소/profile과 시작·종료 절차를 정리한다. Vite 없이 localhost와 명시적 LAN 설정에서 생성·수정·preview를 검증한다.                                                                                                           | 기반          |
+| O01 | [완료, ADR 0022, trace `O01-production-serving.md`] **개발 서버 없는 제품 실행.** production 웹 자산과 API를 실행하고 preview는 별도 origin으로 유지한다. 웹·CLI의 서버 주소/profile과 시작·종료 절차를 정리한다. Vite 없이 localhost와 명시적 LAN 설정에서 생성·수정·preview를 검증한다.                                                       | 기반          |
 | O02 | **개인 서버의 원격 접근 경계.** HTTPS reverse proxy 뒤의 API/MCP Host·Origin·preview 주소 정책과 단일 owner용 agent token 발급·회전·철회를 구현한다. 연결 가능성과 인증을 구분하고 폐기한 token·잘못된 origin·proxy 설정을 거절한다. 다중 사용자/OAuth 전체는 S01 범위다.                                                                       | O01           |
 | O03 | **실행·배포 패키지.** Linux/Windows 배포물, 선택적 container, 정적 웹과 별도 Rust API의 배포 설정을 제공한다. ngrok/Cloudflare, Headscale 같은 접근 경로와 Vercel 정적 UI의 설정을 문서화한다. CI에서는 깨끗한 환경의 설치·시작·저장을 검증하고 실제 외부 서비스 실행 여부는 별도로 기록한다. Codex·Pi 연결도 실제 실행한 범위와 버전을 남긴다. | O01, O02      |
 | O04 | **백업·복구와 schema 업그레이드.** 운영 중 일관된 SQLite 백업을 만들고 새 인스턴스에서 리비전·바이트·key replay를 복구한다. 지원하는 이전 schema에서 migration을 검증하고, 더 최신 schema나 실패한 migration은 데이터 손상 없이 거절한다. 이후 도메인도 백업 범위를 함께 확장한다.                                                              | O01           |

@@ -33,6 +33,22 @@ import type { FeedState } from './use-live-workspace';
 import { describeFailure, useRequest } from './use-request';
 
 const TOKEN_KEY = 'artifree.accessToken';
+const SERVER_KEY = 'artifree.serverUrl';
+
+function readInitialServerUrl(): string {
+  try {
+    const fromQuery = new URLSearchParams(window.location.search).get('server');
+    if (fromQuery !== null && fromQuery.trim() !== '') {
+      const parsed = new URL(fromQuery.trim());
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed.origin;
+      }
+    }
+    return sessionStorage.getItem(SERVER_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
 
 function storedToken(): string | undefined {
   try {
@@ -43,12 +59,23 @@ function storedToken(): string | undefined {
   }
 }
 
-function storeToken(token: string | undefined): void {
+function storeConnection(
+  token: string | undefined,
+  serverUrl: string | undefined,
+): void {
   try {
-    if (token === undefined) sessionStorage.removeItem(TOKEN_KEY);
-    else sessionStorage.setItem(TOKEN_KEY, token);
+    if (token === undefined) {
+      sessionStorage.removeItem(TOKEN_KEY);
+    } else {
+      sessionStorage.setItem(TOKEN_KEY, token);
+    }
+    if (serverUrl === undefined || serverUrl === '') {
+      sessionStorage.removeItem(SERVER_KEY);
+    } else {
+      sessionStorage.setItem(SERVER_KEY, serverUrl);
+    }
   } catch {
-    // Without storage the token lives only in memory for this page.
+    // Without storage the values live only in memory for this page.
   }
 }
 
@@ -58,23 +85,44 @@ function storeToken(token: string | undefined): void {
  */
 export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
   const [token, setToken] = useState(storedToken);
-  function connect(next: string | undefined): void {
-    storeToken(next);
-    setToken(next);
+  const [serverUrl, setServerUrl] = useState(readInitialServerUrl);
+
+  function connect(next: {
+    token: string | undefined;
+    serverUrl?: string | undefined;
+  }): void {
+    const nextToken = next.token;
+    const nextServerUrl = next.serverUrl ?? '';
+    storeConnection(nextToken, nextServerUrl);
+    setToken(nextToken);
+    setServerUrl(nextServerUrl);
   }
-  if (token === undefined) return <ConnectForm onConnect={connect} />;
+
+  if (token === undefined) {
+    return (
+      <ConnectForm
+        defaultServerUrl={serverUrl}
+        onConnect={({ token: t, serverUrl: s }) =>
+          connect({ token: t, serverUrl: s })
+        }
+      />
+    );
+  }
+
   return (
     <ConnectedWorkspace
-      key={token}
+      key={`${token}:${serverUrl}`}
       token={token}
+      serverUrl={serverUrl}
       drafts={drafts}
-      onDisconnect={() => connect(undefined)}
+      onDisconnect={() => connect({ token: undefined, serverUrl })}
     />
   );
 }
 
 interface ConnectedWorkspaceProps {
   token: string;
+  serverUrl: string;
   drafts: PageDrafts;
   onDisconnect: () => void;
 }
@@ -90,6 +138,7 @@ const FEED_MESSAGES: Record<FeedState, string> = {
 
 function ConnectedWorkspace({
   token,
+  serverUrl,
   drafts,
   onDisconnect,
 }: ConnectedWorkspaceProps) {
@@ -98,7 +147,7 @@ function ConnectedWorkspace({
   const [client] = useState(
     () =>
       new ArtifreeClient({
-        baseUrl: '',
+        baseUrl: serverUrl,
         accessToken: token,
         fetch: new RequestGate(pageVisibility).fetch,
       }),

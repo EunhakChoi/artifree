@@ -14,6 +14,7 @@ mod ranges;
 mod runtime_policy;
 mod runtime_sessions;
 pub mod serve;
+pub mod web;
 
 #[cfg(test)]
 mod runtime_tests;

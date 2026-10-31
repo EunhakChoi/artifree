@@ -31,7 +31,7 @@ crates/
   artifree-ports/      artifact store contract; other families planned
   artifree-providers/  SQLite artifact store, ZIP source archives; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
-  artifree-server/     composition root, Axum HTTP API, MCP endpoint, preview origin
+  artifree-server/     composition root, Axum HTTP API, static web asset serving, MCP endpoint, preview origin
 contracts/generated/  generated JSON Schemas (descriptor, API v1), MCP tool catalog, inventory snapshot
 docs/architecture/    TypeScript, CSS, and HTML source for the standalone design
 scripts/              contract generation, architecture build, checks, smoke
@@ -99,6 +99,12 @@ again on every call; other capabilities remain proposed
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
 ## Local and server operation
+
+Production web asset serving (`--web-dir`) runs the management UI directly from
+the Rust process alongside the HTTP API, allowing self-hosted setups without a
+separate Node development process. Explicit LAN configuration (`--lan <ip>`)
+derives the network address and isolated preview origin while keeping MCP
+loopback enforcement intact.
 
 Provider selection should preserve commit, conflict, retry, and authorization
 semantics across deployments. Local persistence candidates are SQLite and files;

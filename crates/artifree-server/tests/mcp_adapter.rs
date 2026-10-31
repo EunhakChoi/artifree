@@ -183,6 +183,11 @@ async fn browser_origins_and_foreign_hosts_are_refused() -> TestResult {
         .headers_mut()
         .insert(header::HOST, "attacker.example:7410".parse()?);
     assert_eq!(harness.post(rebound).await?.0, StatusCode::FORBIDDEN);
+    // LAN host: MCP remains loopback-only.
+    let mut lan = rpc(Some(TOKEN), &list_tools())?;
+    lan.headers_mut()
+        .insert(header::HOST, "192.168.1.50:7410".parse()?);
+    assert_eq!(harness.post(lan).await?.0, StatusCode::FORBIDDEN);
     let stream = Request::get("/mcp")
         .header(header::HOST, "127.0.0.1:7410")
         .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
