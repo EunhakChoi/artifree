@@ -11,7 +11,7 @@ const proxy = { '/v1': { target: api, changeOrigin: false } };
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: './',
+  base: '/',
   server: { proxy },
   preview: { proxy },
   resolve: {
