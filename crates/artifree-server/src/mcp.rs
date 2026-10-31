@@ -18,9 +18,10 @@ use artifree_contracts::api::{
     SaveRevisionRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::{
-    self, ArtifactArguments, CreateArtifactArguments, DuplicateArtifactArguments, FileArguments,
-    FileContent, RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments,
-    ToolDefinition, UpdateArtifactArguments,
+    self, AcknowledgeHandoffArguments, ArtifactArguments, CreateArtifactArguments,
+    DuplicateArtifactArguments, FileArguments, FileContent, PollHandoffArguments,
+    RegisterHandoffSessionArguments, RestoreRevisionArguments, RevisionArguments,
+    SaveRevisionArguments, ToolDefinition, UpdateArtifactArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
@@ -232,6 +233,53 @@ async fn dispatch(
                     revision,
                 } = parse(arguments)?;
                 operations::preview(state, actor, &artifact_id, revision).await
+            })
+            .await
+        }
+        _ => return dispatch_handoffs(state, actor, name, arguments).await,
+    };
+    Some(outcome)
+}
+
+/// Routes the separate agent inbox protocol without assuming a page callback.
+async fn dispatch_handoffs(
+    state: &AppState,
+    actor: ActorId,
+    name: &str,
+    arguments: Value,
+) -> Option<Result<Value, ApiError>> {
+    let outcome = match name {
+        "register_handoff_session" => {
+            json(async {
+                let RegisterHandoffSessionArguments { name } = parse(arguments)?;
+                operations::register_handoff_session(state, &actor, &name)
+            })
+            .await
+        }
+        "poll_handoffs" => {
+            json(async {
+                let PollHandoffArguments {
+                    session_id,
+                    session_secret,
+                } = parse(arguments)?;
+                operations::poll_handoffs(state, actor, &session_id, &session_secret).await
+            })
+            .await
+        }
+        "acknowledge_handoff" => {
+            json(async {
+                let AcknowledgeHandoffArguments {
+                    session_id,
+                    session_secret,
+                    delivery_id,
+                } = parse(arguments)?;
+                operations::acknowledge_handoff(
+                    state,
+                    &actor,
+                    &session_id,
+                    &session_secret,
+                    &delivery_id,
+                )
             })
             .await
         }

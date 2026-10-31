@@ -1,4 +1,5 @@
 import type {
+  AgentSession,
   Artifact,
   ArtifactList,
   CommitResponse,
@@ -6,6 +7,7 @@ import type {
   DuplicateArtifactRequest,
   DuplicateArtifactResponse,
   FileUpload,
+  Handoff,
   ListArtifactsQuery,
   Preview,
   RestoreRevisionRequest,
@@ -14,6 +16,7 @@ import type {
   RuntimeGrant,
   RuntimeView,
   SaveRevisionRequest,
+  StageHandoffRequest,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
@@ -25,11 +28,13 @@ import {
 } from './change-feed.js';
 import { ArtifreeApiError } from './errors.js';
 import {
+  parseAgentSessions,
   parseArtifact,
   parseArtifactList,
   parseCommit,
   parseDuplicate,
   parseError,
+  parseHandoff,
   parsePreview,
   parseRevisionList,
   parseRuntimeConnection,
@@ -329,6 +334,25 @@ function connectionReplaced(): ArtifreeApiError {
       status: 0,
       code: 'invalid_request',
     },
+  );
+}
+
+/** The immutable proposal fields must not change between delivery states. */
+function sameHandoff(left: Handoff, right: Handoff): boolean {
+  const a = left.selection;
+  const b = right.selection;
+  return (
+    left.id === right.id &&
+    left.agent_session_id === right.agent_session_id &&
+    left.agent_name === right.agent_name &&
+    left.intent === right.intent &&
+    a.artifact_id === b.artifact_id &&
+    a.revision === b.revision &&
+    a.path === b.path &&
+    a.file_sha256 === b.file_sha256 &&
+    a.start === b.start &&
+    a.end === b.end &&
+    a.text === b.text
   );
 }
 
@@ -667,6 +691,121 @@ export class ArtifreeClient {
       parsePreview,
       { signal: options.signal },
     );
+  }
+
+  /** Lists registered agent inboxes for the current workspace connection. */
+  async agentSessions(options: ReadOptions = {}): Promise<AgentSession[]> {
+    if (this.runtimeClosing) throw connectionReplaced();
+    const session = this.runtimeSessionId;
+    const sessions = await this.json(
+      'GET',
+      `/v1/agent-sessions?workspace_session_id=${encodeURIComponent(session)}`,
+      parseAgentSessions,
+      { signal: options.signal },
+    );
+    if (this.runtimeClosing || this.runtimeSession !== session)
+      throw connectionReplaced();
+    return sessions;
+  }
+
+  /** Stages a saved source selection; this does not send it to the agent. */
+  async stageHandoff(request: StageHandoffRequest): Promise<Handoff> {
+    if (
+      this.runtimeClosing ||
+      this.runtimeSessionId !== request.workspace_session_id
+    )
+      throw connectionReplaced();
+    const response = await this.send('POST', '/v1/handoffs', { body: request });
+    const handoff = parseHandoff(await readJson(response));
+    const selection = handoff?.selection;
+    if (
+      response.status !== 201 ||
+      handoff === undefined ||
+      selection === undefined ||
+      handoff.state !== 'staged' ||
+      handoff.agent_session_id !== request.agent_session_id ||
+      handoff.intent !== request.intent ||
+      selection.artifact_id !== request.artifact_id ||
+      selection.revision !== request.revision ||
+      selection.path !== request.path ||
+      selection.file_sha256 !== request.file_sha256 ||
+      selection.start !== request.start ||
+      selection.end !== request.end ||
+      this.runtimeClosing ||
+      this.runtimeSession !== request.workspace_session_id
+    )
+      throw new ArtifreeApiError('The staged handoff was not confirmed.', {
+        status: response.status,
+        code: 'invalid_response',
+      });
+    return handoff;
+  }
+
+  /** Reads a staged delivery's current status, including receipt. */
+  async getHandoff(
+    handoff: Handoff,
+    workspace: string,
+    options: ReadOptions = {},
+  ): Promise<Handoff> {
+    const result = await this.json(
+      'GET',
+      `/v1/handoffs/${encodeURIComponent(handoff.id)}?workspace_session_id=${encodeURIComponent(workspace)}`,
+      parseHandoff,
+      { signal: options.signal },
+    );
+    return this.confirmHandoff(handoff, result);
+  }
+
+  /** Sends the same staged identity on every retry; consent is not replayed. */
+  async sendHandoff(handoff: Handoff, workspace: string): Promise<Handoff> {
+    if (this.runtimeClosing || this.runtimeSessionId !== workspace)
+      throw connectionReplaced();
+    const result = await this.json(
+      'POST',
+      `/v1/handoffs/${encodeURIComponent(handoff.id)}/send`,
+      parseHandoff,
+      { body: { workspace_session_id: workspace } },
+    );
+    this.confirmHandoff(handoff, result);
+    if (
+      this.runtimeClosing ||
+      this.runtimeSession !== workspace ||
+      !['queued', 'offered', 'acknowledged'].includes(result.state)
+    )
+      throw new ArtifreeApiError('The handoff send was not confirmed.', {
+        status: 200,
+        code: 'invalid_response',
+      });
+    return result;
+  }
+
+  /** Cancels a proposal only if the server confirms it was not offered. */
+  async cancelHandoff(handoff: Handoff, workspace: string): Promise<Handoff> {
+    const result = await this.json(
+      'POST',
+      `/v1/handoffs/${encodeURIComponent(handoff.id)}/cancel`,
+      parseHandoff,
+      { body: { workspace_session_id: workspace } },
+    );
+    this.confirmHandoff(handoff, result);
+    if (result.state !== 'cancelled')
+      throw new ArtifreeApiError(
+        'The handoff cancellation was not confirmed.',
+        {
+          status: 200,
+          code: 'invalid_response',
+        },
+      );
+    return result;
+  }
+
+  private confirmHandoff(expected: Handoff, result: Handoff): Handoff {
+    if (!sameHandoff(expected, result))
+      throw new ArtifreeApiError('The server returned a different handoff.', {
+        status: 200,
+        code: 'invalid_response',
+      });
+    return result;
   }
 
   /** Issues an ephemeral runtime view. The account token stays in this client. */

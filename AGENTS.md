@@ -2,7 +2,8 @@
 
 Artifree is in early development: local HTML artifacts work end to end
 (decision 0003), including MCP tools for agents (decision 0004), and an
-opted-in preview can read its own metadata (decision 0019). Other runtime
+opted-in preview can read its own metadata with a connection grant
+(decisions 0019 and 0020). Other runtime
 capabilities remain proposed. Keep implemented and proposed behavior
 explicitly separate in code, UI, docs, and completion reports.
 
@@ -30,7 +31,8 @@ analysis back to original evidence. Keep private evidence outside public files.
   frames may read their own artifact metadata through the bound bridge
   (decision 0019). They are isolated from the workspace, not from the
   network: content can navigate its own frame elsewhere (decision 0003).
-  Grants, other capabilities, and network isolation remain unimplemented.
+  Runtime metadata requires an explicit connection grant (decision 0020).
+  Other capabilities and network isolation remain unimplemented.
 - Mutations go through `ArtifactService` with a base revision and an
   idempotency key. Do not add a write path that bypasses either.
 

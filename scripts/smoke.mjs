@@ -16,6 +16,7 @@ import {
 import { checkDuplicate } from './smoke-duplicate.mjs';
 import { checkEditor } from './smoke-editor.mjs';
 import { checkExport } from './smoke-export.mjs';
+import { checkHandoff } from './smoke-handoff.mjs';
 import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
@@ -282,6 +283,12 @@ try {
     server: api,
     checkAccessibility,
   });
+  const handoff = await checkHandoff({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   const drafts = await checkDrafts({
     browser,
     origin,
@@ -485,6 +492,7 @@ try {
     incompleteLocks,
     strictRecovery,
     runtime,
+    handoff,
     artifactConsole,
     expectedApiFailures,
     pageErrors,

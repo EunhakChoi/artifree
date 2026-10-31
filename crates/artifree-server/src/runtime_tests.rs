@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
     ContentEncoding, CreateArtifactRequest, CreateRuntimeViewRequest, FileChange, FileUpload,
-    RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
+    RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
 };
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
@@ -478,6 +478,119 @@ fn revocation_while_metadata_waits_rejects_its_late_result() -> Result<(), Box<d
         Ok::<(), Box<dyn Error>>(())
     })?;
     Ok(())
+}
+
+#[test]
+fn logout_while_handoff_source_waits_rejects_its_late_delivery() -> Result<(), Box<dyn Error>> {
+    handoff_source_recheck(true)
+}
+
+#[test]
+fn acknowledgement_while_handoff_source_waits_stops_its_replay() -> Result<(), Box<dyn Error>> {
+    handoff_source_recheck(false)
+}
+
+fn handoff_source_recheck(logout: bool) -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let artifact = create_runtime_artifact(&state, &actor).await?;
+        let revision = operations::revision(&state, actor.clone(), &artifact, 1)
+            .await
+            .map_err(|error| error.body.message)?;
+        let workspace = operations::open_runtime_session(&state, &actor)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let agent = operations::register_handoff_session(&state, &actor, "Editor")
+            .map_err(|error| error.body.message)?;
+        let staged = operations::stage_handoff(
+            &state,
+            actor.clone(),
+            StageHandoffRequest {
+                workspace_session_id: workspace.clone(),
+                agent_session_id: agent.session_id.clone(),
+                artifact_id: artifact,
+                revision: 1,
+                path: "index.html".into(),
+                file_sha256: revision
+                    .files
+                    .first()
+                    .ok_or("missing source")?
+                    .sha256
+                    .clone(),
+                start: 0,
+                end: 4,
+                intent: "Edit".into(),
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        operations::send_handoff(&state, actor.clone(), &workspace, &staged.id)
+            .await
+            .map_err(|error| error.body.message)?;
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _sent = started.send(());
+            let _released = waiting.recv();
+        });
+        ready.await?;
+        let mut request = Box::pin(operations::poll_handoffs(
+            &state,
+            actor.clone(),
+            &agent.session_id,
+            &agent.session_secret,
+        ));
+        assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await);
+        if logout {
+            operations::close_runtime_session(&state, &actor, &workspace)
+                .map_err(|error| error.body.message)?;
+        } else {
+            operations::acknowledge_handoff(
+                &state,
+                &actor,
+                &agent.session_id,
+                &agent.session_secret,
+                &staged.id,
+            )
+            .map_err(|error| error.body.message)?;
+        }
+        release.send(())?;
+        let result = request.await;
+        if logout {
+            assert!(
+                matches!(result, Err(error) if error.status == StatusCode::NOT_FOUND),
+                "logout must fence an offered delivery whose source lookup finishes later"
+            );
+        } else {
+            assert!(
+                result
+                    .map_err(|error| error.body.message)?
+                    .deliveries
+                    .is_empty(),
+                "an acknowledged item must not be replayed by a delayed poll"
+            );
+        }
+        let receipt = operations::acknowledge_handoff(
+            &state,
+            &actor,
+            &agent.session_id,
+            &agent.session_secret,
+            &staged.id,
+        )
+        .map_err(|error| error.body.message)?;
+        assert_eq!(
+            receipt.state,
+            artifree_contracts::api::HandoffState::Acknowledged
+        );
+        blocker.await?;
+        Ok::<(), Box<dyn Error>>(())
+    })
 }
 
 #[test]

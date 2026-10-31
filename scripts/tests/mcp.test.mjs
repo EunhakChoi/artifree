@@ -125,6 +125,207 @@ async function api(path, init = {}) {
   return { status: response.status, body: await response.json() };
 }
 
+test('a user stages a pinned selection for one registered MCP inbox', async () => {
+  await withClient(async (client) => {
+    const source = '\uFEFFa😀\r\nb';
+    const created = await ok(client, 'create_artifact', {
+      title: 'Selection handoff',
+      files: [utf8('index.html', source)],
+      idempotency_key: freshKey(),
+    });
+    const agent = await ok(client, 'register_handoff_session', {
+      name: 'Editor',
+    });
+    const other = await ok(client, 'register_handoff_session', {
+      name: 'Other',
+    });
+    const poll = (identity) => ok(client, 'poll_handoffs', identity);
+    const workspace = await api('/v1/runtime-sessions', { method: 'POST' });
+    assert.equal(workspace.status, 200);
+    const connection = workspace.body.session_id;
+    const otherWorkspace = await api('/v1/runtime-sessions', {
+      method: 'POST',
+    });
+    const listing = await api(
+      `/v1/agent-sessions?workspace_session_id=${connection}`,
+    );
+    assert.equal(listing.status, 200);
+    assert.ok(
+      listing.body.sessions.some(
+        ({ id, name }) => id === agent.session_id && name === 'Editor',
+      ),
+    );
+    assert.equal(
+      JSON.stringify(listing.body).includes(agent.session_secret),
+      false,
+    );
+    await refused(
+      client,
+      'poll_handoffs',
+      {
+        session_id: agent.session_id,
+        session_secret: other.session_secret,
+      },
+      'not_found',
+    );
+
+    const proposal = {
+      workspace_session_id: connection,
+      agent_session_id: agent.session_id,
+      artifact_id: created.artifact.id,
+      revision: 1,
+      path: 'index.html',
+      file_sha256: createHash('sha256').update(source).digest('hex'),
+      start: 2,
+      end: 5,
+      intent: '\uFEFF Clarify the selection \uFEFF',
+    };
+    const post = (path, body) =>
+      api(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    assert.equal(
+      (await post('/v1/handoffs', { ...proposal, file_sha256: '0'.repeat(64) }))
+        .status,
+      409,
+    );
+    assert.equal(
+      (await post('/v1/handoffs', { ...proposal, start: 3 })).status,
+      422,
+    );
+    const first = await post('/v1/handoffs', proposal);
+    assert.equal(first.status, 201);
+    assert.equal(first.body.state, 'staged');
+    assert.deepEqual(first.body.selection, {
+      artifact_id: created.artifact.id,
+      revision: 1,
+      path: 'index.html',
+      file_sha256: proposal.file_sha256,
+      start: 2,
+      end: 5,
+      text: '😀\n',
+    });
+    assert.equal(first.body.intent, proposal.intent);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${first.body.id}?workspace_session_id=${otherWorkspace.body.session_id}`,
+        )
+      ).status,
+      404,
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+    await refused(
+      client,
+      'acknowledge_handoff',
+      { ...agent, delivery_id: first.body.id },
+      'invalid_request',
+    );
+    const action = { workspace_session_id: connection };
+    assert.equal(
+      (await post(`/v1/handoffs/${first.body.id}/cancel`, action)).body.state,
+      'cancelled',
+    );
+    assert.equal(
+      (await post(`/v1/handoffs/${first.body.id}/send`, action)).status,
+      409,
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+
+    const staged = await post('/v1/handoffs', proposal);
+    assert.equal(staged.status, 201);
+    const send = () => post(`/v1/handoffs/${staged.body.id}/send`, action);
+    assert.equal((await send()).body.state, 'queued');
+    assert.equal((await send()).body.state, 'queued');
+    assert.deepEqual((await poll(other)).deliveries, []);
+    const offered = (await poll(agent)).deliveries;
+    assert.equal(offered.length, 1);
+    assert.equal(offered[0].id, staged.body.id);
+    assert.equal(offered[0].state, 'offered');
+    assert.equal(offered[0].selection.text, '😀\n');
+    assert.equal(offered[0].intent, proposal.intent);
+    assert.deepEqual((await poll(agent)).deliveries, offered);
+    assert.equal(
+      (await post(`/v1/handoffs/${staged.body.id}/cancel`, action)).status,
+      409,
+    );
+    await refused(
+      client,
+      'acknowledge_handoff',
+      { ...other, delivery_id: staged.body.id },
+      'not_found',
+    );
+    const receipt = await ok(client, 'acknowledge_handoff', {
+      ...agent,
+      delivery_id: staged.body.id,
+    });
+    assert.equal(receipt.state, 'acknowledged');
+    assert.deepEqual(
+      await ok(client, 'acknowledge_handoff', {
+        ...agent,
+        delivery_id: staged.body.id,
+      }),
+      receipt,
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${staged.body.id}?workspace_session_id=${connection}`,
+        )
+      ).body.state,
+      'acknowledged',
+    );
+
+    const pending = await post('/v1/handoffs', proposal);
+    assert.equal(
+      (await post(`/v1/handoffs/${pending.body.id}/send`, action)).body.state,
+      'queued',
+    );
+    const close = await fetch(
+      `${server.api_url}/v1/runtime-sessions/${connection}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${server.token}` },
+      },
+    );
+    assert.equal(close.status, 204);
+    assert.equal(
+      (
+        await api(
+          `/v1/handoffs/${pending.body.id}?workspace_session_id=${connection}`,
+        )
+      ).body.state,
+      'expired',
+    );
+    assert.deepEqual((await poll(agent)).deliveries, []);
+
+    const active = otherWorkspace.body.session_id;
+    const currentProposal = { ...proposal, workspace_session_id: active };
+    const unsent = await post('/v1/handoffs', currentProposal);
+    const queued = await post('/v1/handoffs', currentProposal);
+    const activeAction = { workspace_session_id: active };
+    assert.equal(
+      (await post(`/v1/handoffs/${queued.body.id}/send`, activeAction)).body
+        .state,
+      'queued',
+    );
+    await ok(client, 'update_artifact', {
+      artifact_id: created.artifact.id,
+      base_metadata_revision: created.artifact.metadata_revision,
+      deleted: true,
+      idempotency_key: freshKey(),
+    });
+    assert.equal(
+      (await post(`/v1/handoffs/${unsent.body.id}/send`, activeAction)).status,
+      404,
+    );
+    await refused(client, 'poll_handoffs', agent, 'not_found');
+  });
+});
+
 test('tools/list serves the generated catalog in both protocol eras', async () => {
   for (const era of Object.keys(ERAS)) {
     await withClient(async (client) => {
@@ -148,7 +349,9 @@ test('tools/list serves the generated catalog in both protocol eras', async () =
         assert.deepEqual(tool.annotations, {
           readOnlyHint: expected.effect === 'read',
           destructiveHint: false,
-          idempotentHint: expected.effect !== 'issue_link',
+          idempotentHint: !['issue_link', 'issue_session'].includes(
+            expected.effect,
+          ),
           openWorldHint: false,
         });
       }

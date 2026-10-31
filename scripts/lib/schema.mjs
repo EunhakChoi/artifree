@@ -48,7 +48,9 @@ export function checkMcpCatalog(catalog) {
   for (const tool of catalog.tools) {
     assert.match(tool.name, /^[a-z][a-z_]*$/, `MCP tool name ${tool.name}`);
     assert.ok(
-      ['read', 'commit', 'issue_link'].includes(tool.effect),
+      ['read', 'commit', 'issue_link', 'issue_session', 'handoff'].includes(
+        tool.effect,
+      ),
       `${tool.name}: unknown effect ${tool.effect}`,
     );
     for (const key of ['inputSchema', 'outputSchema']) {

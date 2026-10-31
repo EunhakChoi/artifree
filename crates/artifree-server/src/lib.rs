@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod changes;
+mod handoffs;
 pub mod http;
 mod inventory;
 pub mod limits;

@@ -102,6 +102,94 @@ async function failure(promise) {
   return error;
 }
 
+test('Handoff replies must confirm the exact proposal and transition', async () => {
+  const session = 'e'.repeat(32);
+  const agent = 'a'.repeat(32);
+  const proposal = {
+    workspace_session_id: session,
+    agent_session_id: agent,
+    artifact_id: artifact.id,
+    revision: 1,
+    path: 'index.html',
+    file_sha256: 'f'.repeat(64),
+    start: 2,
+    end: 6,
+    intent: 'Edit this',
+  };
+  const staged = {
+    id: 'b'.repeat(32),
+    agent_session_id: agent,
+    agent_name: 'Editor',
+    state: 'staged',
+    selection: {
+      artifact_id: artifact.id,
+      revision: 1,
+      path: 'index.html',
+      file_sha256: 'f'.repeat(64),
+      start: 2,
+      end: 6,
+      text: 'test',
+    },
+    intent: 'Edit this',
+  };
+  let body = staged;
+  let status = 201;
+  const client = await runtimeClientWith(() => Response.json(body, { status }));
+  assert.deepEqual(await client.stageHandoff(proposal), staged);
+  body = { ...staged, intent: '\uFEFFEdit this\uFEFF' };
+  assert.deepEqual(
+    await client.stageHandoff({ ...proposal, intent: body.intent }),
+    body,
+  );
+  body = staged;
+  status = 200;
+  assert.equal(
+    (await failure(client.stageHandoff(proposal))).code,
+    'invalid_response',
+  );
+  status = 201;
+  body = {
+    ...staged,
+    selection: { ...staged.selection, file_sha256: '0'.repeat(64) },
+  };
+  assert.equal(
+    (await failure(client.stageHandoff(proposal))).code,
+    'invalid_response',
+  );
+  status = 200;
+  body = staged;
+  assert.equal(
+    (await failure(client.sendHandoff(staged, session))).code,
+    'invalid_response',
+  );
+  body = { ...staged, state: 'queued', intent: 'a different request' };
+  assert.equal(
+    (await failure(client.sendHandoff(staged, session))).code,
+    'invalid_response',
+  );
+  body = { ...staged, state: 'queued' };
+  assert.equal((await client.sendHandoff(staged, session)).state, 'queued');
+  body = { ...staged, state: 'offered' };
+  assert.equal(
+    (await failure(client.cancelHandoff(staged, session))).code,
+    'invalid_response',
+  );
+  body = { ...staged, state: 'cancelled' };
+  assert.equal(
+    (await client.cancelHandoff(staged, session)).state,
+    'cancelled',
+  );
+  body = { ...staged, id: 'c'.repeat(32) };
+  assert.equal(
+    (await failure(client.getHandoff(staged, session))).code,
+    'invalid_response',
+  );
+  assert.equal(
+    (await failure(client.sendHandoff(staged, 'd'.repeat(32)))).code,
+    'invalid_request',
+  );
+});
+
 function runtimeView(session, viewId = 'd'.repeat(32), generation = 1) {
   return {
     url: `http://127.0.0.1:7411/r/${'b'.repeat(64)}/`,

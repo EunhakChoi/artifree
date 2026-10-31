@@ -5,14 +5,15 @@
 //! error semantics; only the framing differs.
 
 use artifree_contracts::api::{
-    Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse, ContentEncoding, CopiedPart,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime, FileChange as WireChange,
-    FileUpload, ListArtifactsQuery, ListSort, Preview, RestoreRevisionRequest, Revision,
-    RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
-    SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat, SourceExportManifest,
-    UpdateArtifactRequest, UpdateArtifactResponse,
+    AgentSessionList, Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse,
+    ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime,
+    FileChange as WireChange, FileUpload, Handoff, ListArtifactsQuery, ListSort, Preview,
+    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
+    RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    SourceExportManifest, StageHandoffRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
+use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
@@ -30,6 +31,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::auth::hex;
+use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
 use crate::preview::{self, RuntimeAuthority, RuntimeIssueError};
 use crate::runtime_policy::{MANIFEST_PATH, METADATA_READ, RuntimePolicy, SDK_PIN};
@@ -551,6 +553,205 @@ fn session_error(error: SessionError) -> ApiError {
             "runtime connections are temporarily unavailable",
         ),
     }
+}
+
+fn handoff_error(error: HandoffError) -> ApiError {
+    match error {
+        HandoffError::Missing => ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "handoff or agent session not found",
+        ),
+        HandoffError::Invalid(message) => ApiError::unprocessable(message),
+        HandoffError::Conflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, ErrorCode::InvalidRequest, message)
+        }
+        HandoffError::Unavailable => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "handoffs are temporarily unavailable",
+        ),
+        HandoffError::ConnectionClosed => session_error(SessionError::Closed),
+    }
+}
+
+pub(crate) fn register_handoff_session(
+    state: &AppState,
+    actor: &ActorId,
+    name: &str,
+) -> Result<RegisteredHandoffSession, ApiError> {
+    state
+        .handoffs()
+        .register(actor, name)
+        .map_err(handoff_error)
+}
+
+pub(crate) fn agent_sessions(
+    state: &AppState,
+    actor: &ActorId,
+    workspace_id: &str,
+) -> Result<AgentSessionList, ApiError> {
+    validate_view(workspace_id, 1)?;
+    let workspace = state
+        .runtime_sessions()
+        .get(actor, workspace_id)
+        .map_err(session_error)?;
+    let sessions = workspace
+        .while_active(|| state.handoffs().list(actor))
+        .map_err(session_error)?
+        .map_err(handoff_error)?;
+    Ok(AgentSessionList { sessions })
+}
+
+pub(crate) async fn stage_handoff(
+    state: &AppState,
+    actor: ActorId,
+    request: StageHandoffRequest,
+) -> Result<Handoff, ApiError> {
+    validate_view(&request.workspace_session_id, 1)?;
+    validate_view(&request.agent_session_id, 1)?;
+    let workspace = state
+        .runtime_sessions()
+        .get(&actor, &request.workspace_session_id)
+        .map_err(session_error)?;
+    let intent = handoffs::intent(&request.intent).map_err(handoff_error)?;
+    let file = read_file(
+        state,
+        actor.clone(),
+        &request.artifact_id,
+        request.revision,
+        &request.path,
+        ByteRange::WHOLE,
+        Boundary::Byte,
+    )
+    .await?;
+    let selection = handoffs::selection(
+        request.artifact_id,
+        request.revision,
+        file.path.to_string(),
+        &request.file_sha256,
+        request.start,
+        request.end,
+        file.part,
+    )
+    .map_err(handoff_error)?;
+    state
+        .handoffs()
+        .stage(
+            &actor,
+            &request.workspace_session_id,
+            &workspace,
+            &request.agent_session_id,
+            selection,
+            intent,
+        )
+        .map_err(handoff_error)
+}
+
+pub(crate) fn get_handoff(
+    state: &AppState,
+    actor: &ActorId,
+    workspace_id: &str,
+    id: &str,
+) -> Result<Handoff, ApiError> {
+    validate_view(workspace_id, 1)?;
+    validate_view(id, 1)?;
+    state
+        .handoffs()
+        .get(actor, workspace_id, id)
+        .map_err(handoff_error)
+}
+
+pub(crate) async fn send_handoff(
+    state: &AppState,
+    actor: ActorId,
+    workspace_id: &str,
+    id: &str,
+) -> Result<Handoff, ApiError> {
+    let handoff = get_handoff(state, &actor, workspace_id, id)?;
+    confirm_handoff_source(state, actor.clone(), &handoff).await?;
+    state
+        .handoffs()
+        .send(&actor, workspace_id, id)
+        .map_err(handoff_error)
+}
+
+pub(crate) fn cancel_handoff(
+    state: &AppState,
+    actor: &ActorId,
+    workspace_id: &str,
+    id: &str,
+) -> Result<Handoff, ApiError> {
+    validate_view(workspace_id, 1)?;
+    validate_view(id, 1)?;
+    state
+        .handoffs()
+        .cancel(actor, workspace_id, id)
+        .map_err(handoff_error)
+}
+
+pub(crate) async fn poll_handoffs(
+    state: &AppState,
+    actor: ActorId,
+    session_id: &str,
+    secret: &str,
+) -> Result<HandoffInbox, ApiError> {
+    validate_view(session_id, 1)?;
+    let mut deliveries = state
+        .handoffs()
+        .poll(&actor, session_id, secret)
+        .map_err(handoff_error)?;
+    if let Some(delivery) = deliveries.first() {
+        // Once offered it cannot be recalled, even if this response fails.
+        confirm_handoff_source(state, actor.clone(), delivery).await?;
+        if !state
+            .handoffs()
+            .confirm_offer(&actor, session_id, secret, &delivery.id)
+            .map_err(handoff_error)?
+        {
+            deliveries.clear();
+        }
+    }
+    Ok(HandoffInbox { deliveries })
+}
+
+async fn confirm_handoff_source(
+    state: &AppState,
+    actor: ActorId,
+    handoff: &Handoff,
+) -> Result<(), ApiError> {
+    let selected = &handoff.selection;
+    let file = read_file(
+        state,
+        actor,
+        &selected.artifact_id,
+        selected.revision,
+        &selected.path,
+        ByteRange::WHOLE,
+        Boundary::Byte,
+    )
+    .await?;
+    if hex(&file.part.sha256) != selected.file_sha256 {
+        return Err(handoff_error(HandoffError::Conflict(
+            "the saved file no longer matches the selection",
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn acknowledge_handoff(
+    state: &AppState,
+    actor: &ActorId,
+    session_id: &str,
+    secret: &str,
+    id: &str,
+) -> Result<HandoffReceipt, ApiError> {
+    validate_view(session_id, 1)?;
+    validate_view(id, 1)?;
+    state
+        .handoffs()
+        .acknowledge(actor, session_id, secret, id)
+        .map_err(handoff_error)
 }
 
 pub(crate) fn open_runtime_session(

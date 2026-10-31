@@ -16,11 +16,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DuplicateArtifactRequest, ErrorCode, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
-    Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
-    RuntimeMetadataRequest, SaveRevisionRequest, SetRuntimeGrantRequest, UpdateArtifactRequest,
-    UpdateArtifactResponse,
+    AgentSessionList, Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
+    DuplicateArtifactRequest, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
+    ListArtifactsQuery, RestoreRevisionRequest, Revision, RevisionList, RuntimeConnection,
+    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
+    SetRuntimeGrantRequest, StageHandoffRequest, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::parts::{Boundary, ByteRange};
@@ -39,6 +39,7 @@ use axum::{Json, Router};
 
 use crate::auth::AccessToken;
 use crate::changes::{self, Feed};
+use crate::handoffs::Handoffs;
 use crate::limits::{Limiter, Refusal, RequestLimits};
 use crate::mcp;
 use crate::operations::{self, ApiError};
@@ -80,6 +81,7 @@ struct Shared {
     owner: ActorId,
     previews: PreviewTickets,
     runtime_sessions: RuntimeSessions,
+    handoffs: Handoffs,
     limiter: Limiter,
     feed: Feed,
     draining: AtomicUsize,
@@ -110,6 +112,7 @@ impl AppState {
                 owner,
                 previews: PreviewTickets::new(settings.preview_ttl),
                 runtime_sessions: RuntimeSessions::new(Duration::from_secs(24 * 60 * 60)),
+                handoffs: Handoffs::new(Duration::from_secs(60 * 60)),
                 limiter: Limiter::new(settings.limits.validate()?),
                 feed: Feed::new(settings.change_streams),
                 draining: AtomicUsize::new(0),
@@ -135,6 +138,10 @@ impl AppState {
 
     pub(crate) fn runtime_sessions(&self) -> &RuntimeSessions {
         &self.shared.runtime_sessions
+    }
+
+    pub(crate) fn handoffs(&self) -> &Handoffs {
+        &self.shared.handoffs
     }
 
     pub(crate) fn settings(&self) -> &Settings {
@@ -233,6 +240,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/runtime-sessions/{session}/artifacts/{id}/revisions/{revision}/grant",
             axum::routing::put(set_runtime_grant),
+        )
+        .route("/v1/agent-sessions", get(agent_sessions))
+        .route("/v1/handoffs", axum::routing::post(stage_handoff))
+        .route("/v1/handoffs/{id}", get(get_handoff))
+        .route("/v1/handoffs/{id}/send", axum::routing::post(send_handoff))
+        .route(
+            "/v1/handoffs/{id}/cancel",
+            axum::routing::post(cancel_handoff),
         )
         .route("/v1/changes", get(changes::stream))
         .method_not_allowed_fallback(method_not_allowed)
@@ -756,6 +771,63 @@ async fn set_runtime_grant(
     operations::set_runtime_grant(&state, actor, &session, &id, revision, request)
         .await
         .map(Json)
+}
+
+async fn agent_sessions(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    query: Result<Query<HandoffActionRequest>, QueryRejection>,
+) -> Result<Json<AgentSessionList>, ApiError> {
+    let Query(request) = query?;
+    operations::agent_sessions(&state, &actor, &request.workspace_session_id).map(Json)
+}
+
+async fn stage_handoff(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    body: Result<Json<StageHandoffRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(request) = body?;
+    let handoff = operations::stage_handoff(&state, actor, request).await?;
+    Ok(created(
+        &format!("/v1/handoffs/{}", handoff.id),
+        Json(handoff),
+    ))
+}
+
+async fn get_handoff(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<HandoffActionRequest>, QueryRejection>,
+) -> Result<Json<Handoff>, ApiError> {
+    let Path(id) = path?;
+    let Query(request) = query?;
+    operations::get_handoff(&state, &actor, &request.workspace_session_id, &id).map(Json)
+}
+
+async fn send_handoff(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<HandoffActionRequest>, JsonRejection>,
+) -> Result<Json<Handoff>, ApiError> {
+    let Path(id) = path?;
+    let Json(request) = body?;
+    operations::send_handoff(&state, actor, &request.workspace_session_id, &id)
+        .await
+        .map(Json)
+}
+
+async fn cancel_handoff(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<HandoffActionRequest>, JsonRejection>,
+) -> Result<Json<Handoff>, ApiError> {
+    let Path(id) = path?;
+    let Json(request) = body?;
+    operations::cancel_handoff(&state, &actor, &request.workspace_session_id, &id).map(Json)
 }
 
 fn created(location: &str, body: impl IntoResponse) -> Response {

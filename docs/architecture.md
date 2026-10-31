@@ -27,7 +27,7 @@ packages/
   runtime-sdk/         bound metadata read; other capability types proposed
 crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
-  artifree-core/       artifact service and owner policy; documents, jobs, handoff planned
+  artifree-core/       artifact service and owner policy; documents and jobs planned
   artifree-ports/      artifact store contract; other families planned
   artifree-providers/  SQLite artifact store, ZIP source archives; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
@@ -131,6 +131,11 @@ in the Rust core.
 | `POST /v1/runtime-sessions`                                                        | Open an ephemeral runtime connection              |
 | `DELETE /v1/runtime-sessions/{session}`                                            | Close the connection and revoke its grants        |
 | `PUT /v1/runtime-sessions/{session}/artifacts/{id}/revisions/{n}/grant`            | Replace an observed connection grant              |
+| `GET /v1/agent-sessions`                                                           | List the actor's registered inboxes               |
+| `POST /v1/handoffs`                                                                | Stage a pinned source selection                   |
+| `GET /v1/handoffs/{id}`                                                            | Read a handoff's state                            |
+| `POST /v1/handoffs/{id}/send`                                                      | Confirm sending the staged delivery               |
+| `POST /v1/handoffs/{id}/cancel`                                                    | Cancel before the agent may have received it      |
 | `GET /v1/changes`                                                                  | Committed changes as server-sent events           |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
@@ -169,7 +174,9 @@ are the HTTP API v1 bodies; failures are those error bodies with
 `isError: true`. MCP requests share the per-actor request limits with HTTP;
 a refused call is an HTTP `429`. The generated catalog is
 `contracts/generated/mcp-tools.json`; [the MCP guide](mcp.md) shows Codex and
-Pi configuration. These are agent tools, not page capabilities.
+Pi configuration. The three additional handoff tools register an agent inbox,
+poll it, and acknowledge a delivered selection. They are not page callbacks;
+an agent has to poll. All these are agent tools, not page capabilities.
 
 ## Next implementation slices
 
@@ -223,7 +230,10 @@ refused with an explicit warning to protect other tabs' records
 ([0018](decisions/0018-source-draft-recovery.md)).
 R04 adds the first bound runtime metadata read ([0019](decisions/0019-runtime-metadata-bridge.md)),
 and R05 adds connection-scoped metadata consent and grants
-([0020](decisions/0020-runtime-grants.md)). The agent handoff (A08) remains planned.
+([0020](decisions/0020-runtime-grants.md)). A08 stages a saved source
+selection and, after user confirmation, delivers it to an explicitly registered
+MCP inbox ([0021](decisions/0021-agent-selection-handoff.md)). Its receipt
+acknowledgement is separate from model work and its state is process-local.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

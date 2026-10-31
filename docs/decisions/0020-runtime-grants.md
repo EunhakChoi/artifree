@@ -1,6 +1,6 @@
 # 0020: Runtime declarations and connection grants
 
-Date: 2026-10-31. Status: proposed for this change. Builds on
+Date: 2026-10-31. Status: accepted. Builds on
 [0019](0019-runtime-metadata-bridge.md).
 
 ## Context

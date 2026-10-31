@@ -15,11 +15,12 @@
 )]
 
 use artifree_contracts::api::{
-    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
-    CreateRuntimeViewRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse,
-    FeedPosition, ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList,
-    RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeView,
-    SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportManifest, UpdateArtifactRequest,
+    AgentSessionList, Artifact, ArtifactChange, ArtifactList, CommitResponse,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest,
+    ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision, RevisionList, RuntimeConnection,
+    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest,
+    SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, UpdateArtifactRequest,
     UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
@@ -41,6 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<RevisionList>(),
         generator.subschema_for::<Preview>(),
         generator.subschema_for::<RuntimeConnection>(),
+        generator.subschema_for::<AgentSessionList>(),
+        generator.subschema_for::<StageHandoffRequest>(),
+        generator.subschema_for::<HandoffActionRequest>(),
+        generator.subschema_for::<Handoff>(),
         generator.subschema_for::<CreateRuntimeViewRequest>(),
         generator.subschema_for::<RuntimeView>(),
         generator.subschema_for::<SetRuntimeGrantRequest>(),

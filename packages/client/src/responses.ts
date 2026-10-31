@@ -1,4 +1,5 @@
 import type {
+  AgentSession,
   Artifact,
   ArtifactKind,
   ArtifactList,
@@ -9,6 +10,8 @@ import type {
   ErrorBody,
   ErrorCode,
   FeedPosition,
+  Handoff,
+  HandoffState,
   Preview,
   Revision,
   RevisionFile,
@@ -256,6 +259,80 @@ export function parsePreview(value: unknown): Preview | undefined {
   if (typeof url !== 'string' || !isCount(number) || !isTime(expires_at_ms))
     return undefined;
   return { url, revision: number, expires_at_ms };
+}
+
+/** Validates registered inboxes without treating their registration as liveness. */
+export function parseAgentSessions(value: unknown): AgentSession[] | undefined {
+  if (!isRecord(value) || !Array.isArray(value.sessions)) return undefined;
+  const sessions: AgentSession[] = [];
+  for (const item of value.sessions) {
+    if (
+      !isRecord(item) ||
+      typeof item.id !== 'string' ||
+      !/^[0-9a-f]{32}$/.test(item.id) ||
+      typeof item.name !== 'string' ||
+      item.name.length === 0 ||
+      item.name.length > 160 ||
+      sessions.some((session) => session.id === item.id)
+    )
+      return undefined;
+    sessions.push({ id: item.id, name: item.name });
+  }
+  return sessions.length <= 128 ? sessions : undefined;
+}
+
+const HANDOFF_STATES: readonly HandoffState[] = [
+  'staged',
+  'queued',
+  'offered',
+  'acknowledged',
+  'cancelled',
+  'expired',
+];
+
+/** Validates the server's selection and delivery state before showing it. */
+export function parseHandoff(value: unknown): Handoff | undefined {
+  if (!isRecord(value) || !isRecord(value.selection)) return undefined;
+  const { id, agent_session_id, agent_name, intent, state, selection } = value;
+  const { artifact_id, revision, path, file_sha256, start, end, text } =
+    selection;
+  if (
+    typeof id !== 'string' ||
+    !/^[0-9a-f]{32}$/.test(id) ||
+    typeof agent_session_id !== 'string' ||
+    !/^[0-9a-f]{32}$/.test(agent_session_id) ||
+    typeof agent_name !== 'string' ||
+    agent_name.length === 0 ||
+    agent_name.length > 160 ||
+    typeof intent !== 'string' ||
+    intent.length === 0 ||
+    intent.length > 4096 ||
+    typeof state !== 'string' ||
+    !HANDOFF_STATES.some((candidate) => candidate === state) ||
+    typeof artifact_id !== 'string' ||
+    !isCount(revision) ||
+    revision === 0 ||
+    typeof path !== 'string' ||
+    typeof file_sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(file_sha256) ||
+    !isCount(start) ||
+    !isCount(end) ||
+    end <= start ||
+    typeof text !== 'string' ||
+    text.length === 0 ||
+    text.length > 16_384
+  )
+    return undefined;
+  const handoffState = HANDOFF_STATES.find((candidate) => candidate === state);
+  if (handoffState === undefined) return undefined;
+  return {
+    id,
+    agent_session_id,
+    agent_name,
+    intent,
+    state: handoffState,
+    selection: { artifact_id, revision, path, file_sha256, start, end, text },
+  };
 }
 
 /** Validates a runtime view before its values are used for frame binding. */

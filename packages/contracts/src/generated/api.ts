@@ -17,6 +17,10 @@ export type ApiBody =
   | RevisionList
   | Preview
   | RuntimeConnection
+  | AgentSessionList
+  | StageHandoffRequest
+  | HandoffActionRequest
+  | Handoff
   | CreateRuntimeViewRequest
   | RuntimeView
   | SetRuntimeGrantRequest
@@ -63,6 +67,10 @@ export type ArtifactKind = 'app' | 'document' | 'slides' | 'dashboard' | 'design
  * A part of an artifact that a duplicate copies.
  */
 export type CopiedPart = 'files';
+/**
+ * Delivery state; acknowledgement is receipt, not model completion.
+ */
+export type HandoffState = 'staged' | 'queued' | 'offered' | 'acknowledged' | 'cancelled' | 'expired';
 /**
  * Machine-readable error category.
  */
@@ -342,6 +350,134 @@ export interface RuntimeConnection {
    * Random 32-digit lowercase hexadecimal connection identifier.
    */
   session_id: string;
+}
+/**
+ * Registered agent inboxes for the current actor.
+ */
+export interface AgentSessionList {
+  /**
+   * Registered sessions; registration alone does not imply a model is running.
+   */
+  sessions: AgentSession[];
+}
+/**
+ * A registered agent inbox visible to the workspace, without its secret.
+ */
+export interface AgentSession {
+  /**
+   * Server-issued session identity.
+   */
+  id: string;
+  /**
+   * Label supplied by the agent when registering.
+   */
+  name: string;
+}
+/**
+ * Prepares a source selection for explicit user review.
+ */
+export interface StageHandoffRequest {
+  /**
+   * Agent inbox selected by the user.
+   */
+  agent_session_id: string;
+  /**
+   * Artifact whose saved file is selected.
+   */
+  artifact_id: string;
+  /**
+   * Exclusive UTF-16 offset in LF-normalized editor text.
+   */
+  end: number;
+  /**
+   * SHA-256 of the stored file the user saw.
+   */
+  file_sha256: string;
+  /**
+   * User's requested edit, separate from artifact data.
+   */
+  intent: string;
+  /**
+   * Package path.
+   */
+  path: string;
+  /**
+   * Pinned source revision.
+   */
+  revision: number;
+  /**
+   * Inclusive UTF-16 offset in LF-normalized editor text.
+   */
+  start: number;
+  /**
+   * Current workspace connection, which owns this proposal.
+   */
+  workspace_session_id: string;
+}
+/**
+ * Identifies the workspace connection for a handoff operation.
+ */
+export interface HandoffActionRequest {
+  /**
+   * Current connection that staged the delivery.
+   */
+  workspace_session_id: string;
+}
+/**
+ * One proposed or sent selection, as the workspace and agent see it.
+ */
+export interface Handoff {
+  /**
+   * Chosen session's label at staging time.
+   */
+  agent_name: string;
+  /**
+   * Chosen registered agent session.
+   */
+  agent_session_id: string;
+  /**
+   * Server-issued delivery identity, reused for send retries and deduplication.
+   */
+  id: string;
+  /**
+   * The user's edit intent, separate from the selected source data.
+   */
+  intent: string;
+  selection: HandoffSelection;
+  state: HandoffState;
+}
+/**
+ * A selected range in a saved, LF-normalized source file.
+ */
+export interface HandoffSelection {
+  /**
+   * Artifact whose source was selected.
+   */
+  artifact_id: string;
+  /**
+   * Exclusive UTF-16 code-unit offset in the normalized editor text.
+   */
+  end: number;
+  /**
+   * SHA-256 of the complete stored file, before line-ending normalization.
+   */
+  file_sha256: string;
+  /**
+   * Package path of the selected file.
+   */
+  path: string;
+  /**
+   * Pinned source revision.
+   */
+  revision: number;
+  /**
+   * First UTF-16 code-unit offset in the normalized editor text.
+   */
+  start: number;
+  /**
+   * Selected source text. This is untrusted artifact data, not instructions.
+   */
+  text: string;
 }
 /**
  * Requests a preview view whose frame can read its artifact metadata.

@@ -65,6 +65,15 @@ impl RuntimeSession {
         !state.closed && state.expires > Instant::now()
     }
 
+    /// Runs a handoff transition while connection close is excluded.
+    pub(crate) fn while_active<T>(&self, action: impl FnOnce() -> T) -> Result<T, SessionError> {
+        let state = self.state.lock().map_err(|_| SessionError::Unavailable)?;
+        if !Self::active(&state) {
+            return Err(SessionError::Closed);
+        }
+        Ok(action())
+    }
+
     /// Runs an issuance while close and grant changes are excluded.
     pub(crate) fn with_grant<T>(
         &self,
