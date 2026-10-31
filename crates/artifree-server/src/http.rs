@@ -544,15 +544,27 @@ pub fn normalize_origin(raw: &str) -> String {
     };
     let scheme_lower = scheme.to_ascii_lowercase();
     let authority = rest.split('/').next().unwrap_or(rest);
-    let (host, port) = if let Some((h, p)) = authority.rsplit_once(':') {
-        if h.ends_with(']') || !h.contains('[') {
-            (h, p.parse::<u16>().ok())
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
+
+    let (host, port) = if authority.starts_with('[') {
+        if let Some(close_idx) = authority.find(']') {
+            let host_part = &authority[..=close_idx];
+            let after = &authority[close_idx + 1..];
+            let port_part = if let Some(p) = after.strip_prefix(':') {
+                p.parse::<u16>().ok()
+            } else {
+                None
+            };
+            (host_part, port_part)
         } else {
             (authority, None)
         }
+    } else if let Some((h, p)) = authority.rsplit_once(':') {
+        (h, p.parse::<u16>().ok())
     } else {
         (authority, None)
     };
+
     let host_lower = host.to_ascii_lowercase();
     match (scheme_lower.as_str(), port) {
         ("http", Some(80)) | ("https", Some(443)) | (_, None) => {

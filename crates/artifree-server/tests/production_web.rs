@@ -265,6 +265,39 @@ async fn cors_origin_normalization_and_preview_isolation() -> TestResult {
     let res = harness.router.clone().oneshot(req).await?;
     // Normalized comparison correctly detects it matches configured content origin!
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 4. Bracketed IPv6 preview origin configured with default port matches browser Origin without port
+    let ipv6_harness = WebTestHarness::new("http://[::1]:80/")?;
+    let req = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/v1/artifacts")
+        .header(header::ORIGIN, "http://[::1]")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .body(Body::empty())?;
+    let res = ipv6_harness.router.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 5. Exact normalize_origin behavior across IPv4 and IPv6 variations
+    assert_eq!(
+        artifree_server::http::normalize_origin("http://[::1]:80/"),
+        "http://[::1]"
+    );
+    assert_eq!(
+        artifree_server::http::normalize_origin("http://[::1]"),
+        "http://[::1]"
+    );
+    assert_eq!(
+        artifree_server::http::normalize_origin("http://[::1]:7411/"),
+        "http://[::1]:7411"
+    );
+    assert_eq!(
+        artifree_server::http::normalize_origin("https://[2001:db8::1]:443/"),
+        "https://[2001:db8::1]"
+    );
+    assert_eq!(
+        artifree_server::http::normalize_origin("http://localhost:80/"),
+        "http://localhost"
+    );
     Ok(())
 }
 
