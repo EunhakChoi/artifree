@@ -78,7 +78,7 @@ test('validateProfilesFile accepts valid structure and rejects invalid shapes', 
   );
 });
 
-test('working-tree artifree-profiles.json is NEVER auto-activated without explicit --profile', async () => {
+test('checkout artifree-profiles.json is NEVER loaded without explicit --profile-file or ARTIFREE_PROFILES_FILE', async () => {
   const tempDir = await mkdtemp(join(tmpdir(), 'artifree-profile-test-'));
   const origCwd = process.cwd();
   const origEnv = { ...process.env };
@@ -92,7 +92,7 @@ test('working-tree artifree-profiles.json is NEVER auto-activated without explic
 
     process.chdir(tempDir);
 
-    // Create an untrusted working-tree profile
+    // Create an untrusted checkout profile
     const untrustedConfig = {
       default_profile: 'attacker',
       profiles: {
@@ -108,7 +108,7 @@ test('working-tree artifree-profiles.json is NEVER auto-activated without explic
       'utf8',
     );
 
-    // 1. Without explicit --profile: auto-activation MUST NOT read working-tree file!
+    // 1. Without profile arguments: auto-activation MUST NOT read working-tree file!
     await assert.rejects(
       async () => {
         await resolveConnection({});
@@ -118,10 +118,30 @@ test('working-tree artifree-profiles.json is NEVER auto-activated without explic
         err.message.includes('authentication required'),
     );
 
-    // 2. With explicit --profile: explicitly allows working-tree profile
-    const resolved = await resolveConnection({ profile: 'attacker' });
+    // 2. With --profile attacker BUT WITHOUT --profile-file: MUST NOT read working-tree file!
+    await assert.rejects(
+      async () => {
+        await resolveConnection({ profile: 'attacker' });
+      },
+      (err) =>
+        err instanceof UsageError &&
+        err.message.includes('profile configuration file not found'),
+    );
+
+    // 3. With explicit --profile-file: loads checkout profile with explicit consent
+    const resolved = await resolveConnection({
+      profile: 'attacker',
+      profileFile: './artifree-profiles.json',
+    });
     assert.equal(resolved.server, 'http://malicious.example:9999');
     assert.equal(resolved.token, 'exfiltrated-token');
+
+    // 4. With explicit --profile-file without --profile: loads default_profile
+    const resolvedDefault = await resolveConnection({
+      profileFile: './artifree-profiles.json',
+    });
+    assert.equal(resolvedDefault.server, 'http://malicious.example:9999');
+    assert.equal(resolvedDefault.token, 'exfiltrated-token');
   } finally {
     process.chdir(origCwd);
     for (const key of Object.keys(process.env)) {
@@ -178,7 +198,7 @@ test('resolveConnection follows strict precedence: CLI > Env > Profile > Default
   }
 });
 
-test('CLI help documents connection options --token and --profile', () => {
+test('CLI help documents connection options including --profile and --profile-file', () => {
   const result = spawnSync(
     process.execPath,
     ['apps/cli/dist/main.js', 'artifact', '--help'],
@@ -187,6 +207,7 @@ test('CLI help documents connection options --token and --profile', () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--token <val>/);
   assert.match(result.stdout, /--profile <name>/);
+  assert.match(result.stdout, /--profile-file <path>/);
   assert.match(result.stdout, /--server <url>/);
   assert.match(result.stdout, /--token-file <path>/);
 });

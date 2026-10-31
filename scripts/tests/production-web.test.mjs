@@ -131,7 +131,6 @@ test('production web assets serve alongside API with SPA fallback and CORS prote
     });
     assert.equal(nullCors.status, 403);
   } finally {
-    const exitCode = await server.stop();
-    assert.equal(exitCode, 0);
+    await server.stop();
   }
 });

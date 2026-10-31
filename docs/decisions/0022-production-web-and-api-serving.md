@@ -62,11 +62,11 @@ boundaries established in earlier decisions:
    resolves connection parameters with strict precedence: command-line flag >
    environment variable > profile configuration > default (`http://127.0.0.1:7410`).
    To prevent untrusted repository checkouts from hijacking CLI traffic or
-   exfiltrating credentials, working-tree profile files (`./artifree-profiles.json`)
-   are only consulted when explicitly requested via `--profile` or
-   `ARTIFREE_PROFILES_FILE`. Automatic default profile activation strictly
-   restricts file discovery to user-level configuration directories
-   (`~/.config/artifree/` and `~/.artifree/`).
+   exfiltrating credentials, working-tree or checkout profile files are NEVER
+   loaded implicitly; they require an explicit profile file option (`--profile-file <path>`)
+   or environment variable (`ARTIFREE_PROFILES_FILE`). Specifying only a profile
+   name (`--profile <name>`) strictly resolves from user-level configuration
+   directories (`~/.config/artifree/` and `~/.artifree/`).
 8. **Web origin-scoped tokens and explicit targeting.** The web application
    supports targeting custom servers. Access tokens stored in `sessionStorage`
    are scoped by origin (`artifree.accessToken.<origin>`). URL query parameters

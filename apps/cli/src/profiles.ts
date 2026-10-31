@@ -19,6 +19,7 @@ export interface ConnectionOptions {
   token?: string | undefined;
   tokenFile?: string | undefined;
   profile?: string | undefined;
+  profileFile?: string | undefined;
 }
 
 export interface ResolvedConnection {
@@ -86,37 +87,35 @@ export function validateProfilesFile(
 /**
  * Finds and loads the active profile configuration file across standard locations.
  * To prevent untrusted repository checkouts from exfiltrating user files/credentials,
- * a working-tree `artifree-profiles.json` is only allowed when `allowWorkingTree` is true
- * (i.e. when explicitly requested via `--profile` or `ARTIFREE_PROFILES_FILE`).
+ * a repository checkout's profiles file is NEVER loaded implicitly; it requires an
+ * explicit profile-file option (`--profile-file`) or environment variable (`ARTIFREE_PROFILES_FILE`).
+ * Passing only a profile name (`--profile`) resolves strictly against the user's home configuration.
  */
 export async function findProfilesFile(
-  allowWorkingTree = false,
+  customPath?: string | undefined,
 ): Promise<{ path: string; content: ProfilesFile } | null> {
-  const customPath = process.env.ARTIFREE_PROFILES_FILE;
-  if (customPath) {
+  const targetPath = customPath ?? process.env.ARTIFREE_PROFILES_FILE;
+  if (targetPath) {
+    const resolvedPath = resolve(process.cwd(), targetPath);
     try {
-      const raw = await readFile(customPath, 'utf8');
+      const raw = await readFile(resolvedPath, 'utf8');
       const parsed: unknown = JSON.parse(raw);
       return {
-        path: customPath,
-        content: validateProfilesFile(parsed, customPath),
+        path: resolvedPath,
+        content: validateProfilesFile(parsed, resolvedPath),
       };
     } catch (err) {
       if (err instanceof UsageError) throw err;
       throw new UsageError(
-        `cannot read profile configuration file ${customPath}: ${(err as Error).message}`,
+        `cannot read profile configuration file ${resolvedPath}: ${(err as Error).message}`,
       );
     }
   }
 
-  const candidates: string[] = [];
-  if (allowWorkingTree) {
-    candidates.push(resolve(process.cwd(), 'artifree-profiles.json'));
-  }
-  candidates.push(
+  const candidates: string[] = [
     resolve(homedir(), '.config', 'artifree', 'profiles.json'),
     resolve(homedir(), '.artifree', 'profiles.json'),
-  );
+  ];
 
   for (const candidate of candidates) {
     try {
@@ -149,8 +148,7 @@ export async function resolveConnection(
   let activeProfile: Profile | undefined;
 
   if (options.profile !== undefined) {
-    // Explicit --profile: allow working-tree profiles file as well as user profiles
-    const file = await findProfilesFile(true);
+    const file = await findProfilesFile(options.profileFile);
     if (!file) {
       throw new UsageError(
         `profile configuration file not found for profile "${options.profile}"`,
@@ -163,9 +161,22 @@ export async function resolveConnection(
       );
     }
     activeProfile = profiles[options.profile];
+  } else if (options.profileFile !== undefined) {
+    const file = await findProfilesFile(options.profileFile);
+    if (file?.content.default_profile) {
+      const defaultName = file.content.default_profile;
+      const profiles = file.content.profiles ?? {};
+      if (Object.hasOwn(profiles, defaultName)) {
+        activeProfile = profiles[defaultName];
+      } else {
+        throw new UsageError(
+          `default profile "${defaultName}" not found in ${file.path}`,
+        );
+      }
+    }
   } else {
-    // Default profile auto-activation: do NOT load untrusted working-tree files
-    const file = await findProfilesFile(false);
+    // Default profile auto-activation: resolves only from user home configuration
+    const file = await findProfilesFile();
     if (file?.content.default_profile) {
       const defaultName = file.content.default_profile;
       const profiles = file.content.profiles ?? {};

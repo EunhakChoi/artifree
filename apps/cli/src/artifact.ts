@@ -48,6 +48,7 @@ Connection:
   --token <val>          Access token [env ARTIFREE_TOKEN]
   --token-file <path>    Access token file [env ARTIFREE_TOKEN_FILE]
   --profile <name>       Connection profile to load
+  --profile-file <path>  Path to profile configuration file [env ARTIFREE_PROFILES_FILE]
 
 list prints every matching artifact, reading page after page, unless
 --limit or --page-token asks for one page; that page carries next_page_token
@@ -83,6 +84,7 @@ const connectionOptions = {
   token: { type: 'string' },
   'token-file': { type: 'string' },
   profile: { type: 'string' },
+  'profile-file': { type: 'string' },
 } as const;
 
 async function connect(values: {
@@ -90,12 +92,14 @@ async function connect(values: {
   token?: string | undefined;
   'token-file'?: string | undefined;
   profile?: string | undefined;
+  'profile-file'?: string | undefined;
 }): Promise<ArtifreeClient> {
   const { server, token } = await resolveConnection({
     server: values.server,
     token: values.token,
     tokenFile: values['token-file'],
     profile: values.profile,
+    profileFile: values['profile-file'],
   });
   return new ArtifreeClient({ baseUrl: server, accessToken: token });
 }
