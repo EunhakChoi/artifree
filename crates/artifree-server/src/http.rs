@@ -272,7 +272,11 @@ pub fn router_with_web(state: AppState, web_assets: Option<WebAssets>) -> Router
         let assets = fallback_assets.clone();
         async move {
             let path = req.uri().path();
-            let is_api = path.starts_with("/v1/") || path == "/v1" || path.starts_with("/mcp");
+            let is_api = path.starts_with("/v1/")
+                || path == "/v1"
+                || path.starts_with("/mcp")
+                || path == "/healthz"
+                || path.starts_with("/healthz/");
             let owner = state.shared.owner.clone();
             if is_api || assets.is_none() {
                 return run_admitted(&state, req, move |req| async move {
@@ -294,10 +298,16 @@ pub fn router_with_web(state: AppState, web_assets: Option<WebAssets>) -> Router
     };
 
     Router::new()
+        .route("/healthz", get(healthz).head(healthz))
         .merge(api_routes)
         .fallback(fallback_handler)
         .layer(middleware::from_fn_with_state(state.clone(), cors))
         .with_state(state)
+}
+
+/// Unauthenticated health check endpoint for supervisors and load balancers.
+async fn healthz() -> impl IntoResponse {
+    (StatusCode::OK, "ok\n")
 }
 
 /// CORS middleware handling preflights and response headers on `/v1/*` API endpoints.
@@ -345,6 +355,10 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
                 "Authorization, Content-Type, If-Match, Idempotency-Key, Last-Event-ID",
             )
+            .header(
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                "Content-Range, Retry-After, Location",
+            )
             .header(header::ACCESS_CONTROL_MAX_AGE, "86400")
             .header(header::VARY, "Origin")
             .body(Body::empty())
@@ -355,6 +369,10 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
     response
         .headers_mut()
         .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin_val);
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("Content-Range, Retry-After, Location"),
+    );
     response
         .headers_mut()
         .append(header::VARY, HeaderValue::from_static("Origin"));

@@ -236,4 +236,37 @@ test('CLI profile and connection resolution precedence', async (t) => {
       },
     );
   }
+
+  // 9. --token-file flag overrides ARTIFREE_TOKEN env var
+  {
+    const flagTokenFile = join(tempDir, 'flag-token');
+    await writeFile(flagTokenFile, 'f'.repeat(64));
+    const origToken = process.env.ARTIFREE_TOKEN;
+    process.env.ARTIFREE_TOKEN = 'e'.repeat(64);
+    try {
+      const res = await resolveConnection({
+        'token-file': flagTokenFile,
+      });
+      assert.equal(res.accessToken, 'f'.repeat(64));
+    } finally {
+      if (origToken !== undefined) process.env.ARTIFREE_TOKEN = origToken;
+      else delete process.env.ARTIFREE_TOKEN;
+    }
+  }
+
+  // 10. Explicit profile requested with a shorthand config (no profiles map) throws UsageError
+  {
+    await assert.rejects(
+      async () => {
+        await resolveConnection({
+          config: shorthandConfig,
+          profile: 'custom-profile',
+        });
+      },
+      {
+        name: 'UsageError',
+        message: /Profile "custom-profile" not found/i,
+      },
+    );
+  }
 });

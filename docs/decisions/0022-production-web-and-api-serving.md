@@ -27,6 +27,8 @@ deterministic connection profiles without risk of credential leakage.
    cache headers (`Cache-Control: public, max-age=31536000, immutable`).
    Non-asset requests outside `/v1/*`, `/mcp`, and `/healthz` fall back to
    `index.html` with `no-cache` headers to support client-side SPA routing.
+   An unauthenticated health endpoint `GET`/`HEAD /healthz` returns `200 OK`
+   for supervisors and load balancers, kept strictly outside the SPA fallback.
    Path traversal is strictly prevented by rejecting paths with `..` or
    non-canonical components.
 2. **Local and Explicit LAN Binding.** The server defaults to loopback
@@ -42,7 +44,10 @@ deterministic connection profiles without risk of credential leakage.
    `OPTIONS` requests return `204 No Content` with allowed methods (`GET`,
    `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`) and allowed headers
    (`Authorization`, `Content-Type`, `If-Match`, `Idempotency-Key`,
-   `Last-Event-ID`). Unmatched `/v1/*` routes require bearer authentication
+   `Last-Event-ID`). CORS responses expose necessary protocol headers
+   (`Access-Control-Expose-Headers: Content-Range, Retry-After, Location`)
+   so cross-origin clients can read byte ranges, backoff hints, and resource locations.
+   Unmatched `/v1/*` routes require bearer authentication
    before 404 to prevent route enumeration, pass through the admission
    limiter, and return JSON 404 with CORS headers.
 4. **Strict Isolation of MCP and Preview.** MCP (`/mcp`) remains strictly
@@ -53,11 +58,13 @@ deterministic connection profiles without risk of credential leakage.
    `allow-same-origin`.
 5. **CLI Connection Profiles.** The CLI resolves server connection parameters
    with strict precedence: CLI flags (`--server`, `--token`, `--token-file`) >
-   environment variables (`ARTIFREE_SERVER`, `ARTIFREE_TOKEN`) > profile configuration
-   (`~/.artifree/profiles.json`) > defaults (`http://127.0.0.1:7410`).
+   environment variables (`ARTIFREE_SERVER`, `ARTIFREE_TOKEN`, `ARTIFREE_TOKEN_FILE`) >
+   profile configuration (`~/.artifree/profiles.json`, `~/.config/artifree/profiles.json`,
+   `.artifree/profiles.json`) > defaults (`http://127.0.0.1:7410`).
    Configuration files undergo strict runtime type and shape validation, throwing
    descriptive `UsageError` on invalid types, missing requested profiles, or
-   missing config files when an explicit profile is requested.
+   missing config files when an explicit profile is requested. Explicit profile
+   selection against a shorthand configuration lacking that profile is rejected.
 6. **Web Workspace Server Configuration.** The web workspace stores tokens in
    origin-scoped `sessionStorage` (`artifree.accessToken.<origin>`) to prevent
    cross-origin credential exfiltration. Submitting a blank server URL explicitly

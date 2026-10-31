@@ -365,6 +365,14 @@ async fn cors_preflight_and_response_headers_on_api_v1() -> TestResult {
     assert!(allowed_headers.contains("Last-Event-ID"));
     assert!(allowed_headers.contains("Authorization"));
 
+    let exposed_headers = headers
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(exposed_headers.contains("Content-Range"));
+    assert!(exposed_headers.contains("Retry-After"));
+    assert!(exposed_headers.contains("Location"));
+
     // 2. Preflight on unrecognized API endpoint -> 204 No Content with CORS headers
     let unrec_preflight = Request::builder()
         .method(Method::OPTIONS)
@@ -397,6 +405,14 @@ async fn cors_preflight_and_response_headers_on_api_v1() -> TestResult {
             .and_then(|v| v.to_str().ok()),
         Some("http://localhost:5173")
     );
+    let exposed = res
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(exposed.contains("Content-Range"));
+    assert!(exposed.contains("Retry-After"));
+    assert!(exposed.contains("Location"));
     let body = to_bytes(res.into_body(), 1024).await?;
     let json: Value = serde_json::from_slice(&body)?;
     assert_eq!(json["error"]["code"], "not_found");
@@ -495,4 +511,33 @@ async fn web_assets_validation_fails_on_missing_dir_or_index() {
     assert!(res.is_err());
 
     let _ = fs::remove_dir_all(&temp);
+}
+
+#[tokio::test]
+async fn healthz_returns_200_ok_and_does_not_fallback_to_spa() -> TestResult {
+    let harness = Harness::new();
+
+    // 1. GET /healthz returns 200 OK without authentication
+    let req = Request::builder().uri("/healthz").body(Body::empty())?;
+    let res = harness.router().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = to_bytes(res.into_body(), 1024).await?;
+    let text = String::from_utf8(body.to_vec())?;
+    assert_eq!(text, "ok\n");
+
+    // 2. HEAD /healthz returns 200 OK with empty body
+    let head_request = Request::builder()
+        .method(Method::HEAD)
+        .uri("/healthz")
+        .body(Body::empty())?;
+    let head_response = harness.router().oneshot(head_request).await?;
+    assert_eq!(head_response.status(), StatusCode::OK);
+    let head_body = to_bytes(head_response.into_body(), 1024).await?;
+    assert!(head_body.is_empty());
+
+    // 3. /healthz never falls back to SPA index.html
+    assert!(!text.contains("<!doctype html>"));
+    assert!(!text.contains("Artifree Test"));
+
+    Ok(())
 }

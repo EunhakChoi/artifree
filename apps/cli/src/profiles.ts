@@ -145,6 +145,7 @@ async function loadProfileConfig(options: ConnectionCliOptions): Promise<{
     const candidates = [
       resolve('.artifree', 'profiles.json'),
       resolve('.artifree', 'config.json'),
+      resolve(homedir(), '.artifree', 'profiles.json'),
       resolve(homedir(), '.config', 'artifree', 'profiles.json'),
     ];
     for (const candidate of candidates) {
@@ -179,26 +180,28 @@ async function loadProfileConfig(options: ConnectionCliOptions): Promise<{
   const parsed = validateProfilesFile(parsedUnknown, configPath);
   const configDir = dirname(configPath);
 
-  if (
-    parsed.profiles !== undefined &&
-    explicitProfile !== undefined &&
-    !(explicitProfile in parsed.profiles)
-  ) {
-    throw new UsageError(
-      `Profile "${explicitProfile}" not found in ${configPath}`,
-    );
-  }
-
-  const profileName = explicitProfile ?? parsed.default_profile;
   let config: ProfileConfig | undefined;
 
-  if (profileName !== undefined && parsed.profiles !== undefined) {
-    if (!(profileName in parsed.profiles)) {
+  if (explicitProfile !== undefined) {
+    if (
+      parsed.profiles === undefined ||
+      !(explicitProfile in parsed.profiles)
+    ) {
       throw new UsageError(
-        `Profile "${profileName}" not found in ${configPath}`,
+        `Profile "${explicitProfile}" not found in ${configPath}`,
       );
     }
-    config = parsed.profiles[profileName];
+    config = parsed.profiles[explicitProfile];
+  } else if (parsed.default_profile !== undefined) {
+    if (
+      parsed.profiles === undefined ||
+      !(parsed.default_profile in parsed.profiles)
+    ) {
+      throw new UsageError(
+        `Profile "${parsed.default_profile}" not found in ${configPath}`,
+      );
+    }
+    config = parsed.profiles[parsed.default_profile];
   } else if (
     parsed.server !== undefined ||
     parsed.token !== undefined ||
@@ -230,17 +233,20 @@ export async function resolveConnection(
   const baseUrl = server.trim().replace(/\/+$/, '');
 
   // 2. Resolve accessToken
-  let token = options.token ?? process.env.ARTIFREE_TOKEN;
+  let token: string | undefined;
 
-  if (token === undefined && options['token-file'] !== undefined) {
+  // Precedence: CLI flags (--token, --token-file) > Environment (ARTIFREE_TOKEN, ARTIFREE_TOKEN_FILE) > Profile config
+  if (options.token !== undefined) {
+    token = options.token.trim();
+  } else if (options['token-file'] !== undefined) {
     const content = await tryReadFile(options['token-file']);
     if (content === undefined) {
       throw new UsageError(`Token file not found: ${options['token-file']}`);
     }
     token = content.trim();
-  }
-
-  if (token === undefined && process.env.ARTIFREE_TOKEN_FILE !== undefined) {
+  } else if (process.env.ARTIFREE_TOKEN !== undefined) {
+    token = process.env.ARTIFREE_TOKEN.trim();
+  } else if (process.env.ARTIFREE_TOKEN_FILE !== undefined) {
     const content = await tryReadFile(process.env.ARTIFREE_TOKEN_FILE);
     if (content === undefined) {
       throw new UsageError(
@@ -248,13 +254,9 @@ export async function resolveConnection(
       );
     }
     token = content.trim();
-  }
-
-  if (token === undefined && config?.token !== undefined) {
+  } else if (config?.token !== undefined) {
     token = config.token.trim();
-  }
-
-  if (token === undefined && config?.token_file !== undefined) {
+  } else if (config?.token_file !== undefined) {
     const resolvedPath = configDir
       ? resolve(configDir, config.token_file)
       : resolve(config.token_file);
