@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import {
   ArtifreeApiError,
@@ -41,9 +40,11 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact preview <id> [--revision <n>]
 
 Connection:
-  --server <url>         API URL [env ARTIFREE_URL, default http://127.0.0.1:7410]
+  --server <url>         API URL [env ARTIFREE_SERVER, default http://127.0.0.1:7410]
+  --token <token>        Access token [env ARTIFREE_TOKEN]
   --token-file <path>    Access token file [env ARTIFREE_TOKEN_FILE]
-                         ARTIFREE_TOKEN may hold the token itself.
+  --config <path>        Configuration file [env ARTIFREE_CONFIG_FILE]
+  --profile <name>       Connection profile [env ARTIFREE_PROFILE]
 
 list prints every matching artifact, reading page after page, unless
 --limit or --page-token asks for one page; that page carries next_page_token
@@ -74,30 +75,21 @@ package with the directory's files (hidden entries skipped) and deletes
 files the directory lacks. Results are JSON on stdout; cat writes raw bytes.
 `;
 
-/** Invalid command-line input; the caller reports it with exit code 2. */
-export class UsageError extends Error {
-  override name = 'UsageError';
-}
+import { UsageError } from './errors.js';
+import { resolveConnection } from './profiles.js';
+import type { ConnectionCliOptions } from './profiles.js';
+export { UsageError };
 
 const connectionOptions = {
   server: { type: 'string' },
+  token: { type: 'string' },
   'token-file': { type: 'string' },
+  config: { type: 'string' },
+  profile: { type: 'string' },
 } as const;
 
-async function connect(values: {
-  server?: string | undefined;
-  'token-file'?: string | undefined;
-}): Promise<ArtifreeClient> {
-  const baseUrl =
-    values.server ?? process.env.ARTIFREE_URL ?? 'http://127.0.0.1:7410';
-  const tokenFile = values['token-file'] ?? process.env.ARTIFREE_TOKEN_FILE;
-  let accessToken = process.env.ARTIFREE_TOKEN;
-  if (tokenFile !== undefined)
-    accessToken = (await readFile(tokenFile, 'utf8')).trim();
-  if (accessToken === undefined || accessToken === '')
-    throw new UsageError(
-      'An access token is required: pass --token-file, or set ARTIFREE_TOKEN_FILE or ARTIFREE_TOKEN.',
-    );
+async function connect(values: ConnectionCliOptions): Promise<ArtifreeClient> {
+  const { baseUrl, accessToken } = await resolveConnection(values);
   return new ArtifreeClient({ baseUrl, accessToken });
 }
 

@@ -29,7 +29,7 @@ React/TSX 실행은 R01–R03을 거친다. 선행 조건이 없는 작업 사�
 | 검증            | 병합된 변경의 CI는 Linux·Windows·Rust 1.88·Chromium·Firefox를 포함한다. 현재 변경의 실행 결과는 해당 PR과 검사 기록에서 확인한다.                                                                                                                                                                                                                                                                                                                                                                      |
 
 구현 결정은 [0001](decisions/0001-foundation.md)부터
-[0019](decisions/0019-runtime-metadata-bridge.md)까지가 기준이다. Axum/Tokio와 SQLite는
+[0022](decisions/0022-production-web-and-api-serving.md)까지가 기준이다. Axum/Tokio와 SQLite는
 이미 선택했다. 다른 DB·queue·editor·bundler·worker 도구는 해당 기능 PR에서 결정한다.
 
 ## 모든 구현 PR의 진입 조건과 완료 기준
@@ -104,7 +104,7 @@ R04(runtime metadata 읽기)와 R05(최소 권한 부여·철회)도 구현했�
 
 | ID  | PR 범위와 완료 기준                                                                                                                                                                                                                                                                                                                             | 선행          |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| O01 | **개발 서버 없는 제품 실행.** production 웹 자산과 API를 실행하고 preview는 별도 origin으로 유지한다. 웹·CLI의 서버 주소/profile과 시작·종료 절차를 정리한다. Vite 없이 localhost와 명시적 LAN 설정에서 생성·수정·preview를 검증한다.                                                                                                           | 기반          |
+| O01 | **[완료: 0022] 개발 서버 없는 제품 실행.** production 웹 자산과 API를 실행하고 preview는 별도 origin으로 유지한다. 웹·CLI의 서버 주소/profile과 시작·종료 절차를 정리한다. Vite 없이 localhost와 명시적 LAN 설정에서 생성·수정·preview를 검증한다.                                                                                              | 기반          |
 | O02 | **개인 서버의 원격 접근 경계.** HTTPS reverse proxy 뒤의 API/MCP Host·Origin·preview 주소 정책과 단일 owner용 agent token 발급·회전·철회를 구현한다. 연결 가능성과 인증을 구분하고 폐기한 token·잘못된 origin·proxy 설정을 거절한다. 다중 사용자/OAuth 전체는 S01 범위다.                                                                       | O01           |
 | O03 | **실행·배포 패키지.** Linux/Windows 배포물, 선택적 container, 정적 웹과 별도 Rust API의 배포 설정을 제공한다. ngrok/Cloudflare, Headscale 같은 접근 경로와 Vercel 정적 UI의 설정을 문서화한다. CI에서는 깨끗한 환경의 설치·시작·저장을 검증하고 실제 외부 서비스 실행 여부는 별도로 기록한다. Codex·Pi 연결도 실제 실행한 범위와 버전을 남긴다. | O01, O02      |
 | O04 | **백업·복구와 schema 업그레이드.** 운영 중 일관된 SQLite 백업을 만들고 새 인스턴스에서 리비전·바이트·key replay를 복구한다. 지원하는 이전 schema에서 migration을 검증하고, 더 최신 schema나 실패한 migration은 데이터 손상 없이 거절한다. 이후 도메인도 백업 범위를 함께 확장한다.                                                              | O01           |

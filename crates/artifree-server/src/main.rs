@@ -56,6 +56,7 @@ fn run() -> Result<(), String> {
                 let line = serde_json::json!({
                     "event": "ready",
                     "api_url": ready.api_url,
+                    "web_url": ready.web_url,
                     "content_origin": ready.content_origin,
                     "token_file": ready.token_file,
                 });
@@ -72,13 +73,26 @@ fn run() -> Result<(), String> {
 
 fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
     let mut data_dir = None;
-    let mut api_address = serve::DEFAULT_API_ADDRESS.to_owned();
-    let mut content_address = serve::DEFAULT_CONTENT_ADDRESS.to_owned();
-    let mut content_origin = None;
-    let mut frame_ancestors = serve::DEFAULT_FRAME_ANCESTORS.to_owned();
+    let mut explicit_api_listen = None;
+    let mut explicit_content_listen = None;
+    let mut explicit_content_origin = None;
+    let mut explicit_frame_ancestors = None;
     let mut preview_ttl = serve::DEFAULT_PREVIEW_TTL;
     let mut limits = RequestLimits::default();
     let mut change_streams = changes::DEFAULT_STREAMS_PER_ACTOR;
+    let mut lan_ip: Option<std::net::IpAddr> = None;
+    let mut web_dir = std::env::var_os("ARTIFREE_WEB_DIR").map(PathBuf::from);
+
+    if let Ok(lan_env) = std::env::var("ARTIFREE_LAN") {
+        let trimmed = lan_env.trim();
+        if !trimmed.is_empty() {
+            let ip: std::net::IpAddr = trimmed
+                .parse()
+                .map_err(|_| "ARTIFREE_LAN must be an IP address such as 192.168.1.100 or ::1.")?;
+            lan_ip = Some(ip);
+        }
+    }
+
     let mut remaining = arguments.iter();
     while let Some(flag) = remaining.next() {
         let mut value = || {
@@ -89,10 +103,18 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         };
         match flag.as_str() {
             "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
-            "--api-listen" => api_address = value()?,
-            "--content-listen" => content_address = value()?,
-            "--content-origin" => content_origin = Some(value()?),
-            "--frame-ancestors" => frame_ancestors = value()?,
+            "--api-listen" => explicit_api_listen = Some(value()?),
+            "--content-listen" => explicit_content_listen = Some(value()?),
+            "--content-origin" => explicit_content_origin = Some(value()?),
+            "--frame-ancestors" => explicit_frame_ancestors = Some(value()?),
+            "--web-dir" => web_dir = Some(PathBuf::from(value()?)),
+            "--lan" => {
+                let val = value()?;
+                let ip: std::net::IpAddr = val
+                    .parse()
+                    .map_err(|_| "--lan must be an IP address such as 192.168.1.100 or ::1.")?;
+                lan_ip = Some(ip);
+            }
             "--preview-ttl-seconds" => {
                 let range = || {
                     format!(
@@ -117,11 +139,32 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             }
         }
     }
+
+    let (default_api, default_content, default_origin) = resolve_lan_defaults(lan_ip);
+
+    let api_address = explicit_api_listen.unwrap_or(default_api);
+    let content_address = explicit_content_listen
+        .as_deref()
+        .unwrap_or(&default_content)
+        .to_owned();
+
+    let content_origin = if let Some(origin) = explicit_content_origin {
+        Some(origin)
+    } else if explicit_content_listen.is_none() {
+        default_origin
+    } else {
+        None
+    };
+
+    let frame_ancestors =
+        explicit_frame_ancestors.unwrap_or_else(|| derive_frame_ancestors(&api_address));
+
     let address = |flag: &str, value: &str| {
         value
             .parse::<SocketAddr>()
             .map_err(|_| format!("{flag} must be an IP address and port, such as 127.0.0.1:7410."))
     };
+
     Ok(ServeOptions {
         data_dir: data_dir.ok_or("serve requires --data-dir <directory>.")?,
         api_address: address("--api-listen", &api_address)?,
@@ -129,9 +172,38 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         content_origin,
         frame_ancestors,
         preview_ttl,
+        web_dir,
         limits,
         change_streams,
     })
+}
+
+fn resolve_lan_defaults(lan_ip: Option<std::net::IpAddr>) -> (String, String, Option<String>) {
+    if let Some(ip) = lan_ip {
+        let (api_str, content_str) = match ip {
+            std::net::IpAddr::V4(v4) => (format!("{v4}:7410"), format!("{v4}:7411")),
+            std::net::IpAddr::V6(v6) => (format!("[{v6}]:7410"), format!("[{v6}]:7411")),
+        };
+        let origin = format!("http://{content_str}");
+        (api_str, content_str, Some(origin))
+    } else {
+        (
+            serve::DEFAULT_API_ADDRESS.to_owned(),
+            serve::DEFAULT_CONTENT_ADDRESS.to_owned(),
+            None,
+        )
+    }
+}
+
+fn derive_frame_ancestors(api_address: &str) -> String {
+    if api_address.starts_with("127.0.0.1:")
+        || api_address.starts_with("localhost:")
+        || api_address.starts_with("[::1]:")
+    {
+        serve::DEFAULT_FRAME_ANCESTORS.to_owned()
+    } else {
+        format!("{} http://{api_address}", serve::DEFAULT_FRAME_ANCESTORS)
+    }
 }
 
 /// A request limit: a whole number from 1 to 100000.
@@ -164,6 +236,8 @@ Options:
   --content-origin <origin>     Public preview origin, if proxied
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
   --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
+  --web-dir <dir>               Serve production web assets (env: ARTIFREE_WEB_DIR)
+  --lan <ip>                    Bind API and preview to LAN IP (env: ARTIFREE_LAN)
   --request-burst <n>           Requests accepted at once [default: {burst}]
   --requests-per-minute <n>     Sustained request rate [default: {rate}]
   --concurrent-requests <n>     Requests running at once [default: {concurrent}]
@@ -184,4 +258,75 @@ running server.",
         concurrent = RequestLimits::default().concurrent,
         streams = changes::DEFAULT_STREAMS_PER_ACTOR,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_frame_ancestors_for_loopback() {
+        assert_eq!(
+            derive_frame_ancestors("127.0.0.1:7410"),
+            serve::DEFAULT_FRAME_ANCESTORS
+        );
+        assert_eq!(
+            derive_frame_ancestors("localhost:7410"),
+            serve::DEFAULT_FRAME_ANCESTORS
+        );
+        assert_eq!(
+            derive_frame_ancestors("[::1]:7410"),
+            serve::DEFAULT_FRAME_ANCESTORS
+        );
+    }
+
+    #[test]
+    fn derives_frame_ancestors_for_lan_and_custom_ports() {
+        assert_eq!(
+            derive_frame_ancestors("192.168.1.50:7410"),
+            format!(
+                "{} http://192.168.1.50:7410",
+                serve::DEFAULT_FRAME_ANCESTORS
+            )
+        );
+        assert_eq!(
+            derive_frame_ancestors("192.168.1.50:9000"),
+            format!(
+                "{} http://192.168.1.50:9000",
+                serve::DEFAULT_FRAME_ANCESTORS
+            )
+        );
+    }
+
+    #[test]
+    fn parse_serve_overrides_frame_ancestors_correctly() -> Result<(), Box<dyn std::error::Error>> {
+        let opts = parse_serve(&[
+            "--data-dir".into(),
+            "/tmp/test-data".into(),
+            "--lan".into(),
+            "192.168.1.50".into(),
+            "--api-listen".into(),
+            "192.168.1.50:9000".into(),
+        ])?;
+
+        assert_eq!(
+            opts.frame_ancestors,
+            format!(
+                "{} http://192.168.1.50:9000",
+                serve::DEFAULT_FRAME_ANCESTORS
+            )
+        );
+
+        let explicit = parse_serve(&[
+            "--data-dir".into(),
+            "/tmp/test-data".into(),
+            "--lan".into(),
+            "192.168.1.50".into(),
+            "--frame-ancestors".into(),
+            "https://custom.app".into(),
+        ])?;
+
+        assert_eq!(explicit.frame_ancestors, "https://custom.app");
+        Ok(())
+    }
 }

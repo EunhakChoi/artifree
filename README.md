@@ -39,7 +39,11 @@ npm run dev
 
 Open the URL printed by Vite and paste the token from
 `.artifree/data/access-token`. Vite forwards `/v1` to the API
-(`ARTIFREE_API_URL` overrides the target). Agents and scripts use the CLI:
+(`ARTIFREE_API_URL` overrides the target).
+
+Alternatively, run the production build without Vite by passing `--web-dir apps/web/dist` (or `ARTIFREE_WEB_DIR=apps/web/dist`). To bind on an explicit LAN address, use `--lan <ip>` (or `ARTIFREE_LAN=<ip>`).
+
+Agents and scripts use the CLI:
 
 ```sh
 export ARTIFREE_TOKEN_FILE=.artifree/data/access-token
@@ -52,7 +56,9 @@ node apps/cli/dist/main.js artifact --help
 Results are JSON on stdout; failures go to stderr with exit code 1 (API) or 2
 (usage). A save names its base revision and fails with `revision_conflict` if
 another save won. Retrying with the same `--idempotency-key` returns the
-original result instead of committing twice. The HTTP API is summarized in the
+original result instead of committing twice. Connection settings can be managed
+with profiles in `~/.artifree/profiles.json` or specified via `--config` and
+`--profile`. The HTTP API is summarized in the
 [architecture document](docs/architecture.md#http-api-v1).
 
 MCP agents such as Codex and Pi connect to `http://127.0.0.1:7410/mcp` with the
@@ -99,8 +105,10 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0016](docs/decisions/0016-bounded-file-reads.md),
 [0017](docs/decisions/0017-code-workspace.md),
 [0018](docs/decisions/0018-source-draft-recovery.md),
-[0019](docs/decisions/0019-runtime-metadata-bridge.md), and
-[0020](docs/decisions/0020-runtime-grants.md)).
+[0019](docs/decisions/0019-runtime-metadata-bridge.md),
+[0020](docs/decisions/0020-runtime-grants.md),
+[0021](docs/decisions/0021-agent-selection-handoff.md), and
+[0022](docs/decisions/0022-production-web-and-api-serving.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

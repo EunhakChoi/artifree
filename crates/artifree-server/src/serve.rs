@@ -46,6 +46,8 @@ pub struct ServeOptions {
     pub limits: RequestLimits,
     /// Change streams one actor may keep open.
     pub change_streams: u32,
+    /// Optional production web asset directory.
+    pub web_dir: Option<PathBuf>,
 }
 
 /// Addresses reported once both listeners accept connections.
@@ -53,6 +55,8 @@ pub struct ServeOptions {
 pub struct Ready {
     /// Base URL of the API.
     pub api_url: String,
+    /// Base URL of the served production web frontend, when configured.
+    pub web_url: Option<String>,
     /// Origin of preview content.
     pub content_origin: String,
     /// File holding the access token.
@@ -69,6 +73,10 @@ pub struct Ready {
 /// when a listener fails while serving.
 pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
     prepare_data_dir(&options.data_dir)?;
+    let web_assets = match options.web_dir {
+        Some(dir) => Some(crate::web::WebAssets::new(dir)?),
+        None => None,
+    };
     let store = SqliteStore::open(&options.data_dir.join("artifree.sqlite3"))
         .map_err(|error| error.to_string())?;
     let token_file = options.data_dir.join("access-token");
@@ -82,6 +90,7 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
         let api = bind(options.api_address).await?;
         let content = bind(options.content_address).await?;
         let api_url = format!("http://{}", local_address(&api)?);
+        let web_url = web_assets.as_ref().map(|_| api_url.clone());
         let content_origin = match options.content_origin {
             Some(origin) => origin,
             None => format!("http://{}", local_address(&content)?),
@@ -99,12 +108,13 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
         )?;
         on_ready(&Ready {
             api_url,
+            web_url,
             content_origin,
             token_file,
         });
         let streams = state.clone();
-        let api_server =
-            axum::serve(api, http::router(state.clone())).with_graceful_shutdown(async move {
+        let api_server = axum::serve(api, http::router_with_web(state.clone(), web_assets))
+            .with_graceful_shutdown(async move {
                 shutdown_signal().await;
                 // Open change streams would otherwise keep the server running.
                 streams.close_streams();

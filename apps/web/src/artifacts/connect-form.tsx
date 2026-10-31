@@ -18,17 +18,23 @@ import {
 import { Input } from '@/components/ui/input';
 
 interface ConnectFormProps {
-  /** Receives a non-empty token; the caller verifies it with the server. */
-  onConnect: (token: string) => void;
+  /** Optional initial server URL (defaults to empty string for current origin). */
+  initialServerUrl?: string;
+  /** Receives a non-empty token and server URL (empty string for current origin); the caller verifies it with the server. */
+  onConnect: (token: string, serverUrl: string) => void;
 }
 
 /** Asks for the access token printed into the server's data directory. */
-export function ConnectForm({ onConnect }: ConnectFormProps) {
+export function ConnectForm({
+  initialServerUrl = '',
+  onConnect,
+}: ConnectFormProps) {
+  const [serverUrl, setServerUrl] = useState(initialServerUrl);
   const [token, setToken] = useState('');
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
-    const trimmed = token.trim();
-    if (trimmed !== '') onConnect(trimmed);
+    const trimmedToken = token.trim();
+    if (trimmedToken !== '') onConnect(trimmedToken, serverUrl.trim());
   }
   return (
     <Card>
@@ -46,6 +52,22 @@ export function ConnectForm({ onConnect }: ConnectFormProps) {
         <form onSubmit={submit}>
           <FieldGroup>
             <Field>
+              <FieldLabel htmlFor="server-url">Server URL</FieldLabel>
+              <Input
+                id="server-url"
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="http://127.0.0.1:7410"
+                value={serverUrl}
+                onChange={(event) => setServerUrl(event.target.value)}
+              />
+              <FieldDescription>
+                Leave empty to use the current origin. Remote servers must have
+                CORS enabled.
+              </FieldDescription>
+            </Field>
+            <Field>
               <FieldLabel htmlFor="access-token">Access token</FieldLabel>
               <Input
                 id="access-token"
@@ -56,8 +78,7 @@ export function ConnectForm({ onConnect }: ConnectFormProps) {
                 onChange={(event) => setToken(event.target.value)}
               />
               <FieldDescription>
-                Requests go to this page’s origin under <code>/v1</code>; the
-                development server forwards them to the API.
+                Requests go to <code>/v1</code> on the target server.
               </FieldDescription>
             </Field>
             <Field orientation="horizontal">
