@@ -6,11 +6,12 @@ import { createInterface } from 'node:readline';
  * Builds artifree-server and returns the executable path reported by Cargo,
  * so callers do not guess target directories or platform suffixes.
  */
-export function buildServer(root) {
+export function buildServer(root, { release = false } = {}) {
   const output = execFileSync(
     'cargo',
     [
       'build',
+      ...(release ? ['--release'] : []),
       '--quiet',
       '--locked',
       '-p',
@@ -36,9 +37,15 @@ export function buildServer(root) {
 
 /**
  * Starts `artifree-server serve` on free loopback ports and resolves after
- * its readiness line. `stop()` ends it gracefully; `kill()` simulates a crash.
+ * its readiness line. `options.env` and `options.cwd` replace the child's
+ * environment and working directory. `stop()` ends it gracefully; `kill()` simulates a crash.
  */
-export async function startServer(binary, dataDir, extraArgs = []) {
+export async function startServer(
+  binary,
+  dataDir,
+  extraArgs = [],
+  { env, cwd } = {},
+) {
   const child = spawn(
     binary,
     [
@@ -51,7 +58,13 @@ export async function startServer(binary, dataDir, extraArgs = []) {
       '127.0.0.1:0',
       ...extraArgs,
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+    // Without `env`/`cwd` the child inherits ours; release verification passes
+    // a scrubbed environment and a directory outside the repository.
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(env && { env }),
+      ...(cwd && { cwd }),
+    },
   );
   let stderr = '';
   child.stderr.setEncoding('utf8');
