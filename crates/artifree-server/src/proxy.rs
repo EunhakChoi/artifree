@@ -106,8 +106,12 @@ impl FromStr for IpNetwork {
 /// Evaluated client connection metadata after proxy inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConnectionInfo {
-    /// Effective client IP address (forwarded by trusted proxy or direct peer).
-    pub client_ip: IpAddr,
+    /// Effective client IP address: the direct peer, or the address recovered
+    /// from forwarding headers sent by a trusted proxy. `None` when the peer is
+    /// a trusted proxy that sent no client address, so the client is unknown.
+    /// Unknown is not loopback; consumers that gate on locality must fail
+    /// closed (ADR 0024, 2026-11-01 amendment).
+    pub client_ip: Option<IpAddr>,
     /// Effective host header (X-Forwarded-Host if trusted proxy, else Host).
     pub host: String,
     /// Effective protocol scheme ("http" or "https").
@@ -148,14 +152,14 @@ pub(crate) fn evaluate_connection(
             .map_or("", str::trim)
             .to_owned();
         return Ok(ClientConnectionInfo {
-            client_ip: peer_ip,
+            client_ip: Some(peer_ip),
             host,
             proto: "http".to_owned(),
             is_proxied: false,
         });
     }
 
-    let client_ip = parse_trusted_client_ip(headers, peer_ip, trusted_proxies)?;
+    let client_ip = parse_trusted_client_ip(headers, trusted_proxies)?;
     let host = parse_trusted_host(headers)?;
     let proto = parse_trusted_proto(headers);
 
@@ -167,11 +171,14 @@ pub(crate) fn evaluate_connection(
     })
 }
 
+/// Resolves the client address behind a trusted proxy peer.
+///
+/// Returns `Ok(None)` when the request carries no `X-Forwarded-For` or
+/// `Forwarded` header: the peer is the proxy itself, not the client.
 fn parse_trusted_client_ip(
     headers: &HeaderMap,
-    peer_ip: IpAddr,
     trusted_proxies: &[IpNetwork],
-) -> Result<IpAddr, ApiError> {
+) -> Result<Option<IpAddr>, ApiError> {
     if let Some(xff) = headers.get("x-forwarded-for") {
         let xff_str = xff.to_str().map_err(|_| {
             ApiError::new(
@@ -211,11 +218,10 @@ fn parse_trusted_client_ip(
         // This prevents untrusted clients from injecting spoofed leftmost IPs.
         for ip in ips.iter().rev() {
             if !trusted_proxies.iter().any(|net| net.contains(ip)) {
-                return Ok(*ip);
+                return Ok(Some(*ip));
             }
         }
-        // If all forwarded IPs are trusted proxies, fall back to the leftmost IP.
-        Ok(*ips.first().unwrap_or(&peer_ip))
+        Ok(leftmost_when_all_trusted(&ips))
     } else if let Some(fwd) = headers.get("forwarded") {
         let fwd_str = fwd.to_str().map_err(|_| {
             ApiError::new(
@@ -227,13 +233,23 @@ fn parse_trusted_client_ip(
         let ips = extract_forwarded_for_hops(fwd_str)?;
         for ip in ips.iter().rev() {
             if !trusted_proxies.iter().any(|net| net.contains(ip)) {
-                return Ok(*ip);
+                return Ok(Some(*ip));
             }
         }
-        Ok(*ips.first().unwrap_or(&peer_ip))
+        Ok(leftmost_when_all_trusted(&ips))
     } else {
-        Ok(peer_ip)
+        Ok(None)
     }
+}
+
+/// Picks the client when every hop in the chain is a trusted proxy address.
+///
+/// A trusted proxy appends the peer it saw, so each entry was recorded by a
+/// trusted hop and the leftmost one is the original client, which genuinely
+/// is a trusted address (for example a local client of a local proxy). The
+/// chains are never empty here; an empty one would be unknown, never the peer.
+fn leftmost_when_all_trusted(hops: &[IpAddr]) -> Option<IpAddr> {
+    hops.first().copied()
 }
 
 fn parse_trusted_host(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -482,11 +498,61 @@ mod tests {
         // Right-to-left: 10.0.0.1 is trusted proxy -> skipped.
         // Next: 203.0.113.195 is untrusted -> chosen as real client IP.
         // Injected 127.0.0.1 on the left is ignored!
-        assert_eq!(info.client_ip, "203.0.113.195".parse::<IpAddr>()?);
+        assert_eq!(info.client_ip, Some("203.0.113.195".parse::<IpAddr>()?));
         assert_eq!(info.host, "artifree.example.com:8443");
         assert_eq!(info.proto, "https");
         assert!(info.is_proxied);
 
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_proxy_without_forwarding_information_has_unknown_client()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
+        let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
+
+        let info = evaluate_connection(&HeaderMap::new(), proxy_peer, &trusted)
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, None);
+        assert!(info.is_proxied);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-host", "artifree.example.com".parse()?);
+        headers.insert("x-forwarded-proto", "https".parse()?);
+        let info =
+            evaluate_connection(&headers, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, None, "host/proto alone name no client");
+        Ok(())
+    }
+
+    #[test]
+    fn direct_peer_is_its_own_client() -> Result<(), Box<dyn std::error::Error>> {
+        let peer = "127.0.0.1".parse::<IpAddr>()?;
+        let info =
+            evaluate_connection(&HeaderMap::new(), peer, &[]).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, Some(peer));
+        assert!(!info.is_proxied);
+        Ok(())
+    }
+
+    #[test]
+    fn all_trusted_chain_resolves_to_leftmost_hop() -> Result<(), Box<dyn std::error::Error>> {
+        let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
+        let trusted = vec![
+            "127.0.0.1".parse::<IpNetwork>()?,
+            "10.0.0.0/8".parse::<IpNetwork>()?,
+        ];
+
+        let mut xff = HeaderMap::new();
+        xff.insert("x-forwarded-for", "10.1.2.3, 127.0.0.1".parse()?);
+        let info = evaluate_connection(&xff, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, Some("10.1.2.3".parse::<IpAddr>()?));
+
+        let mut fwd = HeaderMap::new();
+        fwd.insert("forwarded", "for=10.1.2.3, for=127.0.0.1".parse()?);
+        let info = evaluate_connection(&fwd, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, Some("10.1.2.3".parse::<IpAddr>()?));
         Ok(())
     }
 
@@ -504,7 +570,7 @@ mod tests {
 
         let info =
             evaluate_connection(&headers, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
-        assert_eq!(info.client_ip, "203.0.113.195".parse::<IpAddr>()?);
+        assert_eq!(info.client_ip, Some("203.0.113.195".parse::<IpAddr>()?));
         assert_eq!(info.host, "artifree.example.com");
         assert_eq!(info.proto, "https");
 

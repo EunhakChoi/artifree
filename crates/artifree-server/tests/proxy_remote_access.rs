@@ -403,6 +403,102 @@ async fn mcp_loopback_confinement_behind_trusted_proxy() -> TestResult {
     Ok(())
 }
 
+/// Builds an authenticated `tools/list` request to `/mcp` from `peer`, with
+/// the given extra headers.
+fn mcp_request(
+    peer: SocketAddr,
+    extra: &[(&str, &str)],
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    let mut builder = Request::post("/mcp")
+        .header(header::HOST, "artifree.example.com")
+        .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-11-25");
+    for (name, value) in extra {
+        builder = builder.header(*name, *value);
+    }
+    let mut req = builder.body(Body::from(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+    ))?;
+    req.extensions_mut().insert(ConnectInfo(peer));
+    Ok(req)
+}
+
+fn mcp_harness(allow_remote_mcp: bool) -> Result<ProxyHarness, Box<dyn std::error::Error>> {
+    ProxyHarness::new(
+        vec!["127.0.0.1/32".parse()?],
+        vec!["artifree.example.com".into()],
+        vec![],
+        Some("https://artifree.example.com".into()),
+        "https://preview.example.com".into(),
+        allow_remote_mcp,
+    )
+}
+
+#[tokio::test]
+async fn mcp_rejects_trusted_proxy_request_without_forwarding_information() -> TestResult {
+    // A same-host tunnel or proxy (peer 127.0.0.1, trusted) that strips the
+    // visitor address leaves the real client unknown. That must not be
+    // treated as a loopback client (ADR 0024 amendment).
+    let peer: SocketAddr = "127.0.0.1:44444".parse()?;
+    let harness = mcp_harness(false)?;
+
+    let res = harness.api.clone().oneshot(mcp_request(peer, &[])?).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "no headers at all");
+
+    // Forwarded host/proto without a client address is still unknown.
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(
+            peer,
+            &[
+                ("x-forwarded-host", "artifree.example.com"),
+                ("x-forwarded-proto", "https"),
+            ],
+        )?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "host/proto only");
+
+    // The explicit remote opt-in still admits the unknown client.
+    let remote = mcp_harness(true)?;
+    let res = remote.api.clone().oneshot(mcp_request(peer, &[])?).await?;
+    assert_eq!(res.status(), StatusCode::OK, "--allow-remote-mcp");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_allows_direct_loopback_client_without_proxy() -> TestResult {
+    // No trusted proxies configured: the socket peer is the client.
+    let harness = ProxyHarness::new(
+        vec![],
+        vec!["artifree.example.com".into()],
+        vec![],
+        Some("https://artifree.example.com".into()),
+        "https://preview.example.com".into(),
+        false,
+    )?;
+    let peer: SocketAddr = "127.0.0.1:44444".parse()?;
+    let res = harness.api.clone().oneshot(mcp_request(peer, &[])?).await?;
+    assert_eq!(res.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn untrusted_peer_forwarded_headers_rejected_on_mcp() -> TestResult {
+    let harness = mcp_harness(false)?;
+    let peer: SocketAddr = "198.51.100.5:12345".parse()?;
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(peer, &[("x-forwarded-for", "127.0.0.1")])?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
 #[tokio::test]
 async fn api_origin_and_content_origin_conflict_rejected() -> TestResult {
     let temp_dir = std::env::temp_dir().join(format!("artifree-conflict-{}", std::process::id()));

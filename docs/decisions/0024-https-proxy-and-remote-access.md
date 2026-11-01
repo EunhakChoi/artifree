@@ -85,3 +85,38 @@ critical security vulnerabilities:
   defense against forwarded header forgery.
 - MCP's loopback security model is preserved by default behind local reverse proxies.
 - Preview sandbox isolation remains fully enforced across distinct public origins.
+
+## Amendment 2026-11-01: trusted-proxy requests without a client address
+
+Decision 2 above misdescribed the implementation and left a gap. This
+amendment replaces its resolution rules; everything else stands.
+
+- **Resolution.** Behind a trusted proxy peer, the effective client is found by
+  walking `X-Forwarded-For` (or, if absent, `Forwarded`) right to left and
+  taking the first address that is not in `--trusted-proxy`. The leftmost
+  entry is not used while an untrusted entry exists, so a client cannot prepend
+  `127.0.0.1`.
+- **No forwarding information means unknown client.** If the peer is trusted
+  but the request has neither `X-Forwarded-For` nor `Forwarded`, the peer is
+  the proxy, not the client, and the client is unknown. `X-Forwarded-Host` and
+  `X-Forwarded-Proto` alone do not name a client. Previously the peer address
+  was returned, so a same-host tunnel or proxy (peer 127.0.0.1) that strips
+  visitor addresses made every internet request look like loopback and
+  bypassed the `/mcp` confinement (the agent token was still required).
+- **Representation.** `ClientConnectionInfo.client_ip` is
+  `Option<IpAddr>`; `None` is the unknown client, with no placeholder address.
+- **Consumers fail closed.** `/mcp` allows a request only if `--allow-remote-mcp`
+  is set or the client is known and loopback; unknown is `403`. No other code
+  reads `client_ip`: Host and Origin checks, rate limits, and preview use
+  the peer socket, host, and proto, and are unchanged. A direct loopback client
+  without a trusted proxy remains its own client.
+- **All hops trusted.** When every address in the chain is a trusted proxy, the
+  leftmost one is the client. The model requires trusted proxies to append the
+  peer they saw, so every entry was recorded by a trusted hop and the leftmost
+  is a genuine trusted address, for example a local client of a local proxy.
+  This stays, now covered by tests. It does assume the proxy appends rather
+  than passes client-supplied `X-Forwarded-For` through unchanged; such a
+  proxy must not be listed as trusted.
+- **Unverified.** Only the first `X-Forwarded-For` header line is read; a
+  proxy that adds a second line instead of appending to the first is not
+  handled and is left to a follow-up.
