@@ -3,8 +3,10 @@
 Status: O03a, implemented ([decision 0025](decisions/0025-release-packages.md)).
 The [container image](container.md) and [remote access guides](remote-access.md)
 are O03b ([decision 0026](decisions/0026-container-image.md)). Archive
-signing, publishing, and license texts (O03c) and backup (O04) are not
-implemented.
+signing, publishing, and license texts (O03c) are not implemented.
+Backup, restore, and schema upgrade are O04
+([decision 0027](decisions/0027-backup-restore-and-schema-upgrade.md),
+[guide](backup-restore.md)).
 
 > **Warning.** CI archives are for testing and your own use. Do not
 > redistribute them: the full license texts of the Rust crates and npm
@@ -50,6 +52,7 @@ artifree-<version>-<target>/
   web/                     built web workspace (index.html, assets/)
   cli/artifree.mjs         the command-line client, one bundled script
   docs/release-packages.md this page
+  docs/backup-restore.md   backup, restore, and upgrade (O04)
   LICENSE  THIRD_PARTY_NOTICES.md
   RUST_DEPENDENCIES.json   crates linked into the server: name, version, license expression
 ```
@@ -111,17 +114,18 @@ restarted, but treat it as a last resort.
 
 ## Upgrade in place
 
-1. Stop the server.
-2. Copy the whole `--data-dir` somewhere else. A consistent online backup,
-   restore verification, and migration checks across versions are O04 and do
-   not exist yet, so a copy of the stopped server's directory is the only
-   safeguard.
+1. Take a backup of the running server with the new package's
+   `bin/artifree-server backup --data-dir <dir> --output <file>`: it reads
+   the data of older releases, proves the file restores, and needs no
+   `backup` command in the old release ([backup guide](backup-restore.md)).
+   Alternatively stop the server and copy the whole `--data-dir`.
+2. Stop the server.
 3. Extract the new archive into a new directory (do not overlay the old one) and
-   start it with the same `--data-dir`.
+   start it with the same `--data-dir`. The first start upgrades the database
+   in one transaction; a refused or failed upgrade leaves the file unchanged.
 
-There is no tested guarantee that data written by a newer version opens in an
-older one, so keep the previous package and the copied directory until you are
-satisfied. Release notes do not exist yet; check the decision records for a
+A newer schema is refused by an older build, and there is no downgrade: keep
+the previous package and the backup until you are satisfied. Release notes do not exist yet; check the decision records for a
 changed data format.
 
 ## What CI checks

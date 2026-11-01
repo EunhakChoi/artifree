@@ -9,6 +9,7 @@
     reason = "Command failures must be reported on stderr."
 )]
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -18,6 +19,8 @@ use std::time::Duration;
 use artifree_server::changes;
 use artifree_server::limits::RequestLimits;
 use artifree_server::serve::{self, ServeOptions};
+
+mod maintenance;
 
 fn main() -> ExitCode {
     match run() {
@@ -30,7 +33,28 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // Paths may be any bytes the platform allows, so these two commands read
+    // their arguments as they are.
+    if let Some((command, rest)) = args.split_first() {
+        if command == "backup" {
+            return maintenance::backup_command(rest);
+        }
+        if command == "restore" {
+            return maintenance::restore_command(rest);
+        }
+    }
+    let args = args
+        .into_iter()
+        .map(|argument| {
+            argument.into_string().map_err(|argument| {
+                format!(
+                    "Unknown arguments. {} is not valid UTF-8.",
+                    argument.to_string_lossy()
+                )
+            })
+        })
+        .collect::<Result<Vec<String>, String>>()?;
     match args.as_slice() {
         [] => {
             print_help();
@@ -528,6 +552,8 @@ fn print_help() {
 
 Usage:
   artifree-server serve --data-dir <dir> [options]
+  artifree-server backup --data-dir <dir> --output <file>
+  artifree-server restore --input <file> --data-dir <dir>
   artifree-server --describe | --version | --help
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or
@@ -568,6 +594,11 @@ Request limits apply per actor to HTTP and MCP together; a refused request
 gets 429 rate_limited with Retry-After and is not processed. Opening a change
 stream counts as one request; an open stream holds one of the actor's
 change stream slots instead of a running request.
+
+backup writes a consistent copy of the database to a new file, also while
+the server runs, and proves that it restores. restore builds a new data
+directory from such a file. Each prints one JSON line on success; see
+`backup --help`, `restore --help`, and docs/backup-restore.md.
 
 --describe emits the build-time module inventory as JSON; it does not probe a
 running server.",

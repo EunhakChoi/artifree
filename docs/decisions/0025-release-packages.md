@@ -71,5 +71,5 @@ package job only; the existing checks keep `-D warnings` unchanged.
 
 Not run against a real tunnel, reverse proxy, other machines, older glibc
 systems, clean Windows installs without the Visual C++ runtime, or Windows
-Defender/SmartScreen. Nothing here enables unattended upgrades or backup (O04).
+Defender/SmartScreen. Nothing here enables unattended upgrades. Backup and restore are O04 ([0027](0027-backup-restore-and-schema-upgrade.md)).
 Codex and Pi connection status is unchanged by this decision.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -17,8 +17,10 @@ import {
  * own extractor; every file is checked against the manifest; then only files
  * from the unpacked tree are run, with an empty PATH and no repository
  * working directory: start, health, the packaged web page, create and save an
- * artifact with the packaged CLI, fetch its preview, stop, restart on the
- * same data, and refuse bad startup configuration. Throws on the first failure.
+ * artifact with the packaged CLI, fetch its preview, back up the running
+ * server, stop, restart on the same data, restore the backup into a new
+ * directory and serve it, and refuse bad startup configuration and restores
+ * onto existing paths (decision 0027). Throws on the first failure.
  */
 
 const windows = process.platform === 'win32';
@@ -177,6 +179,19 @@ export async function refuses(starting, pattern) {
 }
 
 /**
+ * Runs `artifree-server backup` or `restore` from the unpacked package and
+ * returns its one JSON line. Exit status 0 and an empty stderr are required.
+ */
+function runMaintenance(binary, env, cwd, args) {
+  const run = spawnSync(binary, args, { env, cwd, encoding: 'utf8' });
+  assert.equal(run.status, 0, `${args[0]} failed: ${run.stderr}`);
+  assert.equal(run.stderr, '', `${args[0]} wrote to stderr.`);
+  const lines = run.stdout.trimEnd().split('\n');
+  assert.equal(lines.length, 1, `${args[0]} must print one line.`);
+  return JSON.parse(lines[0]);
+}
+
+/**
  * Runs the whole installation check for `archive` (a path to a `.tar.gz` or
  * `.zip` built by package-release.mjs). Returns a short summary object.
  */
@@ -214,11 +229,13 @@ export async function verifyRelease(archive) {
     const env = windows
       ? { SystemRoot: process.env.SystemRoot, PATH: '' }
       : { PATH: '' };
-    const serve = (extra = []) =>
-      startServer(binary, dataDir, ['--web-dir', webDir, ...extra], {
+    const serve = (extra = [], dir = dataDir) =>
+      startServer(binary, dir, ['--web-dir', webDir, ...extra], {
         env,
         cwd: workDir,
       });
+    const backupFile = join(scratch, 'backup.sqlite3');
+    const restoredDir = join(scratch, 'restored');
 
     const summary = {};
     const first = await serve();
@@ -240,6 +257,17 @@ export async function verifyRelease(archive) {
       });
       artifactId = exercised.artifactId;
       summary.revision = exercised.revision;
+      // Back up while this server is running (decision 0027).
+      const saved = runMaintenance(binary, env, workDir, [
+        'backup',
+        '--data-dir',
+        dataDir,
+        '--output',
+        backupFile,
+      ]);
+      assert.equal(saved.event, 'backup');
+      assert.equal(saved.output, backupFile);
+      assert.ok(saved.bytes > 0, 'The backup is empty.');
     });
 
     const second = await serve();
@@ -251,6 +279,42 @@ export async function verifyRelease(archive) {
       };
       await expectSavedRevision({ packageDir, cliEnv, artifactId });
     });
+
+    // Restore the backup into a new directory and serve it: the saved
+    // revision and its bytes come back. The access token is not part of a
+    // backup, so the restored instance has its own.
+    const restored = runMaintenance(binary, env, workDir, [
+      'restore',
+      '--input',
+      backupFile,
+      '--data-dir',
+      restoredDir,
+    ]);
+    assert.equal(restored.event, 'restore');
+    const third = await serve([], restoredDir);
+    await withServer(third, async () => {
+      const cliEnv = {
+        ...env,
+        ARTIFREE_SERVER: third.api_url,
+        ARTIFREE_TOKEN_FILE: third.token_file,
+      };
+      await expectSavedRevision({ packageDir, cliEnv, artifactId });
+    });
+    // Nothing existing is replaced: a used data directory and a used backup
+    // file are refused, with nothing on stdout.
+    for (const args of [
+      ['restore', '--input', backupFile, '--data-dir', dataDir],
+      ['backup', '--data-dir', dataDir, '--output', backupFile],
+    ]) {
+      const refusedRun = spawnSync(binary, args, {
+        env,
+        cwd: workDir,
+        encoding: 'utf8',
+      });
+      assert.equal(refusedRun.status, 1, `${args[0]} replaced something.`);
+      assert.equal(refusedRun.stdout, '');
+      assert.match(refusedRun.stderr, /already exists/);
+    }
 
     await refuses(
       startServer(
