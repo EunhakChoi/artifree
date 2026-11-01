@@ -32,8 +32,29 @@ read their current documentation first. What was actually run is in
 4. **Trusted proxy is the proxy's address as the server sees it.** Never trust a
    range that internet clients can send from. A request with forwarded headers
    from any other peer is refused with 403.
-5. **Tunnels see your traffic.** A hosted tunnel terminates TLS, so its operator
+5. **The proxy or tunnel must always send `X-Forwarded-For` (or `Forwarded`).**
+   Today, when a trusted proxy sends neither header, the server takes the
+   proxy's own address as the client address. If that is loopback (for example
+   `--trusted-proxy 127.0.0.1/32` with a tunnel daemon on the same host), the
+   loopback check on `/mcp` passes for internet clients, and only the token
+   remains. A server-side fix is planned separately and is **not** part of this
+   change; until it exists, check your provider's settings (for example,
+   options that remove or hide visitor IP headers must be off), and run the
+   post-setup check below.
+6. **Tunnels see your traffic.** A hosted tunnel terminates TLS, so its operator
    can read tokens and artifacts in transit. Treat that as a trust decision.
+
+**Post-setup check (all paths with a public name).** From a machine outside your
+network, with a valid token and without `--allow-remote-mcp`:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://artifree.example.com/mcp \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}'
+```
+
+It must print `403`. Any other code means the server treats internet clients as
+local; stop and fix the proxy headers or `--trusted-proxy` before using the
+service. Repeat it after changing the proxy, tunnel, or flags.
 
 ## Reverse proxy with TLS (Caddy)
 
@@ -41,7 +62,7 @@ Caddy obtains certificates automatically for two public names that point to
 your server, for example `artifree.example.com` and `preview.example.com`. This
 example runs Artifree from the [container](container.md) and Caddy as sibling
 containers on a network with a fixed subnet, so `--trusted-proxy` can be
-narrow. Artifree publishes no port to the host; only Caddy does.
+a single address. Artifree publishes no port to the host; only Caddy does.
 
 `compose.yaml` (not run; `docker compose` was not available):
 
@@ -56,13 +77,15 @@ services:
     command:
       - --api-origin=https://artifree.example.com
       - --content-origin=https://preview.example.com
-      - --trusted-proxy=172.28.0.0/24
+      - --trusted-proxy=172.28.0.2/32
     networks: [edge]
   caddy:
     image: caddy:2 # pin a digest for real use
     ports: ['80:80', '443:443']
     volumes: ['./Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data']
-    networks: [edge]
+    networks:
+      edge:
+        ipv4_address: 172.28.0.2 # the only trusted proxy
 networks:
   edge:
     ipam:
@@ -92,6 +115,7 @@ preview.example.com {
 - The live change feed is a long-lived response; Caddy streams these by default
   as far as its documentation says. Check that the web workspace shows saves
   from the CLI without a reload.
+- Caddy's `reverse_proxy` sets `X-Forwarded-For` by default, per its documentation; the post-setup check above confirms it.
 - Keep MCP loopback-only: do not add `--allow-remote-mcp`. A local agent on the
   server host can use the unpacked archive on `127.0.0.1`.
 
@@ -115,9 +139,19 @@ artifree-server serve --data-dir ./data --web-dir ./web \
   --trusted-proxy 127.0.0.1/32
 ```
 
-Do not use `--trusted-proxy` with a container's published ports unless you
-have read the note in [the container guide](container.md): the server sees the
-Docker bridge address, not `127.0.0.1`.
+**Tunnel daemon and the container.** A daemon on the Docker host that reaches
+a published port appears to the container as the bridge gateway (for example
+`172.17.0.1`), the same address as every other host process and, with the port
+published on all interfaces, every network client. Trusting that gateway
+(`--trusted-proxy 172.17.0.1/32`) lets anything that can reach the published
+port forge `X-Forwarded-For`, so it is acceptable only if the port is published
+on `127.0.0.1` alone (`-p 127.0.0.1:7410:7410`) and no untrusted local process
+exists. The safer shape is to run the tunnel daemon as a sibling container on a
+user-defined network with a fixed address (as in the Caddy example), publish no
+port, point its ingress at `http://artifree:7410` and `http://artifree:7411`,
+and trust only that `/32`. Add `--allowed-host artifree:7410` only if the
+daemon forwards the internal `Host` instead of the public name (the public name
+is allowed through `--api-origin`). Neither shape was run.
 
 Points to settle before using it:
 
@@ -130,6 +164,9 @@ Points to settle before using it:
   `X-Forwarded-*` from a trusted peer and uses the `Host` header otherwise.
 - Do not start `--allow-remote-mcp`. A tunnel makes every internet client a
   "remote client" whose only barrier is the token.
+- Make sure the tunnel always sends `X-Forwarded-For` (or `Forwarded`); a
+  setting that removes visitor IP headers defeats the loopback MCP check
+  (rule 5). Run the post-setup check above through the public name.
 
 ## Private network (Tailscale or Headscale)
 
@@ -198,6 +235,11 @@ workspace is plain static files, and its API address can be chosen at run time.
 
 Limits and risks:
 
+- A `?server=<url>` link makes whoever opens it send their token to the
+  named server. Only use links you built yourself, and never open one from
+  someone else.
+- The API still needs the headers and post-setup check of rule 5 and the
+  check above; the static host does not change them.
 - The static host serves the code that handles your token. A compromised
   deployment or an account takeover on that host can steal it. Use a dedicated
   agent token (decision 0023) for browsers on such a host if you want to

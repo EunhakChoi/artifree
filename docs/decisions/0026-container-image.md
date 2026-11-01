@@ -60,8 +60,8 @@ moves to O03c. The web-workspace gaps found while writing the guides are O03d.
    say what choosing `--allow-remote-mcp` means and recommend a dedicated token
    per agent (decision 0023); no guide enables it by default.
 7. **Trusted proxy in a container** must name the proxy's address on the
-   container network. The Caddy example uses a compose network with a fixed
-   subnet so the range is narrow. A proxy on the Docker host that reaches a
+   container network. The Caddy example uses a compose network and a fixed proxy address
+   (one trusted /32). A proxy on the Docker host that reaches a
    published port appears with the bridge gateway address instead.
 8. **Verification.** `scripts/verify-container.mjs` (Node built-ins and the
    `docker` CLI) reuses `verifyManifest` and the shared service exercise in
@@ -90,6 +90,10 @@ moves to O03c. The web-workspace gaps found while writing the guides are O03d.
 - The static web workspace has no build-time default server, and
   `--frame-ancestors`/`--content-origin` have no environment variables, which
   makes container and static-UI setups argument-only. Tracked as O03d.
+- A trusted proxy that sends no `X-Forwarded-For` makes the server treat its own
+  address as the client; behind a loopback tunnel that defeats the loopback MCP
+  check. A server fix is planned in a separate change and is not part of this
+  one; the guides require the header and a post-setup `curl` check meanwhile.
 - Not verified: other CPUs, rootless Docker, Podman, Kubernetes, compose,
   bind-mount ownership workflows other than the refusal, any named third-party
   service, the public internet. Codex and Pi were not run.

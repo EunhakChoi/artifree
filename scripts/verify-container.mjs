@@ -35,6 +35,9 @@ import { extract, verifyChecksum, verifyManifest } from './verify-release.mjs';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const dockerfilePath = join(here, '..', 'deploy', 'container', 'Dockerfile');
 const NON_ROOT_UID = '10001';
+// The release package is x86-64; an arm64 host would otherwise resolve the
+// base image's multi-arch digest to arm64 and fail confusingly.
+const PLATFORM = 'linux/amd64';
 
 /** Runs `docker` and returns `{ status, stdout, stderr }` without throwing. */
 function docker(args, { input } = {}) {
@@ -109,6 +112,8 @@ function startContainer({ image, name, volume, apiPort, contentPort, extra }) {
   dockerOk([
     'run',
     '--detach',
+    '--platform',
+    PLATFORM,
     '--name',
     name,
     '--read-only',
@@ -153,29 +158,44 @@ function stopCleanly(name) {
 }
 
 /**
- * Requires `docker run` with `args` to exit nonzero with stderr matching.
- * A container that keeps running is a failed guard: it is removed and
- * reported at once instead of waiting for a long timeout.
+ * Requires a container started with `args` to exit nonzero within 30 s with
+ * logs matching `pattern`. One that is still running then was accepted, and
+ * is removed with its anonymous volumes.
  */
-export function refusedRun(args, pattern) {
+export async function refusedRun(args, pattern) {
   const name = `artifree-refused-${randomBytes(4).toString('hex')}`;
-  const result = spawnSync('docker', ['run', '--name', name, ...args], {
-    encoding: 'utf8',
-    timeout: 60_000,
-  });
   try {
-    if (result.error)
-      assert.fail(
-        `The container did not exit; the configuration was accepted: ${args.join(' ')}`,
-      );
-    assert.notEqual(
-      result.status,
-      0,
-      `The container started: ${args.join(' ')}`,
+    dockerOk([
+      'run',
+      '--detach',
+      '--platform',
+      PLATFORM,
+      '--name',
+      name,
+      ...args,
+    ]);
+    const state = async () =>
+      dockerOk(['inspect', '--format', '{{.State.Status}}', name]);
+    const exited = await until(
+      'the container to exit',
+      async () => {
+        const status = await state();
+        return status === 'running' ? false : status;
+      },
+      30,
+    ).catch(() => undefined);
+    assert.ok(
+      exited,
+      `The container did not exit; the configuration was accepted: ${args.join(' ')}`,
     );
-    assert.match(result.stderr, pattern);
+    assert.notEqual(
+      dockerOk(['inspect', '--format', '{{.State.ExitCode}}', name]),
+      '0',
+      `The container exited cleanly: ${args.join(' ')}`,
+    );
+    assert.match(docker(['logs', name]).stderr, pattern);
   } finally {
-    docker(['rm', '--force', name]);
+    docker(['rm', '--force', '--volumes', name]);
   }
 }
 
@@ -196,7 +216,16 @@ export async function verifyContainer(archive) {
     assert.equal(manifest.target, 'linux-x64', 'The image is linux-x64 only.');
 
     checkDockerfile(await readFile(dockerfilePath, 'utf8'));
-    dockerOk(['build', '--tag', image, '--file', dockerfilePath, packageDir]);
+    dockerOk([
+      'build',
+      '--platform',
+      PLATFORM,
+      '--tag',
+      image,
+      '--file',
+      dockerfilePath,
+      packageDir,
+    ]);
     const inspected = JSON.parse(
       dockerOk(['image', 'inspect', '--format', '{{json .Config}}', image]),
     );
@@ -264,6 +293,13 @@ export async function verifyContainer(archive) {
     startContainer({ ...common, name: names[1] });
     try {
       await waitHealthy(names[1], apiUrl);
+      // The token comes from the restarted container, so a lost volume shows
+      // as a missing revision, not as a stale token.
+      await writeFile(
+        tokenFile,
+        `${dockerOk(['exec', names[1], 'cat', '/data/access-token'])}\n`,
+        { mode: 0o600 },
+      );
       await expectSavedRevision({ packageDir, cliEnv, artifactId });
       stopCleanly(names[1]);
     } catch (error) {
@@ -271,7 +307,7 @@ export async function verifyContainer(archive) {
       throw error;
     }
 
-    refusedRun(
+    await refusedRun(
       [
         image,
         '--api-origin',
@@ -285,13 +321,13 @@ export async function verifyContainer(archive) {
     const open = join(scratch, 'open-data');
     await mkdir(open);
     await chmod(open, 0o755);
-    refusedRun(
+    await refusedRun(
       ['--volume', `${open}:/data`, image],
       /accessible to other users/,
     );
     return summary;
   } finally {
-    for (const name of names) docker(['rm', '--force', name]);
+    for (const name of names) docker(['rm', '--force', '--volumes', name]);
     docker(['volume', 'rm', '--force', volume]);
     docker(['image', 'rm', '--force', image]);
     await rm(scratch, { recursive: true, force: true });

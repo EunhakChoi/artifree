@@ -15,8 +15,9 @@ and Docker was not available where the change was written.
 
 The image is the Linux x64 release package (`artifree-<version>-linux-x64`,
 decision 0025) copied to `/app` on `debian:bookworm-slim`, pinned by digest.
-Nothing is compiled or downloaded while building. Only Linux x64 is supported:
-no ARM image, no Alpine/musl, no Windows container.
+Nothing is compiled or downloaded while building. Only Linux x64 is supported (pass `--platform linux/amd64` to `docker build` and
+`docker run`; on an ARM host the pinned multi-arch base would otherwise resolve
+to arm64 and the x86-64 binary would not run): no ARM image, no Alpine/musl, no Windows container.
 
 | Item        | Value                                                                                                               |
 | ----------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -42,7 +43,7 @@ builds the image, and runs the checks listed below. To build by hand:
 
 ```sh
 mkdir pkg && tar -xzf artifree-<version>-linux-x64.tar.gz -C pkg
-docker build -t artifree:local -f deploy/container/Dockerfile pkg/artifree-<version>-linux-x64
+docker build --platform linux/amd64 -t artifree:local -f deploy/container/Dockerfile pkg/artifree-<version>-linux-x64
 ```
 
 ## Run on one machine
@@ -52,7 +53,7 @@ address your browser uses for port 7411:
 
 ```sh
 docker volume create artifree-data
-docker run -d --name artifree --restart unless-stopped \
+docker run -d --name artifree --restart unless-stopped --platform linux/amd64 \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v artifree-data:/data \
   -p 127.0.0.1:7410:7410 -p 127.0.0.1:7411:7411 \
@@ -81,7 +82,7 @@ docker exec artifree cat /data/access-token      # paste into http://127.0.0.1:7
 Use the flags of [decision 0024](decisions/0024-https-proxy-and-remote-access.md)
 as arguments after the image name. A container sees the proxy at its
 container-network address, not at `127.0.0.1`: `--trusted-proxy` must name the
-network the proxy connects from. [Remote access](remote-access.md) has a Caddy
+network the proxy connects from, ideally one fixed `/32`. [Remote access](remote-access.md) has a Caddy
 example with a fixed network.
 
 ## MCP
@@ -89,11 +90,22 @@ example with a fixed network.
 MCP is loopback-only unless `--allow-remote-mcp` is set (decision 0024). A
 request that arrives through a published Docker port comes from the Docker
 bridge, not loopback, so **an agent on the Docker host cannot reach `/mcp`
-through the published port** (CI checks that it gets 403). Either run the agent
-as another container on the same network with `--allow-remote-mcp` and its own
-token (decision 0023), or use the unpacked archive on the host. Do not set
+through the published port** (CI checks that it gets 403 on GitHub's default
+rootful Docker bridge; rootless Docker and Podman use other port drivers that
+may present a different peer address, which was not checked). Do not set
 `--allow-remote-mcp` unless you have decided that every client that can reach
-the API port may attempt MCP.
+the API port may attempt MCP. Two ways to give an agent access:
+
+- Use the unpacked archive on the host, where the agent connects over
+  `127.0.0.1`.
+- Run the agent as another container on the same user-defined network, start
+  Artifree with `--allow-remote-mcp --allowed-host artifree:7410` (use your
+  service name and port), give the agent its own token (decision 0023), and
+  point it at `http://artifree:7410/mcp`. The `--allowed-host` is needed
+  twice over: the API rejects any `Host` that is not allowed with 400
+  (`proxy_inspection` in `http.rs`), and the MCP endpoint builds its own
+  allowed-host list from the same setting (`mcp.rs`), so without it the
+  request is refused before MCP is reached. This recipe was not run.
 
 ## What CI checks
 

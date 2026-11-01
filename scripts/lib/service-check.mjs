@@ -107,11 +107,12 @@ export async function exerciseNewService({
 
 /** Requires a restarted server to still hold revision 2 of `artifactId`. */
 export async function expectSavedRevision({ packageDir, cliEnv, artifactId }) {
-  const shown = await runCli(packageDir, cliEnv, [
-    'artifact',
-    'show',
-    artifactId,
-  ]);
+  let shown;
+  try {
+    shown = await runCli(packageDir, cliEnv, ['artifact', 'show', artifactId]);
+  } catch (error) {
+    assert.fail(`The saved artifact must survive a restart: ${error.message}`);
+  }
   assert.equal(
     shown.current_revision,
     2,
