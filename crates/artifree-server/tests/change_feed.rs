@@ -8,7 +8,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use artifree_providers::storage::SqliteStore;
+use artifree_providers::backup;
+use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use artifree_server::auth::AccessToken;
 use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
@@ -32,6 +33,13 @@ struct Harness {
 
 impl Harness {
     fn new(change_streams: u32) -> Self {
+        let directory = Self::fresh_path();
+        std::fs::create_dir_all(&directory)
+            .unwrap_or_else(|error| panic!("cannot create test directory: {error}"));
+        Self::over(directory, change_streams)
+    }
+
+    fn fresh_path() -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let directory = std::env::temp_dir().join(format!(
             "artifree-feed-{}-{}",
@@ -39,13 +47,28 @@ impl Harness {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory)
-            .unwrap_or_else(|error| panic!("cannot create test directory: {error}"));
-        let store = SqliteStore::open(&directory.join("db.sqlite3"))
+        directory
+    }
+
+    /// A server over the database in a copy of this one's data directory,
+    /// made by backup and restore.
+    fn restored(&self, change_streams: u32) -> Self {
+        let output = Self::fresh_path();
+        backup::backup(&self.directory, &output)
+            .unwrap_or_else(|error| panic!("cannot back up: {error}"));
+        let directory = Self::fresh_path();
+        backup::restore(&output, &directory)
+            .unwrap_or_else(|error| panic!("cannot restore: {error}"));
+        let _ = std::fs::remove_file(&output);
+        Self::over(directory, change_streams)
+    }
+
+    fn over(directory: PathBuf, change_streams: u32) -> Self {
+        let database = directory.join(DATABASE_FILE);
+        let store = SqliteStore::open(&database)
             .unwrap_or_else(|error| panic!("cannot open store: {error}"));
-        let token_store =
-            artifree_providers::tokens::SqliteTokenStore::open(&directory.join("db.sqlite3"))
-                .unwrap_or_else(|error| panic!("cannot open token store: {error}"));
+        let token_store = artifree_providers::tokens::SqliteTokenStore::open(&database)
+            .unwrap_or_else(|error| panic!("cannot open token store: {error}"));
         let token = AccessToken::parse(TOKEN).unwrap_or_else(|| panic!("fixture token is invalid"));
         let state = AppState::new(
             store,
@@ -386,6 +409,35 @@ async fn a_cursor_of_another_feed_or_beyond_the_head_is_reset() -> TestResult {
         );
         assert!(reset.quiet().await);
     }
+    Ok(())
+}
+
+/// A restore gives the feed a new identity (decision 0006): a client that
+/// followed the original is told to reload, and the sequence goes on.
+#[tokio::test]
+async fn a_cursor_of_the_original_database_is_reset_by_its_restore() -> TestResult {
+    let original = Harness::new(4);
+    let mut events = original.follow(None).await?;
+    let ready = events.expect("ready").await?;
+    let id = original.create("feed-create-1").await?["artifact"]["id"]
+        .as_str()
+        .ok_or("no id")?
+        .to_owned();
+    original.save(&id, "feed-save-2", 1).await?;
+    let (old_feed, _) = ready.id.split_once('.').ok_or("not a cursor")?;
+    let followed = format!("{old_feed}.2");
+    drop(events);
+    let mut same = original.follow(Some(&followed)).await?;
+    assert!(same.quiet().await, "the original still accepts its cursor");
+    drop(same);
+
+    let restored = original.restored(4);
+
+    let mut reset = restored.follow(Some(&followed)).await?;
+    let event = reset.expect("reset").await?;
+    let (new_feed, head) = event.id.split_once('.').ok_or("not a cursor")?;
+    assert_ne!(new_feed, old_feed, "the restored feed has a new identity");
+    assert_eq!(head, "2", "the sequence head did not go back");
     Ok(())
 }
 

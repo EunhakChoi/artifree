@@ -8,24 +8,13 @@ use std::time::Duration;
 
 use artifree_domain::identity::TokenId;
 use artifree_ports::token_store::{NewTokenRecord, TokenRecord, TokenStore, TokenStoreError};
-use rusqlite::{Connection, ErrorCode, OptionalExtension};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
+
+use crate::schema::SCHEMA_VERSION;
 use sha2::{Digest, Sha256};
 
 const DIGITS: &[u8; 16] = b"0123456789abcdef";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS tokens (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    secret_hash TEXT NOT NULL UNIQUE,
-    prefix TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    last_used_at TEXT,
-    revoked_at TEXT
-) STRICT;
-CREATE INDEX IF NOT EXISTS idx_tokens_secret_hash ON tokens (secret_hash);
-";
 
 /// Computes the SHA-256 hex digest of a token secret string.
 #[must_use]
@@ -48,25 +37,40 @@ pub struct SqliteTokenStore {
 }
 
 impl SqliteTokenStore {
-    /// Opens or creates token storage at `path` and initializes the schema.
+    /// Opens token storage in the database at `path`. The file must already be
+    /// at the current schema version, which [`SqliteStore::open`] creates and
+    /// upgrades together with the `tokens` table; this opener changes nothing,
+    /// so it leaves a newer, older, or foreign file as it found it.
+    ///
+    /// [`SqliteStore::open`]: crate::storage::SqliteStore::open
     ///
     /// # Errors
     ///
-    /// When the file cannot be opened or initialized.
+    /// When the file does not exist, cannot be opened, or is not at
+    /// [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Self, TokenStoreError> {
         let store = Self {
             path: path.to_owned(),
         };
         let connection = store.connect()?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(unavailable)?;
-        connection.execute_batch(SCHEMA).map_err(unavailable)?;
+        if version != SCHEMA_VERSION {
+            return Err(TokenStoreError::Unavailable(format!(
+                "database schema version {version} is not the version {SCHEMA_VERSION} this build uses; open the artifact store first to upgrade it"
+            )));
+        }
         Ok(store)
     }
 
     fn connect(&self) -> Result<Connection, TokenStoreError> {
-        let connection = Connection::open(&self.path).map_err(unavailable)?;
+        // Never creates the file: the artifact store owns it.
+        let connection = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(unavailable)?;
         connection.busy_timeout(BUSY_TIMEOUT).map_err(unavailable)?;
         connection
             .pragma_update(None, "synchronous", "FULL")
@@ -317,6 +321,7 @@ mod tests {
         std::fs::create_dir_all(&dir)?;
         let db_path = dir.join("test.db");
 
+        crate::storage::SqliteStore::open(&db_path)?;
         let store = SqliteTokenStore::open(&db_path)?;
         let id1 = TokenId::from_random([1; 16]);
         let token1 = NewTokenRecord {

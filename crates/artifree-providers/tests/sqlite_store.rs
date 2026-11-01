@@ -16,7 +16,7 @@ use artifree_ports::artifact_store::{
     Delivery, ListOrder, ListPosition, MetadataReceipt, MetadataUpdate, NewArtifact,
     RequestFingerprint, RequestIdentity, RevisionCommit, StoreError,
 };
-use artifree_providers::storage::SqliteStore;
+use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
 use sha2::{Digest, Sha256};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -710,7 +710,7 @@ fn a_version_1_database_gains_the_feed_and_metadata_and_keeps_its_data() -> Test
         feed(&store, &owner, 0, 100)?,
         (vec![(1, ChangeKind::MetadataUpdated, 2)], 1)
     );
-    assert_eq!(user_version(&db)?, 5);
+    assert_eq!(user_version(&db)?, SCHEMA_VERSION);
     Ok(())
 }
 
@@ -790,7 +790,7 @@ fn a_version_2_database_keeps_its_feed_head_and_its_request_keys() -> TestResult
         feed(&store, &owner, 2, 100)?,
         (vec![(6, ChangeKind::Revised, 3)], 6)
     );
-    assert_eq!(user_version(&db)?, 5);
+    assert_eq!(user_version(&db)?, SCHEMA_VERSION);
     Ok(())
 }
 
@@ -1169,7 +1169,7 @@ fn commit_times_follow_commit_order_after_the_clock_was_set_back() -> TestResult
             ["Renamed", "Old"],
             "version {version}"
         );
-        assert_eq!(user_version(&db)?, 5);
+        assert_eq!(user_version(&db)?, SCHEMA_VERSION);
     }
     Ok(())
 }

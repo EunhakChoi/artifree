@@ -74,8 +74,9 @@ docker exec artifree cat /data/access-token      # paste into http://127.0.0.1:7
   volume gets the right owner and mode from the image.
 - The container stops on `docker stop` (SIGTERM) with status 0. Data is in the
   volume; remove the container, not the volume, to upgrade: build a new image
-  and run it on the same volume. As with archives, copy the volume first;
-  there is no tested backup or downgrade (O04).
+  and run it on the same volume. Take a backup first
+  ([backup guide](backup-restore.md#containers), commands not run in CI); there
+  is no downgrade.
 
 ## Behind a reverse proxy
 

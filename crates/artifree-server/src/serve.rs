@@ -1,12 +1,12 @@
 //! Local server process: one data directory, an API listener, and a separate
 //! preview content listener.
 
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use artifree_providers::storage::SqliteStore;
+use artifree_providers::data_dir;
+use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
 use tokio::net::TcpListener;
 
@@ -88,8 +88,8 @@ pub struct Ready {
 /// set up, when the data directory is accessible to other users (Unix), or
 /// when a listener fails while serving.
 pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
-    prepare_data_dir(&options.data_dir)?;
-    let db_path = options.data_dir.join("artifree.sqlite3");
+    data_dir::prepare_data_dir(&options.data_dir)?;
+    let db_path = options.data_dir.join(DATABASE_FILE);
     let store = SqliteStore::open(&db_path).map_err(|error| error.to_string())?;
     let token_store = SqliteTokenStore::open(&db_path).map_err(|error| error.to_string())?;
     let token_file = options.data_dir.join("access-token");
@@ -243,38 +243,6 @@ pub fn derive_loopback_address(options: &ServeOptions) -> Option<SocketAddr> {
             Some(SocketAddr::new(loopback_ip, options.api_address.port()))
         }
     })
-}
-
-/// Creates the data directory for the current user only, or checks that an
-/// existing one is. It holds the database, its WAL, and the access token, so
-/// anyone who can enter it can read every artifact without the token. An
-/// existing directory that is open to group or other users is refused rather
-/// than changed, because it may be shared on purpose. On other platforms the
-/// directory inherits its parent's access control.
-fn prepare_data_dir(path: &Path) -> Result<(), String> {
-    let cannot_create =
-        |error: std::io::Error| format!("cannot create {}: {error}", path.display());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .map_err(cannot_create)?;
-        let metadata = fs::metadata(path)
-            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
-        let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(format!(
-                "{} is accessible to other users (mode {mode:03o}); run chmod 700 on it or choose another --data-dir",
-                path.display()
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    fs::create_dir_all(path).map_err(cannot_create)?;
-    Ok(())
 }
 
 async fn bind(address: SocketAddr) -> Result<TcpListener, String> {

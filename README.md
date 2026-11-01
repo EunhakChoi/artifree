@@ -66,6 +66,13 @@ published), and the [remote access guides](docs/remote-access.md) cover a
 reverse proxy with TLS, tunnels, a private network, and a static web UI on
 another host; none of those third-party services was run.
 
+The `backup` command makes a consistent copy of a running server's database
+and proves that it restores; `restore` builds a new data directory from it,
+and starting a newer build on an older data directory upgrades it. See the
+[backup guide](docs/backup-restore.md) ([decision 0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md)).
+The access token is not part of a backup; a restored directory gets a new
+one. Windows and container use of these commands is not verified outside CI.
+
 For development with live reloading, Vite is still available:
 
 ```sh
@@ -142,8 +149,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0022](docs/decisions/0022-production-web-and-api-serving.md),
 [0023](docs/decisions/0023-single-owner-token-management.md),
 [0024](docs/decisions/0024-https-proxy-and-remote-access.md),
-[0025](docs/decisions/0025-release-packages.md), and
-[0026](docs/decisions/0026-container-image.md)).
+[0025](docs/decisions/0025-release-packages.md),
+[0026](docs/decisions/0026-container-image.md), and
+[0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

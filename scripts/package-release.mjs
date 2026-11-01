@@ -222,6 +222,10 @@ export async function buildReleasePackage({
       path: 'docs/release-packages.md',
       data: await text('docs/release-packages.md'),
     },
+    {
+      path: 'docs/backup-restore.md',
+      data: await text('docs/backup-restore.md'),
+    },
     { path: paths.server, data: binaryBytes, executable: true },
     { path: CLI_PATH, data: await cliBundle(root), executable: true },
     ...(await webFiles(webDir)),
