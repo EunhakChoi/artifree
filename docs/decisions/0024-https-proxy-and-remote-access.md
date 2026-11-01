@@ -86,39 +86,43 @@ critical security vulnerabilities:
 - MCP's loopback security model is preserved by default behind local reverse proxies.
 - Preview sandbox isolation remains fully enforced across distinct public origins.
 
-## Amendment 2026-11-01: trusted-proxy requests without a client address
+## Amendment 2026-11-01: unknown clients fail closed
 
-Decision 2 above misdescribed the implementation and left a gap. This
+Decision 2 above misdescribed the implementation and left fail-open gaps. This
 amendment replaces its resolution rules; everything else stands.
 
-- **Resolution.** Behind a trusted proxy peer, the effective client is found by
-  walking `X-Forwarded-For` (or, if absent, `Forwarded`) right to left and
-  taking the first address that is not in `--trusted-proxy`. The leftmost
-  entry is not used while an untrusted entry exists, so a client cannot prepend
-  `127.0.0.1`.
-- **No forwarding information means unknown client.** If the peer is trusted
-  but the request has neither `X-Forwarded-For` nor `Forwarded`, the peer is
-  the proxy, not the client, and the client is unknown. `X-Forwarded-Host` and
-  `X-Forwarded-Proto` alone do not name a client. Previously the peer address
-  was returned, so a same-host tunnel or proxy (peer 127.0.0.1) that strips
-  visitor addresses made every internet request look like loopback and
-  bypassed the `/mcp` confinement (the agent token was still required).
-- **Representation.** `ClientConnectionInfo.client_ip` is
-  `Option<IpAddr>`; `None` is the unknown client, with no placeholder address.
+- **Effective client.** Behind a trusted proxy peer, every `X-Forwarded-For`
+  line, and separately every `Forwarded` line, is read and joined in arrival
+  order as one comma list (RFC 9110 field combination). The client is the
+  rightmost entry that is not in `--trusted-proxy`. Entries a client prepended
+  further left are never consulted. A non-ASCII line anywhere, or an invalid
+  address, is `400`.
+- **Unknown client.** The client is unknown (`ClientConnectionInfo.client_ip`
+  is `None`; there is no placeholder address) when
+  1. a trusted peer sent neither `X-Forwarded-For` nor `Forwarded`
+     (`X-Forwarded-Host` and `X-Forwarded-Proto` do not name a client);
+     previously the peer address was used, so a same-host tunnel or proxy that
+     strips visitor addresses made every internet request look like loopback;
+  2. every entry in the chain is a trusted proxy; a client-supplied
+     `127.0.0.1` cannot be told apart from one a proxy recorded (tunnel to local
+     proxy to Artifree, with 127.0.0.1 trusted, where an attacker sends
+     `X-Forwarded-For: 127.0.0.1` and the local proxy appends the tunnel's
+     `127.0.0.1`); the earlier "leftmost of an all-trusted chain" rule is
+     removed;
+  3. both headers are present and resolve to different clients; one of them was
+     not written by the proxy. If they agree, that client is used; and
+  4. the socket peer address is missing. It is never assumed to be loopback
+     and is never trusted.
 - **Consumers fail closed.** `/mcp` allows a request only if `--allow-remote-mcp`
-  is set or the client is known and loopback; unknown is `403`. No other code
-  reads `client_ip`: Host and Origin checks, rate limits, and preview use
-  the peer socket, host, and proto, and are unchanged. A direct loopback client
-  without a trusted proxy remains its own client.
-- **All hops trusted.** When every address in the chain is a trusted proxy, the
-  leftmost one is the client. The model requires trusted proxies to append the
-  peer they saw, so every entry was recorded by a trusted hop and the leftmost
-  is a genuine trusted address, for example a local client of a local proxy.
-  This stays, now covered by tests. It does assume the proxy appends rather
-  than passes client-supplied `X-Forwarded-For` through unchanged; such a
-  proxy must not be listed as trusted.
-- **Repeated header lines.** Every `X-Forwarded-For` line, and separately every
-  `Forwarded` line, is read and joined in arrival order as one comma list
-  (RFC 9110 field combination) before the right-to-left walk. A proxy that adds
-  its own line instead of appending to the client's therefore cannot leave a
-  client-supplied `127.0.0.1` in charge. A non-ASCII line anywhere is `400`.
+  is set or the client is known and loopback (IPv4-mapped IPv6 such as
+  `::ffff:127.0.0.1` is canonicalized first). Unknown is `403`. No other code
+  reads `client_ip`: Host and Origin checks, rate limits, and preview use the
+  peer socket, host, and proto, so other routes keep working for unknown clients.
+- **Operator consequences.** The proxy must append (or overwrite) the client
+  address in the header it uses and strip the other one. A local agent that goes
+  through a local trusted proxy now has an unknown or all-trusted chain and gets
+  `403` on `/mcp`; local agents connect directly to the loopback listener.
+  A direct loopback client without a trusted proxy is its own client.
+- **Known limitation.** `X-Forwarded-Host`, `X-Forwarded-Proto`, and the
+  `host=`/`proto=` parameters of `Forwarded` read only the first line. They
+  do not affect client locality.

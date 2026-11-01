@@ -354,7 +354,8 @@ async fn mcp_loopback_confinement_behind_trusted_proxy() -> TestResult {
     let res = harness_local_mcp.api.clone().oneshot(req).await?;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
-    // Local client (127.0.0.1) forwarded via local proxy is accepted
+    // A chain made only of trusted proxies names no client (ADR 0024
+    // amendment): a local client behind a local proxy is unknown, so 403.
     let mut req = Request::post("/mcp")
         .header(header::HOST, "artifree.example.com")
         .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
@@ -370,7 +371,7 @@ async fn mcp_loopback_confinement_behind_trusted_proxy() -> TestResult {
         .insert(ConnectInfo(loopback_proxy_peer));
 
     let res = harness_local_mcp.api.clone().oneshot(req).await?;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
     // Harness B: allow_remote_mcp is TRUE
     let harness_remote_mcp = ProxyHarness::new(
@@ -548,7 +549,11 @@ async fn mcp_reads_every_forwarded_for_line_behind_trusted_proxy() -> TestResult
         .clone()
         .oneshot(mcp_request(peer, &[("x-forwarded-for", "127.0.0.1")])?)
         .await?;
-    assert_eq!(res.status(), StatusCode::OK, "single line, loopback");
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "single line, all trusted"
+    );
 
     // A non-ASCII line anywhere is still a 400.
     let mut req = mcp_request(peer, &[("x-forwarded-for", "203.0.113.195")])?;
@@ -559,6 +564,116 @@ async fn mcp_reads_every_forwarded_for_line_behind_trusted_proxy() -> TestResult
     let res = harness.api.clone().oneshot(req).await?;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST, "non-ASCII line");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_rejects_chains_made_only_of_trusted_proxies() -> TestResult {
+    // Tunnel -> local proxy -> artifree, with 127.0.0.1 trusted: an attacker
+    // sends `X-Forwarded-For: 127.0.0.1` and the local proxy appends the
+    // tunnel's 127.0.0.1. Nothing in the chain proves a loopback client.
+    let peer: SocketAddr = "127.0.0.1:44444".parse()?;
+    let harness = mcp_harness(false)?;
+    for (name, value) in [
+        ("x-forwarded-for", "127.0.0.1, 127.0.0.1"),
+        ("forwarded", "for=127.0.0.1, for=127.0.0.1"),
+    ] {
+        let res = harness
+            .api
+            .clone()
+            .oneshot(mcp_request(peer, &[(name, value)])?)
+            .await?;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{name}: {value}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_rejects_disagreeing_xff_and_forwarded() -> TestResult {
+    // The proxy sets only `Forwarded`; the attacker's own XFF is passed through.
+    let peer: SocketAddr = "127.0.0.1:44444".parse()?;
+    let harness = mcp_harness(false)?;
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(
+            peer,
+            &[
+                ("x-forwarded-for", "127.0.0.1"),
+                ("forwarded", "for=203.0.113.9"),
+            ],
+        )?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // And the reverse: only XFF is trusted, a spoofed Forwarded says loopback.
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(
+            peer,
+            &[
+                ("forwarded", "for=127.0.0.1"),
+                ("x-forwarded-for", "203.0.113.9"),
+            ],
+        )?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_ipv6_and_mapped_loopback_clients() -> TestResult {
+    let harness = mcp_harness(false)?;
+    let proxy: SocketAddr = "127.0.0.1:44444".parse()?;
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(proxy, &[("x-forwarded-for", "[2001:db8::1]")])?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "remote IPv6 via proxy");
+
+    // Direct clients, no trusted proxy configured.
+    let direct = ProxyHarness::new(
+        vec![],
+        vec!["artifree.example.com".into()],
+        vec![],
+        Some("https://artifree.example.com".into()),
+        "https://preview.example.com".into(),
+        false,
+    )?;
+    for peer in ["[::1]:44444", "[::ffff:127.0.0.1]:44444"] {
+        let res = direct
+            .api
+            .clone()
+            .oneshot(mcp_request(peer.parse()?, &[])?)
+            .await?;
+        assert_eq!(res.status(), StatusCode::OK, "direct {peer}");
+    }
+    let res = direct
+        .api
+        .clone()
+        .oneshot(mcp_request("[::ffff:198.51.100.5]:1".parse()?, &[])?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "mapped non-loopback");
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_denies_request_without_peer_address() -> TestResult {
+    // No socket peer is known: that must not be taken for loopback.
+    let harness = ProxyHarness::new(
+        vec![],
+        vec!["artifree.example.com".into()],
+        vec![],
+        Some("https://artifree.example.com".into()),
+        "https://preview.example.com".into(),
+        false,
+    )?;
+    let mut req = mcp_request("127.0.0.1:1".parse()?, &[])?;
+    req.extensions_mut().remove::<ConnectInfo<SocketAddr>>();
+    let res = harness.api.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
     Ok(())
 }
 

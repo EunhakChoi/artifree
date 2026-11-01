@@ -128,10 +128,12 @@ pub struct ClientConnectionInfo {
 /// or when forwarded headers are syntactically invalid.
 pub(crate) fn evaluate_connection(
     headers: &HeaderMap,
-    peer_ip: IpAddr,
+    peer_ip: Option<IpAddr>,
     trusted_proxies: &[IpNetwork],
 ) -> Result<ClientConnectionInfo, ApiError> {
-    let is_trusted_proxy = trusted_proxies.iter().any(|net| net.contains(&peer_ip));
+    // A missing socket peer is never trusted and never assumed to be loopback.
+    let is_trusted_proxy =
+        peer_ip.is_some_and(|peer| trusted_proxies.iter().any(|net| net.contains(&peer)));
 
     let has_forwarded_headers = headers.contains_key("x-forwarded-for")
         || headers.contains_key("x-forwarded-host")
@@ -152,7 +154,7 @@ pub(crate) fn evaluate_connection(
             .map_or("", str::trim)
             .to_owned();
         return Ok(ClientConnectionInfo {
-            client_ip: Some(peer_ip),
+            client_ip: peer_ip,
             host,
             proto: "http".to_owned(),
             is_proxied: false,
@@ -173,65 +175,73 @@ pub(crate) fn evaluate_connection(
 
 /// Resolves the client address behind a trusted proxy peer.
 ///
-/// Returns `Ok(None)` when the request carries no `X-Forwarded-For` or
-/// `Forwarded` header: the peer is the proxy itself, not the client.
+/// The client is the rightmost hop of the combined forwarding chain that is
+/// not itself a trusted proxy. `Ok(None)` (unknown) is returned when there is
+/// no `X-Forwarded-For` or `Forwarded` header, when every hop is a trusted
+/// proxy (a client-supplied loopback address cannot be told apart from one a
+/// proxy recorded), or when both headers are present and name different
+/// clients (one of them was not written by the proxy).
 fn parse_trusted_client_ip(
     headers: &HeaderMap,
     trusted_proxies: &[IpNetwork],
 ) -> Result<Option<IpAddr>, ApiError> {
-    if let Some(xff_str) = combined_header(
+    let from_xff = combined_header(
         headers,
         "x-forwarded-for",
         "x-forwarded-for header is not valid ASCII",
-    )? {
-        let ips = xff_str
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let unbracketed = s
-                    .strip_prefix('[')
-                    .and_then(|t| t.strip_suffix(']'))
-                    .unwrap_or(s);
-                unbracketed.parse::<IpAddr>().map_err(|_| {
-                    ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        ErrorCode::InvalidRequest,
-                        "x-forwarded-for header contains an invalid IP address",
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if ips.is_empty() {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                "x-forwarded-for header contains an invalid IP address",
-            ));
-        }
-
-        // Right-to-left traversal: find the first IP that is NOT in trusted_proxies.
-        // This prevents untrusted clients from injecting spoofed leftmost IPs.
-        for ip in ips.iter().rev() {
-            if !trusted_proxies.iter().any(|net| net.contains(ip)) {
-                return Ok(Some(*ip));
-            }
-        }
-        Ok(leftmost_when_all_trusted(&ips))
-    } else if let Some(fwd_str) =
+    )?
+    .map(|value| extract_forwarded_for_chain(&value))
+    .transpose()?
+    .map(|hops| rightmost_untrusted(&hops, trusted_proxies));
+    let from_forwarded =
         combined_header(headers, "forwarded", "forwarded header is not valid ASCII")?
-    {
-        let ips = extract_forwarded_for_hops(&fwd_str)?;
-        for ip in ips.iter().rev() {
-            if !trusted_proxies.iter().any(|net| net.contains(ip)) {
-                return Ok(Some(*ip));
-            }
-        }
-        Ok(leftmost_when_all_trusted(&ips))
-    } else {
-        Ok(None)
+            .map(|value| extract_forwarded_for_hops(&value))
+            .transpose()?
+            .map(|hops| rightmost_untrusted(&hops, trusted_proxies));
+
+    Ok(match (from_xff, from_forwarded) {
+        (Some(xff), Some(forwarded)) if xff == forwarded => xff,
+        (Some(_), Some(_)) | (None, None) => None,
+        (Some(client), None) | (None, Some(client)) => client,
+    })
+}
+
+/// Parses a combined `X-Forwarded-For` value into its hops, left to right.
+fn extract_forwarded_for_chain(value: &str) -> Result<Vec<IpAddr>, ApiError> {
+    let invalid = || {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "x-forwarded-for header contains an invalid IP address",
+        )
+    };
+    let hops = value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let unbracketed = s
+                .strip_prefix('[')
+                .and_then(|t| t.strip_suffix(']'))
+                .unwrap_or(s);
+            unbracketed.parse::<IpAddr>().map_err(|_| invalid())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if hops.is_empty() {
+        return Err(invalid());
     }
+    Ok(hops)
+}
+
+/// Returns the rightmost hop that is not a trusted proxy, if any.
+///
+/// Walking right to left stops at the first address no trusted proxy vouches
+/// for, so entries a client prepended further left are never consulted.
+fn rightmost_untrusted(hops: &[IpAddr], trusted_proxies: &[IpNetwork]) -> Option<IpAddr> {
+    hops.iter()
+        .rev()
+        .find(|ip| !trusted_proxies.iter().any(|net| net.contains(ip)))
+        .copied()
 }
 
 /// Joins every line of a repeated list header into one comma-separated value
@@ -256,16 +266,6 @@ fn combined_header(
         lines.push(line);
     }
     Ok((!lines.is_empty()).then(|| lines.join(",")))
-}
-
-/// Picks the client when every hop in the chain is a trusted proxy address.
-///
-/// A trusted proxy appends the peer it saw, so each entry was recorded by a
-/// trusted hop and the leftmost one is the original client, which genuinely
-/// is a trusted address (for example a local client of a local proxy). The
-/// chains are never empty here; an empty one would be unknown, never the peer.
-fn leftmost_when_all_trusted(hops: &[IpAddr]) -> Option<IpAddr> {
-    hops.first().copied()
 }
 
 fn parse_trusted_host(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -484,7 +484,7 @@ mod tests {
         let untrusted_peer: IpAddr = "198.51.100.1".parse()?;
         let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
 
-        let result = evaluate_connection(&headers, untrusted_peer, &trusted);
+        let result = evaluate_connection(&headers, Some(untrusted_peer), &trusted);
         match result {
             Ok(_) => panic!("expected forbidden error, got success"),
             Err(err) => assert_eq!(err.status, StatusCode::FORBIDDEN),
@@ -509,8 +509,8 @@ mod tests {
             "10.0.0.1".parse::<IpNetwork>()?,
         ];
 
-        let info =
-            evaluate_connection(&headers, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        let info = evaluate_connection(&headers, Some(proxy_peer), &trusted)
+            .map_err(|e| format!("{e:?}"))?;
         // Right-to-left: 10.0.0.1 is trusted proxy -> skipped.
         // Next: 203.0.113.195 is untrusted -> chosen as real client IP.
         // Injected 127.0.0.1 on the left is ignored!
@@ -528,7 +528,7 @@ mod tests {
         let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
         let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
 
-        let info = evaluate_connection(&HeaderMap::new(), proxy_peer, &trusted)
+        let info = evaluate_connection(&HeaderMap::new(), Some(proxy_peer), &trusted)
             .map_err(|e| format!("{e:?}"))?;
         assert_eq!(info.client_ip, None);
         assert!(info.is_proxied);
@@ -536,8 +536,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-host", "artifree.example.com".parse()?);
         headers.insert("x-forwarded-proto", "https".parse()?);
-        let info =
-            evaluate_connection(&headers, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        let info = evaluate_connection(&headers, Some(proxy_peer), &trusted)
+            .map_err(|e| format!("{e:?}"))?;
         assert_eq!(info.client_ip, None, "host/proto alone name no client");
         Ok(())
     }
@@ -545,30 +545,78 @@ mod tests {
     #[test]
     fn direct_peer_is_its_own_client() -> Result<(), Box<dyn std::error::Error>> {
         let peer = "127.0.0.1".parse::<IpAddr>()?;
-        let info =
-            evaluate_connection(&HeaderMap::new(), peer, &[]).map_err(|e| format!("{e:?}"))?;
+        let info = evaluate_connection(&HeaderMap::new(), Some(peer), &[])
+            .map_err(|e| format!("{e:?}"))?;
         assert_eq!(info.client_ip, Some(peer));
         assert!(!info.is_proxied);
         Ok(())
     }
 
     #[test]
-    fn all_trusted_chain_resolves_to_leftmost_hop() -> Result<(), Box<dyn std::error::Error>> {
+    fn all_trusted_chain_has_unknown_client() -> Result<(), Box<dyn std::error::Error>> {
         let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
         let trusted = vec![
             "127.0.0.1".parse::<IpNetwork>()?,
             "10.0.0.0/8".parse::<IpNetwork>()?,
         ];
 
-        let mut xff = HeaderMap::new();
-        xff.insert("x-forwarded-for", "10.1.2.3, 127.0.0.1".parse()?);
-        let info = evaluate_connection(&xff, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
-        assert_eq!(info.client_ip, Some("10.1.2.3".parse::<IpAddr>()?));
+        for (name, value) in [
+            ("x-forwarded-for", "10.1.2.3, 127.0.0.1"),
+            ("x-forwarded-for", "127.0.0.1, 127.0.0.1"),
+            ("forwarded", "for=10.1.2.3, for=127.0.0.1"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value.parse()?);
+            let info = evaluate_connection(&headers, Some(proxy_peer), &trusted)
+                .map_err(|e| format!("{e:?}"))?;
+            assert_eq!(info.client_ip, None, "{name}: {value}");
+        }
+        Ok(())
+    }
 
-        let mut fwd = HeaderMap::new();
-        fwd.insert("forwarded", "for=10.1.2.3, for=127.0.0.1".parse()?);
-        let info = evaluate_connection(&fwd, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
-        assert_eq!(info.client_ip, Some("10.1.2.3".parse::<IpAddr>()?));
+    #[test]
+    fn xff_and_forwarded_must_agree() -> Result<(), Box<dyn std::error::Error>> {
+        let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
+        let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
+        let resolve =
+            |xff: &str, fwd: &str| -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+                let mut headers = HeaderMap::new();
+                headers.insert("x-forwarded-for", xff.parse()?);
+                headers.insert("forwarded", fwd.parse()?);
+                let info = evaluate_connection(&headers, Some(proxy_peer), &trusted)
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(info.client_ip)
+            };
+
+        assert_eq!(
+            resolve("203.0.113.9", "for=203.0.113.9")?,
+            Some("203.0.113.9".parse()?),
+            "agreeing headers resolve",
+        );
+        assert_eq!(
+            resolve("127.0.0.1, 203.0.113.9", "for=\"203.0.113.9:80\"")?,
+            Some("203.0.113.9".parse()?),
+            "agreement is on the resolved client, not the raw text",
+        );
+        assert_eq!(resolve("127.0.0.1", "for=203.0.113.9")?, None);
+        assert_eq!(resolve("203.0.113.9", "for=198.51.100.1")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_peer_is_unknown_and_never_trusted() -> Result<(), Box<dyn std::error::Error>> {
+        let trusted = vec!["0.0.0.0/0".parse::<IpNetwork>()?];
+        let info =
+            evaluate_connection(&HeaderMap::new(), None, &trusted).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, None);
+        assert!(!info.is_proxied);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.9".parse()?);
+        match evaluate_connection(&headers, None, &trusted) {
+            Ok(_) => panic!("forwarded headers without a known peer must be rejected"),
+            Err(err) => assert_eq!(err.status, StatusCode::FORBIDDEN),
+        }
         Ok(())
     }
 
@@ -584,8 +632,8 @@ mod tests {
         let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
         let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
 
-        let info =
-            evaluate_connection(&headers, proxy_peer, &trusted).map_err(|e| format!("{e:?}"))?;
+        let info = evaluate_connection(&headers, Some(proxy_peer), &trusted)
+            .map_err(|e| format!("{e:?}"))?;
         assert_eq!(info.client_ip, Some("203.0.113.195".parse::<IpAddr>()?));
         assert_eq!(info.host, "artifree.example.com");
         assert_eq!(info.proto, "https");

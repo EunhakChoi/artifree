@@ -49,6 +49,13 @@ cargo run -p artifree-server -- serve \
   --allow-remote-mcp
 ```
 
+The proxy must append (or overwrite) the client address in `X-Forwarded-For` or
+`Forwarded` and strip the header it does not use. A request with no client
+address, or a chain made only of trusted proxies, has an unknown client, and
+`/mcp` refuses unknown clients unless `--allow-remote-mcp` is set. Local agents
+should connect directly to the loopback listener, not through a trusted proxy
+(decision 0024).
+
 Linux x64 and Windows x64 release archives (server, built web workspace, a
 bundled CLI that needs Node.js 22.12 or newer, and a SHA-256 manifest) are built
 by CI and checked by unpacking them into an empty directory, starting, saving,

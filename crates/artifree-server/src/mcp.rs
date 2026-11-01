@@ -110,11 +110,13 @@ async fn enforce_mcp_access(
     // A trusted proxy that forwarded no client address leaves `client_ip`
     // unknown (`None`); only the explicit opt-in admits an unknown client.
     let is_loopback_client = match req.extensions().get::<crate::proxy::ClientConnectionInfo>() {
-        Some(info) => info.client_ip.is_some_and(|ip| ip.is_loopback()),
+        Some(info) => info
+            .client_ip
+            .is_some_and(|ip| ip.to_canonical().is_loopback()),
         None => req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
-            .is_some_and(|connect| connect.ip().is_loopback()),
+            .is_some_and(|connect| connect.ip().to_canonical().is_loopback()),
     };
     let is_allowed = state.settings().allow_remote_mcp || is_loopback_client;
 

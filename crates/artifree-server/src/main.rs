@@ -546,10 +546,17 @@ Options:
   --content-listen <addr:port>  Preview address [default: {content}]
   --content-origin <origin>     Public preview origin, if proxied
   --api-origin <origin>         Public API and web origin, if proxied (or ARTIFREE_API_ORIGIN)
-  --trusted-proxy <cidr>        Trusted reverse proxy IP or CIDR (or ARTIFREE_TRUSTED_PROXIES)
+  --trusted-proxy <cidr>        Trusted reverse proxy IP or CIDR (or ARTIFREE_TRUSTED_PROXIES).
+                                The proxy must append (or overwrite) the client
+                                address in X-Forwarded-For or Forwarded and strip
+                                the header it does not use. A request with no
+                                client address, or a chain of only trusted
+                                proxies, has an unknown client.
   --allowed-host <host>         Permitted Host header value (or ARTIFREE_ALLOWED_HOSTS)
   --allowed-origin <origin>     Permitted CORS origin (or ARTIFREE_ALLOWED_ORIGINS)
-  --allow-remote-mcp            Permit remote authenticated MCP connections
+  --allow-remote-mcp            Permit remote authenticated MCP connections. Without
+                                it /mcp admits only a known loopback client: connect
+                                local agents directly, not through a trusted proxy.
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
   --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
   --request-burst <n>           Requests accepted at once [default: {burst}]

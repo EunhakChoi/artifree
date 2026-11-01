@@ -2,6 +2,7 @@
 //! budget, refusals come after authentication and before any processing, and
 //! a refused request leaves its idempotency key unused.
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,6 +16,7 @@ use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
 use http_body::Frame;
 use serde_json::{Value, json};
@@ -62,7 +64,12 @@ impl Harness {
         .unwrap_or_else(|error| panic!("cannot build state: {error}"));
         Self {
             directory,
-            api: http::router(state),
+            // The real server records the socket peer; with none, the client
+            // is unknown and /mcp is refused, so tests connect from loopback.
+            api: http::router(state).layer(axum::Extension(ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                40_000,
+            ))))),
         }
     }
 
