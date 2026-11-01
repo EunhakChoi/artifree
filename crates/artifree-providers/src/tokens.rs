@@ -8,8 +8,10 @@ use std::time::Duration;
 
 use artifree_domain::identity::TokenId;
 use artifree_ports::token_store::{NewTokenRecord, TokenRecord, TokenStore, TokenStoreError};
-use rusqlite::{Connection, ErrorCode, OptionalExtension};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
+
+use crate::storage::SCHEMA_VERSION;
 
 const DIGITS: &[u8; 16] = b"0123456789abcdef";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,16 +54,32 @@ impl SqliteTokenStore {
     ///
     /// # Errors
     ///
-    /// When the file cannot be opened or initialized.
+    /// When the file cannot be opened or initialized, or uses a newer schema
+    /// version than this build supports (the file is not changed then).
     pub fn open(path: &Path) -> Result<Self, TokenStoreError> {
         let store = Self {
             path: path.to_owned(),
         };
-        let connection = store.connect()?;
+        let mut connection = store.connect()?;
+        // As in `SqliteStore::open`: refuse before writing anything, create the
+        // table in one transaction, and switch to WAL only afterwards, so a
+        // refused open leaves the file as it was whichever store opens first.
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(unavailable)?;
+        let version: i64 = transaction
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(unavailable)?;
+        if version > SCHEMA_VERSION {
+            return Err(TokenStoreError::Unavailable(format!(
+                "database schema version {version} is not supported by this build (expected {SCHEMA_VERSION})"
+            )));
+        }
+        transaction.execute_batch(SCHEMA).map_err(unavailable)?;
+        transaction.commit().map_err(unavailable)?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(unavailable)?;
-        connection.execute_batch(SCHEMA).map_err(unavailable)?;
         Ok(store)
     }
 

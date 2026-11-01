@@ -8,12 +8,10 @@
 use std::fs;
 use std::path::Path;
 
-use artifree_providers::backup::{self, BackupSummary};
+use artifree_providers::backup::{self, BackupSummary, SCRATCH_PREFIX};
+use artifree_providers::storage::DATABASE_FILE;
 
 use crate::serve::prepare_data_dir;
-
-/// Name of the database file inside a data directory.
-pub const DATABASE_FILE: &str = "artifree.sqlite3";
 
 /// Writes a consistent snapshot of the data directory's database to the new
 /// file `output`. A server may be running on the directory.
@@ -38,9 +36,25 @@ pub fn backup(data_dir: &Path, output: &Path) -> Result<BackupSummary, String> {
 pub fn restore(input: &Path, data_dir: &Path) -> Result<BackupSummary, String> {
     let created = match fs::read_dir(data_dir) {
         Ok(mut entries) => {
-            if entries.next().is_some() {
+            if let Some(first) = entries.next() {
+                let leftover = std::iter::once(first)
+                    .chain(entries)
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(SCRATCH_PREFIX)
+                    });
+                let hint = if leftover {
+                    format!(
+                        "; {SCRATCH_PREFIX}* directories are leftovers of an interrupted backup or restore and are safe to delete"
+                    )
+                } else {
+                    String::new()
+                };
                 return Err(format!(
-                    "restore failed: {} is not empty; restore into a new or empty directory",
+                    "restore failed: {} is not empty; restore into a new or empty directory{hint}",
                     data_dir.display()
                 ));
             }

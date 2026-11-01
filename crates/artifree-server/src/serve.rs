@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use artifree_providers::storage::SqliteStore;
+use artifree_providers::storage::{self, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
 use tokio::net::TcpListener;
 
@@ -89,7 +89,7 @@ pub struct Ready {
 /// when a listener fails while serving.
 pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
     prepare_data_dir(&options.data_dir)?;
-    let db_path = options.data_dir.join("artifree.sqlite3");
+    let db_path = options.data_dir.join(storage::DATABASE_FILE);
     let store = SqliteStore::open(&db_path).map_err(|error| error.to_string())?;
     let token_store = SqliteTokenStore::open(&db_path).map_err(|error| error.to_string())?;
     let token_file = options.data_dir.join("access-token");

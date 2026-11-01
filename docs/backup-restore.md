@@ -27,6 +27,17 @@ artifree-server backup --data-dir /var/lib/artifree --output /backups/artifree-2
 - The output directory must exist and its file system must support hard links.
 - The snapshot is one point in time: a revision is either wholly in or wholly out.
 - It reads a snapshot of the live database; leave the server running.
+- The command refuses a file that is not an Artifree database (schema version 0,
+  such as an empty or another application's database) and a current-schema
+  database whose tables differ from what this build creates, so it does not
+  report success for a logically damaged source.
+- Success is reported after the file is flushed to disk and, on Unix, the output
+  directory is flushed. Windows has no directory flush in the standard library,
+  so there only the file is flushed; check that the file exists after a crash.
+- While it runs, the command keeps a private scratch directory
+  `.artifree-scratch-*` beside the output (it holds a full unencrypted copy of
+  the database). It is removed on success and on errors. If the process is
+  killed (Ctrl+C, `kill -9`, power loss), delete the leftover directory by hand.
 - Do not copy `artifree.sqlite3` with `cp` while the server runs: the WAL file
   holds recent commits and a plain copy can be inconsistent.
 
@@ -44,6 +55,11 @@ docker cp artifree:/data/backup-2026-11-01.sqlite3 .
 docker exec artifree rm /data/backup-2026-11-01.sqlite3
 ```
 
+The output and its scratch directory must be on the same file system (the file
+is published with a hard link), so inside the container both go to `/data`, the
+only writable persistent place of a read-only container. After an interrupted
+`docker exec`, remove `/data/.artifree-scratch-*`.
+
 The copy on the host is mode 600 and, depending on how you run `docker cp`,
 owned by you. Keep it somewhere only you can read.
 
@@ -55,8 +71,19 @@ artifree-server serve --data-dir /srv/artifree-new --web-dir ...
 ```
 
 - The target directory must not exist or must be empty; nothing is replaced.
-- A backup that is damaged, or whose schema is newer than this build, is
-  refused. An older schema is upgraded during the restore.
+- A backup that is damaged, empty, another application's database, or whose
+  schema is newer than this build, is refused. An older schema is upgraded during
+  the restore. Before anything is published the restored file must pass
+  `quick_check` and `foreign_key_check` and have exactly the tables, indexes and
+  constraints this build creates; otherwise nothing is left behind.
+- Success is reported after the file and (Unix) its directory are flushed.
+  The new directory's own entry in its parent is not flushed, so after a crash
+  during or right after a restore, check that the directory exists and rerun it
+  if not.
+- The scratch directory `.artifree-scratch-*` of an interrupted restore sits
+  inside the target and makes a retry fail with "not empty"; the message says so.
+  Delete it and retry. A stale `artifree.sqlite3-wal`, `-shm` or `-journal` next
+  to the target is refused as well.
 - The restore does not create an access token. The first `serve` prints a new
   `token_file`; managed tokens from the backup still work unless revoked.
 - The change feed keeps its identity. A web page open on the old server reloads
@@ -80,7 +107,8 @@ care about before retiring the old instance.
    with the same `--data-dir`.
 3. Opening the database upgrades an older schema (1 to the current) in one
    transaction. If an upgrade step fails, nothing changes and the server does
-   not start; the error names the failing statement.
+   not start; the error carries SQLite's message (for example the name of a
+   conflicting object).
 4. A database written by a **newer** version is refused unchanged. There is no
    downgrade: restore the backup into a new directory and run the old version
    on it.
@@ -97,3 +125,5 @@ care about before retiring the old instance.
   not executed against a container runtime; the same binary is exercised by the
   release verification in CI.
 - Running as a user other than the server's was not tested.
+- That the flushes reach stable storage: calling them is not tested (a test
+  cannot observe a power loss), only that backup and restore succeed.

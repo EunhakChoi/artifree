@@ -30,8 +30,9 @@ data to the backup tests.**
 ## Decision
 
 1. **Backup uses `VACUUM INTO`, not the online backup API.** One statement reads
-   a single snapshot inside one read transaction. In WAL mode writers are not
-   blocked and the snapshot holds exactly the commits complete when it began, so
+   a single snapshot inside one read transaction. In WAL mode SQLite lets writers proceed during a read
+   transaction (its documented behavior; the tests take a backup while a writer
+   commits and check the snapshot, but do not measure blocking). The snapshot holds exactly the commits complete when it began, so
    a revision, its blobs, its request key, and its feed row are all in or all out.
    The SQLite backup API needs rusqlite's `backup` feature and a step loop that
    restarts when another connection writes. Avoiding a new feature keeps
@@ -45,7 +46,7 @@ data to the backup tests.**
    deletes them, so a backup of a stopped server leaves the directory (and the
    database bytes) as they were (tested). While a server runs the backup is not
    the last connection, nothing is checkpointed by it, and it issues no write
-   statements, so it takes no write lock and cannot block or alter commits. Run
+   statements, so by SQLite's design it takes no write lock (not measured). Run
    backup and restore as the server's user; as another user the connection could
    create files the server cannot use.
 2. **The file is written privately and published without replacing anything.**
@@ -82,7 +83,7 @@ data to the backup tests.**
 5. **Schema upgrade policy.** `PRAGMA user_version` is the schema version
    (currently 5). Opening a database of version 0 to 4 runs all missing steps in
    one `BEGIN IMMEDIATE` transaction; any failure rolls back everything and
-   reports the failing SQL error. A newer version is refused without a write.
+   reports SQLite's error message, which names for example a conflicting object. A newer version is refused without a write.
    There is no downgrade: to go back, restore a backup taken before the upgrade
    into a directory used by the older build. **The open now switches to WAL after
    the migration commits, not before.** Switching rewrites the file header, so the
@@ -102,6 +103,37 @@ data to the backup tests.**
    The logic lives in `artifree-providers::backup` (next to the SQLite code) and
    `artifree-server::data_backup`, so tests exercise it without the binary.
 
+8. **A backup or restore must be an Artifree database, exactly.** Schema
+   version 0 never shipped; an empty file, a truncated file, or another
+   application's database has it and is refused (`Damaged`) by backup and
+   restore. For the current version the file's `sqlite_master` (whitespace and
+   quoting ignored) must equal that of a database this build creates in the
+   scratch directory: a backup checks its snapshot (the token table may be
+   absent, since a build before token records produced valid version 5 files); a
+   restore checks the migrated file including the token table. Older snapshots
+   are checked by the restore, after their migration. A mismatch publishes
+   nothing.
+9. **Durability.** `VACUUM INTO` does not flush its output and a restore migrates
+   after copying, so the file is set to mode 600, flushed (`sync_all`), linked,
+   and then the destination directory is flushed on Unix. Windows has no
+   directory flush in the standard library; there only the file is flushed. The
+   directory entry of a newly created restore target is not flushed either; a
+   crash may lose it, and the restore is rerun. The flush calls cannot be
+   tested for effect.
+10. **Interrupted runs.** The scratch directory (`.artifree-scratch-*`, 0700) is
+    removed on every return path but not on a signal or crash. It must be on the
+    destination's file system for the hard link, so a container writes output
+    and scratch to `/data`. A restore into a directory holding only such
+    leftovers fails with "not empty" and says they are safe to delete. A restore
+    also refuses a stale `-journal` (as `-wal`, `-shm`) beside the target, which
+    a later open could roll back into the new file.
+11. **Token store open order.** `SqliteTokenStore::open` follows the same order
+    as the store: read `user_version`, refuse a newer one, create its table in
+    one transaction, switch to WAL afterwards. A refused open leaves the file
+    unchanged whichever store opens first (tested).
+12. One constant (`storage::DATABASE_FILE`) names the database file for serve,
+    backup, and restore.
+
 ## Tests
 
 - Backup during writes: a writer commits 40 revisions while a backup starts after
@@ -110,7 +142,10 @@ data to the backup tests.**
   with the same body and conflict with another, and the key just past the
   snapshot is unused. Renames, pins, the trash state, the feed identity and
   earlier changes, and token records (including a revoked one) survive.
-- Refusals: existing output, missing database, newer-schema source, existing
+- Refusals: an empty file, an unrelated database (also with our version number),
+  and a current-version file with a missing or an extra table, by restore
+  (nothing left behind) and by backup; a stale `-journal`, `-wal`, `-shm`;
+  the token store on a newer schema (bytes unchanged); existing output, missing database, newer-schema source, existing
   restore target, newer-schema backup (backup file untouched), non-database
   file; owner-only modes on Unix.
 - Upgrade fixtures, written out as released (not derived from current code) for

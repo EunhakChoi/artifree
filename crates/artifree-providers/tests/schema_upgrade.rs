@@ -16,7 +16,7 @@ use artifree_ports::artifact_store::{
     ArtifactStore, ChangeKind, Delivery, NewArtifact, RequestFingerprint, RequestIdentity,
     StoreError,
 };
-use artifree_ports::token_store::{NewTokenRecord, TokenStore};
+use artifree_ports::token_store::{NewTokenRecord, TokenStore, TokenStoreError};
 use artifree_providers::backup;
 use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
 use artifree_providers::tokens::{SqliteTokenStore, hash_token_secret};
@@ -454,6 +454,29 @@ fn a_newer_schema_is_refused_without_touching_the_file() -> TestResult {
         let error = SqliteStore::open(path).err();
         assert!(
             matches!(&error, Some(StoreError::Unavailable(reason)) if reason.contains("not supported")),
+            "{path:?}: expected a refusal, got {error:?}"
+        );
+        assert_eq!(std::fs::read(path)?, before, "{path:?}: file bytes");
+        assert_eq!(names(&dir)?, files_before, "{path:?}: no stray files");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_token_store_alone_refuses_a_newer_schema_without_touching_the_file() -> TestResult {
+    let dir = TempDir::new("tokens-newer");
+    let rollback = dir.join("rollback.sqlite3");
+    fixture(&rollback, 4)?;
+    Connection::open(&rollback)?.pragma_update(None, "user_version", SCHEMA_VERSION + 1)?;
+    let wal = dir.join("wal.sqlite3");
+    SqliteStore::open(&wal)?;
+    Connection::open(&wal)?.pragma_update(None, "user_version", SCHEMA_VERSION + 1)?;
+    for path in [&rollback, &wal] {
+        let before = std::fs::read(path)?;
+        let files_before = names(&dir)?;
+        let error = SqliteTokenStore::open(path).err();
+        assert!(
+            matches!(&error, Some(TokenStoreError::Unavailable(reason)) if reason.contains("not supported")),
             "{path:?}: expected a refusal, got {error:?}"
         );
         assert_eq!(std::fs::read(path)?, before, "{path:?}: file bytes");

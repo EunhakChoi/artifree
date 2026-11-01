@@ -44,6 +44,9 @@ use artifree_ports::artifact_store::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
+/// Name of the database file inside a data directory.
+pub const DATABASE_FILE: &str = "artifree.sqlite3";
+
 /// The schema version this build reads and writes, as `PRAGMA user_version`.
 pub const SCHEMA_VERSION: i64 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);

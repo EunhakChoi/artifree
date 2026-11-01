@@ -252,3 +252,24 @@ fn help_describes_the_backup_commands() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn a_restore_names_the_leftovers_of_an_interrupted_run() -> TestResult {
+    let scratch = Scratch::new("leftover")?;
+    let target = scratch.0.join("target");
+    std::fs::create_dir_all(target.join(".artifree-scratch-0123456789abcdef"))?;
+    let output = binary()
+        .arg("restore")
+        .arg("--input")
+        .arg(scratch.0.join("missing.sqlite3"))
+        .arg("--data-dir")
+        .arg(&target)
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    let message = String::from_utf8(output.stderr)?;
+    assert!(
+        message.contains("not empty") && message.contains(".artifree-scratch-*"),
+        "{message}"
+    );
+    Ok(())
+}

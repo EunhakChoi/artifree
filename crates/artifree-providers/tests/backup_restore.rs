@@ -172,19 +172,24 @@ fn backup_during_writes(
             }
             Ok(())
         });
-        while reached.load(Ordering::Acquire) < BACKUP_AFTER {
+        // A writer that failed early must not leave this loop waiting; its
+        // error is reported by the join below.
+        while reached.load(Ordering::Acquire) < BACKUP_AFTER && !writer.is_finished() {
             thread::yield_now();
         }
-        let summary = backup::create_backup(database, output)?;
-        assert_eq!(summary.schema_version, SCHEMA_VERSION);
+        let summary = backup::create_backup(database, output);
         writer.join().map_err(|_| "writer panicked")??;
+        assert_eq!(summary?.schema_version, SCHEMA_VERSION);
         Ok(())
     })
 }
 
 /// The snapshot is one commit boundary: revision numbers are contiguous, the
-/// snapshot is neither empty nor complete, and every file reads as its
-/// revision wrote it. Returns the snapshot's head revision.
+/// snapshot is not earlier than the writer's progress when the backup began,
+/// and every file reads as its revision wrote it. The writer may or may not
+/// have finished by then, so this does not show that writers are not blocked
+/// (that is `SQLite`'s WAL behavior, which these tests rely on but do not
+/// measure). Returns the snapshot's head revision.
 fn assert_history(
     restored: &SqliteStore,
     id: &ArtifactId,
@@ -192,7 +197,7 @@ fn assert_history(
     let head = restored.artifact(id)?.ok_or("artifact")?.current_revision.0;
     assert!(
         (BACKUP_AFTER..=LAST_REVISION).contains(&head),
-        "snapshot head {head} should lie where the writer was when it began"
+        "snapshot head {head} should not precede the writer progress that started the backup"
     );
     let revisions = restored.revisions(id)?;
     assert_eq!(
@@ -470,5 +475,119 @@ fn a_file_that_is_not_a_database_is_not_restored() -> TestResult {
     );
     assert!(!database.exists());
     assert_eq!(leftovers(&target)?, ["snapshot.sqlite3"]);
+    Ok(())
+}
+
+fn without_a_table(
+    table: &str,
+) -> Result<(TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
+    let (source, store, tokens) = instance()?;
+    create(&store, "create", "Demo")?;
+    tokens.create(&token(1, "active"))?;
+    let dir = TempDir::new("missing-table");
+    let output = dir.join("snapshot.sqlite3");
+    backup::create_backup(&source.database, &output)?;
+    rusqlite::Connection::open(&output)?.execute_batch(&format!("DROP TABLE {table};"))?;
+    Ok((dir, output))
+}
+
+fn assert_not_restored(output: &Path, dir: &TempDir, what: &str) -> TestResult {
+    let database = dir.join("restored.sqlite3");
+    let before = leftovers(dir)?;
+    let error = backup::restore_backup(output, &database).err();
+    assert!(
+        matches!(error, Some(BackupError::Damaged(_))),
+        "{what}: expected Damaged, got {error:?}"
+    );
+    assert_eq!(leftovers(dir)?, before, "{what}: nothing is left behind");
+    assert!(!database.exists(), "{what}");
+    Ok(())
+}
+
+#[test]
+fn a_file_that_is_not_this_applications_database_is_not_restored() -> TestResult {
+    let dir = TempDir::new("restore-foreign");
+    let empty = dir.join("empty.sqlite3");
+    std::fs::write(&empty, b"")?;
+    assert_not_restored(&empty, &dir, "zero-byte file")?;
+
+    let foreign = dir.join("foreign.sqlite3");
+    rusqlite::Connection::open(&foreign)?
+        .execute_batch("CREATE TABLE notes (body TEXT); INSERT INTO notes VALUES ('x');")?;
+    assert_not_restored(&foreign, &dir, "unrelated database")?;
+
+    // Another application's database that happens to carry our version number.
+    rusqlite::Connection::open(&foreign)?.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    assert_not_restored(&foreign, &dir, "unrelated database at the current version")?;
+
+    // The current version with a table missing, and with a table the build
+    // would not create.
+    let (missing, output) = without_a_table("changes")?;
+    assert_not_restored(&output, &missing, "missing table")?;
+    let (extra, output) = without_a_table("tokens")?;
+    rusqlite::Connection::open(&output)?.execute_batch("CREATE TABLE stray (x);")?;
+    assert_not_restored(&output, &extra, "unexpected table")
+}
+
+#[test]
+fn a_source_that_is_not_this_applications_database_is_not_backed_up() -> TestResult {
+    let dir = TempDir::new("backup-foreign");
+    let foreign = dir.join("foreign.sqlite3");
+    rusqlite::Connection::open(&foreign)?.execute_batch("CREATE TABLE notes (body TEXT);")?;
+    let output = dir.join("snapshot.sqlite3");
+    let error = backup::create_backup(&foreign, &output).err();
+    assert!(matches!(error, Some(BackupError::Damaged(_))), "{error:?}");
+
+    // A damaged current-version database is not backed up either.
+    let (source, store, _tokens) = instance()?;
+    create(&store, "create", "Demo")?;
+    rusqlite::Connection::open(&source.database)?.execute_batch("DROP TABLE changes;")?;
+    let error = backup::create_backup(&source.database, &dir.join("two.sqlite3")).err();
+    assert!(
+        matches!(&error, Some(BackupError::Damaged(reason)) if reason.contains("changes")),
+        "{error:?}"
+    );
+    assert_eq!(
+        leftovers(&dir)?,
+        ["foreign.sqlite3"],
+        "nothing is left behind"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_current_database_without_a_token_table_is_backed_up_and_restored_with_one() -> TestResult {
+    let dir = TempDir::new("no-token-table");
+    let database = dir.join("artifree.sqlite3");
+    let store = SqliteStore::open(&database)?;
+    create(&store, "create", "Demo")?;
+    let output = dir.join("snapshot.sqlite3");
+    backup::create_backup(&database, &output)?;
+    let restored = dir.join("restored.sqlite3");
+    backup::restore_backup(&output, &restored)?;
+    assert!(SqliteTokenStore::open(&restored)?.list()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_restore_refuses_a_stale_journal_beside_the_new_database() -> TestResult {
+    let (source, store, _tokens) = instance()?;
+    create(&store, "create", "Demo")?;
+    let target = TempDir::new("restore-journal");
+    let output = target.join("snapshot.sqlite3");
+    backup::create_backup(&source.database, &output)?;
+    let database = target.join("restored.sqlite3");
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let stale = target.join(&format!("restored.sqlite3{suffix}"));
+        std::fs::write(&stale, b"stale")?;
+        assert_eq!(
+            backup::restore_backup(&output, &database).err(),
+            Some(BackupError::Exists(stale.clone())),
+            "{suffix}"
+        );
+        std::fs::remove_file(&stale)?;
+    }
+    assert!(!database.exists());
+    backup::restore_backup(&output, &database)?;
     Ok(())
 }
