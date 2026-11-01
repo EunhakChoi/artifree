@@ -8,6 +8,8 @@
 //! without a second description of it: the reference is made by running the
 //! same upgrade on an empty in-memory database.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use artifree_ports::artifact_store::StoreError;
@@ -256,30 +258,174 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     transaction.commit().map_err(unavailable)
 }
 
-/// One schema object as `SQLite` records it, with whitespace normalized.
-#[derive(Debug, PartialEq, Eq)]
-struct Object {
-    kind: String,
-    name: String,
-    table: String,
-    sql: String,
-}
-
-fn objects(connection: &Connection) -> Result<Vec<Object>, rusqlite::Error> {
+/// What the schema is, described by `SQLite`'s own introspection and not by
+/// the text it stores. `ALTER TABLE ... RENAME` rewrites stored SQL text in a
+/// way that may differ between `SQLite` versions, so comparing text would make a
+/// library upgrade refuse real databases.
+///
+/// Every object by kind and table; for each table its columns (type, not-null,
+/// default, primary key, hidden), strictness, `WITHOUT ROWID`, indexes with
+/// their columns, uniqueness and partiality, foreign keys, and the text of its
+/// `CHECK` constraints. The last is the one place that compares text, because
+/// `SQLite` has no introspection for it; the expressions themselves are not
+/// rewritten by a rename of a table.
+fn shape(connection: &Connection) -> Result<BTreeMap<String, Vec<String>>, rusqlite::Error> {
+    let mut shape = BTreeMap::new();
     let mut statement = connection.prepare(
         "SELECT type, name, tbl_name, coalesce(sql, '') FROM sqlite_master
-         WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name",
+         WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY type, name",
     )?;
-    let rows = statement.query_map([], |row| {
-        let sql: String = row.get(3)?;
-        Ok(Object {
-            kind: row.get(0)?,
-            name: row.get(1)?,
-            table: row.get(2)?,
-            sql: sql.split_whitespace().collect::<Vec<_>>().join(" "),
-        })
+    let objects = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (kind, name, table, sql) in objects {
+        let mut lines = vec![format!("on {table}")];
+        if kind == "table" {
+            lines.extend(table_lines(connection, &name, &sql)?);
+        } else if kind != "index" {
+            // A view or trigger: no build creates one, so its text must match.
+            lines.push(sql.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+        shape.insert(format!("{kind} {name}"), lines);
+    }
+    Ok(shape)
+}
+
+fn table_lines(
+    connection: &Connection,
+    table: &str,
+    sql: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut lines = Vec::new();
+    lines.extend(described(
+        connection,
+        "SELECT 'column', cid, name, type, \"notnull\", dflt_value, pk, hidden
+         FROM pragma_table_xinfo(?1) ORDER BY cid",
+        [table],
+    )?);
+    lines.extend(described(
+        connection,
+        "SELECT 'table', strict, wr FROM pragma_table_list(?1) WHERE schema = 'main'",
+        [table],
+    )?);
+    lines.extend(described(
+        connection,
+        "SELECT 'foreign key', id, seq, \"table\", \"from\", \"to\", on_update, on_delete, match
+         FROM pragma_foreign_key_list(?1) ORDER BY id, seq",
+        [table],
+    )?);
+    let indexes: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_index_list(?1) ORDER BY name")?
+        .query_map([table], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for index in &indexes {
+        lines.push(format!("index {index}"));
+        lines.extend(described(
+            connection,
+            "SELECT 'key', seqno, cid, name, desc, coll, key
+             FROM pragma_index_xinfo(?1) ORDER BY seqno",
+            [index],
+        )?);
+        lines.extend(described(
+            connection,
+            "SELECT 'flags', \"unique\", origin, partial
+             FROM pragma_index_list(?2) WHERE name = ?1",
+            [index.as_str(), table],
+        )?);
+    }
+    lines.extend(
+        check_constraints(sql)
+            .into_iter()
+            .map(|check| format!("check {check}")),
+    );
+    Ok(lines)
+}
+
+/// Runs `query` and renders each row as its fields joined by `|`.
+fn described<P: rusqlite::Params>(
+    connection: &Connection,
+    query: &str,
+    parameters: P,
+) -> Result<Vec<String>, rusqlite::Error> {
+    use rusqlite::types::ValueRef;
+    let mut statement = connection.prepare(query)?;
+    let count = statement.column_count();
+    let rows = statement.query_map(parameters, |row| {
+        let mut fields = Vec::with_capacity(count);
+        for index in 0..count {
+            fields.push(match row.get_ref(index)? {
+                ValueRef::Null => "-".to_owned(),
+                ValueRef::Integer(number) => number.to_string(),
+                ValueRef::Real(number) => number.to_string(),
+                ValueRef::Text(text) => String::from_utf8_lossy(text).into_owned(),
+                ValueRef::Blob(_) => "blob".to_owned(),
+            });
+        }
+        Ok(fields.join("|"))
     })?;
     rows.collect()
+}
+
+/// The expressions of the `CHECK (...)` constraints in a `CREATE TABLE`
+/// statement, whitespace-normalized, outside string literals.
+fn check_constraints(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut checks = Vec::new();
+    let mut position = 0;
+    let mut quote: Option<u8> = None;
+    while position < bytes.len() {
+        let byte = bytes[position];
+        if let Some(open) = quote {
+            if byte == open {
+                quote = None;
+            }
+            position += 1;
+        } else if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+            position += 1;
+        } else if sql[position..].len() >= 5
+            && sql[position..position + 5].eq_ignore_ascii_case("check")
+            && !bytes
+                .get(position.wrapping_sub(1))
+                .is_some_and(|before| before.is_ascii_alphanumeric() || *before == b'_')
+        {
+            let rest = sql[position + 5..].trim_start();
+            let start = sql.len() - rest.len();
+            let mut depth = 0_usize;
+            let mut end = start;
+            for (offset, character) in sql[start..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            end = start + offset + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            checks.push(
+                sql[start..end]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            position = end.max(position + 5);
+        } else {
+            position += 1;
+        }
+    }
+    checks.sort();
+    checks
 }
 
 /// Checks that the database holds exactly the schema this build creates, and
@@ -292,25 +438,29 @@ fn objects(connection: &Connection) -> Result<Vec<Object>, rusqlite::Error> {
 pub(crate) fn check_current(connection: &Connection) -> Result<(), String> {
     let mut reference = Connection::open_in_memory().map_err(|error| error.to_string())?;
     upgrade(&mut reference).map_err(|error| error.to_string())?;
-    let expected = objects(&reference).map_err(|error| error.to_string())?;
-    let actual = objects(connection).map_err(|error| error.to_string())?;
-    for wanted in &expected {
-        match actual.iter().find(|found| found.name == wanted.name) {
-            None => return Err(format!("{} {} is missing", wanted.kind, wanted.name)),
+    let expected = shape(&reference).map_err(|error| error.to_string())?;
+    let actual = shape(connection).map_err(|error| error.to_string())?;
+    for (object, wanted) in &expected {
+        match actual.get(object) {
+            None => return Err(format!("{object} is missing")),
             Some(found) if found != wanted => {
+                let detail = wanted
+                    .iter()
+                    .zip(found)
+                    .find(|(wanted, found)| wanted != found)
+                    .map_or_else(
+                        || "a different number of parts".to_owned(),
+                        |(wanted, found)| format!("expected {wanted:?}, found {found:?}"),
+                    );
                 return Err(format!(
-                    "{} {} differs from this build's schema",
-                    wanted.kind, wanted.name
+                    "{object} differs from this build's schema: {detail}"
                 ));
             }
             Some(_) => {}
         }
     }
-    if let Some(extra) = actual
-        .iter()
-        .find(|found| !expected.iter().any(|wanted| wanted.name == found.name))
-    {
-        return Err(format!("unexpected {} {}", extra.kind, extra.name));
+    if let Some(extra) = actual.keys().find(|object| !expected.contains_key(*object)) {
+        return Err(format!("unexpected {extra}"));
     }
     let feeds: i64 = connection
         .query_row("SELECT count(*) FROM feed", [], |row| row.get(0))

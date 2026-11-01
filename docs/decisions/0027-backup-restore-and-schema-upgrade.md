@@ -50,10 +50,22 @@ newer or failed schemas that does no damage.
 4. **A backup is proven restorable before success.** The snapshot goes through
    the restore pipeline: version in range, `integrity_check` and
    `foreign_key_check`, upgrade of a copy when the snapshot is older (the
-   integrity checks run again only then), and a comparison of the normalized
-   `sqlite_master` with the schema this build creates, taken from an empty
-   in-memory database upgraded by the same ladder. There is no on-disk
-   reference. The feed table must hold exactly one row. A snapshot at the
+   integrity checks run again only then), and a comparison with the schema this build
+   creates, taken from an empty in-memory database upgraded by the same
+   ladder. There is no on-disk reference. **The comparison is structural,
+   not textual.** `ALTER TABLE ... RENAME` makes SQLite rewrite the stored
+   `CREATE` text, and the rewrite may differ between SQLite versions, so a
+   future `libsqlite3-sys` bump would otherwise make backup and restore refuse
+   genuine databases (every released build used 0.38.2, so today the texts
+   agree). The comparison uses SQLite's own introspection: objects by kind and
+   table; for each table its columns (type, not-null, default, primary key,
+   hidden), STRICT and WITHOUT ROWID, indexes with their columns, uniqueness
+   and partiality, and foreign keys. `CHECK` constraints have no
+   introspection, so their expressions are extracted from the stored text and
+   compared as written; that is the one textual part, and a rewrite that
+   changed a `CHECK` expression itself would need the comparison revisited.
+   A test accepts a database whose stored text was rewritten with the same
+   structure and refuses dropped checks, foreign keys, and changed defaults. The feed table must hold exactly one row. A snapshot at the
    current version is checked in place and not copied. Refused: version
    below 1 (empty, truncated, another application's database), above the
    current one, damaged, a foreign key violation, or a schema that differs
@@ -125,11 +137,28 @@ newer or failed schemas that does no damage.
    for a path flag is refused at parse, and an argument of another command that is not UTF-8
    is reported instead of panicking. The database file name is the constant
    `DATABASE_FILE`, shared with `serve`.
-9. **Later domains extend the backup.** A new persisted table is added as a
-   ladder step in `schema.rs`; the backup and the schema comparison then
-   include it with no further change. Anything stored outside the database
-   file (object storage, X03) needs its own entry in `docs/backup-restore.md`
-   before it ships.
+9. **Maintenance writes outside `ArtifactService`.** AGENTS.md requires
+   mutations to go through `ArtifactService` with a base revision and an
+   idempotency key. Restore writes in two ways that do not: the schema upgrade
+   and the renewal of `feed.id` (`UPDATE feed SET id = ...`). Neither is an
+   artifact mutation: they do not create, revise, or change any artifact,
+   revision, or request key, so a base revision and a key have nothing to
+   guard. They cannot race with a request because they run on a private
+   scratch copy in a directory created by this process (mode 0700, random
+   name) before any server has the file open, and the copy is published, by a
+   no-replace hard link, only after every connection to it is closed. The
+   server's own start-time upgrade is the existing ladder (decision 0003) and
+   is unchanged. Backup writes nothing to the live database; it only reads it
+   (a crash-left WAL is recovered by SQLite itself, decision 5). The
+   connections that write use the store's own settings (busy timeout,
+   foreign keys on, `synchronous=FULL`, no create) through one shared
+   function; the token store keeps its own 5 second timeout and no foreign
+   keys (its table has none) because it is not one of those connections.
+10. **Later domains extend the backup.** A new persisted table is added as a
+    ladder step in `schema.rs`; the backup and the schema comparison then
+    include it with no further change. Anything stored outside the database
+    file (object storage, X03) needs its own entry in `docs/backup-restore.md`
+    before it ships.
 
 ## Rewrite after review
 

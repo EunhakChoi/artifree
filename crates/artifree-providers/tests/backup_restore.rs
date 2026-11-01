@@ -80,6 +80,16 @@ fn refused<T: std::fmt::Debug>(result: &Result<T, BackupError>, case: &str) {
     );
 }
 
+/// SQL that edits the stored `CREATE` text of `table` in place, as `SQLite`'s own
+/// rewrites do, without changing the table's data.
+fn rewritten_schema(table: &str, from: &str, to: &str) -> String {
+    format!(
+        "PRAGMA writable_schema = ON;
+         UPDATE sqlite_master SET sql = replace(sql, '{from}', '{to}') WHERE name = '{table}';
+         PRAGMA writable_schema = OFF;"
+    )
+}
+
 /// Databases a backup and a restore must both refuse: each is named with the
 /// function that builds it in `directory`.
 fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -102,6 +112,21 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
              PRAGMA user_version = {SCHEMA_VERSION}"
             ))?)
         }
+        "dropped check constraint" => mutate(&rewritten_schema(
+            "artifacts",
+            "CHECK (current_revision >= 1)",
+            "",
+        )),
+        "dropped foreign key" => mutate(&rewritten_schema(
+            "revisions",
+            " REFERENCES artifacts (id)",
+            "",
+        )),
+        "changed column default" => mutate(&rewritten_schema(
+            "artifacts",
+            "DEFAULT 0 CHECK (pinned",
+            "DEFAULT 1 CHECK (pinned",
+        )),
         "missing table" => mutate("DROP TABLE request_keys"),
         "missing index" => mutate("DROP INDEX artifacts_by_owner"),
         "missing token index" => mutate("DROP INDEX idx_tokens_secret_hash"),
@@ -157,12 +182,15 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-const REFUSED: [&str; 16] = [
+const REFUSED: [&str; 19] = [
     "newer schema",
     "empty file",
     "unrelated database",
     "unrelated database with our version",
     "utf-16 database with our version",
+    "dropped check constraint",
+    "dropped foreign key",
+    "changed column default",
     "missing table",
     "missing index",
     "missing token index",
@@ -178,6 +206,10 @@ const REFUSED: [&str; 16] = [
 
 #[test]
 fn backup_refuses_every_bad_database_and_leaves_nothing_behind() -> TestResult {
+    // A refused database must not leave a stray file in the working directory
+    // either (a path misread by SQLite once did: decision 0027, review 2).
+    let working_dir = std::env::current_dir()?;
+    let before_cwd = files_of(&working_dir);
     for case in REFUSED {
         let layout = Layout::new();
         refusable(case, &layout.database())?;
@@ -195,6 +227,11 @@ fn backup_refuses_every_bad_database_and_leaves_nothing_behind() -> TestResult {
             "{case}: left files behind"
         );
     }
+    assert_eq!(
+        files_of(&working_dir),
+        before_cwd,
+        "a file appeared in the working directory"
+    );
     Ok(())
 }
 
@@ -757,5 +794,23 @@ fn a_restore_target_below_a_file_names_the_real_cause() -> TestResult {
     // Not `Exists`; the operating system's own text may mention existing files.
     assert!(error.to_string().contains("notes.txt"), "{error}");
     assert_eq!(fs::read(&file)?, b"mine");
+    Ok(())
+}
+
+/// The schema is compared by what `SQLite` reports about it, not by the text it
+/// stores: a different library version may rewrite that text (for example the
+/// quoting after `ALTER TABLE ... RENAME`) without changing the schema.
+#[test]
+fn a_schema_whose_stored_text_differs_but_whose_structure_is_the_same_is_accepted() -> TestResult {
+    let layout = Layout::new();
+    current_database(&layout.database())?;
+    Connection::open(layout.database())?.execute_batch(&format!(
+        "{}{}",
+        rewritten_schema("tokens", "CREATE TABLE tokens", "CREATE TABLE   \"tokens\""),
+        rewritten_schema("changes", "sequence INTEGER", "\"sequence\"   INTEGER"),
+    ))?;
+
+    backup(&layout.data(), &layout.output())?;
+    restore(&layout.output(), &layout.target())?;
     Ok(())
 }

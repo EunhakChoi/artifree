@@ -36,7 +36,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::data_dir::{self, parent_dir};
 use crate::schema::{self, SCHEMA_VERSION};
-use crate::storage::{BUSY_TIMEOUT, DATABASE_FILE, random_bytes};
+use crate::storage::{self, DATABASE_FILE, random_bytes};
 
 /// Name prefix of the scratch directories backup and restore create. A
 /// directory with this prefix that no running command owns is a leftover of a
@@ -266,9 +266,7 @@ fn open_existing(path: &Path) -> Result<Connection, BackupError> {
         }
         _ => damaged(path, error),
     })?;
-    connection
-        .busy_timeout(BUSY_TIMEOUT)
-        .map_err(|error| damaged(path, error))?;
+    storage::configure(&connection).map_err(|error| damaged(path, error))?;
     Ok(connection)
 }
 
@@ -386,10 +384,6 @@ fn upgrade_and_verify(copy: &Path) -> Result<i64, BackupError> {
 
 /// [`upgrade_and_verify`] on a connection to `copy` the caller keeps using.
 fn verify_and_upgrade(connection: &mut Connection, copy: &Path) -> Result<i64, BackupError> {
-    // The upgrade ladder has always run with foreign keys enforced.
-    connection
-        .pragma_update(None, "foreign_keys", true)
-        .map_err(|error| damaged(copy, error))?;
     let version = supported_version(connection, copy)?;
     check_integrity(connection, copy)?;
     if version < SCHEMA_VERSION {

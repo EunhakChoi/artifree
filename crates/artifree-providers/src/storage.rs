@@ -51,7 +51,7 @@ pub use crate::schema::SCHEMA_VERSION;
 /// restore all use it.
 pub const DATABASE_FILE: &str = "artifree.sqlite3";
 
-pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Artifact storage in one local `SQLite` database file.
 #[derive(Debug, Clone)]
@@ -95,13 +95,7 @@ impl SqliteStore {
 
     fn connect(&self) -> Result<Connection, StoreError> {
         let connection = Connection::open(&self.path).map_err(unavailable)?;
-        connection.busy_timeout(BUSY_TIMEOUT).map_err(unavailable)?;
-        connection
-            .pragma_update(None, "foreign_keys", true)
-            .map_err(unavailable)?;
-        connection
-            .pragma_update(None, "synchronous", "FULL")
-            .map_err(unavailable)?;
+        configure(&connection).map_err(unavailable)?;
         Ok(connection)
     }
 
@@ -118,6 +112,14 @@ impl SqliteStore {
         transaction.commit().map_err(unavailable)?;
         Ok(value)
     }
+}
+
+/// The settings every connection that writes the database has: the store's,
+/// and backup and restore's upgrade and feed renewal.
+pub(crate) fn configure(connection: &Connection) -> rusqlite::Result<()> {
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    connection.pragma_update(None, "synchronous", "FULL")
 }
 
 impl ArtifactStore for SqliteStore {
