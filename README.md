@@ -49,6 +49,12 @@ cargo run -p artifree-server -- serve \
   --allow-remote-mcp
 ```
 
+Linux x64 and Windows x64 release archives (server, built web workspace, a
+bundled CLI that needs Node.js 22.12 or newer, and a SHA-256 manifest) are built
+by CI and checked by unpacking them into an empty directory, starting, saving,
+previewing, and restarting. They are not published or signed yet. See
+[release packages](docs/release-packages.md).
+
 For development with live reloading, Vite is still available:
 
 ```sh
@@ -122,8 +128,10 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0019](docs/decisions/0019-runtime-metadata-bridge.md),
 [0020](docs/decisions/0020-runtime-grants.md),
 [0021](docs/decisions/0021-agent-selection-handoff.md),
-[0022](docs/decisions/0022-production-web-and-api-serving.md), and
-[0023](docs/decisions/0023-single-owner-token-management.md)).
+[0022](docs/decisions/0022-production-web-and-api-serving.md),
+[0023](docs/decisions/0023-single-owner-token-management.md),
+[0024](docs/decisions/0024-https-proxy-and-remote-access.md), and
+[0025](docs/decisions/0025-release-packages.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
