@@ -33,7 +33,8 @@ pub fn backup(data_dir: &Path, output: &Path) -> Result<BackupSummary, String> {
 /// # Errors
 ///
 /// When the directory holds anything, the backup is damaged or of a newer
-/// schema, or a file operation fails.
+/// schema, or a file operation fails. A failure removes the directory this call
+/// created, but not parent directories it had to create on the way.
 pub fn restore(input: &Path, data_dir: &Path) -> Result<BackupSummary, String> {
     let created = match fs::read_dir(data_dir) {
         Ok(mut entries) => {

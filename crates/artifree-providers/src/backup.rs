@@ -109,8 +109,15 @@ pub fn create_backup(database: &Path, output: &Path) -> Result<BackupSummary, Ba
     let scratch = Scratch::beside(output)?;
     let snapshot = scratch.path().join(DATABASE_NAME);
     {
-        let source = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(failed)?;
+        // Read-write but never written: a read-only connection to a stopped
+        // server's WAL database would create `-wal` and `-shm` files it cannot
+        // remove, while the last read-write connection to close checkpoints and
+        // removes them, leaving the data directory as it was.
+        let source = Connection::open_with_flags(
+            database,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(failed)?;
         source
             .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(failed)?;
@@ -227,7 +234,10 @@ fn publish(finished: &Path, destination: &Path) -> Result<(), BackupError> {
         if error.kind() == io::ErrorKind::AlreadyExists {
             BackupError::Exists(destination.to_owned())
         } else {
-            io_failure("write", destination)(error)
+            BackupError::Failed(format!(
+                "cannot write {}: {error}; the destination file system must support hard links",
+                destination.display()
+            ))
         }
     })
 }
@@ -249,6 +259,17 @@ fn restrict(path: &Path) -> Result<(), BackupError> {
 #[cfg(not(unix))]
 fn restrict(_path: &Path) -> Result<(), BackupError> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new().create(path)
 }
 
 fn io_failure<'p>(action: &'p str, path: &'p Path) -> impl Fn(io::Error) -> BackupError + 'p {
@@ -282,13 +303,7 @@ impl Scratch {
             ".artifree-scratch-{:016x}",
             u64::from_be_bytes(random)
         ));
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&path).map_err(io_failure("create", &path))?;
+        create_private_dir(&path).map_err(io_failure("create", &path))?;
         Ok(Self { path })
     }
 

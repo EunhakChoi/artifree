@@ -30,15 +30,22 @@ artifree-server backup --data-dir /var/lib/artifree --output /backups/artifree-2
 - Do not copy `artifree.sqlite3` with `cp` while the server runs: the WAL file
   holds recent commits and a plain copy can be inconsistent.
 
-In a container, write into the volume or a mounted directory and copy it out:
+Run `backup` and `restore` as the user that runs the server (the owner of the
+data directory). The command is safe to run against a stopped server too: it
+leaves the data directory as it found it. As another user, or as root, it could
+leave files the server cannot use.
+
+In a container, `docker exec` runs as the image's user (uid 10001), the server's
+own user, and the binary is not on `PATH`:
 
 ```sh
-docker exec artifree artifree-server backup --data-dir /data --output /data/backup-2026-11-01.sqlite3
+docker exec artifree /app/bin/artifree-server backup --data-dir /data --output /data/backup-2026-11-01.sqlite3
 docker cp artifree:/data/backup-2026-11-01.sqlite3 .
+docker exec artifree rm /data/backup-2026-11-01.sqlite3
 ```
 
-(`/data` is the image's data directory; the backup file then sits beside the
-database, so move it out and delete it from the volume.)
+The copy on the host is mode 600 and, depending on how you run `docker cp`,
+owned by you. Keep it somewhere only you can read.
 
 ## Restore into a new instance
 
@@ -54,9 +61,14 @@ artifree-server serve --data-dir /srv/artifree-new --web-dir ...
   `token_file`; managed tokens from the backup still work unless revoked.
 - The change feed keeps its identity. A web page open on the old server reloads
   its state if it was ahead of the backup.
-- In a container, restore with the image's entrypoint overridden, into an empty
-  volume owned by uid 10001:
-  `docker run --rm -v artifree-new:/data -v "$PWD":/in:ro --entrypoint artifree-server artifree:local restore --input /in/backup.sqlite3 --data-dir /data`
+- The parent directories of a new `--data-dir` are created if missing, and a
+  failed restore removes only the directory it created, not those parents.
+- In a container the restore must run as uid 10001, but the backup on the host
+  is mode 600 and owned by you. Copy it in as root, hand it to 10001, then drop
+  privileges (`setpriv` is part of the Debian base image):
+  `docker run --rm --user 0 -v artifree-new:/data -v "$PWD":/in:ro --entrypoint bash artifree:local -c 'cp /in/backup.sqlite3 /tmp/b.sqlite3 && chown 10001:10001 /tmp/b.sqlite3 && exec setpriv --reuid 10001 --regid 10001 --clear-groups /app/bin/artifree-server restore --input /tmp/b.sqlite3 --data-dir /data'`
+  The new named volume gets mode 700 and owner 10001 from the image. Then run
+  the image normally on `artifree-new`.
 
 Check the result by serving the restored directory and opening the artifacts you
 care about before retiring the old instance.
@@ -81,5 +93,7 @@ care about before retiring the old instance.
   are portable, but this was not run).
 - Upgrades from schema versions other than the fixtures in the tests; versions
   before 1 do not exist in a released build.
-- The container commands above were not executed against a container runtime;
-  the same binary is exercised by the release verification in CI.
+- The container commands above (including the root copy and `setpriv` step) were
+  not executed against a container runtime; the same binary is exercised by the
+  release verification in CI.
+- Running as a user other than the server's was not tested.

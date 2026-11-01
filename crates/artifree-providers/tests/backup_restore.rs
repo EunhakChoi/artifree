@@ -335,6 +335,34 @@ fn leftovers(dir: &TempDir) -> Result<Vec<String>, std::io::Error> {
 }
 
 #[test]
+fn a_backup_of_a_stopped_server_leaves_the_data_directory_as_it_was() -> TestResult {
+    let (source, store, tokens) = instance()?;
+    create(&store, "create", "Demo")?;
+    tokens.create(&token(1, "active"))?;
+    drop((store, tokens));
+    let data_dir = source.database.parent().ok_or("data dir")?;
+    let listing = |dir: &Path| -> Result<Vec<String>, std::io::Error> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)?
+            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<_, std::io::Error>>()?;
+        names.sort();
+        Ok(names)
+    };
+    let before = listing(data_dir)?;
+    assert_eq!(
+        before,
+        ["artifree.sqlite3"],
+        "a stopped server leaves one file"
+    );
+    let bytes = std::fs::read(&source.database)?;
+    let target = TempDir::new("backup-stopped");
+    backup::create_backup(&source.database, &target.join("snapshot.sqlite3"))?;
+    assert_eq!(listing(data_dir)?, before, "no -wal or -shm files remain");
+    assert_eq!(std::fs::read(&source.database)?, bytes, "database bytes");
+    Ok(())
+}
+
+#[test]
 fn a_backup_never_replaces_an_existing_file() -> TestResult {
     let (source, store, _tokens) = instance()?;
     create(&store, "create", "Demo")?;

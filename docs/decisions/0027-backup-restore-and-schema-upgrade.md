@@ -39,6 +39,15 @@ data to the backup tests.**
    copy is rebuilt rather than page-copied, which also compacts it. A source of
    a newer schema is refused; one of an older schema is copied as it is and
    restore upgrades it.
+   The source is opened read-write but never written. A read-only connection
+   to a stopped server's WAL database creates `-wal` and `-shm` files it cannot
+   remove, whereas the last read-write connection to close checkpoints and
+   deletes them, so a backup of a stopped server leaves the directory (and the
+   database bytes) as they were (tested). While a server runs the backup is not
+   the last connection, nothing is checkpointed by it, and it issues no write
+   statements, so it takes no write lock and cannot block or alter commits. Run
+   backup and restore as the server's user; as another user the connection could
+   create files the server cannot use.
 2. **The file is written privately and published without replacing anything.**
    The snapshot is written into a freshly created `0700` scratch directory next
    to the destination, so other users cannot read a partly written file whatever
@@ -49,7 +58,7 @@ data to the backup tests.**
    reader never sees a partial file. The scratch directory is removed on every
    path. Consequence: the destination's file system must support hard links
    (ext4, XFS, APFS, NTFS do; some network and FAT file systems do not, and then
-   the command fails rather than falls back to a replacing rename).
+   the command fails with a message naming that requirement rather than falling back to a replacing rename).
 3. **The access token file is not in the backup; token records are.** The
    database contains the SHA-256 hashes of managed tokens (decision 0023),
    their names, prefixes, and revocation state. Hashes of high-entropy secrets
@@ -67,7 +76,7 @@ data to the backup tests.**
    open (which also readies the token table), checked again, and hard-linked to
    `artifree.sqlite3`. A damaged file, a schema newer than the build, or an
    existing database leaves no database behind; a directory the command created
-   is removed again. The restored database keeps the feed identity, so change
+   is removed again (parent directories created on the way stay). The restored database keeps the feed identity, so change
    cursors from before the backup stay meaningful (0006); a client that was
    ahead of the backup's head sees the existing reset behavior.
 5. **Schema upgrade policy.** `PRAGMA user_version` is the schema version
@@ -109,7 +118,9 @@ data to the backup tests.**
   normalized `sqlite_master` as a fresh database, keeps bytes, digests, the pin,
   the key replay, and the feed head, and passes integrity and foreign key checks.
   Missing, zero-byte, and version-0 files become the fresh schema.
-- Failure injection: a pre-existing `changes_v5` table makes the last step fail
+- Backup of a stopped server (WAL database): the data directory listing and the
+  database bytes are unchanged afterwards.
+- Failure injection, in rollback-journal and WAL mode: a pre-existing `changes_v5` table makes the last step fail
   after earlier steps ran, from each starting version. The file bytes, directory
   listing, and `user_version` are unchanged and the error names the table; the
   same file upgrades once the obstacle is gone.
@@ -121,7 +132,9 @@ data to the backup tests.**
 
 ## Not decided or verified
 
-Backup retention, scheduling, encryption, and pruning of old request keys (O05);
+The v3 and v4 fixtures were compared once, by hand, with the schema text of the
+commits that introduced those versions (equal after normalization); that check
+is not repeated by the tests. Backup retention, scheduling, encryption, and pruning of old request keys (O05);
 PostgreSQL; backups of a database on a network file system; concurrent
 `restore` into the same directory (two processes could race on the final link,
 and the loser fails with an existing-file error); downgrade. Restore of a

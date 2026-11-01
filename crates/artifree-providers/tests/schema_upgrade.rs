@@ -391,30 +391,40 @@ fn an_empty_or_new_file_becomes_the_fresh_schema() -> TestResult {
 
 #[test]
 fn a_failed_migration_leaves_the_file_as_it_was() -> TestResult {
-    for version in 1..SCHEMA_VERSION {
-        let dir = TempDir::new("failed");
-        let path = dir.join("artifree.sqlite3");
-        fixture(&path, version)?;
-        // The last step creates `changes_v5`; an object of that name makes it
-        // fail after the earlier steps have run.
-        Connection::open(&path)?.execute_batch("CREATE TABLE changes_v5 (in_the_way TEXT);")?;
-        let before = std::fs::read(&path)?;
-        let files_before = names(&dir)?;
+    // Released databases are in WAL mode; the rollback-journal variant is the
+    // file of a server that never ran under this build's mode switch.
+    for wal in [false, true] {
+        for version in 1..SCHEMA_VERSION {
+            let label = format!("from {version}, wal={wal}");
+            let dir = TempDir::new("failed");
+            let path = dir.join("artifree.sqlite3");
+            fixture(&path, version)?;
+            let connection = Connection::open(&path)?;
+            if wal {
+                connection.pragma_update(None, "journal_mode", "WAL")?;
+            }
+            // The last step creates `changes_v5`; an object of that name makes
+            // it fail after the earlier steps have run.
+            connection.execute_batch("CREATE TABLE changes_v5 (in_the_way TEXT);")?;
+            drop(connection);
+            let before = std::fs::read(&path)?;
+            let files_before = names(&dir)?;
 
-        let error = SqliteStore::open(&path).err();
-        assert!(
-            matches!(&error, Some(StoreError::Unavailable(reason)) if reason.contains("changes_v5")),
-            "from {version}: expected the conflicting object in the error, got {error:?}"
-        );
-        assert_eq!(std::fs::read(&path)?, before, "from {version}: file bytes");
-        assert_eq!(names(&dir)?, files_before, "from {version}: no stray files");
-        assert_eq!(user_version(&path)?, version, "from {version}");
+            let error = SqliteStore::open(&path).err();
+            assert!(
+                matches!(&error, Some(StoreError::Unavailable(reason)) if reason.contains("changes_v5")),
+                "{label}: expected the conflicting object in the error, got {error:?}"
+            );
+            assert_eq!(std::fs::read(&path)?, before, "{label}: file bytes");
+            assert_eq!(names(&dir)?, files_before, "{label}: no stray files");
+            assert_eq!(user_version(&path)?, version, "{label}");
 
-        // Without the obstacle the same file upgrades with all its data.
-        Connection::open(&path)?.execute_batch("DROP TABLE changes_v5;")?;
-        let store = SqliteStore::open(&path)?;
-        let record = store.artifact(&old_id())?.ok_or("artifact kept")?;
-        assert_eq!(record.current_revision, SourceRevision(2), "from {version}");
+            // Without the obstacle the same file upgrades with all its data.
+            Connection::open(&path)?.execute_batch("DROP TABLE changes_v5;")?;
+            let store = SqliteStore::open(&path)?;
+            let record = store.artifact(&old_id())?.ok_or("artifact kept")?;
+            assert_eq!(record.current_revision, SourceRevision(2), "{label}");
+        }
     }
     Ok(())
 }

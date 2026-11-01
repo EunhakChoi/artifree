@@ -80,7 +80,7 @@ fn run() -> Result<(), String> {
                 "{}",
                 serde_json::json!({
                     "event": "backup",
-                    "output": output,
+                    "output": output.to_string_lossy(),
                     "schema_version": summary.schema_version,
                     "bytes": summary.bytes,
                 })
@@ -94,7 +94,7 @@ fn run() -> Result<(), String> {
                 "{}",
                 serde_json::json!({
                     "event": "restore",
-                    "data_dir": data_dir,
+                    "data_dir": data_dir.to_string_lossy(),
                     "schema_version": summary.schema_version,
                     "bytes": summary.bytes,
                 })
