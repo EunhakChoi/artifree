@@ -2,6 +2,7 @@
 //! router, MCP SDK, application core, and `SQLite` store. Tool behavior with
 //! a real MCP client is covered by `scripts/tests/mcp.test.mjs`.
 use std::fmt::Display;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,6 +18,7 @@ use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
 use axum::Router;
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -75,7 +77,12 @@ impl Harness {
         Self {
             directory,
             database,
-            api: http::router(state),
+            // The real server records the socket peer; with none, the client
+            // is unknown and /mcp is refused, so tests connect from loopback.
+            api: http::router(state).layer(axum::Extension(ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                40_000,
+            ))))),
         }
     }
 

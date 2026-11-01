@@ -675,14 +675,14 @@ async fn proxy_inspection_content(
     mut req: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let peer_addr = req
+    let peer_ip = req
         .extensions()
         .get::<ConnectInfo<std::net::SocketAddr>>()
-        .map_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)), |c| c.0);
+        .map(|c| c.0.ip());
 
     let connection_info = match crate::proxy::evaluate_connection(
         req.headers(),
-        peer_addr.ip(),
+        peer_ip,
         &state.settings().trusted_proxies,
     ) {
         Ok(info) => info,

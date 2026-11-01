@@ -10,7 +10,6 @@
 //! These tools are for agents, separate from the metadata-only runtime
 //! bridge of an opted-in workspace preview.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use artifree_contracts::api::ErrorCode;
@@ -29,7 +28,7 @@ use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::ActorId;
 use axum::Router;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
@@ -101,26 +100,24 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
         .route_layer(middleware::from_fn_with_state(state, enforce_mcp_access))
 }
 
+/// Returns whether the resolved client is known and loopback. Missing or
+/// unknown connection information is not loopback (fail closed).
+fn is_known_loopback(info: Option<&crate::proxy::ClientConnectionInfo>) -> bool {
+    info.and_then(|info| info.client_ip)
+        .is_some_and(|ip| ip.to_canonical().is_loopback())
+}
+
 /// Enforces loopback or explicitly enabled remote access to the MCP endpoint.
 async fn enforce_mcp_access(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let client_ip = req
-        .extensions()
-        .get::<crate::proxy::ClientConnectionInfo>()
-        .map(|info| info.client_ip)
-        .or_else(|| {
-            req.extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|connect| connect.ip())
-        });
-
-    let is_allowed = match client_ip {
-        Some(ip) => state.settings().allow_remote_mcp || ip.is_loopback(),
-        None => state.settings().allow_remote_mcp,
-    };
+    // Only the proxy-resolved client counts. A request that never went through
+    // `proxy_inspection` has no `ClientConnectionInfo` and is treated as unknown.
+    let is_loopback_client =
+        is_known_loopback(req.extensions().get::<crate::proxy::ClientConnectionInfo>());
+    let is_allowed = state.settings().allow_remote_mcp || is_loopback_client;
 
     if !is_allowed {
         return ApiError::new(
@@ -489,4 +486,32 @@ fn tool(definition: ToolDefinition) -> Result<Tool, ErrorData> {
             .idempotent(effect.idempotent())
             .open_world(false),
     ))
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use crate::proxy::ClientConnectionInfo;
+
+    fn info(client_ip: Option<&str>) -> ClientConnectionInfo {
+        ClientConnectionInfo {
+            client_ip: client_ip.and_then(|ip| ip.parse().ok()),
+            host: String::new(),
+            proto: "http".to_owned(),
+            is_proxied: false,
+        }
+    }
+
+    #[test]
+    fn only_a_known_loopback_client_is_loopback() {
+        assert!(is_known_loopback(Some(&info(Some("127.0.0.1")))));
+        assert!(is_known_loopback(Some(&info(Some("::1")))));
+        assert!(is_known_loopback(Some(&info(Some("::ffff:127.0.0.1")))));
+        assert!(!is_known_loopback(Some(&info(Some("203.0.113.9")))));
+        assert!(!is_known_loopback(Some(&info(None))), "unknown client");
+        assert!(
+            !is_known_loopback(None),
+            "a request that skipped proxy inspection must fail closed"
+        );
+    }
 }

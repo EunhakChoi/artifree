@@ -575,14 +575,14 @@ where
 /// Evaluates client connection info, rejects untrusted forwarded headers,
 /// and validates the Host header against the allowed hosts.
 async fn proxy_inspection(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    let peer_addr = req
+    let peer_ip = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)), |c| c.0);
+        .map(|c| c.0.ip());
 
     let connection_info = match crate::proxy::evaluate_connection(
         req.headers(),
-        peer_addr.ip(),
+        peer_ip,
         &state.shared.settings.trusted_proxies,
     ) {
         Ok(info) => info,
