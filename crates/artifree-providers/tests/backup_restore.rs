@@ -754,7 +754,7 @@ fn a_restore_target_below_a_file_names_the_real_cause() -> TestResult {
     let error = error_of(restore(&layout.output(), &file.join("new")), "below a file");
 
     assert!(matches!(error, BackupError::Failed(_)), "{error:?}");
-    assert!(!error.to_string().contains("already exists"), "{error}");
+    // Not `Exists`; the operating system's own text may mention existing files.
     assert!(error.to_string().contains("notes.txt"), "{error}");
     assert_eq!(fs::read(&file)?, b"mine");
     Ok(())
