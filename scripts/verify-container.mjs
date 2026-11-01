@@ -152,11 +152,31 @@ function stopCleanly(name) {
   );
 }
 
-/** Requires `docker run` with `args` to exit nonzero with stderr matching. */
+/**
+ * Requires `docker run` with `args` to exit nonzero with stderr matching.
+ * A container that keeps running is a failed guard: it is removed and
+ * reported at once instead of waiting for a long timeout.
+ */
 export function refusedRun(args, pattern) {
-  const result = docker(['run', '--rm', ...args]);
-  assert.notEqual(result.status, 0, `The container started: ${args.join(' ')}`);
-  assert.match(result.stderr, pattern);
+  const name = `artifree-refused-${randomBytes(4).toString('hex')}`;
+  const result = spawnSync('docker', ['run', '--name', name, ...args], {
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  try {
+    if (result.error)
+      assert.fail(
+        `The container did not exit; the configuration was accepted: ${args.join(' ')}`,
+      );
+    assert.notEqual(
+      result.status,
+      0,
+      `The container started: ${args.join(' ')}`,
+    );
+    assert.match(result.stderr, pattern);
+  } finally {
+    docker(['rm', '--force', name]);
+  }
 }
 
 /** Runs the whole container check for the release archive at `archive`. */
