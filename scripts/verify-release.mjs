@@ -35,17 +35,24 @@ function sha256(bytes) {
 export function extract(archive, into) {
   if (archive.endsWith('.zip')) {
     assert.ok(windows, 'ZIP release archives are unpacked on Windows.');
+    // Paths travel in the environment: `-Command` does not bind trailing
+    // arguments to $args.
     execFileSync(
       'powershell.exe',
       [
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1]',
-        archive,
-        into,
+        'Expand-Archive -LiteralPath $env:ARTIFREE_ARCHIVE -DestinationPath $env:ARTIFREE_DEST',
       ],
-      { stdio: ['ignore', 'inherit', 'inherit'] },
+      {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: {
+          ...process.env,
+          ARTIFREE_ARCHIVE: archive,
+          ARTIFREE_DEST: into,
+        },
+      },
     );
   } else {
     execFileSync('tar', ['-xzf', archive, '-C', into], { stdio: 'inherit' });
