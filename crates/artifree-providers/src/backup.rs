@@ -257,6 +257,10 @@ fn restrict(path: &Path) -> Result<(), BackupError> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Same signature as the Unix variant, which can fail."
+)]
 fn restrict(_path: &Path) -> Result<(), BackupError> {
     Ok(())
 }
