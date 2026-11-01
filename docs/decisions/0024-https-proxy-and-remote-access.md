@@ -117,6 +117,8 @@ amendment replaces its resolution rules; everything else stands.
   This stays, now covered by tests. It does assume the proxy appends rather
   than passes client-supplied `X-Forwarded-For` through unchanged; such a
   proxy must not be listed as trusted.
-- **Unverified.** Only the first `X-Forwarded-For` header line is read; a
-  proxy that adds a second line instead of appending to the first is not
-  handled and is left to a follow-up.
+- **Repeated header lines.** Every `X-Forwarded-For` line, and separately every
+  `Forwarded` line, is read and joined in arrival order as one comma list
+  (RFC 9110 field combination) before the right-to-left walk. A proxy that adds
+  its own line instead of appending to the client's therefore cannot leave a
+  client-supplied `127.0.0.1` in charge. A non-ASCII line anywhere is `400`.

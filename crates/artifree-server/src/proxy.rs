@@ -179,14 +179,11 @@ fn parse_trusted_client_ip(
     headers: &HeaderMap,
     trusted_proxies: &[IpNetwork],
 ) -> Result<Option<IpAddr>, ApiError> {
-    if let Some(xff) = headers.get("x-forwarded-for") {
-        let xff_str = xff.to_str().map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                "x-forwarded-for header is not valid ASCII",
-            )
-        })?;
+    if let Some(xff_str) = combined_header(
+        headers,
+        "x-forwarded-for",
+        "x-forwarded-for header is not valid ASCII",
+    )? {
         let ips = xff_str
             .split(',')
             .map(str::trim)
@@ -222,15 +219,10 @@ fn parse_trusted_client_ip(
             }
         }
         Ok(leftmost_when_all_trusted(&ips))
-    } else if let Some(fwd) = headers.get("forwarded") {
-        let fwd_str = fwd.to_str().map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                "forwarded header is not valid ASCII",
-            )
-        })?;
-        let ips = extract_forwarded_for_hops(fwd_str)?;
+    } else if let Some(fwd_str) =
+        combined_header(headers, "forwarded", "forwarded header is not valid ASCII")?
+    {
+        let ips = extract_forwarded_for_hops(&fwd_str)?;
         for ip in ips.iter().rev() {
             if !trusted_proxies.iter().any(|net| net.contains(ip)) {
                 return Ok(Some(*ip));
@@ -240,6 +232,30 @@ fn parse_trusted_client_ip(
     } else {
         Ok(None)
     }
+}
+
+/// Joins every line of a repeated list header into one comma-separated value
+/// in arrival order (RFC 9110 field combination), or `None` if absent.
+///
+/// A proxy may add its own line instead of appending to the client's, so
+/// reading only the first line would trust client-supplied data.
+fn combined_header(
+    headers: &HeaderMap,
+    name: &str,
+    non_ascii_message: &'static str,
+) -> Result<Option<String>, ApiError> {
+    let mut lines = Vec::new();
+    for value in headers.get_all(name) {
+        let line = value.to_str().map_err(|_| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                non_ascii_message,
+            )
+        })?;
+        lines.push(line);
+    }
+    Ok((!lines.is_empty()).then(|| lines.join(",")))
 }
 
 /// Picks the client when every hop in the chain is a trusted proxy address.

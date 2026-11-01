@@ -500,6 +500,69 @@ async fn untrusted_peer_forwarded_headers_rejected_on_mcp() -> TestResult {
 }
 
 #[tokio::test]
+async fn mcp_reads_every_forwarded_for_line_behind_trusted_proxy() -> TestResult {
+    // The client injects a loopback address on its own line; the trusted proxy
+    // adds the real peer on a separate line instead of appending to it.
+    let peer: SocketAddr = "127.0.0.1:44444".parse()?;
+    let harness = mcp_harness(false)?;
+
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(
+            peer,
+            &[
+                ("x-forwarded-for", "127.0.0.1"),
+                ("x-forwarded-for", "203.0.113.195"),
+            ],
+        )?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "two XFF lines");
+
+    // Same shape with RFC 7239 `Forwarded`.
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(
+            peer,
+            &[
+                ("forwarded", "for=127.0.0.1"),
+                ("forwarded", "for=203.0.113.195"),
+            ],
+        )?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "two Forwarded lines");
+
+    // A proxy that appends to a single line still works for both outcomes.
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(
+            peer,
+            &[("x-forwarded-for", "127.0.0.1, 203.0.113.195")],
+        )?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "single line, remote");
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(peer, &[("x-forwarded-for", "127.0.0.1")])?)
+        .await?;
+    assert_eq!(res.status(), StatusCode::OK, "single line, loopback");
+
+    // A non-ASCII line anywhere is still a 400.
+    let mut req = mcp_request(peer, &[("x-forwarded-for", "203.0.113.195")])?;
+    req.headers_mut().append(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_bytes(b"\xff")?,
+    );
+    let res = harness.api.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "non-ASCII line");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn api_origin_and_content_origin_conflict_rejected() -> TestResult {
     let temp_dir = std::env::temp_dir().join(format!("artifree-conflict-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
