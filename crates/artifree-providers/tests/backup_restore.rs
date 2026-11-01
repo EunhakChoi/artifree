@@ -122,6 +122,7 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
             " REFERENCES artifacts (id)",
             "",
         )),
+        "dropped autoincrement" => mutate(&rewritten_schema("changes", " AUTOINCREMENT", "")),
         "changed column default" => mutate(&rewritten_schema(
             "artifacts",
             "DEFAULT 0 CHECK (pinned",
@@ -182,7 +183,7 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-const REFUSED: [&str; 19] = [
+const REFUSED: [&str; 20] = [
     "newer schema",
     "empty file",
     "unrelated database",
@@ -190,6 +191,7 @@ const REFUSED: [&str; 19] = [
     "utf-16 database with our version",
     "dropped check constraint",
     "dropped foreign key",
+    "dropped autoincrement",
     "changed column default",
     "missing table",
     "missing index",

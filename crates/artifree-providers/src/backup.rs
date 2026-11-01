@@ -383,6 +383,8 @@ fn upgrade_and_verify(copy: &Path) -> Result<i64, BackupError> {
 }
 
 /// [`upgrade_and_verify`] on a connection to `copy` the caller keeps using.
+/// The connection must come from [`open_existing`], whose settings (foreign
+/// keys enforced) the upgrade ladder has always run with.
 fn verify_and_upgrade(connection: &mut Connection, copy: &Path) -> Result<i64, BackupError> {
     let version = supported_version(connection, copy)?;
     check_integrity(connection, copy)?;

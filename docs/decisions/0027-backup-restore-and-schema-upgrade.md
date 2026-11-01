@@ -60,11 +60,16 @@ newer or failed schemas that does no damage.
    agree). The comparison uses SQLite's own introspection: objects by kind and
    table; for each table its columns (type, not-null, default, primary key,
    hidden), STRICT and WITHOUT ROWID, indexes with their columns, uniqueness
-   and partiality, and foreign keys. `CHECK` constraints have no
-   introspection, so their expressions are extracted from the stored text and
-   compared as written; that is the one textual part, and a rewrite that
-   changed a `CHECK` expression itself would need the comparison revisited.
-   A test accepts a database whose stored text was rewritten with the same
+   and partiality, and foreign keys. A few clauses have no introspection:
+   `CHECK` expressions, `AUTOINCREMENT` (which decides whether the change
+   feed's sequence is reused), `COLLATE` names, `ON CONFLICT` algorithms, and
+   the `WHERE` of a partial index. They are read from the stored text with a
+   tokenizer that skips quoted names, literals and comments and works on
+   characters, and compared as written; that is the one textual part, and a
+   rewrite that changed such a clause itself would need the comparison
+   revisited. The expression of a generated column is not read (no table has
+   one). The table-valued pragma functions need SQLite 3.37; the bundled
+   library is newer. The reference is built once per process. A test accepts a database whose stored text was rewritten with the same
    structure and refuses dropped checks, foreign keys, and changed defaults. The feed table must hold exactly one row. A snapshot at the
    current version is checked in place and not copied. Refused: version
    below 1 (empty, truncated, another application's database), above the

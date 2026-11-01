@@ -9,6 +9,7 @@
 //! same upgrade on an empty in-memory database.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
@@ -265,10 +266,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
 ///
 /// Every object by kind and table; for each table its columns (type, not-null,
 /// default, primary key, hidden), strictness, `WITHOUT ROWID`, indexes with
-/// their columns, uniqueness and partiality, foreign keys, and the text of its
-/// `CHECK` constraints. The last is the one place that compares text, because
-/// `SQLite` has no introspection for it; the expressions themselves are not
-/// rewritten by a rename of a table.
+/// their columns, uniqueness and partiality, foreign keys, and the clauses read
+/// by [`clauses`]. That is the one place that compares text, because `SQLite`
+/// has no introspection for it; a rename of a table does not rewrite those
+/// clauses. The table-valued pragma functions need `SQLite` 3.37; the bundled
+/// library is newer.
 fn shape(connection: &Connection) -> Result<BTreeMap<String, Vec<String>>, rusqlite::Error> {
     let mut shape = BTreeMap::new();
     let mut statement = connection.prepare(
@@ -289,7 +291,9 @@ fn shape(connection: &Connection) -> Result<BTreeMap<String, Vec<String>>, rusql
         let mut lines = vec![format!("on {table}")];
         if kind == "table" {
             lines.extend(table_lines(connection, &name, &sql)?);
-        } else if kind != "index" {
+        } else if kind == "index" {
+            lines.extend(clauses(&sql));
+        } else {
             // A view or trigger: no build creates one, so its text must match.
             lines.push(sql.split_whitespace().collect::<Vec<_>>().join(" "));
         }
@@ -340,11 +344,7 @@ fn table_lines(
             [index.as_str(), table],
         )?);
     }
-    lines.extend(
-        check_constraints(sql)
-            .into_iter()
-            .map(|check| format!("check {check}")),
-    );
+    lines.extend(clauses(sql));
     Ok(lines)
 }
 
@@ -361,71 +361,143 @@ fn described<P: rusqlite::Params>(
         let mut fields = Vec::with_capacity(count);
         for index in 0..count {
             fields.push(match row.get_ref(index)? {
-                ValueRef::Null => "-".to_owned(),
+                ValueRef::Null => "\u{1}null".to_owned(),
                 ValueRef::Integer(number) => number.to_string(),
                 ValueRef::Real(number) => number.to_string(),
                 ValueRef::Text(text) => String::from_utf8_lossy(text).into_owned(),
                 ValueRef::Blob(_) => "blob".to_owned(),
             });
         }
-        Ok(fields.join("|"))
+        Ok(fields.join("\u{1f}"))
     })?;
     rows.collect()
 }
 
-/// The expressions of the `CHECK (...)` constraints in a `CREATE TABLE`
-/// statement, whitespace-normalized, outside string literals.
-fn check_constraints(sql: &str) -> Vec<String> {
-    let bytes = sql.as_bytes();
-    let mut checks = Vec::new();
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// The clauses of a `CREATE` statement that `SQLite`'s introspection does not
+/// report, read from its stored text: `CHECK` expressions, `AUTOINCREMENT`,
+/// `COLLATE` names, `ON CONFLICT` algorithms, and the `WHERE` predicate of a
+/// partial index. Sorted. Read with a tokenizer that skips quoted names, string
+/// literals and comments, and works on characters, so no text can make it
+/// panic; text it cannot parse (an unbalanced parenthesis) is kept as it is
+/// and so differs from the reference.
+///
+/// Not read: the expression of a generated column, which no table of this
+/// schema has.
+fn clauses(sql: &str) -> Vec<String> {
+    let characters: Vec<char> = sql.chars().collect();
+    let mut words: Vec<(String, usize)> = Vec::new();
     let mut position = 0;
-    let mut quote: Option<u8> = None;
-    while position < bytes.len() {
-        let byte = bytes[position];
-        if let Some(open) = quote {
-            if byte == open {
-                quote = None;
+    while position < characters.len() {
+        let character = characters[position];
+        let close = match character {
+            '\'' | '"' | '`' => Some(character),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(close) = close {
+            position += 1;
+            while position < characters.len() && characters[position] != close {
+                position += 1;
             }
             position += 1;
-        } else if matches!(byte, b'\'' | b'"' | b'`') {
-            quote = Some(byte);
-            position += 1;
-        } else if sql[position..].len() >= 5
-            && sql[position..position + 5].eq_ignore_ascii_case("check")
-            && !bytes
-                .get(position.wrapping_sub(1))
-                .is_some_and(|before| before.is_ascii_alphanumeric() || *before == b'_')
-        {
-            let rest = sql[position + 5..].trim_start();
-            let start = sql.len() - rest.len();
-            let mut depth = 0_usize;
-            let mut end = start;
-            for (offset, character) in sql[start..].char_indices() {
-                match character {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            end = start + offset + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
+        } else if character == '-' && characters.get(position + 1) == Some(&'-') {
+            while position < characters.len() && characters[position] != '\n' {
+                position += 1;
             }
-            checks.push(
-                sql[start..end]
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
-            position = end.max(position + 5);
+        } else if character == '/' && characters.get(position + 1) == Some(&'*') {
+            position += 2;
+            while position < characters.len()
+                && !(characters[position] == '*' && characters.get(position + 1) == Some(&'/'))
+            {
+                position += 1;
+            }
+            position += 2;
+        } else if is_word_character(character) {
+            let start = position;
+            // At least one character: the branch was entered on one.
+            position += 1;
+            while position < characters.len() && is_word_character(characters[position]) {
+                position += 1;
+            }
+            words.push((characters[start..position].iter().collect(), start));
         } else {
             position += 1;
         }
     }
-    checks.sort();
-    checks
+    let normalized = |from: usize, to: usize| -> String {
+        characters[from..to.min(characters.len())]
+            .iter()
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut found = Vec::new();
+    for (index, (word, start)) in words.iter().enumerate() {
+        let word = word.to_ascii_lowercase();
+        let next = words
+            .get(index + 1)
+            .map(|(next, _)| next.to_ascii_lowercase())
+            .unwrap_or_default();
+        match word.as_str() {
+            "autoincrement" => found.push("autoincrement".to_owned()),
+            "collate" => found.push(format!("collate {next}")),
+            "conflict" => found.push(format!("conflict {next}")),
+            "check" => {
+                let open = characters[start + 5..]
+                    .iter()
+                    .position(|c| !c.is_whitespace())
+                    .map(|offset| start + 5 + offset)
+                    .filter(|open| characters[*open] == '(');
+                found.push(match open {
+                    Some(open) => {
+                        let mut depth = 0_usize;
+                        let mut end = characters.len();
+                        for (offset, c) in characters[open..].iter().enumerate() {
+                            match c {
+                                '(' => depth += 1,
+                                ')' => {
+                                    depth = depth.saturating_sub(1);
+                                    if depth == 0 {
+                                        end = open + offset + 1;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        format!("check {}", normalized(open, end))
+                    }
+                    None => "check".to_owned(),
+                });
+            }
+            "where" => found.push(format!(
+                "where {}",
+                normalized(*start + 5, characters.len())
+            )),
+            _ => {}
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The shape of the schema this build creates, computed once: an empty
+/// in-memory database upgraded by the ladder.
+fn reference_shape() -> Result<&'static BTreeMap<String, Vec<String>>, String> {
+    static REFERENCE: OnceLock<Result<BTreeMap<String, Vec<String>>, String>> = OnceLock::new();
+    REFERENCE
+        .get_or_init(|| {
+            let mut reference = Connection::open_in_memory().map_err(|error| error.to_string())?;
+            upgrade(&mut reference).map_err(|error| error.to_string())?;
+            shape(&reference).map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 /// Checks that the database holds exactly the schema this build creates, and
@@ -436,11 +508,9 @@ fn check_constraints(sql: &str) -> Vec<String> {
 ///
 /// A description of the first missing, extra, or different object.
 pub(crate) fn check_current(connection: &Connection) -> Result<(), String> {
-    let mut reference = Connection::open_in_memory().map_err(|error| error.to_string())?;
-    upgrade(&mut reference).map_err(|error| error.to_string())?;
-    let expected = shape(&reference).map_err(|error| error.to_string())?;
+    let expected = reference_shape()?;
     let actual = shape(connection).map_err(|error| error.to_string())?;
-    for (object, wanted) in &expected {
+    for (object, wanted) in expected {
         match actual.get(object) {
             None => return Err(format!("{object} is missing")),
             Some(found) if found != wanted => {
@@ -521,4 +591,52 @@ fn keeping_feed_head(transaction: &Transaction<'_>, schema: &str) -> Result<(), 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clauses_are_read_from_tokens_not_from_substrings() {
+        let sql = "CREATE TABLE t (
+            checksum TEXT, check_at TEXT, _hidden TEXT, __x__ TEXT, -- it's a 'check (x)' comment
+            n INTEGER CHECK (n >= 1 AND n < (2 + 3)),
+            \"check\" TEXT COLLATE nocase,
+            id INTEGER PRIMARY KEY AUTOINCREMENT
+        ) STRICT";
+        assert_eq!(
+            clauses(sql),
+            [
+                "autoincrement",
+                "check (n >= 1 AND n < (2 + 3))",
+                "collate nocase"
+            ]
+        );
+    }
+
+    /// Identifiers made of or starting with underscores, as in `request_keys`
+    /// and `_x`, end a word instead of looping.
+    #[test]
+    fn identifiers_with_underscores_are_whole_words() {
+        let sql = "CREATE TABLE request_keys (_a TEXT, b__ TEXT, ___ TEXT CHECK (_a <> ''))";
+        assert_eq!(clauses(sql), ["check (_a <> '')"]);
+    }
+
+    #[test]
+    fn text_that_is_not_ascii_or_not_balanced_never_panics() {
+        for sql in [
+            "CREATE TABLE ü (名前 TEXT CHECK (名前 <> 'é'))",
+            "CREATE TABLE t (x CHECK",
+            "CREATE TABLE t (x CHECK (a > 1",
+            "CREATE TABLE t (x TEXT) /* open comment",
+            "é'",
+            "",
+        ] {
+            let found = clauses(sql);
+            assert!(found.len() <= 1, "{sql:?}: {found:?}");
+        }
+        assert_eq!(clauses("x CHECK (a > 1"), ["check (a > 1"]);
+        assert_ne!(clauses("x CHECK (a > 1"), clauses("x CHECK (a > 2"));
+    }
 }
