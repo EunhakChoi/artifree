@@ -1,24 +1,15 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
-import {
-  mkdtemp,
-  mkdir,
-  readdir,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  CLI_PATH,
-  TARGET_LAYOUT,
-  entrypoints,
-  sha256,
-} from './lib/release-layout.mjs';
+import { TARGET_LAYOUT, entrypoints, sha256 } from './lib/release-layout.mjs';
 import { startServer } from './lib/server-process.mjs';
+import {
+  exerciseNewService,
+  expectSavedRevision,
+} from './lib/service-check.mjs';
 
 /**
  * Installs a release archive into an empty directory and exercises it as an
@@ -185,30 +176,6 @@ export async function refuses(starting, pattern) {
   );
 }
 
-function runCli(packageDir, env, args) {
-  const result = spawn(
-    process.execPath,
-    [join(packageDir, ...CLI_PATH.split('/')), ...args],
-    {
-      env,
-      cwd: packageDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  return new Promise((resolveRun, reject) => {
-    let stdout = '';
-    let stderr = '';
-    result.stdout.on('data', (chunk) => (stdout += chunk));
-    result.stderr.on('data', (chunk) => (stderr += chunk));
-    result.once('error', reject);
-    result.once('close', (code) => {
-      if (code !== 0)
-        reject(new Error(`CLI ${args.join(' ')} exited ${code}: ${stderr}`));
-      else resolveRun(JSON.parse(stdout));
-    });
-  });
-}
-
 /**
  * Runs the whole installation check for `archive` (a path to a `.tar.gz` or
  * `.zip` built by package-release.mjs). Returns a short summary object.
@@ -257,65 +224,22 @@ export async function verifyRelease(archive) {
     const first = await serve();
     let artifactId;
     await withServer(first, async () => {
-      const health = await fetch(`${first.api_url}/healthz`);
-      assert.equal(health.status, 200);
-      assert.equal(await health.text(), 'ok\n');
-
-      const page = Buffer.from(
-        await (await fetch(`${first.web_url}/`)).arrayBuffer(),
-      );
-      assert.deepEqual(page, await readFile(join(webDir, 'index.html')));
-
       const cliEnv = {
         ...env,
         ARTIFREE_SERVER: first.api_url,
         ARTIFREE_TOKEN_FILE: first.token_file,
       };
-      const siteDir = join(scratch, 'site');
-      await mkdir(siteDir);
-      await writeFile(
-        join(siteDir, 'index.html'),
-        '<!doctype html><title>v1</title><p>installed</p>',
-      );
-      const created = await runCli(packageDir, cliEnv, [
-        'artifact',
-        'create',
-        '--title',
-        'Install check',
-        '--dir',
-        siteDir,
-      ]);
-      artifactId = created.artifact.id;
-      assert.equal(created.revision.revision, 1);
-      await writeFile(
-        join(siteDir, 'index.html'),
-        '<!doctype html><title>v2</title><p>saved</p>',
-      );
-      const saved = await runCli(packageDir, cliEnv, [
-        'artifact',
-        'save',
-        artifactId,
-        '--base',
-        '1',
-        '--dir',
-        siteDir,
-      ]);
-      assert.equal(saved.revision.revision, 2);
-
-      const preview = await runCli(packageDir, cliEnv, [
-        'artifact',
-        'preview',
-        artifactId,
-      ]);
-      assert.equal(preview.revision, 2);
-      const frame = await fetch(preview.url);
-      assert.equal(frame.status, 200);
-      assert.match(await frame.text(), /<p>saved<\/p>/);
-      assert.match(
-        frame.headers.get('content-security-policy') ?? '',
-        /sandbox/,
-      );
-      summary.revision = saved.revision.revision;
+      const siteScratch = join(scratch, 'check');
+      await mkdir(siteScratch);
+      const exercised = await exerciseNewService({
+        packageDir,
+        cliEnv,
+        apiUrl: first.api_url,
+        webIndex: join(webDir, 'index.html'),
+        scratch: siteScratch,
+      });
+      artifactId = exercised.artifactId;
+      summary.revision = exercised.revision;
     });
 
     const second = await serve();
@@ -325,16 +249,7 @@ export async function verifyRelease(archive) {
         ARTIFREE_SERVER: second.api_url,
         ARTIFREE_TOKEN_FILE: second.token_file,
       };
-      const shown = await runCli(packageDir, cliEnv, [
-        'artifact',
-        'show',
-        artifactId,
-      ]);
-      assert.equal(
-        shown.current_revision,
-        2,
-        'The saved revision must survive a restart.',
-      );
+      await expectSavedRevision({ packageDir, cliEnv, artifactId });
     });
 
     await refuses(
