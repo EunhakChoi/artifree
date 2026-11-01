@@ -3,6 +3,7 @@
 //! Worker processes may use a different language through a versioned contract.
 
 pub mod archive;
+pub mod backup;
 pub mod build;
 pub mod export;
 pub mod models;

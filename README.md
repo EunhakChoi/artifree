@@ -64,7 +64,9 @@ previewing, and restarting. They are not published or signed yet. See
 built from the Linux archive is checked in CI the same way (nothing is
 published), and the [remote access guides](docs/remote-access.md) cover a
 reverse proxy with TLS, tunnels, a private network, and a static web UI on
-another host; none of those third-party services was run.
+another host; none of those third-party services was run. `artifree-server backup`
+takes a consistent snapshot of a running server and `restore` creates a new data
+directory from it; see [backup and restore](docs/backup-restore.md).
 
 For development with live reloading, Vite is still available:
 
@@ -142,8 +144,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0022](docs/decisions/0022-production-web-and-api-serving.md),
 [0023](docs/decisions/0023-single-owner-token-management.md),
 [0024](docs/decisions/0024-https-proxy-and-remote-access.md),
-[0025](docs/decisions/0025-release-packages.md), and
-[0026](docs/decisions/0026-container-image.md)).
+[0025](docs/decisions/0025-release-packages.md),
+[0026](docs/decisions/0026-container-image.md), and
+[0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

@@ -251,7 +251,7 @@ pub fn derive_loopback_address(options: &ServeOptions) -> Option<SocketAddr> {
 /// existing directory that is open to group or other users is refused rather
 /// than changed, because it may be shared on purpose. On other platforms the
 /// directory inherits its parent's access control.
-fn prepare_data_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn prepare_data_dir(path: &Path) -> Result<(), String> {
     let cannot_create =
         |error: std::io::Error| format!("cannot create {}: {error}", path.display());
     #[cfg(unix)]

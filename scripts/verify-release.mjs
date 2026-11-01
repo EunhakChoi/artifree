@@ -18,7 +18,8 @@ import {
  * from the unpacked tree are run, with an empty PATH and no repository
  * working directory: start, health, the packaged web page, create and save an
  * artifact with the packaged CLI, fetch its preview, stop, restart on the
- * same data, and refuse bad startup configuration. Throws on the first failure.
+ * same data, back up the running server and restore into a new directory that
+ * serves the same revision, and refuse bad startup configuration. Throws on the first failure.
  */
 
 const windows = process.platform === 'win32';
@@ -242,12 +243,58 @@ export async function verifyRelease(archive) {
       summary.revision = exercised.revision;
     });
 
+    const snapshot = join(scratch, 'snapshot.sqlite3');
+    const restoredDir = join(scratch, 'restored');
     const second = await serve();
     await withServer(second, async () => {
       const cliEnv = {
         ...env,
         ARTIFREE_SERVER: second.api_url,
         ARTIFREE_TOKEN_FILE: second.token_file,
+      };
+      await expectSavedRevision({ packageDir, cliEnv, artifactId });
+      // An online backup of the running server (decision 0027).
+      const backedUp = JSON.parse(
+        execFileSync(
+          binary,
+          ['backup', '--data-dir', dataDir, '--output', snapshot],
+          {
+            env,
+            cwd: workDir,
+            encoding: 'utf8',
+          },
+        ),
+      );
+      assert.equal(backedUp.event, 'backup');
+    });
+
+    // The backup restores into a new directory that serves the same revision.
+    const restored = JSON.parse(
+      execFileSync(
+        binary,
+        ['restore', '--input', snapshot, '--data-dir', restoredDir],
+        {
+          env,
+          cwd: workDir,
+          encoding: 'utf8',
+        },
+      ),
+    );
+    assert.equal(restored.event, 'restore');
+    const third = await startServer(
+      binary,
+      restoredDir,
+      ['--web-dir', webDir],
+      {
+        env,
+        cwd: workDir,
+      },
+    );
+    await withServer(third, async () => {
+      const cliEnv = {
+        ...env,
+        ARTIFREE_SERVER: third.api_url,
+        ARTIFREE_TOKEN_FILE: third.token_file,
       };
       await expectSavedRevision({ packageDir, cliEnv, artifactId });
     });

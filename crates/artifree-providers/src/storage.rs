@@ -44,7 +44,8 @@ use artifree_ports::artifact_store::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: i64 = 5;
+/// The schema version this build reads and writes, as `PRAGMA user_version`.
+pub const SCHEMA_VERSION: i64 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SCHEMA: &str = "
@@ -222,9 +223,8 @@ impl SqliteStore {
             path: path.to_owned(),
         };
         let mut connection = store.connect()?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(unavailable)?;
+        // The migration runs before the switch to WAL, which rewrites the file
+        // header: a refused or failed open must leave the file as it was.
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
@@ -268,6 +268,9 @@ impl SqliteStore {
             }
         }
         transaction.commit().map_err(unavailable)?;
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(unavailable)?;
         Ok(store)
     }
 

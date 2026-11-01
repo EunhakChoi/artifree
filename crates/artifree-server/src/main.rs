@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use artifree_server::changes;
+use artifree_server::data_backup;
 use artifree_server::limits::RequestLimits;
 use artifree_server::serve::{self, ServeOptions};
 
@@ -72,7 +73,66 @@ fn run() -> Result<(), String> {
                 }
             })
         }
+        [command, options @ ..] if command == "backup" => {
+            let (data_dir, output) = parse_paths(options, "--data-dir", "--output")?;
+            let summary = data_backup::backup(&data_dir, &output)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "backup",
+                    "output": output,
+                    "schema_version": summary.schema_version,
+                    "bytes": summary.bytes,
+                })
+            );
+            Ok(())
+        }
+        [command, options @ ..] if command == "restore" => {
+            let (input, data_dir) = parse_paths(options, "--input", "--data-dir")?;
+            let summary = data_backup::restore(&input, &data_dir)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "restore",
+                    "data_dir": data_dir,
+                    "schema_version": summary.schema_version,
+                    "bytes": summary.bytes,
+                })
+            );
+            Ok(())
+        }
         _ => Err("Unknown arguments. Use --help.".into()),
+    }
+}
+
+/// Parses exactly two required path flags, in any order.
+fn parse_paths(
+    arguments: &[String],
+    first: &str,
+    second: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let (mut first_value, mut second_value) = (None, None);
+    let mut remaining = arguments.iter();
+    while let Some(flag) = remaining.next() {
+        let slot = if flag == first {
+            &mut first_value
+        } else if flag == second {
+            &mut second_value
+        } else {
+            return Err(format!("Unknown arguments. Unexpected {flag}; use --help."));
+        };
+        let value = remaining
+            .next()
+            .ok_or_else(|| format!("Unknown arguments. {flag} requires a value; use --help."))?;
+        if slot.replace(PathBuf::from(value)).is_some() {
+            return Err(format!("Unknown arguments. {flag} was given twice."));
+        }
+    }
+    match (first_value, second_value) {
+        (Some(one), Some(two)) => Ok((one, two)),
+        _ => Err(format!(
+            "Unknown arguments. {first} and {second} are both required; use --help."
+        )),
     }
 }
 
@@ -528,6 +588,8 @@ fn print_help() {
 
 Usage:
   artifree-server serve --data-dir <dir> [options]
+  artifree-server backup --data-dir <dir> --output <file>
+  artifree-server restore --input <file> --data-dir <new-dir>
   artifree-server --describe | --version | --help
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or
@@ -568,6 +630,17 @@ Request limits apply per actor to HTTP and MCP together; a refused request
 gets 429 rate_limited with Retry-After and is not processed. Opening a change
 stream counts as one request; an open stream holds one of the actor's
 change stream slots instead of a running request.
+
+backup writes a consistent snapshot of the database to a new file while a
+server may be running on the directory, and prints one JSON line on stdout:
+{{\"event\":\"backup\",\"output\":...,\"schema_version\":...,\"bytes\":...}}
+It refuses an existing --output and creates it readable by its owner only. The
+file holds every artifact and the token hashes unencrypted; it does not hold
+the access token file.
+restore creates a data directory from such a file, upgrading its schema, and
+prints {{\"event\":\"restore\",...}}. It refuses a directory that holds
+anything, a damaged file, and a schema newer than this build. A new access token
+is created when the restored directory first serves.
 
 --describe emits the build-time module inventory as JSON; it does not probe a
 running server.",
