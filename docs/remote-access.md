@@ -24,23 +24,30 @@ read their current documentation first. What was actually run is in
    rotated without changing the owner token in `<data-dir>/access-token`.
 3. **MCP stays loopback-only** unless you start the server with
    `--allow-remote-mcp`. Behind a proxy the server judges the client address
-   from `X-Forwarded-For`, but only when the request comes from a
-   `--trusted-proxy`. Do not set `--allow-remote-mcp` just to make a tunnel
+   from the forwarding chain, but only when the request comes from a
+   `--trusted-proxy` (rule 5). A local agent therefore must **not** go through
+   the local proxy or tunnel: it gets 403 there. It connects directly to the
+   loopback listener (`http://127.0.0.1:7410/mcp`). Do not set `--allow-remote-mcp` just to make a tunnel
    work; if an agent must connect remotely, issue it a dedicated token and
    revoke it when done. Today a remote agent token is a full-owner token:
    there are no scopes.
 4. **Trusted proxy is the proxy's address as the server sees it.** Never trust a
    range that internet clients can send from. A request with forwarded headers
    from any other peer is refused with 403.
-5. **The proxy or tunnel must always send `X-Forwarded-For` (or `Forwarded`).**
-   Today, when a trusted proxy sends neither header, the server takes the
-   proxy's own address as the client address. If that is loopback (for example
-   `--trusted-proxy 127.0.0.1/32` with a tunnel daemon on the same host), the
-   loopback check on `/mcp` passes for internet clients, and only the token
-   remains. A server-side fix is planned separately and is **not** part of this
-   change; until it exists, check your provider's settings (for example,
-   options that remove or hide visitor IP headers must be off), and run the
-   post-setup check below.
+5. **The proxy or tunnel must record the client address.** Behind a trusted
+   proxy, the effective client is the rightmost entry of the forwarding chain
+   (`X-Forwarded-For` or `Forwarded`, all lines joined) that is not itself a
+   trusted proxy ([decision 0024](decisions/0024-https-proxy-and-remote-access.md),
+   amendment of 2026-11-01). The client is **unknown**, and `/mcp` returns 403
+   (unless `--allow-remote-mcp`), when the proxy sent no forwarding header,
+   when every entry is a trusted proxy, when `X-Forwarded-For` and `Forwarded`
+   resolve to different clients, or when the peer address is missing. So the
+   proxy must append (or overwrite) the real client address in the one header it
+   uses and strip the other, and a setting that hides visitor IPs makes `/mcp`
+   unusable rather than open. Other routes keep working for unknown clients.
+   Do not trust a range wider than your proxies. Run the post-setup check
+   below; it still catches misconfiguration such as trusting too broad a
+   range.
 6. **Tunnels see your traffic.** A hosted tunnel terminates TLS, so its operator
    can read tokens and artifacts in transit. Treat that as a trust decision.
 
@@ -117,7 +124,8 @@ preview.example.com {
   from the CLI without a reload.
 - Caddy's `reverse_proxy` sets `X-Forwarded-For` by default, per its documentation; the post-setup check above confirms it.
 - Keep MCP loopback-only: do not add `--allow-remote-mcp`. A local agent on the
-  server host can use the unpacked archive on `127.0.0.1`.
+  server host must not go through Caddy (that is 403); it connects directly to
+  `http://127.0.0.1:7410/mcp` of the unpacked archive.
 
 ## Cloudflare Tunnel or ngrok
 
@@ -164,9 +172,11 @@ Points to settle before using it:
   `X-Forwarded-*` from a trusted peer and uses the `Host` header otherwise.
 - Do not start `--allow-remote-mcp`. A tunnel makes every internet client a
   "remote client" whose only barrier is the token.
-- Make sure the tunnel always sends `X-Forwarded-For` (or `Forwarded`); a
-  setting that removes visitor IP headers defeats the loopback MCP check
-  (rule 5). Run the post-setup check above through the public name.
+- Make sure the tunnel records the visitor address in `X-Forwarded-For` (or
+  `Forwarded`). A setting that removes visitor IP headers leaves the client
+  unknown and `/mcp` returns 403 (rule 5); a local agent must not use the
+  tunnel for MCP either. Run the post-setup check above through the public
+  name.
 
 ## Private network (Tailscale or Headscale)
 

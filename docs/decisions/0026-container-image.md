@@ -90,10 +90,11 @@ moves to O03c. The web-workspace gaps found while writing the guides are O03d.
 - The static web workspace has no build-time default server, and
   `--frame-ancestors`/`--content-origin` have no environment variables, which
   makes container and static-UI setups argument-only. Tracked as O03d.
-- A trusted proxy that sends no `X-Forwarded-For` makes the server treat its own
-  address as the client; behind a loopback tunnel that defeats the loopback MCP
-  check. A server fix is planned in a separate change and is not part of this
-  one; the guides require the header and a post-setup `curl` check meanwhile.
+- Client locality behind a proxy follows the amendment of 2026-11-01 in
+  [0024](0024-https-proxy-and-remote-access.md): a missing, all-trusted, or
+  disagreeing forwarding chain is an unknown client and `/mcp` returns 403. The
+  guides require the proxy to supply the chain and keep a post-setup `curl`
+  check as a guard against misconfiguration such as trusting too broad a range.
 - Not verified: other CPUs, rootless Docker, Podman, Kubernetes, compose,
   bind-mount ownership workflows other than the refusal, any named third-party
   service, the public internet. Codex and Pi were not run.

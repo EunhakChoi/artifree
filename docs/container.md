@@ -92,7 +92,9 @@ request that arrives through a published Docker port comes from the Docker
 bridge, not loopback, so **an agent on the Docker host cannot reach `/mcp`
 through the published port** (CI checks that it gets 403 on GitHub's default
 rootful Docker bridge; rootless Docker and Podman use other port drivers that
-may present a different peer address, which was not checked). Do not set
+may present a different peer address, which was not checked). The same holds if you add the bridge to `--trusted-proxy`: a client the
+proxy chain cannot name is unknown and also gets 403 (decision 0024, amendment
+of 2026-11-01). Do not set
 `--allow-remote-mcp` unless you have decided that every client that can reach
 the API port may attempt MCP. Two ways to give an agent access:
 
