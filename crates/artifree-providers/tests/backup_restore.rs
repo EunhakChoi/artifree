@@ -285,7 +285,7 @@ fn an_older_backup_keeps_its_version_and_a_restore_upgrades_it() -> TestResult {
             "v{version}: the source changed"
         );
         let restored = restore(&layout.output(), &layout.target())?;
-        assert_eq!(restored.schema_version, version, "the version it had");
+        assert_eq!(restored.schema_version, SCHEMA_VERSION);
         assert_eq!(
             user_version(&database_in(&layout.target()))?,
             SCHEMA_VERSION

@@ -81,7 +81,8 @@ impl std::error::Error for BackupError {}
 /// What a finished backup or restore produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
-    /// Schema version of the written database file.
+    /// Schema version of the written database file: the one the backup was
+    /// taken at, and always the current one after a restore.
     pub schema_version: i64,
     /// Size of the written database file in bytes.
     pub bytes: u64,
@@ -137,13 +138,14 @@ pub fn backup(data_dir: &Path, output: &Path) -> Result<Report, BackupError> {
     let schema_version = prove_restorable(&snapshot, &scratch)?;
     refuse_siblings(&snapshot)?;
     seal(&snapshot)?;
+    let bytes = size_of(&snapshot)?;
     publish(&snapshot, output, || {
         scratch.remove()?;
         sync_directory(parent)
     })?;
     Ok(Report {
         schema_version,
-        bytes: size_of(output)?,
+        bytes,
     })
 }
 
@@ -196,7 +198,7 @@ fn restore_into(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
             error,
         )
     })?;
-    let schema_version = upgrade_and_verify(&copy)?;
+    upgrade_and_verify(&copy)?;
     let connection = open_existing(&copy)?;
     schema::renew_feed_identity(&connection)
         .map_err(|error| failed("cannot renew the change feed identity", error))?;
@@ -204,14 +206,15 @@ fn restore_into(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
     refuse_siblings(&copy)?;
     seal(&copy)?;
     let database = data_dir.join(DATABASE_FILE);
+    let bytes = size_of(&copy)?;
     publish(&copy, &database, || {
         scratch.remove()?;
         sync_directory(data_dir)?;
         sync_directory(parent_dir(data_dir))
     })?;
     Ok(Report {
-        schema_version,
-        bytes: size_of(&database)?,
+        schema_version: SCHEMA_VERSION,
+        bytes,
     })
 }
 
@@ -231,12 +234,21 @@ fn refuse_siblings(database: &Path) -> Result<(), BackupError> {
         let mut sibling = database.as_os_str().to_owned();
         sibling.push(suffix);
         let sibling = PathBuf::from(sibling);
-        if fs::symlink_metadata(&sibling).is_ok() {
-            return Err(BackupError::Refused(format!(
-                "{} exists beside {}; it belongs to a database that was not closed cleanly. Open the original with the server's user and stop it first",
-                sibling.display(),
-                database.display()
-            )));
+        match fs::symlink_metadata(&sibling) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(failed(
+                    format!("cannot inspect {}", sibling.display()),
+                    error,
+                ));
+            }
+            Ok(_) => {
+                return Err(BackupError::Refused(format!(
+                    "{} exists beside {}; it belongs to a database that was not closed cleanly. Open the original with the server's user and stop it first",
+                    sibling.display(),
+                    database.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -248,7 +260,13 @@ fn open_existing(path: &Path) -> Result<Connection, BackupError> {
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|error| damaged(path, error))?;
+    .map_err(|error| match error.sqlite_error_code() {
+        // Permissions, a missing file or a wrong user, not a damaged database.
+        Some(rusqlite::ErrorCode::CannotOpen | rusqlite::ErrorCode::PermissionDenied) => {
+            failed(format!("cannot open {}", path.display()), error)
+        }
+        _ => damaged(path, error),
+    })?;
     connection
         .busy_timeout(BUSY_TIMEOUT)
         .map_err(|error| damaged(path, error))?;
@@ -441,7 +459,8 @@ fn size_of(file: &Path) -> Result<u64, BackupError> {
 /// or, on an error path, when dropped.
 #[derive(Debug)]
 struct Scratch {
-    directory: Option<PathBuf>,
+    directory: PathBuf,
+    removed: bool,
 }
 
 impl Scratch {
@@ -456,30 +475,27 @@ impl Scratch {
             )
         })?;
         Ok(Self {
-            directory: Some(directory),
+            directory,
+            removed: false,
         })
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.directory
-            .as_deref()
-            .map_or_else(|| PathBuf::from(name), |directory| directory.join(name))
+        self.directory.join(name)
     }
 
     fn remove(mut self) -> Result<(), BackupError> {
-        match self.directory.take() {
-            Some(directory) => fs::remove_dir_all(&directory)
-                .map_err(|error| failed(format!("cannot remove {}", directory.display()), error)),
-            None => Ok(()),
-        }
+        self.removed = true;
+        fs::remove_dir_all(&self.directory)
+            .map_err(|error| failed(format!("cannot remove {}", self.directory.display()), error))
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        if let Some(directory) = self.directory.take() {
+        if !self.removed {
             // The command already failed; a leftover is named by SCRATCH_PREFIX.
-            drop(fs::remove_dir_all(directory));
+            drop(fs::remove_dir_all(&self.directory));
         }
     }
 }

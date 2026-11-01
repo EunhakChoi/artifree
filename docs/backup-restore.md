@@ -107,17 +107,17 @@ docker cp artifree:/data/backup-2026-11-02.sqlite3 .
 docker exec artifree rm /data/backup-2026-11-02.sqlite3
 
 # Restore into a NEW volume with a throwaway container run as the same user.
-# The target must not exist, and a volume's mount point does, so use a
-# subdirectory of it.
+# The target must not exist, and a mount point does, so use a subdirectory.
+# A new volume at /data inherits the owner and mode 700 the image gives /data.
 docker volume create artifree-data-restored
 docker run --rm --platform linux/amd64 --entrypoint /app/bin/artifree-server \
-  -v artifree-data-restored:/restore -v "$PWD":/in:ro artifree:local \
-  restore --input /in/backup-2026-11-02.sqlite3 --data-dir /restore/data
+  -v artifree-data-restored:/data -v "$PWD":/in:ro artifree:local \
+  restore --input /in/backup-2026-11-02.sqlite3 --data-dir /data/instance
 
 # Serve it: the later --data-dir wins over the image's /data.
 docker run -d --name artifree-restored --platform linux/amd64 \
-  -v artifree-data-restored:/restore -p 127.0.0.1:7410:7410 -p 127.0.0.1:7411:7411 \
-  artifree:local --data-dir /restore/data --content-origin http://127.0.0.1:7411
+  -v artifree-data-restored:/data -p 127.0.0.1:7410:7410 -p 127.0.0.1:7411:7411 \
+  artifree:local --data-dir /data/instance --content-origin http://127.0.0.1:7411
 ```
 
 Notes:
