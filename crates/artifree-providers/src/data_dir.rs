@@ -61,7 +61,12 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
 pub fn create_new_data_dir(path: &Path) -> io::Result<()> {
     let parent = parent_dir(path);
     builder().recursive(true).create(parent).map_err(|error| {
-        io::Error::other(format!("cannot create {}: {error}", parent.display()))
+        // A parent that exists as a file must not read as an existing target.
+        let kind = match error.kind() {
+            io::ErrorKind::AlreadyExists => io::ErrorKind::NotADirectory,
+            other => other,
+        };
+        io::Error::new(kind, format!("{}: {error}", parent.display()))
     })?;
     builder().create(path)
 }
@@ -87,4 +92,15 @@ fn builder() -> DirBuilder {
 /// When the directory cannot be created.
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
     builder().create(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_file_name_is_created_in_the_current_directory() {
+        assert_eq!(parent_dir(Path::new("backup.db")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("a/backup.db")), Path::new("a"));
+    }
 }

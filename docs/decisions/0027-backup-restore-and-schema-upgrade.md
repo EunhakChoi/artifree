@@ -68,11 +68,15 @@ newer or failed schemas that does no damage.
    SQLite's normal recovery, which writes to it; byte-for-byte preservation
    is not claimed in that case. Backup and restore must therefore run as the
    server's operating-system user, and on Unix backup enforces it: before it
-   opens the database it compares the file's owner with the owner of the
-   scratch directory it has just created (the standard library has no
-   `geteuid`, and no dependency was added for one) and refuses a database of
-   another user, root included, so it cannot leave recovery files owned by the
-   wrong user in the server's data directory.
+   opens the database it learns the invoking user from the owner of a file it
+   creates, for a moment, beside the database (the standard library has no
+   `geteuid`, and no dependency was added for one; being on the database's own
+   file system, ownership means the same for both), compares it with the
+   database file's owner, and refuses a database of another user, root
+   included, or a directory it cannot write in, so it cannot leave recovery
+   files owned by the wrong user in the server's data directory. The snapshot
+   is taken only from a UTF-8 database, because the path is passed to
+   `VACUUM INTO` as bytes.
 6. **Publishing.** The finished file is `sync_all`ed, and given mode 0600 on
    Unix. It is published with a hard link, which fails instead of replacing
    anything, so an existing destination, a symbolic link included, is refused

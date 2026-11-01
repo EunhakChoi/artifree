@@ -96,6 +96,12 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
         "unrelated database with our version" => Ok(Connection::open(path)?.execute_batch(
             &format!("CREATE TABLE notes (body TEXT); PRAGMA user_version = {SCHEMA_VERSION}"),
         )?),
+        "utf-16 database with our version" => {
+            Ok(Connection::open(path)?.execute_batch(&format!(
+                "PRAGMA encoding = 'UTF-16le'; CREATE TABLE notes (body TEXT);
+             PRAGMA user_version = {SCHEMA_VERSION}"
+            ))?)
+        }
         "missing table" => mutate("DROP TABLE request_keys"),
         "missing index" => mutate("DROP INDEX artifacts_by_owner"),
         "missing token index" => mutate("DROP INDEX idx_tokens_secret_hash"),
@@ -151,11 +157,12 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-const REFUSED: [&str; 15] = [
+const REFUSED: [&str; 16] = [
     "newer schema",
     "empty file",
     "unrelated database",
     "unrelated database with our version",
+    "utf-16 database with our version",
     "missing table",
     "missing index",
     "missing token index",

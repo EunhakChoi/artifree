@@ -112,6 +112,20 @@ fn damaged(path: &Path, error: impl fmt::Display) -> BackupError {
 /// [`BackupError::Failed`] for other failures. On any error `output` and the
 /// scratch directory are gone.
 pub fn backup(data_dir: &Path, output: &Path) -> Result<Report, BackupError> {
+    #[cfg(unix)]
+    let owner_check = refuse_foreign_database;
+    #[cfg(not(unix))]
+    let owner_check = |_: &Path| Ok(());
+    backup_checking_owner(data_dir, output, owner_check)
+}
+
+/// [`backup`] with the check of who owns the database made by `owner_check`,
+/// which runs before anything is opened or created.
+fn backup_checking_owner(
+    data_dir: &Path,
+    output: &Path,
+    owner_check: impl FnOnce(&Path) -> Result<(), BackupError>,
+) -> Result<Report, BackupError> {
     let database = data_dir.join(DATABASE_FILE);
     refuse_existing(output)?;
     if !database.is_file() {
@@ -120,10 +134,9 @@ pub fn backup(data_dir: &Path, output: &Path) -> Result<Report, BackupError> {
             database.display()
         )));
     }
+    owner_check(&database)?;
     let parent = parent_dir(output);
     let scratch = Scratch::create_in(parent)?;
-    #[cfg(unix)]
-    refuse_foreign_database(&database, &scratch.path("."))?;
     let snapshot = scratch.path(SNAPSHOT_FILE);
     take_snapshot(&database, &snapshot)?;
     let schema_version = prove_restorable(&snapshot, &scratch)?;
@@ -183,8 +196,8 @@ fn restore_into(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
     let scratch = Scratch::create_in(data_dir)?;
     let copy = scratch.path(COPY_FILE);
     copy_private(input, &copy)?;
-    upgrade_and_verify(&copy)?;
-    let connection = open_existing(&copy)?;
+    let mut connection = open_existing(&copy)?;
+    verify_and_upgrade(&mut connection, &copy)?;
     schema::renew_feed_identity(&connection)
         .map_err(|error| failed("cannot renew the change feed identity", error))?;
     use_rollback_journal(&connection, &copy)?;
@@ -314,6 +327,17 @@ fn check_integrity(connection: &Connection, path: &Path) -> Result<(), BackupErr
 fn take_snapshot(database: &Path, snapshot: &Path) -> Result<(), BackupError> {
     let source = open_existing(database)?;
     supported_version(&source, database)?;
+    // The path is cast to text in the database's encoding, so only UTF-8 files
+    // are snapshotted; every database this project creates is UTF-8.
+    let encoding: String = source
+        .pragma_query_value(None, "encoding", |row| row.get(0))
+        .map_err(|error| damaged(database, error))?;
+    if encoding != "UTF-8" {
+        return Err(damaged(
+            database,
+            format!("its text encoding is {encoding}, not UTF-8"),
+        ));
+    }
     // The path is bound as a blob and cast to text, which keeps its bytes, so
     // a directory name that is not UTF-8 works.
     source
@@ -357,23 +381,27 @@ fn use_rollback_journal(connection: &Connection, path: &Path) -> Result<(), Back
 /// written. The upgrade runs on this pipeline's own connection and does not
 /// touch the journal mode. It returns the version the file had.
 fn upgrade_and_verify(copy: &Path) -> Result<i64, BackupError> {
-    let mut connection = open_existing(copy)?;
+    verify_and_upgrade(&mut open_existing(copy)?, copy)
+}
+
+/// [`upgrade_and_verify`] on a connection to `copy` the caller keeps using.
+fn verify_and_upgrade(connection: &mut Connection, copy: &Path) -> Result<i64, BackupError> {
     // The upgrade ladder has always run with foreign keys enforced.
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| damaged(copy, error))?;
-    let version = supported_version(&connection, copy)?;
-    check_integrity(&connection, copy)?;
+    let version = supported_version(connection, copy)?;
+    check_integrity(connection, copy)?;
     if version < SCHEMA_VERSION {
-        schema::upgrade(&mut connection).map_err(|error| {
+        schema::upgrade(connection).map_err(|error| {
             BackupError::Refused(format!(
                 "upgrading {} from schema version {version} failed ({error}); nothing was published",
                 copy.display()
             ))
         })?;
-        check_integrity(&connection, copy)?;
+        check_integrity(connection, copy)?;
     }
-    schema::check_current(&connection).map_err(|difference| {
+    schema::check_current(connection).map_err(|difference| {
         BackupError::Refused(format!(
             "{} does not match the schema this build creates: {difference}",
             copy.display()
@@ -423,17 +451,36 @@ fn create_private_file(path: &Path) -> io::Result<fs::File> {
 
 /// Refuses a database owned by another user. Opening it read-write could run
 /// `SQLite`'s WAL recovery and leave `-wal` and `-shm` files this user owns in
-/// the server's data directory. `scratch` was just created by this user, so
-/// its owner is the invoking user (the standard library has no `geteuid`).
+/// the server's data directory. The standard library has no `geteuid`, so the
+/// invoking user is the owner of a file this command creates, for a moment,
+/// beside the database: on the same file system, so ownership means the same
+/// for both. No write access there is refused too, since recovery needs it.
 #[cfg(unix)]
-fn refuse_foreign_database(database: &Path, scratch: &Path) -> Result<(), BackupError> {
+fn refuse_foreign_database(database: &Path) -> Result<(), BackupError> {
     use std::os::unix::fs::MetadataExt;
-    let owner = |path: &Path| {
-        fs::metadata(path)
-            .map(|metadata| metadata.uid())
-            .map_err(|error| failed(format!("cannot inspect {}", path.display()), error))
-    };
-    check_owner(owner(database)?, owner(scratch)?, database)
+    let directory = parent_dir(database);
+    let random = random_bytes().map_err(|error| failed("no system randomness", error))?;
+    let probe = directory.join(format!(
+        "{SCRATCH_PREFIX}owner-{:032x}",
+        u128::from_be_bytes(random)
+    ));
+    let user_uid = create_private_file(&probe)
+        .and_then(|file| file.metadata())
+        .map(|metadata| metadata.uid());
+    drop(fs::remove_file(&probe));
+    let user_uid = user_uid.map_err(|error| {
+        failed(
+            format!(
+                "cannot write in {}; run backup as the user that runs the server",
+                directory.display()
+            ),
+            error,
+        )
+    })?;
+    let database_uid = fs::metadata(database)
+        .map(|metadata| metadata.uid())
+        .map_err(|error| failed(format!("cannot inspect {}", database.display()), error))?;
+    check_owner(database_uid, user_uid, database)
 }
 
 #[cfg(unix)]
@@ -502,7 +549,9 @@ fn publish(
 /// failure there, and the entry is only as durable as the mount makes it.
 #[cfg(unix)]
 fn sync_directory(directory: &Path) -> Result<(), BackupError> {
-    match fs::File::open(directory).and_then(|handle| handle.sync_all()) {
+    let handle = fs::File::open(directory)
+        .map_err(|error| failed(format!("cannot open {}", directory.display()), error))?;
+    match handle.sync_all() {
         Err(error) if !directory_flush_unsupported(&error) => Err(failed(
             format!("cannot flush {}", directory.display()),
             error,
@@ -511,14 +560,15 @@ fn sync_directory(directory: &Path) -> Result<(), BackupError> {
     }
 }
 
-/// Whether `error` says that the file system cannot flush a directory
-/// (`EINVAL` or `ENOTSUP`), not that flushing failed.
+/// Whether `error` is the operating system saying that this file system
+/// cannot flush a directory (`EINVAL` or `ENOTSUP`), not that flushing failed.
 #[cfg(unix)]
 fn directory_flush_unsupported(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
-    )
+    error.raw_os_error().is_some()
+        && matches!(
+            error.kind(),
+            io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+        )
 }
 
 #[cfg(not(unix))]
@@ -638,12 +688,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_bare_file_name_is_created_in_the_current_directory() {
-        assert_eq!(parent_dir(Path::new("backup.db")), Path::new("."));
-        assert_eq!(parent_dir(Path::new("a/backup.db")), Path::new("a"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn a_database_of_another_user_is_refused_before_it_is_opened() {
@@ -658,29 +702,68 @@ mod tests {
         assert!(check_owner(1000, 0, database).is_err());
     }
 
+    /// The owner check is wired into `backup`: with another owner reported it
+    /// stops before anything is created, and with the real one it proceeds.
+    #[cfg(unix)]
+    #[test]
+    fn backup_stops_for_a_database_of_another_user_and_leaves_nothing() -> TestResult {
+        use std::os::unix::fs::MetadataExt;
+        let dir = directory("owner")?;
+        let data = dir.join("data");
+        fs::create_dir(&data)?;
+        crate::storage::SqliteStore::open(&data.join(DATABASE_FILE))?;
+        let out = dir.join("out");
+        fs::create_dir(&out)?;
+        let before: Vec<_> = fs::read_dir(&data)?
+            .map(|entry| entry.map(|e| e.file_name()))
+            .collect::<Result<_, _>>()?;
+        let uid = fs::metadata(data.join(DATABASE_FILE))?.uid();
+
+        let refused = backup_checking_owner(&data, &out.join("b.sqlite3"), |database| {
+            check_owner(uid.wrapping_add(1), uid, database)
+        });
+
+        assert!(
+            matches!(refused, Err(BackupError::Refused(_))),
+            "{refused:?}"
+        );
+        assert_eq!(fs::read_dir(&out)?.count(), 0, "nothing was created");
+        let after: Vec<_> = fs::read_dir(&data)?
+            .map(|entry| entry.map(|e| e.file_name()))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(before.len(), after.len());
+        // The real check passes for a database of this user and leaves no probe.
+        refuse_foreign_database(&data.join(DATABASE_FILE))?;
+        assert_eq!(fs::read_dir(&data)?.count(), before.len(), "probe removed");
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn only_an_unsupported_directory_flush_is_tolerated() {
-        // EINVAL and ENOTSUP, as some FUSE, SMB, and NFS mounts answer.
+        // EINVAL is 22 on every Unix.
         assert!(directory_flush_unsupported(&io::Error::from_raw_os_error(
             22
         )));
+        #[cfg(target_os = "linux")]
         assert!(directory_flush_unsupported(&io::Error::from_raw_os_error(
             95
         )));
-        assert!(directory_flush_unsupported(
-            &io::ErrorKind::Unsupported.into()
-        ));
-        // Real failures still fail the publish.
+        // Real failures still fail the publish: EIO, EACCES, and an error that
+        // did not come from the operating system.
         assert!(!directory_flush_unsupported(&io::Error::from_raw_os_error(
             5
         )));
-        assert!(!directory_flush_unsupported(
-            &io::ErrorKind::PermissionDenied.into()
-        ));
         assert!(!directory_flush_unsupported(&io::Error::from_raw_os_error(
-            28
+            13
         )));
+        assert!(!directory_flush_unsupported(
+            &io::ErrorKind::InvalidInput.into()
+        ));
+        assert!(!directory_flush_unsupported(
+            &io::ErrorKind::Unsupported.into()
+        ));
     }
 
     #[cfg(unix)]
