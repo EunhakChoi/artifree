@@ -60,7 +60,11 @@ Linux x64 and Windows x64 release archives (server, built web workspace, a
 bundled CLI that needs Node.js 22.12 or newer, and a SHA-256 manifest) are built
 by CI and checked by unpacking them into an empty directory, starting, saving,
 previewing, and restarting. They are not published or signed yet. See
-[release packages](docs/release-packages.md).
+[release packages](docs/release-packages.md). A [container image](docs/container.md)
+built from the Linux archive is checked in CI the same way (nothing is
+published), and the [remote access guides](docs/remote-access.md) cover a
+reverse proxy with TLS, tunnels, a private network, and a static web UI on
+another host; none of those third-party services was run.
 
 For development with live reloading, Vite is still available:
 
@@ -137,8 +141,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0021](docs/decisions/0021-agent-selection-handoff.md),
 [0022](docs/decisions/0022-production-web-and-api-serving.md),
 [0023](docs/decisions/0023-single-owner-token-management.md),
-[0024](docs/decisions/0024-https-proxy-and-remote-access.md), and
-[0025](docs/decisions/0025-release-packages.md)).
+[0024](docs/decisions/0024-https-proxy-and-remote-access.md),
+[0025](docs/decisions/0025-release-packages.md), and
+[0026](docs/decisions/0026-container-image.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

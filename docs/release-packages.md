@@ -1,12 +1,14 @@
 # Release packages
 
 Status: O03a, implemented ([decision 0025](decisions/0025-release-packages.md)).
-A container image, the access-path guides (tunnels, private networks, a
-Vercel-hosted static UI), and backup are not implemented (O03b, O04).
+The [container image](container.md) and [remote access guides](remote-access.md)
+are O03b ([decision 0026](decisions/0026-container-image.md)). Archive
+signing, publishing, and license texts (O03c) and backup (O04) are not
+implemented.
 
 > **Warning.** CI archives are for testing and your own use. Do not
 > redistribute them: the full license texts of the Rust crates and npm
-> packages inside are not bundled yet (O03b).
+> packages inside are not bundled yet (O03c).
 
 A release package is one archive per platform that runs without a repository
 checkout, Rust, or `npm install`:
