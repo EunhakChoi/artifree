@@ -623,6 +623,48 @@ async fn mcp_rejects_disagreeing_xff_and_forwarded() -> TestResult {
 }
 
 #[tokio::test]
+async fn mcp_rejects_disagreement_when_loopback_is_not_a_trusted_proxy() -> TestResult {
+    // Trusted 10.0.0.0/8 does not contain loopback, so each header on its own
+    // names a known client; only the disagreement rule can reject the spoof.
+    let peer: SocketAddr = "10.0.0.5:44444".parse()?;
+    let harness = ProxyHarness::new(
+        vec!["10.0.0.0/8".parse()?],
+        vec!["artifree.example.com".into()],
+        vec![],
+        Some("https://artifree.example.com".into()),
+        "https://preview.example.com".into(),
+        false,
+    )?;
+    for (xff, forwarded) in [
+        ("127.0.0.1", "for=203.0.113.9"),
+        ("203.0.113.9", "for=127.0.0.1"),
+    ] {
+        let res = harness
+            .api
+            .clone()
+            .oneshot(mcp_request(
+                peer,
+                &[("x-forwarded-for", xff), ("forwarded", forwarded)],
+            )?)
+            .await?;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{xff} vs {forwarded}");
+    }
+
+    // Sanity: the same loopback client, named by a single header, is admitted.
+    let res = harness
+        .api
+        .clone()
+        .oneshot(mcp_request(peer, &[("x-forwarded-for", "127.0.0.1")])?)
+        .await?;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "single header, loopback client"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcp_ipv6_and_mapped_loopback_clients() -> TestResult {
     let harness = mcp_harness(false)?;
     let proxy: SocketAddr = "127.0.0.1:44444".parse()?;

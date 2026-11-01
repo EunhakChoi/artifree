@@ -113,6 +113,11 @@ amendment replaces its resolution rules; everything else stands.
      not written by the proxy. If they agree, that client is used; and
   4. the socket peer address is missing. It is never assumed to be loopback
      and is never trusted.
+
+  `/mcp` also treats a request without resolved connection information (one
+  that skipped proxy inspection) as unknown; it never falls back to the raw
+  socket peer. `Forwarded` parameter names are matched case-insensitively.
+
 - **Consumers fail closed.** `/mcp` allows a request only if `--allow-remote-mcp`
   is set or the client is known and loopback (IPv4-mapped IPv6 such as
   `::ffff:127.0.0.1` is canonicalized first). Unknown is `403`. No other code

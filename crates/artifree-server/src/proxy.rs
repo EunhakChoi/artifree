@@ -311,13 +311,20 @@ fn parse_trusted_proto(headers: &HeaderMap) -> String {
     }
 }
 
+/// Strips `name=` from the start of a `Forwarded` element. RFC 7239 parameter
+/// names are case-insensitive; values are left untouched.
+fn strip_parameter_name<'v>(part: &'v str, name: &str) -> Option<&'v str> {
+    let (candidate, value) = part.split_once('=')?;
+    candidate.trim().eq_ignore_ascii_case(name).then_some(value)
+}
+
 /// Extracts the client IP hops from a standard RFC 7239 `Forwarded` header string.
 fn extract_forwarded_for_hops(header_value: &str) -> Result<Vec<IpAddr>, ApiError> {
     let mut ips = Vec::new();
     for hop in header_value.split(',') {
         for part in hop.split(';') {
             let trimmed = part.trim();
-            if let Some(rest) = trimmed.strip_prefix("for=") {
+            if let Some(rest) = strip_parameter_name(trimmed, "for") {
                 let val = rest.trim_matches('"').trim();
                 let without_port = if val.starts_with('[') {
                     if let Some(end) = val.find(']') {
@@ -600,6 +607,54 @@ mod tests {
         );
         assert_eq!(resolve("127.0.0.1", "for=203.0.113.9")?, None);
         assert_eq!(resolve("203.0.113.9", "for=198.51.100.1")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn disagreement_is_unknown_even_when_loopback_is_not_trusted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Trusted net excludes loopback, so a spoofed 127.0.0.1 resolves to a
+        // known client in its own header: only the disagreement check can
+        // reject it.
+        let proxy_peer = "10.0.0.5".parse::<IpAddr>()?;
+        let trusted = vec!["10.0.0.0/8".parse::<IpNetwork>()?];
+        let resolve =
+            |xff: &str, fwd: &str| -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+                let mut headers = HeaderMap::new();
+                headers.insert("x-forwarded-for", xff.parse()?);
+                headers.insert("forwarded", fwd.parse()?);
+                let info = evaluate_connection(&headers, Some(proxy_peer), &trusted)
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(info.client_ip)
+            };
+
+        assert_eq!(
+            resolve("127.0.0.1", "for=203.0.113.9")?,
+            None,
+            "XFF spoofed"
+        );
+        assert_eq!(
+            resolve("203.0.113.9", "for=127.0.0.1")?,
+            None,
+            "Forwarded spoofed"
+        );
+        assert_eq!(
+            resolve("203.0.113.9", "for=203.0.113.9")?,
+            Some("203.0.113.9".parse()?),
+            "agreement resolves",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forwarded_parameter_names_are_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
+        let proxy_peer = "127.0.0.1".parse::<IpAddr>()?;
+        let trusted = vec!["127.0.0.1".parse::<IpNetwork>()?];
+        let mut headers = HeaderMap::new();
+        headers.insert("forwarded", "For=203.0.113.9;Proto=https".parse()?);
+        let info = evaluate_connection(&headers, Some(proxy_peer), &trusted)
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(info.client_ip, Some("203.0.113.9".parse::<IpAddr>()?));
         Ok(())
     }
 
