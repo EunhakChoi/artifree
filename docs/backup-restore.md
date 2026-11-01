@@ -40,13 +40,22 @@ failures are one line on stderr and exit status 1, and leave no output file.
   opens the database for reading and writing (it never creates one). Opening a
   database that a crashed server left with a WAL performs SQLite's normal
   recovery, which writes to it; a cleanly closed database is left as it was.
+  On Unix the command refuses a database file that belongs to another user
+  (root included) before it opens it, so it cannot leave recovery files with
+  the wrong owner in the data directory. Paths that are not UTF-8 work on
+  Unix; on Windows they must be valid Unicode.
 - The command works in a directory named `.artifree-scratch-<random>` beside the
   output and removes it on every failure. If the process is killed (SIGKILL,
   power loss) that directory stays; delete such leftovers when no backup or
   restore is running.
 - On Unix the finished file and the directory entry are flushed to disk before
   success is reported. Windows has no standard-library directory flush, so
-  there the entry is as durable as the file system makes it.
+  there the entry is as durable as the file system makes it. On a file system
+  that cannot flush a directory (some FUSE, SMB, and NFS mounts) the backup
+  still succeeds, since the file itself was flushed, and the entry is only as
+  durable as that mount.
+- The file is in the rollback-journal mode: one self-contained file with no
+  `-wal` beside it.
 
 Copy the file off the machine yourself. Backups are not scheduled, encrypted
 or rotated.
@@ -62,7 +71,9 @@ artifree-server serve --data-dir /path/to/new-data ...
   `serve`) and refuses an existing path. To replace an instance, restore into a
   new directory, start the server on it, and keep the old directory until you
   are satisfied.
-- The input is only read. Files named `<input>-wal`, `<input>-shm` or
+- The input is only read, so a backup kept read-only (mode 0400) works. The
+  restored file is in the rollback-journal mode; the server switches it to WAL
+  when it starts. Files named `<input>-wal`, `<input>-shm` or
   `<input>-journal` beside it are refused.
 - The database is upgraded to the current schema, checked, and given a new
   change-feed identity: open web workspaces and clients that followed the

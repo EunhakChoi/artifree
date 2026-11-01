@@ -67,13 +67,22 @@ newer or failed schemas that does no damage.
    database does leave them). A database left with a WAL by a crash gets
    SQLite's normal recovery, which writes to it; byte-for-byte preservation
    is not claimed in that case. Backup and restore must therefore run as the
-   server's operating-system user.
+   server's operating-system user, and on Unix backup enforces it: before it
+   opens the database it compares the file's owner with the owner of the
+   scratch directory it has just created (the standard library has no
+   `geteuid`, and no dependency was added for one) and refuses a database of
+   another user, root included, so it cannot leave recovery files owned by the
+   wrong user in the server's data directory.
 6. **Publishing.** The finished file is `sync_all`ed, and given mode 0600 on
    Unix. It is published with a hard link, which fails instead of replacing
-   anything, and a destination that already exists, a symbolic link included,
-   is refused first. Then the scratch directory is removed and the parent
-   directory is fsynced (Unix; Windows has no standard-library directory
-   flush, so there the entry is as durable as the file system makes it). If
+   anything, so an existing destination, a symbolic link included, is refused
+   (backup also checks first, to fail before the snapshot is taken). Then the
+   scratch directory is removed and the parent directory is fsynced (Unix;
+   Windows has no standard-library directory flush, so there the entry is as
+   durable as the file system makes it). A file system that cannot flush a
+   directory (`EINVAL` or `ENOTSUP`, as some FUSE, SMB, and NFS mounts answer)
+   is not a failure, because the file itself was flushed; the entry is then
+   only as durable as that mount makes it. Any other flush error fails. If
    anything after the link fails, the linked destination is removed before the
    error is returned, so a failure never leaves the output behind and a retry
    works. The scratch directory is removed on every error path; a killed
@@ -84,12 +93,19 @@ newer or failed schemas that does no damage.
    new instance and never merges); it is created with the policy of
    `prepare_data_dir`, which moved to the providers crate so `serve` and
    `restore` share it. The input is only read: it is copied into a scratch
-   directory inside the target, run through the shared pipeline (check,
-   upgrade, check, compare), and given a **new random change-feed identity**
+   directory inside the target as a new owner read-write file (a backup kept
+   at mode 0400 is a valid input), run through the shared pipeline (check,
+   upgrade on the pipeline's own connection, check, compare), and given a **new random change-feed identity**
    (decision 0006, 11). Only `feed.id` changes; the `AUTOINCREMENT` head in
    `sqlite_sequence` is untouched, so sequences never go back and cursors of
    the original feed get `reset`. An input with stale `-wal`, `-shm` or
-   `-journal` files beside it is refused. On any failure everything restore
+   `-journal` files beside it is refused. **Every file backup and restore
+   publish is in the rollback-journal mode** (`journal_mode=DELETE`, header
+   bytes 18 and 19 equal to 1), one self-contained file with no sidecar,
+   whatever the input's version or journal mode was; the upgrade does not
+   switch the journal mode, and the server switches to WAL when it opens the
+   database. A target below a regular file is reported as that, not as an
+   existing target. On any failure everything restore
    created, the target included, is removed (missing parents it created
    remain). The access token is not part of a backup; the first `serve`
    creates one. Preview tickets, runtime grants and sessions and handoffs are
@@ -98,8 +114,11 @@ newer or failed schemas that does no damage.
    `artifree-server restore --input F --data-dir D`. Each prints one JSON line
    on stdout and diagnostics on stderr; `--help` prints usage and exits 0; an
    unknown, missing or repeated flag, or an unusable value, exits 1. The two
-   commands read their arguments as operating-system strings, so a path that
-   is not UTF-8 works, and an argument of another command that is not UTF-8
+   commands read their arguments as operating-system strings, so on Unix a
+   path that is not UTF-8 works (the snapshot path is bound to `VACUUM INTO`
+   as bytes and cast to text; on Windows SQLite opens UTF-8, so a path that is
+   not valid Unicode is refused when the snapshot is taken). An empty value
+   for a path flag is refused at parse, and an argument of another command that is not UTF-8
    is reported instead of panicking. The database file name is the constant
    `DATABASE_FILE`, shared with `serve`.
 9. **Later domains extend the backup.** A new persisted table is added as a

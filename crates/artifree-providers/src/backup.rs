@@ -31,20 +31,18 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::data_dir;
+use crate::data_dir::{self, parent_dir};
 use crate::schema::{self, SCHEMA_VERSION};
-use crate::storage::{DATABASE_FILE, SqliteStore, random_bytes};
+use crate::storage::{BUSY_TIMEOUT, DATABASE_FILE, random_bytes};
 
 /// Name prefix of the scratch directories backup and restore create. A
 /// directory with this prefix that no running command owns is a leftover of a
 /// killed process.
 pub const SCRATCH_PREFIX: &str = ".artifree-scratch-";
 
-const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_FILE: &str = "snapshot.sqlite3";
 const COPY_FILE: &str = "copy.sqlite3";
 const SIBLING_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
@@ -88,15 +86,6 @@ pub struct Report {
     pub bytes: u64,
 }
 
-/// The directory a new file is created in: its parent, or the current
-/// directory for a bare file name.
-fn parent_dir(path: &Path) -> &Path {
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    }
-}
-
 fn failed(context: impl fmt::Display, error: impl fmt::Display) -> BackupError {
     BackupError::Failed(format!("{context}: {error}"))
 }
@@ -133,6 +122,8 @@ pub fn backup(data_dir: &Path, output: &Path) -> Result<Report, BackupError> {
     }
     let parent = parent_dir(output);
     let scratch = Scratch::create_in(parent)?;
+    #[cfg(unix)]
+    refuse_foreign_database(&database, &scratch.path("."))?;
     let snapshot = scratch.path(SNAPSHOT_FILE);
     take_snapshot(&database, &snapshot)?;
     let schema_version = prove_restorable(&snapshot, &scratch)?;
@@ -165,7 +156,6 @@ pub fn backup(data_dir: &Path, output: &Path) -> Result<Report, BackupError> {
 /// error everything restore created, `data_dir` included, is removed. Missing
 /// parent directories it created stay.
 pub fn restore(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
-    refuse_existing(data_dir)?;
     if !input.is_file() {
         return Err(BackupError::Failed(format!(
             "{} is not a file",
@@ -192,16 +182,12 @@ pub fn restore(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
 fn restore_into(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
     let scratch = Scratch::create_in(data_dir)?;
     let copy = scratch.path(COPY_FILE);
-    fs::copy(input, &copy).map_err(|error| {
-        failed(
-            format!("cannot copy {} to {}", input.display(), copy.display()),
-            error,
-        )
-    })?;
+    copy_private(input, &copy)?;
     upgrade_and_verify(&copy)?;
     let connection = open_existing(&copy)?;
     schema::renew_feed_identity(&connection)
         .map_err(|error| failed("cannot renew the change feed identity", error))?;
+    use_rollback_journal(&connection, &copy)?;
     drop(connection);
     refuse_siblings(&copy)?;
     seal(&copy)?;
@@ -328,39 +314,66 @@ fn check_integrity(connection: &Connection, path: &Path) -> Result<(), BackupErr
 fn take_snapshot(database: &Path, snapshot: &Path) -> Result<(), BackupError> {
     let source = open_existing(database)?;
     supported_version(&source, database)?;
-    let target = snapshot
-        .to_str()
-        .ok_or_else(|| BackupError::Failed(format!("{} is not valid UTF-8", snapshot.display())))?;
+    // The path is bound as a blob and cast to text, which keeps its bytes, so
+    // a directory name that is not UTF-8 works.
     source
-        .execute("VACUUM INTO ?1", [target])
+        .execute("VACUUM INTO CAST(?1 AS TEXT)", [path_bytes(snapshot)?])
         .map_err(|error| damaged(database, format!("cannot snapshot: {error}")))?;
     drop(source);
-    // A single self-contained file, whatever the source's journal mode was.
-    open_existing(snapshot)?
+    use_rollback_journal(&open_existing(snapshot)?, snapshot)
+}
+
+/// A path as the bytes `SQLite` opens. On Unix that is the path itself. Windows
+/// paths are opened as UTF-8, so one that is not valid Unicode is refused.
+#[cfg(unix)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Same signature as the Windows function, which can fail."
+)]
+fn path_bytes(path: &Path) -> Result<Vec<u8>, BackupError> {
+    use std::os::unix::ffi::OsStrExt;
+    Ok(path.as_os_str().as_bytes().to_vec())
+}
+
+#[cfg(not(unix))]
+fn path_bytes(path: &Path) -> Result<Vec<u8>, BackupError> {
+    path.to_str()
+        .map(|text| text.as_bytes().to_vec())
+        .ok_or_else(|| BackupError::Failed(format!("{} is not valid Unicode", path.display())))
+}
+
+/// Every file backup and restore publish is in the rollback-journal mode, one
+/// self-contained file, whatever mode the source was in. The server switches
+/// its database to WAL when it opens it.
+fn use_rollback_journal(connection: &Connection, path: &Path) -> Result<(), BackupError> {
+    connection
         .pragma_update(None, "journal_mode", "DELETE")
-        .map_err(|error| damaged(snapshot, error))
+        .map_err(|error| damaged(path, error))
 }
 
 /// The restore pipeline on a file the caller owns and may change: check it,
 /// upgrade it when older, check again after an upgrade, and compare its
 /// schema with this build's. A file already at the current version is not
-/// written. It returns the version the file had.
+/// written. The upgrade runs on this pipeline's own connection and does not
+/// touch the journal mode. It returns the version the file had.
 fn upgrade_and_verify(copy: &Path) -> Result<i64, BackupError> {
-    let version = {
-        let connection = open_existing(copy)?;
-        let version = supported_version(&connection, copy)?;
-        check_integrity(&connection, copy)?;
-        version
-    };
+    let mut connection = open_existing(copy)?;
+    // The upgrade ladder has always run with foreign keys enforced.
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|error| damaged(copy, error))?;
+    let version = supported_version(&connection, copy)?;
+    check_integrity(&connection, copy)?;
     if version < SCHEMA_VERSION {
-        SqliteStore::open(copy).map_err(|error| {
+        schema::upgrade(&mut connection).map_err(|error| {
             BackupError::Refused(format!(
-                "upgrading from schema version {version} failed and changed nothing: {error}"
+                "upgrading {} from schema version {version} failed ({error}); nothing was published",
+                copy.display()
             ))
         })?;
-        check_integrity(&open_existing(copy)?, copy)?;
+        check_integrity(&connection, copy)?;
     }
-    schema::check_current(&open_existing(copy)?).map_err(|difference| {
+    schema::check_current(&connection).map_err(|difference| {
         BackupError::Refused(format!(
             "{} does not match the schema this build creates: {difference}",
             copy.display()
@@ -377,9 +390,62 @@ fn prove_restorable(snapshot: &Path, scratch: &Scratch) -> Result<i64, BackupErr
         return upgrade_and_verify(snapshot);
     }
     let copy = scratch.path(COPY_FILE);
-    fs::copy(snapshot, &copy)
-        .map_err(|error| failed(format!("cannot copy {}", snapshot.display()), error))?;
+    copy_private(snapshot, &copy)?;
     upgrade_and_verify(&copy)
+}
+
+/// Copies `from` to the new file `to`, which the current user can read and
+/// write whatever the permissions of `from` are (a backup kept read-only is
+/// still a valid input), and flushes it.
+fn copy_private(from: &Path, to: &Path) -> Result<(), BackupError> {
+    let context = || format!("cannot copy {} to {}", from.display(), to.display());
+    let mut source = fs::File::open(from).map_err(|error| failed(context(), error))?;
+    let mut target = create_private_file(to).map_err(|error| failed(context(), error))?;
+    io::copy(&mut source, &mut target)
+        .and_then(|_| target.sync_all())
+        .map_err(|error| failed(context(), error))
+}
+
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> io::Result<fs::File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+/// Refuses a database owned by another user. Opening it read-write could run
+/// `SQLite`'s WAL recovery and leave `-wal` and `-shm` files this user owns in
+/// the server's data directory. `scratch` was just created by this user, so
+/// its owner is the invoking user (the standard library has no `geteuid`).
+#[cfg(unix)]
+fn refuse_foreign_database(database: &Path, scratch: &Path) -> Result<(), BackupError> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = |path: &Path| {
+        fs::metadata(path)
+            .map(|metadata| metadata.uid())
+            .map_err(|error| failed(format!("cannot inspect {}", path.display()), error))
+    };
+    check_owner(owner(database)?, owner(scratch)?, database)
+}
+
+#[cfg(unix)]
+fn check_owner(database_uid: u32, user_uid: u32, database: &Path) -> Result<(), BackupError> {
+    if database_uid == user_uid {
+        Ok(())
+    } else {
+        Err(BackupError::Refused(format!(
+            "{} is owned by user id {database_uid}, not by the user running this command ({user_uid}); run backup as the user that runs the server",
+            database.display()
+        )))
+    }
 }
 
 /// Gives the finished file its final permissions and makes it durable.
@@ -407,7 +473,6 @@ fn publish(
     destination: &Path,
     finish: impl FnOnce() -> Result<(), BackupError>,
 ) -> Result<(), BackupError> {
-    refuse_existing(destination)?;
     fs::hard_link(source, destination).map_err(|error| {
         if error.kind() == io::ErrorKind::AlreadyExists {
             BackupError::Exists(destination.to_owned())
@@ -432,12 +497,28 @@ fn publish(
 
 /// Flushes a directory's entries. Windows has no standard-library way to
 /// flush a directory, so there a created file is as durable as the file
-/// system makes it.
+/// system makes it. Some file systems (certain FUSE, SMB, and NFS mounts)
+/// cannot flush a directory; the file was already flushed, so that is not a
+/// failure there, and the entry is only as durable as the mount makes it.
 #[cfg(unix)]
 fn sync_directory(directory: &Path) -> Result<(), BackupError> {
-    fs::File::open(directory)
-        .and_then(|handle| handle.sync_all())
-        .map_err(|error| failed(format!("cannot flush {}", directory.display()), error))
+    match fs::File::open(directory).and_then(|handle| handle.sync_all()) {
+        Err(error) if !directory_flush_unsupported(&error) => Err(failed(
+            format!("cannot flush {}", directory.display()),
+            error,
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `error` says that the file system cannot flush a directory
+/// (`EINVAL` or `ENOTSUP`), not that flushing failed.
+#[cfg(unix)]
+fn directory_flush_unsupported(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+    )
 }
 
 #[cfg(not(unix))]
@@ -561,5 +642,53 @@ mod tests {
     fn a_bare_file_name_is_created_in_the_current_directory() {
         assert_eq!(parent_dir(Path::new("backup.db")), Path::new("."));
         assert_eq!(parent_dir(Path::new("a/backup.db")), Path::new("a"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_database_of_another_user_is_refused_before_it_is_opened() {
+        let database = Path::new("/data/artifree.sqlite3");
+        assert!(check_owner(1000, 1000, database).is_ok());
+        let refused = check_owner(999, 1000, database);
+        assert!(
+            matches!(&refused, Err(BackupError::Refused(reason)) if reason.contains("999") && reason.contains("1000")),
+            "{refused:?}"
+        );
+        // Root is held to the same rule: the files must belong to the server's user.
+        assert!(check_owner(1000, 0, database).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_unsupported_directory_flush_is_tolerated() {
+        // EINVAL and ENOTSUP, as some FUSE, SMB, and NFS mounts answer.
+        assert!(directory_flush_unsupported(&io::Error::from_raw_os_error(
+            22
+        )));
+        assert!(directory_flush_unsupported(&io::Error::from_raw_os_error(
+            95
+        )));
+        assert!(directory_flush_unsupported(
+            &io::ErrorKind::Unsupported.into()
+        ));
+        // Real failures still fail the publish.
+        assert!(!directory_flush_unsupported(&io::Error::from_raw_os_error(
+            5
+        )));
+        assert!(!directory_flush_unsupported(
+            &io::ErrorKind::PermissionDenied.into()
+        ));
+        assert!(!directory_flush_unsupported(&io::Error::from_raw_os_error(
+            28
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_flush_succeeds_on_an_ordinary_directory() -> TestResult {
+        let dir = directory("flush")?;
+        sync_directory(&dir)?;
+        fs::remove_dir_all(dir)?;
+        Ok(())
     }
 }

@@ -40,24 +40,29 @@ pub fn prepare_data_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The directory a new file or directory is created in: its parent, or the
+/// current directory for a bare name.
+pub(crate) fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
 /// Creates a data directory that must not exist yet, with the access policy of
 /// [`prepare_data_dir`]. Missing parent directories are created the same way
 /// and are not removed again by a caller that fails later.
 ///
 /// # Errors
 ///
-/// [`io::ErrorKind::AlreadyExists`] when anything is at `path`, also a
-/// dangling symbolic link; other errors when it cannot be created.
+/// [`io::ErrorKind::AlreadyExists`] only when `path` itself exists, also as a
+/// dangling symbolic link. A parent that cannot be created, for example
+/// because a component of it is a file, is another error that names it.
 pub fn create_new_data_dir(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path).is_ok() {
-        return Err(io::ErrorKind::AlreadyExists.into());
-    }
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        builder().recursive(true).create(parent)?;
-    }
+    let parent = parent_dir(path);
+    builder().recursive(true).create(parent).map_err(|error| {
+        io::Error::other(format!("cannot create {}: {error}", parent.display()))
+    })?;
     builder().create(path)
 }
 

@@ -51,7 +51,7 @@ pub use crate::schema::SCHEMA_VERSION;
 /// restore all use it.
 pub const DATABASE_FILE: &str = "artifree.sqlite3";
 
-const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Artifact storage in one local `SQLite` database file.
 #[derive(Debug, Clone)]

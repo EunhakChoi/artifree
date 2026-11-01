@@ -10,7 +10,8 @@ const BACKUP_HELP: &str = "Usage: artifree-server backup --data-dir <dir> --outp
 
 Writes a consistent copy of the database in <dir> to the new file <output>,
 also while the server runs. It reports success only after proving that the
-file restores, and never leaves a partial file. Run it as the user that runs the server.
+file restores, and never leaves a partial file. Run it as the user that runs
+the server; on Unix a database of another user is refused.
 
 Options:
   --data-dir <dir>   Data directory of the server (required)
@@ -71,6 +72,11 @@ pub fn parse(arguments: &[OsString], flags: [&str; 2]) -> Result<Parsed, String>
                 "Unknown arguments. {flag} requires a value; use --help."
             ));
         };
+        if value.is_empty() {
+            return Err(format!(
+                "Unknown arguments. {flag} needs a non-empty path; use --help."
+            ));
+        }
         if values[position].replace(PathBuf::from(value)).is_some() {
             return Err(format!(
                 "Unknown arguments. {flag} was given twice; use --help."
@@ -166,6 +172,8 @@ mod tests {
             &["--data-dir", "c"],
             &["--input", "a", "--data-dir"],
             &["--input", "a", "--data-dir", "c", "--force"],
+            &["--input", "", "--data-dir", "c"],
+            &["--input", "a", "--data-dir", ""],
             &[],
         ] {
             let Err(error) = parse(&args(bad), flags) else {

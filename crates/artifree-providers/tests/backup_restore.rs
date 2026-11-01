@@ -612,3 +612,143 @@ fn a_backup_during_writes_restores_a_contiguous_prefix_of_history() -> TestResul
     assert!(records.iter().any(|record| record.last_used_at.is_some()));
     Ok(())
 }
+
+/// The rollback-journal header bytes 18 and 19 are 1; WAL files have 2.
+fn journal_header(path: &Path) -> Result<[u8; 2], Box<dyn std::error::Error>> {
+    let bytes = fs::read(path)?;
+    Ok([bytes[18], bytes[19]])
+}
+
+/// Both commands publish a self-contained rollback-journal file whatever
+/// the input's version or journal mode was (the server switches to WAL when
+/// it opens it).
+#[test]
+fn published_files_are_in_the_rollback_journal_mode() -> TestResult {
+    for version in [None, Some(3)] {
+        let layout = Layout::new();
+        match version {
+            None => {
+                let store = SqliteStore::open(&layout.database())?;
+                create_demo(&store, &actor("owner"), &key("a"), "A", "<h1>a</h1>")?;
+            }
+            Some(version) => historical_database(&layout.database(), version)?,
+        }
+        // The source is WAL (current) or rollback (old); a raw copy keeps that.
+        let raw = layout.out_dir().join("raw.sqlite3");
+        fs::copy(layout.database(), &raw)?;
+        let raw_header = journal_header(&raw)?;
+        assert_eq!(raw_header, if version.is_none() { [2, 2] } else { [1, 1] });
+
+        backup(&layout.data(), &layout.output())?;
+        assert_eq!(journal_header(&layout.output())?, [1, 1], "{version:?}");
+
+        for (name, input) in [("backup", layout.output()), ("raw", raw)] {
+            let target = layout.root.path().join(format!("restored-{name}"));
+            restore(&input, &target)?;
+            let restored = database_in(&target);
+            assert_eq!(journal_header(&restored)?, [1, 1], "{name} {version:?}");
+            let mode: String =
+                Connection::open(&restored)?
+                    .pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            assert_eq!(mode, "delete", "{name} {version:?}");
+            assert_eq!(files_of(&target).len(), 1, "no sidecar files");
+        }
+    }
+    Ok(())
+}
+
+/// A backup kept read-only (mode 0400) is a valid input, at the current
+/// version and at an older one that needs an upgrade.
+#[cfg(unix)]
+#[test]
+fn a_read_only_backup_restores() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    for version in [None, Some(3)] {
+        let layout = Layout::new();
+        match version {
+            None => {
+                let store = SqliteStore::open(&layout.database())?;
+                create_demo(&store, &actor("owner"), &key("a"), "A", "<h1>a</h1>")?;
+            }
+            Some(version) => historical_database(&layout.database(), version)?,
+        }
+        backup(&layout.data(), &layout.output())?;
+        fs::set_permissions(layout.output(), fs::Permissions::from_mode(0o400))?;
+
+        let report = restore(&layout.output(), &layout.target());
+
+        let report = report.map_err(|error| format!("{version:?}: {error}"))?;
+        assert_eq!(report.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            user_version(&database_in(&layout.target()))?,
+            SCHEMA_VERSION
+        );
+        let mode = fs::metadata(layout.output())?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400, "the input is only read");
+    }
+    Ok(())
+}
+
+/// Directory names are bytes on Unix: a backup into one, and a restore below
+/// one, work although the name is not UTF-8.
+#[cfg(unix)]
+#[test]
+fn directories_that_are_not_utf8_work() -> TestResult {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let layout = Layout::new();
+    let store = SqliteStore::open(&layout.database())?;
+    create_demo(&store, &actor("owner"), &key("a"), "A", "<h1>a</h1>")?;
+    let odd = layout
+        .root
+        .path()
+        .join(OsString::from_vec(vec![b'o', 0xff, 0xfe]));
+    fs::create_dir(&odd)?;
+    let output = odd.join("backup.sqlite3");
+
+    backup(&layout.data(), &output)?;
+
+    assert_eq!(files_of(&odd).len(), 1, "only the backup, no scratch");
+    let target = odd.join("restored");
+    restore(&output, &target)?;
+    let restored = SqliteStore::open(&database_in(&target))?;
+    assert!(restored.artifact(&store_artifact_id(&store)?)?.is_some());
+    Ok(())
+}
+
+#[cfg(unix)]
+fn store_artifact_id(
+    store: &SqliteStore,
+) -> Result<artifree_domain::identity::ArtifactId, StoreError> {
+    let page = store.list_artifacts(ArtifactListing {
+        owner: &actor("owner"),
+        search: None,
+        pinned: None,
+        deleted: false,
+        order: ListOrder::Updated,
+        after: None,
+        limit: 10,
+    })?;
+    page.first()
+        .map(|record| record.id.clone())
+        .ok_or(StoreError::NotFound)
+}
+
+/// A restore target below a file is reported as what it is, not as an
+/// existing target.
+#[test]
+fn a_restore_target_below_a_file_names_the_real_cause() -> TestResult {
+    let layout = Layout::new();
+    SqliteStore::open(&layout.database())?;
+    backup(&layout.data(), &layout.output())?;
+    let file = layout.root.join("notes.txt");
+    fs::write(&file, b"mine")?;
+
+    let error = error_of(restore(&layout.output(), &file.join("new")), "below a file");
+
+    assert!(matches!(error, BackupError::Failed(_)), "{error:?}");
+    assert!(!error.to_string().contains("already exists"), "{error}");
+    assert!(error.to_string().contains("notes.txt"), "{error}");
+    assert_eq!(fs::read(&file)?, b"mine");
+    Ok(())
+}
