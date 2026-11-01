@@ -38,7 +38,8 @@ export function buildServer(root, { release = false } = {}) {
 /**
  * Starts `artifree-server serve` on free loopback ports and resolves after
  * its readiness line. `options.env` and `options.cwd` replace the child's
- * environment and working directory. `stop()` ends it gracefully; `kill()` simulates a crash.
+ * environment and working directory. `stop()` ends it gracefully;
+ * `kill()` simulates a crash.
  */
 export async function startServer(
   binary,

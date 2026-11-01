@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import {
   mkdtemp,
   mkdir,
@@ -13,6 +12,12 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  CLI_PATH,
+  TARGET_LAYOUT,
+  entrypoints,
+  sha256,
+} from './lib/release-layout.mjs';
 import { startServer } from './lib/server-process.mjs';
 
 /**
@@ -26,10 +31,6 @@ import { startServer } from './lib/server-process.mjs';
  */
 
 const windows = process.platform === 'win32';
-
-function sha256(bytes) {
-  return createHash('sha256').update(bytes).digest('hex');
-}
 
 /** Unpacks `archive` into the empty directory `into` with the OS extractor. */
 export function extract(archive, into) {
@@ -59,55 +60,118 @@ export function extract(archive, into) {
   }
 }
 
-async function listFiles(dir, prefix = '') {
-  const found = [];
+/**
+ * Walks the unpacked tree without following links. Returns the package-
+ * relative paths of regular files and of directories; anything else
+ * (symlink, device, socket) is refused, because a link named like a listed
+ * file could pass a hash check while pointing outside the package.
+ */
+async function walk(dir, prefix = '', found = { files: [], dirs: [] }) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (entry.isDirectory())
-      found.push(
-        ...(await listFiles(join(dir, entry.name), `${prefix}${entry.name}/`)),
-      );
-    else found.push(`${prefix}${entry.name}`);
+    const path = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      found.dirs.push(path);
+      await walk(join(dir, entry.name), `${path}/`, found);
+    } else if (entry.isFile()) {
+      found.files.push(path);
+    } else {
+      assert.fail(`Not a regular file or directory: ${path}`);
+    }
   }
   return found;
 }
 
 /**
- * Checks the unpacked tree against its MANIFEST.json: every listed file has
- * the recorded size and SHA-256, and nothing else is present. Returns the
- * manifest.
+ * Checks the unpacked tree against its MANIFEST.json: the entrypoints are
+ * exactly those of the manifest's target and are listed files; the tree has
+ * only regular files and directories; every listed file has the recorded size
+ * and SHA-256; and nothing else is present, not even an empty directory.
+ * Returns the manifest.
  */
 export async function verifyManifest(packageDir) {
   const manifest = JSON.parse(
     await readFile(join(packageDir, 'MANIFEST.json'), 'utf8'),
   );
   assert.equal(manifest.format, 1, 'Unsupported manifest format.');
+  assert.ok(
+    Object.hasOwn(TARGET_LAYOUT, manifest.target),
+    `Unknown manifest target: ${manifest.target}`,
+  );
+  const expected = entrypoints(manifest.target);
+  assert.deepEqual(manifest.entrypoints, expected, 'Unexpected entrypoints.');
   const listed = new Set();
   for (const file of manifest.files) {
     assert.ok(
-      !file.path.startsWith('/') && !file.path.split('/').includes('..'),
+      file.path !== '' &&
+        !file.path.startsWith('/') &&
+        !file.path.includes('\\') &&
+        !file.path.split('/').some((part) => part === '' || part === '..'),
       `Unsafe manifest path: ${file.path}`,
     );
-    const bytes = await readFile(join(packageDir, ...file.path.split('/')));
-    assert.equal(bytes.length, file.size, `Size mismatch: ${file.path}`);
-    assert.equal(sha256(bytes), file.sha256, `SHA-256 mismatch: ${file.path}`);
     listed.add(file.path);
   }
-  const actual = (await listFiles(packageDir)).filter(
-    (p) => p !== 'MANIFEST.json',
+  for (const required of [
+    expected.server,
+    expected.cli,
+    `${expected.web}/index.html`,
+  ]) {
+    assert.ok(listed.has(required), `The manifest does not list ${required}.`);
+  }
+
+  const found = await walk(packageDir);
+  const files = found.files.filter((path) => path !== 'MANIFEST.json');
+  assert.ok(
+    found.files.includes('MANIFEST.json'),
+    'MANIFEST.json is not a regular file.',
   );
   assert.deepEqual(
-    actual.sort(),
+    files.sort(),
     [...listed].sort(),
     'Files differ from the manifest.',
   );
+  const parents = new Set();
+  for (const path of listed) {
+    const parts = path.split('/');
+    for (let n = 1; n < parts.length; n += 1)
+      parents.add(parts.slice(0, n).join('/'));
+  }
+  assert.deepEqual(
+    found.dirs.sort(),
+    [...parents].sort(),
+    'Directories differ from the manifest.',
+  );
+  for (const file of manifest.files) {
+    const bytes = await readFile(join(packageDir, ...file.path.split('/')));
+    assert.equal(bytes.length, file.size, `Size mismatch: ${file.path}`);
+    assert.equal(sha256(bytes), file.sha256, `SHA-256 mismatch: ${file.path}`);
+  }
   return manifest;
+}
+
+/**
+ * Runs `body` with a started server, then stops it. A failing body keeps its
+ * own error: stopping is best effort then. After a successful body the stop
+ * must be clean (exit status 0; Windows has no graceful signal for a child,
+ * so there the process is ended and only the restart proves the data).
+ */
+async function withServer(server, body) {
+  let result;
+  try {
+    result = await body();
+  } catch (error) {
+    await server.stop().catch(() => undefined);
+    throw error;
+  }
+  const code = await server.stop();
+  if (!windows) assert.equal(code, 0, `Unclean stop: ${server.stderr()}`);
+  return result;
 }
 
 /**
  * Requires a server start to fail with a message matching `pattern`. A start
  * that succeeds is stopped first so a broken guard fails here, not by hanging.
  */
-async function refuses(starting, pattern) {
+export async function refuses(starting, pattern) {
   let server;
   try {
     server = await starting;
@@ -124,7 +188,7 @@ async function refuses(starting, pattern) {
 function runCli(packageDir, env, args) {
   const result = spawn(
     process.execPath,
-    [join(packageDir, 'cli', 'artifree.mjs'), ...args],
+    [join(packageDir, ...CLI_PATH.split('/')), ...args],
     {
       env,
       cwd: packageDir,
@@ -164,6 +228,16 @@ export async function verifyRelease(archive) {
     const packageDir = join(installRoot, top);
     const manifest = await verifyManifest(packageDir);
 
+    const layout = TARGET_LAYOUT[manifest.target];
+    assert.ok(
+      layout.platform === process.platform && layout.arch === process.arch,
+      `${manifest.target} cannot run on ${process.platform}-${process.arch}.`,
+    );
+    const expectedName = `artifree-${manifest.version}-${manifest.target}`;
+    assert.ok(
+      basename(archive).startsWith(`${expectedName}.`) && top === expectedName,
+      `The manifest (${expectedName}) does not match the archive name or its directory (${basename(archive)}, ${top}).`,
+    );
     const binary = join(packageDir, ...manifest.entrypoints.server.split('/'));
     const webDir = join(packageDir, manifest.entrypoints.web);
     const dataDir = join(scratch, 'data');
@@ -182,7 +256,7 @@ export async function verifyRelease(archive) {
     const summary = {};
     const first = await serve();
     let artifactId;
-    try {
+    await withServer(first, async () => {
       const health = await fetch(`${first.api_url}/healthz`);
       assert.equal(health.status, 200);
       assert.equal(await health.text(), 'ok\n');
@@ -242,14 +316,10 @@ export async function verifyRelease(archive) {
         /sandbox/,
       );
       summary.revision = saved.revision.revision;
-    } finally {
-      const code = await first.stop();
-      // Windows has no graceful signal for a child; there the process is ended.
-      if (!windows) assert.equal(code, 0, `Unclean stop: ${first.stderr()}`);
-    }
+    });
 
     const second = await serve();
-    try {
+    await withServer(second, async () => {
       const cliEnv = {
         ...env,
         ARTIFREE_SERVER: second.api_url,
@@ -265,9 +335,7 @@ export async function verifyRelease(archive) {
         2,
         'The saved revision must survive a restart.',
       );
-    } finally {
-      await second.stop();
-    }
+    });
 
     await refuses(
       startServer(

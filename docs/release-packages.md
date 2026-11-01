@@ -4,6 +4,10 @@ Status: O03a, implemented ([decision 0025](decisions/0025-release-packages.md)).
 A container image, the access-path guides (tunnels, private networks, a
 Vercel-hosted static UI), and backup are not implemented (O03b, O04).
 
+> **Warning.** CI archives are for testing and your own use. Do not
+> redistribute them: the full license texts of the Rust crates and npm
+> packages inside are not bundled yet (O03b).
+
 A release package is one archive per platform that runs without a repository
 checkout, Rust, or `npm install`:
 
@@ -48,7 +52,10 @@ artifree-<version>-<target>/
   RUST_DEPENDENCIES.json   crates linked into the server: name, version, license expression
 ```
 
-`RUST_DEPENDENCIES.json` lists declared license expressions only; it does not
+`RUST_DEPENDENCIES.json` lists registry crates reachable through normal
+dependencies of the server, with declared license expressions only. Artifree's
+own workspace crates (covered by `LICENSE`) and build-only or dev-only crates
+(not linked into the binary) are intentionally left out. It does not
 contain the license texts of those crates or of the npm packages bundled into
 `web/` and `cli/`.
 
@@ -121,8 +128,9 @@ The `Release archive` job builds the archive on each platform, and the `Clean
 install` job unpacks it into an empty directory on a fresh runner without
 installing npm packages or building Rust. The check runs only files from the
 unpacked directory, with an empty `PATH` and a working directory outside any
-checkout, and verifies: archive checksum, every manifest hash and no unlisted
-file, start and health, the packaged web page, creating and saving an artifact
+checkout, and verifies: archive checksum, every manifest hash, only regular files
+and no unlisted file, link, or directory, entrypoints equal to the target's
+layout, the manifest matching the archive name and the runner's platform, start and health, the packaged web page, creating and saving an artifact
 with the packaged CLI, fetching its preview, stopping, restarting on the same
 data and finding revision 2, and the two startup refusals above. It ran only on
 those two runner images; it did not run against a real reverse proxy, tunnel, or

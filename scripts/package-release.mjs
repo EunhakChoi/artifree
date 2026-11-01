@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdir, lstat, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { tarGz, zip } from './lib/archive.mjs';
+import {
+  CLI_PATH,
+  TARGET_LAYOUT,
+  entrypoints,
+  sha256,
+} from './lib/release-layout.mjs';
 import { buildServer } from './lib/server-process.mjs';
 
 /**
@@ -21,18 +26,14 @@ import { buildServer } from './lib/server-process.mjs';
 /** Supported release targets. Each is built natively on its own platform. */
 export const TARGETS = {
   'linux-x64': {
-    platform: 'linux',
-    arch: 'x64',
+    ...TARGET_LAYOUT['linux-x64'],
     triple: 'x86_64-unknown-linux-gnu',
-    executable: 'artifree-server',
     extension: 'tar.gz',
     pack: tarGz,
   },
   'windows-x64': {
-    platform: 'win32',
-    arch: 'x64',
+    ...TARGET_LAYOUT['windows-x64'],
     triple: 'x86_64-pc-windows-msvc',
-    executable: 'artifree-server.exe',
     extension: 'zip',
     pack: zip,
   },
@@ -122,6 +123,10 @@ async function cliBundle(root) {
 /**
  * The third-party Rust crates linked into the server for `triple`: name,
  * version, and declared license expression (not the license texts).
+ * Only registry/git crates reachable through normal dependencies count:
+ * workspace crates (`source === null`) are Artifree's own code under the
+ * repository LICENSE, and build-only or dev-only crates are not linked into
+ * the binary, so listing them would claim more than ships.
  */
 function rustDependencies(root, triple) {
   const metadata = JSON.parse(
@@ -137,11 +142,11 @@ function rustDependencies(root, triple) {
     ),
   );
   const nodes = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
-  const root_id = metadata.packages.find(
+  const rootId = metadata.packages.find(
     (pkg) => pkg.name === 'artifree-server',
   ).id;
-  const reached = new Set([root_id]);
-  const queue = [root_id];
+  const reached = new Set([rootId]);
+  const queue = [rootId];
   while (queue.length > 0) {
     for (const dep of nodes.get(queue.pop()).deps) {
       const normal = dep.dep_kinds.some((kind) => kind.kind === null);
@@ -158,11 +163,11 @@ function rustDependencies(root, triple) {
       version: pkg.version,
       license: pkg.license ?? null,
     }))
-    .sort((a, b) => (a.name + a.version < b.name + b.version ? -1 : 1));
-}
-
-function sha256(bytes) {
-  return createHash('sha256').update(bytes).digest('hex');
+    .sort(
+      (a, b) =>
+        a.name.localeCompare(b.name, 'en') ||
+        a.version.localeCompare(b.version, 'en'),
+    );
 }
 
 /**
@@ -187,6 +192,8 @@ export async function buildReleasePackage({
   ).version;
   const binaryBytes = await readFile(binary);
   assertBinaryFormat(target, binaryBytes);
+  // The binary can only be run to read its version on its own platform; a
+  // different target is checked for format only.
   if (hostTarget() === target) {
     const reported = execFileSync(binary, ['--version'], { encoding: 'utf8' });
     assert.equal(
@@ -197,6 +204,7 @@ export async function buildReleasePackage({
   }
 
   const name = `artifree-${version}-${target}`;
+  const paths = entrypoints(target);
   const text = async (path) => readFile(join(root, path));
   const files = [
     { path: 'LICENSE', data: await text('LICENSE') },
@@ -214,8 +222,8 @@ export async function buildReleasePackage({
       path: 'docs/release-packages.md',
       data: await text('docs/release-packages.md'),
     },
-    { path: `bin/${spec.executable}`, data: binaryBytes, executable: true },
-    { path: 'cli/artifree.mjs', data: await cliBundle(root), executable: true },
+    { path: paths.server, data: binaryBytes, executable: true },
+    { path: CLI_PATH, data: await cliBundle(root), executable: true },
     ...(await webFiles(webDir)),
   ].sort((a, b) => (a.path < b.path ? -1 : 1));
 
@@ -224,11 +232,7 @@ export async function buildReleasePackage({
     name: 'artifree',
     version,
     target,
-    entrypoints: {
-      server: `bin/${spec.executable}`,
-      cli: 'cli/artifree.mjs',
-      web: 'web',
-    },
+    entrypoints: paths,
     files: files.map((file) => ({
       path: file.path,
       size: file.data.length,

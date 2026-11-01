@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -12,6 +20,7 @@ import {
 import { buildServer } from '../lib/server-process.mjs';
 import {
   extract,
+  refuses,
   verifyChecksum,
   verifyManifest,
   verifyRelease,
@@ -94,7 +103,7 @@ test(
     await assert.rejects(verifyManifest(dir), /differ from the manifest/);
     await rm(join(dir, 'extra.txt'));
     await rm(index);
-    await assert.rejects(verifyManifest(dir), /ENOENT/);
+    await assert.rejects(verifyManifest(dir), /Files differ/);
   },
 );
 
@@ -138,4 +147,138 @@ test('the archive checksum rejects a changed archive', options, async () => {
   bytes[bytes.length - 1] ^= 0xff;
   await writeFile(built.archive, bytes);
   await assert.rejects(verifyChecksum(built.archive), /checksum mismatch/);
+});
+
+/** Builds and unpacks a package; returns its directory and archive info. */
+async function unpacked(label) {
+  const built = await pack(join(scratch, `out-${label}`));
+  const installRoot = join(scratch, label);
+  await mkdir(installRoot);
+  extract(built.archive, installRoot);
+  return { built, dir: join(installRoot, built.name) };
+}
+
+test(
+  'the manifest check rejects a link, even to identical bytes',
+  options,
+  async (t) => {
+    const { dir } = await unpacked('link');
+    const index = join(dir, 'web', 'index.html');
+    const same = join(scratch, 'outside-copy.html');
+    await copyFile(index, same);
+    await rm(index);
+    try {
+      await symlink(same, index);
+    } catch (error) {
+      if (error.code === 'EPERM' || error.code === 'EACCES') {
+        t.skip(
+          'this account may not create symlinks (Windows without privilege)',
+        );
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      verifyManifest(dir),
+      /Not a regular file or directory: web\/index.html/,
+    );
+  },
+);
+
+test(
+  'the manifest check rejects an unlisted empty directory',
+  options,
+  async () => {
+    const { dir } = await unpacked('emptydir');
+    await verifyManifest(dir);
+    await mkdir(join(dir, 'web', 'hidden'));
+    await assert.rejects(verifyManifest(dir), /Directories differ/);
+  },
+);
+
+test(
+  'the manifest check rejects entrypoints other than the target layout',
+  options,
+  async () => {
+    const { dir } = await unpacked('entry');
+    const path = join(dir, 'MANIFEST.json');
+    const manifest = JSON.parse(await readFile(path, 'utf8'));
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...manifest,
+        entrypoints: { ...manifest.entrypoints, server: 'web/index.html' },
+      }),
+    );
+    await assert.rejects(verifyManifest(dir), /Unexpected entrypoints/);
+
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...manifest,
+        files: manifest.files.filter(
+          (f) => f.path !== manifest.entrypoints.cli,
+        ),
+      }),
+    );
+    await assert.rejects(
+      verifyManifest(dir),
+      /does not list cli\/artifree.mjs/,
+    );
+  },
+);
+
+test(
+  'verification rejects an archive renamed away from its manifest',
+  options,
+  async () => {
+    const built = await pack(join(scratch, 'out-rename'));
+    const renamed = join(
+      scratch,
+      built.archive.endsWith('.zip')
+        ? 'artifree-9.9.9-x.zip'
+        : 'artifree-9.9.9-x.tar.gz',
+    );
+    await copyFile(built.archive, renamed);
+    await assert.rejects(
+      verifyRelease(renamed),
+      /does not match the archive name/,
+    );
+  },
+);
+
+test(
+  'packaging rejects a binary that reports another version',
+  options,
+  async () => {
+    // Node is a native executable of this platform whose --version is "v22...".
+    await assert.rejects(
+      buildReleasePackage({
+        root,
+        target,
+        binary: process.execPath,
+        webDir,
+        outDir: join(scratch, 'out-version'),
+      }),
+      /does not report the repository version/,
+    );
+  },
+);
+
+test('the refusal check fails when the server starts anyway', async () => {
+  let killed = false;
+  const accepting = Promise.resolve({
+    kill: () => {
+      killed = true;
+    },
+  });
+  await assert.rejects(refuses(accepting, /must differ/), /started although/);
+  assert.equal(killed, true, 'a wrongly started server must be stopped');
+  await refuses(
+    Promise.reject(new Error('origins must differ')),
+    /must differ/,
+  );
+  await assert.rejects(
+    refuses(Promise.reject(new Error('some other failure')), /must differ/),
+  );
 });
