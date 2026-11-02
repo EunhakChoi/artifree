@@ -247,6 +247,9 @@ fn restore_into(
     verify_and_upgrade(&mut connection, &copy)?;
     schema::renew_feed_identity(&connection)
         .map_err(|error| failed("cannot renew the change feed identity", error))?;
+    // A running job's lease belongs to a worker of another database (0030).
+    schema::expire_job_leases(&connection)
+        .map_err(|error| failed("cannot expire the leases of running jobs", error))?;
     use_rollback_journal(&connection, &copy)?;
     drop(connection);
     refuse_siblings(&copy)?;

@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA: &str = "
 CREATE TABLE artifacts (
@@ -227,6 +227,66 @@ DROP TABLE changes;
 ALTER TABLE changes_v7 RENAME TO changes;
 ";
 
+/// Added in schema version 8 (decision 0030): persistent jobs, the keys of the
+/// requests that enqueued and cancelled them, and the mismatches a
+/// verification found. A job pins its actor, artifact, and revision; its state
+/// and lease columns agree through checks, so no write can leave a running job
+/// without a lease or an ended job without an end time. None of these tables
+/// holds a content digest: a job reads its revision's files through
+/// `revision_files`, which the unreferenced-content rule already counts.
+const JOB_SCHEMA: &str = "
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('verify_revision')),
+    state TEXT NOT NULL CHECK (state IN
+        ('queued', 'running', 'retry_scheduled', 'succeeded', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
+    fence INTEGER NOT NULL CHECK (fence >= 0),
+    run_after INTEGER NOT NULL,
+    worker TEXT,
+    lease_expires_at INTEGER,
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    failure TEXT CHECK (failure IN
+        ('revision_unavailable', 'storage_unavailable', 'lease_expired', 'internal')),
+    files_checked INTEGER CHECK (files_checked >= 0),
+    bytes_checked INTEGER CHECK (bytes_checked >= 0),
+    mismatch_count INTEGER CHECK (mismatch_count >= 0),
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    CHECK (attempts <= max_attempts),
+    CHECK ((state = 'running') = (worker IS NOT NULL AND lease_expires_at IS NOT NULL)),
+    CHECK ((state IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
+    CHECK ((state = 'failed') = (failure IS NOT NULL)),
+    CHECK (state = 'succeeded'
+        OR (files_checked IS NULL AND bytes_checked IS NULL AND mismatch_count IS NULL))
+) STRICT;
+CREATE INDEX jobs_by_actor ON jobs (actor, created_at DESC, id);
+CREATE INDEX jobs_by_artifact ON jobs (artifact_id, created_at DESC, id);
+CREATE INDEX jobs_by_state ON jobs (state, run_after);
+CREATE TABLE job_requests (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    job_id TEXT NOT NULL REFERENCES jobs (id),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE job_findings (
+    job_id TEXT NOT NULL REFERENCES jobs (id),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    path TEXT NOT NULL,
+    problem TEXT NOT NULL CHECK (problem IN
+        ('digest_mismatch', 'size_mismatch', 'content_missing')),
+    PRIMARY KEY (job_id, ordinal)
+) STRICT, WITHOUT ROWID;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -290,6 +350,9 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if version < 7 {
         keeping_feed_head(&transaction, PURGE_SCHEMA)?;
+    }
+    if version < 8 {
+        transaction.execute_batch(JOB_SCHEMA).map_err(unavailable)?;
     }
     transaction
         .execute_batch(TOKEN_SCHEMA)
@@ -600,6 +663,24 @@ pub(crate) fn renew_feed_identity(connection: &Connection) -> Result<(), StoreEr
             "the feed table has {changed} rows, expected 1"
         )))
     }
+}
+
+/// Expires the lease of every running job, so that the next claim takes it.
+/// A restore runs it: a lease in a backup belongs to a worker of the machine
+/// the backup was taken on, whose clock and process this database does not
+/// know, and which writes to the original database, not to this one. The
+/// claim that follows has a higher fencing token.
+///
+/// # Errors
+///
+/// [`StoreError::Unavailable`].
+pub(crate) fn expire_job_leases(connection: &Connection) -> Result<usize, StoreError> {
+    connection
+        .execute(
+            "UPDATE jobs SET lease_expires_at = 0 WHERE state = 'running'",
+            [],
+        )
+        .map_err(unavailable)
 }
 
 /// Applies `schema`, which rebuilds the `changes` table, and keeps the change

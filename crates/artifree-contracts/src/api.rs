@@ -420,6 +420,216 @@ pub struct ArtifactList {
     pub next_page_token: Option<String>,
 }
 
+/// What a job does (decision 0030). Each kind is trusted in-repository code
+/// that runs in the Artifree worker process. This is not a way to run
+/// untrusted code, to build sources, or to call model providers; none of
+/// those exists yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    /// Re-reads every file of a pinned revision from storage, recomputes its
+    /// SHA-256 digest and size, and compares them with the stored listing.
+    VerifyRevision,
+}
+
+/// Where a job is in its life. `succeeded`, `failed`, and `cancelled` are
+/// terminal: a job there never changes again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    /// Waiting for a worker to claim it.
+    Queued,
+    /// A worker holds its lease. With `cancel_requested` the worker stops at
+    /// its next checkpoint.
+    Running,
+    /// An attempt failed in a way worth repeating; the next one starts at
+    /// `retry_at_ms`.
+    RetryScheduled,
+    /// The job ran to the end. A verification that found mismatches is still
+    /// `succeeded`: read its `result.verdict`.
+    Succeeded,
+    /// The job could not run to the end and will not be tried again; see
+    /// `failure`.
+    Failed,
+    /// The job was stopped before it finished. This says the work stopped. It
+    /// does not say that anything the work did was undone; a verification
+    /// does nothing outside its own record.
+    Cancelled,
+}
+
+/// Why a job ended as `failed`. A fixed vocabulary, never free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobFailure {
+    /// The pinned revision could not be read; its artifact was purged.
+    RevisionUnavailable,
+    /// Storage kept failing for every attempt.
+    StorageUnavailable,
+    /// A worker held the final attempt and stopped renewing its lease.
+    LeaseExpired,
+    /// A failure the worker did not expect.
+    Internal,
+}
+
+/// What is wrong with one file of a verified revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobProblem {
+    /// The stored content has another SHA-256 digest than the listing.
+    DigestMismatch,
+    /// The stored content has another size than the listing.
+    SizeMismatch,
+    /// The listing names a file whose content is not stored.
+    ContentMissing,
+}
+
+/// The outcome of a verification that ran to the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobVerdict {
+    /// Every file matched its listing.
+    Ok,
+    /// At least one file did not; see `mismatches`.
+    Mismatch,
+}
+
+/// One file that does not match its listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobMismatch {
+    /// The file's package path, relative to the artifact.
+    pub path: String,
+    /// What is wrong with it.
+    pub problem: JobProblem,
+}
+
+/// The result of a `verify_revision` job that ran to the end. It holds counts
+/// and package paths of the pinned revision, never file content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobResult {
+    /// `ok` when no file mismatched.
+    pub verdict: JobVerdict,
+    /// How many files of the revision were read.
+    pub files_checked: u64,
+    /// The sum of the sizes of the content that was read.
+    pub bytes_checked: u64,
+    /// How many files mismatched, counted without the bound of `mismatches`.
+    pub mismatch_count: u64,
+    /// The first mismatches in path order, at most 50.
+    pub mismatches: Vec<JobMismatch>,
+    /// True when `mismatches` lists fewer than `mismatch_count`.
+    pub truncated: bool,
+}
+
+/// A persistent job. It pins the actor that enqueued it, one artifact, one
+/// source revision, and a kind; none of these changes. Time fields are Unix
+/// milliseconds. A client learns of progress by reading the job again: there
+/// is no push for jobs, and the change feed does not carry them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Job {
+    /// Job identifier, `job_` followed by 32 lowercase hex digits.
+    pub id: String,
+    /// The artifact whose revision the job verifies.
+    pub artifact_id: String,
+    /// The pinned source revision.
+    pub revision: u64,
+    /// What the job does.
+    pub kind: JobKind,
+    /// Where it is in its life.
+    pub state: JobState,
+    /// True when a cancel was requested while the job was running. It then
+    /// ends as `cancelled` unless it already ended; the request stops work
+    /// and rolls nothing back.
+    pub cancel_requested: bool,
+    /// How many times a worker claimed the job.
+    pub attempt: u64,
+    /// How many claims it gets at most.
+    pub max_attempts: u64,
+    /// When the job was enqueued.
+    pub created_at_ms: i64,
+    /// When a worker first claimed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    /// When it reached a terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<i64>,
+    /// While `retry_scheduled`, the earliest time of the next attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<i64>,
+    /// Why the job failed, once it is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<JobFailure>,
+    /// The result, once the job is `succeeded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<JobResult>,
+}
+
+/// Body of `POST /v1/artifacts/{id}/jobs`, with an `Idempotency-Key` header:
+/// enqueues a job for one revision of the artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnqueueJobRequest {
+    /// What to do.
+    pub kind: JobKind,
+    /// The source revision to pin. It must exist.
+    pub revision: u64,
+}
+
+/// Response of `POST /v1/artifacts/{id}/jobs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnqueueJobResponse {
+    /// The job. On a replay it is shown as it is now, not as it was.
+    pub job: Job,
+    /// True when an earlier request with the same key already enqueued it.
+    pub replayed: bool,
+}
+
+/// Body of `POST /v1/jobs/{id}/cancel`, with an `Idempotency-Key` header. It
+/// has no fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelJobRequest {}
+
+/// Response of `POST /v1/jobs/{id}/cancel`. A job that had not started is
+/// `cancelled`. A running job is still `running` with `cancel_requested`: its
+/// worker stops at its next checkpoint, and the job ends `cancelled` unless it
+/// ended first. A job that already ended answers `job_ended`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelJobResponse {
+    /// The job. On a replay it is shown as it is now.
+    pub job: Job,
+    /// True when an earlier request with the same key already asked.
+    pub replayed: bool,
+}
+
+/// Query parameters of `GET /v1/jobs` and `GET /v1/artifacts/{id}/jobs`, all
+/// optional.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListJobsQuery {
+    /// Page size, 1-100; 50 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// `next_page_token` of the previous page of the same list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+}
+
+/// Response of `GET /v1/jobs` and `GET /v1/artifacts/{id}/jobs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobList {
+    /// Jobs of artifacts that are not in the trash, newest first.
+    pub jobs: Vec<Job>,
+    /// Pass as `page_token` to read the next page; absent on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
 /// Response of `GET /v1/artifacts/{id}/revisions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -792,6 +1002,12 @@ pub enum ErrorCode {
     /// The unreferenced content is no longer the set the dry run reported, so
     /// nothing was deleted. Run the dry run again.
     ContentConflict,
+    /// The job already succeeded, failed, or was cancelled, so it cannot be
+    /// cancelled. Nothing was changed.
+    JobEnded,
+    /// The actor already has the largest number of jobs waiting or running.
+    /// Wait for one to end or cancel one; nothing was enqueued.
+    TooManyJobs,
     /// The idempotency key was already used for a different request.
     RequestKeyReused,
     /// The request body exceeds the size limit.

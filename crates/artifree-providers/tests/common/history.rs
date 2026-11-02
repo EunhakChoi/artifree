@@ -173,3 +173,37 @@ CREATE TABLE IF NOT EXISTS tokens (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_tokens_secret_hash ON tokens (secret_hash);
 ";
+
+/// Added in schema version 7 (decision 0029): the tombstone of an artifact
+/// removed for good, the record of a cleanup of unreferenced content, an index
+/// on the content a revision file refers to, and the change kind of a purge.
+pub const STEP_7: &str = "
+ALTER TABLE artifacts ADD COLUMN purged_at INTEGER
+    CHECK (purged_at IS NULL OR deleted_at IS NOT NULL);
+CREATE INDEX revision_files_by_digest ON revision_files (digest);
+CREATE TABLE cleanup_runs (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    blobs INTEGER NOT NULL CHECK (blobs >= 0),
+    bytes INTEGER NOT NULL CHECK (bytes >= 0),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE changes_v7 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    committed_at INTEGER NOT NULL,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision)
+) STRICT;
+INSERT INTO changes_v7 (sequence, artifact_id, kind, revision, metadata_revision, committed_at)
+    SELECT sequence, artifact_id, kind, revision, metadata_revision, committed_at FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v7 RENAME TO changes;
+";

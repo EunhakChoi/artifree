@@ -17,15 +17,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    AgentSessionList, Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DuplicateArtifactRequest, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
-    ListArtifactsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
+    AgentSessionList, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DuplicateArtifactRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest, Job, JobList,
+    ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
     UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
+use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::{ActorId, RequestKey};
 use artifree_ports::token_store::TokenStore;
@@ -84,6 +86,8 @@ pub struct Settings {
     pub allowed_origins: Vec<String>,
     /// Whether remote MCP access is permitted.
     pub allow_remote_mcp: bool,
+    /// The clock that stamps jobs (decision 0030). Tests replace it.
+    pub clock: Arc<dyn Clock>,
 }
 
 impl Default for Settings {
@@ -99,6 +103,7 @@ impl Default for Settings {
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
             allow_remote_mcp: false,
+            clock: Arc::new(SystemClock),
         }
     }
 }
@@ -233,6 +238,10 @@ impl AppState {
         &self.shared.settings
     }
 
+    pub(crate) fn clock(&self) -> &dyn Clock {
+        &*self.shared.settings.clock
+    }
+
     pub(crate) fn content_policy(&self) -> &HeaderValue {
         &self.shared.content_policy
     }
@@ -316,6 +325,13 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
             "/v1/content/unreferenced",
             get(show_unreferenced_content).delete(remove_unreferenced_content),
         )
+        .route(
+            "/v1/artifacts/{id}/jobs",
+            get(list_artifact_jobs).post(enqueue_job),
+        )
+        .route("/v1/jobs", get(list_jobs))
+        .route("/v1/jobs/{id}", get(show_job))
+        .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))
         .route(
             "/v1/artifacts/{id}/revisions",
             get(list_revisions).post(save_revision),
@@ -980,6 +996,74 @@ async fn update_artifact(
     Ok(Json(
         operations::update(&state, actor, key, &id, request).await?,
     ))
+}
+
+/// Enqueues a verification job for one revision (decision 0030). An agent
+/// token may: the job reads stored files and changes nothing, and the actor's
+/// limit bounds how many wait.
+async fn enqueue_job(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<EnqueueJobRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path(id) = path?;
+    // An identifier that cannot name an artifact is reported before a
+    // malformed body; whether the artifact exists is checked with the request.
+    operations::artifact_id(&id)?;
+    let Json(request) = body?;
+    let response: EnqueueJobResponse =
+        operations::enqueue_job(&state, actor, key, &id, request).await?;
+    let location = format!("/v1/jobs/{}", response.job.id);
+    Ok(created(&location, Json(response)))
+}
+
+async fn list_jobs(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    query: Result<Query<ListJobsQuery>, QueryRejection>,
+) -> Result<Json<JobList>, ApiError> {
+    let Query(query) = query?;
+    Ok(Json(
+        operations::list_jobs(&state, actor, None, query).await?,
+    ))
+}
+
+async fn list_artifact_jobs(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<ListJobsQuery>, QueryRejection>,
+) -> Result<Json<JobList>, ApiError> {
+    let Path(id) = path?;
+    let Query(query) = query?;
+    Ok(Json(
+        operations::list_jobs(&state, actor, Some(&id), query).await?,
+    ))
+}
+
+async fn show_job(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<Job>, ApiError> {
+    let Path(id) = path?;
+    Ok(Json(operations::show_job(&state, actor, &id).await?))
+}
+
+/// Asks to stop a job. The body must be `{}`.
+async fn cancel_job(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<CancelJobRequest>, JsonRejection>,
+) -> Result<Json<CancelJobResponse>, ApiError> {
+    let Path(id) = path?;
+    operations::job_id(&id)?;
+    let Json(CancelJobRequest {}) = body?;
+    Ok(Json(operations::cancel_job(&state, actor, key, &id).await?))
 }
 
 /// Removes a trashed artifact for good. The administrative credential only

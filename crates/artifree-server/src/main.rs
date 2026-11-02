@@ -25,6 +25,7 @@ use artifree_server::serve::{self, ServeOptions};
 
 mod maintenance;
 mod serve_env;
+mod worker_command;
 
 use serve_env::{Given, ServeEnv};
 
@@ -40,14 +41,17 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    // Paths may be any bytes the platform allows, so these two commands read
-    // their arguments as they are.
+    // Paths may be any bytes the platform allows, so these three commands read
+    // their arguments as they are, as does `worker`.
     if let Some((command, rest)) = args.split_first() {
         if command == "backup" {
             return maintenance::backup_command(rest);
         }
         if command == "restore" {
             return maintenance::restore_command(rest);
+        }
+        if command == "worker" {
+            return worker_command::worker_command(rest);
         }
     }
     let args = args
@@ -535,6 +539,7 @@ Usage:
   artifree-server serve --data-dir <dir> [options]
   artifree-server backup --data-dir <dir> --output <file>
   artifree-server restore --input <file> --data-dir <dir>
+  artifree-server worker run --data-dir <dir> [--once]
   artifree-server --describe | --version | --help
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or
@@ -588,6 +593,10 @@ backup writes a consistent copy of the database to a new file, also while
 the server runs, and proves that it restores. restore builds a new data
 directory from such a file. Each prints one JSON line on success; see
 `backup --help`, `restore --help`, and docs/backup-restore.md.
+
+worker run runs the persistent jobs of a data directory in a separate process
+(decision 0030) until the queue is empty with --once, or until Ctrl+C or
+SIGTERM. It prints JSON lines; see `worker --help`.
 
 --describe emits the build-time module inventory as JSON; it does not probe a
 running server.",

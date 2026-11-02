@@ -12,8 +12,11 @@ detection and safe retries, and previewed in a sandbox on a separate origin —
 through the HTTP API, MCP tools for agents, the CLI, and the web workspace,
 stored in a local SQLite file. It is single-user and listens on loopback by
 default. A runtime preview may read its own artifact metadata through a
-bound bridge after a connection-scoped user grant. Publishing, sharing, build and conversion
-workers, and multi-user authentication are not implemented. The module inventory shown by the UI and
+bound bridge after a connection-scoped user grant. One persistent job, `verify_revision`, re-checks a revision's stored files
+against their digests in a separate worker process the operator starts
+(`artifree-server worker run`). Publishing, sharing, build and conversion
+workers, sandboxed execution of untrusted code, and multi-user authentication
+are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
 
 ## Quick start
@@ -94,6 +97,19 @@ the owner's access token may purge or clean up), is not offered to MCP agents,
 and does not reach earlier backups. Request keys, those of a cleanup too, are
 never expired.
 
+Jobs are the first background work ([decision 0030](docs/decisions/0030-persistent-jobs-and-worker.md)).
+`artifree job enqueue <id> --revision <n> --idempotency-key <key>` queues a
+`verify_revision` job, which recomputes the SHA-256 and size of every file of
+that revision from the database and reports `ok` or the first 50 mismatches;
+`job show`, `job list`, and `job cancel <job> --idempotency-key <key>` follow
+and stop it. Nothing starts a worker: the server does not, and the container
+runs only the server, so a job stays `queued` until an operator runs
+`artifree-server worker run --data-dir <dir>` (`--once` stops when nothing is
+due). A job runs trusted server code, with no sandbox and no network; it is
+not the isolated execution that builds of React sources or model calls will
+need. Cancelling stops work and never rolls anything back. Job changes are
+not in the change feed and the web workspace has no job view; poll `job show`.
+
 For development with live reloading, Vite is still available:
 
 ```sh
@@ -173,8 +189,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0025](docs/decisions/0025-release-packages.md),
 [0026](docs/decisions/0026-container-image.md),
 [0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md),
-[0028](docs/decisions/0028-static-web-defaults.md), and
-[0029](docs/decisions/0029-retention-and-cleanup.md)).
+[0028](docs/decisions/0028-static-web-defaults.md),
+[0029](docs/decisions/0029-retention-and-cleanup.md), and
+[0030](docs/decisions/0030-persistent-jobs-and-worker.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

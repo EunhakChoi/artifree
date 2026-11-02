@@ -40,7 +40,12 @@ export type ApiBody =
   | CreateTokenResponse
   | RotateTokenResponse
   | TokenList
-  | TokenInfo;
+  | TokenInfo
+  | EnqueueJobRequest
+  | EnqueueJobResponse
+  | CancelJobResponse
+  | Job
+  | JobList;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -94,6 +99,8 @@ export type ErrorCode =
   | 'metadata_conflict'
   | 'not_in_trash'
   | 'content_conflict'
+  | 'job_ended'
+  | 'too_many_jobs'
   | 'request_key_reused'
   | 'payload_too_large'
   | 'range_not_satisfiable'
@@ -113,6 +120,30 @@ export type SourceExportFormat = 'artifree.source-export.v1' | 'artifree.source-
  * What exported files need from a host to run as they do in Artifree.
  */
 export type ExportRuntime = 'none' | 'metadata';
+/**
+ * What a job does (decision 0030). Each kind is trusted in-repository code
+ * that runs in the Artifree worker process. This is not a way to run
+ * untrusted code, to build sources, or to call model providers; none of
+ * those exists yet.
+ */
+export type JobKind = 'verify_revision';
+/**
+ * Why a job ended as `failed`. A fixed vocabulary, never free text.
+ */
+export type JobFailure = 'revision_unavailable' | 'storage_unavailable' | 'lease_expired' | 'internal';
+/**
+ * What is wrong with one file of a verified revision.
+ */
+export type JobProblem = 'digest_mismatch' | 'size_mismatch' | 'content_missing';
+/**
+ * The outcome of a verification that ran to the end.
+ */
+export type JobVerdict = 'ok' | 'mismatch';
+/**
+ * Where a job is in its life. `succeeded`, `failed`, and `cancelled` are
+ * terminal: a job there never changes again.
+ */
+export type JobState = 'queued' | 'running' | 'retry_scheduled' | 'succeeded' | 'failed' | 'cancelled';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -905,6 +936,150 @@ export interface TokenList {
    */
   tokens: TokenInfo[];
 }
+/**
+ * Body of `POST /v1/artifacts/{id}/jobs`, with an `Idempotency-Key` header:
+ * enqueues a job for one revision of the artifact.
+ */
+export interface EnqueueJobRequest {
+  kind: JobKind;
+  /**
+   * The source revision to pin. It must exist.
+   */
+  revision: number;
+}
+/**
+ * Response of `POST /v1/artifacts/{id}/jobs`.
+ */
+export interface EnqueueJobResponse {
+  job: Job;
+  /**
+   * True when an earlier request with the same key already enqueued it.
+   */
+  replayed: boolean;
+}
+/**
+ * A persistent job. It pins the actor that enqueued it, one artifact, one
+ * source revision, and a kind; none of these changes. Time fields are Unix
+ * milliseconds. A client learns of progress by reading the job again: there
+ * is no push for jobs, and the change feed does not carry them.
+ */
+export interface Job {
+  /**
+   * The artifact whose revision the job verifies.
+   */
+  artifact_id: string;
+  /**
+   * How many times a worker claimed the job.
+   */
+  attempt: number;
+  /**
+   * True when a cancel was requested while the job was running. It then
+   * ends as `cancelled` unless it already ended; the request stops work
+   * and rolls nothing back.
+   */
+  cancel_requested: boolean;
+  /**
+   * When the job was enqueued.
+   */
+  created_at_ms: number;
+  /**
+   * Why the job failed, once it is `failed`.
+   */
+  failure?: JobFailure | null;
+  /**
+   * When it reached a terminal state.
+   */
+  finished_at_ms?: number | null;
+  /**
+   * Job identifier, `job_` followed by 32 lowercase hex digits.
+   */
+  id: string;
+  kind: JobKind;
+  /**
+   * How many claims it gets at most.
+   */
+  max_attempts: number;
+  /**
+   * The result, once the job is `succeeded`.
+   */
+  result?: JobResult | null;
+  /**
+   * While `retry_scheduled`, the earliest time of the next attempt.
+   */
+  retry_at_ms?: number | null;
+  /**
+   * The pinned source revision.
+   */
+  revision: number;
+  /**
+   * When a worker first claimed it.
+   */
+  started_at_ms?: number | null;
+  state: JobState;
+}
+/**
+ * The result of a `verify_revision` job that ran to the end. It holds counts
+ * and package paths of the pinned revision, never file content.
+ */
+export interface JobResult {
+  /**
+   * The sum of the sizes of the content that was read.
+   */
+  bytes_checked: number;
+  /**
+   * How many files of the revision were read.
+   */
+  files_checked: number;
+  /**
+   * How many files mismatched, counted without the bound of `mismatches`.
+   */
+  mismatch_count: number;
+  /**
+   * The first mismatches in path order, at most 50.
+   */
+  mismatches: JobMismatch[];
+  /**
+   * True when `mismatches` lists fewer than `mismatch_count`.
+   */
+  truncated: boolean;
+  verdict: JobVerdict;
+}
+/**
+ * One file that does not match its listing.
+ */
+export interface JobMismatch {
+  /**
+   * The file's package path, relative to the artifact.
+   */
+  path: string;
+  problem: JobProblem;
+}
+/**
+ * Response of `POST /v1/jobs/{id}/cancel`. A job that had not started is
+ * `cancelled`. A running job is still `running` with `cancel_requested`: its
+ * worker stops at its next checkpoint, and the job ends `cancelled` unless it
+ * ended first. A job that already ended answers `job_ended`.
+ */
+export interface CancelJobResponse {
+  job: Job;
+  /**
+   * True when an earlier request with the same key already asked.
+   */
+  replayed: boolean;
+}
+/**
+ * Response of `GET /v1/jobs` and `GET /v1/artifacts/{id}/jobs`.
+ */
+export interface JobList {
+  /**
+   * Jobs of artifacts that are not in the trash, newest first.
+   */
+  jobs: Job[];
+  /**
+   * Pass as `page_token` to read the next page; absent on the last page.
+   */
+  next_page_token?: string | null;
+}
 
 /**
  * Order of `GET /v1/artifacts`. Ties are broken by identifier.
@@ -943,6 +1118,27 @@ export interface ListArtifactsQuery {
    */
   sort?: ListSort | null;
 }
+
+/**
+ * Query parameters of `GET /v1/jobs` and `GET /v1/artifacts/{id}/jobs`, all
+ * optional.
+ */
+export interface ListJobsQuery {
+  /**
+   * Page size, 1-100; 50 when absent.
+   */
+  limit?: number | null;
+  /**
+   * `next_page_token` of the previous page of the same list.
+   */
+  page_token?: string | null;
+}
+
+/**
+ * Body of `POST /v1/jobs/{id}/cancel`, with an `Idempotency-Key` header. It
+ * has no fields.
+ */
+export interface CancelJobRequest {}
 
 /**
  * Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:

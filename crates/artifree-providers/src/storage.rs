@@ -32,8 +32,14 @@
 //! other revision refers to are deleted. Reads treat a purged artifact as
 //! missing.
 //!
+//! Persistent jobs (decision 0030) live in the same database: the `jobs`
+//! module owns their queue, leases, fencing, and results. A purge ends an
+//! artifact's open jobs and erases their findings in the purge transaction.
+//!
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
+
+mod jobs;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -75,7 +81,8 @@ impl SqliteStore {
     /// metadata revisions, a version 1 to 3 database the latest commit time,
     /// a version 1 to 4 database the trash, with no artifact in it, a
     /// version 1 to 5 database the token table unless it has one, and a
-    /// version 1 to 6 database the purge tombstone column.
+    /// version 1 to 6 database the purge tombstone column, and a version 1 to
+    /// 7 database the job tables.
     ///
     /// The upgrade runs in one transaction before the file is switched to WAL.
     /// An open that fails leaves the file byte for byte as it was: a newer
@@ -108,10 +115,10 @@ impl SqliteStore {
         Ok(connection)
     }
 
-    fn write<T>(
+    fn write<T, E: From<StoreError>>(
         &self,
-        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         self.write_with(false, operation)
     }
 
@@ -120,10 +127,10 @@ impl SqliteStore {
     /// bytes do not stay in the database file's free pages. Copies in the
     /// write-ahead log until it is checkpointed and truncated, and in earlier
     /// backups, remain (decision 0029).
-    fn write_erasing<T>(
+    fn write_erasing<T, E: From<StoreError>>(
         &self,
-        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         self.write_with(true, operation)
     }
 
@@ -177,11 +184,11 @@ impl SqliteStore {
         Ok(records)
     }
 
-    fn write_with<T>(
+    fn write_with<T, E: From<StoreError>>(
         &self,
         erase: bool,
-        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         let mut connection = self.connect()?;
         if erase {
             // Before the transaction: the setting cannot change inside one.
@@ -451,6 +458,9 @@ impl ArtifactStore for SqliteStore {
             let now = commit_time(transaction)?;
             let next = MetadataRevision(current.metadata_revision.0 + 1);
             remove_files(transaction, request.artifact)?;
+            // Jobs pinned to the revisions that were just removed end, and
+            // what they found about the files is erased (decision 0030).
+            jobs::revoke_for_purge(transaction, request.artifact, now)?;
             // Titles are scrubbed from every metadata revision: they describe
             // what was removed. The tombstone keeps only the headers.
             transaction
@@ -543,10 +553,13 @@ impl ArtifactStore for SqliteStore {
                     delivery: Delivery::Replayed,
                 });
             }
-            // The key space is shared with the requests that name an artifact.
+            // The key space is shared with the requests that name an artifact
+            // and with the requests that enqueue or cancel a job (0030).
             let named_artifact: bool = transaction
                 .query_row(
                     "SELECT EXISTS (SELECT 1 FROM request_keys
+                                    WHERE actor = ?1 AND request_key = ?2)
+                         OR EXISTS (SELECT 1 FROM job_requests
                                     WHERE actor = ?1 AND request_key = ?2)",
                     params![identity.actor.as_str(), identity.key.as_str()],
                     |row| row.get(0),
@@ -784,15 +797,17 @@ fn key_use(
     transaction: &Transaction<'_>,
     request: RequestIdentity<'_>,
 ) -> Result<KeyUse, StoreError> {
-    // A key a cleanup ran under belongs to that request alone (decision 0029).
-    let cleanup: bool = transaction
+    // A key a cleanup or a job request ran under belongs to that request
+    // alone (decisions 0029 and 0030).
+    let elsewhere: bool = transaction
         .query_row(
-            "SELECT EXISTS (SELECT 1 FROM cleanup_runs WHERE actor = ?1 AND request_key = ?2)",
+            "SELECT EXISTS (SELECT 1 FROM cleanup_runs WHERE actor = ?1 AND request_key = ?2)
+                 OR EXISTS (SELECT 1 FROM job_requests WHERE actor = ?1 AND request_key = ?2)",
             params![request.actor.as_str(), request.key.as_str()],
             |row| row.get(0),
         )
         .map_err(unavailable)?;
-    if cleanup {
+    if elsewhere {
         return Ok(KeyUse::Reused);
     }
     let stored: Option<(Vec<u8>, String, i64, i64, bool)> = transaction

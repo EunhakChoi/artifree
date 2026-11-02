@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use artifree_core::artifacts::ArtifactService;
-use artifree_domain::identity::{ActorId, RequestKey, Title};
+use artifree_domain::SourceRevision;
+use artifree_domain::identity::{ActorId, RequestKey, Title, UnixMillis};
+use artifree_domain::job::JobKind;
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_providers::storage::SqliteStore;
 use artifree_server::auth::AccessToken;
@@ -252,9 +254,36 @@ async fn another_owners_artifact_is_not_found_through_every_tool() -> TestResult
     let id = harness.foreign_artifact("shared-key-1")?;
     let listed = harness.call("list_artifacts", json!({})).await?;
     assert_eq!(listed["structuredContent"]["artifacts"], json!([]));
+    let jobs = harness.call("list_jobs", json!({})).await?;
+    assert_eq!(jobs["structuredContent"]["jobs"], json!([]), "{jobs}");
     let file = json!({ "artifact_id": id, "revision": 1, "path": "index.html" });
     let pinned = json!({ "artifact_id": id, "revision": 1 });
+    let foreign_job = ArtifactService::new(SqliteStore::open(&harness.database)?)
+        .enqueue_job(
+            &parsed::<ActorId>("someone-else"),
+            &parsed::<RequestKey>("foreign-job-key"),
+            &parsed(&id),
+            SourceRevision(1),
+            JobKind::VerifyRevision,
+            UnixMillis(1),
+        )?
+        .job
+        .id
+        .to_string();
     for (tool, arguments) in [
+        (
+            "enqueue_job",
+            json!({
+                "artifact_id": id, "revision": 1, "kind": "verify_revision",
+                "idempotency_key": "mine-job-key"
+            }),
+        ),
+        ("get_job", json!({ "job_id": foreign_job })),
+        ("list_jobs", json!({ "artifact_id": id })),
+        (
+            "cancel_job",
+            json!({ "job_id": foreign_job, "idempotency_key": "mine-job-cancel" }),
+        ),
         ("get_artifact", json!({ "artifact_id": id })),
         ("list_revisions", json!({ "artifact_id": id })),
         ("get_revision", pinned.clone()),
@@ -396,5 +425,166 @@ async fn agents_rename_pin_and_page_through_artifacts() -> TestResult {
         .call("list_artifacts", json!({ "limit": 0 }))
         .await?;
     assert_eq!(error_code(&invalid), "invalid_request");
+    Ok(())
+}
+
+#[tokio::test]
+async fn agents_enqueue_read_list_and_cancel_jobs_with_the_http_semantics() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "job-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+    let enqueue = json!({
+        "artifact_id": artifact, "revision": 1, "kind": "verify_revision",
+        "idempotency_key": "job-enqueue-1"
+    });
+
+    let queued = harness.call("enqueue_job", enqueue.clone()).await?;
+    assert_eq!(queued["isError"], false, "{queued}");
+    let job = &queued["structuredContent"]["job"];
+    assert_eq!(
+        (
+            job["state"].clone(),
+            job["revision"].clone(),
+            job["attempt"].clone()
+        ),
+        (json!("queued"), json!(1), json!(0))
+    );
+    assert_eq!(queued["structuredContent"]["replayed"], false);
+    let replay = harness.call("enqueue_job", enqueue).await?;
+    assert_eq!(replay["structuredContent"]["replayed"], true);
+    assert_eq!(replay["structuredContent"]["job"]["id"], job["id"]);
+
+    let shown = harness
+        .call("get_job", json!({ "job_id": job["id"] }))
+        .await?;
+    assert_eq!(shown["structuredContent"]["state"], "queued");
+    let listed = harness
+        .call("list_jobs", json!({ "artifact_id": artifact }))
+        .await?;
+    assert_eq!(listed["structuredContent"]["jobs"][0]["id"], job["id"]);
+    let everything = harness.call("list_jobs", json!({ "limit": 1 })).await?;
+    assert_eq!(
+        everything["structuredContent"]["jobs"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+
+    let cancelled = harness
+        .call(
+            "cancel_job",
+            json!({ "job_id": job["id"], "idempotency_key": "job-cancel-1" }),
+        )
+        .await?;
+    assert_eq!(
+        cancelled["structuredContent"]["job"]["state"], "cancelled",
+        "{cancelled}"
+    );
+    let ended = harness
+        .call(
+            "cancel_job",
+            json!({ "job_id": job["id"], "idempotency_key": "job-cancel-2" }),
+        )
+        .await?;
+    assert_eq!(error_code(&ended), "job_ended");
+    let gone = harness
+        .call("get_job", json!({ "job_id": "job_zzzz-not-a-job" }))
+        .await?;
+    assert_eq!(error_code(&gone), "not_found");
+    assert!(!gone.to_string().contains("zzzz"), "{gone}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn job_requests_that_cannot_be_served_get_the_http_error_codes() -> TestResult {
+    let harness = Harness::new();
+    let mut artifacts = Vec::new();
+    for (name, key) in [("Page", "job-create-1"), ("Other", "job-create-2")] {
+        let created = harness
+            .call(
+                "create_artifact",
+                json!({
+                    "title": name, "idempotency_key": key,
+                    "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+                }),
+            )
+            .await?;
+        artifacts.push(created["structuredContent"]["artifact"]["id"].clone());
+    }
+    let (artifact, other) = (&artifacts[0], &artifacts[1]);
+    let first = harness
+        .call(
+            "enqueue_job",
+            json!({
+                "artifact_id": artifact, "revision": 1, "kind": "verify_revision",
+                "idempotency_key": "job-enqueue-1"
+            }),
+        )
+        .await?;
+    assert_eq!(first["isError"], false, "{first}");
+    for (arguments, code) in [
+        // The key serves one request only.
+        (
+            json!({ "artifact_id": artifact, "revision": 1, "kind": "verify_revision",
+                    "idempotency_key": "job-enqueue-1", "extra": 1 }),
+            "invalid_request",
+        ),
+        (
+            json!({ "artifact_id": other, "revision": 1,
+                    "kind": "verify_revision", "idempotency_key": "job-enqueue-1" }),
+            "request_key_reused",
+        ),
+        (
+            json!({ "artifact_id": artifact, "revision": 9, "kind": "verify_revision",
+                    "idempotency_key": "job-enqueue-2" }),
+            "not_found",
+        ),
+        (
+            json!({ "artifact_id": artifact, "revision": 1, "kind": "build",
+                    "idempotency_key": "job-enqueue-3" }),
+            "invalid_request",
+        ),
+        (
+            json!({ "artifact_id": artifact, "revision": 1, "kind": "verify_revision" }),
+            "invalid_request",
+        ),
+    ] {
+        let refused = harness.call("enqueue_job", arguments.clone()).await?;
+        assert_eq!(error_code(&refused), code, "{arguments}: {refused}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_job_tools_say_what_they_change() -> TestResult {
+    let harness = Harness::new();
+    let (_, body) = harness.post(rpc(Some(TOKEN), &list_tools())?).await?;
+    let listed: Value = serde_json::from_slice(&body)?;
+    let tools = listed["result"]["tools"].as_array().ok_or("tools")?;
+    for (name, read_only) in [
+        ("enqueue_job", false),
+        ("get_job", true),
+        ("list_jobs", true),
+        ("cancel_job", false),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .ok_or_else(|| format!("{name} is not offered"))?;
+        assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{name}");
+        assert_eq!(tool["annotations"]["destructiveHint"], false, "{name}");
+        assert_eq!(tool["annotations"]["openWorldHint"], false, "{name}");
+        let required = tool["inputSchema"]["required"].to_string();
+        assert_eq!(required.contains("idempotency_key"), !read_only, "{name}");
+    }
     Ok(())
 }

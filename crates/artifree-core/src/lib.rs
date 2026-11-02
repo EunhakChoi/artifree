@@ -8,3 +8,4 @@ pub mod jobs;
 pub mod listing;
 pub mod parts;
 pub mod policy;
+pub mod worker;

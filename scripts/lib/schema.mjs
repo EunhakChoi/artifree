@@ -24,7 +24,7 @@ export function createAjv() {
  * these schemas with their own validators, so they must be self-contained
  * (no `$ref`) and use only standard formats: a strict Ajv without the integer
  * formats above must accept them. Arguments are closed objects, every tool
- * that commits requires an idempotency key, and every output schema accepts
+ * that commits or changes a job requires an idempotency key, and every output schema accepts
  * the error body, because clients validate error results too.
  */
 export function checkMcpCatalog(catalog) {
@@ -48,9 +48,14 @@ export function checkMcpCatalog(catalog) {
   for (const tool of catalog.tools) {
     assert.match(tool.name, /^[a-z][a-z_]*$/, `MCP tool name ${tool.name}`);
     assert.ok(
-      ['read', 'commit', 'issue_link', 'issue_session', 'handoff'].includes(
-        tool.effect,
-      ),
+      [
+        'read',
+        'commit',
+        'issue_link',
+        'issue_session',
+        'handoff',
+        'job',
+      ].includes(tool.effect),
       `${tool.name}: unknown effect ${tool.effect}`,
     );
     for (const key of ['inputSchema', 'outputSchema']) {
@@ -76,10 +81,10 @@ export function checkMcpCatalog(catalog) {
       false,
       `${tool.name} must reject unknown arguments.`,
     );
-    if (tool.effect === 'commit')
+    if (tool.effect === 'commit' || tool.effect === 'job')
       assert.ok(
         tool.inputSchema.required?.includes('idempotency_key'),
-        `${tool.name} commits and must require idempotency_key.`,
+        `${tool.name} changes state and must require idempotency_key.`,
       );
   }
 }

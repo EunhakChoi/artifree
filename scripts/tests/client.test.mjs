@@ -1968,6 +1968,147 @@ test('A refusal to purge outside the trash keeps its own code', async () => {
   assert.deepEqual([error.status, error.code], [409, 'not_in_trash']);
 });
 
+const job = {
+  id: `job_${'1'.repeat(32)}`,
+  artifact_id: artifact.id,
+  revision: 2,
+  kind: 'verify_revision',
+  state: 'queued',
+  attempt: 0,
+  max_attempts: 3,
+  cancel_requested: false,
+  created_at_ms: 5,
+};
+
+test('Job requests name the job, artifact, revision, and key, and every reply is checked', async () => {
+  const sent = [];
+  let answer;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([init.method, String(url), init.headers, init.body]);
+      return Response.json(answer);
+    },
+  });
+  const options = { idempotencyKey: 'test-key-1' };
+  answer = { job, replayed: false };
+  assert.deepEqual(
+    await client.enqueueJob(
+      artifact.id,
+      { kind: 'verify_revision', revision: 2 },
+      options,
+    ),
+    answer,
+  );
+  answer = job;
+  assert.deepEqual(await client.getJob(job.id), job);
+  answer = { jobs: [job], next_page_token: 'j1.x' };
+  assert.deepEqual(
+    await client.listJobs({ limit: 1, page_token: 'j1.x' }),
+    answer,
+  );
+  assert.deepEqual(
+    await client.listJobs({}, { artifactId: artifact.id }),
+    answer,
+  );
+  answer = {
+    job: { ...job, state: 'cancelled', finished_at_ms: 9 },
+    replayed: true,
+  };
+  assert.deepEqual(await client.cancelJob(job.id, options), answer);
+
+  const [enqueue, show, page, own, cancel] = sent;
+  assert.deepEqual(
+    [enqueue[0], enqueue[1], JSON.parse(enqueue[3])],
+    [
+      'POST',
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/jobs`,
+      { kind: 'verify_revision', revision: 2 },
+    ],
+  );
+  assert.equal(new Headers(enqueue[2]).get('idempotency-key'), 'test-key-1');
+  assert.deepEqual(
+    [show[0], show[1]],
+    ['GET', `http://127.0.0.1:7410/v1/jobs/${job.id}`],
+  );
+  assert.equal(
+    page[1],
+    'http://127.0.0.1:7410/v1/jobs?limit=1&page_token=j1.x',
+  );
+  assert.equal(
+    own[1].startsWith(`http://127.0.0.1:7410/v1/artifacts/${artifact.id}/jobs`),
+    true,
+  );
+  assert.deepEqual(
+    [cancel[0], cancel[1], JSON.parse(cancel[3])],
+    ['POST', `http://127.0.0.1:7410/v1/jobs/${job.id}/cancel`, {}],
+  );
+  assert.equal(new Headers(cancel[2]).get('idempotency-key'), 'test-key-1');
+});
+
+test('A job reply that breaks the contract is an invalid response, not a guess', async () => {
+  const result = {
+    verdict: 'mismatch',
+    files_checked: 2,
+    bytes_checked: 20,
+    mismatch_count: 1,
+    mismatches: [{ path: 'index.html', problem: 'digest_mismatch' }],
+    truncated: false,
+  };
+  const good = { ...job, state: 'succeeded', result, finished_at_ms: 9 };
+  let answer = good;
+  const client = clientWith(() => Response.json(answer));
+  assert.deepEqual(await client.getJob(job.id), good);
+  for (const broken of [
+    { ...good, state: 'paused' },
+    { ...good, kind: 'build' },
+    { ...good, attempt: -1 },
+    { ...good, cancel_requested: 'no' },
+    { ...good, id: 7 },
+    { ...good, created_at_ms: '5' },
+    { ...good, failure: 'exploded' },
+    { ...good, result: { ...result, verdict: 'maybe' } },
+    {
+      ...good,
+      result: { ...result, mismatches: [{ path: 'a', problem: 'rot' }] },
+    },
+    { ...good, result: { ...result, truncated: 'no' } },
+    { ...good, finished_at_ms: 'soon' },
+    { ...good, retry_at_ms: {} },
+  ]) {
+    answer = broken;
+    assert.equal(
+      (await failure(client.getJob(job.id))).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
+  answer = { jobs: [{ ...job, state: 'paused' }] };
+  assert.equal((await failure(client.listJobs())).code, 'invalid_response');
+  answer = { job, replayed: 'yes' };
+  assert.equal(
+    (await failure(client.cancelJob(job.id, { idempotencyKey: 'test-key-1' })))
+      .code,
+    'invalid_response',
+  );
+});
+
+test('The job error codes keep their own names and statuses', async () => {
+  for (const [status, code] of [
+    [409, 'job_ended'],
+    [409, 'too_many_jobs'],
+  ]) {
+    const client = clientWith(() =>
+      Response.json({ error: { code, message: 'no' } }, { status }),
+    );
+    const error = await failure(
+      client.cancelJob(job.id, { idempotencyKey: 'test-key-1' }),
+    );
+    assert.deepEqual([error.status, error.code], [status, code]);
+  }
+});
+
 test('The dry run reads the set and the cleanup names it with a key, each with a checked report', async () => {
   const sent = [];
   const digest = 'ab'.repeat(32);

@@ -56,6 +56,37 @@ function cli(server, args, token = server.token) {
   return result;
 }
 
+function jobCli(server, args) {
+  const env = {
+    ...process.env,
+    ARTIFREE_URL: server.api_url,
+    ARTIFREE_TOKEN: server.token,
+  };
+  delete env.ARTIFREE_TOKEN_FILE;
+  const result = spawnSync(
+    process.execPath,
+    ['apps/cli/dist/main.js', 'job', ...args],
+    { cwd: root, encoding: 'utf8', timeout: 20_000, env },
+  );
+  if (result.error) throw result.error;
+  return result;
+}
+
+/** Runs `artifree-server worker run --once` and returns its JSON lines. */
+function drainJobs(data) {
+  const result = spawnSync(
+    binary,
+    ['worker', 'run', '--once', '--poll-ms', '10', '--data-dir', data],
+    { encoding: 'utf8', timeout: 60_000 },
+  );
+  if (result.error) throw result.error;
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+}
+
 function json(result) {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, '');
@@ -937,5 +968,96 @@ test('A crash after commit loses nothing and a retry replays the result', async 
     );
   } finally {
     await second.stop();
+  }
+});
+
+test('CLI queues a verification job that a separate worker process finishes', async () => {
+  const data = dataDirectory('cli-jobs');
+  const site = await freshDirectory('cli-jobs-site');
+  await writeFile(join(site, 'index.html'), '<p>verify me</p>');
+  await writeFile(join(site, 'app.js'), 'let a = 1;');
+  const server = await startServer(binary, data);
+  try {
+    const id = json(cli(server, ['create', '--title', 'Jobs', '--dir', site]))
+      .artifact.id;
+    const enqueue = [
+      'enqueue',
+      id,
+      '--revision',
+      '1',
+      '--idempotency-key',
+      'cli-job-enqueue-1',
+    ];
+    const queued = json(jobCli(server, enqueue));
+    assert.equal(queued.replayed, false);
+    assert.equal(queued.job.state, 'queued');
+    const jobId = queued.job.id;
+    assert.equal(json(jobCli(server, enqueue)).replayed, true);
+
+    // Nothing runs the job by itself.
+    assert.equal(json(jobCli(server, ['show', jobId])).state, 'queued');
+
+    // A worker process on the same data directory, beside the running server.
+    const events = drainJobs(data);
+    assert.deepEqual(
+      events.map((event) => event.event),
+      ['ready', 'job', 'stopped'],
+    );
+    assert.deepEqual(
+      [events[1].job, events[1].state, events[1].verified],
+      [jobId, 'succeeded', true],
+    );
+    assert.equal(events[2].reason, 'drained');
+
+    const shown = json(jobCli(server, ['show', jobId]));
+    assert.equal(shown.state, 'succeeded');
+    assert.equal(shown.attempt, 1);
+    assert.deepEqual(
+      [
+        shown.result.verdict,
+        shown.result.files_checked,
+        shown.result.mismatch_count,
+      ],
+      ['ok', 2, 0],
+    );
+    assert.deepEqual(
+      json(jobCli(server, ['list', '--artifact', id])).jobs.map((j) => j.id),
+      [jobId],
+    );
+
+    // A job that ended cannot be cancelled; one that waits can, and a worker
+    // then finds nothing to do.
+    const ended = jobCli(server, ['cancel', jobId]);
+    assert.equal(ended.status, 1);
+    assert.match(ended.stderr, /^error\[job_ended\]/);
+    const second = json(
+      jobCli(server, [
+        'enqueue',
+        id,
+        '--revision',
+        '1',
+        '--idempotency-key',
+        'cli-job-enqueue-2',
+      ]),
+    ).job.id;
+    assert.equal(
+      json(jobCli(server, ['cancel', second])).job.state,
+      'cancelled',
+    );
+    assert.deepEqual(
+      drainJobs(data).map((event) => event.event),
+      ['ready', 'stopped'],
+    );
+
+    // Usage and not-found errors.
+    const unknown = jobCli(server, ['show', `job_${'0'.repeat(32)}`]);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /^error\[not_found\]/);
+    assert.equal(jobCli(server, ['enqueue', id]).status, 2);
+    const missing = jobCli(server, ['enqueue', id, '--revision', '9']);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /^error\[not_found\]/);
+  } finally {
+    await server.stop();
   }
 });

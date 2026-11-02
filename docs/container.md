@@ -21,15 +21,16 @@ Nothing is compiled or downloaded while building. Only Linux x64 is supported (p
 `docker run`; on an ARM host the pinned multi-arch base would otherwise resolve
 to arm64 and the x86-64 binary would not run): no ARM image, no Alpine/musl, no Windows container.
 
-| Item        | Value                                                                                                               |
-| ----------- | ------------------------------------------------------------------------------------------------------------------- |
-| User        | `10001:10001`, no login shell, no home                                                                              |
-| Data        | volume `/data` (database and `access-token`), mode 700, owned by the user                                           |
-| Ports       | `7410` API and web workspace; `7411` preview content, a separate origin                                             |
-| Command     | `artifree-server serve --data-dir /data --web-dir /app/web --api-listen 0.0.0.0:7410 --content-listen 0.0.0.0:7411` |
-| Your flags  | everything after the image name is appended; server environment variables (`ARTIFREE_*`) work as usual, see below   |
-| Healthcheck | `GET /healthz` on `127.0.0.1:7410` inside the container, using the shell already in the image                       |
-| Not inside  | Node.js (the bundled CLI in `/app/cli` cannot run there), curl, any package manager step                            |
+| Item        | Value                                                                                                                       |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
+| User        | `10001:10001`, no login shell, no home                                                                                      |
+| Data        | volume `/data` (database and `access-token`), mode 700, owned by the user                                                   |
+| Ports       | `7410` API and web workspace; `7411` preview content, a separate origin                                                     |
+| Command     | `artifree-server serve --data-dir /data --web-dir /app/web --api-listen 0.0.0.0:7410 --content-listen 0.0.0.0:7411`         |
+| Your flags  | everything after the image name is appended; server environment variables (`ARTIFREE_*`) work as usual, see below           |
+| Healthcheck | `GET /healthz` on `127.0.0.1:7410` inside the container, using the shell already in the image                               |
+| Not inside  | Node.js (the bundled CLI in `/app/cli` cannot run there), curl, any package manager step                                    |
+| No worker   | The image runs `serve` only. Jobs (decision 0030) stay queued; the image starts no worker, and running one is untested here |
 
 ## Build
 

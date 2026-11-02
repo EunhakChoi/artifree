@@ -224,6 +224,7 @@ fn build_settings(
         allowed_hosts,
         allowed_origins: options.allowed_origins.clone(),
         allow_remote_mcp: options.allow_remote_mcp,
+        clock: std::sync::Arc::new(artifree_core::jobs::SystemClock),
     }
 }
 
@@ -257,7 +258,9 @@ fn local_address(listener: &TcpListener) -> Result<SocketAddr, String> {
         .map_err(|error| format!("cannot read the bound address: {error}"))
 }
 
-async fn shutdown_signal() {
+/// Completes when the process receives Ctrl-C (SIGINT) or, on Unix, SIGTERM.
+/// If a handler cannot be installed, that signal is never delivered here.
+pub(crate) async fn shutdown_signal() {
     let interrupt = async {
         // If the handler cannot be installed, keep serving rather than exit.
         if tokio::signal::ctrl_c().await.is_err() {

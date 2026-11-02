@@ -63,6 +63,7 @@ impl ProxyHarness {
             allowed_hosts,
             allowed_origins,
             allow_remote_mcp,
+            ..Settings::default()
         };
 
         let state = AppState::new(store, token_store, token, settings)

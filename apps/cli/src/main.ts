@@ -4,6 +4,7 @@ import { ArtifreeApiError } from '@artifree/client';
 import { scaffoldDescription } from '@artifree/contracts';
 import { runArtifact, UsageError } from './artifact.js';
 import { runContent } from './content.js';
+import { runJob } from './jobs.js';
 import { runToken } from './tokens.js';
 
 const help = `Artifree — open artifacts, any agent.
@@ -11,6 +12,7 @@ const help = `Artifree — open artifacts, any agent.
 Usage:
   artifree artifact <command>  Create, read, save, rename, pin, and preview artifacts
   artifree content <command>   Find and delete file content no revision refers to (cleanup)
+  artifree job <command>       Queue, read, list, and cancel verification jobs (enqueue, show, list, cancel)
   artifree token <command>     Manage agent access tokens (list, create, rotate, revoke)
   artifree describe [--json]  Inspect the build-time module inventory
   artifree --version         Print the version
@@ -18,6 +20,8 @@ Usage:
 
 Artifact commands talk to a running artifree-server; see artifree artifact --help.
 Content commands talk to a running artifree-server; see artifree content --help.
+Job commands talk to a running artifree-server; see artifree job --help. A job runs only while an
+artifree-server worker process runs on the same data directory.
 Token commands talk to a running artifree-server; see artifree token --help.
 describe prints an inventory bundled at build time; it does not probe a server.
 `;
@@ -89,6 +93,7 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === 'artifact') await runArtifact(args.slice(1));
   else if (args[0] === 'content') await runContent(args.slice(1));
+  else if (args[0] === 'job') await runJob(args.slice(1));
   else if (args[0] === 'token') await runToken(args.slice(1));
   else describe(args);
 }

@@ -95,9 +95,14 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 | `register_handoff_session` | `name`                                                                                                  | `{ session_id, session_secret }`           |
 | `poll_handoffs`            | `session_id`, `session_secret`                                                                          | `{ deliveries }`                           |
 | `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                           | receipt state                              |
+| `enqueue_job`              | `artifact_id`, `revision`, `kind` (`verify_revision`), `idempotency_key`                                | `{ job, replayed }`                        |
+| `get_job`                  | `job_id`                                                                                                | one job                                    |
+| `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                           | `{ jobs, next_page_token? }`               |
+| `cancel_job`               | `job_id`, `idempotency_key`                                                                             | `{ job, replayed }`                        |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
+
 A file is `{ "path", "encoding": "utf8" | "base64", "content" }`. A change is
 `{ "op": "put", "path", "encoding", "content" }` or
 `{ "op": "delete", "path" }`; unchanged files carry over.
@@ -192,6 +197,29 @@ A typical sequence of `tools/call` parameters:
 { "name": "create_preview", "arguments": { "artifact_id": "art_…", "revision": 2 } }
 ```
 
+### Jobs
+
+`enqueue_job` queues a `verify_revision` job: a worker re-reads every file of
+that revision from the database and compares its SHA-256 and size with the
+stored listing ([decision 0030](decisions/0030-persistent-jobs-and-worker.md)).
+**It only queues.** The server does not start a worker; a job stays `queued`
+until an operator runs `artifree-server worker run`, and `get_job` is how an
+agent learns the outcome (job changes are not pushed). A finished job has
+`state: "succeeded"` with a `verdict` of `ok` or `mismatch` (a mismatch is a
+result, not a failure; up to 50 findings with artifact-relative paths, never
+file content), `failed` with a `failure` code, or `cancelled`. The job runs
+trusted server code, not an agent's code. `cancel_job` stops work that has not
+finished and never undoes anything; on a running job it records a request the
+worker honors at its next checkpoint, so poll `get_job` for `cancelled`. Retry
+rules are those of every write: resend the identical call with the same
+`idempotency_key`; the answer shows the job as it is now with `replayed: true`.
+An artifact in the trash or purged, and another actor's job, answer
+`not_found`; the open jobs of an artifact in the trash wait untouched, are
+not counted toward the limit, and run again if the artifact is recovered. At
+most 16 jobs may be open per actor, the owner's and all agent tokens' together
+(`too_many_jobs`, 409); a
+cancel of a finished job is `job_ended` (409).
+
 ## Errors and retries
 
 A failed tool call returns `isError: true` with the HTTP API error body:
@@ -211,7 +239,9 @@ A failed tool call returns `isError: true` with the HTTP API error body:
 | `revision_conflict`  | Nothing was written. Read the current files, reapply, save on the new base. |
 | `request_key_reused` | The key was used for different content. Use a new key for a new change.     |
 | `invalid_request`    | Fix the arguments named in the message; the key is not reserved.            |
-| `not_found`          | The artifact, revision, or file does not exist or is not yours.             |
+| `not_found`          | The artifact, revision, file, or job does not exist or is not yours.        |
+| `too_many_jobs`      | Sixteen jobs are open. Wait for or cancel one, then enqueue again.          |
+| `job_ended`          | The job already finished; nothing to cancel.                                |
 | `unavailable`        | Retry the identical call with the same key.                                 |
 | `internal`           | Retry the identical call with the same key to learn whether it committed.   |
 
@@ -246,4 +276,5 @@ read its own artifact metadata (decision [0019](decisions/0019-runtime-metadata-
 workspace shows an agent's saves as they are committed (decision
 [0007](decisions/0007-live-web-workspace.md)); an unsaved draft there is kept
 and marked as outdated. Sharing, publishing, structured documents, and builds
-are not available through MCP or any other interface yet.
+are not available through MCP or any other interface yet. The only job is a
+read-only integrity check; no job runs an agent's code.

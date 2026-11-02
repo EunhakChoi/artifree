@@ -14,13 +14,15 @@ use std::sync::Arc;
 
 use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
-    CommitResponse, ContentEncoding, CreateArtifactRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, ErrorResponse, ListArtifactsQuery, RestoreRevisionRequest,
-    SaveRevisionRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest, EnqueueJobResponse,
+    ErrorResponse, ListArtifactsQuery, ListJobsQuery, RestoreRevisionRequest, SaveRevisionRequest,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::mcp::{
-    self, AcknowledgeHandoffArguments, ArtifactArguments, CreateArtifactArguments,
-    DuplicateArtifactArguments, FileArguments, FileContent, PollHandoffArguments,
+    self, AcknowledgeHandoffArguments, ArtifactArguments, CancelJobArguments,
+    CreateArtifactArguments, DuplicateArtifactArguments, EnqueueJobArguments, FileArguments,
+    FileContent, JobArguments, ListJobsArguments, PollHandoffArguments,
     RegisterHandoffSessionArguments, RestoreRevisionArguments, RevisionArguments,
     SaveRevisionArguments, ToolDefinition, UpdateArtifactArguments,
 };
@@ -243,6 +245,41 @@ async fn dispatch(
             })
             .await
         }
+        _ => return dispatch_jobs(state, actor, name, arguments).await,
+    };
+    Some(outcome)
+}
+
+/// Routes the job tools (decision 0030): the same operations as the job
+/// routes of HTTP, so keys, access, errors, and limits are the same.
+async fn dispatch_jobs(
+    state: &AppState,
+    actor: ActorId,
+    name: &str,
+    arguments: Value,
+) -> Option<Result<Value, ApiError>> {
+    let outcome = match name {
+        "enqueue_job" => json(enqueue_job(state, actor, arguments)).await,
+        "get_job" => {
+            json(async {
+                let JobArguments { job_id } = parse(arguments)?;
+                operations::show_job(state, actor, &job_id).await
+            })
+            .await
+        }
+        "list_jobs" => {
+            json(async {
+                let ListJobsArguments {
+                    artifact_id,
+                    limit,
+                    page_token,
+                } = parse(arguments)?;
+                let query = ListJobsQuery { limit, page_token };
+                operations::list_jobs(state, actor, artifact_id.as_deref(), query).await
+            })
+            .await
+        }
+        "cancel_job" => json(cancel_job(state, actor, arguments)).await,
         _ => return dispatch_handoffs(state, actor, name, arguments).await,
     };
     Some(outcome)
@@ -341,6 +378,35 @@ async fn save_revision(
         changes,
     };
     operations::save(state, actor, key, &artifact_id, request).await
+}
+
+async fn enqueue_job(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<EnqueueJobResponse, ApiError> {
+    let EnqueueJobArguments {
+        artifact_id,
+        revision,
+        kind,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = EnqueueJobRequest { kind, revision };
+    operations::enqueue_job(state, actor, key, &artifact_id, request).await
+}
+
+async fn cancel_job(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<CancelJobResponse, ApiError> {
+    let CancelJobArguments {
+        job_id,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    operations::cancel_job(state, actor, key, &job_id).await
 }
 
 async fn update_artifact(

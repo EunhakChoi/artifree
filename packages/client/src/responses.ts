@@ -12,6 +12,17 @@ import type {
   FeedPosition,
   Handoff,
   HandoffState,
+  CancelJobResponse,
+  EnqueueJobResponse,
+  Job,
+  JobFailure,
+  JobKind,
+  JobList,
+  JobMismatch,
+  JobProblem,
+  JobResult,
+  JobState,
+  JobVerdict,
   Preview,
   PurgeArtifactResponse,
   RemoveUnreferencedContentResponse,
@@ -70,6 +81,8 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   revision_conflict: true,
   metadata_conflict: true,
   not_in_trash: true,
+  job_ended: true,
+  too_many_jobs: true,
   content_conflict: true,
   request_key_reused: true,
   payload_too_large: true,
@@ -544,6 +557,172 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     metadata_revision,
     committed_at_ms,
   };
+}
+
+// Job vocabularies are closed on purpose. A job state or failure this client
+// does not know is not shown as a guess: the response is invalid, because
+// reading an unknown state as finished or as running could be wrong.
+const JOB_KINDS: readonly JobKind[] = ['verify_revision'];
+const JOB_STATES: readonly JobState[] = [
+  'queued',
+  'running',
+  'retry_scheduled',
+  'succeeded',
+  'failed',
+  'cancelled',
+];
+const JOB_FAILURES: readonly JobFailure[] = [
+  'revision_unavailable',
+  'storage_unavailable',
+  'lease_expired',
+  'internal',
+];
+const JOB_PROBLEMS: readonly JobProblem[] = [
+  'digest_mismatch',
+  'size_mismatch',
+  'content_missing',
+];
+const JOB_VERDICTS: readonly JobVerdict[] = ['ok', 'mismatch'];
+
+function oneOf<T extends string>(
+  values: readonly T[],
+  value: unknown,
+): T | undefined {
+  return values.find((known) => known === value);
+}
+
+/** Absent and `null` both mean "not set"; anything else must pass `check`. */
+function optional<T>(
+  value: unknown,
+  check: (value: unknown) => T | undefined,
+): { readonly set: T | undefined } | undefined {
+  if (value === undefined || value === null) return { set: undefined };
+  const checked = check(value);
+  return checked === undefined ? undefined : { set: checked };
+}
+
+function jobMismatch(value: unknown): JobMismatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const problem = oneOf(JOB_PROBLEMS, value.problem);
+  return typeof value.path === 'string' && problem !== undefined
+    ? { path: value.path, problem }
+    : undefined;
+}
+
+function jobResult(value: unknown): JobResult | undefined {
+  if (!isRecord(value)) return undefined;
+  const { files_checked, bytes_checked, mismatch_count, truncated } = value;
+  const verdict = oneOf(JOB_VERDICTS, value.verdict);
+  const mismatches = list(value.mismatches, jobMismatch);
+  if (
+    verdict === undefined ||
+    mismatches === undefined ||
+    !isCount(files_checked) ||
+    !isCount(bytes_checked) ||
+    !isCount(mismatch_count) ||
+    typeof truncated !== 'boolean'
+  )
+    return undefined;
+  return {
+    verdict,
+    files_checked,
+    bytes_checked,
+    mismatch_count,
+    mismatches,
+    truncated,
+  };
+}
+
+function time(value: unknown): number | undefined {
+  return isTime(value) ? value : undefined;
+}
+
+function job(value: unknown): Job | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = oneOf(JOB_KINDS, value.kind);
+  const state = oneOf(JOB_STATES, value.state);
+  const failure = optional(value.failure, (v) => oneOf(JOB_FAILURES, v));
+  const result = optional(value.result, jobResult);
+  const retryAt = optional(value.retry_at_ms, time);
+  const startedAt = optional(value.started_at_ms, time);
+  const finishedAt = optional(value.finished_at_ms, time);
+  const {
+    id,
+    artifact_id,
+    revision,
+    attempt,
+    max_attempts,
+    cancel_requested,
+    created_at_ms,
+  } = value;
+  if (
+    typeof id !== 'string' ||
+    typeof artifact_id !== 'string' ||
+    kind === undefined ||
+    state === undefined ||
+    !isCount(revision) ||
+    !isCount(attempt) ||
+    !isCount(max_attempts) ||
+    typeof cancel_requested !== 'boolean' ||
+    !isTime(created_at_ms) ||
+    failure === undefined ||
+    result === undefined ||
+    retryAt === undefined ||
+    startedAt === undefined ||
+    finishedAt === undefined
+  )
+    return undefined;
+  const parsed: Job = {
+    id,
+    artifact_id,
+    revision,
+    kind,
+    state,
+    attempt,
+    max_attempts,
+    cancel_requested,
+    created_at_ms,
+  };
+  if (failure.set !== undefined) parsed.failure = failure.set;
+  if (result.set !== undefined) parsed.result = result.set;
+  if (retryAt.set !== undefined) parsed.retry_at_ms = retryAt.set;
+  if (startedAt.set !== undefined) parsed.started_at_ms = startedAt.set;
+  if (finishedAt.set !== undefined) parsed.finished_at_ms = finishedAt.set;
+  return parsed;
+}
+
+/** Parses `GET /v1/jobs/{id}`. */
+export function parseJob(value: unknown): Job | undefined {
+  return job(value);
+}
+
+/** Parses the response of an enqueue. */
+export function parseEnqueueJob(
+  value: unknown,
+): EnqueueJobResponse | undefined {
+  if (!isRecord(value) || typeof value.replayed !== 'boolean') return undefined;
+  const parsed = job(value.job);
+  return parsed === undefined
+    ? undefined
+    : { job: parsed, replayed: value.replayed };
+}
+
+/** Parses the response of a cancel. */
+export function parseCancelJob(value: unknown): CancelJobResponse | undefined {
+  return parseEnqueueJob(value);
+}
+
+/** Parses `GET /v1/jobs` and `GET /v1/artifacts/{id}/jobs`. */
+export function parseJobList(value: unknown): JobList | undefined {
+  if (!isRecord(value)) return undefined;
+  const jobs = list(value.jobs, job);
+  const { next_page_token } = value;
+  if (jobs === undefined) return undefined;
+  if (next_page_token === undefined || next_page_token === null)
+    return { jobs };
+  return typeof next_page_token === 'string'
+    ? { jobs, next_page_token }
+    : undefined;
 }
 
 /** Parses a non-2xx JSON body. */

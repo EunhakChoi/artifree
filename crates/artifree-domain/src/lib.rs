@@ -6,6 +6,7 @@
 
 pub mod change;
 pub mod identity;
+pub mod job;
 pub mod package;
 
 /// The family of an artifact's authoritative source model.

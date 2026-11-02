@@ -29,7 +29,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/cli",
         ComponentStatus::Implemented,
-        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); build inventory.",
+        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; build inventory.",
     ),
     (
         "runtime",
@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, and a sandboxed preview origin.",
+        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, and a sandboxed preview origin.",
     ),
     (
         "domain",
@@ -91,8 +91,8 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         Layer::Logic,
         "Rust",
         "crates/artifree-core/src/jobs.rs",
-        ComponentStatus::Planned,
-        "Commit events, retries, worker lifecycle, and reconnect.",
+        ComponentStatus::Implemented,
+        "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes are not in the change feed.",
     ),
     (
         "handoff",
@@ -110,7 +110,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust · SQLite",
         "crates/artifree-providers/src/storage.rs",
         ComponentStatus::Implemented,
-        "Local SQLite with atomic commits, a change feed in the same transactions, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned.",
+        "Local SQLite with atomic commits, a change feed and job leases in the same transactions, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned.",
     ),
     (
         "models",

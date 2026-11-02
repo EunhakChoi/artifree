@@ -5,24 +5,28 @@
 //! error semantics; only the framing differs.
 
 use artifree_contracts::api::{
-    AgentSessionList, Artifact, ArtifactKind as WireKind, ArtifactList, CommitResponse,
-    ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime,
-    FileChange as WireChange, FileUpload, Handoff, HandoffState, ListArtifactsQuery, ListSort,
-    Preview, PurgeArtifactRequest, PurgeArtifactResponse, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
-    SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat, SourceExportManifest,
-    StageHandoffRequest, UnreferencedContent as WireContent, UpdateArtifactRequest,
-    UpdateArtifactResponse,
+    AgentSessionList, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
+    CommitResponse, ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest, EnqueueJobResponse,
+    ErrorBody, ErrorCode, ExportRuntime, FileChange as WireChange, FileUpload, Handoff,
+    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
+    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, ListArtifactsQuery,
+    ListJobsQuery, ListSort, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
     ArtifactError, ArtifactService, MetadataChange, Missing, RevisionExport,
 };
+use artifree_core::jobs::JobPageSize;
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, TokenId};
+use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
     ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
 };
@@ -31,6 +35,7 @@ use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, ListOrder, RevisionRecord,
     UnreferencedContent,
 };
+use artifree_ports::job_store::JobRecord;
 use artifree_providers::archive::{self, ArchiveEntry};
 use axum::http::StatusCode;
 use base64::Engine;
@@ -145,6 +150,12 @@ impl From<ArtifactError> for ApiError {
             }
             ArtifactError::ContentChanged => {
                 Self::new(StatusCode::CONFLICT, ErrorCode::ContentConflict, message)
+            }
+            ArtifactError::JobEnded { .. } => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::JobEnded, message)
+            }
+            ArtifactError::TooManyJobs => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::TooManyJobs, message)
             }
             ArtifactError::InvalidPageToken => Self::invalid(format!("page_token: {message}")),
             ArtifactError::InvalidRange(RangeError::PastEnd { size }) => {
@@ -1196,6 +1207,147 @@ fn too_many(what: &str, count: usize, limit: usize) -> Result<(), ApiError> {
         )));
     }
     Ok(())
+}
+
+/// Parses a job identifier. One that cannot name a job is not found, as for
+/// an artifact, and is not quoted back.
+pub(crate) fn job_id(value: &str) -> Result<JobId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::not_found("job not found"))
+}
+
+pub(crate) async fn enqueue_job(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: EnqueueJobRequest,
+) -> Result<EnqueueJobResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let revision = revision_number(request.revision)?;
+    let kind = match request.kind {
+        WireJobKind::VerifyRevision => JobKind::VerifyRevision,
+    };
+    let now = state.clock().now();
+    let receipt = state
+        .run(move |artifacts| artifacts.enqueue_job(&actor, &key, &id, revision, kind, now))
+        .await?;
+    Ok(EnqueueJobResponse {
+        job: job_dto(&receipt.job),
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+pub(crate) async fn show_job(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+) -> Result<WireJob, ApiError> {
+    let id = job_id(id)?;
+    let job = state
+        .run(move |artifacts| artifacts.job(&actor, &id))
+        .await?;
+    Ok(job_dto(&job))
+}
+
+/// A page of the actor's jobs: those of the artifact `artifact` names, or all
+/// of them.
+pub(crate) async fn list_jobs(
+    state: &AppState,
+    actor: ActorId,
+    artifact: Option<&str>,
+    query: ListJobsQuery,
+) -> Result<JobList, ApiError> {
+    let artifact = artifact.map(artifact_id).transpose()?;
+    let limit = query
+        .limit
+        .map(JobPageSize::try_from)
+        .transpose()
+        .map_err(|error| ApiError::invalid(format!("limit: {error}")))?
+        .unwrap_or_default();
+    let page_token = query.page_token;
+    let page = state
+        .run(move |artifacts| {
+            artifacts.jobs(&actor, artifact.as_ref(), page_token.as_deref(), limit)
+        })
+        .await?;
+    Ok(JobList {
+        jobs: page.jobs.iter().map(job_dto).collect(),
+        next_page_token: page.next_page_token,
+    })
+}
+
+pub(crate) async fn cancel_job(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+) -> Result<CancelJobResponse, ApiError> {
+    let id = job_id(id)?;
+    let now = state.clock().now();
+    let receipt = state
+        .run(move |artifacts| artifacts.cancel_job(&actor, &key, &id, now))
+        .await?;
+    Ok(CancelJobResponse {
+        job: job_dto(&receipt.job),
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+fn job_dto(record: &JobRecord) -> WireJob {
+    WireJob {
+        id: record.id.to_string(),
+        artifact_id: record.artifact.to_string(),
+        revision: record.revision.0,
+        kind: match record.kind {
+            JobKind::VerifyRevision => WireJobKind::VerifyRevision,
+        },
+        state: match record.state {
+            JobState::Queued => WireJobState::Queued,
+            JobState::Running => WireJobState::Running,
+            JobState::RetryScheduled => WireJobState::RetryScheduled,
+            JobState::Succeeded => WireJobState::Succeeded,
+            JobState::Failed => WireJobState::Failed,
+            JobState::Cancelled => WireJobState::Cancelled,
+        },
+        cancel_requested: record.cancel_requested,
+        attempt: u64::from(record.attempts),
+        max_attempts: u64::from(record.max_attempts),
+        created_at_ms: record.created_at.0,
+        started_at_ms: record.started_at.map(|time| time.0),
+        finished_at_ms: record.finished_at.map(|time| time.0),
+        retry_at_ms: (record.state == JobState::RetryScheduled).then_some(record.run_after.0),
+        failure: record.failure.map(|failure| match failure {
+            JobFailure::RevisionUnavailable => WireFailure::RevisionUnavailable,
+            JobFailure::StorageUnavailable => WireFailure::StorageUnavailable,
+            JobFailure::LeaseExpired => WireFailure::LeaseExpired,
+            JobFailure::Internal => WireFailure::Internal,
+        }),
+        result: record.report.as_ref().map(|report| JobResult {
+            verdict: if report.is_ok() {
+                JobVerdict::Ok
+            } else {
+                JobVerdict::Mismatch
+            },
+            files_checked: report.files_checked,
+            bytes_checked: report.bytes_checked,
+            mismatch_count: report.mismatch_count,
+            mismatches: report
+                .findings
+                .iter()
+                .map(|finding| JobMismatch {
+                    path: finding.path.to_string(),
+                    problem: match finding.problem {
+                        Problem::DigestMismatch => JobProblem::DigestMismatch,
+                        Problem::SizeMismatch => JobProblem::SizeMismatch,
+                        Problem::ContentMissing => JobProblem::ContentMissing,
+                    },
+                })
+                .collect(),
+            truncated: report.is_truncated(),
+        }),
+    }
 }
 
 fn commit_response(receipt: CommitReceipt) -> CommitResponse {

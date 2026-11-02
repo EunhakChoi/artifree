@@ -11,10 +11,13 @@ use std::time::{Duration, Instant};
 
 use artifree_domain::SourceRevision;
 use artifree_domain::change::ChangeSequence;
-use artifree_domain::identity::TokenId;
+use artifree_domain::identity::{TokenId, UnixMillis};
+use artifree_domain::job::{Finding, JobKind, JobState, Problem, VerifyReport, WorkerId};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactStore, CommitReceipt, Delivery, ListOrder, StoreError,
 };
+use artifree_ports::artifact_store::{RequestFingerprint, RequestIdentity};
+use artifree_ports::job_store::{JobClaim, JobStore, NewJob};
 use artifree_ports::token_store::{NewTokenRecord, TokenStore};
 use artifree_providers::backup::{BackupError, SCRATCH_PREFIX, backup, restore};
 use artifree_providers::storage::{DATABASE_FILE, SCHEMA_VERSION, SqliteStore};
@@ -129,6 +132,12 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
             "DEFAULT 1 CHECK (pinned",
         )),
         "missing table" => mutate("DROP TABLE request_keys"),
+        "missing job table" => mutate("DROP TABLE job_findings"),
+        "dropped job state check" => mutate(&rewritten_schema(
+            "jobs",
+            "CHECK (attempts <= max_attempts)",
+            "",
+        )),
         "missing index" => mutate("DROP INDEX artifacts_by_owner"),
         "missing token index" => mutate("DROP INDEX idx_tokens_secret_hash"),
         "extra table" => mutate("CREATE TABLE extra (x TEXT)"),
@@ -183,7 +192,7 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-const REFUSED: [&str; 20] = [
+const REFUSED: [&str; 22] = [
     "newer schema",
     "empty file",
     "unrelated database",
@@ -194,6 +203,8 @@ const REFUSED: [&str; 20] = [
     "dropped autoincrement",
     "changed column default",
     "missing table",
+    "missing job table",
+    "dropped job state check",
     "missing index",
     "missing token index",
     "extra table",
@@ -461,6 +472,89 @@ fn a_restored_database_has_a_new_feed_identity_and_keeps_its_sequence_head() -> 
     assert_eq!(next.revision.revision, SourceRevision(3));
     let after = restored.changes(&owner, ChangeSequence(0), 10)?;
     assert_eq!(after.head, ChangeSequence(original.head.0 + 1));
+    Ok(())
+}
+
+/// A restored database is a new copy of the queue. A job that was running when
+/// the backup was made had a lease held by a worker on the machine that made
+/// it; the restore expires that lease, so a worker of the new data directory
+/// runs the job again, and nothing of the old lease is resumed.
+#[test]
+fn jobs_survive_a_restore_and_a_running_lease_is_expired_not_resumed() -> TestResult {
+    let layout = Layout::new();
+    let store = SqliteStore::open(&layout.database())?;
+    let owner = actor("owner");
+    let created = create_demo(&store, &owner, &key("a"), "A", "<h1>a</h1>")?;
+    let enqueue = |target: &SqliteStore, name: &str, now: i64| {
+        target.enqueue_job(NewJob {
+            request: RequestIdentity {
+                actor: &owner,
+                key: &key(name),
+                fingerprint: RequestFingerprint(digest(name)),
+            },
+            artifact: &created.artifact.id,
+            revision: SourceRevision(1),
+            kind: JobKind::VerifyRevision,
+            now: UnixMillis(now),
+        })
+    };
+    let claim = |target: &SqliteStore, who: &str, now: i64| {
+        target
+            .claim_job(JobClaim {
+                worker: &parsed::<WorkerId>(who),
+                now: UnixMillis(now),
+                lease_ms: 60_000,
+            })
+            .map(|claim| claim.claimed)
+    };
+    let done = enqueue(&store, "done", 1)?.job;
+    let finished = claim(&store, "worker-old", 1)?.ok_or("nothing to claim")?;
+    let report = VerifyReport {
+        files_checked: 2,
+        bytes_checked: 14,
+        mismatch_count: 1,
+        findings: vec![Finding {
+            path: parsed("index.html"),
+            problem: Problem::DigestMismatch,
+        }],
+    };
+    store.complete_job(&finished.lease, &report, UnixMillis(2))?;
+    let running = enqueue(&store, "running", 3)?.job;
+    let held = claim(&store, "worker-old", 3)?.ok_or("nothing to claim")?;
+    assert_eq!(held.job.id, running.id);
+    let queued = enqueue(&store, "queued", 4)?.job;
+    backup(&layout.data(), &layout.output())?;
+    restore(&layout.output(), &layout.target())?;
+    let restored = SqliteStore::open(&database_in(&layout.target()))?;
+
+    let kept = restored.job(&done.id)?.ok_or("the finished job is gone")?;
+    assert_eq!(kept.state, JobState::Succeeded);
+    assert_eq!(kept.report, Some(report), "the result and its findings");
+    assert_eq!(
+        restored
+            .job(&queued.id)?
+            .ok_or("the queued job is gone")?
+            .state,
+        JobState::Queued
+    );
+    let moved = restored
+        .job(&running.id)?
+        .ok_or("the running job is gone")?;
+    assert_eq!(moved.state, JobState::Running);
+    assert_eq!(moved.lease_expires_at, Some(UnixMillis(0)), "expired");
+    // The original keeps its lease: only the restored copy is changed.
+    assert_eq!(
+        store.job(&running.id)?.ok_or("gone")?.lease_expires_at,
+        Some(UnixMillis(60_003))
+    );
+    // A worker of the restored directory runs it again, with a new token.
+    let again = claim(&restored, "worker-new", 10)?.ok_or("the lease was not expired")?;
+    assert_eq!(again.job.id, running.id);
+    assert_eq!((again.job.attempts, again.lease.fence), (2, 2));
+    // The keys of the requests replay.
+    let replay = enqueue(&restored, "queued", 99)?;
+    assert_eq!(replay.delivery, Delivery::Replayed);
+    assert_eq!(replay.job.id, queued.id);
     Ok(())
 }
 

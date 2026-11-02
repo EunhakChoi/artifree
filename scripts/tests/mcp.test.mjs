@@ -772,6 +772,65 @@ test('Results conform to the API contract in both eras', async () => {
   }
 });
 
+test('Job tools conform to the contract, share HTTP semantics, and report errors in both eras', async () => {
+  const validate = createAjv().compile(apiSchema);
+  for (const era of Object.keys(ERAS)) {
+    await withClient(async (client) => {
+      const created = await ok(client, 'create_artifact', {
+        title: `Jobs ${era}`,
+        files: [utf8('index.html', '<p>j</p>')],
+        idempotency_key: freshKey(),
+      });
+      const artifact_id = created.artifact.id;
+      const key = freshKey();
+      const request = {
+        artifact_id,
+        revision: 1,
+        kind: 'verify_revision',
+        idempotency_key: key,
+      };
+      const queued = await ok(client, 'enqueue_job', request);
+      assert.equal(queued.replayed, false);
+      assert.equal(queued.job.state, 'queued');
+      const replay = await ok(client, 'enqueue_job', request);
+      assert.deepEqual([replay.replayed, replay.job.id], [true, queued.job.id]);
+      // HTTP and MCP share one key space and one job table.
+      const viaHttp = await api(`/v1/jobs/${queued.job.id}`);
+      assert.equal(viaHttp.status, 200);
+      assert.deepEqual(viaHttp.body, queued.job);
+      const shown = await ok(client, 'get_job', { job_id: queued.job.id });
+      const listed = await ok(client, 'list_jobs', { artifact_id });
+      assert.deepEqual(listed.jobs, [shown]);
+      await refused(
+        client,
+        'enqueue_job',
+        { ...request, revision: 2 },
+        'not_found',
+      );
+      await refused(
+        client,
+        'enqueue_job',
+        { ...request, artifact_id: 'art_missing' },
+        'not_found',
+      );
+      const cancelled = await ok(client, 'cancel_job', {
+        job_id: queued.job.id,
+        idempotency_key: freshKey(),
+      });
+      assert.equal(cancelled.job.state, 'cancelled');
+      await refused(
+        client,
+        'cancel_job',
+        { job_id: queued.job.id, idempotency_key: freshKey() },
+        'job_ended',
+      );
+      await refused(client, 'get_job', { job_id: 'job_missing' }, 'not_found');
+      for (const result of [queued, replay, shown, listed, cancelled])
+        assert.ok(validate(result), JSON.stringify(validate.errors));
+    }, era);
+  }
+});
+
 test('Retries replay, a reused key is refused, and keys are shared with HTTP', async () => {
   await withClient(async (client) => {
     const key = freshKey();
