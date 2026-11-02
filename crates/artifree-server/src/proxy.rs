@@ -69,20 +69,20 @@ impl FromStr for IpNetwork {
         if let Some((ip_str, prefix_str)) = trimmed.split_once('/') {
             let ip: IpAddr = ip_str
                 .parse()
-                .map_err(|e| format!("invalid IP address in CIDR {trimmed:?}: {e}"))?;
+                .map_err(|e| format!("invalid IP address in a CIDR: {e}"))?;
             let prefix: u8 = prefix_str
                 .parse()
-                .map_err(|e| format!("invalid prefix length in CIDR {trimmed:?}: {e}"))?;
+                .map_err(|e| format!("invalid prefix length in a CIDR: {e}"))?;
             match ip {
                 IpAddr::V4(addr) => {
                     if prefix > 32 {
-                        return Err(format!("IPv4 prefix length must be <= 32 in {trimmed:?}"));
+                        return Err("IPv4 prefix length must be <= 32".to_owned());
                     }
                     Ok(Self::V4 { addr, prefix })
                 }
                 IpAddr::V6(addr) => {
                     if prefix > 128 {
-                        return Err(format!("IPv6 prefix length must be <= 128 in {trimmed:?}"));
+                        return Err("IPv6 prefix length must be <= 128".to_owned());
                     }
                     Ok(Self::V6 { addr, prefix })
                 }
@@ -94,7 +94,7 @@ impl FromStr for IpNetwork {
                 .unwrap_or(trimmed);
             let ip: IpAddr = unbracketed
                 .parse()
-                .map_err(|e| format!("invalid IP address or CIDR {trimmed:?}: {e}"))?;
+                .map_err(|e| format!("invalid IP address or CIDR: {e}"))?;
             match ip {
                 IpAddr::V4(addr) => Ok(Self::V4 { addr, prefix: 32 }),
                 IpAddr::V6(addr) => Ok(Self::V6 { addr, prefix: 128 }),

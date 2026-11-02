@@ -363,6 +363,24 @@ function sameHandoff(left: Handoff, right: Handoff): boolean {
   );
 }
 
+/**
+ * The server address for error messages. The address comes from a flag or an
+ * environment variable and may hold a password (`http://user:secret@host`),
+ * which must not reach a terminal or a log, so credentials are dropped; an
+ * address that cannot be read as a URL is shown only when it has no `@`.
+ */
+function describeServer(baseUrl: string): string {
+  if (baseUrl === '') return 'this origin';
+  try {
+    const url = new URL(baseUrl);
+    url.username = '';
+    url.password = '';
+    return url.href.replace(/\/+$/, '');
+  } catch {
+    return baseUrl.includes('@') ? 'the configured server' : baseUrl;
+  }
+}
+
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
 export class ArtifreeClient {
   private runtimeSession: string | undefined;
@@ -376,11 +394,14 @@ export class ArtifreeClient {
   readonly subscribeRuntimeGrants = this.runtimeGrants.subscribe;
   readonly runtimeGrantSnapshot = this.runtimeGrants.snapshot;
   private readonly baseUrl: string;
+  /** The server address as messages show it: never with credentials. */
+  private readonly serverLabel: string;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(configuration: ClientConfiguration) {
     this.baseUrl = configuration.baseUrl.replace(/\/+$/, '');
+    this.serverLabel = describeServer(this.baseUrl);
     this.accessToken = configuration.accessToken;
     this.fetchImpl =
       configuration.fetch ?? ((input, init) => fetch(input, init));
@@ -1121,7 +1142,7 @@ export class ArtifreeClient {
       return new Uint8Array(await response.arrayBuffer());
     } catch (error: unknown) {
       throw new ArtifreeApiError(
-        `The connection to ${this.baseUrl || 'this origin'} ended while reading ${what}.`,
+        `The connection to ${this.serverLabel} ended while reading ${what}.`,
         { status: response.status, code: 'network_error', cause: error },
       );
     }
@@ -1174,7 +1195,7 @@ export class ArtifreeClient {
       response = await this.fetchImpl(`${this.baseUrl}${path}`, init);
     } catch (error: unknown) {
       throw new ArtifreeApiError(
-        `Could not reach the Artifree API at ${this.baseUrl || 'this origin'}.`,
+        `Could not reach the Artifree API at ${this.serverLabel}.`,
         { status: 0, code: 'network_error', cause: error },
       );
     }

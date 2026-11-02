@@ -113,7 +113,7 @@ const unsafeLinks = [
   'evil.example',
 ];
 for (const link of unsafeLinks) {
-  test(`?server=${link} is reported and never used`, () => {
+  test(`a rejected ?server=${link} is reported, never used, and still withholds a stored token`, () => {
     const result = resolveInitialServer({
       search: `?server=${encodeURIComponent(link)}`,
       stored: null,

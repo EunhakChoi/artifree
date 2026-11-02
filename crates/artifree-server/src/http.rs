@@ -726,6 +726,8 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
 ///
 /// # Errors
 /// Returns an error if `raw` is not a valid absolute HTTP or HTTPS URL, or represents an opaque origin.
+/// No error quotes `raw`, any part of it, or the parser's view of it: callers
+/// log these errors, and the value may carry a password (`https://user:secret@host`).
 pub fn normalize_origin(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -733,39 +735,36 @@ pub fn normalize_origin(raw: &str) -> Result<String, String> {
     }
     let uri: Uri = trimmed
         .parse()
-        .map_err(|e| format!("invalid URL {raw:?}: {e}"))?;
+        .map_err(|e| format!("origin is not a valid URL: {e}"))?;
 
     let Some(scheme) = uri.scheme_str() else {
-        return Err(format!("origin {raw:?} must include an absolute scheme"));
+        return Err("origin must include an absolute scheme".to_owned());
     };
     let scheme_lower = scheme.to_ascii_lowercase();
     if scheme_lower != "http" && scheme_lower != "https" {
-        return Err(format!(
-            "origin {raw:?} must use http or https scheme, got {scheme:?}"
-        ));
+        return Err("origin must use the http or https scheme".to_owned());
     }
 
     let Some(authority) = uri.authority() else {
-        return Err(format!("origin {raw:?} must include an authority/host"));
+        return Err("origin must include a host".to_owned());
     };
 
     // An origin names a host; credentials in it would be silently dropped
     // below and hide a mistake (or a secret pasted into a deployment file).
     if authority.as_str().contains('@') {
-        // The value is not echoed: it may be a secret.
         return Err("origin must not contain credentials".to_owned());
     }
 
     let host = authority.host();
     if host.is_empty() {
-        return Err(format!("origin {raw:?} host must not be empty"));
+        return Err("origin host must not be empty".to_owned());
     }
 
     let canonical_host =
         if let Some(v6_str) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
             let ip: Ipv6Addr = v6_str
                 .parse()
-                .map_err(|e| format!("invalid IPv6 host {host:?} in origin {raw:?}: {e}"))?;
+                .map_err(|e| format!("origin has an invalid IPv6 host: {e}"))?;
             format!("[{ip}]")
         } else if let Ok(ip) = host.parse::<Ipv4Addr>() {
             ip.to_string()

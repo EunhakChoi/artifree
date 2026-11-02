@@ -79,7 +79,13 @@ returns the canonical form (lowercase host, default port dropped, no trailing
 slash; a path prefix is kept because the client appends `/v1` to it). A
 refused link or form entry is explained on the connect form, nothing is sent to
 it, and the connection stays on the default. The messages never repeat the
-address, since it may hold a secret. This is a behavior change for `?server=`:
+address, since it may hold a secret. **A rejected `?server=` link still
+suppresses restoring a stored token** (`fromQuery` stays true): the link tried
+to name a server, so the page does not guess which stored token the person
+meant, and a token is never offered to a server chosen by a link after the link
+failed. The cost is that the person enters the token again for the stored or
+default server; the failure is safe, not silent, because the notice says the
+link was ignored. This is a behavior change for `?server=`:
 relative values such as `/api`, which worked by accident, are now refused; they
 were never documented.
 
@@ -102,8 +108,26 @@ the first two and the limits are outside this row.
   is not valid UTF-8 is refused rather than ignored.
 - **Same validation as the flags**, and the message names the source that was
   used (`ARTIFREE_CONTENT_ORIGIN must be a valid ...` or `--content-origin ...`).
-  A flag in effect hides an invalid variable: only the winning value is read.
+  A flag in effect hides an invalid variable, including one that is not valid UTF-8: only the winning value is read.
 - Equal API and preview origins are refused whichever way each was given.
+- **Errors about serve settings never quote a value the operator wrote.** A
+  rejected origin, source list, address, CIDR, or argument may carry a password
+  (`https://user:secret@host`), and these messages go to stderr and container
+  logs. This holds for every branch, not only the credentials check: a bad
+  scheme, port, or host in a credentialed value fails earlier, so
+  `normalize_origin` describes what is wrong without quoting the value or any
+  part of it. The same rule covers `--frame-ancestors`, `--lan`,
+  `--trusted-proxy`, and unrecognized `serve` arguments (`--content-origin=VALUE`
+  names only `--content-origin`). The TypeScript client, whose address comes from `--server` or
+  `ARTIFREE_SERVER`, drops credentials from the address in its network-error
+  messages. `backup` and `restore` still name an
+  unrecognized option, because their arguments are paths. The tests assert that a
+  password in an origin that fails a scheme, port, host, or form check never
+  reaches stderr.
+- Parsing takes every `ARTIFREE_*` variable from one `ServeEnv` value read at
+  start-up, not from the process environment at each use, so the unit tests
+  give it exactly the variables they mean and pass on a machine that has others
+  set.
 
 Two validation gaps found above were closed for flag and variable alike,
 because declaring them in a file makes mistakes easier to ship unseen:

@@ -172,6 +172,69 @@ const refused = [
   ],
 ];
 
+// Values that carry a password and fail an earlier check than the credentials
+// check (a scheme, a port, a host, a form). No message may quote them.
+const PASSWORD = 'hunter2-secret';
+const withPassword = (rest) => `${rest.replace('@', `:${PASSWORD}@`)}`;
+const leaking = [
+  [
+    'a credentialed origin with another scheme',
+    { ARTIFREE_CONTENT_ORIGIN: withPassword('ftp://user@host.example.test') },
+    [],
+  ],
+  [
+    'a credentialed origin with a malformed port',
+    {
+      ARTIFREE_CONTENT_ORIGIN: withPassword(
+        'https://user@host.example.test:notaport',
+      ),
+    },
+    [],
+  ],
+  [
+    'a credentialed API origin with a malformed host',
+    { ARTIFREE_API_ORIGIN: withPassword('https://user@[not-an-ip]') },
+    [],
+  ],
+  [
+    'a credentialed allowed origin',
+    { ARTIFREE_ALLOWED_ORIGINS: withPassword('ftp://user@host.example.test') },
+    [],
+  ],
+  [
+    'a credentialed allowed-origin flag',
+    {},
+    ['--allowed-origin', withPassword('ftp://user@host.example.test')],
+  ],
+  [
+    'a credentialed frame-ancestors list that injects a directive',
+    {
+      ARTIFREE_FRAME_ANCESTORS: `${withPassword('https://user@host.example.test')}; x`,
+    },
+    [],
+  ],
+  [
+    'a credentialed origin given as --content-origin=value',
+    {},
+    [`--content-origin=${withPassword('https://user@host.example.test')}`],
+  ],
+];
+for (const [name, variables, args] of leaking) {
+  test(`a refusal of ${name} does not print the password`, () => {
+    const result = spawnSync(
+      binary,
+      ['serve', '--data-dir', join(scratch, 'leak-data'), ...args],
+      { encoding: 'utf8', timeout: 20_000, env: cleanEnvironment(variables) },
+    );
+    assert.equal(result.status, 1, result.stderr);
+    assert.ok(result.stderr.length > 0, 'a reason must be printed');
+    assert.ok(
+      !result.stderr.includes(PASSWORD) && !result.stdout.includes(PASSWORD),
+      `the password reached the output: ${result.stderr}`,
+    );
+  });
+}
+
 for (const [name, variables, pattern] of refused) {
   test(`the server refuses to start with ${name}`, () => {
     const result = spawnSync(

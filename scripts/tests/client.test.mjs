@@ -2342,3 +2342,30 @@ test('What onEvent throws ends following, even an API error', async () => {
   assert.equal(error, thrown);
   assert.equal(requests, 1, 'a handler failure was retried');
 });
+
+test('A network failure names the server without its credentials', async () => {
+  const unreachable = async () => {
+    throw new TypeError('fetch failed');
+  };
+  const cases = [
+    ['http://user:hunter2-secret@api.invalid:7410/', 'http://api.invalid:7410'],
+    [
+      'https://user:hunter2-secret@api.invalid/prefix',
+      'https://api.invalid/prefix',
+    ],
+    ['not a url with hunter2-secret@x', 'the configured server'],
+    ['', 'this origin'],
+  ];
+  for (const [baseUrl, shown] of cases) {
+    const client = new ArtifreeClient({
+      baseUrl,
+      accessToken: 't',
+      fetch: unreachable,
+    });
+    const error = await client.listArtifacts().catch((reason) => reason);
+    assert.ok(error instanceof ArtifreeApiError, baseUrl);
+    assert.equal(error.code, 'network_error', baseUrl);
+    assert.ok(!error.message.includes('hunter2-secret'), error.message);
+    assert.ok(error.message.endsWith(`at ${shown}.`), error.message);
+  }
+});

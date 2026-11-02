@@ -105,7 +105,7 @@ A flag wins over its variable for the single-value settings
 (`--api-origin`, `--content-origin`, `--frame-ancestors`); the list settings
 use both, and `--allow-remote-mcp` is on if either is set. An empty variable is
 the same as an unset one. An invalid value stops the server with a message that
-names the variable (CI checks `ARTIFREE_CONTENT_ORIGIN` through the image).
+names the variable and never quotes the value (CI checks `ARTIFREE_CONTENT_ORIGIN` through the image).
 `ARTIFREE_FRAME_ANCESTORS` replaces the default list, as the flag does. Changing
 any of these needs a new container (or a restart): the server reads them once
 at start-up ([restart note](decisions/0028-static-web-defaults.md#changing-the-cors-allow-list-needs-a-restart)).
