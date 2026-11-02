@@ -27,8 +27,8 @@ packages/
   runtime-sdk/         bound metadata read; other capability types proposed
 crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
-  artifree-core/       artifact service and owner policy; documents and jobs planned
-  artifree-ports/      artifact store contract; other families planned
+  artifree-core/       artifact service, owner policy, job and worker logic; documents planned
+  artifree-ports/      artifact and job store contracts; other families planned
   artifree-providers/  SQLite artifact store, ZIP source archives; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
   artifree-server/     composition root, Axum HTTP API, MCP endpoint, preview origin
@@ -137,10 +137,15 @@ in the Rust core.
 | `POST /v1/handoffs/{id}/send`                                                      | Confirm sending the staged delivery               |
 | `POST /v1/handoffs/{id}/cancel`                                                    | Cancel before the agent may have received it      |
 | `GET /v1/changes`                                                                  | Committed changes as server-sent events           |
+| `POST /v1/artifacts/{id}/jobs`                                                     | Queue a `verify_revision` job (`Idempotency-Key`) |
+| `GET /v1/artifacts/{id}/jobs`                                                      | One artifact's jobs, newest first, pages          |
+| `GET /v1/jobs`                                                                     | The actor's jobs, newest first, pages             |
+| `GET /v1/jobs/{id}`                                                                | One job: state, attempts, result or failure       |
+| `POST /v1/jobs/{id}/cancel`                                                        | Stop a job (`Idempotency-Key`); not a rollback    |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
 `invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `not_found` (404),
-`revision_conflict` and `metadata_conflict` (409), `request_key_reused` (422), `payload_too_large`
+`revision_conflict`, `metadata_conflict`, `job_ended`, and `too_many_jobs` (409), `request_key_reused` (422), `payload_too_large`
 (413), `range_not_satisfiable` (416 with `Content-Range: bytes */{size}`), `rate_limited` (429 with
 `Retry-After`; this attempt was not processed),
 `unavailable` (503, retry with the same key), and `internal` (500).
@@ -242,6 +247,19 @@ and retryable by key, `/v1/content/unreferenced`). A purge keeps a tombstone so 
 request keys, change feed sequences, and foreign keys stay valid, and it has no
 MCP tool, because an agent could not undo it
 ([0029](decisions/0029-retention-and-cleanup.md)).
+R01 adds persistent jobs and a worker process
+([0030](decisions/0030-persistent-jobs-and-worker.md)). One job kind,
+`verify_revision`, pins an actor, artifact, revision, and request key, and
+recomputes the digest and size of each file of the revision from the store.
+The job states and the lease live in SQLite (schema 8); a worker claims a job
+under a lease and a fence that rises on every claim, so a worker that stalled
+and was replaced cannot write a result. Execution is at least once; one result
+is recorded. `artifree-server worker run` is a subcommand of the server binary
+that opens the database directly (no HTTP, no credential); nothing starts it.
+The job runs trusted code in that process: it is not R02's isolated execution,
+and no builds, models, or untrusted code run. Job changes are not in the change
+feed, and the web workspace has no job view. Agent tokens may enqueue, read,
+list, and cancel jobs (the four MCP tools), at most 16 open jobs per actor.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

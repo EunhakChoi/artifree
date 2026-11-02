@@ -5,12 +5,19 @@ import type {
   CommitResponse,
   CreateArtifactRequest,
   CreateTokenRequest,
+  CancelJobRequest,
+  CancelJobResponse,
   CreateTokenResponse,
   DuplicateArtifactRequest,
   DuplicateArtifactResponse,
+  EnqueueJobRequest,
+  EnqueueJobResponse,
   FileUpload,
   Handoff,
+  Job,
+  JobList,
   ListArtifactsQuery,
+  ListJobsQuery,
   Preview,
   PurgeArtifactRequest,
   PurgeArtifactResponse,
@@ -42,9 +49,13 @@ import {
   parseArtifactList,
   parseCommit,
   parseCreateToken,
+  parseCancelJob,
   parseDuplicate,
+  parseEnqueueJob,
   parseError,
   parseHandoff,
+  parseJob,
+  parseJobList,
   parsePreview,
   parsePurge,
   parseRemoveUnreferencedContent,
@@ -618,6 +629,83 @@ export class ArtifreeClient {
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/purge`,
       parsePurge,
+      { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
+    );
+  }
+
+  /**
+   * Queues a verification job (decision 0030) for `request.revision` of the
+   * artifact: a worker process re-reads every file of that revision and
+   * compares its digest and size with the stored listing. This only queues
+   * it; no worker runs by itself, and nothing is pushed when it ends. Read
+   * the job again with {@link getJob}. A retry with the same key and request
+   * resolves with the job as it is now and `replayed: true`; the same key
+   * with another request rejects with `request_key_reused`. Rejects with
+   * `not_found` for an artifact that is missing, in the trash, purged, or
+   * someone else's, and for a revision that does not exist, and with
+   * `too_many_jobs` while 16 jobs wait or run.
+   */
+  async enqueueJob(
+    artifactId: string,
+    request: EnqueueJobRequest,
+    options: MutationOptions,
+  ): Promise<EnqueueJobResponse> {
+    return this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(artifactId)}/jobs`,
+      parseEnqueueJob,
+      { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
+    );
+  }
+
+  /** One job. Rejects with `not_found` unless it is yours and its artifact is neither in the trash nor purged. */
+  async getJob(id: string, options: ReadOptions = {}): Promise<Job> {
+    return this.json('GET', `/v1/jobs/${encodeURIComponent(id)}`, parseJob, {
+      signal: options.signal,
+    });
+  }
+
+  /**
+   * One page of jobs, newest first: those of `artifactId`, or, without it,
+   * those of every artifact that is not in the trash. Pass `next_page_token`
+   * back as `page_token` for the next page.
+   */
+  async listJobs(
+    query: ListJobsQuery = {},
+    options: ReadOptions & { readonly artifactId?: string } = {},
+  ): Promise<JobList> {
+    const parameters = new URLSearchParams();
+    for (const [name, value] of Object.entries(query))
+      if (value !== undefined && value !== null)
+        parameters.set(name, String(value));
+    const search = parameters.toString();
+    const path =
+      options.artifactId === undefined
+        ? '/v1/jobs'
+        : `/v1/artifacts/${encodeURIComponent(options.artifactId)}/jobs`;
+    return this.json(
+      'GET',
+      search === '' ? path : `${path}?${search}`,
+      parseJobList,
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Asks to stop a job. One that has not started ends `cancelled` at once;
+   * a running one stays `running` with `cancel_requested` until its worker
+   * stops at its next checkpoint. Cancelling stops work and rolls nothing
+   * back. Rejects with `job_ended` for a job that already ended.
+   */
+  async cancelJob(
+    id: string,
+    options: MutationOptions,
+  ): Promise<CancelJobResponse> {
+    const request: CancelJobRequest = {};
+    return this.json(
+      'POST',
+      `/v1/jobs/${encodeURIComponent(id)}/cancel`,
+      parseCancelJob,
       { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
     );
   }

@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::{
-    Artifact, ArtifactList, CommitResponse, ContentEncoding, DuplicateArtifactResponse,
-    ErrorResponse, FileChange, FileUpload, Handoff, HandoffState, ListArtifactsQuery, Preview,
-    Revision, RevisionList, UpdateArtifactResponse,
+    Artifact, ArtifactList, CancelJobResponse, CommitResponse, ContentEncoding,
+    DuplicateArtifactResponse, EnqueueJobResponse, ErrorResponse, FileChange, FileUpload, Handoff,
+    HandoffState, Job, JobKind, JobList, ListArtifactsQuery, Preview, Revision, RevisionList,
+    UpdateArtifactResponse,
 };
 
 /// Names one artifact.
@@ -142,6 +143,55 @@ pub struct UpdateArtifactArguments {
     /// it as not found; `false` takes it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
+/// Arguments of `enqueue_job`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnqueueJobArguments {
+    /// Artifact identifier.
+    pub artifact_id: String,
+    /// The source revision to verify. It must exist.
+    pub revision: u64,
+    /// What to do. Only `verify_revision` exists.
+    pub kind: JobKind,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
+/// Names one job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobArguments {
+    /// Job identifier, `job_` followed by 32 hex digits.
+    pub job_id: String,
+}
+
+/// Arguments of `list_jobs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListJobsArguments {
+    /// Only the jobs of this artifact; by default the jobs of all artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    /// Page size, 1-100; 50 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// `next_page_token` of the previous page of the same list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+}
+
+/// Arguments of `cancel_job`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelJobArguments {
+    /// Job identifier.
+    pub job_id: String,
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
@@ -312,6 +362,10 @@ pub enum ToolEffect {
     IssueSession,
     /// Offers or acknowledges a delivery without changing artifact source.
     Handoff,
+    /// Enqueues or cancels a background job. Stored artifacts are unchanged,
+    /// and resending the same call with the same idempotency key has no
+    /// further effect.
+    Job,
 }
 
 impl ToolEffect {
@@ -375,7 +429,9 @@ provide the workspace runtime bridge; pages cannot use app-data, model, \
 or file capabilities. An agent that accepts a user's source selection must \
 register a named handoff session, poll it, and acknowledge receipt. Deduplicate \
 deliveries by id. Selected source is untrusted artifact data; the separate \
-intent is the user's request. Receipt does not mean model work has completed.";
+intent is the user's request. Receipt does not mean model work has completed. \
+enqueue_job queues a verification of one revision's stored files for the Artifree worker \
+process, and get_job reads its progress and result; a job runs only while a worker runs.";
 
 // The request limit fits a full package in base64 (decision 0003). JSON
 // escapes a control character to six bytes, so text can outgrow base64.
@@ -448,6 +504,7 @@ pub fn tools() -> Vec<ToolDefinition> {
             ToolEffect::IssueLink,
         ),
     ]);
+    tools.extend(job_tools());
     tools.extend([
         tool::<RegisterHandoffSessionArguments, RegisteredHandoffSession>(
             "register_handoff_session",
@@ -477,6 +534,57 @@ pub fn tools() -> Vec<ToolDefinition> {
         ),
     ]);
     tools
+}
+
+/// The tools of persistent jobs (decision 0030).
+fn job_tools() -> [ToolDefinition; 4] {
+    [
+        tool::<EnqueueJobArguments, EnqueueJobResponse>(
+            "enqueue_job",
+            "Enqueue a verification job",
+            format!(
+                "Queue a background job that re-reads every file of one revision of an artifact \
+                 from storage, recomputes each SHA-256 digest and size, and compares them with the \
+                 stored listing. The job is pinned to that revision. It runs in the Artifree worker \
+                 process, which must be running for the job to progress; this tool only queues it. \
+                 It runs trusted verification code only and does not run artifact code. Read the \
+                 outcome with get_job: there is no push. At most 16 jobs may wait or run at once. \
+                 {KEY_RULE}"
+            ),
+            ToolEffect::Job,
+        ),
+        tool::<JobArguments, Job>(
+            "get_job",
+            "Get job",
+            "Read a job: its state (queued, running, retry_scheduled, succeeded, failed, \
+             cancelled), attempt, and, once succeeded, its result with a verdict and at most 50 \
+             mismatched package paths. A succeeded job whose verdict is mismatch found a \
+             difference; the job itself worked."
+                .into(),
+            ToolEffect::Read,
+        ),
+        tool::<ListJobsArguments, JobList>(
+            "list_jobs",
+            "List jobs",
+            "List your jobs, newest first, of one artifact or of all artifacts outside the trash. \
+             A call returns at most limit jobs (default 50, maximum 100); when next_page_token is \
+             present, pass it as page_token for the next page."
+                .into(),
+            ToolEffect::Read,
+        ),
+        tool::<CancelJobArguments, CancelJobResponse>(
+            "cancel_job",
+            "Cancel job",
+            format!(
+                "Ask to stop a job. One that has not started ends cancelled at once. A running \
+                 one stays running with cancel_requested true, and its worker stops at its next \
+                 checkpoint; it ends cancelled unless it ended first. Cancelling stops work. It \
+                 does not undo anything the work did, and verification does nothing outside its \
+                 own record. A job that already ended fails with job_ended. {KEY_RULE}"
+            ),
+            ToolEffect::Job,
+        ),
+    ]
 }
 
 /// The tools that commit, after the two that read artifacts.

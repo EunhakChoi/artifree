@@ -16,6 +16,7 @@ use std::fmt;
 
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
+use artifree_domain::job::JobState;
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
@@ -40,6 +41,8 @@ pub enum Missing {
     Revision,
     /// The file is not part of the revision.
     File,
+    /// The job does not exist, or its artifact is not accessible.
+    Job,
 }
 
 /// What a source export holds; see [`ArtifactService::export`].
@@ -83,6 +86,15 @@ pub enum ArtifactError {
     ContentChanged,
     /// The actor already used this request key for different content.
     RequestKeyReused,
+    /// The job is already succeeded, failed, or cancelled, so it cannot be
+    /// cancelled (decision 0030).
+    JobEnded {
+        /// The state the job is in.
+        state: JobState,
+    },
+    /// The actor already has the largest number of jobs waiting or running
+    /// (decision 0030).
+    TooManyJobs,
     /// Storage failed. The request may be retried with the same key.
     Unavailable(String),
 }
@@ -94,6 +106,7 @@ impl fmt::Display for ArtifactError {
             Self::NotFound(Missing::Artifact) => formatter.write_str("artifact not found"),
             Self::NotFound(Missing::Revision) => formatter.write_str("revision not found"),
             Self::NotFound(Missing::File) => formatter.write_str("file not found in revision"),
+            Self::NotFound(Missing::Job) => formatter.write_str("job not found"),
             Self::RevisionConflict { current } => write!(
                 formatter,
                 "artifact changed; current revision is {}",
@@ -114,6 +127,11 @@ impl fmt::Display for ArtifactError {
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
+            Self::JobEnded { state } => {
+                write!(formatter, "the job is already {}", state.as_str())
+            }
+            Self::TooManyJobs => formatter
+                .write_str("too many jobs are waiting or running; wait for one or cancel one"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -162,7 +180,7 @@ impl MetadataChange {
 /// adapters call these methods instead of the store.
 #[derive(Debug)]
 pub struct ArtifactService<S> {
-    store: S,
+    pub(crate) store: S,
 }
 
 impl<S: ArtifactStore> ArtifactService<S> {
@@ -766,7 +784,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
     }
 
     /// An artifact the actor may read: one it owns, outside the trash.
-    fn authorized(
+    pub(crate) fn authorized(
         &self,
         actor: &ActorId,
         id: &ArtifactId,
@@ -819,16 +837,16 @@ fn checked<T>(
 
 /// Length-prefixed SHA-256 over a request's operation and content, so that
 /// field boundaries cannot be shifted to produce the same digest.
-struct Fingerprint(Sha256);
+pub(crate) struct Fingerprint(Sha256);
 
 impl Fingerprint {
-    fn new(operation: &str) -> Self {
+    pub(crate) fn new(operation: &str) -> Self {
         let mut fingerprint = Self(Sha256::new());
         fingerprint.field(operation.as_bytes());
         fingerprint
     }
 
-    fn field(&mut self, bytes: &[u8]) {
+    pub(crate) fn field(&mut self, bytes: &[u8]) {
         self.0.update((bytes.len() as u64).to_be_bytes());
         self.0.update(bytes);
     }
@@ -839,7 +857,7 @@ impl Fingerprint {
         self.field(&Sha256::digest(content));
     }
 
-    fn finish(self) -> RequestFingerprint {
+    pub(crate) fn finish(self) -> RequestFingerprint {
         RequestFingerprint(self.0.finalize().into())
     }
 }

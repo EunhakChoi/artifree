@@ -3,11 +3,14 @@
 mod common;
 
 use artifree_domain::change::ChangeSequence;
+use artifree_domain::identity::UnixMillis;
+use artifree_domain::job::JobKind;
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactStore, Delivery, ListOrder, NewArtifact, PurgeRequest,
     RequestFingerprint, RequestIdentity, StoreError,
 };
+use artifree_ports::job_store::{JobStore, JobStoreError, NewJob};
 use artifree_ports::token_store::TokenStore;
 use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
@@ -25,7 +28,7 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
     let fresh = TempDir::new();
     current_database(&database_in(fresh.path()))?;
     let fresh_schema = schema_of(&database_in(fresh.path()))?;
-    for version in 1..=6 {
+    for version in 1..=7 {
         let dir = TempDir::new();
         let path = database_in(dir.path());
         historical_database(&path, version)?;
@@ -74,6 +77,8 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
         assert_eq!(reused.delivery, Delivery::Replayed, "version {version}");
         assert_eq!(reused.artifact.id, old_artifact());
 
+        assert_jobs_work_beside_old_keys(&store, version)?;
+
         // The feed head never moves back through an upgrade.
         let page = store.changes(&owner, ChangeSequence(0), 100)?;
         assert_eq!(page.head, ChangeSequence(if version >= 2 { 5 } else { 0 }));
@@ -112,6 +117,40 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
         } else {
             assert!(SqliteTokenStore::open(&path)?.list()?.is_empty());
         }
+    }
+    Ok(())
+}
+
+/// The tables of persistent jobs exist and work on the old artifact, and their
+/// keys share one space with the keys the file already held.
+fn assert_jobs_work_beside_old_keys(store: &SqliteStore, version: i64) -> TestResult {
+    let owner = actor("owner");
+    let job = |name: &str, revision: u64| {
+        let request_key = parsed(&format!("test-key-{name}"));
+        store.enqueue_job(NewJob {
+            request: RequestIdentity {
+                actor: &owner,
+                key: &request_key,
+                fingerprint: RequestFingerprint([3; 32]),
+            },
+            artifact: &old_artifact(),
+            revision: SourceRevision(revision),
+            kind: JobKind::VerifyRevision,
+            now: UnixMillis(1_000),
+        })
+    };
+    assert_eq!(job("first-job", 1)?.delivery, Delivery::Committed);
+    assert_eq!(
+        job("old", 1).err(),
+        Some(JobStoreError::RequestKeyReused),
+        "version {version}: a key an artifact request used"
+    );
+    if version >= 7 {
+        assert_eq!(
+            job("swept", 1).err(),
+            Some(JobStoreError::RequestKeyReused),
+            "version {version}: a key a cleanup used"
+        );
     }
     Ok(())
 }
@@ -244,6 +283,22 @@ fn a_failed_migration_step_is_rolled_back_without_touching_the_file() -> TestRes
             connection.pragma_update(None, "user_version", 6)
         },
         "changes_v7",
+    )?;
+    // The jobs step (version 7 to 8) fails: a table already uses the name.
+    assert_refused_untouched(
+        |connection| {
+            connection.execute_batch(history::STEP_1)?;
+            connection.execute_batch(history::STEP_2)?;
+            connection.execute_batch("INSERT INTO feed VALUES (1, zeroblob(16));")?;
+            connection.execute_batch(history::STEP_3)?;
+            connection.execute_batch(history::STEP_4)?;
+            connection.execute_batch(history::STEP_5)?;
+            connection.execute_batch(history::OLD_TOKENS)?;
+            connection.execute_batch(history::STEP_7)?;
+            connection.execute_batch("CREATE TABLE jobs (x TEXT);")?;
+            connection.pragma_update(None, "user_version", 7)
+        },
+        "table jobs already exists",
     )?;
     Ok(())
 }

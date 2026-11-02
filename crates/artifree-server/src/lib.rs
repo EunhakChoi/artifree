@@ -18,6 +18,7 @@ mod runtime_sessions;
 pub mod serve;
 pub mod tokens;
 pub mod web;
+pub mod worker;
 
 #[cfg(test)]
 mod runtime_tests;

@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.7.0",
+  "contract_version": "0.8.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -27,7 +27,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "apps/cli",
       "status": "implemented",
-      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); build inventory."
+      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; build inventory."
     },
     {
       "id": "runtime",
@@ -45,7 +45,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, and a sandboxed preview origin."
     },
     {
       "id": "domain",
@@ -89,8 +89,8 @@ export const scaffoldDescription: ServiceDescription = {
       "layer": "logic",
       "language": "Rust",
       "path": "crates/artifree-core/src/jobs.rs",
-      "status": "planned",
-      "summary": "Commit events, retries, worker lifecycle, and reconnect."
+      "status": "implemented",
+      "summary": "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes are not in the change feed."
     },
     {
       "id": "handoff",
@@ -108,7 +108,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust · SQLite",
       "path": "crates/artifree-providers/src/storage.rs",
       "status": "implemented",
-      "summary": "Local SQLite with atomic commits, a change feed in the same transactions, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned."
+      "summary": "Local SQLite with atomic commits, a change feed and job leases in the same transactions, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned."
     },
     {
       "id": "models",

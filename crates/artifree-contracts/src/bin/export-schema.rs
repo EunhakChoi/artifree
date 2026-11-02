@@ -15,10 +15,11 @@
 )]
 
 use artifree_contracts::api::{
-    AgentSessionList, Artifact, ArtifactChange, ArtifactList, CommitResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, CreateTokenRequest, CreateTokenResponse,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse, FeedPosition, Handoff,
-    HandoffActionRequest, ListArtifactsQuery, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
+    AgentSessionList, Artifact, ArtifactChange, ArtifactList, CancelJobRequest, CancelJobResponse,
+    CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest, CreateTokenRequest,
+    CreateTokenResponse, DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList,
+    ListArtifactsQuery, ListJobsQuery, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionList, RotateTokenResponse, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
@@ -69,10 +70,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<RotateTokenResponse>(),
         generator.subschema_for::<TokenList>(),
         generator.subschema_for::<TokenInfo>(),
+        generator.subschema_for::<EnqueueJobRequest>(),
+        generator.subschema_for::<EnqueueJobResponse>(),
+        generator.subschema_for::<CancelJobResponse>(),
+        generator.subschema_for::<Job>(),
+        generator.subschema_for::<JobList>(),
     ];
     // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();
     generator.subschema_for::<DuplicateArtifactRequest>();
+    generator.subschema_for::<ListJobsQuery>();
+    // The cancel body has no fields, so the root would accept any empty object.
+    generator.subschema_for::<CancelJobRequest>();
     let api = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://artifree.invalid/schemas/api-v1.json",

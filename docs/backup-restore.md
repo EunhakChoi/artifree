@@ -121,6 +121,12 @@ artifree-server serve --data-dir /path/to/new-data ...
   change-feed identity: open web workspaces and clients that followed the
   original feed receive a `reset` and read their state again. Sequence numbers
   continue; they never go back.
+- Jobs are part of the database, so a backup holds them and their findings. A
+  job that was `running` has its lease set to expired in the restored copy: the
+  lease belonged to a worker of the original machine, and a worker of the
+  restored directory runs the job again under a new fence (decision 0030). A
+  worker process is never part of a backup; start one on the restored directory
+  if you want queued jobs to run.
 - Request keys are restored, so a client retrying a request that committed
   before the backup gets its original result, and a key reused for different
   content is still a conflict. Commits made after the backup are not there.
@@ -132,7 +138,7 @@ artifree-server serve --data-dir /path/to/new-data ...
 ## Upgrade between versions
 
 1. Back up the running server with the **new** build's `backup` command. It
-   reads schema versions 1 to 7, so it works on a directory written by a
+   reads schema versions 1 to 8, so it works on a directory written by a
    release that has no `backup` command. If you cannot run the new binary
    against the old directory, stop the old server and copy its whole data
    directory instead.
@@ -145,7 +151,7 @@ artifree-server serve --data-dir /path/to/new-data ...
    go back to the previous binary only with a backup taken before the upgrade,
    restored into a new directory.
 
-Schema 7 adds the purge tombstone, the `purged` change kind, and an index on
+Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, and an index on
 file content (decision 0029). Schema 6 adds the token table to the versioned
 schema. A server of an older release that is started again on a directory this
 build upgraded will refuse it.
@@ -200,4 +206,6 @@ Notes:
 - That a backup and a running server never delay each other. Under WAL SQLite
   readers do not block the writer; commit latency during a backup was not measured.
 - Restoring a backup made by a different build than this one, other than the
-  schema versions 1 to 6 fixtures in the tests.
+  schema versions 1 to 7 fixtures in the tests.
+- A worker process taking over a restored `running` job on another operating
+  system or file system; the restore test exercises the lease expiry only.

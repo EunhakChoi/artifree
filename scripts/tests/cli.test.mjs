@@ -293,3 +293,129 @@ for (const args of [
     );
   });
 }
+
+test('CLI job commands send the right requests and refuse bad usage before sending anything', async () => {
+  const requests = [];
+  const jobId = `job_${'2'.repeat(32)}`;
+  const artifactId = `art_${'1'.repeat(32)}`;
+  const job = {
+    id: jobId,
+    artifact_id: artifactId,
+    revision: 3,
+    kind: 'verify_revision',
+    state: 'queued',
+    attempt: 0,
+    max_attempts: 3,
+    cancel_requested: false,
+    created_at_ms: 4,
+  };
+  const server = createServer((request, response) => {
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+    });
+    request.on('end', () => {
+      requests.push([
+        request.method,
+        request.url,
+        request.headers['idempotency-key'],
+        body === '' ? undefined : JSON.parse(body),
+      ]);
+      response.setHeader('content-type', 'application/json');
+      if (request.url.endsWith('/cancel'))
+        response.end(JSON.stringify({ job, replayed: false }));
+      else if (request.method === 'POST')
+        response.end(JSON.stringify({ job, replayed: false }));
+      else if (request.url.startsWith('/v1/jobs/'))
+        response.end(JSON.stringify(job));
+      else response.end(JSON.stringify({ jobs: [job] }));
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address !== null && typeof address === 'object');
+    const env = {
+      ...process.env,
+      ARTIFREE_URL: `http://127.0.0.1:${address.port}`,
+      ARTIFREE_TOKEN: 'f'.repeat(64),
+    };
+    delete env.ARTIFREE_TOKEN_FILE;
+    const run = async (args) => {
+      try {
+        const { stdout, stderr } = await promisify(execFile)(
+          process.execPath,
+          ['apps/cli/dist/main.js', 'job', ...args],
+          { cwd: root, env, timeout: 10_000 },
+        );
+        return { status: 0, stdout, stderr };
+      } catch (error) {
+        return {
+          status: error.code,
+          stdout: error.stdout,
+          stderr: error.stderr,
+        };
+      }
+    };
+    for (const bad of [
+      ['enqueue', artifactId],
+      ['enqueue', artifactId, '--revision', '0'],
+      ['enqueue', artifactId, '--revision', '1.5'],
+      ['enqueue', '--revision', '1'],
+      ['show'],
+      ['show', jobId, 'extra'],
+      ['list', 'extra'],
+      ['list', '--limit', '0'],
+      ['cancel'],
+      ['frobnicate'],
+    ]) {
+      const refused = await run(bad);
+      assert.equal(refused.status, 2, bad.join(' '));
+      assert.equal(refused.stdout, '', bad.join(' '));
+    }
+    assert.deepEqual(requests, [], 'a bad command line sent a request');
+
+    const enqueued = await run([
+      'enqueue',
+      artifactId,
+      '--revision',
+      '3',
+      '--idempotency-key',
+      'cli-job-key-1',
+    ]);
+    assert.equal(enqueued.status, 0, enqueued.stderr);
+    assert.deepEqual(JSON.parse(enqueued.stdout), { job, replayed: false });
+    await run(['show', jobId]);
+    await run([
+      'list',
+      '--artifact',
+      artifactId,
+      '--limit',
+      '5',
+      '--page-token',
+      'j1.a',
+    ]);
+    await run(['list']);
+    await run(['cancel', jobId, '--idempotency-key', 'cli-job-key-2']);
+    assert.deepEqual(requests, [
+      [
+        'POST',
+        `/v1/artifacts/${artifactId}/jobs`,
+        'cli-job-key-1',
+        { kind: 'verify_revision', revision: 3 },
+      ],
+      ['GET', `/v1/jobs/${jobId}`, undefined, undefined],
+      [
+        'GET',
+        `/v1/artifacts/${artifactId}/jobs?limit=5&page_token=j1.a`,
+        undefined,
+        undefined,
+      ],
+      ['GET', '/v1/jobs', undefined, undefined],
+      ['POST', `/v1/jobs/${jobId}/cancel`, 'cli-job-key-2', {}],
+    ]);
+  } finally {
+    server.close();
+  }
+});

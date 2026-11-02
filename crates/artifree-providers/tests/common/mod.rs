@@ -218,14 +218,15 @@ pub fn old_artifact() -> ArtifactId {
     parsed(OLD_ID)
 }
 
-/// A database as the build of schema `version` (1 to 6) left it, holding real
+/// A database as the build of schema `version` (1 to 7) left it, holding real
 /// data, built only from the frozen schema texts in [`history`]:
 ///
 /// - the artifact "Old" at revision 2 with the body [`OLD_BODY`], created by
 ///   the request key "test-key-old";
 /// - from version 2, a feed with its head at 5;
 /// - from version 3, "Old" renamed to "Renamed" and pinned (metadata revision 2);
-/// - from version 5, an artifact "Trashed" in the trash and one access token.
+/// - from version 5, an artifact "Trashed" in the trash and one access token;
+/// - from version 7, a cleanup run under the key "test-key-swept".
 pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Error> {
     let connection = Connection::open(path)?;
     connection.execute_batch(history::STEP_1)?;
@@ -283,6 +284,14 @@ pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Er
             "INSERT INTO tokens (id, name, secret_hash, prefix, created_at)
                  VALUES ('tok_0123456789abcdef0123456789abcdef', 'laptop', 'hash-1', 'art_01', '2026-01-01T00:00:00Z');",
         )?;
+    }
+    if version >= 7 {
+        connection.execute_batch(history::STEP_7)?;
+        connection.execute_batch(HEAD_AT_5)?;
+        connection.execute_batch(&format!(
+            "INSERT INTO cleanup_runs VALUES ('owner', 'test-key-swept', x'{}', 0, 0, 500);",
+            "09".repeat(32)
+        ))?;
     }
     connection.pragma_update(None, "user_version", version)
 }

@@ -507,8 +507,8 @@ replay, and content sharing, and the preview module hides tickets and CSP.
 HTTP, CLI, and web share one client contract and one application service.
 
 The remaining diagnostic is that every module hides a design decision: the
-documents, jobs, models, tools, build, and export modules are still
-placeholders. The `ArtifactStore` port also deliberately exposes request
+documents, models, tools, build, and export modules are still
+placeholders; jobs have their first behavior (decision 0030). The `ArtifactStore` port also deliberately exposes request
 fingerprints, because replay must commit atomically with the revision. Reach
 10/10 by giving each placeholder a narrow behavioral interface only when its
 first behavior is implemented. This score describes design, not production

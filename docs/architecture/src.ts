@@ -75,8 +75,9 @@ const notes: Record<string, ModuleNote> = {
   },
   jobs: {
     purpose: '변경 알림, 긴 작업, 재시도와 연결 복구를 조정합니다.',
-    exists: 'outbox·작업 수명·취소 의미를 기록한 모듈. 큐나 실행기는 없습니다.',
-    next: '커밋 이벤트와 worker 수명, 중복 실행 방지, 실패·재시작·취소를 함께 설계합니다.',
+    exists:
+      '영속 job 하나(verify_revision, 신뢰하는 서버 코드의 무결성 검사)의 상태·lease·fence·재시도·취소와 별도 프로세스 worker(artifree-server worker run). 결과는 한 번만 기록하고 실행은 최소 한 번입니다. sandbox·자원 제한은 없고 서버가 worker를 시작하지 않으며 job 변경은 변경 알림에 없습니다.',
+    next: '신뢰하지 않는 작업의 실행 제한(R02), 빌드(R03), 모델 호출(P01)을 이 큐 위에 각각 결정합니다.',
   },
   handoff: {
     purpose:
