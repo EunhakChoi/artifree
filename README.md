@@ -124,7 +124,8 @@ with a magnitude beyond 2^53-1, in any spelling such as `1e16`, is refused;
 `JSON.stringify` would change silently (`NaN`, `undefined`, a `Date`) is refused
 before it is sent. `data delete` needs a request body, which a proxy that
 strips the body of a `DELETE` makes a `400` (nothing is deleted); `data update
---patch null` removes the same value. Saving or
+--patch null` removes the same value below the root, but not at the root (a
+null patch there is refused; `data set --path "" --value {}` empties it). Saving or
 restoring a revision does not change the data, and `artifact duplicate
 --copy-data` gives a copy its own copy of it. Issued agent tokens and MCP tools
 (`get_data`, `set_data`, `update_data`, `delete_data`) may read and write it;

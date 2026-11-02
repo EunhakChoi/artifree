@@ -49,8 +49,10 @@ refused by the server and not silently changed; 0.1e-400 is stored as 0.
 Limits: 256 KiB per value, 1 MiB and 10000 values in all, 32 levels.
 delete sends its path and version as a JSON body on a DELETE request. A proxy
 or tunnel that strips the body of a DELETE makes the server answer 400
-invalid_request and deletes nothing. Remove a value through such a proxy with
-update, --patch null, and the same --path; or reach the server directly.
+invalid_request and deletes nothing. Remove a value below the root through such
+a proxy with update, --patch null, and the same --path. The root cannot be
+removed that way (a null patch at --path "" is invalid_request); empty it with
+set --path "" --value {}, or reach the server directly.
 set, update, and delete accept --idempotency-key <key>; without it a new key
 is generated and reported on stderr if the outcome is unknown, and a retry
 with that key returns the original result with replayed: true. Results are

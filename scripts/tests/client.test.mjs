@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import vm from 'node:vm';
 import {
   ArtifreeApiError,
   ArtifreeClient,
@@ -2467,6 +2468,132 @@ test('A value that JSON.stringify would change silently is refused before anythi
     options,
   );
   assert.equal(sent.length, 2);
+});
+
+test('Arrays with holes and objects JSON.stringify would rewrite are refused, and the copy is what is sent', async () => {
+  const sent = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push(init.body);
+      return Response.json(dataWrite);
+    },
+  });
+  const options = { idempotencyKey: 'test-key-1' };
+  const store = (value) =>
+    client.setData(
+      artifact.id,
+      { path: 'a', base_data_version: 0, value },
+      options,
+    );
+  const extra = [1, 2];
+  extra.note = 'x';
+  // An array whose given indexes are holes (`delete` leaves the length alone).
+  const holey = (items, ...holes) => {
+    const array = [...items];
+    for (const index of holes) delete array[index];
+    return array;
+  };
+  const huge = [];
+  huge.length = 2 ** 31;
+  const holeAndExtra = holey([0, 1], 0);
+  holeAndExtra.note = 'x';
+  const tagged = [1];
+  tagged.toJSON = () => 'replaced';
+  const hidden = {};
+  Object.defineProperty(hidden, 'h', { value: 1, enumerable: false });
+  const accessor = {
+    get n() {
+      return 1;
+    },
+  };
+  const symbolic = { [Symbol('s')]: 1 };
+  const holes = /holes or properties/;
+  for (const [what, bad, why] of [
+    ['one hole', holey([0], 0), holes],
+    ['hole in the middle', holey([1, 0, 3], 1), holes],
+    ['trailing hole', holey([1, 2, 0], 2), holes],
+    ['hole nested in an object', { a: { b: holey([0, 1], 0) } }, holes],
+    ['huge sparse array', huge, holes],
+    ['array with a property', extra, holes],
+    ['a hole hidden by an extra property', holeAndExtra, /is missing/],
+    ['array with toJSON', tagged, holes],
+    ['object with toJSON function', { toJSON: () => 'x' }, /function/],
+    ['getter', accessor, /getter or setter/],
+    [
+      'array getter',
+      Object.defineProperty([0], '0', { get: () => 1 }),
+      /getter or setter/,
+    ],
+    ['hidden property', hidden, /hidden from JSON.stringify/],
+    ['symbol-keyed property', symbolic, /symbol-keyed/],
+    [
+      'Date from another realm',
+      vm.runInNewContext('new Date(0)'),
+      /only plain objects/,
+    ],
+    [
+      'class instance from another realm',
+      vm.runInNewContext('new (class B {})()'),
+      /only plain objects/,
+    ],
+    [
+      'object with a null prototype and a hole',
+      Object.assign(Object.create(null), { a: holey([0, 1], 0) }),
+      holes,
+    ],
+  ]) {
+    const error = await failure(store(bad));
+    assert.deepEqual([error.status, error.code], [0, 'invalid_request'], what);
+    assert.match(error.message, /JsonText/, what);
+    assert.match(error.message, why, what);
+  }
+  assert.deepEqual(sent, [], 'nothing reached the network');
+
+  // A proxy is read once: what it answers on the first read is what is sent.
+  let reads = 0;
+  const shifting = new Proxy(
+    { n: 1 },
+    {
+      getOwnPropertyDescriptor(target, name) {
+        reads += 1;
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, name);
+        return reads > 1 && descriptor
+          ? { ...descriptor, value: 'changed' }
+          : descriptor;
+      },
+      get() {
+        throw new Error('the value must not be read again');
+      },
+    },
+  );
+  await store(shifting);
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"n":1}}',
+  );
+
+  // Accepted: other realms, -0 (written as 0), a toJSON that is only data, and
+  // a member named __proto__ as JSON.parse would make it.
+  await store(vm.runInNewContext('({a:[1,{b:2}]})'));
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"a":[1,{"b":2}]}}',
+  );
+  await store([-0]);
+  assert.equal(sent.at(-1), '{"base_data_version":0,"path":"a","value":[0]}');
+  await store({ toJSON: 'data' });
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"toJSON":"data"}}',
+  );
+  await store(JSON.parse('{"__proto__":{"x":1}}'));
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"__proto__":{"x":1}}}',
+  );
+  assert.equal(sent.length, 5);
 });
 
 test('Reading data encodes the path and checks what comes back', async () => {

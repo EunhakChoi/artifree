@@ -1249,6 +1249,80 @@ test('CLI keeps application data per artifact, with versions, across a restart, 
     );
     assert.equal(json(dataCli(second, ['get', id])).data_version, 3);
 
+    // Behind a proxy that strips the body of a DELETE, a value below the root
+    // is removed with a null patch; the root is not, because a null patch
+    // cannot make the root anything but an object. `set` with `{}` empties it.
+    const spaceId = copy.artifact.id;
+    json(
+      dataCli(second, [
+        'set',
+        spaceId,
+        '--path',
+        'k',
+        '--base-data-version',
+        '2',
+        '--value',
+        '1',
+      ]),
+    );
+    const rootNull = dataCli(second, [
+      'update',
+      spaceId,
+      '--path',
+      '',
+      '--base-data-version',
+      '3',
+      '--patch',
+      'null',
+    ]);
+    assert.equal(rootNull.status, 1);
+    assert.match(rootNull.stderr, /^error\[invalid_request\].*root/);
+    assert.deepEqual(json(dataCli(second, ['get', spaceId])).value, { k: 1 });
+    const below = json(
+      dataCli(second, [
+        'update',
+        spaceId,
+        '--path',
+        'k',
+        '--base-data-version',
+        '3',
+        '--patch',
+        'null',
+      ]),
+    );
+    assert.deepEqual(
+      [below.data_version, json(dataCli(second, ['get', spaceId])).value],
+      [4, {}],
+    );
+    json(
+      dataCli(second, [
+        'set',
+        spaceId,
+        '--path',
+        'k',
+        '--base-data-version',
+        '4',
+        '--value',
+        '1',
+      ]),
+    );
+    const cleared = json(
+      dataCli(second, [
+        'set',
+        spaceId,
+        '--path',
+        '',
+        '--base-data-version',
+        '5',
+        '--value',
+        '{}',
+      ]),
+    );
+    assert.deepEqual(
+      [cleared.data_version, json(dataCli(second, ['get', spaceId])).value],
+      [6, {}],
+    );
+
     // In the trash, nothing about the data is there to read or write.
     json(cli(second, ['delete', id, '--base-metadata', '1']));
     const hidden = dataCli(second, ['get', id]);

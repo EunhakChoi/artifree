@@ -281,7 +281,11 @@ changes nothing keeps the version. `update` is an RFC 7396 merge patch, `set`
 can store `null`, and a path through a value that is not an object is
 `data_path_conflict`. HTTP, the MCP tools, the client, and the CLI share one
 core service, and issued agent tokens may use them. `DELETE` carries a JSON
-body; a proxy that strips it gets `400`, never a deletion. A duplicate copies the
+body; a proxy that strips it gets `400`, never a deletion (below the root,
+`update` with a `null` patch is the alternative; the root is emptied with `set`
+of `{}`). The client refuses a JavaScript value that `JSON.stringify` would
+change silently (`NaN`, holes, getters, a `Date`, a `toJSON` function) and sends a
+checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge grants only `metadata.read`**. Subscriptions and queries (R07) and

@@ -247,7 +247,9 @@ changes nothing keeps the version (`changed: false`).
 missing; the root must be given an object, and `null` can be stored. `update_data`
 applies a JSON Merge Patch (RFC 7396): objects merge member by member, a `null`
 member is removed, arrays and scalars replace what is there wholesale (an array is
-never merged inside), and a patch cannot store `null` in an object. `delete_data`
+never merged inside), and a patch cannot store `null` in an object. At the root the
+patch must be an object: a `null` patch there is `invalid_request`, and
+`set_data` with `{}` empties everything. `delete_data`
 removes the value at the path (the empty path empties everything); removing what
 is not there succeeds and changes nothing. A value in the way that is not an
 object is `data_path_conflict`.
@@ -256,8 +258,10 @@ object is `data_path_conflict`.
 nested JSON, so that the server sees exactly what you wrote: a repeated member
 name or a number with a magnitude beyond 2^53-1 in any spelling (`9007199254740993`,
 `9007199254740993.0`, `1e16`, `-9223372036854775808`) is `invalid_request` instead
-of being changed silently, and so is text that is not JSON at all (`1e999` is not
-finite; `0.1e-400` is stored as `0`; `1.0` is stored as `1`). Limits: 256 KiB per value, 1 MiB and 10,000 values per space, 32 levels
+of being changed silently. Three more things about numbers: `1e999` is refused
+because it is not finite; `0.1e-400`, too small for a double, is accepted and
+stored as `0`; and `1.0` is accepted and stored as `1`. Text that is not JSON at
+all is `invalid_request` too. Limits: 256 KiB per value, 1 MiB and 10,000 values per space, 32 levels
 (`data_too_large`). **The three write tools are marked destructive: nothing keeps
 the value they replace, so an overwrite cannot be undone** (a duplicate with
 `copy_data` is the only snapshot). Retries follow the same key rules as every

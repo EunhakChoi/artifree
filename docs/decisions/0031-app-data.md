@@ -153,8 +153,11 @@ invalid_request`, like any malformed body; text that is JSON but breaks the
    no body and answers `400 invalid_request` (a malformed body), **never a
    deletion**: a delete is only ever performed for a body that names the path and
    the version. Where bodies cannot be sent, `PATCH` with a `null` patch at
-   the same path removes the same value (decision 5, update; at the root, set
-   `{}`), and the CLI says
+   the same path removes the same value, **for a path below the root only**:
+   a `null` patch at the root is `RootNotObject` (`422 invalid_request`) because
+   the root must stay an object (decision 5). The root is emptied with `PUT`
+   of `{}` at the empty path, which carries a body (a CLI test asserts both),
+   and the CLI says
    so in `artifree data --help`. A deletion has no query-string form: a
    version and a destructive path in a URL would be logged and cached.
 
@@ -218,8 +221,14 @@ WITHOUT ROWID`. Fixtures of versions 1 to 8 upgrade, a failed step rolls
     is not there as absent, in Rust as in TypeScript (a round-trip test of the
     wire contract). The client refuses, before sending, a JavaScript value that
     `JSON.stringify` would change silently or fail on (`NaN`, `Infinity`,
-    `undefined`, functions, symbols, `bigint`, a `Date`, a `Map`, a cycle, more
-    than 64 levels) and a `base_data_version` that is not a whole number from
+    `undefined`, functions including a `toJSON` function, symbols, `bigint`, a
+    `Date`, a `Map`, a class instance, an array with holes or extra properties,
+    a getter, a non-enumerable or symbol-keyed property, a cycle, more than 64
+    levels). It checks a copy that reads every property once and sends that
+    copy, so a getter or proxy cannot change the value after the check. Plain
+    objects and arrays of another realm are accepted (an object is plain when
+    its prototype is `null` or has none), `-0` is sent as `0`, and a `toJSON`
+    member that is not a function is data. It also refuses a `base_data_version` that is not a whole number from
     0; `JsonText` is the path for exact text. A CLI value that starts with `-`
     is written `--value=-5`.
 

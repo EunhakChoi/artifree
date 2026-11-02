@@ -153,7 +153,7 @@ export type JobVerdict = 'ok' | 'mismatch';
  */
 export type JobState = 'queued' | 'running' | 'retry_scheduled' | 'succeeded' | 'failed' | 'cancelled';
 /**
- * Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers.
+ * Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers, and a number too small for a double (0.1e-400) is stored as 0; 1e999 is refused as not finite.
  */
 export type JsonValue =
   | {

@@ -704,8 +704,9 @@ fn data_tools() -> [ToolDefinition; 4] {
                  with data_conflict and current_data_version. A value in the way that is not an \
                  object fails with data_path_conflict; limits (256 KiB per value, 1 MiB, 10000 \
                  values, 32 levels in all) fail with data_too_large. Every number must be finite with a \
-                 magnitude of at most 2^53-1, whatever its spelling (1e16 is refused); member \
-                 names are unique. Nothing keeps the previous \
+                 magnitude of at most 2^53-1, whatever its spelling (1e16 and 1e999 are refused); \
+                 1.0 is stored as 1 and a number too small for a double, such as 0.1e-400, is \
+                 stored as 0; member names are unique. Nothing keeps the previous \
                  value. Writing what is already there changes nothing and keeps the version. \
                  {KEY_RULE}"
             ),
@@ -720,8 +721,10 @@ fn data_tools() -> [ToolDefinition; 4] {
                  removed (a merge patch cannot store null: use set_data for that); arrays and \
                  scalars replace what is there wholesale, and an array is never merged inside. A \
                  null patch removes the value at the path. The objects above the path that are \
-                 missing are made, unless the patch is null. The rules for base_data_version, \
-                 data_conflict, data_path_conflict, and data_too_large are those of set_data. \
+                 missing are made, unless the patch is null. At the root the patch must be an \
+                 object: a null patch there is refused (use set_data with {{}} to empty \
+                 everything). The rules for numbers, base_data_version, data_conflict, \
+                 data_path_conflict, and data_too_large are those of set_data. \
                  Nothing keeps the previous value. {KEY_RULE}"
             ),
             ToolEffect::Data,

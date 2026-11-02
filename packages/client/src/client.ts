@@ -264,9 +264,12 @@ function statedPart(
  * serializing a JavaScript value. A JavaScript value cannot hold what the
  * server refuses to guess at: a repeated member name or an integer beyond
  * 2^53 - 1 is already changed by the time it is a value; a JavaScript value
- * that `JSON.stringify` would change silently (`NaN`, `undefined`, a `Date`) is
- * refused before it is sent. The server parses
- * the text under the rules of application data and rejects with
+ * that `JSON.stringify` would change silently is refused before it is sent:
+ * `NaN` and `Infinity`, `undefined`, functions (a `toJSON` function too),
+ * symbols, a `bigint`, a `Date` or class instance, an array with holes or extra
+ * properties, and a getter, a hidden property or a symbol-keyed one. Only `-0`
+ * is let through, and is written as `0`. Plain objects and arrays from another
+ * realm are accepted. The server parses the text under the rules of application data and rejects with
  * `invalid_request` what is not JSON or breaks them.
  */
 export class JsonText {
@@ -299,37 +302,85 @@ function notData(where: string, why: string): ArtifreeApiError {
   );
 }
 
+/** The value of own data property `name`, read once; refuses anything else. */
+function ownData(
+  holder: object,
+  name: string,
+  where: string,
+  what: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(holder, name);
+  if (descriptor === undefined) throw notData(where, `${what} is missing`);
+  if (!('value' in descriptor))
+    throw notData(where, `${what} is a getter or setter, not a value`);
+  if (descriptor.enumerable !== true)
+    throw notData(where, `${what} is hidden from JSON.stringify`);
+  return descriptor.value;
+}
+
 /**
- * Throws unless `value` is what `JSON.stringify` writes faithfully. It would
- * otherwise turn `NaN` and `Infinity` into `null`, drop members and array
- * elements that are `undefined`, functions, or symbols (an array element
- * becomes `null`), throw on a `bigint` or a cycle, and write a `Date`, a
- * `Map`, or a class instance as something else. The server's own rules (the
- * size of numbers, limits) are left to the server.
+ * Returns a plain copy of `value`, or throws unless `JSON.stringify` would
+ * write `value` faithfully. The copy is what is serialized, and every property
+ * is read exactly once, so a getter, a proxy or a mutation after the check
+ * cannot change what is sent. `JSON.stringify` would otherwise turn `NaN` and
+ * `Infinity` into `null`, drop members that are `undefined`, functions, or
+ * symbols, turn such array elements and array holes into `null`, ignore
+ * symbol-keyed, non-enumerable and non-index array properties, call a
+ * `toJSON` function, throw on a `bigint` or a cycle, and write a `Date`, a
+ * `Map`, or a class instance as something else. All of those are refused.
+ * An array is anything `Array.isArray` accepts; an object is plain when its
+ * prototype is `null` or itself has none, so a value from another realm
+ * (`vm`, an iframe) is accepted. `-0` is the one change that is allowed: it is
+ * written as `0`. The server's own rules (the size of numbers, limits) are
+ * left to the server.
  */
-function checkData(value: unknown, where: string, levels: number): void {
+function plainData(value: unknown, where: string, levels: number): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean')
-    return;
+    return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value))
       throw notData(where, `${String(value)} is not a JSON number`);
-    return;
+    return value;
   }
   if (typeof value !== 'object')
     throw notData(where, `a ${typeof value} has no JSON form`);
   if (levels <= 0)
     throw notData(where, 'it nests too deeply, or refers to itself');
+  const keys = Reflect.ownKeys(value);
   if (Array.isArray(value)) {
-    value.forEach((item: unknown, index) =>
-      checkData(item, `${where}[${index}]`, levels - 1),
-    );
-    return;
+    const length = value.length;
+    // Own keys are the indexes and `length`; a hole or extra property breaks
+    // the count before any loop runs, so `new Array(1e9)` is cheap to refuse.
+    if (keys.length !== length + 1)
+      throw notData(
+        where,
+        'the array has holes or properties beyond its elements',
+      );
+    const items: unknown[] = [];
+    for (let index = 0; index < length; index += 1)
+      items.push(
+        plainData(
+          ownData(value, String(index), `${where}[${index}]`, 'the element'),
+          `${where}[${index}]`,
+          levels - 1,
+        ),
+      );
+    return items;
   }
   const prototype: unknown = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null)
+  if (prototype !== null && Object.getPrototypeOf(prototype) !== null)
     throw notData(where, 'only plain objects and arrays have a JSON form');
-  for (const [name, member] of Object.entries(value))
-    checkData(member, `${where}.${name}`, levels - 1);
+  const members: [string, unknown][] = [];
+  for (const key of keys) {
+    if (typeof key === 'symbol')
+      throw notData(where, 'a symbol-keyed property has no JSON form');
+    const at = `${where}.${key}`;
+    members.push([
+      key,
+      plainData(ownData(value, key, at, 'the member'), at, levels - 1),
+    ]);
+  }
+  return Object.fromEntries(members);
 }
 
 function checkBase(base: number): void {
@@ -351,8 +402,7 @@ function dataBodyText(
   let text: string;
   if (input instanceof JsonText) text = input.text;
   else {
-    checkData(input, field, DATA_VALUE_LEVELS);
-    text = JSON.stringify(input);
+    text = JSON.stringify(plainData(input, field, DATA_VALUE_LEVELS));
   }
   return `{"base_data_version":${JSON.stringify(request.base_data_version)},"path":${JSON.stringify(request.path)},"${field}":${text}}`;
 }
