@@ -104,12 +104,15 @@ a compose file or an env file (decisions
 A flag wins over its variable for the single-value settings
 (`--api-origin`, `--content-origin`, `--frame-ancestors`); the list settings
 use both, and `--allow-remote-mcp` is on if either is set. An empty variable is
-the same as an unset one. A value that cannot be used stops the server with a
-message that names the flag or variable in effect and never quotes the value
-for `ARTIFREE_API_ORIGIN`, `ARTIFREE_CONTENT_ORIGIN`, `ARTIFREE_FRAME_ANCESTORS`,
-`ARTIFREE_ALLOWED_ORIGINS`, `ARTIFREE_TRUSTED_PROXIES`, `ARTIFREE_LAN`, and
-`ARTIFREE_LOOPBACK_LISTEN` (CI checks `ARTIFREE_CONTENT_ORIGIN` through the
-image). Not every variable is checked that closely:
+the same as an unset one. A value that is valid UTF-8 but cannot be used stops
+the server with a message that names the flag or variable in effect and never
+quotes the value (the one exception is `--lan` or `ARTIFREE_LAN` naming an unspecified
+address such as `0.0.0.0`, which has parsed as an IP address and cannot hold a
+secret). This covers `ARTIFREE_API_ORIGIN`, `ARTIFREE_CONTENT_ORIGIN`,
+`ARTIFREE_FRAME_ANCESTORS`, `ARTIFREE_ALLOWED_ORIGINS`,
+`ARTIFREE_TRUSTED_PROXIES`, `ARTIFREE_LAN`, and `ARTIFREE_LOOPBACK_LISTEN` (CI
+checks `ARTIFREE_CONTENT_ORIGIN` through the image). Not every variable is
+checked that closely:
 
 - `ARTIFREE_ALLOW_REMOTE_MCP` is on only for `true` or `1`; `yes`, `on`, or a
   typo leave it off without a message.
@@ -117,7 +120,8 @@ image). Not every variable is checked that closely:
   are compared as written.
 - `ARTIFREE_API_ORIGIN`, `ARTIFREE_ALLOWED_ORIGINS`, `ARTIFREE_ALLOWED_HOSTS`,
   `ARTIFREE_TRUSTED_PROXIES`, `ARTIFREE_LAN`, `ARTIFREE_LOOPBACK_LISTEN`, and
-  `ARTIFREE_WEB_DIR` ignore a value that is not valid UTF-8, as before.
+  `ARTIFREE_WEB_DIR` are treated as unset when their value is not valid UTF-8,
+  as before, so the server starts without them and prints no message.
   Only `ARTIFREE_CONTENT_ORIGIN` and `ARTIFREE_FRAME_ANCESTORS` refuse one, and
   only when no flag overrides them.
 

@@ -1284,8 +1284,8 @@ mod tests {
                 "{joined:?} must not be quoted, got {error:?}"
             );
             assert!(
-                !error.contains("content-origin") || joined.contains('='),
-                "{joined:?}: only a name followed by '=' is named, got {error:?}"
+                !error.contains("Unrecognized serve option"),
+                "{joined:?} is not a plain option name, so none is named, got {error:?}"
             );
         }
         let equals = parse_serve(&base_args(&[&with_equals]))

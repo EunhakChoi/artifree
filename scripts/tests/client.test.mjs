@@ -2408,4 +2408,17 @@ test('A network failure for a plain address keeps the cause for debugging', asyn
   const error = await client.listArtifacts().catch((reason) => reason);
   assert.equal(error.cause, refusal);
   assert.ok(error.message.endsWith('at http://127.0.0.1:7410.'), error.message);
+
+  // An address that `URL` only rewrites (case, default port) lost nothing.
+  const rewritten = new ArtifreeClient({
+    baseUrl: 'HTTP://Localhost:80',
+    accessToken: 't',
+    fetch: async () => {
+      throw refusal;
+    },
+  });
+  const rewrittenError = await rewritten
+    .listArtifacts()
+    .catch((reason) => reason);
+  assert.equal(rewrittenError.cause, refusal);
 });

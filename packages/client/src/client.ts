@@ -367,9 +367,9 @@ function sameHandoff(left: Handoff, right: Handoff): boolean {
 interface ServerLabel {
   readonly text: string;
   /**
-   * True when `text` is the address as given. When it is not, the address may
-   * have held a secret, so the error a failed `fetch` raised for it (which can
-   * quote the whole address) is not passed on as `cause`.
+   * True when nothing was dropped from the address. When something was, it
+   * may have held a secret, so the error a failed `fetch` raised for it (which
+   * can quote the whole address) is not passed on as `cause`.
    */
   readonly plain: boolean;
 }
@@ -390,7 +390,10 @@ function describeServer(baseUrl: string): ServerLabel {
     // `user:secret@host` parses as an opaque `user:` URL.
     if (url.protocol === 'http:' || url.protocol === 'https:') {
       const text = `${url.origin}${url.pathname}`.replace(/\/+$/, '');
-      return { text, plain: text === baseUrl };
+      // Plain: nothing was dropped, whatever `URL` rewrote (case, default port).
+      const dropped =
+        url.username !== '' || url.password !== '' || /[@?#]/.test(baseUrl);
+      return { text, plain: !dropped };
     }
   } catch {
     // Unreadable as a URL: handled below.
@@ -1164,7 +1167,11 @@ export class ArtifreeClient {
     } catch (error: unknown) {
       throw new ArtifreeApiError(
         `The connection to ${this.serverLabel} ended while reading ${what}.`,
-        { status: response.status, code: 'network_error', cause: error },
+        {
+          status: response.status,
+          code: 'network_error',
+          ...(this.keepRequestCause ? { cause: error } : {}),
+        },
       );
     }
   }
