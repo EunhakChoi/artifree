@@ -679,7 +679,7 @@ impl JsonSchema for JsonValue {
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "description": "Any JSON value. Objects have unique member names, and numbers are finite; an integer must be within +-(2^53 - 1).",
+            "description": "Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers.",
             "anyOf": [
                 { "type": "object" },
                 { "type": "array" },
@@ -720,9 +720,22 @@ pub struct AppData {
     /// Whether anything is at the path. The root always exists.
     pub exists: bool,
     /// The value at the path, present when `exists` is true. It can be
-    /// `null`: a member set to `null`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `null`: a member set to `null`, which is present as `null`, unlike a
+    /// value that is not there, which has no `value` member.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub value: Option<JsonValue>,
+}
+
+/// Reads a member that is there, `null` included, as `Some`. Without it,
+/// serde reads `"value": null` as `None`, the same as a member that is absent.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<JsonValue>, D::Error> {
+    JsonValue::deserialize(deserializer).map(Some)
 }
 
 /// Body of `PUT /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:

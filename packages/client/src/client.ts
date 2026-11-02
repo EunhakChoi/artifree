@@ -263,7 +263,9 @@ function statedPart(
  * {@link ArtifreeClient.updateData} send exactly as written, instead of
  * serializing a JavaScript value. A JavaScript value cannot hold what the
  * server refuses to guess at: a repeated member name or an integer beyond
- * 2^53 - 1 is already changed by the time it is a value. The server parses
+ * 2^53 - 1 is already changed by the time it is a value; a JavaScript value
+ * that `JSON.stringify` would change silently (`NaN`, `undefined`, a `Date`) is
+ * refused before it is sent. The server parses
  * the text under the rules of application data and rejects with
  * `invalid_request` what is not JSON or breaks them.
  */
@@ -288,16 +290,70 @@ export type UpdateDataInput = Omit<UpdateDataRequest, 'patch'> & {
   readonly patch: DataInput;
 };
 
+const DATA_VALUE_LEVELS = 64;
+
+function notData(where: string, why: string): ArtifreeApiError {
+  return new ArtifreeApiError(
+    `${where} cannot be sent as application data: ${why}. Use a JSON value, or JsonText for exact text.`,
+    { status: 0, code: 'invalid_request' },
+  );
+}
+
+/**
+ * Throws unless `value` is what `JSON.stringify` writes faithfully. It would
+ * otherwise turn `NaN` and `Infinity` into `null`, drop members and array
+ * elements that are `undefined`, functions, or symbols (an array element
+ * becomes `null`), throw on a `bigint` or a cycle, and write a `Date`, a
+ * `Map`, or a class instance as something else. The server's own rules (the
+ * size of numbers, limits) are left to the server.
+ */
+function checkData(value: unknown, where: string, levels: number): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value))
+      throw notData(where, `${String(value)} is not a JSON number`);
+    return;
+  }
+  if (typeof value !== 'object')
+    throw notData(where, `a ${typeof value} has no JSON form`);
+  if (levels <= 0)
+    throw notData(where, 'it nests too deeply, or refers to itself');
+  if (Array.isArray(value)) {
+    value.forEach((item: unknown, index) =>
+      checkData(item, `${where}[${index}]`, levels - 1),
+    );
+    return;
+  }
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null)
+    throw notData(where, 'only plain objects and arrays have a JSON form');
+  for (const [name, member] of Object.entries(value))
+    checkData(member, `${where}.${name}`, levels - 1);
+}
+
+function checkBase(base: number): void {
+  if (!Number.isSafeInteger(base) || base < 0)
+    throw notData('base_data_version', 'it is not a whole number from 0');
+}
+
 /**
  * The text of a data write. Members are written in a fixed order; a
- * {@link JsonText} goes in as it is, the rest through `JSON.stringify`.
+ * {@link JsonText} goes in as it is, the rest is checked and then written
+ * through `JSON.stringify`.
  */
 function dataBodyText(
   request: { readonly path: string; readonly base_data_version: number },
   field: 'value' | 'patch',
   input: DataInput,
 ): string {
-  const text = input instanceof JsonText ? input.text : JSON.stringify(input);
+  checkBase(request.base_data_version);
+  let text: string;
+  if (input instanceof JsonText) text = input.text;
+  else {
+    checkData(input, field, DATA_VALUE_LEVELS);
+    text = JSON.stringify(input);
+  }
   return `{"base_data_version":${JSON.stringify(request.base_data_version)},"path":${JSON.stringify(request.path)},"${field}":${text}}`;
 }
 
@@ -767,6 +823,7 @@ export class ArtifreeClient {
     request: DeleteDataRequest,
     options: MutationOptions,
   ): Promise<DataWriteResponse> {
+    checkBase(request.base_data_version);
     return this.dataWrite(
       'DELETE',
       artifactId,

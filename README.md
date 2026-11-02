@@ -117,8 +117,14 @@ Each artifact can keep application data: one JSON object per owner, with its own
 and `data delete` need `--path`, `--base-data-version` (the version you read),
 and an optional `--idempotency-key`. A stale base fails with `data_conflict`
 and the current version, and a write that changes nothing keeps the version.
-Values are strict JSON sent as written (a repeated member name or an integer
-beyond 2^53-1 is refused), at most 256 KiB each and 1 MiB in all. Saving or
+Values are strict JSON sent as written (a repeated member name or a number
+with a magnitude beyond 2^53-1, in any spelling such as `1e16`, is refused;
+`1.0` is stored as `1`), at most 256 KiB each and 1 MiB in all. The client
+(`JsonText`) and the CLI send the text exactly as given; a JavaScript value that
+`JSON.stringify` would change silently (`NaN`, `undefined`, a `Date`) is refused
+before it is sent. `data delete` needs a request body, which a proxy that
+strips the body of a `DELETE` makes a `400` (nothing is deleted); `data update
+--patch null` removes the same value. Saving or
 restoring a revision does not change the data, and `artifact duplicate
 --copy-data` gives a copy its own copy of it. Issued agent tokens and MCP tools
 (`get_data`, `set_data`, `update_data`, `delete_data`) may read and write it;

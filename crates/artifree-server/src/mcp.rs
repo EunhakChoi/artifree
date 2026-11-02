@@ -330,10 +330,13 @@ async fn dispatch_data(
     Some(outcome)
 }
 
-/// A JSON value given as text, as the tools of application data take it.
+/// A JSON value given as text, as the tools of application data take it. Text
+/// that is not JSON at all is `invalid_request` as a malformed body is over
+/// HTTP (`400`); text that is JSON but breaks the rules of application data is
+/// refused later, by the same code as over HTTP (decision 0031).
 fn json_text(field: &str, text: String) -> Result<JsonValue, ApiError> {
     JsonValue::from_text(text)
-        .ok_or_else(|| ApiError::unprocessable(format!("{field}: not valid JSON text")))
+        .ok_or_else(|| ApiError::invalid(format!("{field}: not valid JSON text")))
 }
 
 /// Routes the job tools (decision 0030): the same operations as the job

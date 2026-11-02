@@ -41,9 +41,16 @@ path empties everything. Every write needs --path (use --path "" for the
 root) and --base-data-version, the data_version you read; a write over a
 newer version fails with data_conflict and prints current_data_version on
 stderr. A write that changes nothing keeps the version (changed: false).
+A value that starts with "-" (a negative number) is written --value=-5, with
+the "=", or read from --value-file; --value -5 is a usage error.
 Values are JSON text and are sent exactly as written, so a repeated member
-name or an integer beyond 2^53-1 is refused by the server and not silently
-changed. Limits: 256 KiB per value, 1 MiB and 10000 values in all, 32 levels.
+name or a number beyond 2^53-1 in any spelling (9007199254740993, 1e16) is
+refused by the server and not silently changed; 0.1e-400 is stored as 0.
+Limits: 256 KiB per value, 1 MiB and 10000 values in all, 32 levels.
+delete sends its path and version as a JSON body on a DELETE request. A proxy
+or tunnel that strips the body of a DELETE makes the server answer 400
+invalid_request and deletes nothing. Remove a value through such a proxy with
+update, --patch null, and the same --path; or reach the server directly.
 set, update, and delete accept --idempotency-key <key>; without it a new key
 is generated and reported on stderr if the outcome is unknown, and a retry
 with that key returns the original result with replayed: true. Results are

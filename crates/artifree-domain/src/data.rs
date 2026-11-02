@@ -187,32 +187,40 @@ enum Repr {
     Float(f64),
 }
 
-/// A JSON number as stored: an integer within +-(2^53 - 1), or another finite
-/// double precision number.
+/// A JSON number as stored: a finite number whose magnitude is at most
+/// 2^53 - 1, in whatever spelling. A whole number is stored as an integer, any
+/// other as a double precision number (a fraction too small for a double reads
+/// as 0).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DataNumber(Repr);
 
 impl DataNumber {
-    /// An integer within +-(2^53 - 1), or `None`.
+    /// An integer within +-(2^53 - 1), or `None`. A range check, not `abs`,
+    /// so that `i64::MIN` is refused instead of overflowing.
     #[must_use]
     pub fn from_i64(value: i64) -> Option<Self> {
-        (value.abs() <= MAX_SAFE_INTEGER).then_some(Self(Repr::Int(value)))
+        (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER)
+            .contains(&value)
+            .then_some(Self(Repr::Int(value)))
     }
 
-    /// A finite number, or `None`. A whole number within the safe integer
-    /// range becomes an integer, so `1.0` and `1` are equal.
+    /// A finite number of magnitude at most 2^53 - 1, or `None`. Every double
+    /// beyond that is a whole number that an integer spelling of the same
+    /// value would be refused for, so `1e16` and `9007199254740993.0` are
+    /// refused as `10000000000000000` is. A whole number within range becomes
+    /// an integer, so `1.0` and `1` are equal.
     #[must_use]
     pub fn from_f64(value: f64) -> Option<Self> {
-        if !value.is_finite() {
+        // Exact: 2^53 - 1 is a double, and so is every bound compared here.
+        const LIMIT: f64 = 9_007_199_254_740_991.0;
+        if !value.is_finite() || value.abs() > LIMIT {
             return None;
         }
         // The display of a whole double is its digits with no exponent, so a
         // whole number in range reads back as an integer without a cast, and
         // `-0` reads as 0.
-        if let Ok(whole) = value.to_string().parse::<i64>()
-            && whole.abs() <= MAX_SAFE_INTEGER
-        {
-            return Some(Self(Repr::Int(whole)));
+        if let Ok(whole) = value.to_string().parse::<i64>() {
+            return Self::from_i64(whole);
         }
         Some(Self(Repr::Float(value)))
     }
@@ -284,7 +292,8 @@ impl DataValue {
     /// deeper than [`MAX_NESTING`]; [`DataError::InvalidJson`] for anything
     /// that is not exactly one JSON value under the rules of this module:
     /// surrounding content, a duplicate member name, an empty or overlong
-    /// member name, an integer beyond 2^53 - 1, a number that is not finite,
+    /// member name, a number of magnitude beyond 2^53 - 1 in any spelling or one
+    /// that is not finite,
     /// or a lone surrogate escape.
     pub fn parse(text: &str) -> Result<Self, DataError> {
         if text.len() > MAX_VALUE_BYTES {
@@ -643,7 +652,7 @@ impl Parser<'_> {
         let token = &self.text[start..self.position];
         let out_of_range = DataError::InvalidJson {
             offset: start,
-            rule: "a number outside what a double precision client holds exactly (an integer beyond 2^53 - 1, or a number that is not finite)",
+            rule: "a number outside what a double precision client holds exactly (magnitude beyond 2^53 - 1 in any spelling, or not finite)",
         };
         let number = if whole {
             token
@@ -1003,11 +1012,12 @@ mod tests {
             ("1e2", "100"),
             ("0.5e1", "5"),
             ("1.5", "1.5"),
-            ("1e300", "1e300"),
             ("-1.25e-7", "-1.25e-7"),
             ("9007199254740991", "9007199254740991"),
             ("-9007199254740991", "-9007199254740991"),
-            ("1e20", "1e20"),
+            ("0.1e-400", "0"),
+            ("-1e-999", "0"),
+            ("9007199254740991.0", "9007199254740991"),
             ("\"a\\/b\\u00e9\\n\"", "\"a/b\u{e9}\\n\""),
             ("\"\\u0001\\u001f\"", "\"\\u0001\\u001f\""),
             ("\"\\ud83d\\ude00\"", "\"\u{1f600}\""),
@@ -1022,8 +1032,8 @@ mod tests {
     fn whole_numbers_are_integers_and_others_stay_doubles() {
         assert_eq!(value("2.0"), value("2"));
         assert_ne!(value("2.5"), value("2"));
-        let big = value("1e20");
-        assert!(matches!(big, DataValue::Number(n) if n.as_i64().is_none()));
+        let fraction = value("2.5");
+        assert!(matches!(fraction, DataValue::Number(n) if n.as_i64().is_none()));
         let small = value("42");
         assert!(matches!(small, DataValue::Number(n) if n.as_i64() == Some(42)));
         assert!(matches!(small, DataValue::Number(n) if (n.as_f64() - 42.0).abs() < f64::EPSILON));
@@ -1036,6 +1046,20 @@ mod tests {
             "-9007199254740992",
             "18446744073709551616",
             "99999999999999999999999999",
+            "-9223372036854775808",
+            "9223372036854775807",
+            "-9223372036854775809",
+            "18446744073709551615",
+            // The same numbers in a float spelling are refused too.
+            "9007199254740993.0",
+            "9.007199254740993e15",
+            "9007199254740992.0",
+            "-9007199254740993.0",
+            "9007199254740991.5",
+            "1e16",
+            "1e20",
+            "1E300",
+            "-1.5e300",
             "1e999",
             "-1e999",
             "[1e400]",
@@ -1045,6 +1069,29 @@ mod tests {
                 "accepted {bad}"
             );
         }
+    }
+
+    /// `abs()` overflows for `i64::MIN`; the bound is a range check, so the
+    /// extremes of every integer type are refused and never panic.
+    #[test]
+    fn the_extremes_of_integer_types_are_refused_without_overflow() {
+        assert_eq!(DataNumber::from_i64(i64::MIN), None);
+        assert_eq!(DataNumber::from_i64(i64::MAX), None);
+        assert_eq!(DataNumber::from_i64(MAX_SAFE_INTEGER + 1), None);
+        assert_eq!(DataNumber::from_i64(-MAX_SAFE_INTEGER - 1), None);
+        assert!(DataNumber::from_i64(MAX_SAFE_INTEGER).is_some());
+        assert!(DataNumber::from_i64(-MAX_SAFE_INTEGER).is_some());
+        for extreme in [
+            f64::MAX,
+            f64::MIN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            assert_eq!(DataNumber::from_f64(extreme), None, "{extreme}");
+        }
+        assert_eq!(DataNumber::from_f64(9_007_199_254_740_992.0), None);
+        assert!(DataNumber::from_f64(-9_007_199_254_740_991.0).is_some());
     }
 
     #[test]

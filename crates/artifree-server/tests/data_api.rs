@@ -971,6 +971,102 @@ async fn values_that_break_the_rules_are_refused() -> TestResult {
     Ok(())
 }
 
+/// `i64::MIN` once overflowed `abs` on the request task; every number outside
+/// +-(2^53 - 1) is refused in whatever spelling, and the bounds are accepted.
+#[tokio::test]
+async fn numbers_outside_the_exact_range_are_refused_in_every_spelling() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let uri = format!("/v1/artifacts/{id}/data");
+    let send = |method: &'static str, field: &'static str, number: String, key: String| {
+        let (harness, uri) = (&harness, uri.clone());
+        async move {
+            harness
+                .send_text(
+                    method,
+                    &uri,
+                    Some(OWNER),
+                    Some(&key),
+                    Some(format!(
+                        r#"{{"path":"n","base_data_version":0,"{field}":{number}}}"#
+                    )),
+                )
+                .await
+        }
+    };
+    let refused = [
+        "-9223372036854775808",
+        "9223372036854775807",
+        "-9223372036854775809",
+        "18446744073709551615",
+        "18446744073709551616",
+        "9007199254740992",
+        "-9007199254740992",
+        "9007199254740993.0",
+        "9.007199254740993e15",
+        "1e16",
+        "-1e16",
+        "1e20",
+        "-1.5e300",
+        "1e999",
+    ];
+    for (index, number) in refused.into_iter().enumerate() {
+        let wrapped = [
+            ("PUT", "value", number.to_owned()),
+            ("PUT", "value", format!("[{number}]")),
+            ("PATCH", "patch", format!(r#"{{"x":{number}}}"#)),
+        ];
+        for (call, (method, field, text)) in wrapped.into_iter().enumerate() {
+            let reply = send(method, field, text, format!("num-{index}-{call}")).await?;
+            assert!(
+                reply.is(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request"),
+                "{method} {number}: {} {}",
+                reply.status,
+                reply.text
+            );
+        }
+    }
+    assert_eq!(
+        harness.at(&id, "").await?["data_version"],
+        0,
+        "nothing written"
+    );
+
+    // The bounds are accepted, as integers or as whole floats; 1e999 is not,
+    // while a fraction too small for a double reads as 0.
+    for (index, (number, stored)) in [
+        ("9007199254740991", "9007199254740991"),
+        ("-9007199254740991", "-9007199254740991"),
+        ("9007199254740991.0", "9007199254740991"),
+        ("1.5e3", "1500"),
+        ("0.1e-400", "0"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let uri = format!("/v1/artifacts/{id}/data");
+        let reply = harness
+            .send_text(
+                "PUT",
+                &uri,
+                Some(OWNER),
+                Some(&format!("num-ok-{index}")),
+                Some(format!(
+                    r#"{{"path":"n","base_data_version":{index},"value":{number}}}"#
+                )),
+            )
+            .await?;
+        assert_eq!(reply.status, StatusCode::OK, "{number}: {}", reply.text);
+        let read = harness.read(&id, "?path=n").await?;
+        assert!(
+            read.text.contains(&format!(r#""value":{stored}"#)),
+            "{number}: {}",
+            read.text
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_body_that_is_not_the_request_is_refused() -> TestResult {
     let harness = Harness::new()?;
@@ -1002,6 +1098,16 @@ async fn a_body_that_is_not_the_request_is_refused() -> TestResult {
         (
             "trailing text",
             r#"{"path":"a","base_data_version":0,"value":1} x"#.to_owned(),
+        ),
+        // Text that is not JSON inside the body is a malformed body (400), as
+        // `invalid_request` is over MCP for a value given as text.
+        (
+            "malformed value",
+            r#"{"path":"a","base_data_version":0,"value":[1,}"#.to_owned(),
+        ),
+        (
+            "unterminated value",
+            r#"{"path":"a","base_data_version":0,"value":{"a":"#.to_owned(),
         ),
     ] {
         let reply = harness
@@ -1046,6 +1152,45 @@ async fn a_body_that_is_not_the_request_is_refused() -> TestResult {
         );
     }
     assert_eq!(harness.at(&id, "").await?["data_version"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_delete_whose_body_was_stripped_is_refused_and_deletes_nothing() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let uri = format!("/v1/artifacts/{id}/data");
+    accepted(
+        &harness
+            .set(&id, "stripped-set", 0, "keep", &json!(1))
+            .await?,
+    )?;
+    // A proxy that strips the body of a DELETE leaves a request with no body,
+    // with or without its content type: refused as a malformed body, and
+    // nothing is deleted.
+    let kept = harness.at(&id, "").await?["data_version"].clone();
+    for content_type_and_empty_body in [None, Some(String::new())] {
+        let reply = harness
+            .send_text(
+                "DELETE",
+                &uri,
+                Some(OWNER),
+                Some("stripped-1"),
+                content_type_and_empty_body,
+            )
+            .await?;
+        assert!(
+            reply.is(StatusCode::BAD_REQUEST, "invalid_request"),
+            "{}",
+            reply.text
+        );
+    }
+    assert_eq!(harness.at(&id, "").await?["data_version"], kept);
+    assert_eq!(
+        harness.at(&id, "keep").await?["value"],
+        1,
+        "nothing was deleted"
+    );
     Ok(())
 }
 

@@ -254,8 +254,10 @@ object is `data_path_conflict`.
 
 `value` and `patch` are **JSON text strings**, such as `"{\"done\":false}"`, not
 nested JSON, so that the server sees exactly what you wrote: a repeated member
-name or an integer beyond 2^53-1 is `invalid_request` instead of being changed
-silently. Limits: 256 KiB per value, 1 MiB and 10,000 values per space, 32 levels
+name or a number with a magnitude beyond 2^53-1 in any spelling (`9007199254740993`,
+`9007199254740993.0`, `1e16`, `-9223372036854775808`) is `invalid_request` instead
+of being changed silently, and so is text that is not JSON at all (`1e999` is not
+finite; `0.1e-400` is stored as `0`; `1.0` is stored as `1`). Limits: 256 KiB per value, 1 MiB and 10,000 values per space, 32 levels
 (`data_too_large`). **The three write tools are marked destructive: nothing keeps
 the value they replace, so an overwrite cannot be undone** (a duplicate with
 `copy_data` is the only snapshot). Retries follow the same key rules as every

@@ -1144,11 +1144,45 @@ test('CLI keeps application data per artifact, with versions, across a restart, 
     assert.match(stale.stderr, /^current_data_version=2$/m);
 
     // What JSON.parse would silently change is refused by the server.
-    for (const value of ['{"a":1,"a":2}', '9007199254740993']) {
-      const refused = dataCli(first, write(id, 2, 'x', value, 'cli-app-3'));
+    // Numbers beyond 2^53 - 1 are refused in every spelling, and the extremes
+    // of the integer types neither crash the server nor the command.
+    for (const value of [
+      '{"a":1,"a":2}',
+      '9007199254740993',
+      '-9223372036854775808',
+      '9223372036854775807',
+      '18446744073709551615',
+      '9007199254740993.0',
+      '9.007199254740993e15',
+      '1e16',
+      '1e999',
+    ]) {
+      // `--value=` so that a negative number is not taken for an option.
+      const refused = dataCli(first, [
+        'set',
+        id,
+        '--path',
+        'x',
+        '--base-data-version',
+        '2',
+        `--value=${value}`,
+        '--idempotency-key',
+        'cli-app-3',
+      ]);
       assert.equal(refused.status, 1, value);
       assert.match(refused.stderr, /^error\[invalid_request\]/, value);
+      assert.doesNotMatch(refused.stderr, /panic/i, value);
     }
+    // Without the `=`, a value that starts with a dash is a usage error and
+    // nothing is sent.
+    const dash = dataCli(first, write(id, 2, 'x', '-1', 'cli-app-dash'));
+    assert.equal(dash.status, 2);
+    assert.equal(dash.stdout, '');
+    assert.equal(
+      json(dataCli(first, ['get', id])).data_version,
+      2,
+      'nothing was written',
+    );
     const valueFile = join(site, 'value.json');
     await writeFile(valueFile, '{"from":"file"}');
     const fromFile = json(

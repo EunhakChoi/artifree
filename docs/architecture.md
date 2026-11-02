@@ -145,7 +145,7 @@ in the Rust core.
 | `GET /v1/artifacts/{id}/data`                                                      | Read your application data at a `?path=`          |
 | `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version) |
 | `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)           |
-| `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, with a body)   |
+| `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)     |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"? } }` with
 `invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `not_found` (404),
@@ -274,13 +274,14 @@ R06 adds application data ([0031](decisions/0031-app-data.md)): one JSON
 object per actor and artifact with its own `data_version` (schema 9),
 unrelated to the source revision and untouched by saving or restoring one.
 Paths are `/`-separated segments that address object members; values are strict
-JSON, canonicalized, and limited (256 KiB per value, 1 MiB and 10,000 values per
+JSON (numbers of magnitude at most 2^53−1 in any spelling), canonicalized, and limited (256 KiB per value, 1 MiB and 10,000 values per
 space, 32 levels). A write is conditional on `base_data_version` and keyed, in
 the key space shared with artifact, cleanup, and job requests; a write that
 changes nothing keeps the version. `update` is an RFC 7396 merge patch, `set`
 can store `null`, and a path through a value that is not an object is
 `data_path_conflict`. HTTP, the MCP tools, the client, and the CLI share one
-core service, and issued agent tokens may use them. A duplicate copies the
+core service, and issued agent tokens may use them. `DELETE` carries a JSON
+body; a proxy that strips it gets `400`, never a deletion. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge grants only `metadata.read`**. Subscriptions and queries (R07) and

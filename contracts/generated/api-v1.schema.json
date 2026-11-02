@@ -67,7 +67,7 @@
               "type": "null"
             }
           ],
-          "description": "The value at the path, present when `exists` is true. It can be\n`null`: a member set to `null`."
+          "description": "The value at the path, present when `exists` is true. It can be\n`null`: a member set to `null`, which is present as `null`, unlike a\nvalue that is not there, which has no `value` member."
         }
       },
       "required": [
@@ -1327,7 +1327,7 @@
           "type": "null"
         }
       ],
-      "description": "Any JSON value. Objects have unique member names, and numbers are finite; an integer must be within +-(2^53 - 1)."
+      "description": "Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers."
     },
     "ListArtifactsQuery": {
       "additionalProperties": false,

@@ -5532,13 +5532,13 @@
                         "type": "null"
                       }
                     ],
-                    "description": "Any JSON value. Objects have unique member names, and numbers are finite; an integer must be within +-(2^53 - 1)."
+                    "description": "Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers."
                   },
                   {
                     "type": "null"
                   }
                 ],
-                "description": "The value at the path, present when `exists` is true. It can be\n`null`: a member set to `null`."
+                "description": "The value at the path, present when `exists` is true. It can be\n`null`: a member set to `null`, which is present as `null`, unlike a\nvalue that is not there, which has no `value` member."
               }
             },
             "required": [
@@ -5712,7 +5712,7 @@
       "title": "Get application data"
     },
     {
-      "description": "Replace the value at a path of your application data with the JSON text in value, making the objects above the path that are missing. null can be stored here. At the root the value must be an object and replaces everything. The write succeeds only if base_data_version is still the data_version; otherwise it fails with data_conflict and current_data_version. A value in the way that is not an object fails with data_path_conflict; limits (256 KiB per value, 1 MiB, 10000 values, 32 levels in all) fail with data_too_large. Numbers must be finite and integers within 2^53-1; member names are unique. Nothing keeps the previous value. Writing what is already there changes nothing and keeps the version. idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
+      "description": "Replace the value at a path of your application data with the JSON text in value, making the objects above the path that are missing. null can be stored here. At the root the value must be an object and replaces everything. The write succeeds only if base_data_version is still the data_version; otherwise it fails with data_conflict and current_data_version. A value in the way that is not an object fails with data_path_conflict; limits (256 KiB per value, 1 MiB, 10000 values, 32 levels in all) fail with data_too_large. Every number must be finite with a magnitude of at most 2^53-1, whatever its spelling (1e16 is refused); member names are unique. Nothing keeps the previous value. Writing what is already there changes nothing and keeps the version. idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
       "effect": "data",
       "inputSchema": {
         "additionalProperties": false,

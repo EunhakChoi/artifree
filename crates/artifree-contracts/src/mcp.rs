@@ -703,8 +703,9 @@ fn data_tools() -> [ToolDefinition; 4] {
                  succeeds only if base_data_version is still the data_version; otherwise it fails \
                  with data_conflict and current_data_version. A value in the way that is not an \
                  object fails with data_path_conflict; limits (256 KiB per value, 1 MiB, 10000 \
-                 values, 32 levels in all) fail with data_too_large. Numbers must be finite and \
-                 integers within 2^53-1; member names are unique. Nothing keeps the previous \
+                 values, 32 levels in all) fail with data_too_large. Every number must be finite with a \
+                 magnitude of at most 2^53-1, whatever its spelling (1e16 is refused); member \
+                 names are unique. Nothing keeps the previous \
                  value. Writing what is already there changes nothing and keeps the version. \
                  {KEY_RULE}"
             ),

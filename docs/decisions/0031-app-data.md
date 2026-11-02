@@ -53,11 +53,20 @@ the CLI, with the owner's token or an issued agent token.
    preserved. A value is refused when it has a repeated member name at any
    depth (also when spelled with escapes), a member name that is empty or over
    256 bytes, a lone surrogate escape, or a raw control character in a string.
-   An integer literal must be within +-(2^53 - 1); other numbers must be
-   finite; a number that is whole and in range is stored as an integer (`1.0`,
-   `1e2`, and `-0` become `1`, `100`, and `0`). The text, not a parsed value,
-   is what is checked, so that a duplicate or an integer a JavaScript parser
-   would silently change is seen. The domain has no serde and no I/O.
+   **Numbers: every number must be finite and have a magnitude of at most
+   2^53 - 1, in whatever spelling.** An integer literal beyond that bound
+   (including `-9223372036854775808` and `18446744073709551615`) is refused,
+   and so is a float spelling of such a number: `9007199254740993.0`,
+   `9.007199254740993e15`, and `1e16` are refused as `10000000000000000` is
+   (every double beyond the bound is a whole number, so the rule has no gap).
+   `1e999` is refused as not finite. A fraction too small for a double reads as
+   `0` (`0.1e-400` is stored as `0`). A number that is whole and in range is
+   stored as an integer (`1.0`, `1e2`, and `-0` become `1`, `100`, and `0`),
+   and any other as the shortest double text that reads back the same. The
+   bound is a range check, not `abs`, so the extremes of the integer types are
+   refused and cannot overflow. The text, not a parsed value, is what is
+   checked, so that a duplicate or an integer a JavaScript parser would
+   silently change is seen. The domain has no serde and no I/O.
 4. **Limits.** A value or patch is at most 256 KiB of text (`MAX_VALUE_BYTES`).
    A space is at most 1 MiB canonical, 10,000 values below the root (every
    array element and member counts), and 32 levels of nesting with the root
@@ -125,11 +134,29 @@ data_version, changed, replayed}`. `path` is required in a write; the
    as raw text so that decision 3 applies to what was sent. The checks run in
    this order: artifact identifier (`404`), `Idempotency-Key` (`400`), body
    shape (`400`), path and value (`422 invalid_request`, or `422
-data_too_large`), then artifact, key, and base. These routes have their own
+data_too_large`), then artifact, key, and base. **Text inside the body that
+   is not JSON at all** (`"value": [1,}`) breaks the body and is `400
+invalid_request`, like any malformed body; text that is JSON but breaks the
+   rules of decision 3 or 4 is `422`. MCP gives the same codes: a `value` or
+   `patch` string that is not JSON is `invalid_request` (internally the same
+   `400`), and one that breaks the rules is `invalid_request` or
+   `data_too_large` as over HTTP. MCP results carry the code and not the HTTP
+   status, so the code is what the two share. These routes have their own
    body bound, the value limit plus 8 KiB, answered `413 payload_too_large`;
    the request rate and concurrency limits apply as everywhere else. New error
    codes: `data_conflict` (`409`), `data_path_conflict` (`409`), and
    `data_too_large` (`422`); `ErrorBody` gains `current_data_version`.
+
+   **`DELETE` carries its request in a JSON body**, as the content cleanup does.
+   The client and the CLI always send one. Some proxies, tunnels, and HTTP
+   clients drop the body of a `DELETE`; the server then sees a request with
+   no body and answers `400 invalid_request` (a malformed body), **never a
+   deletion**: a delete is only ever performed for a body that names the path and
+   the version. Where bodies cannot be sent, `PATCH` with a `null` patch at
+   the same path removes the same value (decision 5, update; at the root, set
+   `{}`), and the CLI says
+   so in `artifree data --help`. A deletion has no query-string form: a
+   version and a destructive path in a URL would be logged and cached.
 
 10. **MCP.** `get_data` (read), and `set_data`, `update_data`, `delete_data`
     (a new effect `data`, all requiring `idempotency_key`). **The three write
@@ -186,7 +213,15 @@ WITHOUT ROWID`. Fixtures of versions 1 to 8 upgrade, a failed step rolls
     `artifree data get|set|update|delete` and `artifree artifact duplicate
 --copy-data`. The CLI embeds the text it is given in the request body
     unparsed. The client rejects a response whose shape or `copied` part it
-    does not know as an invalid response.
+    does not know as an invalid response. `AppData.value` reads a stored
+    `null` as present (`exists: true` with the text `null`) and a value that
+    is not there as absent, in Rust as in TypeScript (a round-trip test of the
+    wire contract). The client refuses, before sending, a JavaScript value that
+    `JSON.stringify` would change silently or fail on (`NaN`, `Infinity`,
+    `undefined`, functions, symbols, `bigint`, a `Date`, a `Map`, a cycle, more
+    than 64 levels) and a `base_data_version` that is not a whole number from
+    0; `JsonText` is the path for exact text. A CLI value that starts with `-`
+    is written `--value=-5`.
 
 ## Limits and what is not implemented
 

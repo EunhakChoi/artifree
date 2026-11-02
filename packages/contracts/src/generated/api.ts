@@ -153,7 +153,7 @@ export type JobVerdict = 'ok' | 'mismatch';
  */
 export type JobState = 'queued' | 'running' | 'retry_scheduled' | 'succeeded' | 'failed' | 'cancelled';
 /**
- * Any JSON value. Objects have unique member names, and numbers are finite; an integer must be within +-(2^53 - 1).
+ * Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers.
  */
 export type JsonValue =
   | {
@@ -1130,7 +1130,8 @@ export interface AppData {
   path: string;
   /**
    * The value at the path, present when `exists` is true. It can be
-   * `null`: a member set to `null`.
+   * `null`: a member set to `null`, which is present as `null`, unlike a
+   * value that is not there, which has no `value` member.
    */
   value?: JsonValue | null;
 }

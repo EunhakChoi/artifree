@@ -2385,6 +2385,90 @@ test('Data requests carry the path, the base version, and the key, and the text 
   }
 });
 
+test('A value that JSON.stringify would change silently is refused before anything is sent', async () => {
+  const sent = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([String(url), init.body]);
+      return Response.json(dataWrite);
+    },
+  });
+  const options = { idempotencyKey: 'test-key-1' };
+  const cycle = {};
+  cycle.self = cycle;
+  const deep = [];
+  let inner = deep;
+  for (let level = 0; level < 100; level += 1) {
+    const next = [];
+    inner.push(next);
+    inner = next;
+  }
+  for (const [what, bad] of [
+    ['NaN', { n: Number.NaN }],
+    ['Infinity', [Number.POSITIVE_INFINITY]],
+    ['-Infinity', { a: { b: Number.NEGATIVE_INFINITY } }],
+    ['undefined member', { a: undefined }],
+    ['undefined element', [1, undefined]],
+    ['undefined', undefined],
+    ['function', { f() {} }],
+    ['symbol', { s: Symbol('s') }],
+    ['bigint', { big: 10n }],
+    ['Date', { when: new Date(0) }],
+    ['Map', { map: new Map() }],
+    ['class instance', { box: new (class Box {})() }],
+    ['cycle', cycle],
+    ['depth', deep],
+  ]) {
+    for (const call of [
+      () =>
+        client.setData(
+          artifact.id,
+          { path: 'a', base_data_version: 0, value: bad },
+          options,
+        ),
+      () =>
+        client.updateData(
+          artifact.id,
+          { path: 'a', base_data_version: 0, patch: bad },
+          options,
+        ),
+    ]) {
+      const error = await failure(call());
+      assert.deepEqual(
+        [error.status, error.code],
+        [0, 'invalid_request'],
+        what,
+      );
+      assert.match(error.message, /JsonText/, what);
+    }
+  }
+  for (const base_data_version of [-1, 1.5, Number.NaN, 2 ** 53]) {
+    const error = await failure(
+      client.deleteData(artifact.id, { path: 'a', base_data_version }, options),
+    );
+    assert.equal(error.code, 'invalid_request', String(base_data_version));
+  }
+  assert.deepEqual(sent, [], 'nothing reached the network');
+  // The good values and the exact-text escape hatch still go.
+  await client.setData(
+    artifact.id,
+    {
+      path: 'a',
+      base_data_version: 0,
+      value: { ok: [1.5, null, 'x', true, {}] },
+    },
+    options,
+  );
+  await client.setData(
+    artifact.id,
+    { path: 'a', base_data_version: 0, value: new JsonText('{"n":1e999}') },
+    options,
+  );
+  assert.equal(sent.length, 2);
+});
+
 test('Reading data encodes the path and checks what comes back', async () => {
   const urls = [];
   let answer;

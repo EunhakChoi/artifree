@@ -900,3 +900,87 @@ async fn duplicate_artifact_copies_data_only_when_asked() -> TestResult {
     assert_eq!(uncopied["structuredContent"]["data_version"], 0);
     Ok(())
 }
+
+/// Text that is not JSON, and numbers outside what a double holds exactly in
+/// any spelling, are `invalid_request` through both tools that take text, with
+/// no panic (`i64::MIN` once overflowed `abs`).
+#[tokio::test]
+async fn data_tools_refuse_text_that_is_not_data_without_panicking() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "num-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+    // Not JSON at all, whichever tool takes it.
+    let not_json = ["{", "1 2", "", "NaN"];
+    // JSON, but a number the rules refuse: alone for `set_data`, and as a
+    // member of an object patch for `update_data`.
+    let numbers = [
+        "-9223372036854775808",
+        "9223372036854775807",
+        "18446744073709551615",
+        "9007199254740992",
+        "-9007199254740992",
+        "9007199254740993.0",
+        "9.007199254740993e15",
+        "1e16",
+        "1e20",
+        "-1.5e300",
+        "1e999",
+        "[-9223372036854775808]",
+    ];
+    let mut cases: Vec<(&str, &str, String)> = Vec::new();
+    for text in not_json {
+        cases.push(("set_data", "value", text.to_owned()));
+        cases.push(("update_data", "patch", text.to_owned()));
+    }
+    for text in numbers {
+        cases.push(("set_data", "value", text.to_owned()));
+        cases.push(("update_data", "patch", format!(r#"{{"x":{text}}}"#)));
+    }
+    for (index, (tool, field, text)) in cases.into_iter().enumerate() {
+        let mut arguments = json!({
+            "artifact_id": artifact, "path": "n", "base_data_version": 0,
+            "idempotency_key": format!("num-refused-{index}")
+        });
+        arguments[field] = json!(text);
+        // A handler that panics never answers; bound the wait so that it is a
+        // failure of this test and not a hang.
+        let result = tokio::time::timeout(Duration::from_secs(30), harness.call(tool, arguments))
+            .await
+            .map_err(|_| format!("{tool} {text:?} was never answered"))??;
+        assert_eq!(
+            error_code(&result),
+            "invalid_request",
+            "{tool} {text:?}: {result}"
+        );
+    }
+    // The bounds themselves are accepted, in either spelling.
+    for (index, text) in [
+        "9007199254740991",
+        "-9007199254740991",
+        "9007199254740991.0",
+        "1.5e3",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = harness
+            .call(
+                "set_data",
+                json!({
+                    "artifact_id": artifact, "path": "ok", "base_data_version": index,
+                    "value": text, "idempotency_key": format!("num-ok-{index}")
+                }),
+            )
+            .await?;
+        assert_eq!(result["isError"], false, "{text}: {result}");
+    }
+    Ok(())
+}
