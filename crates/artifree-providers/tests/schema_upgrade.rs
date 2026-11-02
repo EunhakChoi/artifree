@@ -5,16 +5,16 @@ mod common;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactListing, ArtifactStore, Delivery, ListOrder, NewArtifact, RequestFingerprint,
-    RequestIdentity, StoreError,
+    ArtifactListing, ArtifactStore, Delivery, ListOrder, NewArtifact, PurgeRequest,
+    RequestFingerprint, RequestIdentity, StoreError,
 };
 use artifree_ports::token_store::TokenStore;
 use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
 use common::{
-    OLD_BODY, OLD_FINGERPRINT, TempDir, TestResult, actor, current_database, database_in,
-    expected_artifact_name, files_of, historical_database, history, key, old_artifact, parsed,
-    schema_of, user_version,
+    OLD_BODY, OLD_FINGERPRINT, TRASHED_ID, TempDir, TestResult, actor, current_database,
+    database_in, expected_artifact_name, files_of, historical_database, history, key, old_artifact,
+    parsed, schema_of, user_version,
 };
 use rusqlite::Connection;
 
@@ -25,7 +25,7 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
     let fresh = TempDir::new();
     current_database(&database_in(fresh.path()))?;
     let fresh_schema = schema_of(&database_in(fresh.path()))?;
-    for version in 1..=5 {
+    for version in 1..=6 {
         let dir = TempDir::new();
         let path = database_in(dir.path());
         historical_database(&path, version)?;
@@ -90,13 +90,22 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
         let trashed: Vec<_> = trash.iter().map(|item| item.title.as_str()).collect();
         assert_eq!(
             trashed,
-            if version == 5 {
+            if version >= 5 {
                 vec!["Trashed"]
             } else {
                 vec![]
             }
         );
-        if version == 5 {
+        let found = store.unreferenced_content()?;
+        assert_eq!(
+            (found.blobs, found.bytes),
+            (0, 0),
+            "version {version}: an upgrade must not leave content unreferenced"
+        );
+        if version >= 5 {
+            purge_the_trashed_artifact(&store, version)?;
+        }
+        if version >= 5 {
             let tokens = SqliteTokenStore::open(&path)?.list()?;
             assert_eq!(tokens.len(), 1, "the token of the version 5 file is kept");
             assert_eq!(tokens[0].name, "laptop");
@@ -104,6 +113,33 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
             assert!(SqliteTokenStore::open(&path)?.list()?.is_empty());
         }
     }
+    Ok(())
+}
+
+/// The trashed artifact of a version 5 or 6 file shares its content with
+/// "Old"; removing it for good keeps what "Old" refers to.
+fn purge_the_trashed_artifact(store: &SqliteStore, version: i64) -> TestResult {
+    let owner = actor("owner");
+    let trashed_id = parsed(TRASHED_ID);
+    let receipt = store.purge_artifact(PurgeRequest {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("purge"),
+            fingerprint: RequestFingerprint([9; 32]),
+        },
+        artifact: &trashed_id,
+        base: MetadataRevision(2),
+    })?;
+    assert_eq!(receipt.delivery, Delivery::Committed, "version {version}");
+    assert_eq!(store.artifact(&trashed_id)?, None);
+    let shared = store.revision_file(&old_artifact(), SourceRevision(2), &parsed("index.html"))?;
+    assert_eq!(
+        shared.as_deref(),
+        Some(OLD_BODY.as_bytes()),
+        "version {version}"
+    );
+    let page = store.changes(&owner, ChangeSequence(0), 100)?;
+    assert_eq!(page.head, ChangeSequence(6), "the head continues from 5");
     Ok(())
 }
 
@@ -193,6 +229,21 @@ fn a_failed_migration_step_is_rolled_back_without_touching_the_file() -> TestRes
             connection.pragma_update(None, "user_version", 5)
         },
         "idx_tokens_secret_hash",
+    )?;
+    // The purge step (version 6 to 7) fails after it added its column.
+    assert_refused_untouched(
+        |connection| {
+            connection.execute_batch(history::STEP_1)?;
+            connection.execute_batch(history::STEP_2)?;
+            connection.execute_batch("INSERT INTO feed VALUES (1, zeroblob(16));")?;
+            connection.execute_batch(history::STEP_3)?;
+            connection.execute_batch(history::STEP_4)?;
+            connection.execute_batch(history::STEP_5)?;
+            connection.execute_batch(history::OLD_TOKENS)?;
+            connection.execute_batch("CREATE TABLE changes_v7 (x TEXT);")?;
+            connection.pragma_update(None, "user_version", 6)
+        },
+        "changes_v7",
     )?;
     Ok(())
 }

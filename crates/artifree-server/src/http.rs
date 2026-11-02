@@ -19,9 +19,11 @@ use std::time::Duration;
 use artifree_contracts::api::{
     AgentSessionList, Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
     DuplicateArtifactRequest, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
-    ListArtifactsQuery, RestoreRevisionRequest, Revision, RevisionList, RuntimeConnection,
-    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
-    SetRuntimeGrantRequest, StageHandoffRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    ListArtifactsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeMetadataRequest, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
+    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::parts::{Boundary, ByteRange};
@@ -305,6 +307,14 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/v1/artifacts/{id}",
             get(show_artifact).patch(update_artifact),
+        )
+        .route(
+            "/v1/artifacts/{id}/purge",
+            axum::routing::post(purge_artifact),
+        )
+        .route(
+            "/v1/content/unreferenced",
+            get(show_unreferenced_content).delete(remove_unreferenced_content),
         )
         .route(
             "/v1/artifacts/{id}/revisions",
@@ -969,6 +979,54 @@ async fn update_artifact(
     let Json(request) = body?;
     Ok(Json(
         operations::update(&state, actor, key, &id, request).await?,
+    ))
+}
+
+/// Removes a trashed artifact for good. The administrative credential only
+/// (decision 0029): an agent token authenticates as the owner but must not be
+/// able to do what cannot be undone. The guard comes first, so an agent token
+/// learns nothing about the artifact, the base, or the key.
+async fn purge_artifact(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<PurgeArtifactRequest>, JsonRejection>,
+) -> Result<Json<PurgeArtifactResponse>, ApiError> {
+    let Path(id) = path?;
+    // An identifier that cannot name an artifact is reported before a
+    // malformed body; whether the artifact exists is checked with the request.
+    operations::artifact_id(&id)?;
+    let Json(request) = body?;
+    Ok(Json(
+        operations::purge(&state, actor, key, &id, request).await?,
+    ))
+}
+
+/// The dry run: reads and removes nothing. Administrative like the apply: it
+/// reports the size of content shared by every owner and agent (decision
+/// 0029).
+async fn show_unreferenced_content(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+) -> Result<Json<UnreferencedContent>, ApiError> {
+    Ok(Json(operations::unreferenced_content(&state).await?))
+}
+
+/// Removes the content the dry run reported, once per `Idempotency-Key`, if it
+/// is still exactly that set. Administrative credential only; the role is
+/// checked before the key and the body.
+async fn remove_unreferenced_content(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    body: Result<Json<RemoveUnreferencedContentRequest>, JsonRejection>,
+) -> Result<Json<RemoveUnreferencedContentResponse>, ApiError> {
+    let Json(request) = body?;
+    Ok(Json(
+        operations::remove_unreferenced_content(&state, actor, key, request).await?,
     ))
 }
 

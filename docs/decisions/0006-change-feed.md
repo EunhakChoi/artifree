@@ -112,7 +112,8 @@ delivery guarantees; everything below about them is an Artifree decision.
     head comes from SQLite's record of the largest sequence issued, so
     pruning old rows will not move it back. Pruning belongs to the retention
     work (roadmap O05), which must answer a cursor older than the oldest
-    kept row with `reset`. A restore from backup (O04) must give the
+    kept row with `reset`. (0029 did not prune: a purge keeps its rows and
+    appends a `purged` row.) A restore from backup (O04) must give the
     restored database a new feed identity, because a copy keeps the
     original's.
 12. **CLI correction.** A refused request was described as leaving its key

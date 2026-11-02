@@ -316,7 +316,7 @@ fn a_backup_is_one_private_file_without_scratch_leftovers() -> TestResult {
 
 #[test]
 fn an_older_backup_keeps_its_version_and_a_restore_upgrades_it() -> TestResult {
-    for version in 1..=5 {
+    for version in 1..=6 {
         let layout = Layout::new();
         historical_database(&layout.database(), version)?;
         let source = files_of(&layout.data());

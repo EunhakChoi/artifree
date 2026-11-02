@@ -5,7 +5,9 @@
 //! Every operation checks the actor's authority against current stored
 //! metadata. An artifact in the trash is missing to every request but its
 //! recovery and the replay of a request made before the delete (decision
-//! 0013). Commit success means durable acceptance. Source history is kept
+//! 0013). A purged artifact (decision 0029) is missing to every request,
+//! the replay of an earlier one included, except the retry of its purge.
+//! Commit success means durable acceptance. Source history is kept
 //! separate from future application data and access policy. A duplicate
 //! copies files only, since artifacts have no application data or uploaded
 //! assets yet. Publishing is not implemented.
@@ -17,9 +19,10 @@ use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CommitReceipt, MetadataReceipt,
-    MetadataUpdate, NewArtifact, RequestFingerprint, RequestIdentity, RevisionCommit,
-    RevisionRecord, StoreError,
+    ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
+    CommitReceipt, ContentSetDigest, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
+    PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    UnreferencedContent,
 };
 use sha2::{Digest, Sha256};
 
@@ -73,6 +76,11 @@ pub enum ArtifactError {
     InvalidPageToken,
     /// The range cannot be read from the file; see [`RangeError`].
     InvalidRange(RangeError),
+    /// The artifact is not in the trash, so it cannot be purged.
+    NotInTrash,
+    /// The unreferenced content is not the set the caller reviewed; run the
+    /// dry run again.
+    ContentChanged,
     /// The actor already used this request key for different content.
     RequestKeyReused,
     /// Storage failed. The request may be retried with the same key.
@@ -99,6 +107,10 @@ impl fmt::Display for ArtifactError {
             Self::InvalidPageToken => formatter
                 .write_str("page token is malformed or belongs to another order or filters"),
             Self::InvalidRange(error) => write!(formatter, "{error}"),
+            Self::NotInTrash => formatter.write_str("artifact is not in the trash"),
+            Self::ContentChanged => {
+                formatter.write_str("the unreferenced content is not the set that was reviewed")
+            }
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -115,6 +127,8 @@ impl From<StoreError> for ArtifactError {
             StoreError::NotFound => Self::NotFound(Missing::Artifact),
             StoreError::RevisionConflict { current } => Self::RevisionConflict { current },
             StoreError::MetadataConflict { current } => Self::MetadataConflict { current },
+            StoreError::NotInTrash => Self::NotInTrash,
+            StoreError::ContentChanged => Self::ContentChanged,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
             StoreError::Unchanged => Self::InvalidPackage(PackageError::Unchanged),
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
@@ -159,11 +173,14 @@ impl<S: ArtifactStore> ArtifactService<S> {
 
     /// Creates an app artifact owned by `actor` at revision 1.
     ///
-    /// Retrying with the same key and content returns the original receipt.
+    /// Retrying with the same key and content returns the original receipt,
+    /// unless the artifact it created was purged since (decision 0029).
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::RequestKeyReused`] or [`ArtifactError::Unavailable`].
+    /// [`ArtifactError::NotFound`] for the retry of a create whose artifact
+    /// was purged, [`ArtifactError::RequestKeyReused`], or
+    /// [`ArtifactError::Unavailable`].
     pub fn create(
         &self,
         actor: &ActorId,
@@ -294,7 +311,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// copy is not pinned. Only files are copied. The source is not touched.
     ///
     /// Retrying with the same key returns the original receipt even after
-    /// the source was renamed or revised.
+    /// the source was renamed, revised, or purged; the copy has its own
+    /// history. A retry whose copy was purged is not found.
     ///
     /// # Errors
     ///
@@ -309,7 +327,6 @@ impl<S: ArtifactStore> ArtifactService<S> {
         revision: SourceRevision,
         title: Option<&Title>,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.owned(actor, id)?;
         let mut hasher = Fingerprint::new("duplicate");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&revision.0.to_be_bytes());
@@ -322,14 +339,25 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
             None => hasher.field(b"copy title"),
         }
+        let request = RequestIdentity {
+            actor,
+            key,
+            fingerprint: hasher.finish(),
+        };
+        let record = match self.owned(actor, id) {
+            Ok(record) => record,
+            // The source may have been purged since the copy was made. The
+            // key is the actor's own, so its copy is replayed; anything else
+            // is a source that is missing.
+            Err(error @ ArtifactError::NotFound(_)) => {
+                return self.store.replay_create(request)?.ok_or(error);
+            }
+            Err(error) => return Err(error),
+        };
         let package = checked(&record, self.revision_of(&record, revision))?;
         let title = title.cloned().unwrap_or_else(|| record.title.copy_of());
         let receipt = self.store.create_artifact(NewArtifact {
-            request: RequestIdentity {
-                actor,
-                key,
-                fingerprint: hasher.finish(),
-            },
+            request,
             kind: record.kind,
             title: &title,
             package: &package,
@@ -397,6 +425,92 @@ impl<S: ArtifactStore> ArtifactService<S> {
             deleted: change.deleted,
         })?;
         Ok(receipt)
+    }
+
+    /// Removes an artifact in the trash for good, only if its metadata is
+    /// still at `base` (decision 0029). Its files and titles are deleted; the
+    /// identifier, request keys, and change feed entries remain, and the copies
+    /// made from it are untouched. The purge is not undone.
+    ///
+    /// Retrying with the same key and content returns the original receipt.
+    /// An earlier request that named the artifact is not found afterwards.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for a missing, inaccessible, or purged
+    /// artifact, [`ArtifactError::NotInTrash`] for one outside the trash,
+    /// [`ArtifactError::MetadataConflict`] when `base` is not current,
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
+    pub fn purge(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        base: MetadataRevision,
+    ) -> Result<PurgeReceipt, ArtifactError> {
+        // A purged artifact is not stored as one, so only an artifact that
+        // still exists can belong to someone else. Anything else goes to the
+        // store, which finds the actor's own purge by its key or reports the
+        // artifact missing.
+        if let Some(record) = self.store.artifact(id)?
+            && !policy::may_access(actor, &record)
+        {
+            return Err(ArtifactError::NotFound(Missing::Artifact));
+        }
+        let mut hasher = Fingerprint::new("purge");
+        hasher.field(id.as_str().as_bytes());
+        hasher.field(&base.0.to_be_bytes());
+        Ok(self.store.purge_artifact(PurgeRequest {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
+            },
+            artifact: id,
+            base,
+        })?)
+    }
+
+    /// What content no revision file refers to: the dry run of
+    /// [`Self::remove_unreferenced_content`]. Content is shared by all
+    /// owners' revisions and is not owned by anyone; with one owner nothing is
+    /// revealed that the owner could not see.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn unreferenced_content(&self) -> Result<UnreferencedContent, ArtifactError> {
+        Ok(self.store.unreferenced_content()?)
+    }
+
+    /// Deletes the content no revision file of any artifact, in the trash or
+    /// not, refers to, if it is the set `base` that a dry run reported, and
+    /// reports what it deleted. A retry with the same `key` and `base` returns
+    /// the report of the first run (delivered as a replay) whatever the
+    /// set is by then; the same key with another `base`, or used for another
+    /// request, is [`ArtifactError::RequestKeyReused`]. The key is kept for
+    /// the life of the database, like the keys of artifact requests.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::ContentChanged`] when the set is not `base`,
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
+    pub fn remove_unreferenced_content(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        base: ContentSetDigest,
+    ) -> Result<CleanupReceipt, ArtifactError> {
+        let mut hasher = Fingerprint::new("cleanup");
+        hasher.field(&base.0);
+        Ok(self.store.remove_unreferenced_content(CleanupRequest {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
+            },
+            base,
+        })?)
     }
 
     /// Current metadata of an accessible artifact.
@@ -483,7 +597,13 @@ impl<S: ArtifactStore> ArtifactService<S> {
         id: &ArtifactId,
     ) -> Result<Vec<RevisionRecord>, ArtifactError> {
         self.authorized(actor, id)?;
-        Ok(self.store.revisions(id)?)
+        let revisions = self.store.revisions(id)?;
+        // An artifact outside the trash has a revision, so an empty list means
+        // a purge landed after the check (decision 0029).
+        if revisions.is_empty() {
+            return Err(ArtifactError::NotFound(Missing::Artifact));
+        }
+        Ok(revisions)
     }
 
     /// One revision of an accessible artifact.
@@ -562,7 +682,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
     ) -> Result<RevisionExport, ArtifactError> {
         let artifact = self.authorized(actor, id)?;
         let listing = self.listing_of(&artifact, revision)?;
-        let files = self.package(id, revision)?;
+        // The listing exists, so a package that is gone was purged meanwhile.
+        let files = self.package(id, revision).map_err(|error| match error {
+            ArtifactError::NotFound(_) => ArtifactError::NotFound(Missing::Artifact),
+            other => other,
+        })?;
         Ok(RevisionExport {
             artifact,
             revision: listing,
@@ -624,9 +748,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
         if revision.0 == 0 || revision > record.current_revision {
             return Err(ArtifactError::NotFound(Missing::Revision));
         }
+        // The revision is within the artifact's history, so only a purge that
+        // landed after the check can make it missing (decision 0029).
         self.store
             .revision(&record.id, revision)?
-            .ok_or_else(|| ArtifactError::Unavailable("a listed revision is missing".into()))
+            .ok_or(ArtifactError::NotFound(Missing::Artifact))
     }
 
     fn package(
@@ -728,6 +854,121 @@ mod tests {
             fingerprint.field(field);
         }
         fingerprint.finish()
+    }
+
+    /// A store whose artifact is in place for the authorization check and gone
+    /// for every read after it: what a reader sees when a purge commits
+    /// between the two (decision 0029). Writes are not used.
+    struct PurgedAfterTheCheck {
+        record: ArtifactRecord,
+    }
+
+    impl ArtifactStore for PurgedAfterTheCheck {
+        fn create_artifact(&self, _: NewArtifact<'_>) -> Result<CommitReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn commit_revision(&self, _: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn update_metadata(&self, _: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn replay_create(
+            &self,
+            _: RequestIdentity<'_>,
+        ) -> Result<Option<CommitReceipt>, StoreError> {
+            Ok(None)
+        }
+        fn purge_artifact(&self, _: PurgeRequest<'_>) -> Result<PurgeReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn unreferenced_content(&self) -> Result<UnreferencedContent, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn remove_unreferenced_content(
+            &self,
+            _: CleanupRequest<'_>,
+        ) -> Result<CleanupReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn artifact(&self, _: &ArtifactId) -> Result<Option<ArtifactRecord>, StoreError> {
+            Ok(Some(self.record.clone()))
+        }
+        fn list_artifacts(
+            &self,
+            _: ArtifactListing<'_>,
+        ) -> Result<Vec<ArtifactRecord>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn revisions(&self, _: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn revision(
+            &self,
+            _: &ArtifactId,
+            _: SourceRevision,
+        ) -> Result<Option<RevisionRecord>, StoreError> {
+            Ok(None)
+        }
+        fn revision_package(
+            &self,
+            _: &ArtifactId,
+            _: SourceRevision,
+        ) -> Result<Option<FilePackage>, StoreError> {
+            Ok(None)
+        }
+        fn revision_file(
+            &self,
+            _: &ArtifactId,
+            _: SourceRevision,
+            _: &PackagePath,
+        ) -> Result<Option<Vec<u8>>, StoreError> {
+            Ok(None)
+        }
+        fn changes(
+            &self,
+            _: &ActorId,
+            _: ChangeSequence,
+            _: usize,
+        ) -> Result<ChangePage, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+    }
+
+    #[test]
+    fn reads_that_a_purge_overtakes_are_not_found_not_empty_or_unavailable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let owner: ActorId = "owner".parse()?;
+        let id: ArtifactId = "art_0123456789abcdef0123456789abcdef".parse()?;
+        let service = ArtifactService::new(PurgedAfterTheCheck {
+            record: ArtifactRecord {
+                id: id.clone(),
+                owner: owner.clone(),
+                kind: ArtifactKind::App,
+                title: "Demo".parse()?,
+                pinned: false,
+                current_revision: SourceRevision(1),
+                metadata_revision: MetadataRevision(1),
+                deleted_at: None,
+                created_at: artifree_domain::identity::UnixMillis(1),
+                updated_at: artifree_domain::identity::UnixMillis(1),
+            },
+        });
+
+        assert_eq!(
+            service.revisions(&owner, &id).err(),
+            Some(ArtifactError::NotFound(Missing::Artifact)),
+            "an empty listing of a live artifact is a vanished artifact"
+        );
+        assert_eq!(
+            service.revision(&owner, &id, SourceRevision(1)).err(),
+            Some(ArtifactError::NotFound(Missing::Artifact))
+        );
+        assert_eq!(
+            service.export(&owner, &id, SourceRevision(1)).err(),
+            Some(ArtifactError::NotFound(Missing::Artifact))
+        );
+        Ok(())
     }
 
     #[test]

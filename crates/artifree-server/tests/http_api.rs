@@ -211,6 +211,9 @@ async fn every_api_route_requires_the_bearer_token() -> TestResult {
             ),
         ),
         ("GET", format!("/v1/artifacts/{id}/revisions/1/export")),
+        ("POST", format!("/v1/artifacts/{id}/purge")),
+        ("GET", "/v1/content/unreferenced".to_owned()),
+        ("DELETE", "/v1/content/unreferenced".to_owned()),
         ("DELETE", "/v1/artifacts".to_owned()),
         ("GET", "/v1/no-such-route".to_owned()),
     ] {
@@ -2239,5 +2242,357 @@ async fn ordinary_previews_keep_their_source_and_cannot_use_the_runtime() -> Tes
         &json!({"initialization": body["initialization"]}),
     )?;
     assert_eq!(harness.send(read).await?.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+fn purge_request(
+    id: &str,
+    key: Option<&str>,
+    base: u64,
+) -> Result<Request<Body>, axum::http::Error> {
+    post(
+        &format!("/v1/artifacts/{id}/purge"),
+        key,
+        &json!({ "base_metadata_revision": base }),
+    )
+}
+
+fn content_request(method: &str) -> Result<Request<Body>, axum::http::Error> {
+    authorized(
+        Request::builder()
+            .method(method)
+            .uri("/v1/content/unreferenced"),
+    )
+    .body(Body::empty())
+}
+
+/// The apply: the body names the set a dry run reported.
+fn cleanup_request(key: Option<&str>, base: &str) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = authorized(
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/content/unreferenced"),
+    )
+    .header(header::CONTENT_TYPE, "application/json");
+    if let Some(key) = key {
+        builder = builder.header("idempotency-key", key);
+    }
+    builder.body(Body::from(json!({ "base_digest": base }).to_string()))
+}
+
+/// SHA-256 of the fixed prefix of a set digest: the set with no member.
+const NO_CONTENT: &str = "682ecd252107361fe9315b8f3a149ad933d10bda3417d1b415a432722837098f";
+/// The set whose only member has the digest of 32 zero bytes.
+const ONE_ZERO_BLOB: &str = "f2c419cc2717de15c6115b655447529f36a5f5be96d3bbdde81099a82a42e09f";
+
+#[tokio::test]
+async fn a_purge_needs_the_trash_a_current_base_and_a_key() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+
+    // Outside the trash: refused, and nothing is removed.
+    let live = harness
+        .send(purge_request(&id, Some("purge-key-1"), 1)?)
+        .await?;
+    assert_eq!(live.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&live), "not_in_trash");
+    assert_eq!(listed_ids(&harness, "").await?, [json!(id)]);
+
+    let deleted = harness
+        .send(set_deleted(&id, "delete-key-1", 1, true)?)
+        .await?;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", error_code(&deleted));
+    // A stale base names the trash state to purge against.
+    let stale = harness
+        .send(purge_request(&id, Some("purge-key-2"), 1)?)
+        .await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&stale), "metadata_conflict");
+    assert_eq!(stale.json()?["error"]["current_metadata_revision"], 2);
+    // No key, an unknown field, and an unknown artifact.
+    let keyless = harness.send(purge_request(&id, None, 2)?).await?;
+    assert_eq!(keyless.status, StatusCode::BAD_REQUEST);
+    let unknown_field = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/purge"),
+            Some("purge-key-3"),
+            &json!({ "base_metadata_revision": 2, "force": true }),
+        )?)
+        .await?;
+    assert_eq!(unknown_field.status, StatusCode::BAD_REQUEST);
+    let missing = harness
+        .send(purge_request(
+            "art_00000000000000000000000000000000",
+            Some("purge-key-4"),
+            2,
+        )?)
+        .await?;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(listed_ids(&harness, "?deleted=true").await?, [json!(id)]);
+
+    let purged = harness
+        .send(purge_request(&id, Some("purge-key-5"), 2)?)
+        .await?;
+    assert_eq!(purged.status, StatusCode::OK, "{}", error_code(&purged));
+    let body = purged.json()?;
+    assert_eq!(body["artifact_id"], json!(id));
+    assert_eq!(body["metadata_revision"], 3);
+    assert!(body["purged_at_ms"].is_i64(), "{body}");
+    assert_eq!(body["replayed"], false);
+    assert_eq!(
+        listed_ids(&harness, "?deleted=true").await?,
+        Vec::<Value>::new()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_purged_artifact_answers_as_an_unknown_one_and_its_keys_stay_reserved() -> TestResult {
+    let harness = Harness::new();
+    let (id, link) = trashed(&harness).await?;
+    let purged = harness
+        .send(purge_request(&id, Some("purge-key-1"), 2)?)
+        .await?;
+    assert_eq!(purged.status, StatusCode::OK, "{}", error_code(&purged));
+    let first = purged.json()?;
+
+    // The requests of the trash test: all answered as for an unknown id.
+    // In the trash a retry of the delete replayed; now nothing does.
+    let unknown = "art_00000000000000000000000000000000";
+    let mut missing = 0;
+    for ((what, request), (_, control)) in reads_and_saves(&id)?
+        .into_iter()
+        .chain(other_writes(&id)?)
+        .zip(
+            reads_and_saves(unknown)?
+                .into_iter()
+                .chain(other_writes(unknown)?),
+        )
+    {
+        let reply = harness.send(request).await?;
+        let expected = harness.send(control).await?;
+        assert_eq!(
+            (reply.status, reply.json()?),
+            (expected.status, expected.json()?),
+            "{what}: answered unlike an unknown artifact"
+        );
+        if reply.status == StatusCode::NOT_FOUND {
+            missing += 1;
+        }
+    }
+    assert_eq!(missing, 24, "every request valid in itself is not found");
+    assert_eq!(harness.content(&link).await?.status, StatusCode::NOT_FOUND);
+    // A recovery, and the retries of the requests that made the artifact.
+    for (what, request) in [
+        ("recover", set_deleted(&id, "recover-key-1", 3, false)?),
+        (
+            "retry of the delete",
+            set_deleted(&id, "delete-key-1", 1, true)?,
+        ),
+        (
+            "retry of the save",
+            post(
+                &format!("/v1/artifacts/{id}/revisions"),
+                Some("save-key-1"),
+                &put_index(1, "<h1>v2</h1>"),
+            )?,
+        ),
+    ] {
+        let reply = harness.send(request).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{what}");
+        assert_eq!(error_code(&reply), "not_found", "{what}");
+    }
+    // The retry of the create is not found either, and creates nothing; its
+    // key still refuses another request.
+    let create = harness.create("create-key-1", &page("<h1>v1</h1>")).await?;
+    assert_eq!(create.status, StatusCode::NOT_FOUND);
+    let other = harness
+        .create("create-key-1", &page("<h1>other</h1>"))
+        .await?;
+    assert_eq!(other.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&other), "request_key_reused");
+    assert_eq!(artifact_count(&harness).await?, 0);
+
+    // The purge itself replays.
+    let again = harness
+        .send(purge_request(&id, Some("purge-key-1"), 2)?)
+        .await?;
+    assert_eq!(again.status, StatusCode::OK, "{}", error_code(&again));
+    let replayed = again.json()?;
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(
+        (&replayed["metadata_revision"], &replayed["purged_at_ms"]),
+        (&first["metadata_revision"], &first["purged_at_ms"])
+    );
+    // A purge of a purged artifact under another key is not found.
+    let twice = harness
+        .send(purge_request(&id, Some("purge-key-2"), 3)?)
+        .await?;
+    assert_eq!(twice.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_copy_survives_the_purge_of_its_source_and_its_retry_replays() -> TestResult {
+    let harness = Harness::new();
+    let source = created_id(&harness).await?;
+    let copy = harness
+        .send(duplicate(&source, 1, Some("copy-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(copy.status, StatusCode::CREATED, "{}", error_code(&copy));
+    let copy_id = copy.json()?["artifact"]["id"]
+        .as_str()
+        .ok_or("copy id")?
+        .to_owned();
+    let deleted = harness
+        .send(set_deleted(&source, "delete-key-1", 1, true)?)
+        .await?;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", error_code(&deleted));
+    let purged = harness
+        .send(purge_request(&source, Some("purge-key-1"), 2)?)
+        .await?;
+    assert_eq!(purged.status, StatusCode::OK, "{}", error_code(&purged));
+
+    let file = harness
+        .send(get(&format!(
+            "/v1/artifacts/{copy_id}/revisions/1/files/index.html"
+        ))?)
+        .await?;
+    assert_eq!(file.status, StatusCode::OK);
+    assert_eq!(file.body, b"<h1>v1</h1>");
+    let logo = harness
+        .send(get(&format!(
+            "/v1/artifacts/{copy_id}/revisions/1/files/assets/logo.png"
+        ))?)
+        .await?;
+    assert_eq!(logo.status, StatusCode::OK);
+    assert_eq!(listed_ids(&harness, "").await?, [json!(copy_id)]);
+    // The copy's retry returns the copy, although its source is gone.
+    let retry = harness
+        .send(duplicate(&source, 1, Some("copy-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(retry.status, StatusCode::CREATED, "{}", error_code(&retry));
+    let replayed = retry.json()?;
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["artifact"]["id"], json!(copy_id));
+    // A new copy of the purged source is not found; the key is not consumed
+    // by the copy's request.
+    let fresh = harness
+        .send(duplicate(&source, 1, Some("copy-key-2"), &json!({}))?)
+        .await?;
+    assert_eq!(fresh.status, StatusCode::NOT_FOUND);
+    // The key of the copy with another request on a missing source is not
+    // replayed: a different revision is another request.
+    let other = harness
+        .send(duplicate(&source, 2, Some("copy-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(other.status, StatusCode::NOT_FOUND);
+    // The copy can be trashed and purged on its own.
+    let copy_deleted = harness
+        .send(set_deleted(&copy_id, "delete-key-2", 1, true)?)
+        .await?;
+    assert_eq!(copy_deleted.status, StatusCode::OK);
+    let copy_purged = harness
+        .send(purge_request(&copy_id, Some("purge-key-2"), 2)?)
+        .await?;
+    assert_eq!(copy_purged.status, StatusCode::OK);
+    let gone = harness
+        .send(duplicate(&source, 1, Some("copy-key-1"), &json!({}))?)
+        .await?;
+    assert_eq!(
+        gone.status,
+        StatusCode::NOT_FOUND,
+        "the copy was purged too"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_dry_run_removes_nothing_and_the_apply_removes_what_it_reported() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let nothing = json!({ "blobs": 0, "bytes": 0, "digest": NO_CONTENT });
+    let report = harness.send(content_request("GET")?).await?;
+    assert_eq!(report.status, StatusCode::OK, "{}", error_code(&report));
+    assert_eq!(report.json()?, nothing);
+
+    // Content that no revision file refers to.
+    let database = rusqlite::Connection::open(harness.directory.join("db.sqlite3"))?;
+    database.execute(
+        "INSERT INTO blobs (digest, content) VALUES (zeroblob(32), CAST('stray!' AS BLOB))",
+        [],
+    )?;
+    let one = json!({ "blobs": 1, "bytes": 6, "digest": ONE_ZERO_BLOB });
+    let dry_run = harness.send(content_request("GET")?).await?;
+    assert_eq!(dry_run.json()?, one);
+    let again = harness.send(content_request("GET")?).await?;
+    assert_eq!(again.json()?, one, "a dry run removes nothing");
+
+    // The apply needs a key and the reviewed set, and names what it removed.
+    let keyless = harness.send(cleanup_request(None, ONE_ZERO_BLOB)?).await?;
+    assert_eq!(keyless.status, StatusCode::BAD_REQUEST);
+    let malformed = harness
+        .send(cleanup_request(
+            Some("clean-key-0"),
+            &ONE_ZERO_BLOB.to_uppercase(),
+        )?)
+        .await?;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    let stale = harness
+        .send(cleanup_request(Some("clean-key-0"), NO_CONTENT)?)
+        .await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&stale), "content_conflict");
+    assert_eq!(
+        harness.send(content_request("GET")?).await?.json()?,
+        one,
+        "a refused cleanup removes nothing"
+    );
+
+    let applied = harness
+        .send(cleanup_request(Some("clean-key-1"), ONE_ZERO_BLOB)?)
+        .await?;
+    assert_eq!(applied.status, StatusCode::OK, "{}", error_code(&applied));
+    assert_eq!(
+        applied.json()?,
+        json!({ "blobs": 1, "bytes": 6, "replayed": false })
+    );
+    assert_eq!(
+        harness.send(content_request("GET")?).await?.json()?,
+        nothing
+    );
+    // The response was lost: the retry returns the original report, not zero.
+    let retry = harness
+        .send(cleanup_request(Some("clean-key-1"), ONE_ZERO_BLOB)?)
+        .await?;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(
+        retry.json()?,
+        json!({ "blobs": 1, "bytes": 6, "replayed": true })
+    );
+    // The key with another base is a reused key, not a second cleanup.
+    let reused = harness
+        .send(cleanup_request(Some("clean-key-1"), NO_CONTENT)?)
+        .await?;
+    assert_eq!(reused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&reused), "request_key_reused");
+    // A key an artifact request used belongs to that request.
+    let taken = harness
+        .send(cleanup_request(Some("create-key-1"), NO_CONTENT)?)
+        .await?;
+    assert_eq!(taken.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&taken), "request_key_reused");
+    // What a revision refers to is untouched.
+    let file = harness
+        .send(get(&format!(
+            "/v1/artifacts/{id}/revisions/1/files/index.html"
+        ))?)
+        .await?;
+    assert_eq!(file.body, b"<h1>v1</h1>");
+    // Other methods are not routes.
+    for method in ["POST", "PUT", "PATCH"] {
+        let reply = harness.send(content_request(method)?).await?;
+        assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED, "{method}");
+    }
     Ok(())
 }

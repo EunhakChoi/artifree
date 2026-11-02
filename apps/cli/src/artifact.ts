@@ -38,6 +38,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact unpin <id> --base-metadata <n>
   artifree artifact delete <id> --base-metadata <n>
   artifree artifact recover <id> --base-metadata <n>
+  artifree artifact purge <id> --base-metadata <n> --yes
   artifree artifact cat <id> <package-path> [--revision <n>]
       [--offset <n>] [--length <n>]
   artifree artifact export <id> --output <file> [--revision <n>]
@@ -57,6 +58,13 @@ delete, and recover change metadata only and need the metadata_revision read
 with show, or with list --deleted for an artifact in the trash
 (--base-metadata); they create no revision. delete moves an artifact to the
 trash, where nothing can read or change it until recover takes it out.
+purge removes an artifact that is in the trash for good: its files and titles
+are deleted and it can never be recovered. It needs --yes, and
+--base-metadata from list --deleted, which makes it refuse an artifact that
+was recovered and deleted again since. It needs the owner's access token: an
+issued agent token is refused with 403 forbidden. A retry with the same
+--idempotency-key returns the original result; every other request that named
+the artifact is then not_found. Copies made from it are not affected.
 restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
@@ -71,8 +79,8 @@ bytes from --offset (default 0), or to the end of the file without --length.
 A range that starts at or past the end of the file is refused. history lists
 each file's size and SHA-256.
 
-create, save, restore, duplicate, rename, pin, unpin, delete, and recover
-accept --idempotency-key <key>. Without it a new key is
+create, save, restore, duplicate, rename, pin, unpin, delete, recover, and
+purge accept --idempotency-key <key>. Without it a new key is
 generated and reported on stderr if the outcome is unknown; retry with that key
 to get the original result instead of a duplicate. save --dir replaces the
 package with the directory's files (hidden entries skipped) and deletes
@@ -159,6 +167,8 @@ export async function runArtifact(args: string[]): Promise<void> {
     case 'delete':
     case 'recover':
       return update(command, rest);
+    case 'purge':
+      return purge(rest);
     case 'cat':
       return cat(rest);
     case 'export':
@@ -242,7 +252,7 @@ async function show(
   else print({ revisions: await client.listRevisions(id) });
 }
 
-async function mutate<T>(
+export async function mutate<T>(
   key: string,
   operation: (idempotencyKey: string) => Promise<T>,
 ): Promise<T> {
@@ -351,6 +361,42 @@ async function update(command: MetadataCommand, args: string[]): Promise<void> {
           ...(title === undefined ? {} : { title }),
           ...METADATA_CHANGES[command],
         },
+        { idempotencyKey },
+      ),
+  );
+  print(result);
+}
+
+async function purge(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      ...connectionOptions,
+      'base-metadata': { type: 'string' },
+      'idempotency-key': { type: 'string' },
+      yes: { type: 'boolean' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = ''] = single(positionals, ['id']);
+  // Checked before anything is read or sent: a purge cannot be undone.
+  if (values.yes !== true)
+    throw new UsageError(
+      'purge removes the artifact for good and cannot be undone; pass --yes to confirm.',
+    );
+  if (values['base-metadata'] === undefined)
+    throw new UsageError(
+      'purge requires --base-metadata <n>; read metadata_revision with artifree artifact list --deleted.',
+    );
+  const base = positiveNumber(values['base-metadata'], '--base-metadata');
+  const client = await connect(values);
+  const result = await mutate(
+    values['idempotency-key'] ?? newIdempotencyKey(),
+    (idempotencyKey) =>
+      client.purgeArtifact(
+        id,
+        { base_metadata_revision: base },
         { idempotencyKey },
       ),
   );

@@ -12,6 +12,8 @@ import type {
   Handoff,
   ListArtifactsQuery,
   Preview,
+  PurgeArtifactRequest,
+  PurgeArtifactResponse,
   RestoreRevisionRequest,
   Revision,
   RotateTokenResponse,
@@ -21,6 +23,9 @@ import type {
   SaveRevisionRequest,
   StageHandoffRequest,
   TokenList,
+  RemoveUnreferencedContentRequest,
+  RemoveUnreferencedContentResponse,
+  UnreferencedContent,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
@@ -41,6 +46,8 @@ import {
   parseError,
   parseHandoff,
   parsePreview,
+  parsePurge,
+  parseRemoveUnreferencedContent,
   parseRevisionList,
   parseRotateToken,
   parseRuntimeConnection,
@@ -48,6 +55,7 @@ import {
   parseRuntimeGrant,
   parseRuntimeView,
   parseTokenList,
+  parseUnreferencedContent,
   parseUpdate,
 } from './responses.js';
 
@@ -588,6 +596,67 @@ export class ArtifreeClient {
       'PATCH',
       `/v1/artifacts/${encodeURIComponent(id)}`,
       parseUpdate,
+      { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
+    );
+  }
+
+  /**
+   * Removes an artifact that is in the trash for good (decision 0029). It
+   * cannot be undone. Rejects with `not_in_trash` for an artifact outside the
+   * trash, with `metadata_conflict` and `currentMetadataRevision` when the
+   * artifact's metadata is no longer at `base_metadata_revision`, and with
+   * `not_found` for an artifact that is missing, belongs to someone else, or
+   * is already purged. A retry with the same key and request resolves with
+   * `replayed: true`.
+   */
+  async purgeArtifact(
+    id: string,
+    request: PurgeArtifactRequest,
+    options: MutationOptions,
+  ): Promise<PurgeArtifactResponse> {
+    return this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(id)}/purge`,
+      parsePurge,
+      { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
+    );
+  }
+
+  /**
+   * The dry run of {@link removeUnreferencedContent}: how many contents, and
+   * how many bytes, no revision file of any artifact refers to, and the
+   * `digest` that identifies this set. Removes nothing. Needs the owner's
+   * access token: an issued agent token rejects with `forbidden`.
+   */
+  async getUnreferencedContent(
+    options: ReadOptions = {},
+  ): Promise<UnreferencedContent> {
+    return this.json(
+      'GET',
+      '/v1/content/unreferenced',
+      parseUnreferencedContent,
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Deletes the content no revision file refers to if it is still exactly the
+   * set that a dry run reported (`base_digest`), and resolves with what was
+   * deleted. Rejects with `content_conflict`, deleting nothing, when the set
+   * has changed since the dry run; review it again. A retry with the same key
+   * and `base_digest` resolves with the first run's numbers and
+   * `replayed: true`, also when nothing is left to delete; the same key with
+   * another `base_digest` rejects with `request_key_reused`. Needs the owner's
+   * access token: an issued agent token rejects with `forbidden`.
+   */
+  async removeUnreferencedContent(
+    request: RemoveUnreferencedContentRequest,
+    options: MutationOptions,
+  ): Promise<RemoveUnreferencedContentResponse> {
+    return this.json(
+      'DELETE',
+      '/v1/content/unreferenced',
+      parseRemoveUnreferencedContent,
       { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
     );
   }

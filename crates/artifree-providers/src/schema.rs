@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE artifacts (
@@ -189,6 +189,44 @@ CREATE TABLE IF NOT EXISTS tokens (
 CREATE INDEX IF NOT EXISTS idx_tokens_secret_hash ON tokens (secret_hash);
 ";
 
+/// Added in schema version 7 (decision 0029): the tombstone of an artifact
+/// removed for good, the change kind for it, the record of a cleanup of
+/// unreferenced content (the key it ran under and how much it deleted, never
+/// what), and an index on the content a
+/// revision file refers to, which finding unreferenced content and deleting
+/// content both read. A purge needs the artifact in the trash, which the
+/// column's check states. The change table is rebuilt for its checked kinds.
+const PURGE_SCHEMA: &str = "
+ALTER TABLE artifacts ADD COLUMN purged_at INTEGER
+    CHECK (purged_at IS NULL OR deleted_at IS NOT NULL);
+CREATE INDEX revision_files_by_digest ON revision_files (digest);
+CREATE TABLE cleanup_runs (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    blobs INTEGER NOT NULL CHECK (blobs >= 0),
+    bytes INTEGER NOT NULL CHECK (bytes >= 0),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE changes_v7 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    committed_at INTEGER NOT NULL,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision)
+) STRICT;
+INSERT INTO changes_v7 (sequence, artifact_id, kind, revision, metadata_revision, committed_at)
+    SELECT sequence, artifact_id, kind, revision, metadata_revision, committed_at FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v7 RENAME TO changes;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -249,6 +287,9 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if version < 5 {
         keeping_feed_head(&transaction, TRASH_SCHEMA)?;
+    }
+    if version < 7 {
+        keeping_feed_head(&transaction, PURGE_SCHEMA)?;
     }
     transaction
         .execute_batch(TOKEN_SCHEMA)

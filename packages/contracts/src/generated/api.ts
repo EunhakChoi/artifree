@@ -11,6 +11,11 @@ export type ApiBody =
   | CommitResponse
   | DuplicateArtifactResponse
   | UpdateArtifactResponse
+  | PurgeArtifactRequest
+  | PurgeArtifactResponse
+  | UnreferencedContent
+  | RemoveUnreferencedContentRequest
+  | RemoveUnreferencedContentResponse
   | Artifact
   | ArtifactList
   | Revision
@@ -87,6 +92,8 @@ export type ErrorCode =
   | 'runtime_session_expired'
   | 'revision_conflict'
   | 'metadata_conflict'
+  | 'not_in_trash'
+  | 'content_conflict'
   | 'request_key_reused'
   | 'payload_too_large'
   | 'range_not_satisfiable'
@@ -97,7 +104,7 @@ export type ErrorCode =
  * What a commit did to an artifact. A kind that a client does not know
  * still means the artifact changed: read it again.
  */
-export type ChangeKind = 'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered';
+export type ChangeKind = 'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered' | 'purged';
 /**
  * Version of a source export manifest.
  */
@@ -304,6 +311,98 @@ export interface UpdateArtifactResponse {
   artifact: Artifact;
   /**
    * True when an earlier request with the same key already applied it.
+   */
+  replayed: boolean;
+}
+/**
+ * Body of `POST /v1/artifacts/{id}/purge`: removes an artifact that is in
+ * the trash for good (decision 0029). It cannot be undone.
+ */
+export interface PurgeArtifactRequest {
+  /**
+   * The metadata revision of the artifact in the trash that the caller
+   * saw. The purge fails with `metadata_conflict` unless it is still
+   * current, so an artifact recovered and deleted again since is not
+   * removed by a purge prepared against its earlier trash state.
+   */
+  base_metadata_revision: number;
+}
+/**
+ * Response of `POST /v1/artifacts/{id}/purge`. After a purge the artifact is
+ * `not_found` to every request, also the retry of an earlier create, save,
+ * restore, duplicate, or update that named it; only a retry of the purge
+ * itself answers, with `replayed: true`. The identifier is never used for
+ * another artifact. A copy made from the artifact is not affected.
+ */
+export interface PurgeArtifactResponse {
+  /**
+   * The removed artifact.
+   */
+  artifact_id: string;
+  /**
+   * The metadata revision the purge recorded, which the change feed's
+   * `purged` change also carries.
+   */
+  metadata_revision: number;
+  /**
+   * When the artifact was removed, in Unix milliseconds.
+   */
+  purged_at_ms: number;
+  /**
+   * True when an earlier request with the same key already purged it.
+   */
+  replayed: boolean;
+}
+/**
+ * Response of `GET /v1/content/unreferenced`, the dry run: file content that
+ * no revision file of any artifact refers to, in the trash or not. Nothing is
+ * removed.
+ */
+export interface UnreferencedContent {
+  /**
+   * How many distinct contents.
+   */
+  blobs: number;
+  /**
+   * Their total size in bytes. The database file does not shrink; the
+   * space is reused by later writes.
+   */
+  bytes: number;
+  /**
+   * The identity of this set: 64 lowercase hexadecimal digits (SHA-256 over
+   * the sorted digests of its contents). Send it as `base_digest` to delete
+   * exactly this set.
+   */
+  digest: string;
+}
+/**
+ * Body of `DELETE /v1/content/unreferenced`, with an `Idempotency-Key`
+ * header: the cleanup of the set a dry run reported (decision 0029).
+ */
+export interface RemoveUnreferencedContentRequest {
+  /**
+   * The `digest` of the dry run's set. The cleanup fails with
+   * `content_conflict` and deletes nothing unless the unreferenced content
+   * is still exactly that set.
+   */
+  base_digest: string;
+}
+/**
+ * Response of `DELETE /v1/content/unreferenced`: what the first run under the
+ * key deleted. A retry with the same key and `base_digest` returns the same
+ * numbers with `replayed: true`, also when the set is empty by then.
+ */
+export interface RemoveUnreferencedContentResponse {
+  /**
+   * How many distinct contents were deleted.
+   */
+  blobs: number;
+  /**
+   * Their total size in bytes.
+   */
+  bytes: number;
+  /**
+   * True when an earlier request with the same key did the deleting.
    */
   replayed: boolean;
 }
@@ -679,7 +778,7 @@ export interface ArtifactChange {
   metadata_revision: number;
   /**
    * The revision the commit created, or the current one for a metadata
-   * change (`metadata_updated`, `deleted`, or `recovered`).
+   * change (`metadata_updated`, `deleted`, `recovered`, or `purged`).
    */
   revision: number;
 }

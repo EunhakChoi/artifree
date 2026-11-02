@@ -339,6 +339,7 @@ impl Producer {
                 ChangeKind::MetadataUpdated => WireKind::MetadataUpdated,
                 ChangeKind::Deleted => WireKind::Deleted,
                 ChangeKind::Recovered => WireKind::Recovered,
+                ChangeKind::Purged => WireKind::Purged,
                 // A kind added later is a revision to clients of this
                 // contract: they read the artifact again.
                 _ => WireKind::Revised,

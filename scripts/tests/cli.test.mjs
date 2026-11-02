@@ -97,6 +97,172 @@ test('CLI list without paging options prints every page', async () => {
   }
 });
 
+test('CLI purge sends nothing without --yes, and cleanup deletes only with --apply', async () => {
+  // A stand-in server records every request; the real server is in
+  // server.test.mjs.
+  const requests = [];
+  const digest = 'cd'.repeat(32);
+  const server = createServer((request, response) => {
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+    });
+    request.on('end', () => {
+      requests.push([
+        request.method,
+        request.url,
+        request.headers['idempotency-key'],
+        body === '' ? undefined : JSON.parse(body),
+      ]);
+      response.setHeader('content-type', 'application/json');
+      if (request.url.endsWith('/purge'))
+        response.end(
+          JSON.stringify({
+            artifact_id: `art_${'1'.repeat(32)}`,
+            metadata_revision: 3,
+            purged_at_ms: 5,
+            replayed: false,
+          }),
+        );
+      else if (request.method === 'GET')
+        response.end(JSON.stringify({ blobs: 2, bytes: 40, digest }));
+      else
+        response.end(JSON.stringify({ blobs: 2, bytes: 40, replayed: false }));
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address !== null && typeof address === 'object');
+    const env = {
+      ...process.env,
+      ARTIFREE_URL: `http://127.0.0.1:${address.port}`,
+      ARTIFREE_TOKEN: 'f'.repeat(64),
+    };
+    delete env.ARTIFREE_TOKEN_FILE;
+    // Asynchronous: the stand-in server lives in this process, so a
+    // blocking spawn would stop it from answering.
+    const run = async (args) => {
+      try {
+        const { stdout, stderr } = await promisify(execFile)(
+          process.execPath,
+          ['apps/cli/dist/main.js', ...args],
+          { cwd: root, env, timeout: 10_000 },
+        );
+        return { status: 0, stdout, stderr };
+      } catch (error) {
+        return {
+          status: error.code,
+          stdout: error.stdout,
+          stderr: error.stderr,
+        };
+      }
+    };
+    const id = `art_${'1'.repeat(32)}`;
+    const unconfirmed = await run([
+      'artifact',
+      'purge',
+      id,
+      '--base-metadata',
+      '2',
+    ]);
+    assert.equal(unconfirmed.status, 2);
+    assert.equal(unconfirmed.stdout, '');
+    assert.match(unconfirmed.stderr, /--yes/);
+    assert.deepEqual(requests, [], 'an unconfirmed purge sent a request');
+
+    const purged = await run([
+      'artifact',
+      'purge',
+      id,
+      '--base-metadata',
+      '2',
+      '--yes',
+    ]);
+    assert.equal(purged.status, 0, purged.stderr);
+    assert.equal(JSON.parse(purged.stdout).metadata_revision, 3);
+    assert.deepEqual(
+      requests.map(([method, url]) => [method, url]),
+      [['POST', `/v1/artifacts/${id}/purge`]],
+    );
+
+    requests.length = 0;
+    const dry = await run(['content', 'cleanup']);
+    assert.deepEqual(JSON.parse(dry.stdout), {
+      applied: false,
+      blobs: 2,
+      bytes: 40,
+      digest,
+    });
+    assert.deepEqual(requests, [
+      ['GET', '/v1/content/unreferenced', undefined, undefined],
+    ]);
+
+    // The apply reviews the set, then deletes exactly that set under a key;
+    // stdout is the machine-readable report, the reviewed set is on stderr.
+    requests.length = 0;
+    const applied = await run(['content', 'cleanup', '--apply']);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.deepEqual(JSON.parse(applied.stdout), {
+      applied: true,
+      blobs: 2,
+      bytes: 40,
+      replayed: false,
+    });
+    assert.match(applied.stderr, new RegExp(`Reviewed set ${digest}`));
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0], [
+      'GET',
+      '/v1/content/unreferenced',
+      undefined,
+      undefined,
+    ]);
+    const [method, url, key, body] = requests[1];
+    assert.deepEqual(
+      [method, url, body],
+      ['DELETE', '/v1/content/unreferenced', { base_digest: digest }],
+    );
+    assert.match(key, /^[A-Za-z0-9_.:-]{8,128}$/);
+
+    // A set reviewed earlier and a key chosen by the caller are sent as given,
+    // without another dry run: this is how a lost response is retried.
+    requests.length = 0;
+    const retried = await run([
+      'content',
+      'cleanup',
+      '--apply',
+      '--base-digest',
+      digest,
+      '--idempotency-key',
+      'clean-retry-1',
+    ]);
+    assert.equal(retried.status, 0, retried.stderr);
+    assert.deepEqual(requests, [
+      [
+        'DELETE',
+        '/v1/content/unreferenced',
+        'clean-retry-1',
+        { base_digest: digest },
+      ],
+    ]);
+
+    // The retry options mean nothing to a dry run, so nothing is sent.
+    requests.length = 0;
+    const misplaced = await run([
+      'content',
+      'cleanup',
+      '--base-digest',
+      digest,
+    ]);
+    assert.equal(misplaced.status, 2);
+    assert.equal(misplaced.stdout, '');
+    assert.deepEqual(requests, []);
+  } finally {
+    server.close();
+  }
+});
+
 test('CLI help says the inventory does not probe a server', () => {
   const result = cli(['--help']);
   assert.equal(result.status, 0);

@@ -9,13 +9,17 @@ use artifree_contracts::api::{
     ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
     DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime,
     FileChange as WireChange, FileUpload, Handoff, HandoffState, ListArtifactsQuery, ListSort,
-    Preview, RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection,
-    RuntimeGrant, RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
-    SourceExportFormat, SourceExportManifest, StageHandoffRequest, UpdateArtifactRequest,
+    Preview, PurgeArtifactRequest, PurgeArtifactResponse, RemoveUnreferencedContentRequest,
+    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
+    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat, SourceExportManifest,
+    StageHandoffRequest, UnreferencedContent as WireContent, UpdateArtifactRequest,
     UpdateArtifactResponse,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
-use artifree_core::artifacts::{ArtifactError, MetadataChange, Missing, RevisionExport};
+use artifree_core::artifacts::{
+    ArtifactError, ArtifactService, MetadataChange, Missing, RevisionExport,
+};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, TokenId};
@@ -24,7 +28,8 @@ use artifree_domain::package::{
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, CommitReceipt, Delivery, ListOrder, RevisionRecord,
+    ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, ListOrder, RevisionRecord,
+    UnreferencedContent,
 };
 use artifree_providers::archive::{self, ArchiveEntry};
 use axum::http::StatusCode;
@@ -134,6 +139,12 @@ impl From<ArtifactError> for ApiError {
                     Self::new(StatusCode::CONFLICT, ErrorCode::MetadataConflict, message);
                 conflict.body.current_metadata_revision = Some(current.0);
                 conflict
+            }
+            ArtifactError::NotInTrash => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::NotInTrash, message)
+            }
+            ArtifactError::ContentChanged => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::ContentConflict, message)
             }
             ArtifactError::InvalidPageToken => Self::invalid(format!("page_token: {message}")),
             ArtifactError::InvalidRange(RangeError::PastEnd { size }) => {
@@ -364,6 +375,64 @@ pub(crate) async fn update(
         artifact: artifact_dto(&receipt.artifact),
         replayed: receipt.delivery == Delivery::Replayed,
     })
+}
+
+pub(crate) async fn purge(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: PurgeArtifactRequest,
+) -> Result<PurgeArtifactResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let base = MetadataRevision(request.base_metadata_revision);
+    let receipt = state
+        .run(move |artifacts| artifacts.purge(&actor, &key, &id, base))
+        .await?;
+    if receipt.delivery == Delivery::Committed {
+        state.feed().committed();
+    }
+    Ok(PurgeArtifactResponse {
+        artifact_id: receipt.artifact.to_string(),
+        metadata_revision: receipt.metadata_revision.0,
+        purged_at_ms: receipt.purged_at.0,
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+/// What a cleanup of unreferenced content would remove: the dry run.
+pub(crate) async fn unreferenced_content(state: &AppState) -> Result<WireContent, ApiError> {
+    let content = state.run(ArtifactService::unreferenced_content).await?;
+    Ok(content_dto(content))
+}
+
+/// Removes the unreferenced content that the dry run reported (`request`
+/// names it), once per key.
+pub(crate) async fn remove_unreferenced_content(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    request: RemoveUnreferencedContentRequest,
+) -> Result<RemoveUnreferencedContentResponse, ApiError> {
+    // Exactly 64 lowercase hexadecimal digits, as the dry run writes it.
+    let base = ContentSetDigest::parse(&request.base_digest)
+        .ok_or_else(|| ApiError::invalid("base_digest must be 64 lowercase hexadecimal digits"))?;
+    let receipt = state
+        .run(move |artifacts| artifacts.remove_unreferenced_content(&actor, &key, base))
+        .await?;
+    Ok(RemoveUnreferencedContentResponse {
+        blobs: receipt.blobs,
+        bytes: receipt.bytes,
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+fn content_dto(content: UnreferencedContent) -> WireContent {
+    WireContent {
+        blobs: content.blobs,
+        bytes: content.bytes,
+        digest: content.digest.to_string(),
+    }
 }
 
 /// Wakes change streams when the commit wrote something, and converts the

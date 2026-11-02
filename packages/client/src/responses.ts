@@ -13,6 +13,8 @@ import type {
   Handoff,
   HandoffState,
   Preview,
+  PurgeArtifactResponse,
+  RemoveUnreferencedContentResponse,
   Revision,
   RevisionFile,
   RuntimeConnection,
@@ -23,6 +25,7 @@ import type {
   RotateTokenResponse,
   TokenInfo,
   TokenList,
+  UnreferencedContent,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
 import type { FeedChange } from './change-feed.js';
@@ -66,6 +69,8 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   runtime_session_expired: true,
   revision_conflict: true,
   metadata_conflict: true,
+  not_in_trash: true,
+  content_conflict: true,
   request_key_reused: true,
   payload_too_large: true,
   range_not_satisfiable: true,
@@ -82,6 +87,7 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   metadata_updated: true,
   deleted: true,
   recovered: true,
+  purged: true,
 };
 
 // A record for the same reason as the error codes: a part added later must
@@ -255,6 +261,49 @@ export function parseUpdate(
   return parsed === undefined
     ? undefined
     : { artifact: parsed, replayed: value.replayed };
+}
+
+/** Parses the response of a purge. */
+export function parsePurge(value: unknown): PurgeArtifactResponse | undefined {
+  if (!isRecord(value) || typeof value.replayed !== 'boolean') return undefined;
+  const { artifact_id, metadata_revision, purged_at_ms } = value;
+  if (
+    typeof artifact_id !== 'string' ||
+    !isCount(metadata_revision) ||
+    !isTime(purged_at_ms)
+  )
+    return undefined;
+  return {
+    artifact_id,
+    metadata_revision,
+    purged_at_ms,
+    replayed: value.replayed,
+  };
+}
+
+/** Parses the dry run of a cleanup of unreferenced content. */
+export function parseUnreferencedContent(
+  value: unknown,
+): UnreferencedContent | undefined {
+  if (!isRecord(value)) return undefined;
+  const { blobs, bytes, digest } = value;
+  return isCount(blobs) &&
+    isCount(bytes) &&
+    typeof digest === 'string' &&
+    /^[0-9a-f]{64}$/.test(digest)
+    ? { blobs, bytes, digest }
+    : undefined;
+}
+
+/** Parses what a cleanup of unreferenced content deleted. */
+export function parseRemoveUnreferencedContent(
+  value: unknown,
+): RemoveUnreferencedContentResponse | undefined {
+  if (!isRecord(value) || typeof value.replayed !== 'boolean') return undefined;
+  const { blobs, bytes } = value;
+  return isCount(blobs) && isCount(bytes)
+    ? { blobs, bytes, replayed: value.replayed }
+    : undefined;
 }
 
 /** Parses the response of a preview request. */

@@ -128,7 +128,7 @@
           "type": "integer"
         },
         "revision": {
-          "description": "The revision the commit created, or the current one for a metadata\nchange (`metadata_updated`, `deleted`, or `recovered`).",
+          "description": "The revision the commit created, or the current one for a metadata\nchange (`metadata_updated`, `deleted`, `recovered`, or `purged`).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -229,6 +229,11 @@
         {
           "const": "recovered",
           "description": "The artifact was taken out of the trash.",
+          "type": "string"
+        },
+        {
+          "const": "purged",
+          "description": "The artifact was removed from the trash for good; reading it is\n`not_found` and it never returns.",
           "type": "string"
         }
       ]
@@ -482,6 +487,16 @@
         {
           "const": "metadata_conflict",
           "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+          "type": "string"
+        },
+        {
+          "const": "not_in_trash",
+          "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+          "type": "string"
+        },
+        {
+          "const": "content_conflict",
+          "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
           "type": "string"
         },
         {
@@ -873,6 +888,96 @@
         "url",
         "revision",
         "expires_at_ms"
+      ],
+      "type": "object"
+    },
+    "PurgeArtifactRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/artifacts/{id}/purge`: removes an artifact that is in\nthe trash for good (decision 0029). It cannot be undone.",
+      "properties": {
+        "base_metadata_revision": {
+          "description": "The metadata revision of the artifact in the trash that the caller\nsaw. The purge fails with `metadata_conflict` unless it is still\ncurrent, so an artifact recovered and deleted again since is not\nremoved by a purge prepared against its earlier trash state.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "base_metadata_revision"
+      ],
+      "type": "object"
+    },
+    "PurgeArtifactResponse": {
+      "additionalProperties": false,
+      "description": "Response of `POST /v1/artifacts/{id}/purge`. After a purge the artifact is\n`not_found` to every request, also the retry of an earlier create, save,\nrestore, duplicate, or update that named it; only a retry of the purge\nitself answers, with `replayed: true`. The identifier is never used for\nanother artifact. A copy made from the artifact is not affected.",
+      "properties": {
+        "artifact_id": {
+          "description": "The removed artifact.",
+          "type": "string"
+        },
+        "metadata_revision": {
+          "description": "The metadata revision the purge recorded, which the change feed's\n`purged` change also carries.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "purged_at_ms": {
+          "description": "When the artifact was removed, in Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key already purged it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "metadata_revision",
+        "purged_at_ms",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "RemoveUnreferencedContentRequest": {
+      "additionalProperties": false,
+      "description": "Body of `DELETE /v1/content/unreferenced`, with an `Idempotency-Key`\nheader: the cleanup of the set a dry run reported (decision 0029).",
+      "properties": {
+        "base_digest": {
+          "description": "The `digest` of the dry run's set. The cleanup fails with\n`content_conflict` and deletes nothing unless the unreferenced content\nis still exactly that set.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_digest"
+      ],
+      "type": "object"
+    },
+    "RemoveUnreferencedContentResponse": {
+      "additionalProperties": false,
+      "description": "Response of `DELETE /v1/content/unreferenced`: what the first run under the\nkey deleted. A retry with the same key and `base_digest` returns the same\nnumbers with `replayed: true`, also when the set is empty by then.",
+      "properties": {
+        "blobs": {
+          "description": "How many distinct contents were deleted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes": {
+          "description": "Their total size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key did the deleting.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blobs",
+        "bytes",
+        "replayed"
       ],
       "type": "object"
     },
@@ -1434,6 +1539,34 @@
       ],
       "type": "object"
     },
+    "UnreferencedContent": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/content/unreferenced`, the dry run: file content that\nno revision file of any artifact refers to, in the trash or not. Nothing is\nremoved.",
+      "properties": {
+        "blobs": {
+          "description": "How many distinct contents.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes": {
+          "description": "Their total size in bytes. The database file does not shrink; the\nspace is reused by later writes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "description": "The identity of this set: 64 lowercase hexadecimal digits (SHA-256 over\nthe sorted digests of its contents). Send it as `base_digest` to delete\nexactly this set.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "blobs",
+        "bytes",
+        "digest"
+      ],
+      "type": "object"
+    },
     "UpdateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or\nseveral of them. Source revisions are not touched.",
@@ -1514,6 +1647,21 @@
     },
     {
       "$ref": "#/$defs/UpdateArtifactResponse"
+    },
+    {
+      "$ref": "#/$defs/PurgeArtifactRequest"
+    },
+    {
+      "$ref": "#/$defs/PurgeArtifactResponse"
+    },
+    {
+      "$ref": "#/$defs/UnreferencedContent"
+    },
+    {
+      "$ref": "#/$defs/RemoveUnreferencedContentRequest"
+    },
+    {
+      "$ref": "#/$defs/RemoveUnreferencedContentResponse"
     },
     {
       "$ref": "#/$defs/Artifact"

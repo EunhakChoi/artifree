@@ -18,18 +18,20 @@ use artifree_contracts::api::{
     AgentSessionList, Artifact, ArtifactChange, ArtifactList, CommitResponse,
     CreateArtifactRequest, CreateRuntimeViewRequest, CreateTokenRequest, CreateTokenResponse,
     DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse, FeedPosition, Handoff,
-    HandoffActionRequest, ListArtifactsQuery, Preview, RestoreRevisionRequest, Revision,
-    RevisionList, RotateTokenResponse, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    HandoffActionRequest, ListArtifactsQuery, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RotateTokenResponse, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
-    SourceExportManifest, StageHandoffRequest, TokenInfo, TokenList, UpdateArtifactRequest,
-    UpdateArtifactResponse,
+    SourceExportManifest, StageHandoffRequest, TokenInfo, TokenList, UnreferencedContent,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut generator = SchemaSettings::draft2020_12().into_generator();
-    let bodies = [
+    // A vector: Serde serializes arrays of up to 32 elements only.
+    let bodies = vec![
         generator.subschema_for::<CreateArtifactRequest>(),
         generator.subschema_for::<SaveRevisionRequest>(),
         generator.subschema_for::<RestoreRevisionRequest>(),
@@ -37,6 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<CommitResponse>(),
         generator.subschema_for::<DuplicateArtifactResponse>(),
         generator.subschema_for::<UpdateArtifactResponse>(),
+        generator.subschema_for::<PurgeArtifactRequest>(),
+        generator.subschema_for::<PurgeArtifactResponse>(),
+        generator.subschema_for::<UnreferencedContent>(),
+        generator.subschema_for::<RemoveUnreferencedContentRequest>(),
+        generator.subschema_for::<RemoveUnreferencedContentResponse>(),
         generator.subschema_for::<Artifact>(),
         generator.subschema_for::<ArtifactList>(),
         generator.subschema_for::<Revision>(),

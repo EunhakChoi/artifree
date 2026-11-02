@@ -46,6 +46,16 @@
                 "type": "string"
               },
               {
+                "const": "not_in_trash",
+                "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                "type": "string"
+              },
+              {
+                "const": "content_conflict",
+                "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                "type": "string"
+              },
+              {
                 "const": "request_key_reused",
                 "description": "The idempotency key was already used for a different request.",
                 "type": "string"
@@ -345,6 +355,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -572,6 +592,16 @@
                       {
                         "const": "metadata_conflict",
                         "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
                         "type": "string"
                       },
                       {
@@ -923,6 +953,16 @@
                       {
                         "const": "metadata_conflict",
                         "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
                         "type": "string"
                       },
                       {
@@ -1312,6 +1352,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -1632,6 +1682,16 @@
                       {
                         "const": "metadata_conflict",
                         "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
                         "type": "string"
                       },
                       {
@@ -1974,6 +2034,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -2251,6 +2321,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -2465,6 +2545,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -2668,6 +2758,16 @@
                       {
                         "const": "metadata_conflict",
                         "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
                         "type": "string"
                       },
                       {
@@ -2909,6 +3009,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -3080,6 +3190,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -3236,6 +3356,16 @@
                       {
                         "const": "metadata_conflict",
                         "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
                         "type": "string"
                       },
                       {
@@ -3516,6 +3646,16 @@
                         "type": "string"
                       },
                       {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "request_key_reused",
                         "description": "The idempotency key was already used for a different request.",
                         "type": "string"
@@ -3718,6 +3858,16 @@
                       {
                         "const": "metadata_conflict",
                         "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "not_in_trash",
+                        "description": "The artifact is not in the trash, so it cannot be purged. Move it to\nthe trash first.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "content_conflict",
+                        "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
                         "type": "string"
                       },
                       {

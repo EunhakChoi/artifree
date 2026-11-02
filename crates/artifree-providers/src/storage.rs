@@ -25,6 +25,13 @@
 //! Each write decides its key and the trash first, in one order (see
 //! `settle`).
 //!
+//! A purge (decision 0029) leaves a tombstone: the artifact row with its
+//! `purged_at`, the revision and metadata headers, request keys, and change
+//! feed entries stay, so every foreign key holds, the identifier stays taken,
+//! and the feed keeps its sequences. File listings, titles, and content no
+//! other revision refers to are deleted. Reads treat a purged artifact as
+//! missing.
+//!
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
@@ -39,8 +46,9 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord,
-    CommitReceipt, Delivery, FileEntry, ListOrder, MetadataReceipt, MetadataUpdate, NewArtifact,
-    RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    CleanupReceipt, CleanupRequest, CommitReceipt, ContentSetDigest, Delivery, FileEntry,
+    ListOrder, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest,
+    RequestIdentity, RevisionCommit, RevisionRecord, StoreError, UnreferencedContent,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -65,8 +73,9 @@ impl SqliteStore {
     /// access token table). A version 1 database gains the change feed; its
     /// earlier commits have no feed entries. A version 1 or 2 database gains
     /// metadata revisions, a version 1 to 3 database the latest commit time,
-    /// a version 1 to 4 database the trash, with no artifact in it, and a
-    /// version 1 to 5 database the token table unless it has one.
+    /// a version 1 to 4 database the trash, with no artifact in it, a
+    /// version 1 to 5 database the token table unless it has one, and a
+    /// version 1 to 6 database the purge tombstone column.
     ///
     /// The upgrade runs in one transaction before the file is switched to WAL.
     /// An open that fails leaves the file byte for byte as it was: a newer
@@ -103,7 +112,83 @@ impl SqliteStore {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
+        self.write_with(false, operation)
+    }
+
+    /// As [`Self::write`], for a write that deletes content for good: freed
+    /// pages are overwritten with zeros (`secure_delete`), so the deleted
+    /// bytes do not stay in the database file's free pages. Copies in the
+    /// write-ahead log until it is checkpointed and truncated, and in earlier
+    /// backups, remain (decision 0029).
+    fn write_erasing<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.write_with(true, operation)
+    }
+
+    /// A revision's header and files, read from one snapshot: a purge that
+    /// commits meanwhile is seen whole or not at all, never as a header with
+    /// no files. `between` runs after the header is read; only a test passes
+    /// anything, to commit a purge at that point.
+    fn revision_between(
+        &self,
+        id: &ArtifactId,
+        revision: SourceRevision,
+        between: impl FnOnce(),
+    ) -> Result<Option<RevisionRecord>, StoreError> {
         let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        read_revision(&snapshot, id, revision, between)
+    }
+
+    /// Every revision of an artifact, newest first, from one snapshot like
+    /// [`Self::revision_between`]; `between` runs after the numbers are read.
+    fn revisions_between(
+        &self,
+        id: &ArtifactId,
+        between: impl FnOnce(),
+    ) -> Result<Vec<RevisionRecord>, StoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        let numbers = {
+            let mut statement = snapshot
+                .prepare(
+                    "SELECT r.revision FROM revisions r JOIN artifacts a ON a.id = r.artifact_id
+                     WHERE r.artifact_id = ?1 AND a.purged_at IS NULL ORDER BY r.revision DESC",
+                )
+                .map_err(unavailable)?;
+            let rows = statement
+                .query_map([id.as_str()], |row| row.get::<_, i64>(0))
+                .map_err(unavailable)?;
+            let mut numbers = Vec::new();
+            for number in rows {
+                numbers.push(stored_revision(number.map_err(unavailable)?)?);
+            }
+            numbers
+        };
+        between();
+        let mut records = Vec::new();
+        for revision in numbers {
+            records.push(revision_record(&snapshot, id, revision)?.ok_or_else(|| {
+                StoreError::Unavailable("revision disappeared while listing".into())
+            })?);
+        }
+        Ok(records)
+    }
+
+    fn write_with<T>(
+        &self,
+        erase: bool,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut connection = self.connect()?;
+        if erase {
+            // Before the transaction: the setting cannot change inside one.
+            connection
+                .pragma_update(None, "secure_delete", true)
+                .map_err(unavailable)?;
+        }
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
@@ -319,6 +404,191 @@ impl ArtifactStore for SqliteStore {
         })
     }
 
+    fn replay_create(
+        &self,
+        request: RequestIdentity<'_>,
+    ) -> Result<Option<CommitReceipt>, StoreError> {
+        let mut connection = self.connect()?;
+        // One read snapshot, so the key and the artifact it names agree.
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        match key_use(&snapshot, request)? {
+            KeyUse::Same(id, position) => replayed(&snapshot, &id, position).map(Some),
+            KeyUse::New | KeyUse::Reused | KeyUse::Gone(..) => Ok(None),
+        }
+    }
+
+    fn purge_artifact(&self, request: PurgeRequest<'_>) -> Result<PurgeReceipt, StoreError> {
+        self.write_erasing(|transaction| {
+            // The order of `settle`: a replay, then not found, then a reused
+            // key. The fingerprint names the operation, so a key that finds
+            // its artifact purged was the purge's own.
+            let target = artifact_record(transaction, request.artifact)?;
+            match (key_use(transaction, request.request)?, &target) {
+                (KeyUse::Gone(id, position), _) => {
+                    return Ok(PurgeReceipt {
+                        metadata_revision: position.1,
+                        purged_at: purged_at(transaction, &id)?,
+                        artifact: id,
+                        delivery: Delivery::Replayed,
+                    });
+                }
+                (KeyUse::Same(..), _) => {
+                    return Err(corrupt("the key of a purge names an artifact in place"));
+                }
+                (_, None) => return Err(StoreError::NotFound),
+                (KeyUse::Reused, Some(_)) => return Err(StoreError::RequestKeyReused),
+                (KeyUse::New, Some(_)) => {}
+            }
+            let current = target.ok_or(StoreError::NotFound)?;
+            if current.deleted_at.is_none() {
+                return Err(StoreError::NotInTrash);
+            }
+            if current.metadata_revision != request.base {
+                return Err(StoreError::MetadataConflict {
+                    current: current.metadata_revision,
+                });
+            }
+            let now = commit_time(transaction)?;
+            let next = MetadataRevision(current.metadata_revision.0 + 1);
+            remove_files(transaction, request.artifact)?;
+            // Titles are scrubbed from every metadata revision: they describe
+            // what was removed. The tombstone keeps only the headers.
+            transaction
+                .execute(
+                    "UPDATE metadata_revisions SET title = '' WHERE artifact_id = ?1",
+                    [request.artifact.as_str()],
+                )
+                .map_err(unavailable)?;
+            transaction
+                .execute(
+                    "INSERT INTO metadata_revisions
+                         (artifact_id, metadata_revision, title, pinned, deleted_at, created_by,
+                          created_at)
+                     VALUES (?1, ?2, '', ?3, ?4, ?5, ?6)",
+                    params![
+                        request.artifact.as_str(),
+                        sql_metadata(next)?,
+                        current.pinned,
+                        current.deleted_at.map(|time| time.0),
+                        request.request.actor.as_str(),
+                        now.0
+                    ],
+                )
+                .map_err(unavailable)?;
+            transaction
+                .execute(
+                    "UPDATE artifacts
+                     SET title = '', metadata_revision = ?2, purged_at = ?3 WHERE id = ?1",
+                    params![request.artifact.as_str(), sql_metadata(next)?, now.0],
+                )
+                .map_err(unavailable)?;
+            let position = (current.current_revision, next);
+            record_key(
+                transaction,
+                request.request,
+                request.artifact,
+                position,
+                now,
+            )?;
+            record_change(
+                transaction,
+                request.artifact,
+                ChangeKind::Purged,
+                position,
+                now,
+            )?;
+            Ok(PurgeReceipt {
+                artifact: request.artifact.clone(),
+                metadata_revision: next,
+                purged_at: now,
+                delivery: Delivery::Committed,
+            })
+        })
+    }
+
+    fn unreferenced_content(&self) -> Result<UnreferencedContent, StoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        count_unreferenced(&snapshot)
+    }
+
+    fn remove_unreferenced_content(
+        &self,
+        request: CleanupRequest<'_>,
+    ) -> Result<CleanupReceipt, StoreError> {
+        // Everything is one write transaction. The key is looked up first: a
+        // retry replays what the first run deleted, whatever the set is now.
+        // The count, the comparison with the reviewed set, the delete, and
+        // the record of the key follow, so a commit that refers to content is
+        // wholly before them, which keeps the content, or wholly after, which
+        // stores it again.
+        self.write_erasing(|transaction| {
+            let identity = request.request;
+            let recorded: Option<(Vec<u8>, i64, i64)> = transaction
+                .query_row(
+                    "SELECT fingerprint, blobs, bytes FROM cleanup_runs
+                     WHERE actor = ?1 AND request_key = ?2",
+                    params![identity.actor.as_str(), identity.key.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(unavailable)?;
+            if let Some((fingerprint, blobs, bytes)) = recorded {
+                if fingerprint.as_slice() != identity.fingerprint.0.as_slice() {
+                    return Err(StoreError::RequestKeyReused);
+                }
+                return Ok(CleanupReceipt {
+                    blobs: u64::try_from(blobs).map_err(corrupt)?,
+                    bytes: u64::try_from(bytes).map_err(corrupt)?,
+                    delivery: Delivery::Replayed,
+                });
+            }
+            // The key space is shared with the requests that name an artifact.
+            let named_artifact: bool = transaction
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM request_keys
+                                    WHERE actor = ?1 AND request_key = ?2)",
+                    params![identity.actor.as_str(), identity.key.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(unavailable)?;
+            if named_artifact {
+                return Err(StoreError::RequestKeyReused);
+            }
+            let found = count_unreferenced(transaction)?;
+            if found.digest != request.base {
+                return Err(StoreError::ContentChanged);
+            }
+            transaction
+                .execute(
+                    "DELETE FROM blobs WHERE NOT EXISTS
+                         (SELECT 1 FROM revision_files f WHERE f.digest = blobs.digest)",
+                    [],
+                )
+                .map_err(unavailable)?;
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_runs
+                         (actor, request_key, fingerprint, blobs, bytes, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        identity.actor.as_str(),
+                        identity.key.as_str(),
+                        identity.fingerprint.0.as_slice(),
+                        i64::try_from(found.blobs).map_err(corrupt)?,
+                        i64::try_from(found.bytes).map_err(corrupt)?,
+                        now()?.0
+                    ],
+                )
+                .map_err(unavailable)?;
+            Ok(CleanupReceipt {
+                blobs: found.blobs,
+                bytes: found.bytes,
+                delivery: Delivery::Committed,
+            })
+        })
+    }
+
     fn artifact(&self, id: &ArtifactId) -> Result<Option<ArtifactRecord>, StoreError> {
         artifact_record(&self.connect()?, id)
     }
@@ -356,21 +626,7 @@ impl ArtifactStore for SqliteStore {
     }
 
     fn revisions(&self, id: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {
-        let connection = self.connect()?;
-        let mut statement = connection
-            .prepare("SELECT revision FROM revisions WHERE artifact_id = ?1 ORDER BY revision DESC")
-            .map_err(unavailable)?;
-        let numbers = statement
-            .query_map([id.as_str()], |row| row.get::<_, i64>(0))
-            .map_err(unavailable)?;
-        let mut records = Vec::new();
-        for number in numbers {
-            let revision = stored_revision(number.map_err(unavailable)?)?;
-            records.push(revision_record(&connection, id, revision)?.ok_or_else(|| {
-                StoreError::Unavailable("revision disappeared while listing".into())
-            })?);
-        }
-        Ok(records)
+        self.revisions_between(id, || {})
     }
 
     fn revision(
@@ -378,7 +634,7 @@ impl ArtifactStore for SqliteStore {
         id: &ArtifactId,
         revision: SourceRevision,
     ) -> Result<Option<RevisionRecord>, StoreError> {
-        revision_record(&self.connect()?, id, revision)
+        self.revision_between(id, revision, || {})
     }
 
     fn revision_package(
@@ -492,6 +748,7 @@ impl ArtifactStore for SqliteStore {
                     "metadata_updated" => ChangeKind::MetadataUpdated,
                     "deleted" => ChangeKind::Deleted,
                     "recovered" => ChangeKind::Recovered,
+                    "purged" => ChangeKind::Purged,
                     other => return Err(corrupt(format!("change kind {other}"))),
                 },
                 revision: stored_revision(revision)?,
@@ -516,6 +773,9 @@ enum KeyUse {
     New,
     /// The same request used it, and left its artifact at this position.
     Same(ArtifactId, Position),
+    /// The same request used it, and its artifact was purged since. Only a
+    /// retry of the purge itself can still be answered.
+    Gone(ArtifactId, Position),
     /// A request with different content used it.
     Reused,
 }
@@ -524,16 +784,37 @@ fn key_use(
     transaction: &Transaction<'_>,
     request: RequestIdentity<'_>,
 ) -> Result<KeyUse, StoreError> {
-    let stored: Option<(Vec<u8>, String, i64, i64)> = transaction
+    // A key a cleanup ran under belongs to that request alone (decision 0029).
+    let cleanup: bool = transaction
         .query_row(
-            "SELECT fingerprint, artifact_id, revision, metadata_revision FROM request_keys
-             WHERE actor = ?1 AND request_key = ?2",
+            "SELECT EXISTS (SELECT 1 FROM cleanup_runs WHERE actor = ?1 AND request_key = ?2)",
             params![request.actor.as_str(), request.key.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if cleanup {
+        return Ok(KeyUse::Reused);
+    }
+    let stored: Option<(Vec<u8>, String, i64, i64, bool)> = transaction
+        .query_row(
+            "SELECT k.fingerprint, k.artifact_id, k.revision, k.metadata_revision,
+                 a.purged_at IS NOT NULL
+             FROM request_keys k JOIN artifacts a ON a.id = k.artifact_id
+             WHERE k.actor = ?1 AND k.request_key = ?2",
+            params![request.actor.as_str(), request.key.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((fingerprint, artifact_id, revision, metadata)) = stored else {
+    let Some((fingerprint, artifact_id, revision, metadata, purged)) = stored else {
         return Ok(KeyUse::New);
     };
     // The fingerprint covers the operation, so a key used by one kind of
@@ -541,10 +822,13 @@ fn key_use(
     if fingerprint.as_slice() != request.fingerprint.0.as_slice() {
         return Ok(KeyUse::Reused);
     }
-    Ok(KeyUse::Same(
-        artifact_id.parse().map_err(corrupt)?,
-        (stored_revision(revision)?, stored_metadata(metadata)?),
-    ))
+    let id = artifact_id.parse().map_err(corrupt)?;
+    let position = (stored_revision(revision)?, stored_metadata(metadata)?);
+    Ok(if purged {
+        KeyUse::Gone(id, position)
+    } else {
+        KeyUse::Same(id, position)
+    })
 }
 
 /// How a write goes on after [`settle`].
@@ -560,11 +844,12 @@ enum Settled<T> {
 /// request replays; a write whose target is missing or in the trash is not
 /// found, also when its key was used for another request; and only then is a
 /// reused key refused. `target` is what the write needs in place: the
-/// artifact, or a copy's source.
+/// artifact, or a copy's source. A request whose artifact was purged is not
+/// found like one in the trash, but it cannot replay (decision 0029).
 fn settle<T>(key: KeyUse, target: Option<T>) -> Result<Settled<T>, StoreError> {
     match (key, target) {
         (KeyUse::Same(id, position), _) => Ok(Settled::Replay(id, position)),
-        (_, None) => Err(StoreError::NotFound),
+        (KeyUse::Gone(..), _) | (_, None) => Err(StoreError::NotFound),
         (KeyUse::Reused, Some(_)) => Err(StoreError::RequestKeyReused),
         (KeyUse::New, Some(target)) => Ok(Settled::Proceed(target)),
     }
@@ -587,6 +872,79 @@ fn in_place(
     id: &ArtifactId,
 ) -> Result<Option<ArtifactRecord>, StoreError> {
     Ok(artifact_record(transaction, id)?.filter(|record| record.deleted_at.is_none()))
+}
+
+/// When a purged artifact was removed.
+fn purged_at(connection: &Connection, id: &ArtifactId) -> Result<UnixMillis, StoreError> {
+    let at: Option<i64> = connection
+        .query_row(
+            "SELECT purged_at FROM artifacts WHERE id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    at.map(UnixMillis)
+        .ok_or_else(|| corrupt("a purged artifact has no purge time"))
+}
+
+/// Deletes the listings of all files of an artifact's revisions, and the
+/// content that no other revision file refers to afterwards. Content shared
+/// with a copy, or with another revision, stays.
+fn remove_files(transaction: &Transaction<'_>, id: &ArtifactId) -> Result<(), StoreError> {
+    let digests: Vec<Vec<u8>> = transaction
+        .prepare("SELECT DISTINCT digest FROM revision_files WHERE artifact_id = ?1")
+        .map_err(unavailable)?
+        .query_map([id.as_str()], |row| row.get(0))
+        .map_err(unavailable)?
+        .collect::<Result<_, _>>()
+        .map_err(unavailable)?;
+    transaction
+        .execute(
+            "DELETE FROM revision_files WHERE artifact_id = ?1",
+            [id.as_str()],
+        )
+        .map_err(unavailable)?;
+    let mut remove = transaction
+        .prepare_cached(
+            "DELETE FROM blobs WHERE digest = ?1
+               AND NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = ?1)",
+        )
+        .map_err(unavailable)?;
+    for digest in digests {
+        remove.execute([digest]).map_err(unavailable)?;
+    }
+    Ok(())
+}
+
+/// The content no revision file refers to: how many, how large, and the
+/// identity of the set (SHA-256 over a fixed prefix and the sorted digests).
+fn count_unreferenced(connection: &Connection) -> Result<UnreferencedContent, StoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT digest, length(content) FROM blobs b
+             WHERE NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = b.digest)
+             ORDER BY digest",
+        )
+        .map_err(unavailable)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(unavailable)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"artifree.unreferenced-content.v1\n");
+    let (mut blobs, mut bytes) = (0_u64, 0_u64);
+    for row in rows {
+        let (digest, size) = row.map_err(unavailable)?;
+        hasher.update(&digest);
+        blobs += 1;
+        bytes += u64::try_from(size).map_err(corrupt)?;
+    }
+    Ok(UnreferencedContent {
+        blobs,
+        bytes,
+        digest: ContentSetDigest(hasher.finalize().into()),
+    })
 }
 
 fn insert_revision(
@@ -706,6 +1064,7 @@ fn record_change(
         ChangeKind::MetadataUpdated => "metadata_updated",
         ChangeKind::Deleted => "deleted",
         ChangeKind::Recovered => "recovered",
+        ChangeKind::Purged => "purged",
         _ => {
             return Err(StoreError::Unavailable(
                 "this store cannot record that change".into(),
@@ -781,7 +1140,7 @@ fn artifact_record(
         .query_row(
             "SELECT id, owner, kind, title, pinned, current_revision, metadata_revision,
                  created_at, updated_at, deleted_at
-             FROM artifacts WHERE id = ?1",
+             FROM artifacts WHERE id = ?1 AND purged_at IS NULL",
             [id.as_str()],
             RawArtifact::from_row,
         )
@@ -799,6 +1158,7 @@ SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, crea
     deleted_at
 FROM artifacts
 WHERE owner = ?1
+  AND purged_at IS NULL
   AND (deleted_at IS NOT NULL) = ?7
   AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
   AND (?3 IS NULL OR pinned = ?3)
@@ -812,6 +1172,7 @@ SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, crea
     deleted_at
 FROM artifacts
 WHERE owner = ?1
+  AND purged_at IS NULL
   AND (deleted_at IS NOT NULL) = ?7
   AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
   AND (?3 IS NULL OR pinned = ?3)
@@ -846,10 +1207,23 @@ fn revision_record(
     id: &ArtifactId,
     revision: SourceRevision,
 ) -> Result<Option<RevisionRecord>, StoreError> {
+    read_revision(connection, id, revision, || {})
+}
+
+/// The header, then the files, of a revision. The two reads are consistent
+/// only within one transaction; `between` runs after the header.
+fn read_revision(
+    connection: &Connection,
+    id: &ArtifactId,
+    revision: SourceRevision,
+    between: impl FnOnce(),
+) -> Result<Option<RevisionRecord>, StoreError> {
     let number = sql_revision(revision)?;
     let header: Option<(String, i64)> = connection
         .query_row(
-            "SELECT created_by, created_at FROM revisions WHERE artifact_id = ?1 AND revision = ?2",
+            "SELECT r.created_by, r.created_at FROM revisions r
+             JOIN artifacts a ON a.id = r.artifact_id
+             WHERE r.artifact_id = ?1 AND r.revision = ?2 AND a.purged_at IS NULL",
             params![id.as_str(), number],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -858,6 +1232,7 @@ fn revision_record(
     let Some((created_by, created_at)) = header else {
         return Ok(None);
     };
+    between();
     let mut statement = connection
         .prepare_cached(
             "SELECT path, size, digest FROM revision_files
@@ -1013,4 +1388,145 @@ pub(crate) fn unavailable(error: rusqlite::Error) -> StoreError {
 
 fn corrupt(error: impl std::fmt::Display) -> StoreError {
     StoreError::Unavailable(format!("stored data is invalid: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use artifree_domain::identity::RequestKey;
+    use artifree_ports::artifact_store::RequestFingerprint;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A store in its own directory, with one artifact of two files in the
+    /// trash, ready to be purged.
+    struct Trashed {
+        directory: PathBuf,
+        store: SqliteStore,
+        id: ArtifactId,
+        owner: ActorId,
+    }
+
+    impl Trashed {
+        fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
+            let directory = std::env::temp_dir()
+                .join(format!("artifree-snapshot-{}-{name}", std::process::id()));
+            drop(std::fs::remove_dir_all(&directory));
+            std::fs::create_dir_all(&directory)?;
+            let store = SqliteStore::open(&directory.join(DATABASE_FILE))?;
+            let owner: ActorId = "owner".parse()?;
+            let key: RequestKey = "create-key".parse()?;
+            let title: Title = "Demo".parse()?;
+            let package = FilePackage::new(vec![
+                ("index.html".parse()?, b"<h1>a</h1>".to_vec()),
+                ("style.css".parse()?, b"h1{}".to_vec()),
+            ])?;
+            let created = store.create_artifact(NewArtifact {
+                request: RequestIdentity {
+                    actor: &owner,
+                    key: &key,
+                    fingerprint: RequestFingerprint([1; 32]),
+                },
+                kind: ArtifactKind::App,
+                title: &title,
+                package: &package,
+                source: None,
+            })?;
+            let delete_key: RequestKey = "delete-key".parse()?;
+            store.update_metadata(MetadataUpdate {
+                request: RequestIdentity {
+                    actor: &owner,
+                    key: &delete_key,
+                    fingerprint: RequestFingerprint([2; 32]),
+                },
+                artifact: &created.artifact.id,
+                base: MetadataRevision(1),
+                title: None,
+                pinned: None,
+                deleted: Some(true),
+            })?;
+            Ok(Self {
+                directory,
+                store,
+                id: created.artifact.id,
+                owner,
+            })
+        }
+
+        /// Purges the artifact; the commit is complete when this returns.
+        fn purge(&self) -> Result<(), Box<dyn std::error::Error>> {
+            let key: RequestKey = "purge-key".parse()?;
+            self.store.purge_artifact(PurgeRequest {
+                request: RequestIdentity {
+                    actor: &self.owner,
+                    key: &key,
+                    fingerprint: RequestFingerprint([3; 32]),
+                },
+                artifact: &self.id,
+                base: MetadataRevision(2),
+            })?;
+            Ok(())
+        }
+    }
+
+    impl Drop for Trashed {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.directory));
+        }
+    }
+
+    /// The control: read with no transaction, a purge between the header and
+    /// the files tears the read. This is what the snapshot prevents, and it
+    /// shows that the hook really commits the purge at that point.
+    #[test]
+    fn without_a_snapshot_a_purge_between_the_reads_tears_the_revision() -> TestResult {
+        let fixture = Trashed::new("control")?;
+        let connection = fixture.store.connect()?;
+        let mut purged = Ok(());
+        let torn = read_revision(&connection, &fixture.id, SourceRevision(1), || {
+            purged = fixture.purge();
+        })?;
+        purged?;
+        assert_eq!(
+            torn.map(|record| record.files.len()),
+            Some(0),
+            "the control must reproduce the torn read"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_purge_between_the_header_and_the_files_does_not_tear_a_revision() -> TestResult {
+        let fixture = Trashed::new("revision")?;
+        let mut purged = Ok(());
+        let record = fixture
+            .store
+            .revision_between(&fixture.id, SourceRevision(1), || {
+                purged = fixture.purge();
+            })?
+            .ok_or("the snapshot began before the purge")?;
+        purged?;
+        let paths: Vec<_> = record.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["index.html", "style.css"]);
+        // Once the purge is committed a new read sees nothing at all.
+        assert_eq!(
+            fixture.store.revision(&fixture.id, SourceRevision(1))?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_purge_after_the_numbers_are_listed_does_not_cut_the_listing_short() -> TestResult {
+        let fixture = Trashed::new("listing")?;
+        let mut purged = Ok(());
+        let records = fixture.store.revisions_between(&fixture.id, || {
+            purged = fixture.purge();
+        })?;
+        purged?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].files.len(), 2);
+        assert!(fixture.store.revisions(&fixture.id)?.is_empty());
+        Ok(())
+    }
 }
