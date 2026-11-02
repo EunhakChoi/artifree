@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect } from '@playwright/test';
-import { freePort, startServer } from './lib/server-process.mjs';
+import { startServer } from './lib/server-process.mjs';
 import { buildStaticWeb, serveStatic } from './lib/static-web.mjs';
 import { api } from './smoke-workspace.mjs';
 
@@ -24,8 +24,11 @@ export async function checkStaticDefault({ browser, binary }) {
   let site;
   const contexts = [];
   try {
-    const sitePort = await freePort();
-    const siteOrigin = `http://127.0.0.1:${sitePort}`;
+    // The site binds first (its files arrive after the build), so its port
+    // cannot be taken meanwhile; the servers then allow exactly its origin.
+    const dist = join(scratch, 'dist');
+    site = await serveStatic(dist, 0);
+    const siteOrigin = site.origin;
     const start = async (name, title) => {
       const server = await startServer(binary, join(scratch, name), [
         '--allowed-origin',
@@ -45,10 +48,8 @@ export async function checkStaticDefault({ browser, binary }) {
     const defaultServer = await start('default', 'Default server artifact');
     const otherServer = await start('other', 'Override server artifact');
 
-    const dist = join(scratch, 'dist');
     const built = buildStaticWeb(dist, defaultServer.api_url);
     assert.equal(built.status, 0, `The static build failed: ${built.stderr}`);
-    site = await serveStatic(dist, sitePort);
 
     const open = async (url, { init } = {}) => {
       const context = await browser.newContext();

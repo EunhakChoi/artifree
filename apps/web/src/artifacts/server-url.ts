@@ -19,8 +19,13 @@ const QUERY_OR_FRAGMENT = 'it contains a query or fragment';
  */
 export function parseServerUrl(text: string): ServerUrlResult {
   const trimmed = text.trim();
-  // Browsers read a backslash as a slash, so what follows one is not where it looks.
-  if (!/^https?:\/\/[^/]/i.test(trimmed) || trimmed.includes('\\'))
+  // Browsers read a backslash as a slash and drop tabs and line breaks, so
+  // the host they use would not be the one the text shows.
+  if (
+    !/^https?:\/\/[^/]/i.test(trimmed) ||
+    trimmed.includes('\\') ||
+    hasControlOrSpace(trimmed)
+  )
     return refused(NOT_ABSOLUTE);
   if (/[?#]/.test(trimmed)) return refused(QUERY_OR_FRAGMENT);
   const authority = trimmed.slice(trimmed.indexOf('//') + 2).split('/')[0];
@@ -38,6 +43,13 @@ export function parseServerUrl(text: string): ServerUrlResult {
     ok: true,
     url: `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, ''),
   };
+}
+
+function hasControlOrSpace(text: string): boolean {
+  return Array.from(text).some((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code <= 0x20 || code === 0x7f;
+  });
 }
 
 function refused(reason: string): ServerUrlResult {

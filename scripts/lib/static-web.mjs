@@ -36,8 +36,9 @@ export function buildStaticWeb(outDir, server) {
 }
 
 /**
- * Serves the files of `directory` on `port` like any static host would: no
- * proxy, no API, so the page must reach its server across origins.
+ * Serves the files of `directory` like any static host would: no proxy, no
+ * API, so the page must reach its server across origins. Port 0 picks a free
+ * port, which `origin` reports. The directory may be filled after the call.
  */
 export async function serveStatic(directory, port) {
   const root = resolve(directory);
@@ -65,7 +66,7 @@ export async function serveStatic(directory, port) {
   });
   await new Promise((done) => server.listen(port, '127.0.0.1', done));
   return {
-    origin: `http://127.0.0.1:${port}`,
+    origin: `http://127.0.0.1:${server.address().port}`,
     close: () => new Promise((done) => server.close(done)),
   };
 }
