@@ -136,6 +136,18 @@ impl MetadataUpdate<'_> {
     }
 }
 
+/// A request to remove an artifact in the trash for good (decision 0029).
+#[derive(Debug, Clone, Copy)]
+pub struct PurgeRequest<'a> {
+    /// Retry identity of the purging actor.
+    pub request: RequestIdentity<'a>,
+    /// Artifact to remove. It must be in the trash.
+    pub artifact: &'a ArtifactId,
+    /// Metadata revision the purge was prepared against: the trash state the
+    /// caller saw.
+    pub base: MetadataRevision,
+}
+
 /// Whether a commit was performed now or is the stored result of a retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -164,6 +176,28 @@ pub struct MetadataReceipt {
     pub artifact: ArtifactRecord,
     /// Whether this call handled the request or replayed an earlier one.
     pub delivery: Delivery,
+}
+
+/// The durable result of a purge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeReceipt {
+    /// The removed artifact. The identifier is never used again.
+    pub artifact: ArtifactId,
+    /// The metadata revision the purge itself recorded.
+    pub metadata_revision: MetadataRevision,
+    /// When the artifact was removed.
+    pub purged_at: UnixMillis,
+    /// Whether this call removed it or replayed an earlier request.
+    pub delivery: Delivery,
+}
+
+/// File content that no revision file of any artifact refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnreferencedContent {
+    /// How many distinct contents.
+    pub blobs: u64,
+    /// Their total size in bytes.
+    pub bytes: u64,
 }
 
 /// The order of an artifact list. Ties are broken by identifier.
@@ -218,6 +252,9 @@ pub enum ChangeKind {
     Deleted,
     /// The artifact was taken out of the trash.
     Recovered,
+    /// The artifact was removed from the trash for good. Reading it is not
+    /// found, as in the trash, and it never returns.
+    Purged,
 }
 
 /// One commit as recorded in the change feed.
@@ -266,6 +303,8 @@ pub enum StoreError {
         /// The metadata revision that is current now.
         current: MetadataRevision,
     },
+    /// The artifact exists but is not in the trash, so it cannot be purged.
+    NotInTrash,
     /// The actor already used the key for a request with different content.
     RequestKeyReused,
     /// The files are those of the base revision; nothing was written.
@@ -285,6 +324,7 @@ impl fmt::Display for StoreError {
             Self::MetadataConflict { current } => {
                 write!(formatter, "artifact metadata is at revision {}", current.0)
             }
+            Self::NotInTrash => formatter.write_str("artifact is not in the trash"),
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -305,6 +345,11 @@ impl std::error::Error for StoreError {}
 /// same request or [`StoreError::NotFound`], before any other check, unless
 /// it recovers the artifact (decision 0013). Reads return artifacts in the
 /// trash as stored; the core decides who may see them.
+///
+/// A purged artifact (decision 0029) is gone: reads find nothing, a write
+/// that names it is [`StoreError::NotFound`] even for a retry of an earlier
+/// request, and only the retry of the purge itself replays. Its request keys
+/// stay reserved.
 pub trait ArtifactStore {
     /// Creates an artifact at revision 1, or returns the stored receipt when
     /// the actor already committed the same request key and fingerprint.
@@ -338,7 +383,50 @@ pub trait ArtifactStore {
     /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
     fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError>;
 
-    /// Metadata of one artifact.
+    /// The receipt of an earlier create with this retry identity, without
+    /// writing anything; `None` when there is none or its artifact was purged.
+    /// It lets a copy's retry replay although its source is gone.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Unavailable`].
+    fn replay_create(
+        &self,
+        request: RequestIdentity<'_>,
+    ) -> Result<Option<CommitReceipt>, StoreError>;
+
+    /// Removes an artifact in the trash for good if its metadata is still at
+    /// `base`, or returns the stored receipt of an identical earlier purge.
+    /// Its files, titles, and listing of files are deleted, and so is content
+    /// no other revision file refers to. Revision and metadata headers, request
+    /// keys, and change feed entries remain, and the identifier is never
+    /// reused.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NotFound`] for a missing or purged artifact,
+    /// [`StoreError::NotInTrash`], [`StoreError::MetadataConflict`],
+    /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
+    fn purge_artifact(&self, request: PurgeRequest<'_>) -> Result<PurgeReceipt, StoreError>;
+
+    /// The content that no revision file refers to, counted in one snapshot.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Unavailable`].
+    fn unreferenced_content(&self) -> Result<UnreferencedContent, StoreError>;
+
+    /// Deletes the content that no revision file refers to and reports what
+    /// was deleted. What is deleted is decided in the write transaction, so a
+    /// commit that refers to content either finishes first, which keeps it, or
+    /// starts after, which stores it again.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Unavailable`].
+    fn remove_unreferenced_content(&self) -> Result<UnreferencedContent, StoreError>;
+
+    /// Metadata of one artifact. A purged artifact is `None`.
     ///
     /// # Errors
     ///

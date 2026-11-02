@@ -117,6 +117,11 @@ lists the trash, and `update_artifact` with `deleted: false` recovers an
 artifact from it, under the same base and key rules. Nothing is removed;
 each artifact carries `deleted_at_ms`, `null` outside the trash (decision
 [0013](decisions/0013-deleting-artifacts-and-the-trash.md)).
+There is no MCP tool to purge an artifact for good or to clean up unreferenced
+content: a purge cannot be undone, so only the HTTP API and the CLI offer it
+(decision [0029](decisions/0029-retention-and-cleanup.md)). The `not_in_trash`
+error code of the shared error schema is therefore never returned over MCP, and
+a purged artifact answers every MCP call as an unknown one (`not_found`).
 `restore_revision` commits an earlier revision's files, byte for byte, as the
 next revision under the same `base_revision` and key rules as a save; it
 changes no title or pin. Each file in a manifest carries `sha256`, so two

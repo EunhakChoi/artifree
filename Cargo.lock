@@ -66,6 +66,7 @@ dependencies = [
  "getrandom",
  "http-body",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

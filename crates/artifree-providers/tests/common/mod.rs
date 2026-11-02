@@ -218,14 +218,14 @@ pub fn old_artifact() -> ArtifactId {
     parsed(OLD_ID)
 }
 
-/// A database as the build of schema `version` (1 to 5) left it, holding real
+/// A database as the build of schema `version` (1 to 6) left it, holding real
 /// data, built only from the frozen schema texts in [`history`]:
 ///
 /// - the artifact "Old" at revision 2 with the body [`OLD_BODY`], created by
 ///   the request key "test-key-old";
 /// - from version 2, a feed with its head at 5;
 /// - from version 3, "Old" renamed to "Renamed" and pinned (metadata revision 2);
-/// - at version 5, an artifact "Trashed" in the trash and one access token.
+/// - from version 5, an artifact "Trashed" in the trash and one access token.
 pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Error> {
     let connection = Connection::open(path)?;
     connection.execute_batch(history::STEP_1)?;

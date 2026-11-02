@@ -97,6 +97,99 @@ test('CLI list without paging options prints every page', async () => {
   }
 });
 
+test('CLI purge sends nothing without --yes, and cleanup deletes only with --apply', async () => {
+  // A stand-in server records every request; the real server is in
+  // server.test.mjs.
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push([request.method, request.url]);
+    response.setHeader('content-type', 'application/json');
+    response.end(
+      request.url.endsWith('/purge')
+        ? JSON.stringify({
+            artifact_id: `art_${'1'.repeat(32)}`,
+            metadata_revision: 3,
+            purged_at_ms: 5,
+            replayed: false,
+          })
+        : JSON.stringify({ blobs: 2, bytes: 40 }),
+    );
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address !== null && typeof address === 'object');
+    const env = {
+      ...process.env,
+      ARTIFREE_URL: `http://127.0.0.1:${address.port}`,
+      ARTIFREE_TOKEN: 'f'.repeat(64),
+    };
+    delete env.ARTIFREE_TOKEN_FILE;
+    // Asynchronous: the stand-in server lives in this process, so a
+    // blocking spawn would stop it from answering.
+    const run = async (args) => {
+      try {
+        const { stdout, stderr } = await promisify(execFile)(
+          process.execPath,
+          ['apps/cli/dist/main.js', ...args],
+          { cwd: root, env, timeout: 10_000 },
+        );
+        return { status: 0, stdout, stderr };
+      } catch (error) {
+        return {
+          status: error.code,
+          stdout: error.stdout,
+          stderr: error.stderr,
+        };
+      }
+    };
+    const id = `art_${'1'.repeat(32)}`;
+    const unconfirmed = await run([
+      'artifact',
+      'purge',
+      id,
+      '--base-metadata',
+      '2',
+    ]);
+    assert.equal(unconfirmed.status, 2);
+    assert.equal(unconfirmed.stdout, '');
+    assert.match(unconfirmed.stderr, /--yes/);
+    assert.deepEqual(requests, [], 'an unconfirmed purge sent a request');
+
+    const purged = await run([
+      'artifact',
+      'purge',
+      id,
+      '--base-metadata',
+      '2',
+      '--yes',
+    ]);
+    assert.equal(purged.status, 0, purged.stderr);
+    assert.equal(JSON.parse(purged.stdout).metadata_revision, 3);
+    assert.deepEqual(requests, [['POST', `/v1/artifacts/${id}/purge`]]);
+
+    requests.length = 0;
+    const dry = await run(['content', 'cleanup']);
+    assert.deepEqual(JSON.parse(dry.stdout), {
+      applied: false,
+      blobs: 2,
+      bytes: 40,
+    });
+    assert.deepEqual(requests, [['GET', '/v1/content/unreferenced']]);
+    requests.length = 0;
+    const applied = await run(['content', 'cleanup', '--apply']);
+    assert.deepEqual(JSON.parse(applied.stdout), {
+      applied: true,
+      blobs: 2,
+      bytes: 40,
+    });
+    assert.deepEqual(requests, [['DELETE', '/v1/content/unreferenced']]);
+  } finally {
+    server.close();
+  }
+});
+
 test('CLI help says the inventory does not probe a server', () => {
   const result = cli(['--help']);
   assert.equal(result.status, 0);

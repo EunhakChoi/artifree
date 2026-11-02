@@ -1902,6 +1902,115 @@ test('A metadata conflict reports the current metadata revision', async () => {
   assert.equal(error.currentRevision, undefined);
 });
 
+test('A purge names the artifact, base, and key and must answer with the contract', async () => {
+  const purged = {
+    artifact_id: artifact.id,
+    metadata_revision: 3,
+    purged_at_ms: 9,
+    replayed: false,
+  };
+  const sent = [];
+  let answer = purged;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([init.method, String(url), init.headers, init.body]);
+      return Response.json(answer);
+    },
+  });
+  const purge = () =>
+    client.purgeArtifact(
+      artifact.id,
+      { base_metadata_revision: 2 },
+      { idempotencyKey: 'test-key-1' },
+    );
+  assert.deepEqual(await purge(), purged);
+  const [method, url, headers, body] = sent[0];
+  assert.equal(method, 'POST');
+  assert.equal(url, `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/purge`);
+  assert.equal(new Headers(headers).get('idempotency-key'), 'test-key-1');
+  assert.deepEqual(JSON.parse(body), { base_metadata_revision: 2 });
+  for (const broken of [
+    { ...purged, replayed: undefined },
+    { ...purged, purged_at_ms: '9' },
+    { ...purged, metadata_revision: -1 },
+    { ...purged, artifact_id: 7 },
+  ]) {
+    answer = broken;
+    assert.equal(
+      (await failure(purge())).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
+});
+
+test('A refusal to purge outside the trash keeps its own code', async () => {
+  const client = clientWith(() =>
+    Response.json(
+      {
+        error: {
+          code: 'not_in_trash',
+          message: 'artifact is not in the trash',
+        },
+      },
+      { status: 409 },
+    ),
+  );
+  const error = await failure(
+    client.purgeArtifact(
+      artifact.id,
+      { base_metadata_revision: 1 },
+      { idempotencyKey: 'test-key-1' },
+    ),
+  );
+  assert.deepEqual([error.status, error.code], [409, 'not_in_trash']);
+});
+
+test('The dry run reads and the cleanup deletes, each with a checked report', async () => {
+  const sent = [];
+  let answer = { blobs: 2, bytes: 30 };
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([init.method, String(url), init.body]);
+      return Response.json(answer);
+    },
+  });
+  assert.deepEqual(await client.getUnreferencedContent(), {
+    blobs: 2,
+    bytes: 30,
+  });
+  assert.deepEqual(await client.removeUnreferencedContent(), {
+    blobs: 2,
+    bytes: 30,
+  });
+  assert.deepEqual(sent, [
+    ['GET', 'http://127.0.0.1:7410/v1/content/unreferenced', undefined],
+    ['DELETE', 'http://127.0.0.1:7410/v1/content/unreferenced', undefined],
+  ]);
+  for (const broken of [
+    { blobs: 2 },
+    { blobs: -1, bytes: 0 },
+    { blobs: 1.5, bytes: 0 },
+    { blobs: 1, bytes: '3' },
+  ]) {
+    answer = broken;
+    for (const call of [
+      () => client.getUnreferencedContent(),
+      () => client.removeUnreferencedContent(),
+    ]) {
+      assert.equal(
+        (await failure(call())).code,
+        'invalid_response',
+        JSON.stringify(broken),
+      );
+    }
+  }
+});
+
 test('A restore names the revision, base, and key; manifests need digests', async () => {
   const file = {
     path: 'index.html',
@@ -2091,15 +2200,20 @@ test('The feed parser follows the event stream rules', async () => {
   );
 });
 
-test('Deletes and recoveries arrive as themselves', async () => {
+test('Deletes, recoveries, and purges arrive as themselves', async () => {
   assert.deepEqual(
     await eventsOf(
       stream([
         `event: change\ndata: ${changeData(7, 'deleted')}\n\n`,
         `event: change\ndata: ${changeData(8, 'recovered')}\n\n`,
+        `event: change\ndata: ${changeData(9, 'purged')}\n\n`,
       ]),
     ),
-    [changeEvent(7, 'deleted'), changeEvent(8, 'recovered')],
+    [
+      changeEvent(7, 'deleted'),
+      changeEvent(8, 'recovered'),
+      changeEvent(9, 'purged'),
+    ],
   );
 });
 

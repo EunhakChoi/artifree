@@ -12,6 +12,8 @@ import type {
   Handoff,
   ListArtifactsQuery,
   Preview,
+  PurgeArtifactRequest,
+  PurgeArtifactResponse,
   RestoreRevisionRequest,
   Revision,
   RotateTokenResponse,
@@ -21,6 +23,7 @@ import type {
   SaveRevisionRequest,
   StageHandoffRequest,
   TokenList,
+  UnreferencedContent,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
@@ -41,6 +44,7 @@ import {
   parseError,
   parseHandoff,
   parsePreview,
+  parsePurge,
   parseRevisionList,
   parseRotateToken,
   parseRuntimeConnection,
@@ -48,6 +52,7 @@ import {
   parseRuntimeGrant,
   parseRuntimeView,
   parseTokenList,
+  parseUnreferencedContent,
   parseUpdate,
 } from './responses.js';
 
@@ -589,6 +594,60 @@ export class ArtifreeClient {
       `/v1/artifacts/${encodeURIComponent(id)}`,
       parseUpdate,
       { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
+    );
+  }
+
+  /**
+   * Removes an artifact that is in the trash for good (decision 0029). It
+   * cannot be undone. Rejects with `not_in_trash` for an artifact outside the
+   * trash, with `metadata_conflict` and `currentMetadataRevision` when the
+   * artifact's metadata is no longer at `base_metadata_revision`, and with
+   * `not_found` for an artifact that is missing, belongs to someone else, or
+   * is already purged. A retry with the same key and request resolves with
+   * `replayed: true`.
+   */
+  async purgeArtifact(
+    id: string,
+    request: PurgeArtifactRequest,
+    options: MutationOptions,
+  ): Promise<PurgeArtifactResponse> {
+    return this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(id)}/purge`,
+      parsePurge,
+      { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
+    );
+  }
+
+  /**
+   * The dry run of {@link removeUnreferencedContent}: how many contents, and
+   * how many bytes, no revision file of any artifact refers to. Removes
+   * nothing.
+   */
+  async getUnreferencedContent(
+    options: ReadOptions = {},
+  ): Promise<UnreferencedContent> {
+    return this.json(
+      'GET',
+      '/v1/content/unreferenced',
+      parseUnreferencedContent,
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Deletes the content no revision file refers to, and resolves with what
+   * was deleted. The server decides again when it deletes, so the amounts can
+   * differ from an earlier dry run. Repeating it is safe.
+   */
+  async removeUnreferencedContent(
+    options: ReadOptions = {},
+  ): Promise<UnreferencedContent> {
+    return this.json(
+      'DELETE',
+      '/v1/content/unreferenced',
+      parseUnreferencedContent,
+      { signal: options.signal },
     );
   }
 

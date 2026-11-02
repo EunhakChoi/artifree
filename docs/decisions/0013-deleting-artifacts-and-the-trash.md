@@ -105,7 +105,8 @@ unpublished trace maps each to its evidence.
 ## Costs and limits
 
 - The trash has no limit and no expiry; deleted artifacts keep their
-  storage until O05.
+  storage until they are purged by hand (O05, [0029](0029-retention-and-cleanup.md);
+  nothing purges automatically).
 - A replay of a request made before a delete names an artifact that is now
   in the trash.
 - A copy made before its source was deleted stays; deleting a copy leaves

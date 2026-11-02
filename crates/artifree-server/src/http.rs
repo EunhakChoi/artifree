@@ -19,9 +19,10 @@ use std::time::Duration;
 use artifree_contracts::api::{
     AgentSessionList, Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
     DuplicateArtifactRequest, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
-    ListArtifactsQuery, RestoreRevisionRequest, Revision, RevisionList, RuntimeConnection,
-    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
-    SetRuntimeGrantRequest, StageHandoffRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    ListArtifactsQuery, PurgeArtifactRequest, PurgeArtifactResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeMetadataRequest, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
+    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::parts::{Boundary, ByteRange};
@@ -305,6 +306,14 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/v1/artifacts/{id}",
             get(show_artifact).patch(update_artifact),
+        )
+        .route(
+            "/v1/artifacts/{id}/purge",
+            axum::routing::post(purge_artifact),
+        )
+        .route(
+            "/v1/content/unreferenced",
+            get(show_unreferenced_content).delete(remove_unreferenced_content),
         )
         .route(
             "/v1/artifacts/{id}/revisions",
@@ -970,6 +979,38 @@ async fn update_artifact(
     Ok(Json(
         operations::update(&state, actor, key, &id, request).await?,
     ))
+}
+
+async fn purge_artifact(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<PurgeArtifactRequest>, JsonRejection>,
+) -> Result<Json<PurgeArtifactResponse>, ApiError> {
+    let Path(id) = path?;
+    // An identifier that cannot name an artifact is reported before a
+    // malformed body; whether the artifact exists is checked with the request.
+    operations::artifact_id(&id)?;
+    let Json(request) = body?;
+    Ok(Json(
+        operations::purge(&state, actor, key, &id, request).await?,
+    ))
+}
+
+/// The dry run: reads and removes nothing.
+async fn show_unreferenced_content(
+    State(state): State<AppState>,
+    Authenticated(_actor): Authenticated,
+) -> Result<Json<UnreferencedContent>, ApiError> {
+    Ok(Json(operations::unreferenced_content(&state, false).await?))
+}
+
+async fn remove_unreferenced_content(
+    State(state): State<AppState>,
+    Authenticated(_actor): Authenticated,
+) -> Result<Json<UnreferencedContent>, ApiError> {
+    Ok(Json(operations::unreferenced_content(&state, true).await?))
 }
 
 async fn show_artifact(

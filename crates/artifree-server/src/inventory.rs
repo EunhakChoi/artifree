@@ -29,7 +29,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/cli",
         ComponentStatus::Implemented,
-        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; build inventory.",
+        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); build inventory.",
     ),
     (
         "runtime",
@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions, restores, duplicates (files only), metadata updates, and a recoverable trash, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned.",
+        "Create, conditional revisions, restores, duplicates (files only), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned.",
     ),
     (
         "policy",
@@ -110,7 +110,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust · SQLite",
         "crates/artifree-providers/src/storage.rs",
         ComponentStatus::Implemented,
-        "Local SQLite with atomic commits, a change feed in the same transactions, and shared file content; PostgreSQL planned.",
+        "Local SQLite with atomic commits, a change feed in the same transactions, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned.",
     ),
     (
         "models",

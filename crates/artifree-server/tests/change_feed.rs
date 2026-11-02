@@ -364,6 +364,68 @@ async fn deletes_and_recoveries_are_announced_as_such() -> TestResult {
     Ok(())
 }
 
+/// A purge is announced once, with the new metadata revision; a client that
+/// was away catches up through the earlier changes to it, and after a restore
+/// of a database holding the purge the sequence goes on.
+#[tokio::test]
+async fn a_purge_is_announced_once_and_a_client_behind_catches_up_to_it() -> TestResult {
+    let harness = Harness::new(4);
+    let created = harness.create("feed-create-1").await?;
+    let id = created["artifact"]["id"]
+        .as_str()
+        .ok_or("no id")?
+        .to_owned();
+    let mut events = harness.follow(None).await?;
+    let ready = events.expect("ready").await?;
+    harness.set_deleted(&id, "feed-delete-1", 1, true).await?;
+    let deleted = events.expect("change").await?;
+    let purge = |key: &'static str, base: u64| {
+        harness.send(
+            Request::post(format!("/v1/artifacts/{id}/purge")),
+            key,
+            json!({ "base_metadata_revision": base }),
+        )
+    };
+
+    assert_eq!(purge("feed-purge-1", 2).await?["replayed"], false);
+
+    let purged = events.expect("change").await?;
+    assert_eq!(
+        (
+            &purged.data["change"],
+            &purged.data["artifact_id"],
+            &purged.data["revision"],
+            &purged.data["metadata_revision"]
+        ),
+        (&json!("purged"), &json!(id), &json!(1), &json!(3))
+    );
+    assert_eq!(sequence(&purged.id), sequence(&deleted.id) + 1);
+    // A replay, and a purge refused as not found, send nothing.
+    assert_eq!(purge("feed-purge-1", 2).await?["replayed"], true);
+    assert_eq!(
+        purge("feed-purge-2", 3).await?["error"]["code"],
+        "not_found"
+    );
+    assert!(events.quiet().await, "a replay or a refusal was announced");
+
+    // A client that last saw the create is told what happened since, in order.
+    let (feed, _) = ready.id.split_once('.').ok_or("not a cursor")?;
+    let mut behind = harness.follow(Some(&format!("{feed}.1"))).await?;
+    let kinds = [
+        behind.expect("change").await?.data["change"].clone(),
+        behind.expect("change").await?.data["change"].clone(),
+    ];
+    assert_eq!(kinds, [json!("deleted"), json!("purged")]);
+    assert!(behind.quiet().await);
+    // The cursor of the purge is still the feed's head after a restore, which
+    // renews the identity and keeps the sequence.
+    let restored = harness.restored(4);
+    let mut reset = restored.follow(Some(&purged.id)).await?;
+    let event = reset.expect("reset").await?;
+    assert_eq!(event.id.split_once('.').map(|(_, head)| head), Some("3"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_stream_resumes_after_its_cursor_without_ready() -> TestResult {
     let harness = Harness::new(4);

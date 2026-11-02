@@ -13,6 +13,7 @@ import type {
   Handoff,
   HandoffState,
   Preview,
+  PurgeArtifactResponse,
   Revision,
   RevisionFile,
   RuntimeConnection,
@@ -23,6 +24,7 @@ import type {
   RotateTokenResponse,
   TokenInfo,
   TokenList,
+  UnreferencedContent,
   UpdateArtifactResponse,
 } from '@artifree/contracts';
 import type { FeedChange } from './change-feed.js';
@@ -66,6 +68,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   runtime_session_expired: true,
   revision_conflict: true,
   metadata_conflict: true,
+  not_in_trash: true,
   request_key_reused: true,
   payload_too_large: true,
   range_not_satisfiable: true,
@@ -82,6 +85,7 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   metadata_updated: true,
   deleted: true,
   recovered: true,
+  purged: true,
 };
 
 // A record for the same reason as the error codes: a part added later must
@@ -255,6 +259,33 @@ export function parseUpdate(
   return parsed === undefined
     ? undefined
     : { artifact: parsed, replayed: value.replayed };
+}
+
+/** Parses the response of a purge. */
+export function parsePurge(value: unknown): PurgeArtifactResponse | undefined {
+  if (!isRecord(value) || typeof value.replayed !== 'boolean') return undefined;
+  const { artifact_id, metadata_revision, purged_at_ms } = value;
+  if (
+    typeof artifact_id !== 'string' ||
+    !isCount(metadata_revision) ||
+    !isTime(purged_at_ms)
+  )
+    return undefined;
+  return {
+    artifact_id,
+    metadata_revision,
+    purged_at_ms,
+    replayed: value.replayed,
+  };
+}
+
+/** Parses the report of a cleanup of unreferenced content, dry run or not. */
+export function parseUnreferencedContent(
+  value: unknown,
+): UnreferencedContent | undefined {
+  if (!isRecord(value)) return undefined;
+  const { blobs, bytes } = value;
+  return isCount(blobs) && isCount(bytes) ? { blobs, bytes } : undefined;
 }
 
 /** Parses the response of a preview request. */

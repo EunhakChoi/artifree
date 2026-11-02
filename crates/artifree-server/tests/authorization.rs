@@ -8,6 +8,7 @@ use artifree_core::listing::ListQuery;
 use artifree_domain::identity::{ActorId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, PackagePath};
 use artifree_domain::{MetadataRevision, SourceRevision};
+use artifree_ports::artifact_store::Delivery;
 use artifree_providers::storage::SqliteStore;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -123,4 +124,81 @@ fn another_actor_can_neither_see_nor_change_an_artifact() -> TestResult {
         b"<p>secret</p>"
     );
     Ok(())
+}
+
+/// Removing for good is the owner's alone, and tells another actor nothing:
+/// not whether the artifact is in the trash, nor whether it was purged.
+#[test]
+fn another_actor_cannot_purge_or_learn_of_a_purge() -> TestResult {
+    let directory =
+        TempDir(std::env::temp_dir().join(format!("artifree-authz-purge-{}", std::process::id())));
+    std::fs::create_dir_all(&directory.0)?;
+    let service = ArtifactService::new(SqliteStore::open(&directory.0.join("db.sqlite3"))?);
+    let owner: ActorId = parsed("owner");
+    let intruder: ActorId = parsed("intruder");
+    let package = FilePackage::new(vec![(PackagePath::entry(), b"<p>secret</p>".to_vec())])?;
+    let created = service.create(
+        &owner,
+        &parsed::<RequestKey>("owner-key-1"),
+        &parsed::<Title>("Private"),
+        &package,
+    )?;
+    let id = created.artifact.id;
+    let hidden = Err(ArtifactError::NotFound(Missing::Artifact));
+    let intruder_purge = |key: &str, base| {
+        service
+            .purge(
+                &intruder,
+                &parsed::<RequestKey>(key),
+                &id,
+                MetadataRevision(base),
+            )
+            .map(|_| ())
+    };
+
+    // Outside the trash the owner is told so; another actor is told nothing.
+    assert_eq!(intruder_purge("intruder-key-1", 1), hidden);
+    assert_eq!(
+        service
+            .purge(&owner, &parsed("owner-key-2"), &id, MetadataRevision(1))
+            .map(|_| ()),
+        Err(ArtifactError::NotInTrash)
+    );
+    let delete = MetadataChange::new(None, None, Some(true)).ok_or("a change with fields")?;
+    service.update(
+        &owner,
+        &parsed("owner-key-3"),
+        &id,
+        MetadataRevision(1),
+        &delete,
+    )?;
+    assert_eq!(intruder_purge("intruder-key-2", 2), hidden);
+    assert!(
+        service.artifact(&owner, &id).is_err()
+            && service.list(&owner, &deleted(), None)?.artifacts.len() == 1,
+        "the intruder's attempts must leave the artifact in the trash"
+    );
+
+    let owner_key = parsed::<RequestKey>("owner-key-4");
+    service.purge(&owner, &owner_key, &id, MetadataRevision(2))?;
+    // After the purge the answer is the same for both, but only the owner's
+    // own retry, under the owner's key, replays.
+    assert_eq!(intruder_purge("intruder-key-3", 3), hidden);
+    assert_eq!(
+        intruder_purge("owner-key-4", 2),
+        hidden,
+        "keys are per actor"
+    );
+    let replay = service.purge(&owner, &owner_key, &id, MetadataRevision(2))?;
+    assert_eq!(replay.delivery, Delivery::Replayed);
+    // Another actor cannot recover or read it either.
+    assert_eq!(service.revisions(&intruder, &id).map(|_| ()), hidden);
+    Ok(())
+}
+
+fn deleted() -> ListQuery {
+    ListQuery {
+        deleted: true,
+        ..ListQuery::default()
+    }
 }

@@ -81,6 +81,14 @@ and starting a newer build on an older data directory upgrades it. See the
 The access token is not part of a backup; a restored directory gets a new
 one. Windows and container use of these commands is not verified outside CI.
 
+Nothing is removed unless asked. `artifact purge <id> --base-metadata <n> --yes`
+removes an artifact that is already in the trash for good (its files and
+titles; request keys, change sequences, and copies stay), and `content cleanup
+[--apply]` reports, and with `--apply` deletes, file content that no revision
+refers to ([decision 0029](docs/decisions/0029-retention-and-cleanup.md)). A
+purge cannot be undone, is not offered to MCP agents, and does not reach earlier
+backups. Request keys are never expired.
+
 For development with live reloading, Vite is still available:
 
 ```sh
@@ -158,8 +166,10 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0023](docs/decisions/0023-single-owner-token-management.md),
 [0024](docs/decisions/0024-https-proxy-and-remote-access.md),
 [0025](docs/decisions/0025-release-packages.md),
-[0026](docs/decisions/0026-container-image.md), and
-[0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md)).
+[0026](docs/decisions/0026-container-image.md),
+[0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md),
+[0028](docs/decisions/0028-static-web-defaults.md), and
+[0029](docs/decisions/0029-retention-and-cleanup.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

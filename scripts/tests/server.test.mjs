@@ -268,6 +268,24 @@ test('Every JSON body the server sends matches the API schema root', async () =>
       base_metadata_revision: 2,
       deleted: false,
     });
+    // Purge and its refusals, and both reports of unreferenced content.
+    await request(409, 'POST', `${trashed}/purge`, {
+      base_metadata_revision: 3,
+    });
+    await request(200, 'PATCH', trashed, {
+      base_metadata_revision: 3,
+      deleted: true,
+    });
+    await request(409, 'POST', `${trashed}/purge`, {
+      base_metadata_revision: 3,
+    });
+    const purged = await request(200, 'POST', `${trashed}/purge`, {
+      base_metadata_revision: 4,
+    });
+    assert.equal(purged.metadata_revision, 5);
+    await request(404, 'GET', trashed);
+    await request(200, 'GET', '/v1/content/unreferenced');
+    await request(200, 'DELETE', '/v1/content/unreferenced');
     await request(
       404,
       'GET',
@@ -399,6 +417,160 @@ test('CLI deletes to the trash, lists it, and recovers', async () => {
       assert.equal(refused.status, 2, args.join(' '));
       assert.equal(refused.stdout, '', args.join(' '));
     }
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CLI purges an artifact in the trash only when confirmed, and for good', async () => {
+  const data = dataDirectory('cli-purge');
+  const site = await freshDirectory('cli-purge-site');
+  await writeFile(join(site, 'index.html'), '<h1>doomed</h1>');
+  const first = await startServer(binary, data);
+  const purge = ['purge', 'ID', '--base-metadata', '2', '--yes'];
+  let id;
+  let copyId;
+  let purgedAt;
+  try {
+    const create = ['create', '--title', 'Doomed', '--dir', site];
+    id = json(cli(first, [...create, '--idempotency-key', 'cli-purge-create']))
+      .artifact.id;
+    copyId = json(cli(first, ['duplicate', id, '1'])).artifact.id;
+    const args = (override = {}) =>
+      purge.map((value) => override[value] ?? value);
+
+    // Without --yes nothing is sent: a usage error, the artifact untouched.
+    for (const withoutYes of [
+      ['purge', id, '--base-metadata', '2'],
+      ['purge', id, '--yes'],
+      ['purge', '--base-metadata', '2', '--yes'],
+    ]) {
+      const refused = cli(first, withoutYes);
+      assert.equal(refused.status, 2, withoutYes.join(' '));
+      assert.equal(refused.stdout, '', withoutYes.join(' '));
+    }
+    json(cli(first, ['delete', id, '--base-metadata', '1']));
+    const unconfirmed = cli(first, ['purge', id, '--base-metadata', '2']);
+    assert.equal(unconfirmed.status, 2);
+    assert.match(unconfirmed.stderr, /--yes/);
+    assert.deepEqual(
+      json(cli(first, ['list', '--deleted'])).artifacts.map((a) => a.id),
+      [id],
+      'the unconfirmed purge removed nothing',
+    );
+
+    // Outside the trash, with a stale base, then as it should be.
+    const live = cli(first, ['purge', copyId, '--base-metadata', '1', '--yes']);
+    assert.equal(live.status, 1);
+    assert.match(live.stderr, /^error\[not_in_trash\]/);
+    const stale = cli(first, ['purge', id, '--base-metadata', '1', '--yes']);
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /^error\[metadata_conflict\]/);
+    assert.match(stale.stderr, /current_metadata_revision=2/);
+    const purged = json(
+      cli(first, [...args({ ID: id }), '--idempotency-key', 'cli-purge-key-1']),
+    );
+    assert.deepEqual(
+      [purged.artifact_id, purged.metadata_revision, purged.replayed],
+      [id, 3, false],
+    );
+    assert.equal(typeof purged.purged_at_ms, 'number');
+    purgedAt = purged.purged_at_ms;
+  } finally {
+    await first.stop();
+  }
+
+  // The server restarted: the retry still replays, the artifact is gone
+  // everywhere, and the copy made before keeps its bytes.
+  const second = await startServer(binary, data);
+  try {
+    const again = json(
+      cli(second, [
+        ...purge.map((value) => (value === 'ID' ? id : value)),
+        '--idempotency-key',
+        'cli-purge-key-1',
+      ]),
+    );
+    assert.equal(again.replayed, true);
+    assert.equal(again.purged_at_ms, purgedAt);
+    assert.equal(again.metadata_revision, 3);
+    for (const args of [
+      ['show', id],
+      ['history', id],
+      ['cat', id, 'index.html', '--revision', '1'],
+      ['recover', id, '--base-metadata', '3'],
+      [
+        'create',
+        '--title',
+        'Doomed',
+        '--dir',
+        site,
+        '--idempotency-key',
+        'cli-purge-create',
+      ],
+    ]) {
+      const gone = cli(second, args);
+      assert.equal(gone.status, 1, args.join(' '));
+      assert.match(gone.stderr, /^error\[not_found\]/, args.join(' '));
+    }
+    assert.deepEqual(json(cli(second, ['list', '--deleted'])).artifacts, []);
+    assert.equal(
+      cli(second, ['cat', copyId, 'index.html']).stdout,
+      '<h1>doomed</h1>',
+    );
+    const other = cli(second, ['purge', id, '--base-metadata', '3', '--yes']);
+    assert.equal(other.status, 1);
+    assert.match(other.stderr, /^error\[not_found\]/);
+  } finally {
+    await second.stop();
+  }
+});
+
+test('CLI cleanup of unreferenced content reports first and deletes only with --apply', async () => {
+  const server = await startServer(binary, dataDirectory('cli-cleanup'));
+  try {
+    const run = (args) => {
+      const env = {
+        ...process.env,
+        ARTIFREE_URL: server.api_url,
+        ARTIFREE_TOKEN: server.token,
+      };
+      delete env.ARTIFREE_TOKEN_FILE;
+      return spawnSync(
+        process.execPath,
+        ['apps/cli/dist/main.js', 'content', ...args],
+        { cwd: root, encoding: 'utf8', timeout: 20_000, env },
+      );
+    };
+    const dry = json(run(['cleanup']));
+    assert.deepEqual(dry, { applied: false, blobs: 0, bytes: 0 });
+    const applied = json(run(['cleanup', '--apply']));
+    assert.deepEqual(applied, { applied: true, blobs: 0, bytes: 0 });
+    for (const args of [
+      ['cleanup', 'extra'],
+      ['unknown'],
+      ['cleanup', '--yes'],
+    ]) {
+      const refused = run(args);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stdout, '', args.join(' '));
+    }
+    const unauthorized = spawnSync(
+      process.execPath,
+      ['apps/cli/dist/main.js', 'content', 'cleanup', '--apply'],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        timeout: 20_000,
+        env: {
+          ...process.env,
+          ARTIFREE_URL: server.api_url,
+          ARTIFREE_TOKEN: 'wrong',
+        },
+      },
+    );
+    assert.equal(unauthorized.status, 1);
+    assert.match(unauthorized.stderr, /^error\[unauthenticated\]/);
   } finally {
     await server.stop();
   }

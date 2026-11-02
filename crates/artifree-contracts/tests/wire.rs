@@ -2,9 +2,9 @@
 use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
-    DuplicateArtifactResponse, ErrorResponse, FeedPosition, Preview, Revision, RevisionList,
-    RuntimeConnection, RuntimeGrant, RuntimeView, SaveRevisionRequest, SourceExportManifest,
-    UpdateArtifactResponse,
+    DuplicateArtifactResponse, ErrorResponse, FeedPosition, Preview, PurgeArtifactResponse,
+    Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeView, SaveRevisionRequest,
+    SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -165,6 +165,14 @@ fn response_schemas_describe_what_the_server_writes() {
         (
             "UpdateArtifactResponse",
             published_unlike_written::<UpdateArtifactResponse>(),
+        ),
+        (
+            "PurgeArtifactResponse",
+            published_unlike_written::<PurgeArtifactResponse>(),
+        ),
+        (
+            "UnreferencedContent",
+            published_unlike_written::<UnreferencedContent>(),
         ),
         ("Revision", published_unlike_written::<Revision>()),
         ("RevisionList", published_unlike_written::<RevisionList>()),

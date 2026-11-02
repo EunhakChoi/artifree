@@ -6,6 +6,18 @@ the `--data-dir`: artifacts, revisions and file bytes, request keys, the change
 feed, titles, pins and the trash, and the access token records. `backup` copies
 that file consistently; `restore` builds a new data directory from the copy.
 
+A backup holds what the database held when it was taken. **A purge (decision 0029) does not reach earlier backups:** an artifact removed for good is still
+in every backup made before the purge, and restoring one brings it back (as an
+artifact in the trash, if it was purged after the backup was made). A backup
+taken after a purge holds no content, listing, or title of the artifact, only
+its tombstone rows, request keys, and change entries; a restore of it answers
+the same as the server did (the artifact is not found, the purge retry
+replays, other requests that named it are not found, the change sequence
+continues). Delete old backups yourself when they must not keep a purged
+artifact. Purge and cleanup overwrite the freed pages of the database file
+(`secure_delete`), but a copy can remain in a write-ahead log (`-wal`) that has
+not been checkpointed and truncated yet; stopping the server does that.
+
 Not part of a backup, by design:
 
 - the `access-token` file. A restored directory has none; the first
@@ -113,7 +125,7 @@ artifree-server serve --data-dir /path/to/new-data ...
 ## Upgrade between versions
 
 1. Back up the running server with the **new** build's `backup` command. It
-   reads schema versions 1 to 5 and 6, so it works on a directory written by a
+   reads schema versions 1 to 7, so it works on a directory written by a
    release that has no `backup` command. If you cannot run the new binary
    against the old directory, stop the old server and copy its whole data
    directory instead.
@@ -126,8 +138,10 @@ artifree-server serve --data-dir /path/to/new-data ...
    go back to the previous binary only with a backup taken before the upgrade,
    restored into a new directory.
 
-Schema 6 adds the token table to the versioned schema. A server of an older
-release that is started again on a directory this build upgraded will refuse it.
+Schema 7 adds the purge tombstone, the `purged` change kind, and an index on
+file content (decision 0029). Schema 6 adds the token table to the versioned
+schema. A server of an older release that is started again on a directory this
+build upgraded will refuse it.
 
 ## Containers
 
@@ -179,4 +193,4 @@ Notes:
 - That a backup and a running server never delay each other. Under WAL SQLite
   readers do not block the writer; commit latency during a backup was not measured.
 - Restoring a backup made by a different build than this one, other than the
-  schema versions 1 to 5 fixtures in the tests.
+  schema versions 1 to 6 fixtures in the tests.

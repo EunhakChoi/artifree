@@ -5,7 +5,9 @@
 //! Every operation checks the actor's authority against current stored
 //! metadata. An artifact in the trash is missing to every request but its
 //! recovery and the replay of a request made before the delete (decision
-//! 0013). Commit success means durable acceptance. Source history is kept
+//! 0013). A purged artifact (decision 0029) is missing to every request,
+//! the replay of an earlier one included, except the retry of its purge.
+//! Commit success means durable acceptance. Source history is kept
 //! separate from future application data and access policy. A duplicate
 //! copies files only, since artifacts have no application data or uploaded
 //! assets yet. Publishing is not implemented.
@@ -18,8 +20,8 @@ use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePat
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CommitReceipt, MetadataReceipt,
-    MetadataUpdate, NewArtifact, RequestFingerprint, RequestIdentity, RevisionCommit,
-    RevisionRecord, StoreError,
+    MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest, RequestFingerprint, RequestIdentity,
+    RevisionCommit, RevisionRecord, StoreError, UnreferencedContent,
 };
 use sha2::{Digest, Sha256};
 
@@ -73,6 +75,8 @@ pub enum ArtifactError {
     InvalidPageToken,
     /// The range cannot be read from the file; see [`RangeError`].
     InvalidRange(RangeError),
+    /// The artifact is not in the trash, so it cannot be purged.
+    NotInTrash,
     /// The actor already used this request key for different content.
     RequestKeyReused,
     /// Storage failed. The request may be retried with the same key.
@@ -99,6 +103,7 @@ impl fmt::Display for ArtifactError {
             Self::InvalidPageToken => formatter
                 .write_str("page token is malformed or belongs to another order or filters"),
             Self::InvalidRange(error) => write!(formatter, "{error}"),
+            Self::NotInTrash => formatter.write_str("artifact is not in the trash"),
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -115,6 +120,7 @@ impl From<StoreError> for ArtifactError {
             StoreError::NotFound => Self::NotFound(Missing::Artifact),
             StoreError::RevisionConflict { current } => Self::RevisionConflict { current },
             StoreError::MetadataConflict { current } => Self::MetadataConflict { current },
+            StoreError::NotInTrash => Self::NotInTrash,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
             StoreError::Unchanged => Self::InvalidPackage(PackageError::Unchanged),
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
@@ -159,11 +165,14 @@ impl<S: ArtifactStore> ArtifactService<S> {
 
     /// Creates an app artifact owned by `actor` at revision 1.
     ///
-    /// Retrying with the same key and content returns the original receipt.
+    /// Retrying with the same key and content returns the original receipt,
+    /// unless the artifact it created was purged since (decision 0029).
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::RequestKeyReused`] or [`ArtifactError::Unavailable`].
+    /// [`ArtifactError::NotFound`] for the retry of a create whose artifact
+    /// was purged, [`ArtifactError::RequestKeyReused`], or
+    /// [`ArtifactError::Unavailable`].
     pub fn create(
         &self,
         actor: &ActorId,
@@ -294,7 +303,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// copy is not pinned. Only files are copied. The source is not touched.
     ///
     /// Retrying with the same key returns the original receipt even after
-    /// the source was renamed or revised.
+    /// the source was renamed, revised, or purged; the copy has its own
+    /// history. A retry whose copy was purged is not found.
     ///
     /// # Errors
     ///
@@ -309,7 +319,6 @@ impl<S: ArtifactStore> ArtifactService<S> {
         revision: SourceRevision,
         title: Option<&Title>,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.owned(actor, id)?;
         let mut hasher = Fingerprint::new("duplicate");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&revision.0.to_be_bytes());
@@ -322,14 +331,25 @@ impl<S: ArtifactStore> ArtifactService<S> {
             }
             None => hasher.field(b"copy title"),
         }
+        let request = RequestIdentity {
+            actor,
+            key,
+            fingerprint: hasher.finish(),
+        };
+        let record = match self.owned(actor, id) {
+            Ok(record) => record,
+            // The source may have been purged since the copy was made. The
+            // key is the actor's own, so its copy is replayed; anything else
+            // is a source that is missing.
+            Err(error @ ArtifactError::NotFound(_)) => {
+                return self.store.replay_create(request)?.ok_or(error);
+            }
+            Err(error) => return Err(error),
+        };
         let package = checked(&record, self.revision_of(&record, revision))?;
         let title = title.cloned().unwrap_or_else(|| record.title.copy_of());
         let receipt = self.store.create_artifact(NewArtifact {
-            request: RequestIdentity {
-                actor,
-                key,
-                fingerprint: hasher.finish(),
-            },
+            request,
             kind: record.kind,
             title: &title,
             package: &package,
@@ -397,6 +417,73 @@ impl<S: ArtifactStore> ArtifactService<S> {
             deleted: change.deleted,
         })?;
         Ok(receipt)
+    }
+
+    /// Removes an artifact in the trash for good, only if its metadata is
+    /// still at `base` (decision 0029). Its files and titles are deleted; the
+    /// identifier, request keys, and change feed entries remain, and the copies
+    /// made from it are untouched. The purge is not undone.
+    ///
+    /// Retrying with the same key and content returns the original receipt.
+    /// An earlier request that named the artifact is not found afterwards.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for a missing, inaccessible, or purged
+    /// artifact, [`ArtifactError::NotInTrash`] for one outside the trash,
+    /// [`ArtifactError::MetadataConflict`] when `base` is not current,
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
+    pub fn purge(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        base: MetadataRevision,
+    ) -> Result<PurgeReceipt, ArtifactError> {
+        // A purged artifact is not stored as one, so only an artifact that
+        // still exists can belong to someone else. Anything else goes to the
+        // store, which finds the actor's own purge by its key or reports the
+        // artifact missing.
+        if let Some(record) = self.store.artifact(id)?
+            && !policy::may_access(actor, &record)
+        {
+            return Err(ArtifactError::NotFound(Missing::Artifact));
+        }
+        let mut hasher = Fingerprint::new("purge");
+        hasher.field(id.as_str().as_bytes());
+        hasher.field(&base.0.to_be_bytes());
+        Ok(self.store.purge_artifact(PurgeRequest {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
+            },
+            artifact: id,
+            base,
+        })?)
+    }
+
+    /// What content no revision file refers to: the dry run of
+    /// [`Self::remove_unreferenced_content`]. Content is shared by all
+    /// owners' revisions and is not owned by anyone; with one owner nothing is
+    /// revealed that the owner could not see.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn unreferenced_content(&self) -> Result<UnreferencedContent, ArtifactError> {
+        Ok(self.store.unreferenced_content()?)
+    }
+
+    /// Deletes the content no revision file of any artifact, in the trash or
+    /// not, refers to, and reports what it deleted. It is safe to repeat: a
+    /// second run finds nothing more.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn remove_unreferenced_content(&self) -> Result<UnreferencedContent, ArtifactError> {
+        Ok(self.store.remove_unreferenced_content()?)
     }
 
     /// Current metadata of an accessible artifact.

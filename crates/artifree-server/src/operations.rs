@@ -9,9 +9,10 @@ use artifree_contracts::api::{
     ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
     DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorBody, ErrorCode, ExportRuntime,
     FileChange as WireChange, FileUpload, Handoff, HandoffState, ListArtifactsQuery, ListSort,
-    Preview, RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection,
-    RuntimeGrant, RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
-    SourceExportFormat, SourceExportManifest, StageHandoffRequest, UpdateArtifactRequest,
+    Preview, PurgeArtifactRequest, PurgeArtifactResponse, RestoreRevisionRequest, Revision,
+    RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat, SourceExportManifest,
+    StageHandoffRequest, UnreferencedContent as WireContent, UpdateArtifactRequest,
     UpdateArtifactResponse,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
@@ -24,7 +25,7 @@ use artifree_domain::package::{
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, CommitReceipt, Delivery, ListOrder, RevisionRecord,
+    ArtifactRecord, CommitReceipt, Delivery, ListOrder, RevisionRecord, UnreferencedContent,
 };
 use artifree_providers::archive::{self, ArchiveEntry};
 use axum::http::StatusCode;
@@ -134,6 +135,9 @@ impl From<ArtifactError> for ApiError {
                     Self::new(StatusCode::CONFLICT, ErrorCode::MetadataConflict, message);
                 conflict.body.current_metadata_revision = Some(current.0);
                 conflict
+            }
+            ArtifactError::NotInTrash => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::NotInTrash, message)
             }
             ArtifactError::InvalidPageToken => Self::invalid(format!("page_token: {message}")),
             ArtifactError::InvalidRange(RangeError::PastEnd { size }) => {
@@ -364,6 +368,54 @@ pub(crate) async fn update(
         artifact: artifact_dto(&receipt.artifact),
         replayed: receipt.delivery == Delivery::Replayed,
     })
+}
+
+pub(crate) async fn purge(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: PurgeArtifactRequest,
+) -> Result<PurgeArtifactResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let base = MetadataRevision(request.base_metadata_revision);
+    let receipt = state
+        .run(move |artifacts| artifacts.purge(&actor, &key, &id, base))
+        .await?;
+    if receipt.delivery == Delivery::Committed {
+        state.feed().committed();
+    }
+    Ok(PurgeArtifactResponse {
+        artifact_id: receipt.artifact.to_string(),
+        metadata_revision: receipt.metadata_revision.0,
+        purged_at_ms: receipt.purged_at.0,
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+/// What a cleanup of unreferenced content would remove (`apply` false), or
+/// removes now (`apply` true).
+pub(crate) async fn unreferenced_content(
+    state: &AppState,
+    apply: bool,
+) -> Result<WireContent, ApiError> {
+    let content = state
+        .run(move |artifacts| {
+            if apply {
+                artifacts.remove_unreferenced_content()
+            } else {
+                artifacts.unreferenced_content()
+            }
+        })
+        .await?;
+    Ok(content_dto(content))
+}
+
+fn content_dto(content: UnreferencedContent) -> WireContent {
+    WireContent {
+        blobs: content.blobs,
+        bytes: content.bytes,
+    }
 }
 
 /// Wakes change streams when the commit wrote something, and converts the
