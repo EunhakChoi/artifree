@@ -143,6 +143,13 @@ fn canonical_host(host: &str) -> Result<String, OriginError> {
         let address: Ipv4Addr = host.parse().map_err(|_| OriginError::Host)?;
         return Ok(address.to_string());
     }
+    // A browser reads a host whose last label is a number (`foo.123`, or
+    // `0x7f.0.0.1`, which it takes for 127.0.0.1) as an IPv4 address and refuses
+    // it when it is not a valid one (the WHATWG "ends in a number" rule). A
+    // name here is therefore never one.
+    if ends_in_a_number(host) {
+        return Err(OriginError::Host);
+    }
     let is_name = host.split('.').all(|label| {
         !label.is_empty()
             && label.len() <= 63
@@ -156,6 +163,19 @@ fn canonical_host(host: &str) -> Result<String, OriginError> {
         Ok(host.to_ascii_lowercase())
     } else {
         Err(OriginError::Host)
+    }
+}
+
+/// Whether the last label of `host` is a number the way a browser's IPv4
+/// parser reads one: only decimal digits, or `0x` or `0X` followed by hex
+/// digits (possibly none). A trailing dot leaves an empty last label, which
+/// the label check in `canonical_host` refuses.
+fn ends_in_a_number(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
+    match hex {
+        Some(digits) => digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        None => !last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit()),
     }
 }
 
@@ -195,6 +215,61 @@ mod tests {
                 "input {input}"
             );
         }
+    }
+
+    /// A browser reads these as IPv4 numbers, so they are not names; the
+    /// last one matters most: `0x7f.0.0.1` is the origin `127.0.0.1`.
+    #[test]
+    fn a_host_ending_in_a_number_is_not_a_name() {
+        for input in [
+            "http://0x7f.0.0.1:7410",
+            "http://0X7F.0.0.1",
+            "http://0x7f.1",
+            "http://0x7f",
+            "http://0x",
+            "http://foo.123",
+            "http://foo.0x1f",
+            "http://1.2.3",
+            "http://4294967296",
+            "http://127.1",
+            "http://a.b.00",
+        ] {
+            assert_eq!(
+                normalize_origin(input),
+                Err(OriginError::Host),
+                "input {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_that_only_resemble_numbers_stay_valid() {
+        for (input, expected) in [
+            ("http://a1.example", "http://a1.example"),
+            ("http://example.com", "http://example.com"),
+            ("http://localhost:7410", "http://localhost:7410"),
+            ("http://x.0example", "http://x.0example"),
+            ("http://123.example", "http://123.example"),
+            ("http://0x7f.example", "http://0x7f.example"),
+            ("http://foo.0xzz", "http://foo.0xzz"),
+            ("http://foo.1e3", "http://foo.1e3"),
+            ("http://127.0.0.1", "http://127.0.0.1"),
+        ] {
+            assert_eq!(
+                normalize_origin(input).as_deref(),
+                Ok(expected),
+                "input {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_encoded_loopback_cannot_pass_the_origins_must_differ_check() {
+        assert_eq!(
+            normalize_origin("http://0x7f.0.0.1:7410"),
+            Err(OriginError::Host),
+            "it would otherwise differ in text from http://127.0.0.1:7410 only"
+        );
     }
 
     #[test]

@@ -98,7 +98,7 @@ newer or failed schemas that does no damage.
    Unix. It is published with a hard link, which fails instead of replacing
    anything, so an existing destination, a symbolic link included, is refused
    (backup also checks first, to fail before the snapshot is taken). Then the
-   scratch directory is removed and the parent directory is fsynced (Unix;
+   parent directory is fsynced (Unix;
    Windows has no standard-library directory flush, so there the entry is as
    durable as the file system makes it). A file system that cannot flush a
    directory (`EINVAL` or `ENOTSUP`, as some FUSE, SMB, and NFS mounts answer)
@@ -106,10 +106,18 @@ newer or failed schemas that does no damage.
    only as durable as that mount makes it. Any other flush error fails. If
    anything after the link fails, the linked destination is removed before the
    error is returned, so a failure never leaves the output behind and a retry
-   works. The scratch directory is removed on every error path; a killed
-   process leaves a directory named with the prefix `.artifree-scratch-`,
-   which is safe to delete when no backup or restore runs. The file system
-   must support hard links.
+   works. Only after the link is durable is the scratch directory removed, and
+   nothing after that point may undo the published result: if the removal
+   fails it is retried once, and a directory that is still there is returned
+   to the caller as `Report::leftover` while the command still succeeds, prints
+   its JSON line, and writes one `warning:` line naming the directory on
+   stderr. (An earlier draft removed the directory inside the publish step, so
+   a partial removal failure deleted a backup that had been proven; review of
+   #58 caught it.) On an error path the scratch directory is removed when its
+   guard is dropped, best effort, and the reported error is the original one. A killed process, or a removal that keeps failing, leaves a
+   directory named with the prefix `.artifree-scratch-`, which is safe to
+   delete when no backup or restore runs. The file system must support hard
+   links.
 7. **Restore.** The target data directory must not exist (a restore makes a
    new instance and never merges); it is created with the policy of
    `prepare_data_dir`, which moved to the providers crate so `serve` and
@@ -138,7 +146,14 @@ newer or failed schemas that does no damage.
    commands read their arguments as operating-system strings, so on Unix a
    path that is not UTF-8 works (the snapshot path is bound to `VACUUM INTO`
    as bytes and cast to text; on Windows SQLite opens UTF-8, so a path that is
-   not valid Unicode is refused when the snapshot is taken). An empty value
+   not valid Unicode is refused when the snapshot is taken). The JSON line
+   names the path as a lossy string; for a path that is not UTF-8 it also has
+   `"path_utf8":false` and the exact path as `"path_bytes"` (Unix, an array of
+   bytes) or `"path_wide"` (Windows, UTF-16 code units), so a consumer is never
+   handed a path that does not exist without being told. The line is written
+   with a non-panicking write after the work is published: a closed stdout is
+   ignored (exit 0), another write failure exits 1 with a message that says the
+   work succeeded and was kept. An empty value
    for a path flag is refused at parse, and an argument of another command that is not UTF-8
    is reported instead of panicking. The database file name is the constant
    `DATABASE_FILE`, shared with `serve`.
@@ -200,6 +215,12 @@ Behavioral tests, in `artifree-providers/tests` unless noted:
 - The restored feed identity differs, the head is kept, and through the router
   (`artifree-server/tests/change_feed.rs`) a cursor of the original gets `reset`.
 - The publish failure path removes the destination (unit test in `backup.rs`).
+- A scratch directory that cannot be removed after publishing (injected through
+  a function seam in `backup.rs`, for backup and restore) leaves the output
+  in place, succeeds, and is reported as the leftover; a removal that works on
+  the retry is not reported. The result line for a non-UTF-8 path, a closed
+  stdout and a failing stdout are covered in `maintenance.rs` and
+  `backup_restore_cli.rs`.
 - Command-line behavior of the binary (`artifree-server/tests/backup_restore_cli.rs`),
   and `scripts/verify-release.mjs` against the packaged binary: back up the
   running server, restore, serve, read the saved revision, refuse existing paths.

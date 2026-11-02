@@ -816,3 +816,33 @@ fn a_schema_whose_stored_text_differs_but_whose_structure_is_the_same_is_accepte
     restore(&layout.output(), &layout.target())?;
     Ok(())
 }
+
+/// The "left byte for byte" comparisons rest on `files_of`: a file it cannot
+/// read must stop the test, not compare equal as empty.
+#[cfg(unix)]
+#[test]
+fn files_of_does_not_turn_an_unreadable_file_into_empty_bytes() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    let file = dir.join("secret");
+    fs::write(&file, b"data")?;
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000))?;
+    if fs::read(&file).is_ok() {
+        // Root reads everything, so the failure cannot be provoked.
+        return Ok(());
+    }
+
+    let outcome = std::panic::catch_unwind(|| files_of(dir.path()));
+
+    let Err(payload) = outcome else {
+        panic!("files_of returned for an unreadable file");
+    };
+    let Some(message) = payload.downcast_ref::<String>() else {
+        panic!("files_of panicked without a formatted message");
+    };
+    assert!(
+        message.contains("cannot read") && message.contains("secret"),
+        "{message}"
+    );
+    Ok(())
+}

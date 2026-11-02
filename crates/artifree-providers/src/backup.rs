@@ -24,8 +24,14 @@
 //! sessions, and handoffs live in server memory.
 //!
 //! Scratch directories are named with [`SCRATCH_PREFIX`]. They are removed on
-//! every error path, but a killed process leaves its directory, which is safe
-//! to delete when no backup or restore is running.
+//! every error path the process survives. A scratch directory that cannot be
+//! removed after the result was published does not undo that result: the
+//! output stays, the removal is retried once, and if it still fails the
+//! directory is reported as [`Report::leftover`]. The removal comes after the
+//! output was flushed and is not flushed itself, so a crash right after the
+//! command returned can also leave the directory. A killed process leaves its
+//! directory too. A leftover is safe to delete when no backup or restore is
+//! running.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -76,14 +82,29 @@ impl fmt::Display for BackupError {
 
 impl std::error::Error for BackupError {}
 
+/// A scratch directory that a successful backup or restore could not remove.
+/// The result was published and proven before the removal was tried, so it is
+/// kept; the directory only wastes space and is safe to delete when no backup
+/// or restore is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leftover {
+    /// The directory, named with [`SCRATCH_PREFIX`].
+    pub path: PathBuf,
+    /// Why it could not be removed.
+    pub reason: String,
+}
+
 /// What a finished backup or restore produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     /// Schema version of the written database file: the one the backup was
     /// taken at, and always the current one after a restore.
     pub schema_version: i64,
     /// Size of the written database file in bytes.
     pub bytes: u64,
+    /// The scratch directory that could not be removed after the result was
+    /// published, if any. The backup or restore itself succeeded.
+    pub leftover: Option<Leftover>,
 }
 
 fn failed(context: impl fmt::Display, error: impl fmt::Display) -> BackupError {
@@ -109,22 +130,35 @@ fn damaged(path: &Path, error: impl fmt::Display) -> BackupError {
 /// [`BackupError::Exists`] when `output` exists, also as a symbolic link.
 /// [`BackupError::Refused`] for a database that is empty, foreign, newer than
 /// this build, damaged, or different from this build's schema.
-/// [`BackupError::Failed`] for other failures. On any error `output` and the
-/// scratch directory are gone.
+/// [`BackupError::Failed`] for other failures. On any error `output` is gone
+/// and the scratch directory is removed (see the module documentation for a
+/// scratch directory that cannot be).
+///
+/// A scratch directory that cannot be removed once `output` is published is
+/// not an error: it is returned as [`Report::leftover`].
 pub fn backup(data_dir: &Path, output: &Path) -> Result<Report, BackupError> {
     #[cfg(unix)]
     let owner_check = refuse_foreign_database;
     #[cfg(not(unix))]
     let owner_check = |_: &Path| Ok(());
-    backup_checking_owner(data_dir, output, owner_check)
+    backup_with(data_dir, output, owner_check, remove_tree)
+}
+
+/// How a scratch directory is removed; [`remove_tree`] outside tests.
+type RemoveDir = fn(&Path) -> io::Result<()>;
+
+fn remove_tree(directory: &Path) -> io::Result<()> {
+    fs::remove_dir_all(directory)
 }
 
 /// [`backup`] with the check of who owns the database made by `owner_check`,
-/// which runs before anything is opened or created.
-fn backup_checking_owner(
+/// which runs before anything is opened or created, and the scratch
+/// directory removed by `remove_dir`.
+fn backup_with(
     data_dir: &Path,
     output: &Path,
     owner_check: impl FnOnce(&Path) -> Result<(), BackupError>,
+    remove_dir: RemoveDir,
 ) -> Result<Report, BackupError> {
     let database = data_dir.join(DATABASE_FILE);
     refuse_existing(output)?;
@@ -136,20 +170,18 @@ fn backup_checking_owner(
     }
     owner_check(&database)?;
     let parent = parent_dir(output);
-    let scratch = Scratch::create_in(parent)?;
+    let scratch = Scratch::create_in(parent, remove_dir)?;
     let snapshot = scratch.path(SNAPSHOT_FILE);
     take_snapshot(&database, &snapshot)?;
     let schema_version = prove_restorable(&snapshot, &scratch)?;
     refuse_siblings(&snapshot)?;
     seal(&snapshot)?;
     let bytes = size_of(&snapshot)?;
-    publish(&snapshot, output, || {
-        scratch.remove()?;
-        sync_directory(parent)
-    })?;
+    publish(&snapshot, output, || sync_directory(parent))?;
     Ok(Report {
         schema_version,
         bytes,
+        leftover: scratch.discard(),
     })
 }
 
@@ -167,8 +199,19 @@ fn backup_checking_owner(
 /// As for [`backup`], with `data_dir` in place of `output`; an input with
 /// stale `-wal`, `-shm`, or `-journal` files beside it is refused. On any
 /// error everything restore created, `data_dir` included, is removed. Missing
-/// parent directories it created stay.
+/// parent directories it created stay. A scratch directory inside `data_dir`
+/// that cannot be removed once the database is published is not an error: it
+/// is returned as [`Report::leftover`].
 pub fn restore(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
+    restore_with(input, data_dir, remove_tree)
+}
+
+/// [`restore`] with the scratch directory removed by `remove_dir`.
+fn restore_with(
+    input: &Path,
+    data_dir: &Path,
+    remove_dir: RemoveDir,
+) -> Result<Report, BackupError> {
     if !input.is_file() {
         return Err(BackupError::Failed(format!(
             "{} is not a file",
@@ -183,7 +226,7 @@ pub fn restore(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
             failed(format!("cannot create {}", data_dir.display()), error)
         }
     })?;
-    restore_into(input, data_dir).map_err(|error| match fs::remove_dir_all(data_dir) {
+    restore_into(input, data_dir, remove_dir).map_err(|error| match fs::remove_dir_all(data_dir) {
         Ok(()) => error,
         Err(cleanup) => BackupError::Failed(format!(
             "{error}; additionally {} could not be removed: {cleanup}",
@@ -192,8 +235,12 @@ pub fn restore(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
     })
 }
 
-fn restore_into(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
-    let scratch = Scratch::create_in(data_dir)?;
+fn restore_into(
+    input: &Path,
+    data_dir: &Path,
+    remove_dir: RemoveDir,
+) -> Result<Report, BackupError> {
+    let scratch = Scratch::create_in(data_dir, remove_dir)?;
     let copy = scratch.path(COPY_FILE);
     copy_private(input, &copy)?;
     let mut connection = open_existing(&copy)?;
@@ -207,13 +254,13 @@ fn restore_into(input: &Path, data_dir: &Path) -> Result<Report, BackupError> {
     let database = data_dir.join(DATABASE_FILE);
     let bytes = size_of(&copy)?;
     publish(&copy, &database, || {
-        scratch.remove()?;
         sync_directory(data_dir)?;
         sync_directory(parent_dir(data_dir))
     })?;
     Ok(Report {
         schema_version: SCHEMA_VERSION,
         bytes,
+        leftover: scratch.discard(),
     })
 }
 
@@ -508,9 +555,10 @@ fn seal(file: &Path) -> Result<(), BackupError> {
 }
 
 /// Publishes `source` at `destination` by a hard link, which fails instead of
-/// replacing anything, then runs `finish`. When `finish` fails the link is
-/// removed again: a reported failure never leaves the destination behind, so
-/// a retry works.
+/// replacing anything, then runs `finish`, which makes the entry durable.
+/// When `finish` fails the link is removed again: a reported failure never
+/// leaves the destination behind, so a retry works. Once this returns `Ok`
+/// the destination stays; nothing after it may remove it.
 fn publish(
     source: &Path,
     destination: &Path,
@@ -582,16 +630,16 @@ fn size_of(file: &Path) -> Result<u64, BackupError> {
         .map_err(|error| failed(format!("cannot inspect {}", file.display()), error))
 }
 
-/// A private directory for unfinished files, removed by [`Scratch::remove`]
+/// A private directory for unfinished files, removed by [`Scratch::discard`]
 /// or, on an error path, when dropped.
-#[derive(Debug)]
 struct Scratch {
     directory: PathBuf,
+    remove_dir: RemoveDir,
     removed: bool,
 }
 
 impl Scratch {
-    fn create_in(parent: &Path) -> Result<Self, BackupError> {
+    fn create_in(parent: &Path, remove_dir: RemoveDir) -> Result<Self, BackupError> {
         let random = random_bytes().map_err(|error| failed("no system randomness", error))?;
         let suffix = format!("{:032x}", u128::from_be_bytes(random));
         let directory = parent.join(format!("{SCRATCH_PREFIX}{suffix}"));
@@ -603,6 +651,7 @@ impl Scratch {
         })?;
         Ok(Self {
             directory,
+            remove_dir,
             removed: false,
         })
     }
@@ -611,18 +660,37 @@ impl Scratch {
         self.directory.join(name)
     }
 
-    fn remove(mut self) -> Result<(), BackupError> {
-        self.removed = true;
-        fs::remove_dir_all(&self.directory)
-            .map_err(|error| failed(format!("cannot remove {}", self.directory.display()), error))
+    /// Removes the directory after the result it served was published. A
+    /// failure is not an error: the removal is retried once, by dropping,
+    /// and a directory that is still there is returned as a leftover.
+    fn discard(mut self) -> Option<Leftover> {
+        let error = match (self.remove_dir)(&self.directory) {
+            Ok(()) => {
+                self.removed = true;
+                return None;
+            }
+            Err(error) => error,
+        };
+        let path = self.directory.clone();
+        drop(self);
+        let gone = matches!(
+            fs::symlink_metadata(&path),
+            Err(ref error) if error.kind() == io::ErrorKind::NotFound
+        );
+        (!gone).then(|| Leftover {
+            path,
+            reason: error.to_string(),
+        })
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
         if !self.removed {
-            // The command already failed; a leftover is named by SCRATCH_PREFIX.
-            drop(fs::remove_dir_all(&self.directory));
+            // A leftover is named by SCRATCH_PREFIX. On an error path the
+            // command reports its own error; after `discard` the leftover is
+            // reported.
+            drop((self.remove_dir)(&self.directory));
         }
     }
 }
@@ -715,9 +783,12 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let uid = fs::metadata(data.join(DATABASE_FILE))?.uid();
 
-        let refused = backup_checking_owner(&data, &out.join("b.sqlite3"), |database| {
-            check_owner(uid.wrapping_add(1), uid, database)
-        });
+        let refused = backup_with(
+            &data,
+            &out.join("b.sqlite3"),
+            |database| check_owner(uid.wrapping_add(1), uid, database),
+            remove_tree,
+        );
 
         assert!(
             matches!(refused, Err(BackupError::Refused(_))),
@@ -767,6 +838,114 @@ mod tests {
     fn a_directory_flush_succeeds_on_an_ordinary_directory() -> TestResult {
         let dir = directory("flush")?;
         sync_directory(&dir)?;
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    fn refuse_removal(_: &Path) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "injected: cannot remove",
+        ))
+    }
+
+    fn scratch_names(directory: &Path) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(directory)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.starts_with(SCRATCH_PREFIX) {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+
+    /// A data directory with a database, and an empty `out` directory.
+    fn data_and_out(dir: &Path) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+        let data = dir.join("data");
+        fs::create_dir(&data)?;
+        crate::storage::SqliteStore::open(&data.join(DATABASE_FILE))?;
+        let out = dir.join("out");
+        fs::create_dir(&out)?;
+        Ok((data, out))
+    }
+
+    /// The backup was published and proven before the scratch directory was
+    /// touched, so a scratch directory that cannot be removed is a warning,
+    /// not a failure that deletes the backup.
+    #[test]
+    fn a_scratch_directory_that_cannot_be_removed_keeps_the_published_backup() -> TestResult {
+        let dir = directory("leftover-backup")?;
+        let (data, out) = data_and_out(&dir)?;
+        let output = out.join("b.sqlite3");
+
+        let report = backup_with(&data, &output, |_| Ok(()), refuse_removal)?;
+
+        let Some(leftover) = report.leftover.as_ref() else {
+            panic!("a leftover is reported: {report:?}");
+        };
+        assert_eq!(leftover.path.parent(), Some(out.as_path()));
+        assert!(
+            leftover
+                .path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(SCRATCH_PREFIX)),
+            "{leftover:?}"
+        );
+        assert!(leftover.path.is_dir(), "the leftover is really there");
+        assert!(leftover.reason.contains("injected"), "{leftover:?}");
+        // The proven backup stays, complete and restorable.
+        assert_eq!(report.bytes, fs::metadata(&output)?.len());
+        let target = dir.join("restored");
+        restore(&output, &target)?;
+        assert_eq!(scratch_names(&out)?.len(), 1, "only the reported leftover");
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_scratch_directory_that_cannot_be_removed_keeps_the_restored_database() -> TestResult {
+        let dir = directory("leftover-restore")?;
+        let (data, out) = data_and_out(&dir)?;
+        let input = out.join("b.sqlite3");
+        backup(&data, &input)?;
+        let target = dir.join("restored");
+
+        let report = restore_with(&input, &target, refuse_removal)?;
+
+        let Some(leftover) = report.leftover.as_ref() else {
+            panic!("a leftover is reported: {report:?}");
+        };
+        assert_eq!(leftover.path.parent(), Some(target.as_path()));
+        assert!(leftover.path.is_dir());
+        assert!(target.join(DATABASE_FILE).is_file(), "the database stays");
+        crate::storage::SqliteStore::open(&target.join(DATABASE_FILE))?;
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    /// The removal is retried when the scratch is dropped, so a failure that
+    /// goes away is not reported.
+    #[test]
+    fn a_removal_that_succeeds_on_the_retry_is_not_reported() -> TestResult {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static FAILED_ONCE: AtomicBool = AtomicBool::new(false);
+        fn fail_once(path: &Path) -> io::Result<()> {
+            if FAILED_ONCE.swap(true, Ordering::SeqCst) {
+                fs::remove_dir_all(path)
+            } else {
+                Err(io::Error::other("injected: transient"))
+            }
+        }
+        let dir = directory("leftover-retry")?;
+        let (data, out) = data_and_out(&dir)?;
+
+        let report = backup_with(&data, &out.join("b.sqlite3"), |_| Ok(()), fail_once)?;
+
+        assert_eq!(report.leftover, None);
+        assert!(FAILED_ONCE.load(Ordering::SeqCst));
+        assert_eq!(scratch_names(&out)?, Vec::<String>::new());
+        assert!(out.join("b.sqlite3").is_file());
         fs::remove_dir_all(dir)?;
         Ok(())
     }

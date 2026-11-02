@@ -35,6 +35,11 @@ test('accepted addresses come back as origin plus path without a trailing slash'
     ['https://api.example.com:443', 'https://api.example.com'],
     ['https://example.com/artifree//', 'https://example.com/artifree'],
     ['http://[::1]:7410/', 'http://[::1]:7410'],
+    ['http://api.example.com:1', 'http://api.example.com:1'],
+    ['http://api.example.com:65535', 'http://api.example.com:65535'],
+    // Port 0 is only refused as a port, not as a digit in one.
+    ['http://api.example.com:10', 'http://api.example.com:10'],
+    ['http://api.example.com:80', 'http://api.example.com'],
   ]) {
     assert.deepEqual(parseServerUrl(text), { ok: true, url }, text);
   }
@@ -50,6 +55,9 @@ test('refused addresses give a reason that does not repeat them', () => {
     ['https:api.example.com', /absolute/],
     ['https//user:p%40ss@host', /absolute/],
     ['https://api.example.com:65536', /absolute/],
+    ['http://api.example.com:0', /port is 0/],
+    ['http://api.example.com:00/path', /port is 0/],
+    ['http://[::1]:0', /port is 0/],
     ['https://', /absolute/],
     ['http://good.example\t.evil.example', /absolute/],
     ['http://good.example\n.evil.example', /absolute/],
@@ -177,6 +185,11 @@ test('the build default is never kept for the tab, other servers are', () => {
   assert.equal(serverToKeep('https://build.example', built), undefined);
   assert.equal(serverToKeep('', built), undefined);
   assert.equal(serverToKeep('', undefined), undefined);
+  // The page's own origin typed in full is an address the person chose.
+  assert.equal(
+    serverToKeep('https://page.example', built),
+    'https://page.example',
+  );
   assert.equal(
     serverToKeep('https://other.example', built),
     'https://other.example',

@@ -52,6 +52,7 @@ for (const [name, value] of [
   ['an empty fragment', 'https://api.default.example#'],
   ['a relative address', '/api'],
   ['another scheme', 'ftp://api.default.example'],
+  ['port 0', 'https://api.default.example:0'],
 ]) {
   test(`a default server with ${name} stops the build`, () => {
     const result = build('refused', value);
