@@ -12,10 +12,15 @@ state it had when that backup was taken: live if it was live then, in the trash
 if it had been deleted by then (a purge needs the trash, so a backup taken
 after the delete holds it there). A backup
 taken after a purge holds no content, listing, or title of the artifact, only
-its tombstone rows, request keys, and change entries; a restore of it answers
+its tombstone rows, request keys, and change entries. Those rows hold no title
+or file name, but each request key keeps an unsalted SHA-256 fingerprint of the
+request that created or changed the artifact (its kind, title, file paths and
+content), so someone with the file can confirm a guess about a purged
+artifact's title or content, though not read it; a restore of it answers
 the same as the server did (the artifact is not found, the purge retry
 replays, other requests that named it are not found, the change sequence
-continues). Delete old backups yourself when they must not keep a purged
+continues; the same holds for the key of a content cleanup, whose retry
+returns the first run's report). Delete old backups yourself when they must not keep a purged
 artifact. Purge and cleanup overwrite the freed pages of the database file
 (`secure_delete`), but a copy can remain in a write-ahead log (`-wal`) that has
 not been checkpointed and truncated yet; stopping the server does that.

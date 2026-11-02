@@ -23,6 +23,8 @@ import type {
   SaveRevisionRequest,
   StageHandoffRequest,
   TokenList,
+  RemoveUnreferencedContentRequest,
+  RemoveUnreferencedContentResponse,
   UnreferencedContent,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
@@ -45,6 +47,7 @@ import {
   parseHandoff,
   parsePreview,
   parsePurge,
+  parseRemoveUnreferencedContent,
   parseRevisionList,
   parseRotateToken,
   parseRuntimeConnection,
@@ -621,8 +624,9 @@ export class ArtifreeClient {
 
   /**
    * The dry run of {@link removeUnreferencedContent}: how many contents, and
-   * how many bytes, no revision file of any artifact refers to. Removes
-   * nothing.
+   * how many bytes, no revision file of any artifact refers to, and the
+   * `digest` that identifies this set. Removes nothing. Needs the owner's
+   * access token: an issued agent token rejects with `forbidden`.
    */
   async getUnreferencedContent(
     options: ReadOptions = {},
@@ -636,18 +640,24 @@ export class ArtifreeClient {
   }
 
   /**
-   * Deletes the content no revision file refers to, and resolves with what
-   * was deleted. The server decides again when it deletes, so the amounts can
-   * differ from an earlier dry run. Repeating it is safe.
+   * Deletes the content no revision file refers to if it is still exactly the
+   * set that a dry run reported (`base_digest`), and resolves with what was
+   * deleted. Rejects with `content_conflict`, deleting nothing, when the set
+   * has changed since the dry run; review it again. A retry with the same key
+   * and `base_digest` resolves with the first run's numbers and
+   * `replayed: true`, also when nothing is left to delete; the same key with
+   * another `base_digest` rejects with `request_key_reused`. Needs the owner's
+   * access token: an issued agent token rejects with `forbidden`.
    */
   async removeUnreferencedContent(
-    options: ReadOptions = {},
-  ): Promise<UnreferencedContent> {
+    request: RemoveUnreferencedContentRequest,
+    options: MutationOptions,
+  ): Promise<RemoveUnreferencedContentResponse> {
     return this.json(
       'DELETE',
       '/v1/content/unreferenced',
-      parseUnreferencedContent,
-      { signal: options.signal },
+      parseRemoveUnreferencedContent,
+      { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
     );
   }
 

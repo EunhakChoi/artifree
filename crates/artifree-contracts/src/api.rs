@@ -328,9 +328,9 @@ pub struct PurgeArtifactResponse {
     pub replayed: bool,
 }
 
-/// Response of `GET /v1/content/unreferenced` (what a cleanup would remove)
-/// and `DELETE /v1/content/unreferenced` (what it removed): file content that
-/// no revision file of any artifact refers to, in the trash or not.
+/// Response of `GET /v1/content/unreferenced`, the dry run: file content that
+/// no revision file of any artifact refers to, in the trash or not. Nothing is
+/// removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnreferencedContent {
@@ -339,6 +339,35 @@ pub struct UnreferencedContent {
     /// Their total size in bytes. The database file does not shrink; the
     /// space is reused by later writes.
     pub bytes: u64,
+    /// The identity of this set: 64 lowercase hexadecimal digits (SHA-256 over
+    /// the sorted digests of its contents). Send it as `base_digest` to delete
+    /// exactly this set.
+    pub digest: String,
+}
+
+/// Body of `DELETE /v1/content/unreferenced`, with an `Idempotency-Key`
+/// header: the cleanup of the set a dry run reported (decision 0029).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveUnreferencedContentRequest {
+    /// The `digest` of the dry run's set. The cleanup fails with
+    /// `content_conflict` and deletes nothing unless the unreferenced content
+    /// is still exactly that set.
+    pub base_digest: String,
+}
+
+/// Response of `DELETE /v1/content/unreferenced`: what the first run under the
+/// key deleted. A retry with the same key and `base_digest` returns the same
+/// numbers with `replayed: true`, also when the set is empty by then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveUnreferencedContentResponse {
+    /// How many distinct contents were deleted.
+    pub blobs: u64,
+    /// Their total size in bytes.
+    pub bytes: u64,
+    /// True when an earlier request with the same key did the deleting.
+    pub replayed: bool,
 }
 
 /// Order of `GET /v1/artifacts`. Ties are broken by identifier.
@@ -760,6 +789,9 @@ pub enum ErrorCode {
     /// The artifact is not in the trash, so it cannot be purged. Move it to
     /// the trash first.
     NotInTrash,
+    /// The unreferenced content is no longer the set the dry run reported, so
+    /// nothing was deleted. Run the dry run again.
+    ContentConflict,
     /// The idempotency key was already used for a different request.
     RequestKeyReused,
     /// The request body exceeds the size limit.

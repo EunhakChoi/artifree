@@ -2266,6 +2266,25 @@ fn content_request(method: &str) -> Result<Request<Body>, axum::http::Error> {
     .body(Body::empty())
 }
 
+/// The apply: the body names the set a dry run reported.
+fn cleanup_request(key: Option<&str>, base: &str) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = authorized(
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/content/unreferenced"),
+    )
+    .header(header::CONTENT_TYPE, "application/json");
+    if let Some(key) = key {
+        builder = builder.header("idempotency-key", key);
+    }
+    builder.body(Body::from(json!({ "base_digest": base }).to_string()))
+}
+
+/// SHA-256 of the fixed prefix of a set digest: the set with no member.
+const NO_CONTENT: &str = "682ecd252107361fe9315b8f3a149ad933d10bda3417d1b415a432722837098f";
+/// The set whose only member has the digest of 32 zero bytes.
+const ONE_ZERO_BLOB: &str = "f2c419cc2717de15c6115b655447529f36a5f5be96d3bbdde81099a82a42e09f";
+
 #[tokio::test]
 async fn a_purge_needs_the_trash_a_current_base_and_a_key() -> TestResult {
     let harness = Harness::new();
@@ -2492,7 +2511,7 @@ async fn a_copy_survives_the_purge_of_its_source_and_its_retry_replays() -> Test
 async fn the_dry_run_removes_nothing_and_the_apply_removes_what_it_reported() -> TestResult {
     let harness = Harness::new();
     let id = created_id(&harness).await?;
-    let nothing = json!({ "blobs": 0, "bytes": 0 });
+    let nothing = json!({ "blobs": 0, "bytes": 0, "digest": NO_CONTENT });
     let report = harness.send(content_request("GET")?).await?;
     assert_eq!(report.status, StatusCode::OK, "{}", error_code(&report));
     assert_eq!(report.json()?, nothing);
@@ -2503,26 +2522,66 @@ async fn the_dry_run_removes_nothing_and_the_apply_removes_what_it_reported() ->
         "INSERT INTO blobs (digest, content) VALUES (zeroblob(32), CAST('stray!' AS BLOB))",
         [],
     )?;
+    let one = json!({ "blobs": 1, "bytes": 6, "digest": ONE_ZERO_BLOB });
     let dry_run = harness.send(content_request("GET")?).await?;
-    assert_eq!(dry_run.json()?, json!({ "blobs": 1, "bytes": 6 }));
+    assert_eq!(dry_run.json()?, one);
     let again = harness.send(content_request("GET")?).await?;
+    assert_eq!(again.json()?, one, "a dry run removes nothing");
+
+    // The apply needs a key and the reviewed set, and names what it removed.
+    let keyless = harness.send(cleanup_request(None, ONE_ZERO_BLOB)?).await?;
+    assert_eq!(keyless.status, StatusCode::BAD_REQUEST);
+    let malformed = harness
+        .send(cleanup_request(
+            Some("clean-key-0"),
+            &ONE_ZERO_BLOB.to_uppercase(),
+        )?)
+        .await?;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    let stale = harness
+        .send(cleanup_request(Some("clean-key-0"), NO_CONTENT)?)
+        .await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&stale), "content_conflict");
     assert_eq!(
-        again.json()?,
-        json!({ "blobs": 1, "bytes": 6 }),
-        "a dry run removes nothing"
+        harness.send(content_request("GET")?).await?.json()?,
+        one,
+        "a refused cleanup removes nothing"
     );
 
-    let applied = harness.send(content_request("DELETE")?).await?;
+    let applied = harness
+        .send(cleanup_request(Some("clean-key-1"), ONE_ZERO_BLOB)?)
+        .await?;
     assert_eq!(applied.status, StatusCode::OK, "{}", error_code(&applied));
-    assert_eq!(applied.json()?, json!({ "blobs": 1, "bytes": 6 }));
+    assert_eq!(
+        applied.json()?,
+        json!({ "blobs": 1, "bytes": 6, "replayed": false })
+    );
     assert_eq!(
         harness.send(content_request("GET")?).await?.json()?,
         nothing
     );
+    // The response was lost: the retry returns the original report, not zero.
+    let retry = harness
+        .send(cleanup_request(Some("clean-key-1"), ONE_ZERO_BLOB)?)
+        .await?;
+    assert_eq!(retry.status, StatusCode::OK);
     assert_eq!(
-        harness.send(content_request("DELETE")?).await?.json()?,
-        nothing
+        retry.json()?,
+        json!({ "blobs": 1, "bytes": 6, "replayed": true })
     );
+    // The key with another base is a reused key, not a second cleanup.
+    let reused = harness
+        .send(cleanup_request(Some("clean-key-1"), NO_CONTENT)?)
+        .await?;
+    assert_eq!(reused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&reused), "request_key_reused");
+    // A key an artifact request used belongs to that request.
+    let taken = harness
+        .send(cleanup_request(Some("create-key-1"), NO_CONTENT)?)
+        .await?;
+    assert_eq!(taken.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&taken), "request_key_reused");
     // What a revision refers to is untouched.
     let file = harness
         .send(get(&format!(

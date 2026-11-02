@@ -19,7 +19,8 @@ use std::time::Duration;
 use artifree_contracts::api::{
     AgentSessionList, Artifact, ArtifactList, CreateArtifactRequest, CreateRuntimeViewRequest,
     DuplicateArtifactRequest, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
-    ListArtifactsQuery, PurgeArtifactRequest, PurgeArtifactResponse, RestoreRevisionRequest,
+    ListArtifactsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
     UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
@@ -1010,15 +1011,23 @@ async fn show_unreferenced_content(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
 ) -> Result<Json<UnreferencedContent>, ApiError> {
-    Ok(Json(operations::unreferenced_content(&state, false).await?))
+    Ok(Json(operations::unreferenced_content(&state).await?))
 }
 
-/// Removes content no revision file refers to. Administrative credential only.
+/// Removes the content the dry run reported, once per `Idempotency-Key`, if it
+/// is still exactly that set. Administrative credential only; the role is
+/// checked before the key and the body.
 async fn remove_unreferenced_content(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-) -> Result<Json<UnreferencedContent>, ApiError> {
-    Ok(Json(operations::unreferenced_content(&state, true).await?))
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    body: Result<Json<RemoveUnreferencedContentRequest>, JsonRejection>,
+) -> Result<Json<RemoveUnreferencedContentResponse>, ApiError> {
+    let Json(request) = body?;
+    Ok(Json(
+        operations::remove_unreferenced_content(&state, actor, key, request).await?,
+    ))
 }
 
 async fn show_artifact(

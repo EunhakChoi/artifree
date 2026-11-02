@@ -191,6 +191,54 @@ pub struct PurgeReceipt {
     pub delivery: Delivery,
 }
 
+/// The identity of a set of unreferenced contents: SHA-256 over the sorted
+/// digests of its members, under a fixed prefix. A cleanup is conditional on
+/// the set the caller reviewed (decision 0029).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ContentSetDigest(pub [u8; 32]);
+
+impl fmt::Debug for ContentSetDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "ContentSetDigest({self})")
+    }
+}
+
+impl fmt::Display for ContentSetDigest {
+    /// 64 lowercase hexadecimal digits.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0
+            .iter()
+            .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+    }
+}
+
+impl ContentSetDigest {
+    /// The digest written by [`fmt::Display`]: exactly 64 lowercase
+    /// hexadecimal digits, nothing else.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let bytes = text.as_bytes();
+        if bytes.len() != 64 {
+            return None;
+        }
+        let mut digest = [0_u8; 32];
+        for (slot, pair) in digest.iter_mut().zip(bytes.chunks_exact(2)) {
+            let high = lowercase_hex(pair[0])?;
+            let low = lowercase_hex(pair[1])?;
+            *slot = (high << 4) | low;
+        }
+        Some(Self(digest))
+    }
+}
+
+fn lowercase_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
 /// File content that no revision file of any artifact refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnreferencedContent {
@@ -198,6 +246,29 @@ pub struct UnreferencedContent {
     pub blobs: u64,
     /// Their total size in bytes.
     pub bytes: u64,
+    /// The identity of this set, to give back as the base of the cleanup.
+    pub digest: ContentSetDigest,
+}
+
+/// A cleanup of unreferenced content: conditional on the set the caller
+/// reviewed, and retryable by key.
+#[derive(Debug, Clone, Copy)]
+pub struct CleanupRequest<'a> {
+    /// The actor, key, and fingerprint of the request.
+    pub request: RequestIdentity<'a>,
+    /// The set the caller reviewed; the cleanup deletes only this set.
+    pub base: ContentSetDigest,
+}
+
+/// The durable result of a cleanup: what its first execution deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanupReceipt {
+    /// How many distinct contents were deleted.
+    pub blobs: u64,
+    /// Their total size in bytes.
+    pub bytes: u64,
+    /// Whether this call deleted them or replayed an earlier request.
+    pub delivery: Delivery,
 }
 
 /// The order of an artifact list. Ties are broken by identifier.
@@ -305,6 +376,8 @@ pub enum StoreError {
     },
     /// The artifact exists but is not in the trash, so it cannot be purged.
     NotInTrash,
+    /// The unreferenced content is not the set the caller reviewed.
+    ContentChanged,
     /// The actor already used the key for a request with different content.
     RequestKeyReused,
     /// The files are those of the base revision; nothing was written.
@@ -325,6 +398,9 @@ impl fmt::Display for StoreError {
                 write!(formatter, "artifact metadata is at revision {}", current.0)
             }
             Self::NotInTrash => formatter.write_str("artifact is not in the trash"),
+            Self::ContentChanged => {
+                formatter.write_str("the unreferenced content is not the set that was reviewed")
+            }
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -416,15 +492,21 @@ pub trait ArtifactStore {
     /// [`StoreError::Unavailable`].
     fn unreferenced_content(&self) -> Result<UnreferencedContent, StoreError>;
 
-    /// Deletes the content that no revision file refers to and reports what
-    /// was deleted. What is deleted is decided in the write transaction, so a
-    /// commit that refers to content either finishes first, which keeps it, or
-    /// starts after, which stores it again.
+    /// Deletes the content that no revision file refers to, if it is the set
+    /// at `base`, and records what was deleted with the request key; or
+    /// returns that record for a retry of the same request. What is deleted is
+    /// decided in the write transaction, so a commit that refers to content
+    /// either finishes first, which keeps it, or starts after, which stores it
+    /// again. The key shares its space with the keys of artifact requests.
     ///
     /// # Errors
     ///
-    /// [`StoreError::Unavailable`].
-    fn remove_unreferenced_content(&self) -> Result<UnreferencedContent, StoreError>;
+    /// [`StoreError::ContentChanged`] when the set differs from `base`,
+    /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
+    fn remove_unreferenced_content(
+        &self,
+        request: CleanupRequest<'_>,
+    ) -> Result<CleanupReceipt, StoreError>;
 
     /// Metadata of one artifact. A purged artifact is `None`.
     ///

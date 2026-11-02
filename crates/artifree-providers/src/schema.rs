@@ -190,7 +190,9 @@ CREATE INDEX IF NOT EXISTS idx_tokens_secret_hash ON tokens (secret_hash);
 ";
 
 /// Added in schema version 7 (decision 0029): the tombstone of an artifact
-/// removed for good, the change kind for it, and an index on the content a
+/// removed for good, the change kind for it, the record of a cleanup of
+/// unreferenced content (the key it ran under and how much it deleted, never
+/// what), and an index on the content a
 /// revision file refers to, which finding unreferenced content and deleting
 /// content both read. A purge needs the artifact in the trash, which the
 /// column's check states. The change table is rebuilt for its checked kinds.
@@ -198,6 +200,15 @@ const PURGE_SCHEMA: &str = "
 ALTER TABLE artifacts ADD COLUMN purged_at INTEGER
     CHECK (purged_at IS NULL OR deleted_at IS NOT NULL);
 CREATE INDEX revision_files_by_digest ON revision_files (digest);
+CREATE TABLE cleanup_runs (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    blobs INTEGER NOT NULL CHECK (blobs >= 0),
+    bytes INTEGER NOT NULL CHECK (bytes >= 0),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE changes_v7 (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     artifact_id TEXT NOT NULL,

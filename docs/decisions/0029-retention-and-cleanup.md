@@ -57,14 +57,22 @@ not_in_trash` (new error code); a stale base is `409 metadata_conflict`; a
    kind, times, `deleted_at`), the `revisions` and `metadata_revisions`
    headers (numbers, actors, times), every `request_keys` row, and every
    `changes` row. Why a tombstone and not dropped foreign keys: the rows kept
-   hold no content, title, or file name; every foreign key of the schema still
+   hold no content, title, or file name in the clear (see below for what a
+   request key row still allows); every foreign key of the schema still
    holds, so `foreign_key_check` and the structural schema comparison (0027)
    keep their meaning for live artifacts too; the identifier stays in a
    primary key, so it can never be issued again even if the random generator
    repeated; and the change feed's join to the artifact still tells whose
    change each row is. Rebuilding `request_keys` and `changes` without their
    foreign keys would have weakened all artifacts to make room for the rare
-   purged one.
+   purged one. **What the kept rows still allow:** a request key row keeps the
+   fingerprint of the request that created or changed the artifact, an
+   unsalted SHA-256 over the request's kind, title, file paths and content (or
+   digests of it). Someone with the database or an old backup who guesses a
+   purged artifact's title or content can hash the guess the same way and
+   confirm it; they cannot read it from the row. The fingerprint scheme is
+   unchanged, because a retry is recognized by comparing it. The headers also
+   keep who made each revision and when.
 3. **A purged artifact is missing.** The store's reads (`artifact`, lists,
    revisions) treat `purged_at` as absence; a revision's header and files, and
    a revision listing, are read inside one snapshot, so a purge that commits
@@ -102,34 +110,71 @@ not_in_trash` (new error code); a stale base is `409 metadata_conflict`; a
 6. **Unreferenced content.** Content is stored once per digest in `blobs` and
    referenced by `revision_files`. `GET /v1/content/unreferenced` reports how
    many blobs (and bytes) no `revision_files` row refers to, read in one
-   snapshot, and removes nothing (the dry run). `DELETE
-/v1/content/unreferenced` removes them and reports what it removed. The
-   removal is one write transaction that counts and deletes with the same
-   predicate, `NOT EXISTS` a `revision_files` row with the digest, so it cannot
-   remove content that a revision file refers to: a commit that stored the
-   file is wholly before it, which keeps the content, or wholly after, which
-   stores it again (a commit is an immediate write transaction, so SQLite
-   serializes them). The report of the dry run is not a plan: the apply
-   decides again. Referenced content of artifacts in the trash is referenced
-   content and is kept; so is content of copies, of exports (which read through
-   `revision_files`), and of every older revision. A purge deletes the blobs
-   it makes unreferenced itself, in its own transaction, so on a healthy
-   database the cleanup finds nothing; it exists for content left by other
-   means (an interrupted external operation, future object storage, a manual
-   edit) and as a check. It is not an artifact mutation: it changes no
-   artifact, revision, or key and is naturally idempotent, so it needs
-   no base revision or key; **both calls need the administrative credential**
-   (as above), the dry run too, because even its report describes content
-   shared by every owner and agent, and a client that may not delete has no
-   use for it. Issued agent tokens exist today (0023), so the restriction is
-   not left to S01; S01 still decides which of several owners may run a
-   cleanup, which covers all owners' content.
-   Schema version 7 adds `revision_files_by_digest`, because both the check
-   and the foreign key check of a blob delete otherwise scan every file row.
-   The database file does not shrink: freed pages are reused. No `VACUUM` is
-   run.
+   snapshot, and removes nothing (the dry run). It also returns `digest`, the
+   identity of that set: SHA-256 over a fixed prefix and the sorted digests of
+   its members, written as 64 lowercase hexadecimal digits. `DELETE
+/v1/content/unreferenced` is a mutation like the others: it needs an
+   `Idempotency-Key` and a body `{"base_digest": <digest>}`, the set the caller
+   reviewed. In one write transaction it (1) looks the key up, (2) counts the
+   unreferenced content again, (3) refuses with `409 content_conflict`, deleting
+   nothing, if the set is not the one named, (4) deletes with the predicate
+   `NOT EXISTS` a `revision_files` row with the digest, so it cannot remove
+   content a revision file refers to (a commit that stored the file is wholly
+   before it, which then changes the set, or wholly after, which stores it
+   again; a commit is an immediate write transaction, so SQLite serializes
+   them), and (5) records the key with the report in the same transaction. So
+   the caller deletes only what it saw. The dry run is not a plan the apply
+   trusts: the apply decides again, and the base is what makes the two agree.
+   - **Why not "naturally idempotent".** A second run finds nothing, so a retry
+     after a lost response would report `0` and the caller could not tell a
+     successful deletion from a cleanup that found nothing. The report of the
+     first run must be recoverable, and a deletion of data the caller never
+     reviewed is not acceptable either.
+   - **Replay.** The first run records `(actor, key, fingerprint, blobs, bytes,
+time)` in the table `cleanup_runs`; the fingerprint is over the operation
+     and the base. A retry with the same key and base answers `200` with the
+     first run's `blobs` and `bytes` and `replayed: true`, whatever the set is
+     by then, and never runs again. The same key with another base is `422
+request_key_reused`. A new key with a stale base is `content_conflict`
+     and records nothing, so the same key works after a new dry run.
+   - **One key space.** Keys are per actor. A key an artifact request used
+     cannot start a cleanup, and a key a cleanup used cannot create or change
+     an artifact (`request_key_reused`); the check is in the store, in the same
+     transaction. `cleanup_runs` is a table of its own because a `request_keys`
+     row names an artifact and a revision, which a cleanup has none of;
+     widening that table would have weakened its foreign keys for every
+     artifact. It holds counts and the key, never a digest, name, or content,
+     so the claim that kept rows hold no content stays true.
+   - **Key retention.** These keys are kept for the life of the database like
+     all request keys (decision 11): no TTL, and a restore brings them along
+     (tested). So a retry is answered with the original report however late it
+     comes.
+   - **A new error code.** `content_conflict` (`409`) is new: the existing
+     conflict codes, `revision_conflict` and `metadata_conflict`, each carry a
+     revision number a client acts on, which this conflict does not have.
+     Clients that predate it read an unknown code as the generic error of its
+     status. It is a response of the HTTP API only; MCP has no cleanup tool.
+   - **Roles.** Both calls need the administrative credential (decision 1).
+     The dry run too, because even its report describes content shared by every
+     owner and agent, and a client that may not delete has no use for it.
+     Issued agent tokens exist today (0023), so the restriction is not left to
+     S01; S01 still decides which of several owners may run a cleanup, which
+     covers all owners' content.
+
+   Referenced content of artifacts in the trash is referenced content and is
+   kept; so is content of copies, of exports (which read through
+   `revision_files`), and of every older revision. A purge deletes the blobs it
+   makes unreferenced itself, in its own transaction, so on a healthy database
+   the cleanup finds nothing; it exists for content left by other means (an
+   interrupted external operation, future object storage, a manual edit) and as
+   a check. Schema version 7 adds `revision_files_by_digest`, because both the
+   check and the foreign key check of a blob delete otherwise scan every file
+   row. The database file does not shrink: freed pages are reused. No `VACUUM`
+   is run.
+
 7. **Schema version 7.** Adds `artifacts.purged_at` with `CHECK (purged_at IS
-NULL OR deleted_at IS NOT NULL)`, the index above, and rebuilds `changes`
+NULL OR deleted_at IS NOT NULL)`, the index above, the table `cleanup_runs`
+   (decision 6), and rebuilds `changes`
    with `'purged'` in its checked kinds, keeping every sequence and the feed's
    head (`keeping_feed_head`). It is the next step of the ladder in
    `schema.rs`; `check_current` compares a database with the schema this build
@@ -139,13 +184,19 @@ NULL OR deleted_at IS NOT NULL)`, the index above, and rebuilds `changes`
    serves the same answers (decision 4) with a new feed identity.
 8. **Surface.** Purge and the two cleanup calls are HTTP routes with
    contracts (`PurgeArtifactRequest`, `PurgeArtifactResponse`,
-   `UnreferencedContent`, the `purged` change kind, `not_in_trash`), client
-   methods (`purgeArtifact`, `getUnreferencedContent`,
-   `removeUnreferencedContent`), and CLI commands: `artifree artifact purge
-<id> --base-metadata <n> --yes` and `artifree content cleanup [--apply]`.
+   `UnreferencedContent`, `RemoveUnreferencedContentRequest`,
+   `RemoveUnreferencedContentResponse`, the `purged` change kind,
+   `not_in_trash`, `content_conflict`), client methods (`purgeArtifact`,
+   `getUnreferencedContent`, `removeUnreferencedContent`), and CLI commands:
+   `artifree artifact purge <id> --base-metadata <n> --yes` and `artifree
+content cleanup [--apply] [--base-digest <hex>] [--idempotency-key <key>]`.
    **Purge requires `--yes`**; without it the CLI refuses before any request.
    `content cleanup` without `--apply` is the dry run and issues the read-only
-   request; `--apply` is the only way to delete. **No MCP tool, and no agent token over HTTP.** An agent can
+   request. `--apply` is the only way to delete: it runs a dry run, prints the
+   reviewed set on stderr, and deletes that set under a generated key (or the
+   `--base-digest` of an earlier dry run and the `--idempotency-key` given, to
+   retry after a lost response); stdout is the JSON report with `applied` and
+   `replayed`. **No MCP tool, and no agent token over HTTP.** An agent can
    delete to the trash and recover (0013) because that can be undone; a purge
    cannot, so an agent that went wrong or was misled would lose data for
    good. The MCP catalog has no such tool (a test lists it and calls the
@@ -197,6 +248,12 @@ NULL OR deleted_at IS NOT NULL)`, the index above, and rebuilds `changes`
 - **Replay a purged artifact's create or save as `410 Gone`.** It would name
   the purged identifier to a caller; 0013 chose one answer for what is not
   there.
+- **A keyless, unconditional `DELETE` of unreferenced content, "naturally
+  idempotent".** Rejected (decision 6): a retry after a lost response reports
+  `0` and loses the original report, and the caller deletes what it never
+  reviewed.
+- **Cleanup keys in `request_keys`.** Rejected (decision 6): a row there names
+  an artifact and revisions.
 - **Purge leaves the bytes to the cleanup.** A purge would not be permanent
   until a second command ran.
 - **`DELETE /v1/artifacts/{id}`.** Rejected in 0013 for the same reason: no
@@ -221,6 +278,12 @@ when `secure_delete` is off. This is **not** a guarantee that no copy exists:
   a copy; this record does not delete copies.
 - The file system, snapshots, and the operating system may keep older blocks.
 - The database file does not shrink (decision 6).
+- **A fingerprint of the purged request remains.** The request key rows are
+  kept (decision 2), and each holds an unsalted SHA-256 of the request that
+  created or changed the artifact (its kind, title, file paths and content).
+  The database or an old backup lets someone confirm a guess about a purged
+  artifact's title or content by hashing it the same way; it does not let them
+  read it. The scheme is not changed here.
 
 `docs/backup-restore.md` says the same to operators.
 
@@ -242,19 +305,26 @@ TypeScript tests run the client and CLI against stub servers and, in
   title); replay and reused keys; earlier keys answer `NotFound` and stay
   reserved; feed sequences and the `purged` kind; a copy keeps its history and
   bytes; `replay_create`; the dry run removes nothing and the apply removes what
-  nothing refers to; content a commit refers to after the dry run is kept; a
-  cleanup beside an in-flight commit keeps its content (a channel orders the
-  threads; the interleaving is **not** forced by timing, so both orders must
-  give one outcome); backup and restore of a purged artifact; the `purged_at`
+  nothing refers to; a retry of a cleanup replays the first run's non-zero
+  report; the same key with another base is a reused key and deletes nothing; a
+  set that is not the reviewed one is refused, deletes nothing, and keeps the
+  key; cleanup keys and artifact keys share one space, both ways; a cleanup
+  report survives backup and restore; content a commit refers to after the dry
+  run is kept and the cleanup that reviewed it is refused; a cleanup beside an
+  in-flight commit is refused and keeps the commit's content (a channel orders
+  the threads; the interleaving is **not** forced by timing, so both orders
+  must give a refusal or an empty cleanup, never a deletion); backup and restore of a purged artifact; the `purged_at`
   check; two `secure_delete` erasure tests on the raw file.
 - `schema_upgrade.rs` and `backup_restore.rs`: fixtures of versions 1 to 6
   upgrade to 7, a failed v6 to v7 step leaves the file unchanged, a trashed
   fixture artifact that shares content with another is purged without removing
   the shared bytes.
 - Roles: `token_management.rs` issues an agent token and expects `403
-forbidden` on the purge (valid, keyless, and malformed requests alike) and on
-  both content calls, with nothing removed and the refused key still unused, then
-  the same calls succeed with the owner's token; `mcp_adapter.rs` lists the tool
+forbidden` on 12 requests: the purge and the apply when valid, without a key,
+  with a body that is not JSON, with no body, with JSON of the wrong shape, with
+  an identifier that is malformed or unknown, and the dry run; nothing is
+  removed and no refused key is consumed, then the same calls succeed with the
+  owner's token; `mcp_adapter.rs` lists the tool
   catalog and calls the obvious names to show that no tool purges or cleans up.
 - Reads: unit tests in `storage.rs` commit a purge between a revision's header
   and its files, and between the listing of revision numbers and their reads
@@ -267,10 +337,13 @@ forbidden` on the purge (valid, keyless, and malformed requests alike) and on
   apply with a planted stray blob), `change_feed.rs`, `authorization.rs`
   (another actor cannot purge or learn of one).
 - TypeScript: client contract tests (a purge response is checked against the
-  contract; `not_in_trash`; dry run is `GET`, apply is `DELETE`; the `purged`
-  kind), CLI tests (no request without `--yes`, no delete without `--apply`),
-  and server end-to-end tests of both commands, including a restart that
-  replays the purge.
+  contract; `not_in_trash`; dry run is `GET`, apply is `DELETE` with the key and
+  the base in the body, with a checked digest and report; `content_conflict`;
+  the `purged` kind), CLI tests (no request without `--yes`, no delete without
+  `--apply`, the apply sends the dry run's digest under a key, a given digest
+  and key are sent as given), and server end-to-end tests of both commands,
+  including a restart that replays the purge and a retried cleanup that
+  replays.
 
 Each guard was removed in turn and the tests failed: the trash check, the base
 check, the blob deletion, the shared-blob rule, the `Gone` replay, the purged
@@ -281,6 +354,21 @@ the `purged` kind in the table check, the v7 step, `secure_delete`, and the CLI
 refers to, or all blobs) were caught by SQLite's foreign key, not by an
 assertion of ours: that is defense in depth, and the dedicated tests also pin
 the behavior.
+
+The cleanup's guards were removed in turn as well, and a named test failed each
+time: the digest comparison (a changed set deleted anyway), the replay lookup
+(a retry re-ran and reported nothing), the fingerprint comparison (another base
+under a used key replayed instead of conflicting), the report written under
+another key, either side of the shared key space, a digest that ignores the
+members, a delete that is not limited to the reviewed set, a fixed key in place
+of the header, a lenient (uppercase) digest parse, the administrative check on
+the dry run and on the apply, and, for the purge and the apply, the same check
+moved after the key, after the identifier, or after the body (the 403 tests
+send a garbage body, a malformed identifier, and a missing key, so a check
+that runs after those extractors answers 400, 422, or 404 instead). In core,
+a read that a purge overtakes answering an empty list or "unavailable" instead
+of not found fails a deterministic test with a store that purges between the
+check and the read.
 
 ## Costs and limits
 
@@ -296,7 +384,8 @@ the behavior.
   the trash is not updated. A trashed artifact open in a page when a purge
   arrives is not marked gone until its next read answers `404`. This was
   reasoned from the reducer, not run in a browser; O05b owns the web behavior.
-- The cleanup is global, not per owner, and administrative. It is not limited
+- The cleanup is global, not per owner, and administrative; its keys are kept
+  with the database like all keys. It is not limited
   to one run at a time: two runs serialize on the write lock.
 - Not implemented: automatic purge, a web control, an MCP tool, pruning of
   change rows, vacuum, cleanup of previews and jobs (nothing persists).

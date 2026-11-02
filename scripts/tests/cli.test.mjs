@@ -101,19 +101,34 @@ test('CLI purge sends nothing without --yes, and cleanup deletes only with --app
   // A stand-in server records every request; the real server is in
   // server.test.mjs.
   const requests = [];
+  const digest = 'cd'.repeat(32);
   const server = createServer((request, response) => {
-    requests.push([request.method, request.url]);
-    response.setHeader('content-type', 'application/json');
-    response.end(
-      request.url.endsWith('/purge')
-        ? JSON.stringify({
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+    });
+    request.on('end', () => {
+      requests.push([
+        request.method,
+        request.url,
+        request.headers['idempotency-key'],
+        body === '' ? undefined : JSON.parse(body),
+      ]);
+      response.setHeader('content-type', 'application/json');
+      if (request.url.endsWith('/purge'))
+        response.end(
+          JSON.stringify({
             artifact_id: `art_${'1'.repeat(32)}`,
             metadata_revision: 3,
             purged_at_ms: 5,
             replayed: false,
-          })
-        : JSON.stringify({ blobs: 2, bytes: 40 }),
-    );
+          }),
+        );
+      else if (request.method === 'GET')
+        response.end(JSON.stringify({ blobs: 2, bytes: 40, digest }));
+      else
+        response.end(JSON.stringify({ blobs: 2, bytes: 40, replayed: false }));
+    });
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -167,7 +182,10 @@ test('CLI purge sends nothing without --yes, and cleanup deletes only with --app
     ]);
     assert.equal(purged.status, 0, purged.stderr);
     assert.equal(JSON.parse(purged.stdout).metadata_revision, 3);
-    assert.deepEqual(requests, [['POST', `/v1/artifacts/${id}/purge`]]);
+    assert.deepEqual(
+      requests.map(([method, url]) => [method, url]),
+      [['POST', `/v1/artifacts/${id}/purge`]],
+    );
 
     requests.length = 0;
     const dry = await run(['content', 'cleanup']);
@@ -175,16 +193,71 @@ test('CLI purge sends nothing without --yes, and cleanup deletes only with --app
       applied: false,
       blobs: 2,
       bytes: 40,
+      digest,
     });
-    assert.deepEqual(requests, [['GET', '/v1/content/unreferenced']]);
+    assert.deepEqual(requests, [
+      ['GET', '/v1/content/unreferenced', undefined, undefined],
+    ]);
+
+    // The apply reviews the set, then deletes exactly that set under a key;
+    // stdout is the machine-readable report, the reviewed set is on stderr.
     requests.length = 0;
     const applied = await run(['content', 'cleanup', '--apply']);
+    assert.equal(applied.status, 0, applied.stderr);
     assert.deepEqual(JSON.parse(applied.stdout), {
       applied: true,
       blobs: 2,
       bytes: 40,
+      replayed: false,
     });
-    assert.deepEqual(requests, [['DELETE', '/v1/content/unreferenced']]);
+    assert.match(applied.stderr, new RegExp(`Reviewed set ${digest}`));
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0], [
+      'GET',
+      '/v1/content/unreferenced',
+      undefined,
+      undefined,
+    ]);
+    const [method, url, key, body] = requests[1];
+    assert.deepEqual(
+      [method, url, body],
+      ['DELETE', '/v1/content/unreferenced', { base_digest: digest }],
+    );
+    assert.match(key, /^[A-Za-z0-9_.:-]{8,128}$/);
+
+    // A set reviewed earlier and a key chosen by the caller are sent as given,
+    // without another dry run: this is how a lost response is retried.
+    requests.length = 0;
+    const retried = await run([
+      'content',
+      'cleanup',
+      '--apply',
+      '--base-digest',
+      digest,
+      '--idempotency-key',
+      'clean-retry-1',
+    ]);
+    assert.equal(retried.status, 0, retried.stderr);
+    assert.deepEqual(requests, [
+      [
+        'DELETE',
+        '/v1/content/unreferenced',
+        'clean-retry-1',
+        { base_digest: digest },
+      ],
+    ]);
+
+    // The retry options mean nothing to a dry run, so nothing is sent.
+    requests.length = 0;
+    const misplaced = await run([
+      'content',
+      'cleanup',
+      '--base-digest',
+      digest,
+    ]);
+    assert.equal(misplaced.status, 2);
+    assert.equal(misplaced.stdout, '');
+    assert.deepEqual(requests, []);
   } finally {
     server.close();
   }

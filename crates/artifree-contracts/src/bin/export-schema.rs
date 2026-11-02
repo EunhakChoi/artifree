@@ -19,10 +19,11 @@ use artifree_contracts::api::{
     CreateArtifactRequest, CreateRuntimeViewRequest, CreateTokenRequest, CreateTokenResponse,
     DuplicateArtifactRequest, DuplicateArtifactResponse, ErrorResponse, FeedPosition, Handoff,
     HandoffActionRequest, ListArtifactsQuery, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
-    RestoreRevisionRequest, Revision, RevisionList, RotateTokenResponse, RuntimeConnection,
-    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest,
-    SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo, TokenList,
-    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RotateTokenResponse, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
+    SourceExportManifest, StageHandoffRequest, TokenInfo, TokenList, UnreferencedContent,
+    UpdateArtifactRequest, UpdateArtifactResponse,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -41,6 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<PurgeArtifactRequest>(),
         generator.subschema_for::<PurgeArtifactResponse>(),
         generator.subschema_for::<UnreferencedContent>(),
+        generator.subschema_for::<RemoveUnreferencedContentRequest>(),
+        generator.subschema_for::<RemoveUnreferencedContentResponse>(),
         generator.subschema_for::<Artifact>(),
         generator.subschema_for::<ArtifactList>(),
         generator.subschema_for::<Revision>(),

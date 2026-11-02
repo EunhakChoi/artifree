@@ -1968,47 +1968,102 @@ test('A refusal to purge outside the trash keeps its own code', async () => {
   assert.deepEqual([error.status, error.code], [409, 'not_in_trash']);
 });
 
-test('The dry run reads and the cleanup deletes, each with a checked report', async () => {
+test('The dry run reads the set and the cleanup names it with a key, each with a checked report', async () => {
   const sent = [];
-  let answer = { blobs: 2, bytes: 30 };
+  const digest = 'ab'.repeat(32);
+  let answer;
   const client = new ArtifreeClient({
     baseUrl: 'http://127.0.0.1:7410',
     accessToken: 'token',
     fetch: async (url, init) => {
-      sent.push([init.method, String(url), init.body]);
+      sent.push([
+        init.method,
+        String(url),
+        init.headers['idempotency-key'],
+        init.body,
+      ]);
       return Response.json(answer);
     },
   });
-  assert.deepEqual(await client.getUnreferencedContent(), {
-    blobs: 2,
-    bytes: 30,
-  });
-  assert.deepEqual(await client.removeUnreferencedContent(), {
-    blobs: 2,
-    bytes: 30,
-  });
+  answer = { blobs: 2, bytes: 30, digest };
+  assert.deepEqual(await client.getUnreferencedContent(), answer);
+  answer = { blobs: 2, bytes: 30, replayed: true };
+  assert.deepEqual(
+    await client.removeUnreferencedContent(
+      { base_digest: digest },
+      { idempotencyKey: 'clean-key-1' },
+    ),
+    answer,
+  );
   assert.deepEqual(sent, [
-    ['GET', 'http://127.0.0.1:7410/v1/content/unreferenced', undefined],
-    ['DELETE', 'http://127.0.0.1:7410/v1/content/unreferenced', undefined],
+    [
+      'GET',
+      'http://127.0.0.1:7410/v1/content/unreferenced',
+      undefined,
+      undefined,
+    ],
+    [
+      'DELETE',
+      'http://127.0.0.1:7410/v1/content/unreferenced',
+      'clean-key-1',
+      JSON.stringify({ base_digest: digest }),
+    ],
   ]);
   for (const broken of [
-    { blobs: 2 },
-    { blobs: -1, bytes: 0 },
-    { blobs: 1.5, bytes: 0 },
-    { blobs: 1, bytes: '3' },
+    { blobs: 2, bytes: 3 },
+    { blobs: -1, bytes: 0, digest },
+    { blobs: 1.5, bytes: 0, digest },
+    { blobs: 1, bytes: '3', digest },
+    { blobs: 1, bytes: 3, digest: 'AB'.repeat(32) },
+    { blobs: 1, bytes: 3, digest: 'ab' },
   ]) {
     answer = broken;
-    for (const call of [
-      () => client.getUnreferencedContent(),
-      () => client.removeUnreferencedContent(),
-    ]) {
-      assert.equal(
-        (await failure(call())).code,
-        'invalid_response',
-        JSON.stringify(broken),
-      );
-    }
+    assert.equal(
+      (await failure(client.getUnreferencedContent())).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
   }
+  for (const broken of [
+    { blobs: 2, bytes: 30 },
+    { blobs: -1, bytes: 0, replayed: false },
+    { blobs: 1, bytes: 0, replayed: 'no' },
+  ]) {
+    answer = broken;
+    assert.equal(
+      (
+        await failure(
+          client.removeUnreferencedContent(
+            { base_digest: digest },
+            { idempotencyKey: 'clean-key-1' },
+          ),
+        )
+      ).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
+});
+
+test('A cleanup of a set that changed rejects with content_conflict', async () => {
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async () =>
+      Response.json(
+        {
+          error: { code: 'content_conflict', message: 'the set changed' },
+        },
+        { status: 409 },
+      ),
+  });
+  const error = await failure(
+    client.removeUnreferencedContent(
+      { base_digest: 'ab'.repeat(32) },
+      { idempotencyKey: 'clean-key-1' },
+    ),
+  );
+  assert.deepEqual([error.status, error.code], [409, 'content_conflict']);
 });
 
 test('A restore names the revision, base, and key; manifests need digests', async () => {

@@ -46,9 +46,9 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord,
-    CommitReceipt, Delivery, FileEntry, ListOrder, MetadataReceipt, MetadataUpdate, NewArtifact,
-    PurgeReceipt, PurgeRequest, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
-    UnreferencedContent,
+    CleanupReceipt, CleanupRequest, CommitReceipt, ContentSetDigest, Delivery, FileEntry,
+    ListOrder, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest,
+    RequestIdentity, RevisionCommit, RevisionRecord, StoreError, UnreferencedContent,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -512,12 +512,53 @@ impl ArtifactStore for SqliteStore {
         count_unreferenced(&snapshot)
     }
 
-    fn remove_unreferenced_content(&self) -> Result<UnreferencedContent, StoreError> {
-        // The count and the delete are one write transaction: a commit that
-        // refers to content is wholly before it, which keeps the content, or
-        // wholly after, which stores it again.
+    fn remove_unreferenced_content(
+        &self,
+        request: CleanupRequest<'_>,
+    ) -> Result<CleanupReceipt, StoreError> {
+        // Everything is one write transaction. The key is looked up first: a
+        // retry replays what the first run deleted, whatever the set is now.
+        // The count, the comparison with the reviewed set, the delete, and
+        // the record of the key follow, so a commit that refers to content is
+        // wholly before them, which keeps the content, or wholly after, which
+        // stores it again.
         self.write_erasing(|transaction| {
+            let identity = request.request;
+            let recorded: Option<(Vec<u8>, i64, i64)> = transaction
+                .query_row(
+                    "SELECT fingerprint, blobs, bytes FROM cleanup_runs
+                     WHERE actor = ?1 AND request_key = ?2",
+                    params![identity.actor.as_str(), identity.key.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(unavailable)?;
+            if let Some((fingerprint, blobs, bytes)) = recorded {
+                if fingerprint.as_slice() != identity.fingerprint.0.as_slice() {
+                    return Err(StoreError::RequestKeyReused);
+                }
+                return Ok(CleanupReceipt {
+                    blobs: u64::try_from(blobs).map_err(corrupt)?,
+                    bytes: u64::try_from(bytes).map_err(corrupt)?,
+                    delivery: Delivery::Replayed,
+                });
+            }
+            // The key space is shared with the requests that name an artifact.
+            let named_artifact: bool = transaction
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM request_keys
+                                    WHERE actor = ?1 AND request_key = ?2)",
+                    params![identity.actor.as_str(), identity.key.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(unavailable)?;
+            if named_artifact {
+                return Err(StoreError::RequestKeyReused);
+            }
             let found = count_unreferenced(transaction)?;
+            if found.digest != request.base {
+                return Err(StoreError::ContentChanged);
+            }
             transaction
                 .execute(
                     "DELETE FROM blobs WHERE NOT EXISTS
@@ -525,7 +566,26 @@ impl ArtifactStore for SqliteStore {
                     [],
                 )
                 .map_err(unavailable)?;
-            Ok(found)
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_runs
+                         (actor, request_key, fingerprint, blobs, bytes, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        identity.actor.as_str(),
+                        identity.key.as_str(),
+                        identity.fingerprint.0.as_slice(),
+                        i64::try_from(found.blobs).map_err(corrupt)?,
+                        i64::try_from(found.bytes).map_err(corrupt)?,
+                        now()?.0
+                    ],
+                )
+                .map_err(unavailable)?;
+            Ok(CleanupReceipt {
+                blobs: found.blobs,
+                bytes: found.bytes,
+                delivery: Delivery::Committed,
+            })
         })
     }
 
@@ -724,6 +784,17 @@ fn key_use(
     transaction: &Transaction<'_>,
     request: RequestIdentity<'_>,
 ) -> Result<KeyUse, StoreError> {
+    // A key a cleanup ran under belongs to that request alone (decision 0029).
+    let cleanup: bool = transaction
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM cleanup_runs WHERE actor = ?1 AND request_key = ?2)",
+            params![request.actor.as_str(), request.key.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if cleanup {
+        return Ok(KeyUse::Reused);
+    }
     let stored: Option<(Vec<u8>, String, i64, i64, bool)> = transaction
         .query_row(
             "SELECT k.fingerprint, k.artifact_id, k.revision, k.metadata_revision,
@@ -845,19 +916,34 @@ fn remove_files(transaction: &Transaction<'_>, id: &ArtifactId) -> Result<(), St
     Ok(())
 }
 
-/// How much content no revision file refers to.
+/// The content no revision file refers to: how many, how large, and the
+/// identity of the set (SHA-256 over a fixed prefix and the sorted digests).
 fn count_unreferenced(connection: &Connection) -> Result<UnreferencedContent, StoreError> {
-    let (blobs, bytes): (i64, i64) = connection
-        .query_row(
-            "SELECT count(*), coalesce(sum(length(content)), 0) FROM blobs b
-             WHERE NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = b.digest)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+    let mut statement = connection
+        .prepare(
+            "SELECT digest, length(content) FROM blobs b
+             WHERE NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = b.digest)
+             ORDER BY digest",
         )
         .map_err(unavailable)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(unavailable)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"artifree.unreferenced-content.v1\n");
+    let (mut blobs, mut bytes) = (0_u64, 0_u64);
+    for row in rows {
+        let (digest, size) = row.map_err(unavailable)?;
+        hasher.update(&digest);
+        blobs += 1;
+        bytes += u64::try_from(size).map_err(corrupt)?;
+    }
     Ok(UnreferencedContent {
-        blobs: u64::try_from(blobs).map_err(corrupt)?,
-        bytes: u64::try_from(bytes).map_err(corrupt)?,
+        blobs,
+        bytes,
+        digest: ContentSetDigest(hasher.finalize().into()),
     })
 }
 

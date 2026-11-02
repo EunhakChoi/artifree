@@ -10,9 +10,9 @@ use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactListing, ArtifactStore, ChangeKind, CommitReceipt, Delivery, ListOrder, NewArtifact,
-    PurgeReceipt, PurgeRequest, RequestFingerprint, RequestIdentity, StoreError,
-    UnreferencedContent,
+    ArtifactListing, ArtifactStore, ChangeKind, CleanupReceipt, CleanupRequest, CommitReceipt,
+    ContentSetDigest, Delivery, ListOrder, NewArtifact, PurgeReceipt, PurgeRequest,
+    RequestFingerprint, RequestIdentity, StoreError, UnreferencedContent,
 };
 use artifree_providers::backup::{backup, restore};
 use artifree_providers::storage::SqliteStore;
@@ -152,6 +152,39 @@ impl Fixture {
             assert_eq!(usize::try_from(size)?, content.len());
             assert_eq!(stored, sha2::Sha256::digest(&content).to_vec());
         }
+        Ok(())
+    }
+
+    /// A cleanup of the set at `base` under the key `name`.
+    fn cleanup(&self, name: &str, base: ContentSetDigest) -> Result<CleanupReceipt, StoreError> {
+        self.store.remove_unreferenced_content(CleanupRequest {
+            request: RequestIdentity {
+                actor: &self.owner,
+                key: &key(name),
+                fingerprint: RequestFingerprint(digest(&format!("cleanup {base}"))),
+            },
+            base,
+        })
+    }
+
+    /// The dry run, then a cleanup of exactly what it reported.
+    fn clean_up(&self, name: &str) -> Result<CleanupReceipt, StoreError> {
+        self.cleanup(name, self.unreferenced()?.digest)
+    }
+
+    /// Plants content that no revision file refers to, as an interrupted
+    /// operation might leave it.
+    fn plant_stray(&self, body: &str) -> Result<(), rusqlite::Error> {
+        self.sql()?.execute(
+            "INSERT INTO blobs (digest, content) VALUES (?1, CAST(?2 AS BLOB))",
+            rusqlite::params![digest(body).as_slice(), body],
+        )?;
+        Ok(())
+    }
+
+    fn assert_nothing_unreferenced(&self) -> TestResult {
+        let found = self.unreferenced()?;
+        assert_eq!((found.blobs, found.bytes), (0, 0), "unreferenced content");
         Ok(())
     }
 
@@ -545,10 +578,7 @@ fn a_copy_keeps_its_history_and_bytes_when_the_source_is_purged() -> TestResult 
             .map(|r| r.title.as_str().to_owned()),
         Some("Copy".to_owned())
     );
-    assert_eq!(
-        fixture.unreferenced()?,
-        UnreferencedContent { blobs: 0, bytes: 0 }
-    );
+    fixture.assert_nothing_unreferenced()?;
     // The copy's request still replays, although its source is gone.
     let replay = fixture
         .store
@@ -630,10 +660,7 @@ fn only_unreferenced_content_is_removed_and_the_dry_run_removes_nothing() -> Tes
         Some(true),
     )?;
     let copy = fixture.copy(&live, &key("copy"))?;
-    assert_eq!(
-        fixture.unreferenced()?,
-        UnreferencedContent { blobs: 0, bytes: 0 }
-    );
+    fixture.assert_nothing_unreferenced()?;
     // Content no file refers to: a leftover of some other operation.
     fixture.sql()?.execute(
         "INSERT INTO blobs (digest, content) VALUES (zeroblob(32), CAST('stray!' AS BLOB))",
@@ -643,16 +670,23 @@ fn only_unreferenced_content_is_removed_and_the_dry_run_removes_nothing() -> Tes
 
     let dry_run = fixture.unreferenced()?;
 
-    assert_eq!(dry_run, UnreferencedContent { blobs: 1, bytes: 6 });
+    assert_eq!((dry_run.blobs, dry_run.bytes), (1, 6));
     assert_eq!(
         fixture.count("SELECT count(*) FROM blobs")?,
         blobs_before,
         "dry run deleted"
     );
 
-    let removed = fixture.store.remove_unreferenced_content()?;
+    let removed = fixture.cleanup("clean-1", dry_run.digest)?;
 
-    assert_eq!(removed, dry_run);
+    assert_eq!(
+        removed,
+        CleanupReceipt {
+            blobs: 1,
+            bytes: 6,
+            delivery: Delivery::Committed
+        }
+    );
     assert_eq!(
         fixture.count("SELECT count(*) FROM blobs")?,
         blobs_before - 1
@@ -678,16 +712,16 @@ fn only_unreferenced_content_is_removed_and_the_dry_run_removes_nothing() -> Tes
             .map(|p| p.len()),
         Some(2)
     );
-    // Repeating finds nothing.
-    assert_eq!(
-        fixture.store.remove_unreferenced_content()?,
-        UnreferencedContent { blobs: 0, bytes: 0 }
-    );
+    // A new run finds nothing.
+    fixture.assert_nothing_unreferenced()?;
+    let again = fixture.clean_up("clean-2")?;
+    assert_eq!((again.blobs, again.bytes), (0, 0));
     Ok(())
 }
 
 /// The apply decides again: content the dry run listed that a commit has
-/// referred to since is kept.
+/// referred to since is kept, and the cleanup that reviewed it is refused
+/// because the set is no longer the one reviewed.
 #[test]
 fn content_a_commit_refers_to_after_the_dry_run_is_kept() -> TestResult {
     let fixture = Fixture::new()?;
@@ -702,13 +736,14 @@ fn content_a_commit_refers_to_after_the_dry_run_is_kept() -> TestResult {
 
     // A commit of the same bytes refers to the stored content.
     let created = create_demo(&fixture.store, &fixture.owner, &key("late"), "Late", body)?;
-    let removed = fixture.store.remove_unreferenced_content()?;
+    let refused = fixture.cleanup("clean-late", dry_run.digest);
 
-    assert_eq!(removed, UnreferencedContent { blobs: 0, bytes: 0 });
+    assert_eq!(refused, Err(StoreError::ContentChanged));
     assert_eq!(
         fixture.bytes(&created.artifact.id, 1)?.as_deref(),
         Some(body.as_bytes())
     );
+    fixture.assert_every_file_has_its_content()?;
     Ok(())
 }
 
@@ -747,21 +782,30 @@ fn a_cleanup_beside_a_commit_in_flight_keeps_what_the_commit_refers_to() -> Test
         rusqlite::params![held.artifact.id.as_str(), digest(stray).as_slice()],
     )?;
 
+    // The dry run cannot see the uncommitted file, so it reports the stray.
+    let reviewed = fixture.unreferenced()?;
+    assert_eq!(reviewed.blobs, 1);
     let (started, begun) = mpsc::channel();
     let store = fixture.store.clone();
     let cleanup = thread::spawn(move || {
         started.send(()).ok();
-        store.remove_unreferenced_content()
+        store.remove_unreferenced_content(CleanupRequest {
+            request: RequestIdentity {
+                actor: &actor("owner"),
+                key: &key("clean-flight"),
+                fingerprint: RequestFingerprint(digest(&format!("cleanup {}", reviewed.digest))),
+            },
+            base: reviewed.digest,
+        })
     });
     begun.recv()?;
     transaction.commit()?;
-    let removed = cleanup
-        .join()
-        .map_err(|_| "the cleanup thread panicked")??;
+    let refused = cleanup.join().map_err(|_| "the cleanup thread panicked")?;
 
     assert_eq!(
-        removed.blobs, 0,
-        "the content the commit refers to was removed"
+        refused,
+        Err(StoreError::ContentChanged),
+        "the set the cleanup reviewed was changed by the commit"
     );
     let kept: i64 = fixture.count("SELECT count(*) FROM revision_files WHERE revision = 2")?;
     assert_eq!(kept, 1);
@@ -770,6 +814,206 @@ fn a_cleanup_beside_a_commit_in_flight_keeps_what_the_commit_refers_to() -> Test
         Some(stray.as_bytes())
     );
     Ok(())
+}
+
+/// The first run under a key records what it deleted, with the key, in the
+/// same transaction. A retry whose response was lost gets that report back,
+/// not "nothing found".
+#[test]
+fn a_retry_of_a_cleanup_replays_the_original_report() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.plant_stray("<h1>stray</h1>")?;
+    let reviewed = fixture.unreferenced()?;
+    assert_eq!((reviewed.blobs, reviewed.bytes), (1, 14));
+
+    let first = fixture.cleanup("clean-key", reviewed.digest)?;
+    let retry = fixture.cleanup("clean-key", reviewed.digest)?;
+
+    assert_eq!(
+        first,
+        CleanupReceipt {
+            blobs: 1,
+            bytes: 14,
+            delivery: Delivery::Committed
+        }
+    );
+    assert_eq!(
+        retry,
+        CleanupReceipt {
+            blobs: 1,
+            bytes: 14,
+            delivery: Delivery::Replayed
+        },
+        "the retry must report what the first run deleted, not that the set is empty"
+    );
+    assert_eq!(fixture.count("SELECT count(*) FROM blobs")?, 0);
+    // A run under a new key against the now empty set reports nothing.
+    let empty = fixture.unreferenced()?;
+    let nothing = fixture.cleanup("clean-key-2", empty.digest)?;
+    assert_eq!((nothing.blobs, nothing.bytes), (0, 0));
+    assert_eq!(nothing.delivery, Delivery::Committed);
+    // The record holds counts and the key, never content or names.
+    let columns: Vec<String> = fixture
+        .sql()?
+        .prepare("SELECT name FROM pragma_table_info('cleanup_runs') ORDER BY cid")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        columns,
+        [
+            "actor",
+            "request_key",
+            "fingerprint",
+            "blobs",
+            "bytes",
+            "created_at"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_key_used_with_another_base_is_a_reused_key_and_deletes_nothing() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.plant_stray("<h1>one</h1>")?;
+    let one = fixture.unreferenced()?;
+    fixture.cleanup("clean-key", one.digest)?;
+    fixture.plant_stray("<h1>two</h1>")?;
+    let two = fixture.unreferenced()?;
+    assert_ne!(one.digest, two.digest);
+
+    let refused = fixture.cleanup("clean-key", two.digest);
+
+    assert_eq!(refused, Err(StoreError::RequestKeyReused));
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM blobs")?,
+        1,
+        "the second set must not be deleted under the used key"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_cleanup_of_a_set_that_is_not_the_reviewed_one_deletes_nothing_and_keeps_its_key() -> TestResult
+{
+    let fixture = Fixture::new()?;
+    fixture.plant_stray("<h1>reviewed</h1>")?;
+    let reviewed = fixture.unreferenced()?;
+    // Something else becomes unreferenced after the review.
+    fixture.plant_stray("<h1>unseen</h1>")?;
+
+    let refused = fixture.cleanup("clean-key", reviewed.digest);
+
+    assert_eq!(refused, Err(StoreError::ContentChanged));
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM blobs")?,
+        2,
+        "nothing the caller did not review may be deleted"
+    );
+    assert_eq!(fixture.count("SELECT count(*) FROM cleanup_runs")?, 0);
+    // The refusal consumed nothing: the same key works after a new review.
+    let received = fixture.clean_up("clean-key")?;
+    assert_eq!(
+        (received.blobs, received.delivery),
+        (2, Delivery::Committed)
+    );
+    Ok(())
+}
+
+/// One key space: a key an artifact request used cannot start a cleanup, and
+/// a key a cleanup used cannot create or change an artifact.
+#[test]
+fn a_cleanup_shares_its_key_space_with_the_requests_that_name_an_artifact() -> TestResult {
+    let fixture = Fixture::new()?;
+    let created = fixture.artifact()?;
+    let found = fixture.unreferenced()?;
+
+    assert_eq!(
+        fixture.cleanup("create", found.digest),
+        Err(StoreError::RequestKeyReused)
+    );
+    assert_eq!(
+        fixture.cleanup("save", found.digest),
+        Err(StoreError::RequestKeyReused)
+    );
+
+    fixture.cleanup("clean-key", found.digest)?;
+    assert_eq!(
+        create_demo(
+            &fixture.store,
+            &fixture.owner,
+            &key("clean-key"),
+            "X",
+            FIRST
+        )
+        .err(),
+        Some(StoreError::RequestKeyReused)
+    );
+    assert_eq!(
+        revise(&fixture.store, &created, &key("clean-key"), 2, "<p>y</p>").err(),
+        Some(StoreError::RequestKeyReused)
+    );
+    // Another actor's keys are separate.
+    let other = fixture.store.remove_unreferenced_content(CleanupRequest {
+        request: RequestIdentity {
+            actor: &actor("someone-else"),
+            key: &key("clean-key"),
+            fingerprint: RequestFingerprint(digest(&format!("cleanup {}", found.digest))),
+        },
+        base: found.digest,
+    })?;
+    assert_eq!(other.delivery, Delivery::Committed);
+    Ok(())
+}
+
+#[test]
+fn a_cleanup_report_survives_a_backup_and_restore() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.plant_stray("<h1>stray</h1>")?;
+    let reviewed = fixture.unreferenced()?;
+    fixture.cleanup("clean-key", reviewed.digest)?;
+    std::fs::create_dir(fixture.dir.join("out"))?;
+    let output = fixture.dir.join("out").join("backup.sqlite3");
+    let target = fixture.dir.join("restored");
+    backup(fixture.dir.path(), &output)?;
+    restore(&output, &target)?;
+
+    let restored = SqliteStore::open(&database_in(&target))?;
+    let retry = restored.remove_unreferenced_content(CleanupRequest {
+        request: RequestIdentity {
+            actor: &fixture.owner,
+            key: &key("clean-key"),
+            fingerprint: RequestFingerprint(digest(&format!("cleanup {}", reviewed.digest))),
+        },
+        base: reviewed.digest,
+    })?;
+    assert_eq!(
+        retry,
+        CleanupReceipt {
+            blobs: 1,
+            bytes: 14,
+            delivery: Delivery::Replayed
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn a_content_set_digest_is_written_and_read_as_lowercase_hex_only() {
+    let digest = ContentSetDigest([0xab; 32]);
+    let text = digest.to_string();
+    assert_eq!(text, "ab".repeat(32));
+    assert_eq!(ContentSetDigest::parse(&text), Some(digest));
+    for rejected in [
+        text.to_uppercase(),
+        text[..62].to_owned(),
+        format!("{text}00"),
+        format!("{} ", &text[..63]),
+        format!("g{}", &text[1..]),
+        String::new(),
+    ] {
+        assert_eq!(ContentSetDigest::parse(&rejected), None, "{rejected:?}");
+    }
 }
 
 #[test]
@@ -824,10 +1068,8 @@ fn a_backup_and_restore_keep_a_purged_artifact_gone_and_its_keys_answering() -> 
         .err(),
         Some(StoreError::RequestKeyReused)
     );
-    assert_eq!(
-        restored.unreferenced_content()?,
-        UnreferencedContent { blobs: 0, bytes: 0 }
-    );
+    let found = restored.unreferenced_content()?;
+    assert_eq!((found.blobs, found.bytes), (0, 0));
     // The feed's head is kept and continues.
     let page = restored.changes(&fixture.owner, ChangeSequence(0), 100)?;
     assert_eq!(page.head, ChangeSequence(5));
@@ -922,7 +1164,7 @@ fn removed_unreferenced_content_is_erased_from_the_database_file() -> TestResult
     };
     assert!(contains(&checkpoint()?, marker.as_bytes()), "the premise");
 
-    assert_eq!(fixture.store.remove_unreferenced_content()?.blobs, 1);
+    assert_eq!(fixture.clean_up("clean-erase")?.blobs, 1);
 
     assert!(
         !contains(&checkpoint()?, marker.as_bytes()),

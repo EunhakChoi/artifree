@@ -6,7 +6,7 @@ use artifree_domain::change::ChangeSequence;
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactStore, Delivery, ListOrder, NewArtifact, PurgeRequest,
-    RequestFingerprint, RequestIdentity, StoreError, UnreferencedContent,
+    RequestFingerprint, RequestIdentity, StoreError,
 };
 use artifree_ports::token_store::TokenStore;
 use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
@@ -96,9 +96,10 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
                 vec![]
             }
         );
+        let found = store.unreferenced_content()?;
         assert_eq!(
-            store.unreferenced_content()?,
-            UnreferencedContent { blobs: 0, bytes: 0 },
+            (found.blobs, found.bytes),
+            (0, 0),
             "version {version}: an upgrade must not leave content unreferenced"
         );
         if version >= 5 {

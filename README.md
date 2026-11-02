@@ -83,12 +83,16 @@ one. Windows and container use of these commands is not verified outside CI.
 
 Nothing is removed unless asked. `artifact purge <id> --base-metadata <n> --yes`
 removes an artifact that is already in the trash for good (its files and
-titles; request keys, change sequences, and copies stay), and `content cleanup
-[--apply]` reports, and with `--apply` deletes, file content that no revision
-refers to ([decision 0029](docs/decisions/0029-retention-and-cleanup.md)). A
+titles; request keys, change sequences, and copies stay), and `content cleanup`
+reports file content that no revision refers to. `content cleanup --apply`
+reviews that set, then deletes exactly it under a request key; a retry with the
+same `--idempotency-key` and `--base-digest` prints the first run's report
+again, and a set that changed since the review is refused with
+`content_conflict` ([decision 0029](docs/decisions/0029-retention-and-cleanup.md)). A
 purge cannot be undone, is refused to issued agent tokens (they get `403`; only
 the owner's access token may purge or clean up), is not offered to MCP agents,
-and does not reach earlier backups. Request keys are never expired.
+and does not reach earlier backups. Request keys, those of a cleanup too, are
+never expired.
 
 For development with live reloading, Vite is still available:
 

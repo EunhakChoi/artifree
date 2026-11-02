@@ -284,8 +284,16 @@ test('Every JSON body the server sends matches the API schema root', async () =>
     });
     assert.equal(purged.metadata_revision, 5);
     await request(404, 'GET', trashed);
-    await request(200, 'GET', '/v1/content/unreferenced');
-    await request(200, 'DELETE', '/v1/content/unreferenced');
+    const unreferenced = await request(200, 'GET', '/v1/content/unreferenced');
+    await request(409, 'DELETE', '/v1/content/unreferenced', {
+      base_digest: '0'.repeat(64),
+    });
+    await request(400, 'DELETE', '/v1/content/unreferenced', {
+      base_digest: 'not a digest',
+    });
+    await request(200, 'DELETE', '/v1/content/unreferenced', {
+      base_digest: unreferenced.digest,
+    });
     await request(
       404,
       'GET',
@@ -543,13 +551,57 @@ test('CLI cleanup of unreferenced content reports first and deletes only with --
       );
     };
     const dry = json(run(['cleanup']));
-    assert.deepEqual(dry, { applied: false, blobs: 0, bytes: 0 });
-    const applied = json(run(['cleanup', '--apply']));
-    assert.deepEqual(applied, { applied: true, blobs: 0, bytes: 0 });
+    assert.deepEqual(dry, {
+      applied: false,
+      blobs: 0,
+      bytes: 0,
+      digest: dry.digest,
+    });
+    assert.match(dry.digest, /^[0-9a-f]{64}$/);
+    // The apply reviews the set itself and sends it with a new key.
+    const applied = run(['cleanup', '--apply']);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.deepEqual(JSON.parse(applied.stdout), {
+      applied: true,
+      blobs: 0,
+      bytes: 0,
+      replayed: false,
+    });
+    assert.match(applied.stderr, new RegExp(`Reviewed set ${dry.digest}`));
+    // A retry with the same key and set replays the first report.
+    const first = run([
+      'cleanup',
+      '--apply',
+      '--base-digest',
+      dry.digest,
+      '--idempotency-key',
+      'cli-cleanup-key-1',
+    ]);
+    const retry = run([
+      'cleanup',
+      '--apply',
+      '--base-digest',
+      dry.digest,
+      '--idempotency-key',
+      'cli-cleanup-key-1',
+    ]);
+    assert.equal(json(first).replayed, false);
+    assert.deepEqual(json(retry), {
+      applied: true,
+      blobs: 0,
+      bytes: 0,
+      replayed: true,
+    });
+    // A set the caller did not review is refused, and nothing is sent twice.
+    const stale = run(['cleanup', '--apply', '--base-digest', '0'.repeat(64)]);
+    assert.equal(stale.status, 1);
+    assert.equal(stale.stdout, '');
+    assert.match(stale.stderr, /^error\[content_conflict\]/);
     for (const args of [
       ['cleanup', 'extra'],
       ['unknown'],
       ['cleanup', '--yes'],
+      ['cleanup', '--base-digest', 'a'.repeat(64)],
     ]) {
       const refused = run(args);
       assert.equal(refused.status, 2, args.join(' '));

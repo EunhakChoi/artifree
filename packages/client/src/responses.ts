@@ -14,6 +14,7 @@ import type {
   HandoffState,
   Preview,
   PurgeArtifactResponse,
+  RemoveUnreferencedContentResponse,
   Revision,
   RevisionFile,
   RuntimeConnection,
@@ -69,6 +70,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   revision_conflict: true,
   metadata_conflict: true,
   not_in_trash: true,
+  content_conflict: true,
   request_key_reused: true,
   payload_too_large: true,
   range_not_satisfiable: true,
@@ -279,13 +281,29 @@ export function parsePurge(value: unknown): PurgeArtifactResponse | undefined {
   };
 }
 
-/** Parses the report of a cleanup of unreferenced content, dry run or not. */
+/** Parses the dry run of a cleanup of unreferenced content. */
 export function parseUnreferencedContent(
   value: unknown,
 ): UnreferencedContent | undefined {
   if (!isRecord(value)) return undefined;
+  const { blobs, bytes, digest } = value;
+  return isCount(blobs) &&
+    isCount(bytes) &&
+    typeof digest === 'string' &&
+    /^[0-9a-f]{64}$/.test(digest)
+    ? { blobs, bytes, digest }
+    : undefined;
+}
+
+/** Parses what a cleanup of unreferenced content deleted. */
+export function parseRemoveUnreferencedContent(
+  value: unknown,
+): RemoveUnreferencedContentResponse | undefined {
+  if (!isRecord(value) || typeof value.replayed !== 'boolean') return undefined;
   const { blobs, bytes } = value;
-  return isCount(blobs) && isCount(bytes) ? { blobs, bytes } : undefined;
+  return isCount(blobs) && isCount(bytes)
+    ? { blobs, bytes, replayed: value.replayed }
+    : undefined;
 }
 
 /** Parses the response of a preview request. */

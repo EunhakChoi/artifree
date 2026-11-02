@@ -252,7 +252,7 @@ async function show(
   else print({ revisions: await client.listRevisions(id) });
 }
 
-async function mutate<T>(
+export async function mutate<T>(
   key: string,
   operation: (idempotencyKey: string) => Promise<T>,
 ): Promise<T> {

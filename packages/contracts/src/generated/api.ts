@@ -14,6 +14,8 @@ export type ApiBody =
   | PurgeArtifactRequest
   | PurgeArtifactResponse
   | UnreferencedContent
+  | RemoveUnreferencedContentRequest
+  | RemoveUnreferencedContentResponse
   | Artifact
   | ArtifactList
   | Revision
@@ -91,6 +93,7 @@ export type ErrorCode =
   | 'revision_conflict'
   | 'metadata_conflict'
   | 'not_in_trash'
+  | 'content_conflict'
   | 'request_key_reused'
   | 'payload_too_large'
   | 'range_not_satisfiable'
@@ -351,9 +354,9 @@ export interface PurgeArtifactResponse {
   replayed: boolean;
 }
 /**
- * Response of `GET /v1/content/unreferenced` (what a cleanup would remove)
- * and `DELETE /v1/content/unreferenced` (what it removed): file content that
- * no revision file of any artifact refers to, in the trash or not.
+ * Response of `GET /v1/content/unreferenced`, the dry run: file content that
+ * no revision file of any artifact refers to, in the trash or not. Nothing is
+ * removed.
  */
 export interface UnreferencedContent {
   /**
@@ -365,6 +368,43 @@ export interface UnreferencedContent {
    * space is reused by later writes.
    */
   bytes: number;
+  /**
+   * The identity of this set: 64 lowercase hexadecimal digits (SHA-256 over
+   * the sorted digests of its contents). Send it as `base_digest` to delete
+   * exactly this set.
+   */
+  digest: string;
+}
+/**
+ * Body of `DELETE /v1/content/unreferenced`, with an `Idempotency-Key`
+ * header: the cleanup of the set a dry run reported (decision 0029).
+ */
+export interface RemoveUnreferencedContentRequest {
+  /**
+   * The `digest` of the dry run's set. The cleanup fails with
+   * `content_conflict` and deletes nothing unless the unreferenced content
+   * is still exactly that set.
+   */
+  base_digest: string;
+}
+/**
+ * Response of `DELETE /v1/content/unreferenced`: what the first run under the
+ * key deleted. A retry with the same key and `base_digest` returns the same
+ * numbers with `replayed: true`, also when the set is empty by then.
+ */
+export interface RemoveUnreferencedContentResponse {
+  /**
+   * How many distinct contents were deleted.
+   */
+  blobs: number;
+  /**
+   * Their total size in bytes.
+   */
+  bytes: number;
+  /**
+   * True when an earlier request with the same key did the deleting.
+   */
+  replayed: boolean;
 }
 /**
  * Response of `GET /v1/artifacts`.

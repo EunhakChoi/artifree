@@ -237,7 +237,8 @@ acknowledgement is separate from model work and its state is process-local.
 O05 removes an artifact in the trash for good (`POST
 /v1/artifacts/{id}/purge`, administrative credential only, conditional on its metadata revision and
 retryable by key) and deletes file content no revision file refers to
-(`GET`/`DELETE /v1/content/unreferenced`). A purge keeps a tombstone so that
+(`GET` for the dry run and its set digest, `DELETE` conditional on that digest
+and retryable by key, `/v1/content/unreferenced`). A purge keeps a tombstone so that
 request keys, change feed sequences, and foreign keys stay valid, and it has no
 MCP tool, because an agent could not undo it
 ([0029](decisions/0029-retention-and-cleanup.md)).

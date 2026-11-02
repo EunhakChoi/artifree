@@ -495,6 +495,11 @@
           "type": "string"
         },
         {
+          "const": "content_conflict",
+          "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+          "type": "string"
+        },
+        {
           "const": "request_key_reused",
           "description": "The idempotency key was already used for a different request.",
           "type": "string"
@@ -930,6 +935,48 @@
         "artifact_id",
         "metadata_revision",
         "purged_at_ms",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "RemoveUnreferencedContentRequest": {
+      "additionalProperties": false,
+      "description": "Body of `DELETE /v1/content/unreferenced`, with an `Idempotency-Key`\nheader: the cleanup of the set a dry run reported (decision 0029).",
+      "properties": {
+        "base_digest": {
+          "description": "The `digest` of the dry run's set. The cleanup fails with\n`content_conflict` and deletes nothing unless the unreferenced content\nis still exactly that set.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_digest"
+      ],
+      "type": "object"
+    },
+    "RemoveUnreferencedContentResponse": {
+      "additionalProperties": false,
+      "description": "Response of `DELETE /v1/content/unreferenced`: what the first run under the\nkey deleted. A retry with the same key and `base_digest` returns the same\nnumbers with `replayed: true`, also when the set is empty by then.",
+      "properties": {
+        "blobs": {
+          "description": "How many distinct contents were deleted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes": {
+          "description": "Their total size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key did the deleting.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blobs",
+        "bytes",
         "replayed"
       ],
       "type": "object"
@@ -1494,7 +1541,7 @@
     },
     "UnreferencedContent": {
       "additionalProperties": false,
-      "description": "Response of `GET /v1/content/unreferenced` (what a cleanup would remove)\nand `DELETE /v1/content/unreferenced` (what it removed): file content that\nno revision file of any artifact refers to, in the trash or not.",
+      "description": "Response of `GET /v1/content/unreferenced`, the dry run: file content that\nno revision file of any artifact refers to, in the trash or not. Nothing is\nremoved.",
       "properties": {
         "blobs": {
           "description": "How many distinct contents.",
@@ -1507,11 +1554,16 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "digest": {
+          "description": "The identity of this set: 64 lowercase hexadecimal digits (SHA-256 over\nthe sorted digests of its contents). Send it as `base_digest` to delete\nexactly this set.",
+          "type": "string"
         }
       },
       "required": [
         "blobs",
-        "bytes"
+        "bytes",
+        "digest"
       ],
       "type": "object"
     },
@@ -1604,6 +1656,12 @@
     },
     {
       "$ref": "#/$defs/UnreferencedContent"
+    },
+    {
+      "$ref": "#/$defs/RemoveUnreferencedContentRequest"
+    },
+    {
+      "$ref": "#/$defs/RemoveUnreferencedContentResponse"
     },
     {
       "$ref": "#/$defs/Artifact"
