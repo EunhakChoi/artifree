@@ -60,7 +60,9 @@ the operator's value, passwords included.
    otherwise the person would be connected to a fallback server without ever
    seeing the notice. The tab-stored token for a valid, un-noticed starting
    server is restored as before. Notices are cleared as soon as the person
-   connects or disconnects, so the form does not show them a second time.
+   connects or disconnects, so the form does not show them a second time. A token kept for the tab is keyed by the whole server address, path
+   included, so servers mounted at different paths of one origin do not share
+   one.
 
 ### Environment variables for `serve`
 
@@ -127,7 +129,8 @@ the operator's value, passwords included.
     listen on ..." (it was parsed as an IP address and port, so it cannot hold
     a credential); file-system paths such as `--data-dir` and `--web-dir` in
     their own errors (the operator's own paths, not secrets); the names of the
-    flags and variables. `--allowed-host` entries are not validated and cannot
+    flags and variables; and, in the client, the **path** of an http(s) server
+    address, so a secret placed in a path would be shown. `--allowed-host` entries are not validated and cannot
     produce an error. **The "must differ" error cannot say which of the two
     sources set a value**, so it names both flags and both variables. The
     library errors of `AppState::new` name the setting ("an allowed CORS

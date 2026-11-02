@@ -130,3 +130,12 @@ export function defaultServer(buildDefault: string | undefined): string {
   const result = parseServerUrl(buildDefault ?? '');
   return result.ok ? result.url : '';
 }
+
+/**
+ * Where a token is kept for the tab. The key names the whole server address,
+ * path included, so two servers behind one origin at different paths do not
+ * share a token. An empty address is the page's own origin.
+ */
+export function tokenStorageKey(serverUrl: string, pageOrigin: string): string {
+  return `artifree.accessToken.${serverUrl === '' ? pageOrigin : serverUrl}`;
+}

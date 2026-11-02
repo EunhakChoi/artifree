@@ -16,10 +16,15 @@ const bundle = await build({
   platform: 'neutral',
   write: false,
 });
-const { defaultServer, parseServerUrl, resolveInitialServer, serverToKeep } =
-  await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
-  );
+const {
+  defaultServer,
+  parseServerUrl,
+  resolveInitialServer,
+  serverToKeep,
+  tokenStorageKey,
+} = await import(
+  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
+);
 
 const SECRET = 'hunter2';
 
@@ -180,4 +185,17 @@ test('the build default is never kept for the tab, other servers are', () => {
   assert.equal(defaultServer(built), 'https://build.example');
   assert.equal(defaultServer('nope'), '');
   assert.equal(defaultServer(undefined), '');
+});
+
+test('a token is kept per server address, path included', () => {
+  const page = 'http://127.0.0.1:5000';
+  assert.equal(tokenStorageKey('', page), `artifree.accessToken.${page}`);
+  assert.equal(
+    tokenStorageKey('https://host.example', page),
+    'artifree.accessToken.https://host.example',
+  );
+  assert.notEqual(
+    tokenStorageKey('https://host.example/a', page),
+    tokenStorageKey('https://host.example/b', page),
+  );
 });

@@ -31,6 +31,7 @@ import {
   defaultServer,
   resolveInitialServer,
   serverToKeep,
+  tokenStorageKey,
 } from './server-url';
 import type { InitialServer } from './server-url';
 import { TrashNav } from './trash-list';
@@ -66,14 +67,7 @@ function readInitialServer(): InitialServer {
 }
 
 function tokenKeyForServer(serverUrl: string): string {
-  try {
-    const origin = serverUrl
-      ? new URL(serverUrl, window.location.origin).origin
-      : window.location.origin;
-    return `artifree.accessToken.${origin}`;
-  } catch {
-    return `artifree.accessToken.${serverUrl || 'default'}`;
-  }
+  return tokenStorageKey(serverUrl, window.location.origin);
 }
 
 function storedToken(serverUrl: string): string | undefined {
