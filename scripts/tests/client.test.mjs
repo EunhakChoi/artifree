@@ -2354,6 +2354,8 @@ test('A network failure names the server without its credentials', async () => {
       'https://api.invalid/prefix',
     ],
     ['not a url with hunter2-secret@x', 'the configured server'],
+    ['user:hunter2-secret@host.invalid:80', 'the configured server'],
+    ['ftp://user:hunter2-secret@host.invalid', 'the configured server'],
     ['', 'this origin'],
   ];
   for (const [baseUrl, shown] of cases) {

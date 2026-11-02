@@ -158,7 +158,7 @@ const refused = [
       ARTIFREE_API_ORIGIN: 'https://same.example.test',
       ARTIFREE_CONTENT_ORIGIN: 'https://same.example.test',
     },
-    /must differ from --api-origin/,
+    /ARTIFREE_CONTENT_ORIGIN must differ from ARTIFREE_API_ORIGIN/,
   ],
   [
     'a frame-ancestors list that starts another directive',

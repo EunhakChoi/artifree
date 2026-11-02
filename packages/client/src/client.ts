@@ -373,12 +373,17 @@ function describeServer(baseUrl: string): string {
   if (baseUrl === '') return 'this origin';
   try {
     const url = new URL(baseUrl);
-    url.username = '';
-    url.password = '';
-    return url.href.replace(/\/+$/, '');
+    // Only a hierarchical address has a username to drop. Something like
+    // `user:secret@host` parses as an opaque `user:` URL whose href holds it all.
+    if (url.protocol === 'http:' || url.protocol === 'https:') {
+      url.username = '';
+      url.password = '';
+      return url.href.replace(/\/+$/, '');
+    }
   } catch {
-    return baseUrl.includes('@') ? 'the configured server' : baseUrl;
+    // Unreadable as a URL: handled below.
   }
+  return baseUrl.includes('@') ? 'the configured server' : baseUrl;
 }
 
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */

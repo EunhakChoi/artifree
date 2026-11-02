@@ -109,7 +109,9 @@ the first two and the limits are outside this row.
 - **Same validation as the flags**, and the message names the source that was
   used (`ARTIFREE_CONTENT_ORIGIN must be a valid ...` or `--content-origin ...`).
   A flag in effect hides an invalid variable, including one that is not valid UTF-8: only the winning value is read.
-- Equal API and preview origins are refused whichever way each was given.
+- Equal API and preview origins are refused whichever way each was given, and
+  the message names where each value came from (`ARTIFREE_CONTENT_ORIGIN must
+differ from --api-origin ...`). `ARTIFREE_API_ORIGIN` errors name the variable.
 - **Errors about serve settings never quote a value the operator wrote.** A
   rejected origin, source list, address, CIDR, or argument may carry a password
   (`https://user:secret@host`), and these messages go to stderr and container

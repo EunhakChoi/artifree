@@ -245,6 +245,12 @@ struct Sourced {
     source: &'static str,
 }
 
+/// A normalized origin and the flag or variable it came from.
+struct OriginSetting {
+    origin: String,
+    source: &'static str,
+}
+
 /// Picks the flag over the environment variable; the default is the caller's
 /// fallback when both are absent. The variable is only examined when no flag
 /// is given, so an unusable variable does not matter when a flag overrides it.
@@ -301,14 +307,16 @@ fn parse_serve_with(arguments: &[String], env: ServeEnv) -> Result<ServeOptions,
     )?;
     let resolved_api_origin = resolve_api_origin(flags.explicit_api_origin, env.api_origin)?;
 
-    if let (Some(api_orig), Some(content_orig)) = (&resolved_api_origin, &resolved_content_origin)
-        && api_orig == content_orig
+    if let (Some(api), Some(content)) = (&resolved_api_origin, &resolved_content_origin)
+        && api.origin == content.origin
     {
-        return Err(
-            "--content-origin must differ from --api-origin to maintain preview sandbox isolation"
-                .to_owned(),
-        );
+        return Err(format!(
+            "{} must differ from {} to maintain preview sandbox isolation",
+            content.source, api.source
+        ));
     }
+    let resolved_api_origin = resolved_api_origin.map(|setting| setting.origin);
+    let resolved_content_origin = resolved_content_origin.map(|setting| setting.origin);
 
     let trusted_proxies =
         resolve_trusted_proxies(flags.cli_trusted_proxies, env.trusted_proxies.as_deref())?;
@@ -419,18 +427,24 @@ fn resolve_content_origin(
     explicit: Option<Sourced>,
     explicit_content_listen: bool,
     default_origin: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<OriginSetting>, String> {
     match explicit {
         Some(Sourced { value, source }) => {
             let canon = artifree_server::http::normalize_origin(&value)
                 .map_err(|e| format!("{source} must be a valid HTTP or HTTPS origin: {e}"))?;
-            Ok(Some(canon))
+            Ok(Some(OriginSetting {
+                origin: canon,
+                source,
+            }))
         }
         None => {
             if explicit_content_listen {
                 Ok(None)
             } else {
-                Ok(default_origin)
+                Ok(default_origin.map(|origin| OriginSetting {
+                    origin,
+                    source: "the preview origin derived from --lan",
+                }))
             }
         }
     }
@@ -552,16 +566,21 @@ fn validate_frame_ancestors(value: &str, source: &str) -> Result<String, String>
 fn resolve_api_origin(
     explicit: Option<String>,
     env_origin: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<OriginSetting>, String> {
     let raw = match explicit {
-        Some(origin) => Some(origin),
-        None => env_origin.filter(|s| !s.is_empty()),
+        Some(origin) => Some((origin, "--api-origin")),
+        None => env_origin
+            .filter(|s| !s.is_empty())
+            .map(|origin| (origin, "ARTIFREE_API_ORIGIN")),
     };
     match raw {
-        Some(origin) => {
+        Some((origin, source)) => {
             let canon = artifree_server::http::normalize_origin(&origin)
-                .map_err(|e| format!("--api-origin must be a valid HTTP or HTTPS origin: {e}"))?;
-            Ok(Some(canon))
+                .map_err(|e| format!("{source} must be a valid HTTP or HTTPS origin: {e}"))?;
+            Ok(Some(OriginSetting {
+                origin: canon,
+                source,
+            }))
         }
         None => Ok(None),
     }
@@ -682,11 +701,11 @@ fn resolve_allowed_origins(
             let canon = artifree_server::http::normalize_origin(part)
                 .map_err(|e| format!("{source} must list HTTP or HTTPS origins: {e}"))?;
             // A CORS origin has no path, query, or fragment; normalizing drops
-            // them and would quietly grant what was not written.
-            let has_more = part.parse::<axum::http::Uri>().is_ok_and(|uri| {
-                (uri.path() != "/" && !uri.path().is_empty()) || uri.query().is_some()
-            });
-            if has_more || part.contains('#') {
+            // them and would quietly grant what was not written. Checked on the
+            // text itself, not on a second parse that could disagree.
+            let after_scheme = part.split_once("://").map_or("", |(_, rest)| rest);
+            let after_scheme = after_scheme.strip_suffix('/').unwrap_or(after_scheme);
+            if after_scheme.contains(['/', '?', '#']) {
                 return Err(format!(
                     "{source} must list origins without a path, query, or fragment, such as https://ui.example.app."
                 ));
@@ -1030,7 +1049,7 @@ mod tests {
         )
         .err()
         .unwrap_or_default();
-        assert!(err.contains("--content-origin must differ from --api-origin"));
+        assert!(err.contains("ARTIFREE_CONTENT_ORIGIN must differ from --api-origin"));
     }
 
     #[test]
@@ -1145,6 +1164,8 @@ mod tests {
             "https://ui.example.app/app",
             "https://ui.example.app/?x=1",
             "https://ui.example.app/#top",
+            "https://ui.example.app?x=1",
+            "https://ui.example.app#top",
         ] {
             let err = parse_serve_with(&base_args(&["--allowed-origin", bad]), ServeEnv::default())
                 .err()
@@ -1315,5 +1336,45 @@ mod tests {
             "ARTIFREE_FRAME_ANCESTORS is not valid UTF-8."
         );
         Ok(())
+    }
+
+    #[test]
+    fn equal_origins_name_where_each_value_came_from() {
+        let from_env = parse_serve_with(
+            &base_args(&[]),
+            ServeEnv {
+                api_origin: Some("https://same.example".to_owned()),
+                ..serve_env(Some("https://same.example"), None)
+            },
+        )
+        .err()
+        .unwrap_or_default();
+        assert_eq!(
+            from_env,
+            "ARTIFREE_CONTENT_ORIGIN must differ from ARTIFREE_API_ORIGIN to maintain preview sandbox isolation"
+        );
+        let mixed = parse_serve_with(
+            &base_args(&["--api-origin", "https://same.example"]),
+            serve_env(Some("https://same.example"), None),
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(
+            mixed.starts_with("ARTIFREE_CONTENT_ORIGIN must differ from --api-origin"),
+            "{mixed}"
+        );
+        let bad_env_api = parse_serve_with(
+            &base_args(&[]),
+            ServeEnv {
+                api_origin: Some("ftp://x.example".to_owned()),
+                ..ServeEnv::default()
+            },
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(
+            bad_env_api.starts_with("ARTIFREE_API_ORIGIN must be a valid HTTP or HTTPS origin"),
+            "{bad_env_api}"
+        );
     }
 }
