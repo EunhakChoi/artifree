@@ -129,6 +129,8 @@ restarted, but treat it as a last resort.
 3. Extract the new archive into a new directory (do not overlay the old one) and
    start it with the same `--data-dir`. The first start upgrades the database
    in one transaction; a refused or failed upgrade leaves the file unchanged.
+   `artifree-server worker run` upgrades a database the same way when it opens
+   it first, so the backup comes before either starts.
 
 A newer schema is refused by an older build, and there is no downgrade: keep
 the previous package and the backup until you are satisfied. Release notes do not exist yet; check the decision records for a

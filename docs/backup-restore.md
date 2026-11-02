@@ -145,14 +145,17 @@ artifree-server serve --data-dir /path/to/new-data ...
 2. Stop the server, install the new archive in a new directory, and start it
    with the same `--data-dir`. The first start upgrades the database in one
    transaction before it switches the file to WAL; a failed upgrade leaves the
-   file as it was.
+   file as it was. `artifree-server worker run` opens the database the same way
+   and upgrades it too, so whichever of the server or a worker opens the
+   directory first upgrades it: take the backup with the new build before
+   starting either.
 3. A database with a newer schema than the binary is refused with a message
    that names both versions, and the file is not touched. There is no downgrade:
    go back to the previous binary only with a backup taken before the upgrade,
    restored into a new directory.
 
-Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, and an index on
-file content (decision 0029). Schema 6 adds the token table to the versioned
+Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, an index on
+file content, and the `cleanup_runs` table (decision 0029). Schema 6 adds the token table to the versioned
 schema. A server of an older release that is started again on a directory this
 build upgraded will refuse it.
 
