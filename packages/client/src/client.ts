@@ -366,8 +366,9 @@ function sameHandoff(left: Handoff, right: Handoff): boolean {
 /**
  * How a failure message may name the server, and whether the original error
  * may travel with it. A runtime's network error can quote the URL it was given,
- * so a credentialed, query-bearing, or otherwise unusual address is shown
- * only as a generic label and its errors lose their `cause`.
+ * so an address that is not plain loses its errors' `cause`. The label is at
+ * most origin plus path for an http(s) address (never credentials, query or
+ * fragment), and a generic name for anything else.
  */
 interface Address {
   readonly label: string;
