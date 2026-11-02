@@ -7,10 +7,10 @@ import type {
   RuntimeErrorCode,
 } from '@artifree/runtime-sdk';
 import {
+  FrameAdmission,
   HostRefusal,
   base64Bytes,
   frameErrorCode,
-  parseFrameMessage,
 } from './runtime-requests';
 import type { FrameRequest } from './runtime-requests';
 
@@ -80,6 +80,8 @@ export function RuntimeFrame({
     close.current = stop;
 
     let writing = false;
+    // What this one frame may ask for, decided before a message is read.
+    const admission = new FrameAdmission(performance.now());
     const run = async (
       request: FrameRequest,
       signal: AbortSignal,
@@ -158,6 +160,10 @@ export function RuntimeFrame({
           };
         }
         case 'download':
+          // The question is the workspace's own effect, so a frame that was
+          // never allowed to ask is refused before the user is bothered.
+          if (!view.granted.includes('source.download'))
+            throw new HostRefusal('not_granted');
           return {
             result: await offerDownload({ path: request.path, signal }),
           };
@@ -165,18 +171,19 @@ export function RuntimeFrame({
     };
     const respond = (channel: MessagePort, message: unknown): void => {
       if (!active || performance.now() >= deadline) return;
-      const parsed = parseFrameMessage(message);
-      if (parsed === undefined) return;
-      if (!parsed.ok) {
-        channel.postMessage({ id: parsed.id, ok: false, code: parsed.code });
+      const verdict = admission.admit(
+        message,
+        performance.now(),
+        pending.size,
+        writing,
+      );
+      if (verdict.action === 'ignore') return;
+      if (verdict.action === 'answer') {
+        channel.postMessage({ id: verdict.id, ok: false, code: verdict.code });
         return;
       }
-      const { request } = parsed;
+      const { request } = verdict;
       const { id } = request;
-      if (pending.size >= 64 || (request.kind === 'source.write' && writing)) {
-        channel.postMessage({ id, ok: false, code: 'busy' });
-        return;
-      }
       if (request.kind === 'source.write') writing = true;
       const controller = new AbortController();
       pending.add(controller);

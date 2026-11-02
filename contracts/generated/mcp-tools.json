@@ -36,6 +36,11 @@
                 "type": "string"
               },
               {
+                "const": "stale_view",
+                "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                "type": "string"
+              },
+              {
                 "const": "revision_conflict",
                 "description": "The base revision is not current; reload and reapply the change.",
                 "type": "string"
@@ -378,6 +383,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -648,6 +658,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -1042,6 +1057,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -1474,6 +1494,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -1837,6 +1862,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -2234,6 +2264,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -2554,6 +2589,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -2811,6 +2851,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -3057,6 +3102,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -3341,6 +3391,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -3552,6 +3607,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -4014,6 +4074,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -4433,6 +4498,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -4894,6 +4964,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -5336,6 +5411,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -5587,6 +5667,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -5823,6 +5908,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -6065,6 +6155,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -6299,6 +6394,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -6498,6 +6598,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {
@@ -6821,6 +6926,11 @@
                         "type": "string"
                       },
                       {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+                        "type": "string"
+                      },
+                      {
                         "const": "revision_conflict",
                         "description": "The base revision is not current; reload and reapply the change.",
                         "type": "string"
@@ -7066,6 +7176,11 @@
                       {
                         "const": "runtime_session_expired",
                         "description": "The runtime connection is missing, closed, or expired; open a new one.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stale_view",
+                        "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
                         "type": "string"
                       },
                       {

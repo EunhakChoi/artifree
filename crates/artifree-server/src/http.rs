@@ -134,6 +134,10 @@ struct Shared {
     runtime_sessions: RuntimeSessions,
     handoffs: Handoffs,
     limiter: Limiter,
+    /// A second, smaller budget for the requests a runtime frame makes
+    /// through the workspace (decision 0032), so that a frame cannot spend
+    /// the owner's own.
+    frame_limiter: Limiter,
     feed: Feed,
     draining: AtomicUsize,
     settings: Settings,
@@ -201,6 +205,7 @@ impl AppState {
                 runtime_sessions: RuntimeSessions::new(Duration::from_secs(24 * 60 * 60)),
                 handoffs: Handoffs::new(Duration::from_secs(60 * 60)),
                 limiter: Limiter::new(settings.limits.validate()?),
+                frame_limiter: Limiter::new(settings.limits.validate()?.for_frames()),
                 feed: Feed::new(settings.change_streams),
                 draining: AtomicUsize::new(0),
                 settings,
@@ -316,10 +321,17 @@ pub fn router(state: AppState) -> Router {
     router_with_web(state, None)
 }
 
-/// Routes a runtime frame's source and download requests reach, through the
-/// workspace, with the view's initialization (decision 0032).
-fn runtime_source_routes() -> Router<AppState> {
+/// Routes a runtime frame's requests reach, through the workspace, with the
+/// view's initialization (decisions 0019 and 0032). They are admitted under
+/// the smaller frame budget of the actor instead of the actor's own, so a
+/// frame that floods them leaves the owner's requests, and the grant change
+/// that revokes the frame, available.
+fn runtime_frame_routes(state: &AppState) -> Router<AppState> {
     Router::new()
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/metadata",
+            axum::routing::post(runtime_metadata),
+        )
         .route(
             "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/source",
             axum::routing::post(runtime_source_manifest),
@@ -336,6 +348,10 @@ fn runtime_source_routes() -> Router<AppState> {
             "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/download",
             axum::routing::post(runtime_download),
         )
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::map_response(no_store))
+        .layer(middleware::from_fn_with_state(state.clone(), admit_frame))
 }
 
 /// Routes of HTTP API v1 and the MCP endpoint mounted behind authentication and limits.
@@ -405,11 +421,6 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
             axum::routing::post(create_runtime_view),
         )
         .route(
-            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/metadata",
-            axum::routing::post(runtime_metadata),
-        )
-        .merge(runtime_source_routes())
-        .route(
             "/v1/runtime-views/{view}/{generation}",
             axum::routing::delete(close_runtime_view),
         )
@@ -438,6 +449,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::map_response(no_store))
         .layer(middleware::from_fn_with_state(state.clone(), admit))
+        .merge(runtime_frame_routes(state))
 }
 
 /// Routes of HTTP API v1, the MCP endpoint, and optional production web assets.
@@ -505,15 +517,29 @@ async fn healthz_head() -> impl IntoResponse {
 /// Authenticates the request, then admits it under the actor's limits. A
 /// refused request never reaches the application, so this attempt commits
 /// nothing; its idempotency key is free unless an earlier attempt used it.
-async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+async fn admit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    admit_to(&state, false, request, next).await
+}
+
+/// [`admit`] for a runtime frame's requests, under the frame budget.
+async fn admit_frame(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    admit_to(&state, true, request, next).await
+}
+
+async fn admit_to(state: &AppState, frame: bool, mut request: Request, next: Next) -> Response {
     let auth = match state.authenticate(request.headers()).await {
         Ok(auth) => auth,
         Err(error) => return error.into_response(),
     };
-    let permit = match state.shared.limiter.admit(&auth.actor) {
+    let limiter = if frame {
+        &state.shared.frame_limiter
+    } else {
+        &state.shared.limiter
+    };
+    let permit = match limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
-            discard(&state, request.into_body()).await;
+            discard(state, request.into_body()).await;
             return refused(refusal);
         }
     };

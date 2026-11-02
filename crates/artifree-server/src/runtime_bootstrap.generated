@@ -141,12 +141,43 @@ var __ArtifreeBootstrap = (() => {
     return typeof path === "string" && path.length > 0 && path.length <= MAX_PATH_BYTES && // Package paths are printable ASCII; the server decides the rest.
     /^[\x21-\x7e]+$/.test(path);
   }
-  function validChange(change) {
-    if (!record(change)) return false;
-    const keys = Object.keys(change);
-    if (change.op === "delete")
-      return keys.length === 2 && validPath(change.path);
-    return change.op === "put" && keys.length === 3 && validPath(change.path) && (typeof change.content === "string" || change.content instanceof Uint8Array);
+  function plain(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+  function change(value) {
+    if (!plain(value)) return void 0;
+    const keys = Object.keys(value);
+    const { op, path, content } = value;
+    if (!validPath(path)) return void 0;
+    if (op === "delete")
+      return keys.length === 2 ? { op: "delete", path } : void 0;
+    if (op !== "put" || keys.length !== 3) return void 0;
+    if (typeof content === "string") return { op: "put", path, content };
+    if (content instanceof Uint8Array)
+      return { op: "put", path, content: new Uint8Array(content) };
+    return void 0;
+  }
+  function changes(value) {
+    if (!Array.isArray(value)) return void 0;
+    const length = value.length;
+    if (length === 0 || length > MAX_CHANGES) return void 0;
+    const copy = [];
+    for (let index = 0; index < length; index += 1) {
+      const entry = change(value[index]);
+      if (entry === void 0) return void 0;
+      copy.push(entry);
+    }
+    return copy;
+  }
+  function guarded(message, work) {
+    try {
+      return work() ?? rejected("invalid_request", message);
+    } catch {
+      return rejected("invalid_request", message);
+    }
   }
   function start(config) {
     if (window.artifree !== void 0)
@@ -241,32 +272,50 @@ var __ArtifreeBootstrap = (() => {
     }
     window.artifree = Object.freeze({
       currentMetadata() {
-        return call("metadata");
+        return guarded(
+          "The metadata request is not valid.",
+          () => call("metadata")
+        );
       },
       listSource() {
-        return call("source.list");
+        return guarded(
+          "The source listing is not valid.",
+          () => call("source.list")
+        );
       },
       readSource(path, range = {}) {
-        const { offset, length } = range;
-        if (!validPath(path) || offset !== void 0 && !count(offset) || length !== void 0 && !(count(length) && length >= 1))
-          return rejected("invalid_request", "The source read is not valid.");
-        return call("source.read", {
-          path,
-          ...offset === void 0 ? {} : { offset },
-          ...length === void 0 ? {} : { length }
+        return guarded("The source read is not valid.", () => {
+          const limits = range;
+          if (!validPath(path) || !plain(limits)) return void 0;
+          const { offset, length } = limits;
+          if (offset !== void 0 && !count(offset) || length !== void 0 && !(count(length) && length >= 1))
+            return void 0;
+          return call("source.read", {
+            path,
+            ...offset === void 0 ? {} : { offset },
+            ...length === void 0 ? {} : { length }
+          });
         });
       },
       saveSource(request) {
-        const { key, changes } = request;
-        if (typeof key !== "string" || !KEY_PATTERN.test(key) || !Array.isArray(changes) || changes.length === 0 || changes.length > MAX_CHANGES || !changes.every(validChange))
-          return rejected("invalid_request", "The source save is not valid.");
-        return call("source.write", { key, changes });
+        return guarded("The source save is not valid.", () => {
+          const candidate = request;
+          if (!plain(candidate)) return void 0;
+          const { key } = candidate;
+          const copy = changes(candidate.changes);
+          if (typeof key !== "string" || !KEY_PATTERN.test(key) || copy === void 0)
+            return void 0;
+          return call("source.write", { key, changes: copy });
+        });
       },
       requestDownload(request = {}) {
-        const { path } = request;
-        if (path !== void 0 && !validPath(path))
-          return rejected("invalid_request", "The download is not valid.");
-        return call("download", path === void 0 ? {} : { path });
+        return guarded("The download is not valid.", () => {
+          const candidate = request;
+          if (!plain(candidate)) return void 0;
+          const { path } = candidate;
+          if (path !== void 0 && !validPath(path)) return void 0;
+          return call("download", path === void 0 ? {} : { path });
+        });
       }
     });
   }

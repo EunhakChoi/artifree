@@ -185,6 +185,20 @@ impl RequestKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The key under which a runtime frame's request is recorded (decision
+    /// 0032): `frame/` followed by the frame's own key.
+    ///
+    /// `/` is not a character [`FromStr`] accepts, so no key a client, agent,
+    /// or CLI can send, on any route, equals a value this returns. A frame's
+    /// key therefore can neither replay nor collide with a request made
+    /// outside a frame, whatever the key's text. The value is for the
+    /// store's lookups only; it is not parseable and is never sent back to a
+    /// client.
+    #[must_use]
+    pub fn frame_scoped(&self) -> Self {
+        Self(format!("frame/{}", self.0))
+    }
 }
 
 impl FromStr for RequestKey {
@@ -345,5 +359,21 @@ mod tests {
         for value in ["short", "has space-1234", "slash/123456", &"k".repeat(129)] {
             assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
         }
+    }
+
+    #[test]
+    fn a_frame_scoped_key_is_never_a_key_a_client_can_send() -> Result<(), InvalidValue> {
+        // Including a client key that spells the old textual prefix.
+        for text in ["shared-key-0001", "frame:shared-key-0001", "frame-key-0001"] {
+            let key: RequestKey = text.parse()?;
+            let scoped = key.frame_scoped();
+            assert_ne!(scoped, key);
+            assert!(scoped.as_str().parse::<RequestKey>().is_err());
+            for other in ["shared-key-0001", "frame:shared-key-0001"] {
+                assert_ne!(scoped, other.parse::<RequestKey>()?);
+            }
+            assert_ne!(scoped, key.frame_scoped().frame_scoped());
+        }
+        Ok(())
     }
 }

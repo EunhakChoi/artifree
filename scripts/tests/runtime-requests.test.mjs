@@ -19,10 +19,17 @@ const bundle = await build({
   platform: 'neutral',
   write: false,
 });
-const { HostRefusal, base64Bytes, frameErrorCode, parseFrameMessage } =
-  await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
-  );
+const {
+  FrameAdmission,
+  HostRefusal,
+  RequestBudget,
+  base64Bytes,
+  frameErrorCode,
+  frameMessageId,
+  parseFrameMessage,
+} = await import(
+  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
+);
 
 const put = (path, content) => ({ op: 'put', path, content });
 const save = (changes, key = 'frame-key-0001') => ({
@@ -223,6 +230,7 @@ test('Only the closed set of codes crosses to a frame', () => {
     range_not_satisfiable: 'range',
     rate_limited: 'rate_limited',
     runtime_session_expired: 'view_unavailable',
+    stale_view: 'view_unavailable',
     not_found: 'not_found',
     invalid_request: 'invalid_request',
     network_error: 'unavailable',
@@ -247,4 +255,115 @@ test('Server bytes are decoded exactly', () => {
   assert.deepEqual(base64Bytes(Buffer.from(all).toString('base64')), all);
   assert.deepEqual(base64Bytes(''), new Uint8Array());
   assert.throws(() => base64Bytes('not base64!'));
+});
+
+test('Text that starts with a byte order mark is saved as written', () => {
+  const text = '\uFEFFhello — 日本語';
+  const parsed = parseFrameMessage(save([put('bom.txt', text)]));
+  assert.equal(parsed.ok, true);
+  const bytes = parsed.request.changes[0].bytes;
+  assert.deepEqual(
+    Array.from(bytes),
+    Array.from(Buffer.from(text, 'utf8')),
+    'the mark is three bytes of the file, not dropped',
+  );
+  assert.deepEqual(Array.from(bytes.slice(0, 3)), [0xef, 0xbb, 0xbf]);
+  // A mark alone, and a mark followed by nothing but a surrogate pair.
+  assert.equal(parseFrameMessage(save([put('a.txt', '\uFEFF')])).ok, true);
+  assert.equal(parseFrameMessage(save([put('a.txt', '\uFEFF🙂')])).ok, true);
+  // Bytes that start with the mark are passed on untouched.
+  const raw = new Uint8Array([0xef, 0xbb, 0xbf, 0x61]);
+  const kept = parseFrameMessage(save([put('raw.bin', raw)]));
+  assert.deepEqual(
+    Array.from(kept.request.changes[0].bytes),
+    [0xef, 0xbb, 0xbf, 0x61],
+  );
+  // A lone surrogate is still refused, also after a mark.
+  assert.equal(
+    refused(save([put('a.txt', '\uFEFF\ud800')])).code,
+    'invalid_request',
+  );
+  assert.equal(refused(save([put('a.txt', '\ud800')])).code, 'invalid_request');
+});
+
+test('A frame is read only after its budget allows it', () => {
+  assert.equal(frameMessageId({ id: 7, type: 'x' }), 7);
+  for (const message of [
+    null,
+    5,
+    'x',
+    [],
+    {},
+    { id: 0 },
+    { id: -1 },
+    { id: 1.5 },
+    { id: '1' },
+  ])
+    assert.equal(frameMessageId(message), undefined, JSON.stringify(message));
+  const budget = new RequestBudget(3, 100, 1_000);
+  assert.deepEqual(
+    [1, 2, 3, 4].map(() => budget.take(1_000)),
+    [true, true, true, false],
+  );
+  assert.equal(budget.take(1_099), false, 'less than one interval has passed');
+  assert.equal(budget.take(1_100), true, 'one interval later there is one');
+  assert.equal(budget.take(1_100), false);
+  // A long pause refills the burst and no more than the burst.
+  assert.deepEqual(
+    [1, 2, 3, 4].map(() => budget.take(60_000)),
+    [true, true, true, false],
+  );
+  // A clock that goes backwards neither refills nor breaks the budget.
+  assert.equal(budget.take(10), false);
+});
+
+test('A frame is admitted one message at a time, budget first', () => {
+  const admission = new FrameAdmission(0);
+  const list = (id) => ({ type: 'source.list', id });
+  // A message nothing can answer is dropped and costs nothing.
+  for (let index = 0; index < 100; index += 1)
+    assert.deepEqual(admission.admit({ type: 'source.list' }, 0, 0, false), {
+      action: 'ignore',
+    });
+  // The burst is carried out; the next messages are refused by the budget
+  // without being read, however large they claim to be.
+  for (let id = 1; id <= 20; id += 1)
+    assert.equal(admission.admit(list(id), 0, 0, false).action, 'run');
+  const huge = save([put('a.bin', new Uint8Array(4 * 1024 * 1024))]);
+  assert.deepEqual(admission.admit({ ...huge, id: 21 }, 0, 0, false), {
+    action: 'answer',
+    id: 21,
+    code: 'rate_limited',
+  });
+  assert.deepEqual(admission.admit({ type: 'junk', id: 22 }, 0, 0, false), {
+    action: 'answer',
+    id: 22,
+    code: 'rate_limited',
+  });
+  // A tenth of a second later there is one more.
+  assert.equal(admission.admit(list(23), 100, 0, false).action, 'run');
+});
+
+test('Requests in flight are capped, and one save at a time', () => {
+  const admission = new FrameAdmission(0);
+  const answer = (message, inFlight, saving) =>
+    admission.admit(message, 0, inFlight, saving);
+  assert.equal(answer({ type: 'source.list', id: 1 }, 7, false).action, 'run');
+  assert.deepEqual(answer({ type: 'source.list', id: 2 }, 8, false), {
+    action: 'answer',
+    id: 2,
+    code: 'busy',
+  });
+  assert.equal(answer(save([put('a.txt', 'x')]), 0, false).action, 'run');
+  assert.deepEqual(answer({ ...save([put('a.txt', 'x')]), id: 9 }, 1, true), {
+    action: 'answer',
+    id: 9,
+    code: 'busy',
+  });
+  // A malformed request is answered as one, not as busy or run.
+  assert.deepEqual(answer({ type: 'source.read', id: 10 }, 0, false), {
+    action: 'answer',
+    id: 10,
+    code: 'invalid_request',
+  });
 });

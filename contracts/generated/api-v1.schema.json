@@ -664,6 +664,11 @@
           "type": "string"
         },
         {
+          "const": "stale_view",
+          "description": "A runtime view was issued for an older head than the artifact now has.\nIts grant belonged to that head, so the view reads and downloads\nnothing more; start a new view and ask the user again.",
+          "type": "string"
+        },
+        {
           "const": "revision_conflict",
           "description": "The base revision is not current; reload and reapply the change.",
           "type": "string"
@@ -1939,7 +1944,7 @@
           "type": "integer"
         },
         "files": {
-          "description": "The committed revision's files in path order.",
+          "description": "Only the files this save wrote (its `put` changes), in path order. A\nframe with `source.write` but not `source.read` is told nothing about\nthe other files of the revision, and a deleted file is not listed.",
           "items": {
             "$ref": "#/$defs/RevisionFile"
           },

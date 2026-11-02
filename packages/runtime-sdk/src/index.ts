@@ -42,8 +42,10 @@ export interface RuntimeMetadata {
  *   count rule. Nothing was done.
  * - `not_granted`: the user's connection does not currently grant the
  *   capability (never granted, revoked, or the connection ended).
- * - `view_unavailable`: this view is closed, expired, or replaced by a newer
- *   generation; a replacement view has to be started by the workspace.
+ * - `view_unavailable`: this view is closed, expired, replaced by a newer
+ *   generation, or the artifact has a newer revision than the one the view
+ *   was started for (its permissions belonged to that revision). The
+ *   workspace has to start a new view, and the user has to allow again.
  * - `not_found`: no such file, or the artifact is no longer available.
  * - `revision_conflict`: the source moved past the revision this frame is
  *   pinned to. Nothing was written; `currentRevision` is the new head.
@@ -146,6 +148,10 @@ export interface RuntimeSaveResult {
   readonly revision: number;
   readonly createdAtMs: number;
   readonly replayed: boolean;
+  /**
+   * The files this save wrote, with their sizes and digests; not the other
+   * files of the revision, which a frame may not have the right to read.
+   */
   readonly files: readonly RuntimeSourceFileInfo[];
 }
 
@@ -187,7 +193,8 @@ export interface ArtifactRuntime {
    * `source.write`: commits the changes as the revision after the pinned one,
    * only if that is still the head. Rejects with `revision_conflict` when
    * the source moved; it never overwrites. The commit is attributed to the
-   * user who is viewing the artifact.
+   * user who is viewing the artifact. The keys the app may use are its own:
+   * a key an owner or an agent used elsewhere is neither seen nor reused.
    */
   saveSource(request: RuntimeSaveRequest): Promise<RuntimeSaveResult>;
   /**

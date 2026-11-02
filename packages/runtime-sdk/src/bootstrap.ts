@@ -224,17 +224,63 @@ function validPath(path: unknown): path is string {
   );
 }
 
-function validChange(change: unknown): change is RuntimeSourceChange {
-  if (!record(change)) return false;
-  const keys = Object.keys(change);
-  if (change.op === 'delete')
-    return keys.length === 2 && validPath(change.path);
-  return (
-    change.op === 'put' &&
-    keys.length === 3 &&
-    validPath(change.path) &&
-    (typeof change.content === 'string' || change.content instanceof Uint8Array)
-  );
+/**
+ * A non-null object that is neither an array nor an instance of a class.
+ * Artifacts are plain JavaScript, so every argument is hostile or merely
+ * mistaken: it is read here, property by property and once, never trusted to
+ * be what the types promise.
+ */
+function plain(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** One change, copied out of the caller's object, or undefined. */
+function change(value: unknown): RuntimeSourceChange | undefined {
+  if (!plain(value)) return undefined;
+  const keys = Object.keys(value);
+  const { op, path, content } = value;
+  if (!validPath(path)) return undefined;
+  if (op === 'delete')
+    return keys.length === 2 ? { op: 'delete', path } : undefined;
+  if (op !== 'put' || keys.length !== 3) return undefined;
+  if (typeof content === 'string') return { op: 'put', path, content };
+  if (content instanceof Uint8Array)
+    return { op: 'put', path, content: new Uint8Array(content) };
+  return undefined;
+}
+
+/** The changes of a save, copied, or undefined when any is not valid. */
+function changes(value: unknown): RuntimeSourceChange[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const length = (value as unknown[]).length;
+  if (length === 0 || length > MAX_CHANGES) return undefined;
+  const copy: RuntimeSourceChange[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const entry = change((value as unknown[])[index]);
+    if (entry === undefined) return undefined;
+    copy.push(entry);
+  }
+  return copy;
+}
+
+/**
+ * Runs the checks of a public method. Whatever goes wrong while reading an
+ * argument (a getter or a proxy that throws, a detached buffer) is the
+ * caller's invalid request, answered as a rejected promise like any other:
+ * a public method never throws synchronously.
+ */
+function guarded<T>(
+  message: string,
+  work: () => Promise<T> | undefined,
+): Promise<T> {
+  try {
+    return work() ?? rejected('invalid_request', message);
+  } catch {
+    return rejected('invalid_request', message);
+  }
 }
 
 /** Installs the runtime for the frame that received this initialization. */
@@ -347,48 +393,62 @@ export function start(config: RuntimeInitialization): void {
 
   window.artifree = Object.freeze({
     currentMetadata(): Promise<RuntimeMetadata> {
-      return call('metadata');
+      return guarded('The metadata request is not valid.', () =>
+        call('metadata'),
+      );
     },
     listSource(): Promise<RuntimeSourceManifest> {
-      return call('source.list');
+      return guarded('The source listing is not valid.', () =>
+        call('source.list'),
+      );
     },
     readSource(
       path: string,
       range: RuntimeSourceRange = {},
     ): Promise<RuntimeSourcePart> {
-      const { offset, length } = range;
-      if (
-        !validPath(path) ||
-        (offset !== undefined && !count(offset)) ||
-        (length !== undefined && !(count(length) && length >= 1))
-      )
-        return rejected('invalid_request', 'The source read is not valid.');
-      return call('source.read', {
-        path,
-        ...(offset === undefined ? {} : { offset }),
-        ...(length === undefined ? {} : { length }),
+      return guarded('The source read is not valid.', () => {
+        // `undefined` means no range; `null` and everything else that is not
+        // an object of numbers is a mistake.
+        const limits: unknown = range;
+        if (!validPath(path) || !plain(limits)) return undefined;
+        const { offset, length } = limits;
+        if (
+          (offset !== undefined && !count(offset)) ||
+          (length !== undefined && !(count(length) && length >= 1))
+        )
+          return undefined;
+        return call('source.read', {
+          path,
+          ...(offset === undefined ? {} : { offset }),
+          ...(length === undefined ? {} : { length }),
+        });
       });
     },
     saveSource(request: RuntimeSaveRequest): Promise<RuntimeSaveResult> {
-      const { key, changes } = request;
-      if (
-        typeof key !== 'string' ||
-        !KEY_PATTERN.test(key) ||
-        !Array.isArray(changes) ||
-        changes.length === 0 ||
-        changes.length > MAX_CHANGES ||
-        !(changes as unknown[]).every(validChange)
-      )
-        return rejected('invalid_request', 'The source save is not valid.');
-      return call('source.write', { key, changes });
+      return guarded('The source save is not valid.', () => {
+        const candidate: unknown = request;
+        if (!plain(candidate)) return undefined;
+        const { key } = candidate;
+        const copy = changes(candidate.changes);
+        if (
+          typeof key !== 'string' ||
+          !KEY_PATTERN.test(key) ||
+          copy === undefined
+        )
+          return undefined;
+        return call('source.write', { key, changes: copy });
+      });
     },
     requestDownload(
       request: RuntimeDownloadRequest = {},
     ): Promise<RuntimeDownloadResult> {
-      const { path } = request;
-      if (path !== undefined && !validPath(path))
-        return rejected('invalid_request', 'The download is not valid.');
-      return call('download', path === undefined ? {} : { path });
+      return guarded('The download is not valid.', () => {
+        const candidate: unknown = request;
+        if (!plain(candidate)) return undefined;
+        const { path } = candidate;
+        if (path !== undefined && !validPath(path)) return undefined;
+        return call('download', path === undefined ? {} : { path });
+      });
     },
   });
 }

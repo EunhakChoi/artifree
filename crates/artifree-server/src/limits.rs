@@ -52,6 +52,17 @@ impl RequestLimits {
         Ok(self)
     }
 
+    /// The budget for requests that runtime frames make (decision 0032): half
+    /// of each limit, at least 1, so that frames together cannot use the
+    /// owner's whole budget and can never use the owner's slots.
+    pub(crate) fn for_frames(self) -> Self {
+        Self {
+            burst: (self.burst / 2).max(1),
+            per_minute: (self.per_minute / 2).max(1),
+            concurrent: (self.concurrent / 2).max(1),
+        }
+    }
+
     fn interval(self) -> Duration {
         Duration::from_secs(60) / self.per_minute
     }
@@ -173,6 +184,31 @@ mod tests {
             per_minute,
             concurrent,
         })
+    }
+
+    #[test]
+    fn the_frame_budget_is_half_of_each_limit_and_never_zero() {
+        let frames = RequestLimits {
+            burst: 120,
+            per_minute: 1200,
+            concurrent: 16,
+        }
+        .for_frames();
+        assert_eq!(
+            (frames.burst, frames.per_minute, frames.concurrent),
+            (60, 600, 8)
+        );
+        let smallest = RequestLimits {
+            burst: 1,
+            per_minute: 1,
+            concurrent: 1,
+        }
+        .for_frames();
+        assert_eq!(
+            (smallest.burst, smallest.per_minute, smallest.concurrent),
+            (1, 1, 1)
+        );
+        assert!(frames.validate().is_ok() && smallest.validate().is_ok());
     }
 
     #[test]

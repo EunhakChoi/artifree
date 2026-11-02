@@ -5,6 +5,7 @@ import type { RuntimeView } from '@artifree/contracts';
 import type { RuntimeDownloadResult } from '@artifree/runtime-sdk';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { OfferGate, displayPath, OFFER_TIMING } from './download-offer';
 import { HostRefusal } from './runtime-requests';
 import { RuntimeFrame } from './runtime-frame';
 import { describeFailure } from './use-request';
@@ -25,11 +26,25 @@ interface Offer {
   readonly controller: AbortController;
   readonly resolve: (receipt: RuntimeDownloadResult) => void;
   readonly reject: (reason: unknown) => void;
+  /** Timers that make the question active and withdraw it unanswered. */
+  readonly timers: number[];
 }
 
 type Shown =
-  | { readonly phase: 'asking' | 'saving'; readonly path: string | undefined }
+  | {
+      readonly phase: 'asking' | 'saving';
+      readonly path: string | undefined;
+      /** Whether a press counts yet (see {@link OFFER_TIMING}). */
+      readonly active: boolean;
+    }
   | { readonly phase: 'failed'; readonly message: string };
+
+/** Stops an offer's timers and requests; the caller settles its promise. */
+function end(offer: Offer | undefined): void {
+  if (offer === undefined) return;
+  for (const timer of offer.timers) window.clearTimeout(timer);
+  offer.controller.abort();
+}
 
 /**
  * A runtime frame and the downloads it asks for (decision 0032). A frame
@@ -48,16 +63,27 @@ export function RuntimeStage({
 }: RuntimeStageProps) {
   const [shown, setShown] = useState<Shown>();
   const open = useRef<Offer | undefined>(undefined);
+  const gate = useRef(new OfferGate());
   // The saved file stays addressable until the next download or until the
   // frame goes away, so the browser can finish saving it.
   const saved = useRef<string | undefined>(undefined);
   useEffect(
     () => () => {
-      open.current?.controller.abort();
+      end(open.current);
       if (saved.current !== undefined) URL.revokeObjectURL(saved.current);
     },
     [],
   );
+
+  /** Ends the open question with a refusal and starts the pause. */
+  const withdraw = useCallback((offer: Offer) => {
+    if (open.current !== offer) return;
+    open.current = undefined;
+    gate.current.decline(performance.now());
+    end(offer);
+    setShown(undefined);
+    offer.reject(new HostRefusal('declined'));
+  }, []);
 
   const ask = useCallback(
     ({
@@ -67,23 +93,40 @@ export function RuntimeStage({
       readonly path: string | undefined;
       readonly signal: AbortSignal;
     }) => {
-      if (open.current !== undefined)
-        return Promise.reject(new HostRefusal('busy'));
+      const verdict = gate.current.open(performance.now());
+      // A frame that asks again at once after a "no" is told "no" again.
+      if (verdict === 'cooling')
+        return Promise.reject(new HostRefusal('declined'));
+      if (verdict === 'busy') return Promise.reject(new HostRefusal('busy'));
       return new Promise<RuntimeDownloadResult>((resolve, reject) => {
         const offer: Offer = {
           path,
           controller: new AbortController(),
           resolve,
           reject,
+          timers: [],
         };
         open.current = offer;
-        setShown({ phase: 'asking', path });
+        setShown({ phase: 'asking', path, active: false });
+        offer.timers.push(
+          window.setTimeout(() => {
+            setShown((current) =>
+              current?.phase === 'asking' && open.current === offer
+                ? { ...current, active: true }
+                : current,
+            );
+          }, OFFER_TIMING.activationMs),
+          // Unanswered for too long: the frame stops waiting before long, and
+          // a press after that would save a file nobody asked for.
+          window.setTimeout(() => withdraw(offer), OFFER_TIMING.lifetimeMs),
+        );
         signal.addEventListener(
           'abort',
           () => {
             if (open.current !== offer) return;
             open.current = undefined;
-            offer.controller.abort();
+            gate.current.close();
+            end(offer);
             setShown(undefined);
             reject(new HostRefusal('view_unavailable'));
           },
@@ -91,13 +134,17 @@ export function RuntimeStage({
         );
       });
     },
-    [],
+    [withdraw],
   );
 
   async function confirm(): Promise<void> {
     const offer = open.current;
     if (offer === undefined) return;
-    setShown({ phase: 'saving', path: offer.path });
+    // A press before the question was active, or after it expired, is not an
+    // answer: the frame chose when the question appeared.
+    if (!gate.current.canConfirm(performance.now())) return;
+    for (const timer of offer.timers) window.clearTimeout(timer);
+    setShown({ phase: 'saving', path: offer.path, active: true });
     try {
       const file = await client.runtimeDownload(view, offer.path, {
         signal: offer.controller.signal,
@@ -114,6 +161,7 @@ export function RuntimeStage({
       link.rel = 'noopener';
       link.click();
       open.current = undefined;
+      gate.current.close();
       setShown(undefined);
       offer.resolve({
         status: 'started',
@@ -125,6 +173,7 @@ export function RuntimeStage({
     } catch (error: unknown) {
       if (open.current !== offer) return;
       open.current = undefined;
+      gate.current.close();
       setShown({ phase: 'failed', message: describeFailure(error) });
       offer.reject(error);
     }
@@ -132,21 +181,18 @@ export function RuntimeStage({
 
   function decline(): void {
     const offer = open.current;
-    if (offer === undefined) return;
-    open.current = undefined;
-    offer.controller.abort();
-    setShown(undefined);
-    offer.reject(new HostRefusal('declined'));
+    if (offer !== undefined) withdraw(offer);
   }
 
   const what =
-    shown === undefined || shown.phase === 'failed' || shown.path === undefined
-      ? 'this whole revision as a ZIP archive'
-      : shown.path;
+    shown === undefined || shown.phase === 'failed' ? undefined : shown.path;
   return (
-    <div className="flex flex-col gap-3">
+    <div className="relative">
       {shown === undefined ? null : shown.phase === 'failed' ? (
-        <Alert variant="destructive">
+        <Alert
+          variant="destructive"
+          className="absolute inset-x-2 top-2 z-10 w-auto"
+        >
           <AlertTitle>Download not saved</AlertTitle>
           <AlertDescription>
             <p>{shown.message}</p>
@@ -161,19 +207,33 @@ export function RuntimeStage({
           </AlertDescription>
         </Alert>
       ) : (
-        <Alert aria-label="Download request">
+        <Alert
+          aria-label="Download request"
+          className="absolute inset-x-2 top-2 z-10 w-auto"
+        >
           <DownloadIcon aria-hidden="true" />
           <AlertTitle>The app wants to download a file</AlertTitle>
           <AlertDescription>
             <p>
-              It asks to save {what} from revision {view.revision} to your
-              computer. Nothing is saved until you press Download.
+              {what === undefined ? (
+                'It asks to save this whole revision as a ZIP archive'
+              ) : (
+                <>
+                  It asks to save the file{' '}
+                  <code className="font-mono break-all text-foreground">
+                    {displayPath(what)}
+                  </code>{' '}
+                  (a name the app chose)
+                </>
+              )}{' '}
+              from revision {view.revision} to your computer. Nothing is saved
+              until you press Download.
             </p>
             <div className="flex gap-2">
               <Button
                 type="button"
                 size="sm"
-                disabled={shown.phase === 'saving'}
+                disabled={shown.phase === 'saving' || !shown.active}
                 onClick={() => void confirm()}
               >
                 {shown.phase === 'saving' ? 'Downloading…' : 'Download'}

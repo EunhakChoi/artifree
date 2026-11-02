@@ -41,6 +41,15 @@ impl Harness {
         Self::with_limits(RequestLimits::default())
     }
 
+    /// Limits high enough that a test of something else never meets them.
+    fn unlimited() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_limits(RequestLimits {
+            burst: 100_000,
+            per_minute: 6_000_000,
+            concurrent: 64,
+        })
+    }
+
     fn with_limits(limits: RequestLimits) -> Result<Self, Box<dyn std::error::Error>> {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let directory = std::env::temp_dir().join(format!(
@@ -657,8 +666,22 @@ async fn a_save_commits_one_revision_with_the_framed_bytes_for_the_owner() -> Te
         .send(get(&format!("/v1/artifacts/{id}/revisions/2"))?)
         .await?
         .json()?;
-    assert_eq!(saved["files"], owner["files"]);
     assert_eq!(saved["created_at_ms"], owner["created_at_ms"]);
+    // The answer describes what this save wrote and nothing else: a frame that
+    // may write but not read is not told the other files, and a deleted file
+    // is not listed.
+    let written: Vec<Value> = owner["files"]
+        .as_array()
+        .ok_or("missing files")?
+        .iter()
+        .filter(|file| {
+            ["added/new.txt", "notes.txt", "sprite.png"]
+                .contains(&file["path"].as_str().unwrap_or(""))
+        })
+        .cloned()
+        .collect();
+    assert_eq!(written.len(), 3);
+    assert_eq!(saved["files"], Value::Array(written));
     // The commit is the viewing user's own: the history names the owner's actor
     // and carries nothing that marks the frame.
     let history = harness
@@ -716,24 +739,93 @@ async fn replaying_a_key_returns_the_first_result_without_a_second_revision() ->
 
 #[tokio::test]
 async fn frame_keys_never_collide_with_the_owners_keys() -> TestResult {
+    // The second spelling is the textual prefix an earlier design used for
+    // frame keys: it must be an ordinary key now, one a frame cannot reach.
+    for owner_key in ["shared-key-0001", "frame:shared-key-0001"] {
+        let harness = Harness::new()?;
+        let id = artifact(&harness, &["source.write"]).await?;
+        let editor = frame(&harness, &id, 1, &["source.write"]).await?;
+        // The owner uses a key; the frame, pinned to revision 1, uses the same
+        // string (without the owner's `frame:` where there is one) for the
+        // same changes. Were keys shared, the frame would be told the owner's
+        // commit as its own result.
+        owner_edit(&harness, &id, 1, owner_key, "owner").await?;
+        let reply = editor
+            .save(
+                &harness,
+                "shared-key-0001",
+                &json!([{"op": "put", "path": "notes.txt", "encoding": "utf8", "content": "owner"}]),
+            )
+            .await?;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{owner_key}");
+        assert_eq!(reply.code(), "revision_conflict");
+        assert_eq!(reply.json()?["error"]["current_revision"], json!(2));
+        // Different changes under the same string are not "key reused" either:
+        // the owner's key is not visible to the frame, not even as an error.
+        let other = editor
+            .save(
+                &harness,
+                "shared-key-0001",
+                &json!([{"op": "put", "path": "notes.txt", "encoding": "utf8", "content": "other"}]),
+            )
+            .await?;
+        assert_eq!(other.code(), "revision_conflict", "{owner_key}");
+        assert_eq!(revisions(&harness, &id).await?, [1, 2]);
+        // A frame's own key still replays for the frame.
+        let again = frame(&harness, &id, 2, &["source.write"]).await?;
+        let changes = json!([put("notes.txt", b"framed")]);
+        let first = again.save(&harness, owner_key, &changes).await?;
+        assert_eq!(first.status, StatusCode::OK, "{owner_key}");
+        let repeated = again.save(&harness, owner_key, &changes).await?;
+        assert_eq!(repeated.json()?["replayed"], json!(true), "{owner_key}");
+        assert_eq!(revisions(&harness, &id).await?, [1, 2, 3]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_route_outside_a_frame_accepts_a_key_in_the_frames_namespace() -> TestResult {
     let harness = Harness::new()?;
     let id = artifact(&harness, &["source.write"]).await?;
-    let editor = frame(&harness, &id, 1, &["source.write"]).await?;
-    // The owner uses a key; the frame, pinned to revision 1, uses the same
-    // string for the same changes. Were keys shared, the frame would be told
-    // the owner's commit as its own result.
-    owner_edit(&harness, &id, 1, "shared-key-0001", "owner").await?;
-    let reply = editor
-        .save(
-            &harness,
-            "shared-key-0001",
-            &json!([{"op": "put", "path": "notes.txt", "encoding": "utf8", "content": "owner"}]),
-        )
-        .await?;
-    assert_eq!(reply.status, StatusCode::CONFLICT);
-    assert_eq!(reply.code(), "revision_conflict");
-    assert_eq!(reply.json()?["error"]["current_revision"], json!(2));
-    assert_eq!(revisions(&harness, &id).await?, [1, 2]);
+    // The namespace a frame's key is recorded in is spelled with a character
+    // no other route's key can contain; every route parses its key the same
+    // way, so each refuses it before doing anything.
+    let key = "frame/shared-key-0001";
+    let save = json!({"base_revision": 1, "changes": [
+        {"op": "put", "path": "notes.txt", "encoding": "utf8", "content": "x"}]});
+    for (method, path, body) in [
+        (
+            "POST",
+            "/v1/artifacts".to_owned(),
+            json!({"title": "t", "files": [
+            {"path": "index.html", "encoding": "utf8", "content": "<p>x</p>"}]}),
+        ),
+        ("POST", format!("/v1/artifacts/{id}/revisions"), save),
+        (
+            "PUT",
+            format!("/v1/artifacts/{id}/data"),
+            json!({"path": "a", "base_data_version": 0, "value": 1}),
+        ),
+        (
+            "PATCH",
+            format!("/v1/artifacts/{id}"),
+            json!({"base_metadata_revision": 1, "title": "other"}),
+        ),
+        (
+            "POST",
+            format!("/v1/artifacts/{id}/revisions/1/duplicate"),
+            json!({}),
+        ),
+    ] {
+        let request = authorized(Request::builder().method(method).uri(path.as_str()))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", key)
+            .body(Body::from(body.to_string()))?;
+        let reply = harness.send(request).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{method} {path}");
+        assert_eq!(reply.code(), "invalid_request", "{method} {path}");
+    }
+    assert_eq!(revisions(&harness, &id).await?, [1]);
     Ok(())
 }
 
@@ -1249,7 +1341,7 @@ fn hostile_bodies(init: &str, marker: &str) -> Vec<(&'static str, Vec<u8>)> {
 
 #[tokio::test]
 async fn hostile_messages_are_refused_without_panicking_or_committing() -> TestResult {
-    let harness = Harness::new()?;
+    let harness = Harness::unlimited()?;
     let id = artifact(&harness, &ALL).await?;
     let editor = frame(&harness, &id, 1, &ALL).await?;
     let init = editor.initialization.clone();
@@ -1301,7 +1393,7 @@ async fn hostile_messages_are_refused_without_panicking_or_committing() -> TestR
         "short",
         "has space in it",
         "slash/slash/slash",
-        &"k".repeat(123),
+        &"k".repeat(129),
     ] {
         let reply = editor
             .save(&harness, key, &json!([put("notes.txt", b"x")]))
@@ -1315,47 +1407,82 @@ async fn hostile_messages_are_refused_without_panicking_or_committing() -> TestR
 }
 
 #[tokio::test]
-async fn the_request_limit_applies_to_frame_requests() -> TestResult {
+async fn a_frame_that_floods_cannot_spend_the_owners_budget_or_block_its_revocation() -> TestResult
+{
+    // Frames get half of each limit; the owner's own requests keep theirs.
     let harness = Harness::with_limits(RequestLimits {
-        burst: 7,
+        burst: 40,
         per_minute: 1,
         concurrent: 16,
     })?;
-    let id = artifact(&harness, &["source.write"]).await?;
-    let editor = frame(&harness, &id, 1, &["source.write"]).await?;
-    // Setup spent five of the seven; the owner's own writes share the budget.
-    let first = editor
-        .save(
-            &harness,
-            "limited-save-0001",
-            &json!([put("notes.txt", b"one")]),
-        )
-        .await?;
-    assert_eq!(first.status, StatusCode::OK);
-    let second = editor
-        .save(
-            &harness,
-            "limited-save-0002",
-            &json!([put("notes.txt", b"two")]),
-        )
-        .await?;
-    assert_eq!(second.status, StatusCode::CONFLICT);
-    let limited = editor
-        .save(
-            &harness,
-            "limited-save-0003",
-            &json!([put("notes.txt", b"three")]),
-        )
-        .await?;
-    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    let id = artifact(&harness, &ALL).await?;
+    let flooder = frame(&harness, &id, 1, &ALL).await?;
+    let mut admitted = 0;
+    let mut limited = None;
+    for _ in 0..60 {
+        let reply = flooder.list(&harness).await?;
+        if reply.status == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some(reply);
+            break;
+        }
+        assert_eq!(reply.status, StatusCode::OK);
+        admitted += 1;
+    }
+    assert_eq!(admitted, 20, "half of the burst of 40");
+    let limited = limited.ok_or("the flood was never limited")?;
     assert_eq!(limited.code(), "rate_limited");
     assert!(!limited.header(header::RETRY_AFTER).is_empty());
+    // Every kind of frame request is limited alike.
     for reply in [
-        editor.list(&harness).await?,
-        editor.download(&harness, None).await?,
+        flooder.read(&harness, "notes.txt", (None, None)).await?,
+        flooder.download(&harness, None).await?,
+        flooder
+            .save(
+                &harness,
+                "limited-save-0001",
+                &json!([put("notes.txt", b"x")]),
+            )
+            .await?,
+        flooder.call(&harness, "metadata", None, &json!({})).await?,
     ] {
         assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
     }
+    // The owner's own request is admitted, and so is the grant change that
+    // revokes the flooder.
+    assert_eq!(
+        harness
+            .send(get(&format!("/v1/artifacts/{id}"))?)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    let (status, _) = grant(
+        &harness,
+        &flooder.session,
+        &id,
+        (1, 1),
+        flooder.grant_version,
+        &[],
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "revoking must stay available");
+    assert_eq!(revisions(&harness, &id).await?, [1]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_owners_own_requests_are_limited_by_the_owners_budget() -> TestResult {
+    let harness = Harness::with_limits(RequestLimits {
+        burst: 3,
+        per_minute: 1,
+        concurrent: 16,
+    })?;
+    let mut statuses = Vec::new();
+    for _ in 0..5 {
+        statuses.push(harness.send(get("/v1/artifacts")?).await?.status);
+    }
+    assert_eq!(&statuses[..3], &[StatusCode::OK; 3]);
+    assert_eq!(statuses[3], StatusCode::TOO_MANY_REQUESTS);
     Ok(())
 }
 
@@ -1423,7 +1550,7 @@ async fn a_download_is_the_stored_bytes_as_an_attachment_of_a_closed_type() -> T
         ("../notes.txt", StatusCode::UNPROCESSABLE_ENTITY),
         ("a\"b.txt", StatusCode::UNPROCESSABLE_ENTITY),
     ] {
-        let reply = downloader.download(&harness, Some(path)).await?;
+        let reply = head.download(&harness, Some(path)).await?;
         assert_eq!(reply.status, status, "{path}");
         assert!(!String::from_utf8_lossy(&reply.body).contains(path));
     }
@@ -1434,8 +1561,10 @@ async fn a_download_is_the_stored_bytes_as_an_attachment_of_a_closed_type() -> T
 async fn the_archive_is_the_export_of_the_pinned_revision_not_the_head() -> TestResult {
     let harness = Harness::new()?;
     let id = artifact(&harness, &["source.download"]).await?;
-    let downloader = frame(&harness, &id, 1, &["source.download"]).await?;
     owner_edit(&harness, &id, 1, "owner-moves-head", "newer").await?;
+    // A view of revision 1 opened while the head is 2 (the user is looking at
+    // an old revision): its grant belongs to the head 2, and its bytes to 1.
+    let downloader = frame(&harness, &id, 1, &["source.download"]).await?;
     let reply = downloader.download(&harness, None).await?;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.code());
     let export = harness
@@ -1455,6 +1584,83 @@ async fn the_archive_is_the_export_of_the_pinned_revision_not_the_head() -> Test
     // A file is pinned in the same way.
     let file = downloader.download(&harness, Some("notes.txt")).await?;
     assert_eq!(file.body, text_bytes());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_view_whose_head_has_moved_reads_and_downloads_nothing_until_a_new_consent() -> TestResult
+{
+    let harness = Harness::new()?;
+    let id = artifact(&harness, &ALL).await?;
+    let old = frame(&harness, &id, 1, &ALL).await?;
+    assert_eq!(old.list(&harness).await?.status, StatusCode::OK);
+    let changes = json!([put("notes.txt", b"before")]);
+    let first = old.save(&harness, "head-moves-save-1", &changes).await?;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.code());
+    // The head is now 2. Everything the old view could read or download is
+    // refused with a code of its own, and nothing is disclosed.
+    for reply in [
+        old.list(&harness).await?,
+        old.read(&harness, "notes.txt", (None, None)).await?,
+        old.download(&harness, Some("notes.txt")).await?,
+        old.download(&harness, None).await?,
+    ] {
+        assert_eq!(reply.status, StatusCode::CONFLICT);
+        assert_eq!(reply.code(), "stale_view");
+        let text = String::from_utf8_lossy(&reply.body);
+        assert!(!text.contains("notes.txt") && !text.contains(&old.initialization));
+    }
+    // A repeated save is not a read: it still returns what it committed.
+    let replay = old.save(&harness, "head-moves-save-1", &changes).await?;
+    assert_eq!(replay.status, StatusCode::OK, "{}", replay.code());
+    assert_eq!(replay.json()?["replayed"], json!(true));
+    assert_eq!(replay.json()?["revision"], json!(2));
+    // A new save from the stale base is still a conflict, as before.
+    let stale = old
+        .save(
+            &harness,
+            "head-moves-save-2",
+            &json!([put("notes.txt", b"late")]),
+        )
+        .await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(stale.code(), "revision_conflict");
+    assert_eq!(stale.json()?["error"]["current_revision"], json!(2));
+    // The user consents again on the new head and a new view works.
+    let (status, version) = grant(&harness, &old.session, &id, (2, 2), 0, &ALL).await?;
+    assert_eq!(status, StatusCode::OK);
+    let view_id = format!("{:032x}", VIEWS.fetch_add(1, Ordering::Relaxed));
+    let fresh = view(&harness, &old.session, &id, 2, &view_id, 1, version).await?;
+    let read = fresh.read(&harness, "notes.txt", (None, None)).await?;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.code());
+    assert_eq!(
+        BASE64.decode(read.json()?["content"].as_str().ok_or("content")?)?,
+        b"before"
+    );
+    assert_eq!(fresh.download(&harness, None).await?.status, StatusCode::OK);
+    // The old view stays refused: its grant was for another head.
+    assert_eq!(old.list(&harness).await?.code(), "stale_view");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_head_moved_by_the_owner_stales_the_view_but_not_the_owners_own_reads() -> TestResult {
+    let harness = Harness::new()?;
+    let id = artifact(&harness, &["source.read"]).await?;
+    let viewer = frame(&harness, &id, 1, &["source.read"]).await?;
+    assert_eq!(
+        viewer
+            .read(&harness, "notes.txt", (None, None))
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    owner_edit(&harness, &id, 1, "owner-moves-head-2", "newer").await?;
+    let read = viewer.read(&harness, "notes.txt", (None, None)).await?;
+    assert_eq!(read.status, StatusCode::CONFLICT);
+    assert_eq!(read.code(), "stale_view");
+    // The owner's own read of the same revision is unaffected.
+    assert_eq!(stored(&harness, &id, 1, "notes.txt").await?, text_bytes());
     Ok(())
 }
 

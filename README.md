@@ -291,7 +291,12 @@ user presses Download in the workspace). The frame's calls are
 `saveSource({ key, changes })` and `requestDownload({ path })`; a failure is
 a `RuntimeRequestFailure` with a code from a closed set (decision 0032). A save
 that finds the source has moved on is refused with `revision_conflict` and
-overwrites nothing. These grants are separate from the MCP tools an agent has.
+overwrites nothing. A save answers with the files it wrote only. Once the
+artifact has a newer revision the preview's permissions are void (reads and
+downloads fail as `view_unavailable`), the workspace starts a new view and you
+allow again. A frame has its own request budget, so a loop in an app cannot
+use up the workspace's own, and the download question ignores presses for a
+moment after it appears. These grants are separate from the MCP tools an agent has.
 A frame cannot read app data, subscribe, upload, or replace its own view: those
 rows (R06 data access, R07, R09, R10) are not implemented.
 

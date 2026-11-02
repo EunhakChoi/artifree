@@ -137,6 +137,169 @@ test('Requests that are wrong are refused without reaching the parent', async ()
   view.hide();
 });
 
+test('No public method throws: any argument is refused as a rejected request', async () => {
+  const view = boot();
+  const explode = () => {
+    throw new Error('hostile');
+  };
+  const hostile = new Proxy(
+    {},
+    { get: explode, ownKeys: explode, getPrototypeOf: explode },
+  );
+  const hostileArray = new Proxy([], { get: explode });
+  class Instance {}
+  const bad = [
+    // Each of these is a value an untyped caller might pass in place of an
+    // object; none may throw before the promise is returned.
+    ...[
+      null,
+      [],
+      5,
+      'x',
+      true,
+      Symbol('s'),
+      () => undefined,
+      new Instance(),
+      hostile,
+    ].flatMap((value) => [
+      () => view.runtime.saveSource(value),
+      () => view.runtime.requestDownload(value),
+      () => view.runtime.readSource('a.txt', value),
+    ]),
+    // Not a plain object, even with the right members.
+    () =>
+      view.runtime.saveSource(
+        Object.assign(new Instance(), {
+          key: 'frame-key-0001',
+          changes: [{ op: 'delete', path: 'a.txt' }],
+        }),
+      ),
+    () =>
+      view.runtime.saveSource(
+        Object.assign([], {
+          key: 'frame-key-0001',
+          changes: [{ op: 'delete', path: 'a.txt' }],
+        }),
+      ),
+    () => view.runtime.requestDownload(Object.assign([], { path: 'a.txt' })),
+    () => view.runtime.saveSource(undefined),
+    () => view.runtime.readSource(),
+    () => view.runtime.readSource(null),
+    () => view.runtime.readSource({ toString: explode }),
+    () =>
+      view.runtime.readSource('a.txt', {
+        get offset() {
+          return explode();
+        },
+      }),
+    () =>
+      view.runtime.readSource('a.txt', {
+        offset: 0,
+        get length() {
+          return explode();
+        },
+      }),
+    () =>
+      view.runtime.requestDownload({
+        get path() {
+          return explode();
+        },
+      }),
+    () =>
+      view.runtime.saveSource({
+        get key() {
+          return explode();
+        },
+        changes: [],
+      }),
+    () =>
+      view.runtime.saveSource({
+        key: 'frame-key-0001',
+        get changes() {
+          return explode();
+        },
+      }),
+    () =>
+      view.runtime.saveSource({ key: 'frame-key-0001', changes: hostileArray }),
+    () => view.runtime.saveSource({ key: 'frame-key-0001', changes: [null] }),
+    () => view.runtime.saveSource({ key: 'frame-key-0001', changes: [[]] }),
+    () =>
+      view.runtime.saveSource({ key: 'frame-key-0001', changes: [hostile] }),
+    () =>
+      view.runtime.saveSource({
+        key: 'frame-key-0001',
+        changes: [
+          {
+            op: 'put',
+            path: 'a.txt',
+            get content() {
+              return explode();
+            },
+          },
+        ],
+      }),
+    () =>
+      view.runtime.saveSource({
+        key: 'frame-key-0001',
+        changes: [
+          {
+            get op() {
+              return explode();
+            },
+            path: 'a.txt',
+          },
+        ],
+      }),
+  ];
+  for (const attempt of bad) {
+    let promise;
+    assert.doesNotThrow(() => {
+      promise = attempt();
+    }, attempt.toString());
+    const error = await failure(promise);
+    assert.equal(error.code, 'invalid_request', attempt.toString());
+    assert.equal(error.name, 'RuntimeRequestError');
+  }
+  // The methods that take nothing ignore what they are given and still
+  // answer asynchronously.
+  for (const argument of [null, 5, hostile]) {
+    assert.doesNotThrow(() => {
+      void view.runtime.currentMetadata(argument).catch(() => undefined);
+      void view.runtime.listSource(argument).catch(() => undefined);
+    });
+  }
+  await view.settle();
+  // Only the two argument-free requests per round reached the parent.
+  assert.deepEqual(
+    view.seen.map(({ type }) => type),
+    [
+      'metadata',
+      'source.list',
+      'metadata',
+      'source.list',
+      'metadata',
+      'source.list',
+    ],
+  );
+  view.hide();
+});
+
+test('A save is copied when it is checked, so later changes cannot alter it', async () => {
+  const view = boot();
+  const bytes = new Uint8Array([1, 2, 3]);
+  const change = { op: 'put', path: 'a.bin', content: bytes };
+  const request = { key: 'frame-key-0001', changes: [change] };
+  const pending = view.runtime.saveSource(request);
+  change.path = 'changed.bin';
+  bytes[0] = 9;
+  await view.settle();
+  assert.equal(view.seen.length, 1);
+  assert.equal(view.seen[0].changes[0].path, 'a.bin');
+  assert.deepEqual([...view.seen[0].changes[0].content], [1, 2, 3]);
+  view.hide();
+  await failure(pending);
+});
+
 test('Valid requests carry exactly their fields to the parent', async () => {
   const view = boot();
   const calls = [

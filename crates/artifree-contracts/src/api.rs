@@ -1120,7 +1120,9 @@ pub struct RuntimeSourceSaved {
     pub revision: u64,
     /// Commit time in Unix milliseconds.
     pub created_at_ms: i64,
-    /// The committed revision's files in path order.
+    /// Only the files this save wrote (its `put` changes), in path order. A
+    /// frame with `source.write` but not `source.read` is told nothing about
+    /// the other files of the revision, and a deleted file is not listed.
     pub files: Vec<RevisionFile>,
     /// True when an earlier request with the same key already committed it.
     pub replayed: bool,
@@ -1270,6 +1272,10 @@ pub enum ErrorCode {
     NotFound,
     /// The runtime connection is missing, closed, or expired; open a new one.
     RuntimeSessionExpired,
+    /// A runtime view was issued for an older head than the artifact now has.
+    /// Its grant belonged to that head, so the view reads and downloads
+    /// nothing more; start a new view and ask the user again.
+    StaleView,
     /// The base revision is not current; reload and reapply the change.
     RevisionConflict,
     /// The base metadata revision is not current; reload and reapply the

@@ -107,6 +107,7 @@ export type ErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'runtime_session_expired'
+  | 'stale_view'
   | 'revision_conflict'
   | 'metadata_conflict'
   | 'not_in_trash'
@@ -915,7 +916,9 @@ export interface RuntimeSourceSaved {
    */
   created_at_ms: number;
   /**
-   * The committed revision's files in path order.
+   * Only the files this save wrote (its `put` changes), in path order. A
+   * frame with `source.write` but not `source.read` is told nothing about
+   * the other files of the revision, and a deleted file is not listed.
    */
   files: RevisionFile[];
   /**

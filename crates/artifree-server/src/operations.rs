@@ -36,6 +36,7 @@ use artifree_domain::package::{
     ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
 use artifree_ports::artifact_store::{
@@ -1168,11 +1169,6 @@ pub(crate) async fn runtime_metadata(
 /// The most bytes one `source.read` answer holds (decision 0032).
 pub(crate) const MAX_RUNTIME_READ_BYTES: u64 = 1024 * 1024;
 
-/// Frame request keys are namespaced with this prefix before they reach the
-/// service, so a frame can neither reuse nor probe a key of the owner's own
-/// requests (decision 0032).
-const FRAME_KEY_PREFIX: &str = "frame:";
-
 /// A frame request: the artifact, revision, view, generation, and
 /// initialization the workspace names on the frame's behalf.
 #[derive(Debug, Clone, Copy)]
@@ -1188,6 +1184,37 @@ pub(crate) struct FrameCall<'a> {
 struct Frame {
     id: ArtifactId,
     revision: SourceRevision,
+    /// The head the view and its grant were issued for.
+    head: SourceRevision,
+}
+
+fn stale_view() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        ErrorCode::StaleView,
+        "the source has moved past this runtime view; start a new view",
+    )
+}
+
+/// Refuses a view whose head is no longer the artifact's (decision 0032): the
+/// grant belongs to that head (decision 0020), so after any commit the view
+/// reads and downloads nothing until the workspace starts a new one and the
+/// user consents again. Saves are not fenced here: their pinned base is their
+/// fence and a repeated key must still return its first result.
+async fn require_live_head(
+    state: &AppState,
+    actor: &ActorId,
+    frame: &Frame,
+) -> Result<(), ApiError> {
+    let (lookup_actor, lookup_id) = (actor.clone(), frame.id.clone());
+    let record = state
+        .run(move |artifacts| artifacts.artifact(&lookup_actor, &lookup_id))
+        .await?;
+    if record.current_revision == frame.head {
+        Ok(())
+    } else {
+        Err(stale_view())
+    }
 }
 
 fn frame_refusal(refusal: RuntimeRefusal) -> ApiError {
@@ -1212,7 +1239,7 @@ fn authorize_frame(
     validate_view(call.view_id, call.generation)?;
     let id = artifact_id(call.artifact)?;
     let revision = revision_number(call.revision)?;
-    state
+    let head = state
         .previews()
         .runtime_authorize(
             actor,
@@ -1226,7 +1253,24 @@ fn authorize_frame(
             capability,
         )
         .map_err(frame_refusal)?;
-    Ok(Frame { id, revision })
+    Ok(Frame { id, revision, head })
+}
+
+/// [`authorize_frame`], then the live-head fence (decision 0032): a read of a
+/// frame is refused once the artifact has a newer revision than the one the
+/// view and its grant were issued for. The fence is applied when the call
+/// starts. A commit that lands while the call is in flight does not stop it,
+/// since the bytes belong to an immutable revision; a revoke or a closed view
+/// does (the binding is checked again before the answer).
+async fn authorize_live(
+    state: &AppState,
+    actor: &ActorId,
+    call: &FrameCall<'_>,
+    capability: Capability,
+) -> Result<Frame, ApiError> {
+    let frame = authorize_frame(state, actor, call, capability)?;
+    require_live_head(state, actor, &frame).await?;
+    Ok(frame)
 }
 
 /// Lists the files of the revision a frame is pinned to (`source.read`).
@@ -1235,7 +1279,7 @@ pub(crate) async fn runtime_source_manifest(
     actor: ActorId,
     call: FrameCall<'_>,
 ) -> Result<RuntimeSourceManifest, ApiError> {
-    let frame = authorize_frame(state, &actor, &call, Capability::SourceRead)?;
+    let frame = authorize_live(state, &actor, &call, Capability::SourceRead).await?;
     let (read_actor, read_id, revision) = (actor.clone(), frame.id.clone(), frame.revision);
     let record = state
         .run(move |artifacts| artifacts.revision(&read_actor, &read_id, revision))
@@ -1256,7 +1300,7 @@ pub(crate) async fn runtime_source_read(
     call: FrameCall<'_>,
     request: RuntimeSourceReadRequest,
 ) -> Result<RuntimeSourceFile, ApiError> {
-    let frame = authorize_frame(state, &actor, &call, Capability::SourceRead)?;
+    let frame = authorize_live(state, &actor, &call, Capability::SourceRead).await?;
     let length = match request.length {
         None => MAX_RUNTIME_READ_BYTES,
         Some(length) => length.min(MAX_RUNTIME_READ_BYTES),
@@ -1304,13 +1348,20 @@ pub(crate) async fn runtime_source_save(
     request: RuntimeSourceSaveRequest,
 ) -> Result<RuntimeSourceSaved, ApiError> {
     let frame = authorize_frame(state, &actor, &call, Capability::SourceWrite)?;
-    let key: RequestKey = format!("{FRAME_KEY_PREFIX}{}", key.as_str())
-        .parse()
-        .map_err(|_| ApiError::invalid("Idempotency-Key: too long for a runtime save"))?;
+    // Only the files this save writes are described back: a frame that may
+    // write but not read learns nothing about the others.
+    let written: BTreeSet<String> = request
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            WireChange::Put { path, .. } => Some(path.clone()),
+            WireChange::Delete { .. } => None,
+        })
+        .collect();
     let committed = save(
         state,
         actor,
-        key,
+        key.frame_scoped(),
         &frame.id.to_string(),
         SaveRevisionRequest {
             base_revision: frame.revision.0,
@@ -1321,7 +1372,12 @@ pub(crate) async fn runtime_source_save(
     Ok(RuntimeSourceSaved {
         revision: committed.revision.revision,
         created_at_ms: committed.revision.created_at_ms,
-        files: committed.revision.files,
+        files: committed
+            .revision
+            .files
+            .into_iter()
+            .filter(|file| written.contains(&file.path))
+            .collect(),
         replayed: committed.replayed,
     })
 }
@@ -1368,7 +1424,7 @@ pub(crate) async fn runtime_download(
     call: FrameCall<'_>,
     request: RuntimeDownloadRequest,
 ) -> Result<RuntimeDownload, ApiError> {
-    let frame = authorize_frame(state, &actor, &call, Capability::SourceDownload)?;
+    let frame = authorize_live(state, &actor, &call, Capability::SourceDownload).await?;
     let download = match request.path {
         None => {
             let archive = export(state, actor.clone(), call.artifact, frame.revision.0).await?;

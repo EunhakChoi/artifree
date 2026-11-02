@@ -19,6 +19,8 @@ const entry = `<!doctype html><html lang="en"><head><!-- artifree-runtime -->
 <button data-act="save">Save</button>
 <button data-act="file">Download notes</button>
 <button data-act="archive">Download archive</button>
+<button data-act="twice">Ask twice</button>
+<button data-act="flood">Flood</button>
 <script>
 document.querySelector('#where').textContent = location.pathname;
 const out = document.querySelector('#out');
@@ -38,6 +40,23 @@ const acts = {
   })),
   file: async () => show(await window.artifree.requestDownload({ path: 'notes.txt' })),
   archive: async () => show(await window.artifree.requestDownload()),
+  // Asks again the moment the first question is refused.
+  twice: async () => {
+    const codes = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { await window.artifree.requestDownload({ path: 'notes.txt' }); codes.push('started'); }
+      catch (error) { codes.push(error.code); }
+    }
+    show({ first: codes[0], second: codes[1] });
+  },
+  // Sixty requests in one breath.
+  flood: async () => {
+    const codes = await Promise.all(Array.from({ length: 60 }, () =>
+      window.artifree.listSource().then(() => 'ok', (error) => error.code)));
+    const counts = {};
+    for (const code of codes) counts[code] = (counts[code] ?? 0) + 1;
+    show(counts);
+  },
 };
 for (const button of document.querySelectorAll('button')) {
   button.addEventListener('click', async () => {
@@ -91,28 +110,19 @@ export async function checkSource({
   const context = await browser.newContext({ acceptDownloads: true });
   try {
     const page = await context.newPage();
-    page.setDefaultTimeout(10_000);
+    // Firefox on a loaded runner is slow; nothing here depends on speed.
+    page.setDefaultTimeout(30_000);
+    const check = expect.configure({ timeout: 30_000 });
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     const views = [];
     const downloadRequests = [];
-    const saves = [];
     const pending = [];
     page.on('response', (response) => {
       const url = new URL(response.url());
       if (response.request().method() !== 'POST') return;
       if (url.pathname.endsWith('/runtime-views') && response.ok())
         pending.push(response.json().then((view) => views.push(view)));
-      if (url.pathname.endsWith('/source/save'))
-        pending.push(
-          response.json().then((body) =>
-            saves.push({
-              status: response.status(),
-              body,
-              request: response.request().postDataJSON(),
-            }),
-          ),
-        );
     });
     page.on('request', (request) => {
       if (
@@ -123,6 +133,13 @@ export async function checkSource({
     });
     const downloads = [];
     page.on('download', (download) => downloads.push(download));
+    // The one response to the next save the workspace sends for a frame.
+    const nextSave = () =>
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === 'POST' &&
+          new URL(response.url()).pathname.endsWith('/source/save'),
+      );
 
     await page.goto(origin);
     const workspace = page.locator('#artifacts');
@@ -136,19 +153,21 @@ export async function checkSource({
     const permissions = workspace.getByRole('region', {
       name: 'Runtime permissions',
     });
-    await expect(
+    await check(
       permissions.getByText(
         'Declared: source.download, source.read, source.write',
       ),
     ).toBeVisible();
-    await expect(permissions.getByText('Granted: none')).toBeVisible();
+    await check(permissions.getByText('Granted: none')).toBeVisible();
     const frame = workspace.frameLocator('iframe[title^="Preview of"]');
     const element = workspace.locator('iframe[title^="Preview of"]');
+    const offer = workspace.getByRole('alert', { name: 'Download request' });
+    const answer = frame.locator('#out');
 
     // Waits until the frame on screen is the newest view the server issued,
     // so a click never lands in a frame that is about to be replaced.
     const ready = async () => {
-      await expect
+      await check
         .poll(async () => {
           await Promise.all(pending);
           const last = views.at(-1);
@@ -160,33 +179,45 @@ export async function checkSource({
         })
         .toBe(true);
     };
+    // Clears the frame's answer first, so that what is read afterwards is the
+    // answer to this action and not to an earlier one.
     const act = async (name) => {
+      await answer.evaluate((output) => {
+        output.textContent = 'idle';
+      });
       await frame.locator(`[data-act="${name}"]`).click();
     };
-    const answer = frame.locator('#out');
     const grant = async (label, revoke) => {
       const before = views.length;
       await permissions.getByRole('button', { name: label }).click();
       await permissions.getByRole('button', { name: revoke }).waitFor();
-      await expect.poll(() => views.length).toBeGreaterThan(before);
+      await check.poll(() => views.length).toBeGreaterThan(before);
       await ready();
+    };
+    const answered = async () => JSON.parse(await answer.textContent());
+    const refusedAs = async (code) => {
+      await check(answer).toHaveText(
+        JSON.stringify({ error: code, currentRevision: null }),
+      );
     };
 
     // 1. Nothing is granted: the frame is told so and learns nothing.
     await ready();
     await act('list');
-    await expect(answer).toHaveText(
-      JSON.stringify({ error: 'not_granted', currentRevision: null }),
-    );
+    await refusedAs('not_granted');
     await act('read');
-    await expect(answer).toContainText('"error":"not_granted"');
+    await refusedAs('not_granted');
+    // A frame never allowed to ask cannot even put a question to the user.
+    await act('file');
+    await refusedAs('not_granted');
+    await check(offer).toHaveCount(0);
 
     // 2. Reading is one grant. It lists exactly the stored files and reads
     // the stored bytes; editing and downloading are still refused.
     await grant('Allow reading source', 'Revoke reading source');
     await act('list');
-    await expect(answer).toContainText('"revision":1');
-    const listed = JSON.parse(await answer.textContent());
+    await check(answer).toContainText('"revision":1');
+    const listed = await answered();
     const stored = await api(server, 'GET', `${revision}/1`);
     assert.deepEqual(
       listed.files.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
@@ -197,20 +228,17 @@ export async function checkSource({
       digest(NOTES),
     );
     await act('read');
-    await expect(answer).toContainText('"nextOffset":null');
-    const read = JSON.parse(await answer.textContent());
+    await check(answer).toContainText('"nextOffset":null');
+    const read = await answered();
     assert.equal(read.text, NOTES.toString('utf8'));
     assert.equal(read.sha256, digest(NOTES));
+    // The workspace forwards the frame's save and the server refuses it.
+    const refusal = nextSave();
     await act('save');
-    await expect(answer).toContainText('"error":"not_granted"');
+    assert.equal((await refusal).status(), 403);
+    await refusedAs('not_granted');
     await act('file');
-    await expect(answer).toContainText('"error":"not_granted"');
-    // The workspace forwards the frame's save; the server refuses it.
-    assert.deepEqual(
-      saves.map(({ status }) => status),
-      [403],
-      'A frame without the edit grant must be refused by the server.',
-    );
+    await refusedAs('not_granted');
     assert.deepEqual(downloadRequests, []);
     assert.equal(
       (await api(server, 'GET', `/v1/artifacts/${artifact.id}`))
@@ -222,27 +250,20 @@ export async function checkSource({
     // user: nothing is fetched or saved until the user confirms.
     await grant('Allow downloads', 'Revoke downloads');
     await act('file');
-    const offer = workspace.getByRole('alert', { name: 'Download request' });
-    await expect(offer).toContainText('notes.txt');
-    await expect(offer).toContainText('revision 1');
+    await check(offer).toContainText('notes.txt');
+    await check(offer).toContainText('revision 1');
     await checkAccessibility('runtime-download-request', page);
     assert.deepEqual(downloadRequests, [], 'No bytes before the user agrees.');
     assert.equal(downloads.length, 0);
-    await offer.getByRole('button', { name: 'Decline' }).click();
-    await expect(answer).toContainText('"error":"declined"');
-    await expect(offer).toBeHidden();
-    assert.deepEqual(downloadRequests, []);
-    assert.equal(downloads.length, 0);
-
-    // The user agrees: the browser saves the stored bytes.
-    await act('file');
+    // The user agrees: the browser saves the stored bytes. The button takes
+    // presses only a moment after the question appears; clicking waits for it.
     const saving = page.waitForEvent('download');
     await offer.getByRole('button', { name: 'Download' }).click();
     const file = await saving;
     assert.equal(file.suggestedFilename(), 'notes.txt');
     assert.deepEqual(await readDownload(file), NOTES);
-    await expect(answer).toContainText('"status":"started"');
-    const receipt = JSON.parse(await answer.textContent());
+    await check(answer).toContainText('"status":"started"');
+    const receipt = await answered();
     assert.deepEqual(
       [receipt.kind, receipt.name, receipt.size, receipt.revision],
       ['file', 'notes.txt', NOTES.length, 1],
@@ -263,16 +284,31 @@ export async function checkSource({
     // A question left open dies with its frame: replacing the frame by
     // changing a grant leaves no pending offer and saves nothing.
     await act('file');
-    await expect(offer).toBeVisible();
+    await check(offer).toBeVisible();
     const sent = downloadRequests.length;
     const saved = downloads.length;
     await grant('Allow editing source', 'Revoke editing source');
-    await expect(offer).toBeHidden();
+    await check(offer).toBeHidden();
+    assert.equal(downloadRequests.length, sent);
+    assert.equal(downloads.length, saved);
+
+    // A frame that asks again the moment it is refused is refused again, and
+    // the user is not asked a second time.
+    await act('twice');
+    await check(offer).toBeVisible();
+    await offer.getByRole('button', { name: 'Decline' }).click();
+    await check(answer).toContainText('"second"');
+    assert.deepEqual(await answered(), {
+      first: 'declined',
+      second: 'declined',
+    });
+    await check(offer).toBeHidden();
     assert.equal(downloadRequests.length, sent);
     assert.equal(downloads.length, saved);
 
     // 4. An old generation of the view is refused by the server, with the
     // real initialization the frame once had.
+    await Promise.all(pending);
     const old = views.find(
       (view) =>
         view.view_id === views.at(-1).view_id &&
@@ -298,13 +334,15 @@ export async function checkSource({
 
     // 5. With the edit grant a frame saves, once, as a new revision of the
     // stored bytes, from the revision it is pinned to.
+    const committing = nextSave();
     await act('save');
-    await expect.poll(() => saves.length).toBe(2);
-    const save = saves[1];
-    assert.equal(save.status, 200);
-    assert.equal(save.body.revision, 2);
-    assert.equal(save.body.replayed, false);
-    assert.deepEqual(save.request.changes.map(({ path }) => path).sort(), [
+    const response = await committing;
+    assert.equal(response.status(), 200);
+    const body = await response.json();
+    const request = response.request().postDataJSON();
+    assert.equal(body.revision, 2);
+    assert.equal(body.replayed, false);
+    assert.deepEqual(request.changes.map(({ path }) => path).sort(), [
       'notes.txt',
       'sprite.png',
     ]);
@@ -321,10 +359,44 @@ export async function checkSource({
       NOTES,
       'The pinned revision is unchanged.',
     );
-    assert.deepEqual(
-      save.body.files.find(({ path }) => path === 'notes.txt').sha256,
+    // The answer describes the files this save wrote and no others.
+    assert.deepEqual(body.files.map(({ path }) => path).sort(), [
+      'notes.txt',
+      'sprite.png',
+    ]);
+    assert.equal(
+      body.files.find(({ path }) => path === 'notes.txt').sha256,
       digest(SAVED_NOTES),
     );
+
+    // 6. The permissions belonged to revision 1. Once the source has a new
+    // head the preview starts over without them, and the user allows again.
+    await check(permissions.getByText('Granted: none')).toBeVisible();
+    await grant('Allow reading source', 'Revoke reading source');
+    await act('read');
+    await check(answer).toContainText('"text"');
+    assert.equal((await answered()).text, SAVED_NOTES.toString('utf8'));
+
+    // 7. A frame that floods is slowed by the workspace, and the user can
+    // still take the permission away at once.
+    await act('flood');
+    await check(answer).toContainText('"ok"');
+    const counts = await answered();
+    assert.equal(
+      Object.values(counts).reduce((sum, value) => sum + value, 0),
+      60,
+    );
+    const slowed = (counts.rate_limited ?? 0) + (counts.busy ?? 0);
+    assert.ok(
+      slowed >= 1,
+      `A flood must be limited: ${JSON.stringify(counts)}`,
+    );
+    for (const code of Object.keys(counts))
+      assert.ok(['ok', 'rate_limited', 'busy'].includes(code), code);
+    await permissions
+      .getByRole('button', { name: 'Revoke reading source' })
+      .click();
+    await check(permissions.getByText('Granted: none')).toBeVisible();
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

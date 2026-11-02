@@ -82,7 +82,11 @@ function onlyMembers(
 function textBytes(text: string): Uint8Array | undefined {
   const bytes = new TextEncoder().encode(text);
   // A lone surrogate encodes as U+FFFD and would be stored silently changed.
-  return new TextDecoder().decode(bytes) === text ? bytes : undefined;
+  // A leading U+FEFF is a character of the text, not a marker to drop, so the
+  // round trip keeps it.
+  return new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes) === text
+    ? bytes
+    : undefined;
 }
 
 function changes(
@@ -119,6 +123,53 @@ function changes(
     parsed.push({ op: 'put', path: entry.path, bytes: bytes.slice() });
   }
   return parsed;
+}
+
+/** The id of a message, or undefined when nothing could answer it. */
+export function frameMessageId(message: unknown): number | undefined {
+  if (!record(message)) return undefined;
+  const { id } = message;
+  return Number.isSafeInteger(id) && typeof id === 'number' && id >= 1
+    ? id
+    : undefined;
+}
+
+/**
+ * How much one frame may ask of the workspace (decision 0032): 20 requests at
+ * once, then 10 a second, and 8 at a time. The server has its own, smaller
+ * budget for all frames of the user; this one keeps a single frame from
+ * spending it, and is checked before a message is read at all.
+ */
+export const FRAME_BURST = 20;
+export const FRAME_REFILL_MS = 100;
+export const FRAME_MAX_PENDING = 8;
+
+/** A token bucket on a clock the caller supplies. */
+export class RequestBudget {
+  readonly #burst: number;
+  readonly #refillMs: number;
+  #tokens: number;
+  #at: number;
+
+  constructor(burst: number, refillMs: number, now: number) {
+    this.#burst = burst;
+    this.#refillMs = refillMs;
+    this.#tokens = burst;
+    this.#at = now;
+  }
+
+  /** Spends one request, or says there is none left now. */
+  take(now: number): boolean {
+    const elapsed = Math.max(0, now - this.#at);
+    this.#at = Math.max(this.#at, now);
+    this.#tokens = Math.min(
+      this.#burst,
+      this.#tokens + elapsed / this.#refillMs,
+    );
+    if (this.#tokens < 1) return false;
+    this.#tokens -= 1;
+    return true;
+  }
 }
 
 /**
@@ -204,6 +255,57 @@ export function parseFrameMessage(
   }
 }
 
+/** What the workspace does with one raw message of a frame. */
+export type Admission =
+  /** Nothing can answer it (no usable id): drop it. */
+  | { readonly action: 'ignore' }
+  /** Answer with this code and do nothing else. */
+  | {
+      readonly action: 'answer';
+      readonly id: number;
+      readonly code: RuntimeErrorCode;
+    }
+  /** A valid request within budget: carry it out. */
+  | { readonly action: 'run'; readonly request: FrameRequest };
+
+/**
+ * Decides, for one frame, whether a message is read, answered with a refusal,
+ * or carried out (decision 0032). The budget is spent first, before the
+ * message is parsed, so a flood of large or malformed messages costs the
+ * workspace one token check each and never reaches the server. Then the
+ * message is parsed, and the caps on requests in flight apply.
+ */
+export class FrameAdmission {
+  readonly #budget: RequestBudget;
+
+  constructor(now: number) {
+    this.#budget = new RequestBudget(FRAME_BURST, FRAME_REFILL_MS, now);
+  }
+
+  admit(
+    message: unknown,
+    now: number,
+    inFlight: number,
+    saving: boolean,
+  ): Admission {
+    const id = frameMessageId(message);
+    if (id === undefined) return { action: 'ignore' };
+    if (!this.#budget.take(now))
+      return { action: 'answer', id, code: 'rate_limited' };
+    const parsed = parseFrameMessage(message);
+    if (parsed === undefined) return { action: 'ignore' };
+    if (!parsed.ok)
+      return { action: 'answer', id: parsed.id, code: parsed.code };
+    const { request } = parsed;
+    if (
+      inFlight >= FRAME_MAX_PENDING ||
+      (request.kind === 'source.write' && saving)
+    )
+      return { action: 'answer', id: request.id, code: 'busy' };
+    return { action: 'run', request };
+  }
+}
+
 /**
  * The code a frame is told for a failed server request. Only the closed set
  * of the SDK crosses to the frame, never the server's message.
@@ -223,6 +325,7 @@ export function frameErrorCode(code: string): RuntimeErrorCode {
     case 'rate_limited':
       return 'rate_limited';
     case 'runtime_session_expired':
+    case 'stale_view':
       return 'view_unavailable';
     case 'not_found':
       return 'not_found';
