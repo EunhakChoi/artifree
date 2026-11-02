@@ -266,6 +266,11 @@ the behavior.
   does not shrink.
 - The retry of a create, save, restore, or update whose artifact was purged is
   `404`; the client learns the artifact is gone, not what the request did.
+- The web workspace has no code for `purged`: the feed reducer counts it as a
+  newer metadata revision, so lists refresh, but its record of artifacts seen in
+  the trash is not updated. A trashed artifact open in a page when a purge
+  arrives is not marked gone until its next read answers `404`. This was
+  reasoned from the reducer, not run in a browser; O05b owns the web behavior.
 - The cleanup is global, not per owner, and not limited to one run at a time:
   two runs serialize on the write lock.
 - Not implemented: automatic purge, a web control, an MCP tool, pruning of
