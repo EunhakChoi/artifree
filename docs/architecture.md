@@ -24,7 +24,7 @@ apps/
 packages/
   contracts/           generated TypeScript wire types and build inventory
   client/              HTTP API v1 client with runtime response checks
-  runtime-sdk/         bound metadata read; other capability types proposed
+  runtime-sdk/         bound metadata, source and download requests (0032); other capability types proposed
 crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
   artifree-core/       artifact service, owner policy, job and worker logic; documents planned
@@ -93,9 +93,14 @@ The metadata runtime runs opted-in content separately from the account UI. Its
 short-lived view binds the actor, artifact, source revision, view generation,
 and initialization; the server checks access and the current source on each
 read ([0019](decisions/0019-runtime-metadata-bridge.md)). A process-local
-connection grant requires explicit consent for `metadata.read` and is checked
-again on every call; other capabilities remain proposed
-([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
+connection grant requires explicit consent for each of `metadata.read`,
+`source.read`, `source.write` (a separate edit grant, not implied by reading)
+and `source.download`, and is checked again on every call; other capabilities
+remain proposed ([0020](decisions/0020-runtime-grants.md),
+[0032](decisions/0032-runtime-source-and-download.md)). The frame never holds
+an account token: it talks to the workspace page, which calls the server with
+the user's token and the view's initialization secret, and a frame's save is
+made on top of the revision the view is pinned to, as the viewing user. Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
 ## Local and server operation
@@ -244,8 +249,10 @@ replays with its kept key. Without Web Locks, draft reads and writes are
 refused with an explicit warning to protect other tabs' records
 ([0018](decisions/0018-source-draft-recovery.md)).
 R04 adds the first bound runtime metadata read ([0019](decisions/0019-runtime-metadata-bridge.md)),
-and R05 adds connection-scoped metadata consent and grants
-([0020](decisions/0020-runtime-grants.md)). A08 stages a saved source
+R05 adds connection-scoped metadata consent and grants
+([0020](decisions/0020-runtime-grants.md)), and R11 adds source reading,
+conditional saving, and user-confirmed downloads as further grants
+([0032](decisions/0032-runtime-source-and-download.md)). A08 stages a saved source
 selection and, after user confirmation, delivers it to an explicitly registered
 MCP inbox ([0021](decisions/0021-agent-selection-handoff.md)). Its receipt
 acknowledgement is separate from model work and its state is process-local.
@@ -288,7 +295,7 @@ change silently (`NaN`, holes, getters, a `Date`, a `toJSON` function) and sends
 checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
-bridge grants only `metadata.read`**. Subscriptions and queries (R07) and
+bridge has no data capability**. Subscriptions and queries (R07) and
 assets (R09) are not implemented.
 
 The roadmap separately covers artifact management, local/server deployment,

@@ -255,6 +255,31 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   acknowledgement, and an unknown grant carried across a view change until a
   confirmed clear fences its delayed request. A connection created after server restart has a fresh ID;
   the tests do not claim multi-user authentication.
+- Runtime source and download (decision 0032): `crates/artifree-server/tests/runtime_source.rs`
+  drives the real router with a granted, an ungranted and a read-only frame
+  (and `runtime_tests.rs` holds a listing, a read and a download in the service
+  while the grant is revoked, which must reject the late result):
+  bytes, sizes and digests against the stored revision, bounded reads that
+  join back to the file, a viewer's refused write, non-ASCII and binary saves,
+  replay and key reuse, a frame key that cannot collide with the owner's, a
+  stale pinned base, two frames racing for one base (one winner), a replaced
+  or closed generation, revoke and regrant, logout and a restart, forged
+  bindings, a trashed artifact, size, count and path rules, hostile messages
+  that must not be echoed, the rate limit, and a download whose type, name,
+  headers and archive bytes equal the owner's export of the pinned revision.
+  `scripts/tests/runtime-requests.test.mjs` bundles the workspace's message
+  parser and `scripts/tests/runtime-bootstrap.test.mjs` the shipped frame
+  script and run them against hostile messages and responses. `client.test.mjs`
+  checks the closed download type and name. `scripts/smoke-source.mjs`, in its
+  own browser context in Chromium and Firefox, uses a real server and
+  sandboxed frame: no grant means `not_granted` and nothing is sent; the
+  listed digests and read text equal the stored file; a download question
+  fetches nothing until the user agrees, a declined or replaced question saves
+  nothing, the saved file and the archive equal the stored bytes and the
+  export; an old generation replayed with its real initialization is a 404;
+  and the frame's save request arrives as the stored next revision. The
+  question is checked for accessibility. The smoke does not exercise a stale
+  pinned base in the browser (the Rust tests do).
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,

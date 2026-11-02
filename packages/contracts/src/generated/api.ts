@@ -32,6 +32,13 @@ export type ApiBody =
   | RuntimeGrant
   | RuntimeMetadataRequest
   | RuntimeMetadata
+  | RuntimeDownloadRequest
+  | RuntimeSourceRequest
+  | RuntimeSourceManifest
+  | RuntimeSourceReadRequest
+  | RuntimeSourceFile
+  | RuntimeSourceSaveRequest
+  | RuntimeSourceSaved
   | ErrorResponse
   | ArtifactChange
   | FeedPosition
@@ -778,6 +785,147 @@ export interface RuntimeMetadata {
    * Its current title.
    */
   title: string;
+}
+/**
+ * Asks for the bytes of the pinned revision to be delivered to the user.
+ * The answer is the bytes themselves with `Content-Disposition: attachment`
+ * and a closed content type, for the parent to hand to the user; a frame
+ * never receives them.
+ */
+export interface RuntimeDownloadRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * One file of the pinned revision; absent downloads the whole revision
+   * as the source export archive of decision 0015.
+   */
+  path?: string | null;
+}
+/**
+ * Proves that the parent is acting for an initialized view. Used by the
+ * source manifest of a frame.
+ */
+export interface RuntimeSourceRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+}
+/**
+ * The files of the revision a frame is pinned to, which a frame with the
+ * `source.read` capability may list. Nothing here is the account's
+ * authority; it is the same listing the revision has.
+ */
+export interface RuntimeSourceManifest {
+  /**
+   * The bound artifact's identifier.
+   */
+  artifact_id: string;
+  /**
+   * The revision's files in path order.
+   */
+  files: RevisionFile[];
+  /**
+   * The pinned revision, which is not necessarily the current one.
+   */
+  revision: number;
+}
+/**
+ * Reads part of one file of the frame's pinned revision.
+ */
+export interface RuntimeSourceReadRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * How many bytes at most; absent reads as many as one answer may hold
+   * (1 MiB), and a larger value is read as that limit.
+   */
+  length?: number | null;
+  /**
+   * First byte to read, counted from 0; the start of the file when absent.
+   */
+  offset?: number | null;
+  /**
+   * Portable relative path of a file of the pinned revision.
+   */
+  path: string;
+}
+/**
+ * A part of one file of the pinned revision, cut at bytes.
+ */
+export interface RuntimeSourceFile {
+  /**
+   * Standard padded base64 of this part's bytes.
+   */
+  content: string;
+  /**
+   * Where the next part starts, or null when this part reaches the end.
+   * Always present.
+   */
+  next_offset: number | null;
+  /**
+   * Where this part starts in the file.
+   */
+  offset: number;
+  /**
+   * Package path of the file.
+   */
+  path: string;
+  /**
+   * The pinned revision the bytes belong to.
+   */
+  revision: number;
+  /**
+   * SHA-256 of the whole file, as 64 lowercase hex digits.
+   */
+  sha256: string;
+  /**
+   * The whole file's size in bytes.
+   */
+  size: number;
+}
+/**
+ * Saves files from a frame as one conditional revision commit. The base is
+ * the revision the frame is pinned to, never a value the frame names, so a
+ * frame can only write on top of what it was shown. The request key comes in
+ * the `Idempotency-Key` header, as for every write.
+ */
+export interface RuntimeSourceSaveRequest {
+  /**
+   * Changes applied to the pinned revision; unchanged files carry over.
+   * At most 512 changes, each to a different path.
+   */
+  changes: FileChange[];
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+}
+/**
+ * The revision that a frame's save committed, or committed earlier under the
+ * same key.
+ */
+export interface RuntimeSourceSaved {
+  /**
+   * Commit time in Unix milliseconds.
+   */
+  created_at_ms: number;
+  /**
+   * The committed revision's files in path order.
+   */
+  files: RevisionFile[];
+  /**
+   * True when an earlier request with the same key already committed it.
+   */
+  replayed: boolean;
+  /**
+   * The committed revision.
+   */
+  revision: number;
 }
 /**
  * Body of every non-2xx JSON response.

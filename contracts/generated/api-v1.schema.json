@@ -1685,6 +1685,28 @@
       ],
       "type": "object"
     },
+    "RuntimeDownloadRequest": {
+      "additionalProperties": false,
+      "description": "Asks for the bytes of the pinned revision to be delivered to the user.\nThe answer is the bytes themselves with `Content-Disposition: attachment`\nand a closed content type, for the parent to hand to the user; a frame\nnever receives them.",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "path": {
+          "default": null,
+          "description": "One file of the pinned revision; absent downloads the whole revision\nas the source export archive of decision 0015.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "initialization"
+      ],
+      "type": "object"
+    },
     "RuntimeGrant": {
       "additionalProperties": false,
       "description": "The new version of a connection-scoped grant.",
@@ -1745,6 +1767,200 @@
       },
       "required": [
         "initialization"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceFile": {
+      "additionalProperties": false,
+      "description": "A part of one file of the pinned revision, cut at bytes.",
+      "properties": {
+        "content": {
+          "description": "Standard padded base64 of this part's bytes.",
+          "type": "string"
+        },
+        "next_offset": {
+          "description": "Where the next part starts, or null when this part reaches the end.\nAlways present.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Where this part starts in the file.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Package path of the file.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The pinned revision the bytes belong to.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "description": "SHA-256 of the whole file, as 64 lowercase hex digits.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The whole file's size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "revision",
+        "offset",
+        "size",
+        "sha256",
+        "next_offset",
+        "content"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceManifest": {
+      "additionalProperties": false,
+      "description": "The files of the revision a frame is pinned to, which a frame with the\n`source.read` capability may list. Nothing here is the account's\nauthority; it is the same listing the revision has.",
+      "properties": {
+        "artifact_id": {
+          "description": "The bound artifact's identifier.",
+          "type": "string"
+        },
+        "files": {
+          "description": "The revision's files in path order.",
+          "items": {
+            "$ref": "#/$defs/RevisionFile"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "The pinned revision, which is not necessarily the current one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision",
+        "files"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceReadRequest": {
+      "additionalProperties": false,
+      "description": "Reads part of one file of the frame's pinned revision.",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "length": {
+          "default": null,
+          "description": "How many bytes at most; absent reads as many as one answer may hold\n(1 MiB), and a larger value is read as that limit.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "default": null,
+          "description": "First byte to read, counted from 0; the start of the file when absent.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Portable relative path of a file of the pinned revision.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "path"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceRequest": {
+      "additionalProperties": false,
+      "description": "Proves that the parent is acting for an initialized view. Used by the\nsource manifest of a frame.",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceSaveRequest": {
+      "additionalProperties": false,
+      "description": "Saves files from a frame as one conditional revision commit. The base is\nthe revision the frame is pinned to, never a value the frame names, so a\nframe can only write on top of what it was shown. The request key comes in\nthe `Idempotency-Key` header, as for every write.",
+      "properties": {
+        "changes": {
+          "description": "Changes applied to the pinned revision; unchanged files carry over.\nAt most 512 changes, each to a different path.",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          },
+          "type": "array"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceSaved": {
+      "additionalProperties": false,
+      "description": "The revision that a frame's save committed, or committed earlier under the\nsame key.",
+      "properties": {
+        "created_at_ms": {
+          "description": "Commit time in Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "files": {
+          "description": "The committed revision's files in path order.",
+          "items": {
+            "$ref": "#/$defs/RevisionFile"
+          },
+          "type": "array"
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key already committed it.",
+          "type": "boolean"
+        },
+        "revision": {
+          "description": "The committed revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "created_at_ms",
+        "files",
+        "replayed"
       ],
       "type": "object"
     },
@@ -2334,6 +2550,27 @@
     },
     {
       "$ref": "#/$defs/RuntimeMetadata"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDownloadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceManifest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceReadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceFile"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceSaveRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceSaved"
     },
     {
       "$ref": "#/$defs/ErrorResponse"

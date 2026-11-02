@@ -3,7 +3,8 @@ import type { ArtifreeClient } from '@artifree/client';
 import { useRef, useState, useSyncExternalStore } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { RuntimeFrame } from './runtime-frame';
+import { CAPABILITIES, nextGrant } from './runtime-capabilities';
+import { RuntimeStage } from './runtime-stage';
 import { describeFailure, useRequest } from './use-request';
 
 interface PreviewFrameProps {
@@ -107,10 +108,13 @@ export function PreviewFrame({
     );
   const view = preview.value.view;
   const grantStatus = client.runtimeGrantStatus(view);
-  async function changeGrant(allowed: boolean): Promise<void> {
+  async function changeGrant(name: string, allowed: boolean): Promise<void> {
     setGrantError(undefined);
     try {
-      await client.setRuntimeGrant(view, allowed ? ['metadata.read'] : []);
+      await client.setRuntimeGrant(
+        view,
+        name === '' ? [] : nextGrant(view.granted, name, allowed),
+      );
     } catch (error: unknown) {
       setGrantError(
         `Permission change was not confirmed: ${describeFailure(error)}`,
@@ -147,25 +151,43 @@ export function PreviewFrame({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => void changeGrant(false)}
+              onClick={() => void changeGrant('', false)}
             >
               Resolve by revoking access
             </Button>
-          ) : grantStatus === 'settled' &&
-            view.supported.includes('metadata.read') &&
-            view.declared.includes('metadata.read') ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                void changeGrant(!view.granted.includes('metadata.read'))
-              }
-            >
-              {view.granted.includes('metadata.read')
-                ? 'Revoke metadata access'
-                : 'Allow metadata access'}
-            </Button>
+          ) : grantStatus === 'settled' ? (
+            <ul className="flex flex-col gap-2">
+              {CAPABILITIES.filter(
+                ({ name }) =>
+                  view.supported.includes(name) && view.declared.includes(name),
+              ).map(({ name, allow, revoke, description }) => {
+                const allowed = view.granted.includes(name);
+                return (
+                  <li
+                    key={name}
+                    className="flex flex-col gap-1 rounded-lg border p-2"
+                  >
+                    <p>
+                      <span className="font-medium">{name}</span>{' '}
+                      <span className="text-muted-foreground">
+                        {allowed ? 'allowed' : 'not allowed'}
+                      </span>
+                    </p>
+                    <p className="text-muted-foreground">{description}</p>
+                    <div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void changeGrant(name, !allowed)}
+                      >
+                        {allowed ? revoke : allow}
+                      </Button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           ) : null}
         </section>
       )}
@@ -178,7 +200,7 @@ export function PreviewFrame({
         Refresh preview
       </Button>
       {grantStatus === 'settled' ? (
-        <RuntimeFrame
+        <RuntimeStage
           key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
           client={client}
           view={preview.value.view}

@@ -233,7 +233,8 @@ API, client, CLI, and web workspace (A07), and editing an artifact's files
 in the web workspace, saved as one revision (A09), with the draft kept in
 the browser and recovered by choice after a reload or a closed tab (A10);
 the browser must provide Web Locks to keep drafts safely. R04 adds the first
-runtime metadata read and R05 adds an explicit connection-scoped metadata grant.
+runtime metadata read, R05 adds an explicit connection-scoped metadata grant, and R11
+adds source, edit and download grants for a preview.
 The source editor can stage a saved selection and, after review, send it to a
 registered MCP agent inbox (A08). The agent must poll and acknowledge; receipt
 does not establish that a model completed the requested work.
@@ -259,7 +260,7 @@ the first child of its head, before any script:
 The opt-in prefix must use a doctype followed by `html` and `head` opening
 tags; attributes in these tags must have quoted values. Other source previews
 remain byte-for-byte ordinary previews. The bridge is available in the web
-workspace, requires explicit metadata access consent, that workspace and server,
+workspace, requires explicit consent for each capability, that workspace and server,
 and is not included in source
 exports. A preview is isolated from the workspace, not the network: it can
 navigate its own frame elsewhere. TypeScript consumers can import the runtime
@@ -277,7 +278,22 @@ file specifies a complete declaration, for example:
 An omitted `capabilities` field or an empty list declares none. The workspace
 shows declared, supported and granted capabilities separately. Grants apply to
 one connection and source binding, can be revoked, and expire or disappear on
-server restart. No other runtime capability is implemented.
+server restart.
+
+Four capabilities can be declared and granted, each by its own button:
+`metadata.read`; `source.read` (list the files of the revision the preview is
+pinned to and read them, up to 1 MiB per call); `source.write` (save changes as
+the next revision, only if that revision is still the head, as the viewing
+user; reading does not imply it); and `source.download` (ask the user to save
+one file or the whole revision as a ZIP; nothing is fetched or saved until the
+user presses Download in the workspace). The frame's calls are
+`window.artifree.listSource()`, `readSource(path, range)`,
+`saveSource({ key, changes })` and `requestDownload({ path })`; a failure is
+a `RuntimeRequestFailure` with a code from a closed set (decision 0032). A save
+that finds the source has moved on is refused with `revision_conflict` and
+overwrites nothing. These grants are separate from the MCP tools an agent has.
+A frame cannot read app data, subscribe, upload, or replace its own view: those
+rows (R06 data access, R07, R09, R10) are not implemented.
 
 ## Verification
 

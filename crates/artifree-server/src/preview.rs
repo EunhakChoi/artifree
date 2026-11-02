@@ -10,8 +10,10 @@
 //! This isolates content from the workspace, not from the network: loads and
 //! connections are limited to the content origin, but a script can still
 //! navigate its own frame to another site (decision 0003). The runtime
-//! bridge is limited to the current artifact's metadata; it has no data or
-//! model access.
+//! bridge is limited to the frame's own artifact: its metadata, and with
+//! separate user grants its pinned source, a conditional save, and a
+//! user-confirmed download (decisions 0019, 0020, 0032). It has no app-data
+//! or model access.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -32,6 +34,7 @@ use serde::Serialize;
 
 use crate::auth::hex;
 use crate::http::AppState;
+use crate::runtime_policy::Capability;
 use crate::runtime_sessions::{GrantScope, RuntimeSession};
 
 /// Upper bound on live tickets, which limits memory held by unused links.
@@ -92,6 +95,26 @@ pub(crate) struct RuntimeAuthority {
     pub(crate) session: Arc<RuntimeSession>,
     pub(crate) scope: GrantScope,
     pub(crate) version: u64,
+}
+
+/// The secrets a frame's request names: its view, generation, and the
+/// initialization the server issued to that document.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimeFrameId<'a> {
+    pub(crate) view_id: &'a str,
+    pub(crate) generation: u64,
+    pub(crate) initialization: &'a str,
+}
+
+/// Why a frame's request was not authorized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeRefusal {
+    /// No live view matches in full: unknown, replaced, closed, expired, or
+    /// the wrong initialization.
+    NoView,
+    /// The view matches, but its connection's current grant lacks the
+    /// capability: never granted, revoked, changed, or the connection ended.
+    NotGranted,
 }
 
 /// A runtime ticket could not be issued.
@@ -406,30 +429,51 @@ impl PreviewTickets {
         })
     }
 
-    /// Checks a live binding and the connection's current grant. The registry
-    /// lock is released before taking the session lock.
+    /// Checks a live binding and the connection's current grant for one
+    /// capability. The registry lock is released before taking the session
+    /// lock. A binding that does not match (unknown, replaced, closed,
+    /// expired, wrong secret) is [`RuntimeRefusal::NoView`]; only a binding
+    /// that matches in full can learn that its grant lacks the capability.
+    pub(crate) fn runtime_authorize(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+        revision: SourceRevision,
+        frame: &RuntimeFrameId<'_>,
+        capability: Capability,
+    ) -> Result<SourceRevision, RuntimeRefusal> {
+        let (head, authority) = self
+            .runtime_binding(
+                actor,
+                artifact,
+                revision,
+                frame.view_id,
+                frame.generation,
+                frame.initialization,
+            )
+            .ok_or(RuntimeRefusal::NoView)?;
+        let authority = authority.ok_or(RuntimeRefusal::NoView)?;
+        if authority
+            .session
+            .permits(&authority.scope, authority.version, capability)
+        {
+            Ok(head)
+        } else {
+            Err(RuntimeRefusal::NotGranted)
+        }
+    }
+
+    /// The metadata read's check (decision 0019): either refusal is the same
+    /// missing view.
     pub(crate) fn runtime_access(
         &self,
         actor: &ActorId,
         artifact: &ArtifactId,
         revision: SourceRevision,
-        view_id: &str,
-        generation: u64,
-        initialization: &str,
+        frame: &RuntimeFrameId<'_>,
     ) -> Option<SourceRevision> {
-        let (head, authority) = self.runtime_binding(
-            actor,
-            artifact,
-            revision,
-            view_id,
-            generation,
-            initialization,
-        )?;
-        let authority = authority?;
-        authority
-            .session
-            .permits(&authority.scope, authority.version)
-            .then_some(head)
+        self.runtime_authorize(actor, artifact, revision, frame, Capability::MetadataRead)
+            .ok()
     }
 
     #[cfg(test)]

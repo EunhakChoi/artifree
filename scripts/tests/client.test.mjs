@@ -1556,6 +1556,295 @@ test('Runtime responses must match the requested view and valid metadata', async
   }
 });
 
+const SOURCE_VIEW = {
+  url: `http://127.0.0.1:7411/r/${'b'.repeat(64)}/`,
+  enabled: true,
+  session_id: 'e'.repeat(32),
+  artifact_id: artifact.id,
+  revision: 3,
+  head_revision: 3,
+  sdk: 'artifree.app.v1',
+  declared: ['source.read', 'source.write', 'source.download'],
+  supported: ['source.read', 'source.write', 'source.download'],
+  granted: [],
+  grant_version: 0,
+  view_id: 'a'.repeat(32),
+  generation: 2,
+  initialization: 'c'.repeat(64),
+  expires_at_ms: 1_000_000,
+  lease_ms: 900_000,
+};
+const SOURCE_FILE = {
+  path: 'notes.txt',
+  size: 4,
+  sha256: 'e'.repeat(64),
+  media_type: 'text/plain; charset=utf-8',
+};
+
+/** A client whose runtime requests are recorded and answered by `respond`. */
+async function recordingClient(respond) {
+  const sent = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: 'e'.repeat(32) });
+      sent.push({ url, init });
+      return respond(url);
+    },
+  });
+  await client.openRuntimeSession();
+  return { client, sent };
+}
+
+test('Source calls name the view, carry only its initialization, and check the answer', async () => {
+  const base = `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/3/runtime-views/${'a'.repeat(32)}/2`;
+  const listing = {
+    artifact_id: artifact.id,
+    revision: 3,
+    files: [SOURCE_FILE],
+  };
+  const part = {
+    path: 'notes.txt',
+    revision: 3,
+    offset: 2,
+    size: 4,
+    sha256: 'e'.repeat(64),
+    next_offset: null,
+    content: 'dGU=',
+  };
+  const saved = {
+    revision: 4,
+    created_at_ms: 5,
+    files: [SOURCE_FILE],
+    replayed: false,
+  };
+  const { client, sent } = await recordingClient((url) =>
+    Response.json(
+      url.endsWith('/source')
+        ? listing
+        : url.endsWith('/source/read')
+          ? part
+          : saved,
+    ),
+  );
+  assert.deepEqual(await client.runtimeSourceList(SOURCE_VIEW), listing);
+  assert.deepEqual(
+    await client.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', { offset: 2 }),
+    part,
+  );
+  const changes = [
+    { op: 'put', path: 'notes.txt', encoding: 'utf8', content: 'text' },
+  ];
+  assert.deepEqual(
+    await client.runtimeSourceSave(SOURCE_VIEW, changes, {
+      idempotencyKey: 'frame-key-0001',
+    }),
+    saved,
+  );
+  assert.deepEqual(
+    sent.map(({ url, init }) => [init.method, url]),
+    [
+      ['POST', `${base}/source`],
+      ['POST', `${base}/source/read`],
+      ['POST', `${base}/source/save`],
+    ],
+  );
+  // The account token authenticates the workspace; the frame's secret is the
+  // view's initialization, and nothing else about the frame is sent.
+  assert.deepEqual(JSON.parse(sent[0].init.body), {
+    initialization: 'c'.repeat(64),
+  });
+  assert.deepEqual(JSON.parse(sent[1].init.body), {
+    initialization: 'c'.repeat(64),
+    path: 'notes.txt',
+    offset: 2,
+  });
+  assert.deepEqual(JSON.parse(sent[2].init.body), {
+    initialization: 'c'.repeat(64),
+    changes,
+  });
+  assert.equal(sent[2].init.headers['idempotency-key'], 'frame-key-0001');
+  assert.equal(sent[0].init.headers.authorization, 'Bearer token');
+  for (const [name, body, call] of [
+    [
+      'another artifact',
+      { ...listing, artifact_id: `art_${'1'.repeat(32)}` },
+      (c) => c.runtimeSourceList(SOURCE_VIEW),
+    ],
+    [
+      'another revision',
+      { ...listing, revision: 2 },
+      (c) => c.runtimeSourceList(SOURCE_VIEW),
+    ],
+    [
+      'a bad digest',
+      { ...listing, files: [{ ...SOURCE_FILE, sha256: 'xyz' }] },
+      (c) => c.runtimeSourceList(SOURCE_VIEW),
+    ],
+    [
+      'another file',
+      { ...part, path: 'other.txt' },
+      (c) => c.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', { offset: 2 }),
+    ],
+    [
+      'another offset',
+      { ...part, offset: 0 },
+      (c) => c.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', { offset: 2 }),
+    ],
+    [
+      'another revision part',
+      { ...part, revision: 2 },
+      (c) => c.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', { offset: 2 }),
+    ],
+    [
+      'a next offset that does not advance',
+      { ...part, next_offset: 2 },
+      (c) => c.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', { offset: 2 }),
+    ],
+    [
+      'a next offset past the file',
+      { ...part, next_offset: 5 },
+      (c) => c.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', { offset: 2 }),
+    ],
+    [
+      'content that is not base64',
+      { ...part, content: 'not base64!' },
+      (c) => c.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', { offset: 2 }),
+    ],
+    [
+      'a revision that is not newer',
+      { ...saved, revision: 3 },
+      (c) =>
+        c.runtimeSourceSave(SOURCE_VIEW, changes, {
+          idempotencyKey: 'frame-key-0001',
+        }),
+    ],
+    [
+      'a replay flag that is not a boolean',
+      { ...saved, replayed: 'no' },
+      (c) =>
+        c.runtimeSourceSave(SOURCE_VIEW, changes, {
+          idempotencyKey: 'frame-key-0001',
+        }),
+    ],
+  ]) {
+    const error = await failure(
+      call((await recordingClient(() => Response.json(body))).client),
+    );
+    assert.equal(error.code, 'invalid_response', name);
+  }
+});
+
+test('A refused source save keeps the conflict, the key reuse and the grant refusal apart', async () => {
+  const refusal =
+    (status, code, extra = {}) =>
+    () =>
+      Response.json(
+        { error: { code, message: 'Refused.', ...extra } },
+        { status },
+      );
+  const save = async (respond) =>
+    failure(
+      (await recordingClient(respond)).client.runtimeSourceSave(
+        SOURCE_VIEW,
+        [{ op: 'delete', path: 'notes.txt' }],
+        { idempotencyKey: 'frame-key-0001' },
+      ),
+    );
+  const conflict = await save(
+    refusal(409, 'revision_conflict', { current_revision: 9 }),
+  );
+  assert.deepEqual(
+    [conflict.status, conflict.code, conflict.currentRevision],
+    [409, 'revision_conflict', 9],
+  );
+  assert.equal((await save(refusal(403, 'forbidden'))).code, 'forbidden');
+  assert.equal((await save(refusal(404, 'not_found'))).status, 404);
+  assert.equal(
+    (await save(refusal(422, 'request_key_reused'))).code,
+    'request_key_reused',
+  );
+});
+
+test('A runtime download is a closed type, a safe name and the whole body', async () => {
+  const bytes = new Uint8Array([0, 255, 1, 254]);
+  const answer =
+    (type, name = 'notes.txt') =>
+    () =>
+      new Response(bytes, {
+        status: 200,
+        headers: {
+          'content-type': type,
+          'content-disposition': `attachment; filename="${name}"`,
+        },
+      });
+  const download = async (respond, path) =>
+    (await recordingClient(respond)).client.runtimeDownload(SOURCE_VIEW, path);
+  assert.deepEqual(
+    await download(answer('application/octet-stream'), 'notes.txt'),
+    {
+      bytes,
+      fileName: 'notes.txt',
+      mediaType: 'application/octet-stream',
+      kind: 'file',
+    },
+  );
+  assert.deepEqual(await download(answer('application/zip', 'a-r3.zip')), {
+    bytes,
+    fileName: 'a-r3.zip',
+    mediaType: 'application/zip',
+    kind: 'archive',
+  });
+  const { client, sent } = await recordingClient(
+    answer('application/octet-stream'),
+  );
+  await client.runtimeDownload(SOURCE_VIEW, 'notes.txt');
+  assert.deepEqual(JSON.parse(sent[0].init.body), {
+    initialization: 'c'.repeat(64),
+    path: 'notes.txt',
+  });
+  // Whatever the server says, a file that could be rendered is not accepted
+  // as one to hand to the user: not HTML, not the other kind, not a name
+  // with a path or a quote in it.
+  for (const [type, name, path] of [
+    ['text/html; charset=utf-8', 'notes.txt', 'notes.txt'],
+    ['application/zip', 'notes.txt', 'notes.txt'],
+    ['application/octet-stream', 'notes.txt', undefined],
+    ['application/octet-stream', '../notes.txt', 'notes.txt'],
+    ['application/octet-stream', 'a"b.txt', 'notes.txt'],
+    ['application/octet-stream', 'a b.txt', 'notes.txt'],
+    ['application/octet-stream', '', 'notes.txt'],
+  ]) {
+    const error = await failure(download(answer(type, name), path));
+    assert.equal(error.code, 'invalid_response', `${type} ${name} ${path}`);
+  }
+  const cut = () => {
+    const response = cutOff(200, 'PK');
+    response.headers.set('content-type', 'application/zip');
+    response.headers.set(
+      'content-disposition',
+      'attachment; filename="a-r3.zip"',
+    );
+    return response;
+  };
+  assert.equal((await failure(download(cut))).code, 'network_error');
+});
+
+test('Source calls need the connection that issued the view', async () => {
+  const { client } = await recordingClient(() => Response.json({}));
+  const other = { ...SOURCE_VIEW, session_id: 'd'.repeat(32) };
+  for (const call of [
+    () => client.runtimeSourceList(other),
+    () => client.runtimeSourceRead(other, 'notes.txt'),
+    () =>
+      client.runtimeSourceSave(other, [], { idempotencyKey: 'frame-key-0001' }),
+    () => client.runtimeDownload(other, undefined),
+  ])
+    assert.equal((await failure(call())).code, 'invalid_request');
+});
+
 test('An export is a ZIP archive, whole, or a failure', async () => {
   // The end record of an empty archive.
   const zip = new Uint8Array(22);

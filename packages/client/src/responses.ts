@@ -34,6 +34,9 @@ import type {
   RuntimeConnection,
   RuntimeMetadata,
   RuntimeGrant,
+  RuntimeSourceFile,
+  RuntimeSourceManifest,
+  RuntimeSourceSaved,
   RuntimeView,
   CreateTokenResponse,
   RotateTokenResponse,
@@ -574,6 +577,66 @@ export function parseRuntimeMetadata(
   )
     return undefined;
   return { artifact_id, title, current_revision, metadata_revision };
+}
+
+/** Validates a frame's source listing. */
+export function parseRuntimeSourceManifest(
+  value: unknown,
+): RuntimeSourceManifest | undefined {
+  if (!isRecord(value) || typeof value.artifact_id !== 'string')
+    return undefined;
+  const files = list(value.files, revisionFile);
+  if (!isCount(value.revision) || value.revision === 0 || files === undefined)
+    return undefined;
+  return {
+    artifact_id: value.artifact_id,
+    revision: value.revision,
+    files,
+  };
+}
+
+const BASE64_TEXT =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/** Validates a part of a file a frame read; `content` is padded base64. */
+export function parseRuntimeSourceFile(
+  value: unknown,
+): RuntimeSourceFile | undefined {
+  if (!isRecord(value)) return undefined;
+  const { path, revision, offset, size, sha256, next_offset, content } = value;
+  if (
+    typeof path !== 'string' ||
+    !isCount(revision) ||
+    revision === 0 ||
+    !isCount(offset) ||
+    !isCount(size) ||
+    offset > size ||
+    typeof sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    !(next_offset === null || (isCount(next_offset) && next_offset > offset)) ||
+    (next_offset !== null && next_offset > size) ||
+    typeof content !== 'string' ||
+    !BASE64_TEXT.test(content)
+  )
+    return undefined;
+  return { path, revision, offset, size, sha256, next_offset, content };
+}
+
+/** Validates the result of a frame's save. */
+export function parseRuntimeSourceSaved(
+  value: unknown,
+): RuntimeSourceSaved | undefined {
+  if (!isRecord(value) || typeof value.replayed !== 'boolean') return undefined;
+  const files = list(value.files, revisionFile);
+  const { revision, created_at_ms } = value;
+  if (
+    !isCount(revision) ||
+    revision < 2 ||
+    !isTime(created_at_ms) ||
+    files === undefined
+  )
+    return undefined;
+  return { revision, created_at_ms, files, replayed: value.replayed };
 }
 
 /** Parses the data of a `ready` or `reset` feed event. */

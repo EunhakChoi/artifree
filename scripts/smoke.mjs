@@ -21,6 +21,7 @@ import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
 import { checkRuntime } from './smoke-runtime.mjs';
+import { checkSource } from './smoke-source.mjs';
 import { checkStaticDefault } from './smoke-static-default.mjs';
 import { checkTrash } from './smoke-trash.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
@@ -319,6 +320,12 @@ try {
     server: api,
     checkAccessibility,
   });
+  const source = await checkSource({
+    browser,
+    origin,
+    server: api,
+    checkAccessibility,
+  });
   const staticDefault = await checkStaticDefault({
     browser,
     binary: serverBinary,
@@ -497,6 +504,7 @@ try {
     incompleteLocks,
     strictRecovery,
     runtime,
+    source,
     staticDefault,
     handoff,
     artifactConsole,

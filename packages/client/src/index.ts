@@ -15,6 +15,8 @@ export type {
   UpdateDataInput,
   FilePart,
   FileRange,
+  RuntimeDownloadBytes,
+  RuntimeSourceRange,
   MutationOptions,
   ReadOptions,
   RuntimeViewOptions,

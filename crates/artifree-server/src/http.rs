@@ -23,7 +23,9 @@ use artifree_contracts::api::{
     Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
     PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
-    RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
+    RuntimeConnection, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
+    RuntimeMetadataRequest, RuntimeSourceFile, RuntimeSourceManifest, RuntimeSourceReadRequest,
+    RuntimeSourceRequest, RuntimeSourceSaveRequest, RuntimeSourceSaved, SaveRevisionRequest,
     SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest, UnreferencedContent,
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
@@ -314,6 +316,28 @@ pub fn router(state: AppState) -> Router {
     router_with_web(state, None)
 }
 
+/// Routes a runtime frame's source and download requests reach, through the
+/// workspace, with the view's initialization (decision 0032).
+fn runtime_source_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/source",
+            axum::routing::post(runtime_source_manifest),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/source/read",
+            axum::routing::post(runtime_source_read),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/source/save",
+            axum::routing::post(runtime_source_save),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/download",
+            axum::routing::post(runtime_download),
+        )
+}
+
 /// Routes of HTTP API v1 and the MCP endpoint mounted behind authentication and limits.
 fn api_v1_routes(state: &AppState) -> Router<AppState> {
     Router::new()
@@ -384,6 +408,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
             "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/metadata",
             axum::routing::post(runtime_metadata),
         )
+        .merge(runtime_source_routes())
         .route(
             "/v1/runtime-views/{view}/{generation}",
             axum::routing::delete(close_runtime_view),
@@ -1365,6 +1390,124 @@ async fn runtime_metadata(
     )
     .await
     .map(Json)
+}
+
+type FramePath = Result<Path<(String, u64, String, u64)>, PathRejection>;
+
+/// A frame's request body. A rejection never quotes the body back: serde's
+/// own messages include the offending value, and a frame supplied it
+/// (decision 0032).
+fn frame_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+    match body {
+        Ok(Json(value)) => Ok(value),
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            Err(ApiError::from(rejection))
+        }
+        Err(_) => Err(ApiError::invalid(
+            "the request body is not a valid request for this operation",
+        )),
+    }
+}
+
+async fn runtime_source_manifest(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeSourceRequest>, JsonRejection>,
+) -> Result<Json<RuntimeSourceManifest>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let request = frame_body(body)?;
+    let call = operations::FrameCall {
+        artifact: &id,
+        revision,
+        view_id: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    operations::runtime_source_manifest(&state, actor, call)
+        .await
+        .map(Json)
+}
+
+async fn runtime_source_read(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeSourceReadRequest>, JsonRejection>,
+) -> Result<Json<RuntimeSourceFile>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let request = frame_body(body)?;
+    let initialization = request.initialization.clone();
+    let call = operations::FrameCall {
+        artifact: &id,
+        revision,
+        view_id: &view,
+        generation,
+        initialization: &initialization,
+    };
+    operations::runtime_source_read(&state, actor, call, request)
+        .await
+        .map(Json)
+}
+
+async fn runtime_source_save(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: FramePath,
+    body: Result<Json<RuntimeSourceSaveRequest>, JsonRejection>,
+) -> Result<Json<RuntimeSourceSaved>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let request = frame_body(body)?;
+    let initialization = request.initialization.clone();
+    let call = operations::FrameCall {
+        artifact: &id,
+        revision,
+        view_id: &view,
+        generation,
+        initialization: &initialization,
+    };
+    operations::runtime_source_save(&state, actor, &key, call, request)
+        .await
+        .map(Json)
+}
+
+async fn runtime_download(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeDownloadRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let request = frame_body(body)?;
+    let initialization = request.initialization.clone();
+    let call = operations::FrameCall {
+        artifact: &id,
+        revision,
+        view_id: &view,
+        generation,
+        initialization: &initialization,
+    };
+    let download = operations::runtime_download(&state, actor, call, request).await?;
+    // The type is closed and the name is reduced to ASCII letters, digits,
+    // and `._-`: whatever the file is, a browser saves it and never renders
+    // it, on this origin or any other (decision 0032).
+    Ok((
+        [
+            (header::CONTENT_TYPE, download.media_type.to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", download.file_name),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "sandbox; default-src 'none'".to_owned(),
+            ),
+        ],
+        download.bytes,
+    )
+        .into_response())
 }
 
 async fn close_runtime_view(

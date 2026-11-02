@@ -14,10 +14,12 @@ use artifree_contracts::api::{
     JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
     Preview, PurgeArtifactRequest, PurgeArtifactResponse, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
-    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
-    SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    RevisionList, RuntimeConnection, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
+    RuntimeSourceFile, RuntimeSourceManifest, RuntimeSourceReadRequest, RuntimeSourceSaveRequest,
+    RuntimeSourceSaved, RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
+    SourceExportFormat, SourceExportManifest, StageHandoffRequest,
+    UnreferencedContent as WireContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
@@ -34,6 +36,8 @@ use artifree_domain::package::{
     ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+use std::num::NonZeroU64;
+
 use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, ListOrder, RevisionRecord,
     UnreferencedContent,
@@ -47,8 +51,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use crate::auth::hex;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
-use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest};
-use crate::runtime_policy::{MANIFEST_PATH, METADATA_READ, RuntimePolicy, SDK_PIN};
+use crate::preview::{
+    self, RuntimeAuthority, RuntimeFrameId, RuntimeIssueError, RuntimeRefusal, RuntimeTicketRequest,
+};
+use crate::runtime_policy::{Capability, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
 use crate::runtime_sessions::{GrantScope, SessionError};
 
 /// A failed operation: the HTTP status and the contract error body. MCP
@@ -1009,18 +1015,14 @@ pub(crate) async fn set_runtime_grant(
     if record.current_revision.0 != request.head_revision {
         return Err(session_error(SessionError::Conflict));
     }
-    if !policy.supports_grant(&request.capabilities) {
+    let Some(capabilities) = policy.grant(&request.capabilities) else {
         return Err(ApiError::unprocessable(
             "grant must be a supported, declared subset",
         ));
-    }
+    };
     let scope = GrantScope::new(id, revision, record.current_revision);
     let version = session
-        .set_grant(
-            scope,
-            !request.capabilities.is_empty(),
-            request.expected_version,
-        )
+        .set_grant(scope, capabilities, request.expected_version)
         .map_err(session_error)?;
     Ok(RuntimeGrant { version })
 }
@@ -1053,8 +1055,8 @@ pub(crate) async fn create_runtime_view(
         })?;
     let (record, enabled, policy) = runtime_source(state, &actor, &id, revision).await?;
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
-    let (ticket, grant_version, allowed) = session
-        .with_grant(&scope, |version, allowed| {
+    let (ticket, grant_version, granted) = session
+        .with_grant(&scope, |version, granted| {
             let ticket = state.previews().issue_runtime(RuntimeTicketRequest {
                 actor,
                 token_id,
@@ -1075,7 +1077,7 @@ pub(crate) async fn create_runtime_view(
             {
                 return Err(RuntimeIssueError::Unavailable);
             }
-            Ok((ticket, version, allowed))
+            Ok((ticket, version, granted))
         })
         .map_err(session_error)?
         .map_err(|error| match error {
@@ -1109,11 +1111,7 @@ pub(crate) async fn create_runtime_view(
         } else {
             Vec::new()
         },
-        granted: if allowed {
-            vec![METADATA_READ.to_owned()]
-        } else {
-            Vec::new()
-        },
+        granted: granted.names(),
         grant_version,
         view_id: request.view_id,
         generation: request.generation,
@@ -1135,9 +1133,14 @@ pub(crate) async fn runtime_metadata(
     validate_view(view_id, generation)?;
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
+    let frame = RuntimeFrameId {
+        view_id,
+        generation,
+        initialization,
+    };
     let head = state
         .previews()
-        .runtime_access(&actor, &id, revision, view_id, generation, initialization)
+        .runtime_access(&actor, &id, revision, &frame)
         .ok_or_else(missing_view)?;
     let lookup_actor = actor.clone();
     let lookup_id = id.clone();
@@ -1147,14 +1150,10 @@ pub(crate) async fn runtime_metadata(
     // Access and current source are read from the service on every RPC. A
     // concurrent view replacement or expiry is checked again after the read.
     if record.current_revision != head
-        || state.previews().runtime_access(
-            &actor,
-            &id,
-            revision,
-            view_id,
-            generation,
-            initialization,
-        ) != Some(head)
+        || state
+            .previews()
+            .runtime_access(&actor, &id, revision, &frame)
+            != Some(head)
     {
         return Err(missing_view());
     }
@@ -1164,6 +1163,241 @@ pub(crate) async fn runtime_metadata(
         current_revision: record.current_revision.0,
         metadata_revision: record.metadata_revision.0,
     })
+}
+
+/// The most bytes one `source.read` answer holds (decision 0032).
+pub(crate) const MAX_RUNTIME_READ_BYTES: u64 = 1024 * 1024;
+
+/// Frame request keys are namespaced with this prefix before they reach the
+/// service, so a frame can neither reuse nor probe a key of the owner's own
+/// requests (decision 0032).
+const FRAME_KEY_PREFIX: &str = "frame:";
+
+/// A frame request: the artifact, revision, view, generation, and
+/// initialization the workspace names on the frame's behalf.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrameCall<'a> {
+    pub(crate) artifact: &'a str,
+    pub(crate) revision: u64,
+    pub(crate) view_id: &'a str,
+    pub(crate) generation: u64,
+    pub(crate) initialization: &'a str,
+}
+
+/// A frame request that passed its checks.
+struct Frame {
+    id: ArtifactId,
+    revision: SourceRevision,
+}
+
+fn frame_refusal(refusal: RuntimeRefusal) -> ApiError {
+    match refusal {
+        RuntimeRefusal::NoView => missing_view(),
+        RuntimeRefusal::NotGranted => ApiError::forbidden(
+            "the runtime connection does not currently grant this capability to the view",
+        ),
+    }
+}
+
+/// The checks every frame capability makes before it acts and again before it
+/// answers: the view's full binding (decision 0019), then the connection's
+/// current grant of `capability` (decision 0020). A grant the frame once had,
+/// or a result cached in the frame, is never authority.
+fn authorize_frame(
+    state: &AppState,
+    actor: &ActorId,
+    call: &FrameCall<'_>,
+    capability: Capability,
+) -> Result<Frame, ApiError> {
+    validate_view(call.view_id, call.generation)?;
+    let id = artifact_id(call.artifact)?;
+    let revision = revision_number(call.revision)?;
+    state
+        .previews()
+        .runtime_authorize(
+            actor,
+            &id,
+            revision,
+            &RuntimeFrameId {
+                view_id: call.view_id,
+                generation: call.generation,
+                initialization: call.initialization,
+            },
+            capability,
+        )
+        .map_err(frame_refusal)?;
+    Ok(Frame { id, revision })
+}
+
+/// Lists the files of the revision a frame is pinned to (`source.read`).
+pub(crate) async fn runtime_source_manifest(
+    state: &AppState,
+    actor: ActorId,
+    call: FrameCall<'_>,
+) -> Result<RuntimeSourceManifest, ApiError> {
+    let frame = authorize_frame(state, &actor, &call, Capability::SourceRead)?;
+    let (read_actor, read_id, revision) = (actor.clone(), frame.id.clone(), frame.revision);
+    let record = state
+        .run(move |artifacts| artifacts.revision(&read_actor, &read_id, revision))
+        .await?;
+    authorize_frame(state, &actor, &call, Capability::SourceRead)?;
+    Ok(RuntimeSourceManifest {
+        artifact_id: frame.id.to_string(),
+        revision: frame.revision.0,
+        files: revision_dto(record).files,
+    })
+}
+
+/// Reads at most [`MAX_RUNTIME_READ_BYTES`] of one file of the pinned
+/// revision (`source.read`), cut at bytes with the file's size and digest.
+pub(crate) async fn runtime_source_read(
+    state: &AppState,
+    actor: ActorId,
+    call: FrameCall<'_>,
+    request: RuntimeSourceReadRequest,
+) -> Result<RuntimeSourceFile, ApiError> {
+    let frame = authorize_frame(state, &actor, &call, Capability::SourceRead)?;
+    let length = match request.length {
+        None => MAX_RUNTIME_READ_BYTES,
+        Some(length) => length.min(MAX_RUNTIME_READ_BYTES),
+    };
+    let length = NonZeroU64::new(length)
+        .ok_or_else(|| ApiError::invalid("length: expected at least 1 byte"))?;
+    let range = ByteRange::From {
+        offset: request.offset.unwrap_or(0),
+        length: Some(length),
+    };
+    let file = read_file(
+        state,
+        actor.clone(),
+        call.artifact,
+        frame.revision.0,
+        &request.path,
+        range,
+        Boundary::Byte,
+    )
+    .await?;
+    authorize_frame(state, &actor, &call, Capability::SourceRead)?;
+    let part = file.part;
+    Ok(RuntimeSourceFile {
+        path: file.path.to_string(),
+        revision: file.revision.0,
+        offset: part.offset,
+        size: part.size,
+        sha256: hex(&part.sha256),
+        next_offset: part.next_offset(),
+        content: BASE64.encode(&part.content),
+    })
+}
+
+/// Commits a frame's changes on top of the revision it is pinned to
+/// (`source.write`). This is [`save`] with the base fixed to the pinned
+/// revision and the key namespaced, so a stale base is a `revision_conflict`
+/// and a repeated key replays the first result, exactly as for the owner's
+/// own saves. The commit is attributed to the viewing user's actor, because a
+/// frame has no identity of its own (decision 0032).
+pub(crate) async fn runtime_source_save(
+    state: &AppState,
+    actor: ActorId,
+    key: &RequestKey,
+    call: FrameCall<'_>,
+    request: RuntimeSourceSaveRequest,
+) -> Result<RuntimeSourceSaved, ApiError> {
+    let frame = authorize_frame(state, &actor, &call, Capability::SourceWrite)?;
+    let key: RequestKey = format!("{FRAME_KEY_PREFIX}{}", key.as_str())
+        .parse()
+        .map_err(|_| ApiError::invalid("Idempotency-Key: too long for a runtime save"))?;
+    let committed = save(
+        state,
+        actor,
+        key,
+        &frame.id.to_string(),
+        SaveRevisionRequest {
+            base_revision: frame.revision.0,
+            changes: request.changes,
+        },
+    )
+    .await?;
+    Ok(RuntimeSourceSaved {
+        revision: committed.revision.revision,
+        created_at_ms: committed.revision.created_at_ms,
+        files: committed.revision.files,
+        replayed: committed.replayed,
+    })
+}
+
+/// A file or archive for the workspace to hand to the user.
+pub(crate) struct RuntimeDownload {
+    /// A safe file name: ASCII letters, digits, `.`, `-`, and `_`.
+    pub(crate) file_name: String,
+    /// A closed content type, never the file's own: the download must not
+    /// make a browser render it.
+    pub(crate) media_type: &'static str,
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// The name a download is saved under: the last path segment, reduced to
+/// ASCII letters, digits, `.`, `-`, and `_`. Package paths already satisfy
+/// this; the reduction keeps the header safe regardless.
+fn safe_file_name(path: &PackagePath) -> String {
+    let name = path.as_str().rsplit('/').next().unwrap_or("download");
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() || name.starts_with('.') {
+        format!("download{name}")
+    } else {
+        name
+    }
+}
+
+/// The bytes of one file of the pinned revision, or its source export
+/// archive, for the user (`source.download`). They are the stored bytes (the
+/// archive is the one `export` writes for that revision), under the closed
+/// content type `application/octet-stream` or `application/zip`.
+pub(crate) async fn runtime_download(
+    state: &AppState,
+    actor: ActorId,
+    call: FrameCall<'_>,
+    request: RuntimeDownloadRequest,
+) -> Result<RuntimeDownload, ApiError> {
+    let frame = authorize_frame(state, &actor, &call, Capability::SourceDownload)?;
+    let download = match request.path {
+        None => {
+            let archive = export(state, actor.clone(), call.artifact, frame.revision.0).await?;
+            RuntimeDownload {
+                file_name: archive.file_name,
+                media_type: "application/zip",
+                bytes: archive.archive,
+            }
+        }
+        Some(path) => {
+            let file = read_file(
+                state,
+                actor.clone(),
+                call.artifact,
+                frame.revision.0,
+                &path,
+                ByteRange::WHOLE,
+                Boundary::Byte,
+            )
+            .await?;
+            RuntimeDownload {
+                file_name: safe_file_name(&file.path),
+                media_type: "application/octet-stream",
+                bytes: file.part.content,
+            }
+        }
+    };
+    authorize_frame(state, &actor, &call, Capability::SourceDownload)?;
+    Ok(download)
 }
 
 pub(crate) fn close_runtime_view(

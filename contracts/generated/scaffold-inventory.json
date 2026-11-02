@@ -33,7 +33,7 @@
       "language": "TypeScript",
       "path": "packages/runtime-sdk",
       "status": "implemented",
-      "summary": "An opted-in sandboxed frame reads its own artifact metadata with a connection-scoped grant; other runtime capabilities remain planned."
+      "summary": "An opted-in sandboxed frame reads its own artifact metadata, and with separate connection-scoped grants reads its pinned source, saves changes as a conditional revision, and asks the user to download it. App data, models, subscriptions, uploads, and rooms remain planned."
     },
     {
       "id": "api",
@@ -69,7 +69,7 @@
       "language": "Rust",
       "path": "crates/artifree-core/src/policy.rs",
       "status": "implemented",
-      "summary": "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks runtime metadata grants."
+      "summary": "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks the current runtime grant of each capability on every frame request."
     },
     {
       "id": "documents",

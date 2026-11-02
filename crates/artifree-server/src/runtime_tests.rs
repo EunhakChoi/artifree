@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
     ContentEncoding, CreateArtifactRequest, CreateRuntimeViewRequest, FileChange, FileUpload,
-    Handoff, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
-    UpdateArtifactRequest,
+    Handoff, RuntimeDownloadRequest, RuntimeSourceReadRequest, RuntimeView, SaveRevisionRequest,
+    SetRuntimeGrantRequest, StageHandoffRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::RegisteredHandoffSession;
 use artifree_domain::SourceRevision;
@@ -25,6 +25,14 @@ use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
 use crate::{changes, operations, preview};
+
+/// Every capability this server supports, in the order a view lists them.
+const SUPPORTED: [&str; 4] = [
+    "metadata.read",
+    "source.read",
+    "source.write",
+    "source.download",
+];
 
 struct TestDirectory(PathBuf);
 
@@ -76,7 +84,17 @@ async fn initialized_view(
     state: &AppState,
     actor: &ActorId,
 ) -> Result<(RuntimeView, String), Box<dyn Error>> {
-    let artifact_id = create_runtime_artifact(state, actor).await?;
+    initialized_view_granting(state, actor, &["metadata.read"]).await
+}
+
+/// A view whose artifact declares, and whose connection grants, exactly these
+/// capabilities.
+async fn initialized_view_granting(
+    state: &AppState,
+    actor: &ActorId,
+    capabilities: &[&str],
+) -> Result<(RuntimeView, String), Box<dyn Error>> {
+    let artifact_id = create_artifact_declaring(state, actor, capabilities).await?;
     let session_id = operations::open_runtime_session(state, actor, None)
         .map_err(|error| error.body.message)?
         .session_id;
@@ -89,7 +107,7 @@ async fn initialized_view(
         SetRuntimeGrantRequest {
             head_revision: 1,
             expected_version: 0,
-            capabilities: vec!["metadata.read".into()],
+            capabilities: capabilities.iter().map(|name| (*name).to_owned()).collect(),
         },
     )
     .await
@@ -125,19 +143,41 @@ async fn create_runtime_artifact(
     state: &AppState,
     actor: &ActorId,
 ) -> Result<String, Box<dyn Error>> {
+    create_artifact_declaring(state, actor, &["metadata.read"]).await
+}
+
+async fn create_artifact_declaring(
+    state: &AppState,
+    actor: &ActorId,
+    capabilities: &[&str],
+) -> Result<String, Box<dyn Error>> {
+    let mut files = vec![FileUpload {
+        path: "index.html".into(),
+        encoding: ContentEncoding::Utf8,
+        content:
+            "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>"
+                .into(),
+    }];
+    // A marker alone declares only `metadata.read` (decision 0020).
+    if capabilities != ["metadata.read"] {
+        files.push(FileUpload {
+            path: "artifree-runtime.json".into(),
+            encoding: ContentEncoding::Utf8,
+            content: serde_json::json!({"sdk": "artifree.app.v1", "capabilities": capabilities})
+                .to_string(),
+        });
+    }
     let created = operations::create(
         state,
         actor.clone(),
         "runtime-race-key".parse()?,
         CreateArtifactRequest {
             title: "Runtime race".into(),
-            files: vec![FileUpload {
-                path: "index.html".into(),
-                encoding: ContentEncoding::Utf8,
-                content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
-            }],
+            files,
         },
-    ).await.map_err(|error| error.body.message)?;
+    )
+    .await
+    .map_err(|error| error.body.message)?;
     Ok(created.artifact.id)
 }
 
@@ -292,7 +332,7 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
         .await
         .map_err(|status| format!("view: {status}"))?;
     assert_eq!(declared.declared, ["future.write", "metadata.read"]);
-    assert_eq!(declared.supported, ["metadata.read"]);
+    assert_eq!(declared.supported, SUPPORTED);
     let request = SetRuntimeGrantRequest {
         head_revision: 2,
         expected_version: 0,
@@ -325,7 +365,7 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
         .await
         .map_err(|status| format!("view: {status}"))?;
     assert!(omitted.declared.is_empty());
-    assert_eq!(omitted.supported, ["metadata.read"]);
+    assert_eq!(omitted.supported, SUPPORTED);
     assert_eq!(
         change_grant(&state, &actor, &session, &omitted, true).await,
         Err(StatusCode::UNPROCESSABLE_ENTITY)
@@ -479,10 +519,124 @@ fn revocation_while_metadata_waits_rejects_its_late_result() -> Result<(), Box<d
             SourceRevision(1),
         );
         session_handle
-            .set_grant(scope, false, view.grant_version)
+            .set_grant(
+                scope,
+                crate::runtime_policy::CapabilitySet::default(),
+                view.grant_version,
+            )
             .map_err(|error| format!("{error:?}"))?;
         release.send(())?;
         assert!(matches!(request.await, Err(error) if error.status == StatusCode::NOT_FOUND));
+        blocker.await?;
+        Ok::<(), Box<dyn Error>>(())
+    })?;
+    Ok(())
+}
+
+/// Which call to hold in the service while the grant is revoked.
+#[derive(Clone, Copy)]
+enum HeldCall {
+    List,
+    Read,
+    Download,
+}
+
+#[test]
+fn revocation_while_source_calls_wait_rejects_their_late_results() -> Result<(), Box<dyn Error>> {
+    for (call, capability) in [
+        (HeldCall::List, "source.read"),
+        (HeldCall::Read, "source.read"),
+        (HeldCall::Download, "source.download"),
+    ] {
+        source_call_revoked_while_waiting(call, capability)?;
+    }
+    Ok(())
+}
+
+fn source_call_revoked_while_waiting(
+    held: HeldCall,
+    capability: &str,
+) -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, session) = initialized_view_granting(&state, &actor, &[capability]).await?;
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _sent = started.send(());
+            let _released = waiting.recv();
+        });
+        ready.await?;
+        let call = operations::FrameCall {
+            artifact: &view.artifact_id,
+            revision: view.revision,
+            view_id: &view.view_id,
+            generation: view.generation,
+            initialization: &view.initialization,
+        };
+        let mut request: std::pin::Pin<
+            Box<dyn Future<Output = Result<(), operations::ApiError>> + '_>,
+        > = match held {
+            HeldCall::List => Box::pin(async {
+                operations::runtime_source_manifest(&state, actor.clone(), call)
+                    .await
+                    .map(drop)
+            }),
+            HeldCall::Read => Box::pin(async {
+                operations::runtime_source_read(
+                    &state,
+                    actor.clone(),
+                    call,
+                    RuntimeSourceReadRequest {
+                        initialization: view.initialization.clone(),
+                        path: "index.html".into(),
+                        offset: None,
+                        length: None,
+                    },
+                )
+                .await
+                .map(drop)
+            }),
+            HeldCall::Download => Box::pin(async {
+                operations::runtime_download(
+                    &state,
+                    actor.clone(),
+                    call,
+                    RuntimeDownloadRequest {
+                        initialization: view.initialization.clone(),
+                        path: Some("index.html".into()),
+                    },
+                )
+                .await
+                .map(drop)
+            }),
+        };
+        assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await);
+        // The read is held in the service, but the real grant registry can revoke it.
+        let session_handle = state
+            .runtime_sessions()
+            .get(&actor, &session)
+            .map_err(|error| format!("{error:?}"))?;
+        let scope = crate::runtime_sessions::GrantScope::new(
+            view.artifact_id.parse()?,
+            SourceRevision(1),
+            SourceRevision(1),
+        );
+        session_handle
+            .set_grant(
+                scope,
+                crate::runtime_policy::CapabilitySet::default(),
+                view.grant_version,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        release.send(())?;
+        assert!(matches!(request.await, Err(error) if error.status == StatusCode::FORBIDDEN));
         blocker.await?;
         Ok::<(), Box<dyn Error>>(())
     })?;

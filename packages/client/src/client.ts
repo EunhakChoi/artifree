@@ -30,6 +30,9 @@ import type {
   RotateTokenResponse,
   RuntimeMetadata,
   RuntimeGrant,
+  RuntimeSourceFile,
+  RuntimeSourceManifest,
+  RuntimeSourceSaved,
   RuntimeView,
   SaveRevisionRequest,
   SetDataRequest,
@@ -71,6 +74,9 @@ import {
   parseRotateToken,
   parseRuntimeConnection,
   parseRuntimeMetadata,
+  parseRuntimeSourceFile,
+  parseRuntimeSourceManifest,
+  parseRuntimeSourceSaved,
   parseRuntimeGrant,
   parseRuntimeView,
   parseTokenList,
@@ -127,6 +133,33 @@ export interface FileRange {
   readonly offset: number;
   /** How many bytes at most; the rest of the file when absent. */
   readonly length?: number;
+}
+
+/** Which bytes of a file a frame's read asks for. */
+export interface RuntimeSourceRange {
+  /** The first byte, counted from 0; the start of the file when absent. */
+  readonly offset?: number | undefined;
+  /** How many bytes at most, up to 1 MiB; as many as one answer holds when absent. */
+  readonly length?: number | undefined;
+}
+
+/** A file or archive the server prepared for the user to save. */
+export interface RuntimeDownloadBytes {
+  /** The stored bytes, or the revision's source export archive. */
+  readonly bytes: Uint8Array<ArrayBuffer>;
+  /** A name of ASCII letters, digits, `.`, `-`, and `_` only. */
+  readonly fileName: string;
+  /** Never the file's own type, so saving it cannot render it. */
+  readonly mediaType: 'application/octet-stream' | 'application/zip';
+  /** Whether it is one file or the whole revision. */
+  readonly kind: 'file' | 'archive';
+}
+
+function invalidResponse(what: string): ArtifreeApiError {
+  return new ArtifreeApiError(`The server returned ${what}.`, {
+    status: 200,
+    code: 'invalid_response',
+  });
 }
 
 /** Part of a file. */
@@ -1563,6 +1596,136 @@ export class ArtifreeClient {
         },
       );
     return metadata;
+  }
+
+  private runtimeViewPath(view: RuntimeView): string {
+    return `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}`;
+  }
+
+  /**
+   * Lists the files of the revision a frame is pinned to. The server needs a
+   * current `source.read` grant for the view (decision 0032).
+   */
+  async runtimeSourceList(
+    view: RuntimeView,
+    options: ReadOptions = {},
+  ): Promise<RuntimeSourceManifest> {
+    this.requireViewSession(view);
+    const manifest = await this.json(
+      'POST',
+      `${this.runtimeViewPath(view)}/source`,
+      parseRuntimeSourceManifest,
+      { body: { initialization: view.initialization }, signal: options.signal },
+    );
+    this.requireViewSession(view);
+    if (
+      manifest.artifact_id !== view.artifact_id ||
+      manifest.revision !== view.revision
+    )
+      throw invalidResponse('a listing of another artifact or revision');
+    return manifest;
+  }
+
+  /**
+   * Reads up to 1 MiB of one file of the pinned revision; `source.read`.
+   * Read again from `next_offset` until it is null.
+   */
+  async runtimeSourceRead(
+    view: RuntimeView,
+    path: string,
+    range: RuntimeSourceRange = {},
+    options: ReadOptions = {},
+  ): Promise<RuntimeSourceFile> {
+    this.requireViewSession(view);
+    const part = await this.json(
+      'POST',
+      `${this.runtimeViewPath(view)}/source/read`,
+      parseRuntimeSourceFile,
+      {
+        body: {
+          initialization: view.initialization,
+          path,
+          ...(range.offset === undefined ? {} : { offset: range.offset }),
+          ...(range.length === undefined ? {} : { length: range.length }),
+        },
+        signal: options.signal,
+      },
+    );
+    this.requireViewSession(view);
+    if (
+      part.path !== path ||
+      part.revision !== view.revision ||
+      part.offset !== (range.offset ?? 0)
+    )
+      throw invalidResponse('another file, revision, or offset');
+    return part;
+  }
+
+  /**
+   * Saves changes on top of the revision the frame is pinned to, as one
+   * conditional commit; `source.write`. Rejects with `revision_conflict` and
+   * `currentRevision` when the source moved, and a retry with the same key
+   * returns the first result with `replayed: true`.
+   */
+  async runtimeSourceSave(
+    view: RuntimeView,
+    changes: SaveRevisionRequest['changes'],
+    options: MutationOptions & ReadOptions,
+  ): Promise<RuntimeSourceSaved> {
+    this.requireViewSession(view);
+    const saved = await this.json(
+      'POST',
+      `${this.runtimeViewPath(view)}/source/save`,
+      parseRuntimeSourceSaved,
+      {
+        mutation: {
+          body: { initialization: view.initialization, changes },
+          idempotencyKey: options.idempotencyKey,
+        },
+        signal: options.signal,
+      },
+    );
+    this.requireViewSession(view);
+    if (saved.revision <= view.revision)
+      throw invalidResponse('a revision that is not newer');
+    return saved;
+  }
+
+  /**
+   * The bytes of one file of the pinned revision, or its source export
+   * archive without `path`, for the workspace to hand to the user;
+   * `source.download`. The type is closed: a file is
+   * `application/octet-stream` and an archive `application/zip`, whatever the
+   * file is, so saving it can never render it.
+   */
+  async runtimeDownload(
+    view: RuntimeView,
+    path: string | undefined,
+    options: ReadOptions = {},
+  ): Promise<RuntimeDownloadBytes> {
+    this.requireViewSession(view);
+    const url = `${this.runtimeViewPath(view)}/download`;
+    const response = await this.send('POST', url, {
+      body: {
+        initialization: view.initialization,
+        ...(path === undefined ? {} : { path }),
+      },
+      signal: options.signal,
+    });
+    const kind = path === undefined ? 'archive' : 'file';
+    const expected =
+      kind === 'archive' ? 'application/zip' : 'application/octet-stream';
+    const type = response.headers.get('content-type')?.trim().toLowerCase();
+    const name = /^attachment; filename="([A-Za-z0-9._-]{1,128})"$/.exec(
+      response.headers.get('content-disposition') ?? '',
+    )?.[1];
+    if (type !== expected || name === undefined) {
+      await response.body?.cancel().catch(() => undefined);
+      throw invalidResponse('an unexpected type or file name');
+    }
+    const bytes = await this.bytes(response, 'a runtime download');
+    this.requireViewSession(view);
+    return { bytes, fileName: name, mediaType: expected, kind };
   }
 
   /** Closes one view generation; an older close cannot revoke its replacement. */

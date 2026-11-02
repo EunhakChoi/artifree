@@ -1035,6 +1035,112 @@ pub struct RuntimeMetadata {
     pub metadata_revision: u64,
 }
 
+/// Proves that the parent is acting for an initialized view. Used by the
+/// source manifest of a frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+}
+
+/// The files of the revision a frame is pinned to, which a frame with the
+/// `source.read` capability may list. Nothing here is the account's
+/// authority; it is the same listing the revision has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceManifest {
+    /// The bound artifact's identifier.
+    pub artifact_id: String,
+    /// The pinned revision, which is not necessarily the current one.
+    pub revision: u64,
+    /// The revision's files in path order.
+    pub files: Vec<RevisionFile>,
+}
+
+/// Reads part of one file of the frame's pinned revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceReadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// Portable relative path of a file of the pinned revision.
+    pub path: String,
+    /// First byte to read, counted from 0; the start of the file when absent.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// How many bytes at most; absent reads as many as one answer may hold
+    /// (1 MiB), and a larger value is read as that limit.
+    #[serde(default)]
+    pub length: Option<u64>,
+}
+
+/// A part of one file of the pinned revision, cut at bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceFile {
+    /// Package path of the file.
+    pub path: String,
+    /// The pinned revision the bytes belong to.
+    pub revision: u64,
+    /// Where this part starts in the file.
+    pub offset: u64,
+    /// The whole file's size in bytes.
+    pub size: u64,
+    /// SHA-256 of the whole file, as 64 lowercase hex digits.
+    pub sha256: String,
+    /// Where the next part starts, or null when this part reaches the end.
+    /// Always present.
+    #[schemars(required, extend("type" = ["integer", "null"]))]
+    pub next_offset: Option<u64>,
+    /// Standard padded base64 of this part's bytes.
+    pub content: String,
+}
+
+/// Saves files from a frame as one conditional revision commit. The base is
+/// the revision the frame is pinned to, never a value the frame names, so a
+/// frame can only write on top of what it was shown. The request key comes in
+/// the `Idempotency-Key` header, as for every write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceSaveRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// Changes applied to the pinned revision; unchanged files carry over.
+    /// At most 512 changes, each to a different path.
+    pub changes: Vec<FileChange>,
+}
+
+/// The revision that a frame's save committed, or committed earlier under the
+/// same key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceSaved {
+    /// The committed revision.
+    pub revision: u64,
+    /// Commit time in Unix milliseconds.
+    pub created_at_ms: i64,
+    /// The committed revision's files in path order.
+    pub files: Vec<RevisionFile>,
+    /// True when an earlier request with the same key already committed it.
+    pub replayed: bool,
+}
+
+/// Asks for the bytes of the pinned revision to be delivered to the user.
+/// The answer is the bytes themselves with `Content-Disposition: attachment`
+/// and a closed content type, for the parent to hand to the user; a frame
+/// never receives them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDownloadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// One file of the pinned revision; absent downloads the whole revision
+    /// as the source export archive of decision 0015.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 /// What a commit did to an artifact. A kind that a client does not know
 /// still means the artifact changed: read it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

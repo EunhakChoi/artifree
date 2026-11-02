@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::auth::hex;
+use crate::runtime_policy::{Capability, CapabilitySet};
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
@@ -43,7 +44,7 @@ pub(crate) enum SessionError {
 #[derive(Debug, Clone, Copy)]
 struct Grant {
     version: u64,
-    allowed: bool,
+    capabilities: CapabilitySet,
 }
 
 #[derive(Debug)]
@@ -79,7 +80,7 @@ impl RuntimeSession {
     pub(crate) fn with_grant<T>(
         &self,
         scope: &GrantScope,
-        issue: impl FnOnce(u64, bool) -> T,
+        issue: impl FnOnce(u64, CapabilitySet) -> T,
     ) -> Result<T, SessionError> {
         let state = self.state.lock().map_err(|_| SessionError::Unavailable)?;
         if !Self::active(&state) {
@@ -88,15 +89,15 @@ impl RuntimeSession {
         let grant = state.grants.get(scope);
         Ok(issue(
             grant.map_or(0, |grant| grant.version),
-            grant.is_some_and(|grant| grant.allowed),
+            grant.map_or_else(CapabilitySet::default, |grant| grant.capabilities),
         ))
     }
 
-    /// Replaces the supported grant; a revoked version cannot be revived.
+    /// Replaces the whole grant; a revoked version cannot be revived.
     pub(crate) fn set_grant(
         &self,
         scope: GrantScope,
-        metadata_read: bool,
+        capabilities: CapabilitySet,
         expected_version: u64,
     ) -> Result<u64, SessionError> {
         let mut state = self.state.lock().map_err(|_| SessionError::Unavailable)?;
@@ -105,7 +106,7 @@ impl RuntimeSession {
         }
         let current = state.grants.get(&scope).copied().unwrap_or(Grant {
             version: 0,
-            allowed: false,
+            capabilities: CapabilitySet::default(),
         });
         if expected_version != current.version {
             return Err(SessionError::Conflict);
@@ -123,23 +124,23 @@ impl RuntimeSession {
             scope,
             Grant {
                 version: next,
-                allowed: metadata_read,
+                capabilities,
             },
         );
         Ok(next)
     }
 
-    /// Every RPC checks the exact grant bound to its view.
-    pub(crate) fn permits(&self, scope: &GrantScope, version: u64) -> bool {
+    /// Every RPC checks the exact grant bound to its view for the one
+    /// capability it needs. Holding another capability is not enough.
+    pub(crate) fn permits(&self, scope: &GrantScope, version: u64, capability: Capability) -> bool {
         let Ok(state) = self.state.lock() else {
             return false;
         };
         Self::active(&state)
             && version != 0
-            && state
-                .grants
-                .get(scope)
-                .is_some_and(|grant| grant.allowed && grant.version == version)
+            && state.grants.get(scope).is_some_and(|grant| {
+                grant.version == version && grant.capabilities.contains(capability)
+            })
     }
 }
 
@@ -269,7 +270,15 @@ mod tests {
     use artifree_domain::SourceRevision;
     use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
+    use crate::runtime_policy::{Capability, CapabilitySet};
+
     use super::{GrantScope, RuntimeSessions, SessionError};
+
+    const ONLY_METADATA: [Capability; 1] = [Capability::MetadataRead];
+
+    fn metadata() -> CapabilitySet {
+        CapabilitySet::from_iter(ONLY_METADATA)
+    }
 
     #[test]
     fn grant_revoke_regrant_and_logout_reject_old_bindings()
@@ -290,35 +299,35 @@ mod tests {
             SourceRevision(1),
             SourceRevision(1),
         );
-        assert!(!session.permits(&scope, 0));
+        assert!(!session.permits(&scope, 0, Capability::MetadataRead));
         let first = session
-            .set_grant(scope.clone(), true, 0)
+            .set_grant(scope.clone(), metadata(), 0)
             .map_err(|e| format!("{e:?}"))?;
-        assert!(session.permits(&scope, first));
+        assert!(session.permits(&scope, first, Capability::MetadataRead));
         let other_revision =
             GrantScope::new(scope.artifact.clone(), SourceRevision(2), SourceRevision(1));
         let other_head =
             GrantScope::new(scope.artifact.clone(), SourceRevision(1), SourceRevision(2));
-        assert!(!session.permits(&other_revision, first));
-        assert!(!session.permits(&other_head, first));
+        assert!(!session.permits(&other_revision, first, Capability::MetadataRead));
+        assert!(!session.permits(&other_head, first, Capability::MetadataRead));
         let revoked = session
-            .set_grant(scope.clone(), false, first)
+            .set_grant(scope.clone(), CapabilitySet::default(), first)
             .map_err(|e| format!("{e:?}"))?;
-        assert!(!session.permits(&scope, first));
+        assert!(!session.permits(&scope, first, Capability::MetadataRead));
         assert!(matches!(
-            session.set_grant(scope.clone(), true, first),
+            session.set_grant(scope.clone(), metadata(), first),
             Err(SessionError::Conflict)
         ));
         let second = session
-            .set_grant(scope.clone(), true, revoked)
+            .set_grant(scope.clone(), metadata(), revoked)
             .map_err(|e| format!("{e:?}"))?;
         assert_ne!(first, second);
-        assert!(!session.permits(&scope, first));
-        assert!(session.permits(&scope, second));
+        assert!(!session.permits(&scope, first, Capability::MetadataRead));
+        assert!(session.permits(&scope, second, Capability::MetadataRead));
         sessions.close(&actor, &id).map_err(|e| format!("{e:?}"))?;
-        assert!(!session.permits(&scope, second));
+        assert!(!session.permits(&scope, second, Capability::MetadataRead));
         assert!(matches!(
-            session.set_grant(scope, true, second),
+            session.set_grant(scope, metadata(), second),
             Err(SessionError::Closed)
         ));
         assert!(matches!(
@@ -400,18 +409,56 @@ mod tests {
             SourceRevision(1),
         );
         let barrier = session
-            .set_grant(scope.clone(), false, 0)
+            .set_grant(scope.clone(), CapabilitySet::default(), 0)
             .map_err(|error| format!("{error:?}"))?;
         assert_ne!(barrier, 0);
         assert!(matches!(
-            session.set_grant(scope.clone(), true, 0),
+            session.set_grant(scope.clone(), metadata(), 0),
             Err(SessionError::Conflict)
         ));
-        assert!(!session.permits(&scope, barrier));
+        assert!(!session.permits(&scope, barrier, Capability::MetadataRead));
         let allowed = session
-            .set_grant(scope.clone(), true, barrier)
+            .set_grant(scope.clone(), metadata(), barrier)
             .map_err(|error| format!("{error:?}"))?;
-        assert!(session.permits(&scope, allowed));
+        assert!(session.permits(&scope, allowed, Capability::MetadataRead));
+        Ok(())
+    }
+
+    #[test]
+    fn a_grant_permits_only_the_capabilities_it_names() -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|error| format!("{error:?}"))?;
+        let session = sessions
+            .get(&actor, &id)
+            .map_err(|error| format!("{error:?}"))?;
+        let scope = GrantScope::new(
+            ArtifactId::from_random([1; 16]),
+            SourceRevision(1),
+            SourceRevision(1),
+        );
+        let read_only = CapabilitySet::from_iter([Capability::SourceRead]);
+        let version = session
+            .set_grant(scope.clone(), read_only, 0)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(session.permits(&scope, version, Capability::SourceRead));
+        for other in [
+            Capability::MetadataRead,
+            Capability::SourceWrite,
+            Capability::SourceDownload,
+        ] {
+            assert!(!session.permits(&scope, version, other), "{other:?}");
+        }
+        // Replacing the set takes the capability away at once, and a write
+        // grant added later belongs to the new version only.
+        let both = CapabilitySet::from_iter([Capability::SourceRead, Capability::SourceWrite]);
+        let next = session
+            .set_grant(scope.clone(), both, version)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(!session.permits(&scope, version, Capability::SourceWrite));
+        assert!(session.permits(&scope, next, Capability::SourceWrite));
         Ok(())
     }
 
