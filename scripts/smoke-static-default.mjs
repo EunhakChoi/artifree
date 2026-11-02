@@ -92,6 +92,8 @@ export async function checkStaticDefault({ browser, root, serverBinary, qa }) {
       const page = await context.newPage();
       if (Object.keys(storage).length > 0) {
         await page.addInitScript((entries) => {
+          // Only the page itself: a sandboxed preview frame has no storage.
+          if (window !== window.top) return;
           for (const [key, value] of Object.entries(entries)) {
             window.sessionStorage.setItem(key, value);
           }
@@ -198,6 +200,21 @@ export async function checkStaticDefault({ browser, root, serverBinary, qa }) {
       defaultApi.api_url,
     );
     assert.deepEqual([...legacy.apiHosts], []);
+    // Entering the token connects to the default; after a disconnect the form
+    // does not repeat a notice the person has already dealt with.
+    await connect(legacy, defaultApi);
+    await expect(
+      legacy.workspace.getByText('Default server artifact').first(),
+    ).toBeVisible();
+    await legacy.workspace.getByRole('button', { name: 'Disconnect' }).click();
+    await expect(
+      legacy.workspace.getByRole('heading', { name: 'Connect to your server' }),
+    ).toBeVisible();
+    await expect(
+      legacy.workspace.getByText(
+        'The server address kept for this tab was ignored.',
+      ),
+    ).toHaveCount(0);
 
     // A refused address typed into the form is explained and sends nothing.
     const typed = await open();

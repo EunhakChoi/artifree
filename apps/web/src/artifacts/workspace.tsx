@@ -109,6 +109,9 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
   const [initialConfig] = useState(readInitialServer);
   const defaultServer = checkBuildDefault(buildDefault).url;
   const [serverUrl, setServerUrl] = useState<string>(initialConfig.url);
+  // Startup notices are for the first look at the form; once the person has
+  // connected or disconnected they have been seen and must not come back.
+  const [notices, setNotices] = useState(initialConfig.notices);
   const [token, setToken] = useState<string | undefined>(() =>
     storedToken(initialConfig.url, initialConfig.restoreToken),
   );
@@ -118,8 +121,11 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
     // is one, otherwise the page's own origin.
     const effectiveServer =
       newServerUrl === undefined ? serverUrl : newServerUrl || defaultServer;
+    setNotices([]);
     setServerUrl(effectiveServer);
-    storeServerUrl(effectiveServer);
+    // The build default is not "kept for this tab": storing it would let it
+    // outlive a redeploy that changes the default.
+    storeServerUrl(effectiveServer === defaultServer ? '' : effectiveServer);
     storeToken(newToken, effectiveServer);
     setToken(newToken);
   }
@@ -129,7 +135,7 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
       <ConnectForm
         initialServerUrl={serverUrl}
         defaultServerUrl={defaultServer}
-        notices={initialConfig.notices}
+        notices={notices}
         onConnect={(tok, srv) => connect(tok, srv)}
       />
     );
