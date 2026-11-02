@@ -120,6 +120,13 @@ impl SqliteStore {
     /// bytes do not stay in the database file's free pages. Copies in the
     /// write-ahead log until it is checkpointed and truncated, and in earlier
     /// backups, remain (decision 0029).
+    fn write_erasing<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.write_with(true, operation)
+    }
+
     /// A revision's header and files, read from one snapshot: a purge that
     /// commits meanwhile is seen whole or not at all, never as a header with
     /// no files. `between` runs after the header is read; only a test passes
@@ -168,13 +175,6 @@ impl SqliteStore {
             })?);
         }
         Ok(records)
-    }
-
-    fn write_erasing<T>(
-        &self,
-        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
-        self.write_with(true, operation)
     }
 
     fn write_with<T>(
