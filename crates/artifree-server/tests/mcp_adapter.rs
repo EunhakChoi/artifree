@@ -180,6 +180,48 @@ async fn the_endpoint_authenticates_before_anything_else() -> TestResult {
     Ok(())
 }
 
+/// A purge and the content cleanup cannot be undone (decision 0029), so no
+/// agent tool offers them: not in the catalog, and not callable by name, even
+/// with the owner's own token.
+#[tokio::test]
+async fn no_tool_purges_or_cleans_up() -> TestResult {
+    let harness = Harness::new();
+    let (status, body) = harness.post(rpc(Some(TOKEN), &list_tools())?).await?;
+    assert_eq!(status, StatusCode::OK);
+    let listed: Value = serde_json::from_slice(&body)?;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .ok_or("tools")?
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(names.contains(&"update_artifact"), "{names:?}");
+    for name in &names {
+        for word in ["purge", "cleanup", "clean_up", "unreferenced", "erase"] {
+            assert!(!name.contains(word), "tool {name} must not be offered");
+        }
+    }
+    for name in [
+        "purge_artifact",
+        "cleanup_content",
+        "remove_unreferenced_content",
+    ] {
+        let (status, body) = harness
+            .post(rpc(
+                Some(TOKEN),
+                &json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": { "name": name, "arguments": {} }
+                }),
+            )?)
+            .await?;
+        let reply: Value = serde_json::from_slice(&body)?;
+        let refused = reply.get("error").is_some() || reply["result"]["isError"] == true;
+        assert!(refused, "{name} must not be a tool: {status} {reply}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn browser_origins_and_foreign_hosts_are_refused() -> TestResult {
     let harness = Harness::new();

@@ -617,3 +617,166 @@ async fn cascading_revocation_closes_active_runtime_session() -> Result<(), Box<
 
     Ok(())
 }
+
+fn keyed(
+    method: &str,
+    path: &str,
+    bearer_token: &str,
+    key: &str,
+    body: &Value,
+) -> Result<Request<Body>, Box<dyn Error>> {
+    let mut request = request(method, path, bearer_token, Some(body))?;
+    request
+        .headers_mut()
+        .insert("idempotency-key", key.parse()?);
+    Ok(request)
+}
+
+async fn forbidden_code(harness: &Harness, request: Request<Body>) -> Result<(), Box<dyn Error>> {
+    let reply = harness.send(request).await?;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let error: ErrorResponse = reply.json()?;
+    assert_eq!(
+        error.error.code,
+        artifree_contracts::api::ErrorCode::Forbidden
+    );
+    Ok(())
+}
+
+/// An artifact the owner created and moved to the trash (metadata revision 2).
+async fn trashed_artifact(harness: &Harness) -> Result<String, Box<dyn Error>> {
+    let created = harness
+        .send(keyed(
+            "POST",
+            "/v1/artifacts",
+            OWNER_TOKEN,
+            "create-1",
+            &serde_json::json!({
+                "title": "Demo",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<h1>x</h1>" }]
+            }),
+        )?)
+        .await?;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let id = created.json::<Value>()?["artifact"]["id"]
+        .as_str()
+        .ok_or("id")?
+        .to_owned();
+    let deleted = harness
+        .send(keyed(
+            "PATCH",
+            &format!("/v1/artifacts/{id}"),
+            OWNER_TOKEN,
+            "delete-1",
+            &serde_json::json!({ "base_metadata_revision": 1, "deleted": true }),
+        )?)
+        .await?;
+    assert_eq!(deleted.status, StatusCode::OK);
+    Ok(id)
+}
+
+/// What cannot be undone needs the administrative credential (decision 0029):
+/// an issued agent token authenticates as the owner, so the roles stop it.
+#[tokio::test]
+async fn an_agent_token_cannot_purge_or_clean_up_but_the_owner_can() -> Result<(), Box<dyn Error>> {
+    let harness = Harness::new()?;
+    let issued = harness
+        .send(request(
+            "POST",
+            "/v1/tokens",
+            OWNER_TOKEN,
+            Some(&serde_json::json!({ "name": "Codex Agent" })),
+        )?)
+        .await?;
+    let agent = issued.json::<CreateTokenResponse>()?.secret;
+
+    let id = trashed_artifact(&harness).await?;
+
+    // A request that is valid in every other way, and malformed ones: the
+    // role is checked first, so nothing else is revealed to the agent.
+    let purge_path = format!("/v1/artifacts/{id}/purge");
+    let valid = serde_json::json!({ "base_metadata_revision": 2 });
+    forbidden_code(
+        &harness,
+        keyed("POST", &purge_path, &agent, "purge-agent-1", &valid)?,
+    )
+    .await?;
+    forbidden_code(
+        &harness,
+        request("POST", &purge_path, &agent, Some(&valid))?,
+    )
+    .await?;
+    forbidden_code(
+        &harness,
+        keyed(
+            "POST",
+            "/v1/artifacts/art_00000000000000000000000000000000/purge",
+            &agent,
+            "purge-agent-2",
+            &valid,
+        )?,
+    )
+    .await?;
+    forbidden_code(
+        &harness,
+        request("GET", "/v1/content/unreferenced", &agent, None)?,
+    )
+    .await?;
+    forbidden_code(
+        &harness,
+        request("DELETE", "/v1/content/unreferenced", &agent, None)?,
+    )
+    .await?;
+
+    // Nothing was removed, and the agent's refused key was not consumed.
+    let trash = harness
+        .send(request(
+            "GET",
+            "/v1/artifacts?deleted=true",
+            OWNER_TOKEN,
+            None,
+        )?)
+        .await?;
+    assert_eq!(trash.json::<Value>()?["artifacts"][0]["id"], id.as_str());
+
+    // The administrative credential may.
+    let dry = harness
+        .send(request(
+            "GET",
+            "/v1/content/unreferenced",
+            OWNER_TOKEN,
+            None,
+        )?)
+        .await?;
+    assert_eq!(dry.status, StatusCode::OK);
+    let applied = harness
+        .send(request(
+            "DELETE",
+            "/v1/content/unreferenced",
+            OWNER_TOKEN,
+            None,
+        )?)
+        .await?;
+    assert_eq!(applied.status, StatusCode::OK);
+    let purged = harness
+        .send(keyed(
+            "POST",
+            &purge_path,
+            OWNER_TOKEN,
+            "purge-agent-1",
+            &valid,
+        )?)
+        .await?;
+    assert_eq!(purged.status, StatusCode::OK);
+    assert_eq!(purged.json::<Value>()?["replayed"], false);
+    let trash = harness
+        .send(request(
+            "GET",
+            "/v1/artifacts?deleted=true",
+            OWNER_TOKEN,
+            None,
+        )?)
+        .await?;
+    assert_eq!(trash.json::<Value>()?["artifacts"], serde_json::json!([]));
+    Ok(())
+}

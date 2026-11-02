@@ -42,7 +42,11 @@ not_in_trash` (new error code); a stale base is `409 metadata_conflict`; a
    are made in that order after the key (as 0013). The base is the trash
    state the caller saw: an artifact recovered and deleted again has a newer
    metadata revision, so an old purge does not remove it. The owner check is
-   the one of delete and recover.
+   the one of delete and recover. **The route needs the administrative
+   credential** (0023: the bootstrap owner token, `RequireAdmin`): an issued
+   agent token authenticates as the same owner, so the owner check alone would
+   not stop an agent. An agent token gets `403 forbidden`, before the key, the
+   body, or the artifact is looked at.
 2. **A purge leaves a tombstone.** In one write transaction it deletes the
    artifact's `revision_files` rows (the listing of every revision's files),
    the blobs that no other revision file refers to afterwards, and the title
@@ -62,9 +66,11 @@ not_in_trash` (new error code); a stale base is `409 metadata_conflict`; a
    foreign keys would have weakened all artifacts to make room for the rare
    purged one.
 3. **A purged artifact is missing.** The store's reads (`artifact`, lists,
-   revisions) treat `purged_at` as absence, so every route, preview ticket,
-   export, runtime grant, and handoff that checks the artifact before using
-   it answers as for an unknown identifier (`404 not_found`). `recover` of a
+   revisions) treat `purged_at` as absence; a revision's header and files, and
+   a revision listing, are read inside one snapshot, so a purge that commits
+   meanwhile is seen whole or not at all (never a header with no files). So
+   every route, preview ticket, export, runtime grant, and handoff that checks
+   the artifact before using it answers as for an unknown identifier (`404 not_found`). `recover` of a
    purged artifact is `404`.
 4. **Key replay after a purge.** No key is removed or expired. For a key whose
    request named a purged artifact:
@@ -112,9 +118,12 @@ not_in_trash` (new error code); a stale base is `409 metadata_conflict`; a
    means (an interrupted external operation, future object storage, a manual
    edit) and as a check. It is not an artifact mutation: it changes no
    artifact, revision, or key and is naturally idempotent, so it needs
-   no base revision or key; it needs the same bearer authentication as the
-   rest of the API. The content is shared by all owners; with the single owner
-   of today a report reveals nothing new. S01 must decide who may run it.
+   no base revision or key; **both calls need the administrative credential**
+   (as above), the dry run too, because even its report describes content
+   shared by every owner and agent, and a client that may not delete has no
+   use for it. Issued agent tokens exist today (0023), so the restriction is
+   not left to S01; S01 still decides which of several owners may run a
+   cleanup, which covers all owners' content.
    Schema version 7 adds `revision_files_by_digest`, because both the check
    and the foreign key check of a blob delete otherwise scan every file row.
    The database file does not shrink: freed pages are reused. No `VACUUM` is
@@ -136,11 +145,15 @@ NULL OR deleted_at IS NOT NULL)`, the index above, and rebuilds `changes`
 <id> --base-metadata <n> --yes` and `artifree content cleanup [--apply]`.
    **Purge requires `--yes`**; without it the CLI refuses before any request.
    `content cleanup` without `--apply` is the dry run and issues the read-only
-   request; `--apply` is the only way to delete. **No MCP tool.** An agent can
+   request; `--apply` is the only way to delete. **No MCP tool, and no agent token over HTTP.** An agent can
    delete to the trash and recover (0013) because that can be undone; a purge
    cannot, so an agent that went wrong or was misled would lose data for
-   good. Agent access to purge, if ever wanted, needs a separate decision
-   about confirmation by a person. The web workspace is unchanged: it shows
+   good. The MCP catalog has no such tool (a test lists it and calls the
+   obvious names), and the HTTP routes refuse agent tokens (`403`, tested for
+   all three routes against an issued token, with the administrative
+   credential succeeding). The CLI sends whichever token it was given, so a
+   profile that holds an agent token gets that `403`. Agent access to purge, if
+   ever wanted, needs a separate decision about confirmation by a person. The web workspace is unchanged: it shows
    trash entries from the list, which does not include purged artifacts, and
    reads the `purged` change as it reads any newer metadata revision. A web
    control to purge is a follow-up (O05b in the roadmap).
@@ -203,8 +216,9 @@ when `secure_delete` is off. This is **not** a guarantee that no copy exists:
   truncated (stopping the server does that). It was not tested whether the
   server's checkpoints reach it before then.
 - **Backups made before the purge keep the artifact**, and a restore of one
-  brings it back as an artifact in the trash. A backup is a copy; this record
-  does not delete copies.
+  brings it back in the state it had when the backup was taken: live, if the
+  backup was made before it was deleted, or in the trash, if after. A backup is
+  a copy; this record does not delete copies.
 - The file system, snapshots, and the operating system may keep older blocks.
 - The database file does not shrink (decision 6).
 
@@ -237,6 +251,17 @@ TypeScript tests run the client and CLI against stub servers and, in
   upgrade to 7, a failed v6 to v7 step leaves the file unchanged, a trashed
   fixture artifact that shares content with another is purged without removing
   the shared bytes.
+- Roles: `token_management.rs` issues an agent token and expects `403
+forbidden` on the purge (valid, keyless, and malformed requests alike) and on
+  both content calls, with nothing removed and the refused key still unused, then
+  the same calls succeed with the owner's token; `mcp_adapter.rs` lists the tool
+  catalog and calls the obvious names to show that no tool purges or cleans up.
+- Reads: unit tests in `storage.rs` commit a purge between a revision's header
+  and its files, and between the listing of revision numbers and their reads
+  (a seam that only the tests use); a control without a snapshot shows the
+  torn read the snapshot prevents. The shared-content tests also check, from
+  outside the store, that every file still has its content and the foreign key
+  check is clean, so they fail even if SQLite did not refuse the delete.
 - Server tests: `http_api.rs` (preconditions and error order, purged answers as
   unknown on every route, a surviving copy's retry replays, dry run against
   apply with a planted stray blob), `change_feed.rs`, `authorization.rs`
@@ -271,7 +296,7 @@ the behavior.
   the trash is not updated. A trashed artifact open in a page when a purge
   arrives is not marked gone until its next read answers `404`. This was
   reasoned from the reducer, not run in a browser; O05b owns the web behavior.
-- The cleanup is global, not per owner, and not limited to one run at a time:
-  two runs serialize on the write lock.
+- The cleanup is global, not per owner, and administrative. It is not limited
+  to one run at a time: two runs serialize on the write lock.
 - Not implemented: automatic purge, a web control, an MCP tool, pruning of
   change rows, vacuum, cleanup of previews and jobs (nothing persists).

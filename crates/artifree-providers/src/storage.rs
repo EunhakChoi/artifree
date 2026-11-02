@@ -120,6 +120,56 @@ impl SqliteStore {
     /// bytes do not stay in the database file's free pages. Copies in the
     /// write-ahead log until it is checkpointed and truncated, and in earlier
     /// backups, remain (decision 0029).
+    /// A revision's header and files, read from one snapshot: a purge that
+    /// commits meanwhile is seen whole or not at all, never as a header with
+    /// no files. `between` runs after the header is read; only a test passes
+    /// anything, to commit a purge at that point.
+    fn revision_between(
+        &self,
+        id: &ArtifactId,
+        revision: SourceRevision,
+        between: impl FnOnce(),
+    ) -> Result<Option<RevisionRecord>, StoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        read_revision(&snapshot, id, revision, between)
+    }
+
+    /// Every revision of an artifact, newest first, from one snapshot like
+    /// [`Self::revision_between`]; `between` runs after the numbers are read.
+    fn revisions_between(
+        &self,
+        id: &ArtifactId,
+        between: impl FnOnce(),
+    ) -> Result<Vec<RevisionRecord>, StoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        let numbers = {
+            let mut statement = snapshot
+                .prepare(
+                    "SELECT r.revision FROM revisions r JOIN artifacts a ON a.id = r.artifact_id
+                     WHERE r.artifact_id = ?1 AND a.purged_at IS NULL ORDER BY r.revision DESC",
+                )
+                .map_err(unavailable)?;
+            let rows = statement
+                .query_map([id.as_str()], |row| row.get::<_, i64>(0))
+                .map_err(unavailable)?;
+            let mut numbers = Vec::new();
+            for number in rows {
+                numbers.push(stored_revision(number.map_err(unavailable)?)?);
+            }
+            numbers
+        };
+        between();
+        let mut records = Vec::new();
+        for revision in numbers {
+            records.push(revision_record(&snapshot, id, revision)?.ok_or_else(|| {
+                StoreError::Unavailable("revision disappeared while listing".into())
+            })?);
+        }
+        Ok(records)
+    }
+
     fn write_erasing<T>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
@@ -516,24 +566,7 @@ impl ArtifactStore for SqliteStore {
     }
 
     fn revisions(&self, id: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {
-        let connection = self.connect()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT r.revision FROM revisions r JOIN artifacts a ON a.id = r.artifact_id
-                 WHERE r.artifact_id = ?1 AND a.purged_at IS NULL ORDER BY r.revision DESC",
-            )
-            .map_err(unavailable)?;
-        let numbers = statement
-            .query_map([id.as_str()], |row| row.get::<_, i64>(0))
-            .map_err(unavailable)?;
-        let mut records = Vec::new();
-        for number in numbers {
-            let revision = stored_revision(number.map_err(unavailable)?)?;
-            records.push(revision_record(&connection, id, revision)?.ok_or_else(|| {
-                StoreError::Unavailable("revision disappeared while listing".into())
-            })?);
-        }
-        Ok(records)
+        self.revisions_between(id, || {})
     }
 
     fn revision(
@@ -541,7 +574,7 @@ impl ArtifactStore for SqliteStore {
         id: &ArtifactId,
         revision: SourceRevision,
     ) -> Result<Option<RevisionRecord>, StoreError> {
-        revision_record(&self.connect()?, id, revision)
+        self.revision_between(id, revision, || {})
     }
 
     fn revision_package(
@@ -1088,6 +1121,17 @@ fn revision_record(
     id: &ArtifactId,
     revision: SourceRevision,
 ) -> Result<Option<RevisionRecord>, StoreError> {
+    read_revision(connection, id, revision, || {})
+}
+
+/// The header, then the files, of a revision. The two reads are consistent
+/// only within one transaction; `between` runs after the header.
+fn read_revision(
+    connection: &Connection,
+    id: &ArtifactId,
+    revision: SourceRevision,
+    between: impl FnOnce(),
+) -> Result<Option<RevisionRecord>, StoreError> {
     let number = sql_revision(revision)?;
     let header: Option<(String, i64)> = connection
         .query_row(
@@ -1102,6 +1146,7 @@ fn revision_record(
     let Some((created_by, created_at)) = header else {
         return Ok(None);
     };
+    between();
     let mut statement = connection
         .prepare_cached(
             "SELECT path, size, digest FROM revision_files
@@ -1257,4 +1302,145 @@ pub(crate) fn unavailable(error: rusqlite::Error) -> StoreError {
 
 fn corrupt(error: impl std::fmt::Display) -> StoreError {
     StoreError::Unavailable(format!("stored data is invalid: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use artifree_domain::identity::RequestKey;
+    use artifree_ports::artifact_store::RequestFingerprint;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A store in its own directory, with one artifact of two files in the
+    /// trash, ready to be purged.
+    struct Trashed {
+        directory: PathBuf,
+        store: SqliteStore,
+        id: ArtifactId,
+        owner: ActorId,
+    }
+
+    impl Trashed {
+        fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
+            let directory = std::env::temp_dir()
+                .join(format!("artifree-snapshot-{}-{name}", std::process::id()));
+            drop(std::fs::remove_dir_all(&directory));
+            std::fs::create_dir_all(&directory)?;
+            let store = SqliteStore::open(&directory.join(DATABASE_FILE))?;
+            let owner: ActorId = "owner".parse()?;
+            let key: RequestKey = "create-key".parse()?;
+            let title: Title = "Demo".parse()?;
+            let package = FilePackage::new(vec![
+                ("index.html".parse()?, b"<h1>a</h1>".to_vec()),
+                ("style.css".parse()?, b"h1{}".to_vec()),
+            ])?;
+            let created = store.create_artifact(NewArtifact {
+                request: RequestIdentity {
+                    actor: &owner,
+                    key: &key,
+                    fingerprint: RequestFingerprint([1; 32]),
+                },
+                kind: ArtifactKind::App,
+                title: &title,
+                package: &package,
+                source: None,
+            })?;
+            let delete_key: RequestKey = "delete-key".parse()?;
+            store.update_metadata(MetadataUpdate {
+                request: RequestIdentity {
+                    actor: &owner,
+                    key: &delete_key,
+                    fingerprint: RequestFingerprint([2; 32]),
+                },
+                artifact: &created.artifact.id,
+                base: MetadataRevision(1),
+                title: None,
+                pinned: None,
+                deleted: Some(true),
+            })?;
+            Ok(Self {
+                directory,
+                store,
+                id: created.artifact.id,
+                owner,
+            })
+        }
+
+        /// Purges the artifact; the commit is complete when this returns.
+        fn purge(&self) -> Result<(), Box<dyn std::error::Error>> {
+            let key: RequestKey = "purge-key".parse()?;
+            self.store.purge_artifact(PurgeRequest {
+                request: RequestIdentity {
+                    actor: &self.owner,
+                    key: &key,
+                    fingerprint: RequestFingerprint([3; 32]),
+                },
+                artifact: &self.id,
+                base: MetadataRevision(2),
+            })?;
+            Ok(())
+        }
+    }
+
+    impl Drop for Trashed {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.directory));
+        }
+    }
+
+    /// The control: read with no transaction, a purge between the header and
+    /// the files tears the read. This is what the snapshot prevents, and it
+    /// shows that the hook really commits the purge at that point.
+    #[test]
+    fn without_a_snapshot_a_purge_between_the_reads_tears_the_revision() -> TestResult {
+        let fixture = Trashed::new("control")?;
+        let connection = fixture.store.connect()?;
+        let mut purged = Ok(());
+        let torn = read_revision(&connection, &fixture.id, SourceRevision(1), || {
+            purged = fixture.purge();
+        })?;
+        purged?;
+        assert_eq!(
+            torn.map(|record| record.files.len()),
+            Some(0),
+            "the control must reproduce the torn read"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_purge_between_the_header_and_the_files_does_not_tear_a_revision() -> TestResult {
+        let fixture = Trashed::new("revision")?;
+        let mut purged = Ok(());
+        let record = fixture
+            .store
+            .revision_between(&fixture.id, SourceRevision(1), || {
+                purged = fixture.purge();
+            })?
+            .ok_or("the snapshot began before the purge")?;
+        purged?;
+        let paths: Vec<_> = record.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["index.html", "style.css"]);
+        // Once the purge is committed a new read sees nothing at all.
+        assert_eq!(
+            fixture.store.revision(&fixture.id, SourceRevision(1))?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_purge_after_the_numbers_are_listed_does_not_cut_the_listing_short() -> TestResult {
+        let fixture = Trashed::new("listing")?;
+        let mut purged = Ok(());
+        let records = fixture.store.revisions_between(&fixture.id, || {
+            purged = fixture.purge();
+        })?;
+        purged?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].files.len(), 2);
+        assert!(fixture.store.revisions(&fixture.id)?.is_empty());
+        Ok(())
+    }
 }

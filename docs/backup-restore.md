@@ -7,8 +7,10 @@ feed, titles, pins and the trash, and the access token records. `backup` copies
 that file consistently; `restore` builds a new data directory from the copy.
 
 A backup holds what the database held when it was taken. **A purge (decision 0029) does not reach earlier backups:** an artifact removed for good is still
-in every backup made before the purge, and restoring one brings it back (as an
-artifact in the trash, if it was purged after the backup was made). A backup
+in every backup made before the purge, and restoring one brings it back in the
+state it had when that backup was taken: live if it was live then, in the trash
+if it had been deleted by then (a purge needs the trash, so a backup taken
+after the delete holds it there). A backup
 taken after a purge holds no content, listing, or title of the artifact, only
 its tombstone rows, request keys, and change entries; a restore of it answers
 the same as the server did (the artifact is not found, the purge retry

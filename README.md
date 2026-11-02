@@ -86,8 +86,9 @@ removes an artifact that is already in the trash for good (its files and
 titles; request keys, change sequences, and copies stay), and `content cleanup
 [--apply]` reports, and with `--apply` deletes, file content that no revision
 refers to ([decision 0029](docs/decisions/0029-retention-and-cleanup.md)). A
-purge cannot be undone, is not offered to MCP agents, and does not reach earlier
-backups. Request keys are never expired.
+purge cannot be undone, is refused to issued agent tokens (they get `403`; only
+the owner's access token may purge or clean up), is not offered to MCP agents,
+and does not reach earlier backups. Request keys are never expired.
 
 For development with live reloading, Vite is still available:
 

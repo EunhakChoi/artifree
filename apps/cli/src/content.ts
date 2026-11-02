@@ -19,7 +19,9 @@ it removes nothing (a dry run). With --apply it deletes that content and
 prints what it deleted; the server decides again when it deletes, so the
 numbers can differ from an earlier dry run. A purge already removes the
 content it frees, so on a healthy server cleanup finds nothing. The database
-file does not shrink; the space is reused. Results are JSON on stdout.
+file does not shrink; the space is reused. It needs the owner's access token:
+an issued agent token is refused with 403 forbidden, the dry run too. Results
+are JSON on stdout.
 `;
 
 const connectionOptions = {

@@ -21,6 +21,7 @@ use common::{
     update_metadata,
 };
 use rusqlite::Connection;
+use sha2::Digest as _;
 
 const FIRST: &str = "<h1>first</h1>";
 const SECOND: &str = "<h1>second</h1>";
@@ -116,6 +117,42 @@ impl Fixture {
     fn bytes(&self, id: &ArtifactId, revision: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.store
             .revision_file(id, SourceRevision(revision), &parsed("index.html"))
+    }
+
+    /// What a deletion of shared content would break, checked from outside the
+    /// store and without relying on `SQLite` refusing the delete (a foreign key
+    /// failure is a defense, not the assertion): files whose content is gone,
+    /// and rows the foreign key check reports.
+    fn assert_every_file_has_its_content(&self) -> TestResult {
+        let connection = self.sql()?;
+        let dangling: i64 = connection.query_row(
+            "SELECT count(*) FROM revision_files f
+             WHERE NOT EXISTS (SELECT 1 FROM blobs b WHERE b.digest = f.digest)",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(dangling, 0, "revision files lost their content");
+        let mut check = connection.prepare("PRAGMA foreign_key_check")?;
+        let violations = check.query_map([], |row| row.get::<_, String>(0))?.count();
+        assert_eq!(violations, 0, "foreign key check reports violations");
+        // Each stored size and digest still describes the bytes that are read.
+        let mut files = connection.prepare(
+            "SELECT f.size, f.digest, b.content FROM revision_files f
+             JOIN blobs b ON b.digest = f.digest",
+        )?;
+        let rows = files.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (size, stored, content) = row?;
+            assert_eq!(usize::try_from(size)?, content.len());
+            assert_eq!(stored, sha2::Sha256::digest(&content).to_vec());
+        }
+        Ok(())
     }
 
     fn unreferenced(&self) -> Result<UnreferencedContent, StoreError> {
@@ -483,6 +520,15 @@ fn a_copy_keeps_its_history_and_bytes_when_the_source_is_purged() -> TestResult 
 
     // Only content nothing else refers to was deleted: FIRST.
     assert_eq!(fixture.count("SELECT count(*) FROM blobs")?, 3);
+    fixture.assert_every_file_has_its_content()?;
+    for shared in [SECOND, "h1{}"] {
+        let present = fixture.sql()?.query_row(
+            "SELECT count(*) FROM blobs WHERE digest = ?1",
+            [digest(shared).as_slice()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(present, 1, "shared content {shared:?} was deleted");
+    }
     assert_eq!(
         fixture.bytes(copy_id, 1)?.as_deref(),
         Some(SECOND.as_bytes())
@@ -612,6 +658,7 @@ fn only_unreferenced_content_is_removed_and_the_dry_run_removes_nothing() -> Tes
         blobs_before - 1
     );
     // Nothing a file refers to is gone, in the trash or not, or shared.
+    fixture.assert_every_file_has_its_content()?;
     assert_eq!(
         fixture.bytes(&live.artifact.id, 1)?.as_deref(),
         Some(FIRST.as_bytes())

@@ -981,8 +981,13 @@ async fn update_artifact(
     ))
 }
 
+/// Removes a trashed artifact for good. The administrative credential only
+/// (decision 0029): an agent token authenticates as the owner but must not be
+/// able to do what cannot be undone. The guard comes first, so an agent token
+/// learns nothing about the artifact, the base, or the key.
 async fn purge_artifact(
     State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
     Authenticated(actor): Authenticated,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,
@@ -998,17 +1003,20 @@ async fn purge_artifact(
     ))
 }
 
-/// The dry run: reads and removes nothing.
+/// The dry run: reads and removes nothing. Administrative like the apply: it
+/// reports the size of content shared by every owner and agent (decision
+/// 0029).
 async fn show_unreferenced_content(
     State(state): State<AppState>,
-    Authenticated(_actor): Authenticated,
+    RequireAdmin(_): RequireAdmin,
 ) -> Result<Json<UnreferencedContent>, ApiError> {
     Ok(Json(operations::unreferenced_content(&state, false).await?))
 }
 
+/// Removes content no revision file refers to. Administrative credential only.
 async fn remove_unreferenced_content(
     State(state): State<AppState>,
-    Authenticated(_actor): Authenticated,
+    RequireAdmin(_): RequireAdmin,
 ) -> Result<Json<UnreferencedContent>, ApiError> {
     Ok(Json(operations::unreferenced_content(&state, true).await?))
 }
