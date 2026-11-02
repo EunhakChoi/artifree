@@ -2357,6 +2357,13 @@ const addresses = [
     true,
   ],
   ['the page origin', '', 'this origin', true],
+  ['a path on the page origin', '/api/', '/api', true],
+  [
+    'a protocol-relative address',
+    `//user:${SECRET}@api.example`,
+    'the configured server',
+    false,
+  ],
   [
     'credentials',
     `https://user:${SECRET}@api.example/prefix`,

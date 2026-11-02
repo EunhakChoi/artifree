@@ -20,7 +20,7 @@ const QUERY_OR_FRAGMENT = 'it contains a query or fragment';
 export function parseServerUrl(text: string): ServerUrlResult {
   const trimmed = text.trim();
   // Browsers read a backslash as a slash, so what follows one is not where it looks.
-  if (!/^https?:\/\//i.test(trimmed) || trimmed.includes('\\'))
+  if (!/^https?:\/\/[^/]/i.test(trimmed) || trimmed.includes('\\'))
     return refused(NOT_ABSOLUTE);
   if (/[?#]/.test(trimmed)) return refused(QUERY_OR_FRAGMENT);
   const authority = trimmed.slice(trimmed.indexOf('//') + 2).split('/')[0];

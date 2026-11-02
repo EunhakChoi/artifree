@@ -833,6 +833,11 @@ pub fn normalize_frame_ancestors(raw: &str) -> Result<String, &'static str> {
             return Err("sources must be visible ASCII");
         }
     }
+    // `'none'` is valid only alone; browsers drop a directive that mixes it
+    // with other sources, which would leave embedding unrestricted.
+    if sources.len() > 1 && sources.iter().any(|s| s.eq_ignore_ascii_case("'none'")) {
+        return Err("'none' cannot be combined with other sources");
+    }
     Ok(sources.join(" "))
 }
 
@@ -907,6 +912,7 @@ mod tests {
                 "  https://ui.example:*   'self' ",
                 "https://ui.example:* 'self'",
             ),
+            ("'none'", "'none'"),
         ] {
             assert_eq!(normalize_frame_ancestors(list), Ok(expected.to_owned()));
         }
@@ -915,6 +921,7 @@ mod tests {
             " \t ",
             "https://a.example; sandbox",
             "https://a.example,https://b.example",
+            "'none' https://a.example",
             "https://\u{e4}.example",
             "https://a.example\u{7f}",
         ] {

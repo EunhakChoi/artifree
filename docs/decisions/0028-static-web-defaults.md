@@ -137,8 +137,9 @@ the operator's value, passwords included.
 ### Frame ancestors
 
 13. `--frame-ancestors` and `ARTIFREE_FRAME_ANCESTORS` take a space-separated
-    source list. It is **refused** when empty or when any source contains `;`
-    or `,` (a `;` would end the directive and start another; a comma is the
+    source list. It is **refused** when empty, when `'none'` is combined with
+    other sources (browsers drop such a directive, leaving embedding
+    unrestricted), or when any source contains `;` or `,` (a `;` would end the directive and start another; a comma is the
     separator of other headers and always a mistake here) or a character that
     is not visible ASCII. Sources such as `*`, `'self'`, `https:` and
     `https://ui.example:*` are kept; they are not checked beyond that, so

@@ -46,6 +46,8 @@ test('refused addresses give a reason that does not repeat them', () => {
     ['https//user:p%40ss@host', /absolute/],
     ['https://api.example.com:65536', /absolute/],
     ['https://', /absolute/],
+    ['http:///evil.example', /absolute/],
+    ['https:///', /absolute/],
     [`https://user:${SECRET}@api.example.com`, /user name or password/],
     [`https://${SECRET}@api.example.com`, /user name or password/],
     ['https://@api.example.com', /user name or password/],

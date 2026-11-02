@@ -377,6 +377,10 @@ interface Address {
 
 function describeAddress(baseUrl: string): Address {
   if (baseUrl === '') return { label: 'this origin', plain: true };
+  // A path on the page's own origin has no authority to hold a credential. A
+  // leading `//` would be one, so it is not a path.
+  if (/^\/(?!\/)[^?#\\]*$/.test(baseUrl))
+    return { label: baseUrl, plain: true };
   let url: URL;
   try {
     url = new URL(baseUrl);
