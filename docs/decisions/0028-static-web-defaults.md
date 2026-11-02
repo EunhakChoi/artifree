@@ -35,7 +35,8 @@ the operator's value, passwords included.
    decides every source: the `?server=` link, the connect form, the address
    kept for the tab, and the build default. An address must be absolute
    `http` or `https`, with no user name or password, no query and no fragment
-   (an empty `?` or `#` counts), and no backslash. It is returned as
+   (an empty `?` or `#` counts), no backslash, and not port 0 (the server
+   refuses it, so a default with it would build and then fail when used). It is returned as
    `origin + path` without a trailing slash. The Vite config uses the same
    function: a build default it refuses **fails the build**, and the message
    names the variable and the rule, not the value.
@@ -45,10 +46,13 @@ the operator's value, passwords included.
    it ("The server address in the link was ignored because it contains a user
    name or password").
 4. **The build default is not kept in `sessionStorage`.** `serverToKeep`
-   returns nothing for the page's origin and for the build default, so a tab
-   that connected to the default stores no server address and a later build
-   with another default is followed. An address the person chose (a link or the
-   field) is kept for the tab, as before (0022).
+   returns nothing for the empty address, which stands for the page's own
+   origin, and for an address equal to the build default, so a tab that
+   connected to the default stores no server address and a later build with
+   another default is followed. Every other address the person chose (a link or
+   the field) is kept for the tab, as before (0022), including the page's own
+   origin typed out in full: it is a chosen address, and with a build default
+   present it is the only way to stay on the page's origin (item 5).
 5. **An empty Server URL field means the default** (the build default, else the
    page's own origin). The field is pre-filled with the starting address and
    says what empty means. The consequence is that with a build default present,
@@ -93,8 +97,12 @@ the operator's value, passwords included.
    the default-port origin `https://ui.example`. Rules, checked before anything
    is canonicalized: scheme `http` or `https` (any case); then `://`; the host
    is a registered name (letters, digits, `-` and `_`, non-empty labels, no
-   leading or trailing `-`, no trailing dot), a dotted-quad IPv4 address (digits
-   and dots must form a valid address; `1.2.3` and `01.2.3.4` are refused), or
+   leading or trailing `-`, no trailing dot, and a last label that is not a
+   number: all decimal digits, or `0x`/`0X` and hex digits, so `foo.123`,
+   `0x7f.1` and `0x7f.0.0.1` are refused as a browser would not read them as
+   names; `a1.example`, `x.0example` and `foo.0xzz` are names), a dotted-quad
+   IPv4 address (digits and dots must form a valid address; `1.2.3`,
+   `127.1`, `4294967296` and `01.2.3.4` are refused), or
    a bracketed IPv6 address; if a `:` follows the host the rest must be digits
    only and from 1 to 65535 (`:`, `:0`, `:65536`, `:abc`, `:-1`, `:08080x` are
    errors; leading zeros are accepted, so `:08080` is 8080); no `@`, and no
@@ -187,6 +195,11 @@ the operator's value, passwords included.
 - `--content-origin` and `--api-origin` refuse credentials (they were dropped
   silently), unusable ports (read as the default port), and other lenient
   shapes.
+- A host whose last label is a number (`foo.123`, `0x7f.0.0.1`) is refused in
+  every origin. A browser reads `0x7f.0.0.1` as `127.0.0.1`, so it would have
+  passed the check that `--content-origin` differs from `--api-origin` while
+  being the same origin, and an allow-list entry in that form never matches.
+  `VITE_ARTIFREE_SERVER` and the Server URL field refuse port 0.
 - The CORS middleware answers 403 to a request `Origin` with an unusable port
   instead of reading it as the default port.
 - `--frame-ancestors` refuses an empty list, `;` and `,`.

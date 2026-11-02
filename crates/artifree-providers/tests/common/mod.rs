@@ -153,17 +153,22 @@ pub fn update_metadata(
 
 /// Every file directly in `directory` with its bytes, to compare before and
 /// after an operation that must change nothing. Directories are listed by
-/// name with no bytes.
+/// name with no bytes. A listing, inspection, or read that fails panics with
+/// the path: an unreadable file must not compare equal as empty.
 pub fn files_of(directory: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
     std::fs::read_dir(directory)
         .unwrap_or_else(|error| panic!("cannot list {}: {error}", directory.display()))
         .map(|entry| {
-            let entry = entry.unwrap_or_else(|error| panic!("cannot list: {error}"));
-            let bytes = entry
+            let entry = entry
+                .unwrap_or_else(|error| panic!("cannot list {}: {error}", directory.display()));
+            let path = entry.path();
+            let file_type = entry
                 .file_type()
-                .ok()
-                .filter(std::fs::FileType::is_file)
-                .map(|_| std::fs::read(entry.path()).unwrap_or_default());
+                .unwrap_or_else(|error| panic!("cannot inspect {}: {error}", path.display()));
+            let bytes = file_type.is_file().then(|| {
+                std::fs::read(&path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+            });
             (entry.file_name().to_string_lossy().into_owned(), bytes)
         })
         .collect()
