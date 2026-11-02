@@ -21,8 +21,8 @@ use artifree_ports::artifact_store::{
     RequestFingerprint, RequestIdentity, StoreError,
 };
 use artifree_ports::job_store::{
-    Checkpoint, ClaimedJob, JobCancel, JobClaim, JobListing, JobPosition, JobReceipt, JobRecord,
-    JobStore, JobStoreError, NewJob, Retry,
+    Checkpoint, Claim, ClaimedJob, JobCancel, JobClaim, JobListing, JobPosition, JobReceipt,
+    JobRecord, JobStore, JobStoreError, NewJob, Retry,
 };
 use artifree_providers::storage::SqliteStore;
 use common::{
@@ -139,7 +139,7 @@ impl Fixture {
     }
 
     fn try_claim(&self, who: &str, now: i64) -> Result<Option<ClaimedJob>, JobStoreError> {
-        claim_with(&self.store, who, now)
+        Ok(claim_with(&self.store, who, now)?.claimed)
     }
 
     fn claimed(&self, who: &str, now: i64) -> Result<ClaimedJob, Box<dyn std::error::Error>> {
@@ -182,11 +182,7 @@ impl Fixture {
     }
 }
 
-fn claim_with(
-    store: &SqliteStore,
-    who: &str,
-    now: i64,
-) -> Result<Option<ClaimedJob>, JobStoreError> {
+fn claim_with(store: &SqliteStore, who: &str, now: i64) -> Result<Claim, JobStoreError> {
     store.claim_job(JobClaim {
         worker: &worker(who),
         now: at(now),
@@ -482,8 +478,8 @@ fn two_connections_never_claim_the_same_job() -> TestResult {
     let first = claim_with(&fixture.store, "a", 2_000)?;
     let second = claim_with(&other, "b", 2_000)?;
 
-    assert_eq!(first.map(|claimed| claimed.job.id), Some(job.id));
-    assert!(second.is_none());
+    assert_eq!(first.claimed.map(|claimed| claimed.job.id), Some(job.id));
+    assert!(second.claimed.is_none());
     Ok(())
 }
 
@@ -502,7 +498,8 @@ fn concurrent_workers_claim_each_job_exactly_once() -> TestResult {
             move || -> Result<Vec<JobId>, JobStoreError> {
                 barrier.wait();
                 let mut mine = Vec::new();
-                while let Some(claimed) = claim_with(&store, &format!("t{number}"), 2_000)? {
+                while let Some(claimed) = claim_with(&store, &format!("t{number}"), 2_000)?.claimed
+                {
                     mine.push(claimed.job.id);
                 }
                 Ok(mine)
@@ -635,7 +632,19 @@ fn a_job_whose_lease_expired_on_its_last_attempt_fails() -> TestResult {
         now += LEASE_MS;
     }
 
-    assert!(fixture.try_claim("b", now)?.is_none(), "no fourth attempt");
+    let outcome = claim_with(&fixture.store, "b", now)?;
+    assert!(outcome.claimed.is_none(), "no fourth attempt");
+    assert_eq!(
+        outcome
+            .settled
+            .iter()
+            .map(|record| &record.id)
+            .collect::<Vec<_>>(),
+        [&job.id],
+        "the claim reports the job it failed"
+    );
+    assert_eq!(outcome.settled[0].state, JobState::Failed);
+    assert_eq!(outcome.settled[0].failure, Some(JobFailure::LeaseExpired));
 
     let ended = fixture.job(&job.id)?;
     assert_eq!(ended.state, JobState::Failed);
@@ -652,11 +661,48 @@ fn an_expired_job_with_a_cancel_requested_is_cancelled_not_rerun() -> TestResult
     fixture.claimed("a", 0)?;
     fixture.cancel("stop", &job.id, 100)?;
 
-    assert!(fixture.try_claim("b", LEASE_MS)?.is_none());
+    let outcome = claim_with(&fixture.store, "b", LEASE_MS)?;
+    assert!(outcome.claimed.is_none());
+    assert_eq!(
+        outcome
+            .settled
+            .iter()
+            .map(|record| &record.id)
+            .collect::<Vec<_>>(),
+        [&job.id],
+        "the claim reports the job it cancelled"
+    );
+    assert_eq!(outcome.settled[0].state, JobState::Cancelled);
 
     let ended = fixture.job(&job.id)?;
     assert_eq!(ended.state, JobState::Cancelled);
     assert_eq!(ended.attempts, 1, "it did not run again");
+    Ok(())
+}
+
+#[test]
+fn a_claim_reports_the_jobs_it_ended_and_still_claims_the_next() -> TestResult {
+    let fixture = Fixture::new()?;
+    let doomed = fixture.queued("doomed", 0)?;
+    let mut now = 0;
+    for _ in 0..MAX_ATTEMPTS {
+        fixture.claimed("a", now)?;
+        now += LEASE_MS;
+    }
+    let next = fixture.queued("next", now)?;
+
+    let outcome = claim_with(&fixture.store, "b", now)?;
+
+    assert_eq!(
+        outcome
+            .settled
+            .iter()
+            .map(|record| &record.id)
+            .collect::<Vec<_>>(),
+        [&doomed.id]
+    );
+    let claimed = outcome.claimed.ok_or("the next job is claimed")?;
+    assert_eq!(claimed.job.id, next.id);
     Ok(())
 }
 
@@ -1050,6 +1096,126 @@ fn a_list_of_one_artifact_leaves_out_the_trash_and_purged_artifacts() -> TestRes
 
 // --- trash and purge -------------------------------------------------------
 
+impl Fixture {
+    fn recover(&self) -> Result<(), StoreError> {
+        update_metadata(
+            &self.store,
+            &self.created,
+            &key("recover-all"),
+            2,
+            None,
+            None,
+            Some(false),
+        )
+        .map(|_| ())
+    }
+}
+
+/// The reproduction of a review finding: sixteen queued jobs whose artifact
+/// is then trashed. They cannot be seen, cancelled, or run, so they must not
+/// also block the actor from queueing work on another artifact.
+#[test]
+fn jobs_of_an_artifact_in_the_trash_do_not_count_toward_the_cap_and_are_not_claimed() -> TestResult
+{
+    let fixture = Fixture::new()?;
+    let mut ids = Vec::new();
+    for number in 0..MAX_ACTIVE_JOBS_PER_ACTOR {
+        ids.push(
+            fixture
+                .enqueue(&format!("job{number}"), 2, 1_000 + i64::try_from(number)?)?
+                .job
+                .id,
+        );
+    }
+    assert_eq!(
+        fixture.enqueue("overflow", 2, 2_000).err(),
+        Some(JobStoreError::LimitReached)
+    );
+
+    fixture.trash()?;
+
+    let other = create_demo(&fixture.store, &fixture.owner, &key("create-b"), "B", FIRST)?;
+    let request_key = key("on-b");
+    let on_other = fixture.store.enqueue_job(NewJob {
+        request: RequestIdentity {
+            actor: &fixture.owner,
+            key: &request_key,
+            fingerprint: RequestFingerprint(digest("on-b")),
+        },
+        artifact: &other.artifact.id,
+        revision: SourceRevision(1),
+        kind: JobKind::VerifyRevision,
+        now: at(3_000),
+    })?;
+    assert_eq!(
+        on_other.delivery,
+        Delivery::Committed,
+        "the cap counts visible jobs"
+    );
+
+    let outcome = claim_with(&fixture.store, "a", 4_000)?;
+    assert_eq!(
+        outcome.claimed.map(|claimed| claimed.job.id),
+        Some(on_other.job.id),
+        "only the job of the artifact in place is taken"
+    );
+    assert!(outcome.settled.is_empty());
+    for id in &ids {
+        assert_eq!(fixture.state(id)?, JobState::Queued, "left untouched");
+    }
+    assert!(fixture.try_claim("a", 4_500)?.is_none());
+
+    // Recovery makes them claimable again, oldest first; nothing was lost.
+    fixture.recover()?;
+    let after = fixture.claimed("b", 6_000)?;
+    assert_eq!(after.job.id, ids[0]);
+    Ok(())
+}
+
+#[test]
+fn a_running_job_of_a_trashed_artifact_is_left_alone_when_its_lease_expires() -> TestResult {
+    let fixture = Fixture::new()?;
+    let job = fixture.queued("one", 0)?;
+    let first = fixture.claimed("a", 0)?;
+    fixture.trash()?;
+
+    let outcome = claim_with(&fixture.store, "b", LEASE_MS)?;
+    assert!(outcome.claimed.is_none() && outcome.settled.is_empty());
+    let waiting = fixture.job(&job.id)?;
+    assert_eq!(
+        waiting.state,
+        JobState::Running,
+        "not taken over while hidden"
+    );
+    assert_eq!(waiting.attempts, 1);
+
+    fixture.recover()?;
+    let second = fixture.claimed("b", LEASE_MS + 1)?;
+    assert_eq!(second.job.id, job.id);
+    assert_eq!(second.job.attempts, 2);
+    assert!(second.lease.fence > first.lease.fence);
+    Ok(())
+}
+
+/// An idle poll reads; it must not queue for the write lock behind a writer.
+#[test]
+fn an_idle_claim_does_not_take_the_write_lock() -> TestResult {
+    let fixture = Fixture::new()?;
+    let writer = fixture.sql()?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+
+    let started = std::time::Instant::now();
+    let outcome = claim_with(&fixture.store, "a", 1_000)?;
+
+    assert!(outcome.claimed.is_none() && outcome.settled.is_empty());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "it did not wait for the lock"
+    );
+    writer.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
 #[test]
 fn trashing_an_artifact_does_not_stop_a_running_job() -> TestResult {
     let fixture = Fixture::new()?;
@@ -1095,6 +1261,14 @@ fn a_purge_ends_open_jobs_revokes_leases_and_erases_results() -> TestResult {
     fixture.trash()?;
 
     fixture.purge()?;
+
+    // The purge also raised the fencing token of the job a worker held.
+    let fence: i64 = fixture.sql()?.query_row(
+        "SELECT fence FROM jobs WHERE id = ?1",
+        [running.id.as_str()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(fence, i64::try_from(held.lease.fence)? + 1);
 
     for (id, name) in [
         (&running.id, "running"),

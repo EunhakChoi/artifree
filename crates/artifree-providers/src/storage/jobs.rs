@@ -7,6 +7,10 @@
 //! claim and never lowered); a call whose token is not the job's current claim
 //! is rejected in the same transaction as the write it would have made.
 //!
+//! A job of an artifact in the trash is opaque, like the artifact: it is not
+//! counted toward the actor's limit and a claim does not take it, so it waits
+//! untouched until the artifact is recovered (decision 0030, 4).
+//!
 //! Job times are given by the caller, which reads an injectable clock. These
 //! tables hold no content digest: a job reaches file content only through the
 //! `revision_files` rows of its pinned revision.
@@ -19,8 +23,8 @@ use artifree_domain::job::{
 };
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
 use artifree_ports::job_store::{
-    Checkpoint, ClaimedJob, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord, JobStore,
-    JobStoreError, Lease, NewJob, Retry,
+    Checkpoint, Claim, ClaimedJob, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord,
+    JobStore, JobStoreError, Lease, NewJob, Retry,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -265,8 +269,9 @@ fn enqueue(
     }
     let active: i64 = transaction
         .query_row(
-            "SELECT count(*) FROM jobs
-             WHERE actor = ?1 AND state IN ('queued', 'running', 'retry_scheduled')",
+            "SELECT count(*) FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
+             WHERE j.actor = ?1 AND j.state IN ('queued', 'running', 'retry_scheduled')
+               AND a.purged_at IS NULL AND a.deleted_at IS NULL",
             [request.request.actor.as_str()],
             |row| row.get(0),
         )
@@ -355,13 +360,23 @@ struct Due {
     max_attempts: i64,
 }
 
+/// Which jobs a worker may take, for `?1` = now: a queued or retry-scheduled
+/// job whose time came, or a running job whose lease expired, of an artifact
+/// outside the trash and not purged. A job of an artifact in the trash is
+/// opaque like the artifact (decision 0030): it is left as it is and becomes
+/// due again when the artifact is recovered.
+const DUE: &str = "FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
+     WHERE a.purged_at IS NULL AND a.deleted_at IS NULL
+       AND ((j.state IN ('queued', 'retry_scheduled') AND j.run_after <= ?1)
+         OR (j.state = 'running' AND j.lease_expires_at <= ?1))";
+
 fn next_due(transaction: &Transaction<'_>, now: UnixMillis) -> Result<Option<Due>, StoreError> {
     let row: Option<(String, String, bool, i64, i64)> = transaction
         .query_row(
-            "SELECT id, state, cancel_requested, attempts, max_attempts FROM jobs
-             WHERE (state IN ('queued', 'retry_scheduled') AND run_after <= ?1)
-                OR (state = 'running' AND lease_expires_at <= ?1)
-             ORDER BY created_at, id LIMIT 1",
+            &format!(
+                "SELECT j.id, j.state, j.cancel_requested, j.attempts, j.max_attempts {DUE}
+                 ORDER BY j.created_at, j.id LIMIT 1"
+            ),
             [now.0],
             |row| {
                 Ok((
@@ -411,10 +426,18 @@ fn end(
     Ok(())
 }
 
-fn claim(
-    transaction: &Transaction<'_>,
-    claim: JobClaim<'_>,
-) -> Result<Option<ClaimedJob>, JobStoreError> {
+/// Whether any job is due. A read only: it is a hint that spares an idle
+/// worker the write lock, and the claim decides again inside its transaction.
+fn any_due(connection: &Connection, now: UnixMillis) -> Result<bool, StoreError> {
+    connection
+        .query_row(&format!("SELECT EXISTS (SELECT 1 {DUE})"), [now.0], |row| {
+            row.get(0)
+        })
+        .map_err(unavailable)
+}
+
+fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, JobStoreError> {
+    let mut settled = Vec::new();
     let lease_ms = i64::try_from(claim.lease_ms).map_err(corrupt)?;
     let expires = claim
         .now
@@ -426,6 +449,7 @@ fn claim(
         if due.running && due.cancel_requested {
             // The worker that was asked to stop is gone; nothing is left to run.
             end(transaction, &due.id, JobState::Cancelled, None, claim.now)?;
+            settled.push(written(transaction, &due.id)?);
             continue;
         }
         if due.running && due.attempts >= due.max_attempts {
@@ -436,6 +460,7 @@ fn claim(
                 Some(JobFailure::LeaseExpired),
                 claim.now,
             )?;
+            settled.push(written(transaction, &due.id)?);
             continue;
         }
         transaction
@@ -454,15 +479,21 @@ fn claim(
                 |row| row.get(0),
             )
             .map_err(unavailable)?;
-        return Ok(Some(ClaimedJob {
-            job,
-            lease: Lease {
-                job: due.id,
-                fence: u64::try_from(fence).map_err(corrupt)?,
-            },
-        }));
+        return Ok(Claim {
+            settled,
+            claimed: Some(ClaimedJob {
+                job,
+                lease: Lease {
+                    job: due.id,
+                    fence: u64::try_from(fence).map_err(corrupt)?,
+                },
+            }),
+        });
     }
-    Ok(None)
+    Ok(Claim {
+        settled,
+        claimed: None,
+    })
 }
 
 /// Checks that `lease` is the job's current claim and returns whether a
@@ -722,7 +753,11 @@ impl JobStore for SqliteStore {
         Ok(jobs)
     }
 
-    fn claim_job(&self, request: JobClaim<'_>) -> Result<Option<ClaimedJob>, JobStoreError> {
+    fn claim_job(&self, request: JobClaim<'_>) -> Result<Claim, JobStoreError> {
+        // An idle poll reads and returns; only a due job takes the write lock.
+        if !any_due(&self.connect()?, request.now)? {
+            return Ok(Claim::default());
+        }
         self.write(|transaction| claim(transaction, request))
     }
 

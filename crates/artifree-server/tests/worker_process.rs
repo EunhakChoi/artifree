@@ -413,3 +413,83 @@ fn an_empty_queue_drains_at_once_and_a_bad_command_line_is_refused() -> TestResu
     assert!(message.starts_with("Unknown arguments."), "{message}");
     Ok(())
 }
+
+/// Runs `worker run --once` over a job whose worker died and whose lease has
+/// expired (`update` is the SQL that puts the job there), and returns the
+/// events it printed.
+fn drain_an_abandoned_job(update: &str) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let data = Data::with_job()?;
+    data.sql()?.execute(update, [])?;
+    let mut worker = Worker::spawn(&data, "settle", &["--once".as_ref()])?;
+    assert!(worker.wait_exit()?.success(), "{}", worker.diagnostics());
+    let events = worker.rest();
+    assert_eq!(data.findings()?, 0, "the job was never run");
+    Ok(events)
+}
+
+#[test]
+fn a_job_the_claim_fails_for_its_last_expired_lease_is_reported() -> TestResult {
+    let events = drain_an_abandoned_job(
+        "UPDATE jobs SET state = 'running', attempts = 3, fence = 3, worker = 'worker-dead',
+             lease_expires_at = 1, started_at = 1",
+    )?;
+
+    let kinds: Vec<_> = events
+        .iter()
+        .filter_map(|event| event["event"].as_str())
+        .collect();
+    assert_eq!(kinds, ["ready", "job", "stopped"], "{events:?}");
+    assert_eq!(events[1]["state"], "failed", "{events:?}");
+    assert_eq!(events[1]["failure"], "lease_expired", "{events:?}");
+    assert_eq!(events[2]["reason"], "drained");
+    Ok(())
+}
+
+#[test]
+fn a_job_the_claim_cancels_for_an_expired_lease_with_a_cancel_pending_is_reported() -> TestResult {
+    let events = drain_an_abandoned_job(
+        "UPDATE jobs SET state = 'running', attempts = 1, fence = 1, worker = 'worker-dead',
+             lease_expires_at = 1, started_at = 1, cancel_requested = 1",
+    )?;
+
+    let kinds: Vec<_> = events
+        .iter()
+        .filter_map(|event| event["event"].as_str())
+        .collect();
+    assert_eq!(kinds, ["ready", "job", "stopped"], "{events:?}");
+    assert_eq!(events[1]["state"], "cancelled", "{events:?}");
+    assert_eq!(events[2]["reason"], "drained");
+    Ok(())
+}
+
+#[test]
+fn an_empty_database_file_is_refused_and_left_as_it_was() -> TestResult {
+    let data = Data::with_job()?;
+    let empty = data.dir.join("empty-db");
+    std::fs::create_dir(&empty)?;
+    let file = empty.join(DATABASE_FILE);
+    std::fs::File::create(&file)?;
+
+    let refused = Command::new(BIN)
+        .args(["worker", "run", "--once", "--data-dir"])
+        .arg(&empty)
+        .stdin(Stdio::null())
+        .output()?;
+
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        std::fs::metadata(&file)?.len(),
+        0,
+        "the file was not written"
+    );
+    let names: Vec<_> = std::fs::read_dir(&empty)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        names,
+        [std::ffi::OsString::from(DATABASE_FILE)],
+        "no sidecar file appeared"
+    );
+    Ok(())
+}

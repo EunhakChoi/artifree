@@ -499,11 +499,13 @@ fn jobs_survive_a_restore_and_a_running_lease_is_expired_not_resumed() -> TestRe
         })
     };
     let claim = |target: &SqliteStore, who: &str, now: i64| {
-        target.claim_job(JobClaim {
-            worker: &parsed::<WorkerId>(who),
-            now: UnixMillis(now),
-            lease_ms: 60_000,
-        })
+        target
+            .claim_job(JobClaim {
+                worker: &parsed::<WorkerId>(who),
+                now: UnixMillis(now),
+                lease_ms: 60_000,
+            })
+            .map(|claim| claim.claimed)
     };
     let done = enqueue(&store, "done", 1)?.job;
     let finished = claim(&store, "worker-old", 1)?.ok_or("nothing to claim")?;

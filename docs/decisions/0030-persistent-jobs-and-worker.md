@@ -64,7 +64,14 @@ true`: a job moves on after the request that created it, so replaying
    job or artifact identifier is `404` and is never echoed. The checks are
    made in this order: artifact in place, revision exists, key, per-actor
    limit, insert. A revision whose files were purged cannot be enqueued, by
-   construction (the artifact is gone).
+   construction (the artifact is gone). **The trash is opaque to the queue
+   too:** the jobs of an artifact in the trash are hidden, cannot be
+   cancelled, are not counted toward the limit of decision 6, and are not
+   claimed by a worker (decision 8). They stay as they were (a queued job stays
+   queued; a running job whose lease expires is not taken over or ended) and
+   are claimable again, oldest first, when the artifact is recovered; recovery
+   loses no job. A recovery can leave an actor with more than 16 open jobs;
+   the limit only gates new requests.
 5. **Issued agent tokens may enqueue, read, list, and cancel.** An agent token
    authenticates as the same owner (0023). Purge and cleanup need the
    administrative credential because they cannot be undone (0029). A
@@ -72,12 +79,16 @@ true`: a job moves on after the request that created it, so replaying
    jobs and 3 attempts), and stoppable, so it is allowed to agents over HTTP
    and MCP, and each new route is tested with an issued token. This is a
    product decision, not an oversight; if a later job kind has effects, its
-   own record decides who may start it.
+   own record decides who may start it. The agent tokens and the owner are one
+   actor here, so they share the limit of decision 6: an agent can enqueue
+   into slots the owner freed by cancelling, and an owner cannot reserve room
+   against an agent.
 6. **A bound on open jobs.** An actor may have at most 16 jobs queued,
    running, or waiting for a retry (`MAX_ACTIVE_JOBS_PER_ACTOR`); the
    seventeenth is `409 too_many_jobs`. A retry of an accepted request needs no
-   room. Requests also pass the per-actor rate limiter that HTTP and MCP
-   share (0005).
+   room. Only jobs of artifacts outside the trash are counted (decision 4):
+   jobs nobody can see or cancel must not block new work elsewhere. Requests
+   also pass the per-actor rate limiter that HTTP and MCP share (0005).
 7. **The states.**
 
    | State             | Meaning                                                                                                |
@@ -109,7 +120,10 @@ true`: a job moves on after the request that created it, so replaying
    the same job (tested with concurrent claimers on separate connections).
    An expired lease on the last attempt fails the job with `lease_expired`
    (no attempt is invented); an expired lease with a cancel pending ends it
-   `cancelled`; any other expired lease is claimed again.
+   `cancelled`; any other expired lease is claimed again. Only jobs of an
+   artifact outside the trash are due (decision 4). A claim returns the jobs
+   it ended this way together with the job it claimed, and the worker reports
+   each as a `job` event, so no job reaches an end unseen.
 9. **Attempts and retry.** `max_attempts` is 3. A graceful shutdown is not
    an attempt: it gives the attempt back (`attempts` is reduced; the fence is
    not, so the released run still cannot write). Only `storage_unavailable`
@@ -146,8 +160,14 @@ true`: a job moves on after the request that created it, so replaying
     every file. A file is read whole (at most 5 MiB), so a cancel or a
     shutdown takes effect between files, not inside one read. A renewal that
     fails because the store is unavailable is tried again at the next
-    checkpoint; the safe end is that the write of the result is rejected if
-    the lease lapsed meanwhile.
+    checkpoint. **The write of the result does not look at the clock:** it
+    is accepted while the worker's fence is the job's current claim, even
+    after the lease time passed (a late result with no takeover is recorded),
+    and rejected once another worker claimed the job or a purge revoked it.
+    The fence decides, not the time; a time check would only reject work that
+    is correct and safe to record. The checkpoint before the result ignores a
+    stop request: a finished verification is recorded first, and the worker then
+    stops without starting another job. Only unfinished work is given back.
 13. **The worker is a subcommand of the existing binary:** `artifree-server
 worker run --data-dir <dir> [--once] [--poll-ms n] [--lease-secs n]
 [--hold-file path]`. It opens the existing database directly through the
@@ -155,12 +175,18 @@ worker run --data-dir <dir> [--once] [--poll-ms n] [--lease-secs n]
     writes), not over HTTP, so it needs no credential and no listener, and
     the server need not be running. It never creates a database (a missing one
     is an error), and a database of a newer schema is refused as for every
-    open. `--once` stops when no job is due (a job waiting for a retry is not
-    due). Defaults: poll 1 s (10 ms to 60 s), lease 30 s (1 s to 1 h).
+    open. An empty file is not a database: it is refused and left as it was.
+    `--once` stops when no job is due (a job waiting for a retry is not due).
+    Defaults: poll 1 s (10 ms to 60 s), lease 30 s (1 s to 1 h). An idle poll
+    only reads (a hint that something is due); the write lock is taken when a
+    job is due, and the claim decides again inside its transaction, so the
+    probe cannot cause a double claim.
     Arguments are parsed strictly (unknown, repeated, empty, or non-canonical
     numeric values are refused with `Unknown arguments.`, never echoing the
     value) and the worker reads no environment variable. stdout is JSON lines:
-    `ready`, one `job` per job it ended or gave back, `lease_lost`, `stopped`;
+    `ready`, one `job` per job it ended or gave back (including a job the claim
+    ended without running it: an expired lease on the last attempt, or with a
+    cancel pending), `lease_lost`, `stopped`;
     diagnostics go to stderr. Exit 0 when drained or signalled, 1 on a fatal
     error (missing or refused database, five store failures in a row). The
     worker name is `worker-` and eight random hex digits; it is a label for
@@ -179,13 +205,19 @@ run`, jobs stay `queued`, and every surface says so (the tool description,
     directory on one machine; a database file on a network file system is not
     a supported place for either (SQLite's own limit).
 15. **Purge, trash, backup.** Trashing an artifact does not stop a running job
-    (it finishes; its result is hidden by the `404` of decision 4 until the
-    artifact is recovered). Purging (0029) ends the artifact's open jobs as
-    `cancelled`, raises their fence (a running worker's next call is
-    `LeaseLost`), deletes every job's findings and result counts, and keeps
-    the job headers and request keys, in the same transaction and with the
-    same secure-delete as the rest of the purge; a retry of an enqueue after
-    the purge is `404`. A backup is a copy of the database, so jobs come
+    (it finishes and records its result, which is hidden by the `404` of
+    decision 4 until the artifact is recovered; if its lease expires while the
+    artifact is in the trash it is left alone, decision 4). Purging (0029) ends
+    the artifact's open jobs as `cancelled`, raises their fence (a running
+    worker's next call is `LeaseLost`; the state change alone already causes
+    that, the fence is a second guard, and a test reads it), deletes every
+    job's findings and result counts, and keeps the job headers and request
+    keys, in the same transaction and with the same secure-delete as the rest
+    of the purge; a retry of an enqueue after the purge is `404`. As for
+    purged content (0029): the freed pages are overwritten, but a copy of an
+    erased finding can remain in a write-ahead log that has not been
+    checkpointed and truncated yet, and **in every earlier backup**, which
+    still holds the findings and result counts of the job. A backup is a copy of the database, so jobs come
     along. **A restore sets every running job's lease to expired**
     (`expire_job_leases`), because a lease belongs to a worker on the machine
     that made the backup; the restored directory's worker runs the job again,
@@ -229,7 +261,9 @@ run`, jobs stay `queued`, and every surface says so (the tool description,
   story before it is added.
 - Time is the machine's wall clock, read through one injectable seam. A clock
   that jumps can expire a lease early or late; the fence, not the clock,
-  decides who may write.
+  decides who may write. A clock that steps backwards delays queued jobs
+  until it catches up (`run_after <= now`), and a retry scheduled before the
+  step waits as long as the step.
 - A single worker process runs one job at a time. Many workers on one machine
   are supported by the claim; a worker fleet over a shared database server is
   X04.

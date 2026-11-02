@@ -103,25 +103,6 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
 
-### Jobs
-
-`enqueue_job` queues a `verify_revision` job: a worker re-reads every file of
-that revision from the database and compares its SHA-256 and size with the
-stored listing ([decision 0030](decisions/0030-persistent-jobs-and-worker.md)).
-**It only queues.** The server does not start a worker; a job stays `queued`
-until an operator runs `artifree-server worker run`, and `get_job` is how an
-agent learns the outcome (job changes are not pushed). A finished job has
-`state: "succeeded"` with a `verdict` of `ok` or `mismatch` (a mismatch is a
-result, not a failure; up to 50 findings with artifact-relative paths, never
-file content), `failed` with a `failure` code, or `cancelled`. The job runs
-trusted server code, not an agent's code. `cancel_job` stops work that has not
-finished and never undoes anything; on a running job it records a request the
-worker honors at its next checkpoint, so poll `get_job` for `cancelled`. Retry
-rules are those of every write: resend the identical call with the same
-`idempotency_key`; the answer shows the job as it is now with `replayed: true`.
-An artifact in the trash or purged, and another actor's job, answer
-`not_found`. At most 16 jobs may be open per actor (`too_many_jobs`, 409); a
-cancel of a finished job is `job_ended` (409).
 A file is `{ "path", "encoding": "utf8" | "base64", "content" }`. A change is
 `{ "op": "put", "path", "encoding", "content" }` or
 `{ "op": "delete", "path" }`; unchanged files carry over.
@@ -215,6 +196,29 @@ A typical sequence of `tools/call` parameters:
 
 { "name": "create_preview", "arguments": { "artifact_id": "art_…", "revision": 2 } }
 ```
+
+### Jobs
+
+`enqueue_job` queues a `verify_revision` job: a worker re-reads every file of
+that revision from the database and compares its SHA-256 and size with the
+stored listing ([decision 0030](decisions/0030-persistent-jobs-and-worker.md)).
+**It only queues.** The server does not start a worker; a job stays `queued`
+until an operator runs `artifree-server worker run`, and `get_job` is how an
+agent learns the outcome (job changes are not pushed). A finished job has
+`state: "succeeded"` with a `verdict` of `ok` or `mismatch` (a mismatch is a
+result, not a failure; up to 50 findings with artifact-relative paths, never
+file content), `failed` with a `failure` code, or `cancelled`. The job runs
+trusted server code, not an agent's code. `cancel_job` stops work that has not
+finished and never undoes anything; on a running job it records a request the
+worker honors at its next checkpoint, so poll `get_job` for `cancelled`. Retry
+rules are those of every write: resend the identical call with the same
+`idempotency_key`; the answer shows the job as it is now with `replayed: true`.
+An artifact in the trash or purged, and another actor's job, answer
+`not_found`; the open jobs of an artifact in the trash wait untouched, are
+not counted toward the limit, and run again if the artifact is recovered. At
+most 16 jobs may be open per actor, the owner's and all agent tokens' together
+(`too_many_jobs`, 409); a
+cancel of a finished job is `job_ended` (409).
 
 ## Errors and retries
 

@@ -171,15 +171,17 @@ failures.
 `POST /mcp` serves MCP Streamable HTTP through the official Rust SDK, `rmcp`,
 statelessly and with JSON responses, for protocol versions up to 2026-07-28.
 It requires the same bearer token, accepts only loopback `Host` names, and
-refuses requests carrying an `Origin`. Eleven tools mirror the HTTP routes:
-`list_artifacts`, `get_artifact`, `create_artifact`, `save_revision`,
-`restore_revision`, `duplicate_artifact`, `update_artifact`,
-`list_revisions`, `get_revision`, `read_file`, and `create_preview`. Results
+refuses requests carrying an `Origin`. Eighteen tools are served. Eleven
+mirror the artifact HTTP routes: `list_artifacts`, `get_artifact`,
+`create_artifact`, `save_revision`, `restore_revision`, `duplicate_artifact`,
+`update_artifact`, `list_revisions`, `get_revision`, `read_file`, and
+`create_preview`. Four mirror the job routes: `enqueue_job`, `get_job`,
+`list_jobs`, and `cancel_job` ([0030](decisions/0030-persistent-jobs-and-worker.md)). Results
 are the HTTP API v1 bodies; failures are those error bodies with
 `isError: true`. MCP requests share the per-actor request limits with HTTP;
 a refused call is an HTTP `429`. The generated catalog is
 `contracts/generated/mcp-tools.json`; [the MCP guide](mcp.md) shows Codex and
-Pi configuration. The three additional handoff tools register an agent inbox,
+Pi configuration. The three handoff tools register an agent inbox,
 poll it, and acknowledge a delivered selection. They are not page callbacks;
 an agent has to poll. All these are agent tools, not page capabilities.
 

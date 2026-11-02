@@ -110,9 +110,13 @@ pub fn run(
     on_event: &mut dyn FnMut(&WorkerEvent<'_>),
 ) -> Result<Stopped, String> {
     let database = options.data_dir.join(DATABASE_FILE);
-    if !database.is_file() {
+    // A worker never creates a database: an empty file would be taken for a
+    // new one by the store, so it is refused here, unopened and unchanged.
+    let initialized =
+        std::fs::metadata(&database).is_ok_and(|meta| meta.is_file() && meta.len() > 0);
+    if !initialized {
         return Err(format!(
-            "there is no database in {}; start the server once with this data directory",
+            "there is no initialized database in {}; start the server once with this data directory",
             options.data_dir.display()
         ));
     }
@@ -132,7 +136,8 @@ pub fn run(
         if shutdown.load(Ordering::Acquire) {
             return Ok(Stopped::Signal);
         }
-        match worker::run_next(&store, clock, &worker, &config, &pace) {
+        let mut settled = |record: &JobRecord| on_event(&WorkerEvent::Job(record));
+        match worker::run_next(&store, clock, &worker, &config, &pace, &mut settled) {
             Ok(Step::Idle) => {
                 failures = 0;
                 if options.once {

@@ -150,6 +150,18 @@ pub struct ClaimedJob {
     pub lease: Lease,
 }
 
+/// What one claim did: the jobs it ended on the way and the job it claimed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Claim {
+    /// Jobs the claim ended because they could only end: an expired lease with
+    /// a cancel requested (now cancelled) or on its last attempt (now failed
+    /// with [`JobFailure::LeaseExpired`]), in the order they were ended. They
+    /// are reported so that a worker can tell its operator about each one.
+    pub settled: Vec<JobRecord>,
+    /// The claimed job, if one was due after those.
+    pub claimed: Option<ClaimedJob>,
+}
+
 /// What a heartbeat found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Checkpoint {
@@ -181,7 +193,8 @@ pub enum JobStoreError {
     RequestKeyReused,
     /// The job is in a state that does not allow the request.
     Conflict(JobState),
-    /// The actor has the largest number of jobs waiting or running.
+    /// The actor has the largest number of jobs waiting or running, counting
+    /// only jobs of artifacts outside the trash.
     LimitReached,
     /// The worker's lease is not the job's current claim: the job was claimed
     /// again, cancelled by a purge, or already ended. The worker must stop
@@ -262,15 +275,18 @@ pub trait JobStore {
     fn list_jobs(&self, listing: JobListing<'_>) -> Result<Vec<JobRecord>, JobStoreError>;
 
     /// Claims the oldest job that is due: a queued or retry-scheduled job
-    /// whose time came, or a running job whose lease expired. Jobs found on
-    /// the way that can only end are ended: an expired lease with a cancel
-    /// requested becomes cancelled, and one on its last attempt becomes failed
-    /// with [`JobFailure::LeaseExpired`]. `None` when nothing is due.
+    /// whose time came, or a running job whose lease expired. Only jobs of an
+    /// artifact outside the trash and not purged are due; the others wait
+    /// untouched until the artifact is recovered. Jobs found on the way that
+    /// can only end are ended and returned in [`Claim::settled`]: an expired
+    /// lease with a cancel requested becomes cancelled, and one on its last
+    /// attempt becomes failed with [`JobFailure::LeaseExpired`].
+    /// [`Claim::claimed`] is `None` when nothing else is due.
     ///
     /// # Errors
     ///
     /// [`JobStoreError::Unavailable`].
-    fn claim_job(&self, claim: JobClaim<'_>) -> Result<Option<ClaimedJob>, JobStoreError>;
+    fn claim_job(&self, claim: JobClaim<'_>) -> Result<Claim, JobStoreError>;
 
     /// Renews the lease to `now + lease_ms` and reports whether a cancel was
     /// requested.

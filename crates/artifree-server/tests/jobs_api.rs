@@ -193,6 +193,7 @@ impl Harness {
             &worker,
             &WorkerConfig::with_lease_ms(60_000),
             &Never,
+            &mut |_| {},
         )?)
     }
 
@@ -464,6 +465,31 @@ async fn a_bad_enqueue_is_refused_with_the_right_code() -> TestResult {
             .query_row("SELECT count(*) FROM jobs", [], |row| row.get::<_, i64>(0))?,
         1,
         "only the first request created a job"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn jobs_of_an_artifact_in_the_trash_leave_room_for_work_elsewhere() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    for number in 0..16 {
+        harness.enqueued(&id, &format!("job-{number}")).await?;
+    }
+    harness.trash(&id, "trash-a", 1, true).await?;
+
+    let other = harness.artifact("B").await?;
+    let reply = harness.enqueue(&other, "on-b", 2).await?;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text);
+
+    harness.trash(&id, "recover-a", 2, false).await?;
+    let listed = harness
+        .owner("GET", &format!("/v1/artifacts/{id}/jobs"), None, None)
+        .await?;
+    assert_eq!(
+        listed.json()?["jobs"].as_array().map(Vec::len),
+        Some(16),
+        "recovery brings every job back"
     );
     Ok(())
 }
@@ -779,6 +805,7 @@ async fn cancelling_a_running_job_asks_and_the_worker_confirms() -> TestResult {
             now: SystemClock.now(),
             lease_ms: 60_000,
         })?
+        .claimed
         .ok_or("nothing claimed")?;
     assert_eq!(harness.state_of(&job).await?, "running");
 

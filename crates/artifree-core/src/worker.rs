@@ -85,8 +85,9 @@ impl WorkerConfig {
 
 /// What the process around a worker can tell it between files.
 pub trait Pace {
-    /// Whether the process was asked to stop. The worker then gives the job
-    /// back and returns.
+    /// Whether the process was asked to stop. The worker then gives a job it
+    /// has not finished verifying back and returns; a verification that is
+    /// complete is recorded first.
     fn shutdown_requested(&self) -> bool;
 
     /// Called before each file is read. A test uses it to hold a job at a
@@ -120,6 +121,12 @@ enum Verified {
 /// Claims the oldest due job and runs it to an end the store records, or
 /// returns [`Step::Idle`].
 ///
+/// A claim can also end jobs that nobody can run any more: an expired lease
+/// with a cancel requested, or on its last attempt. Each such job is passed to
+/// `on_settled` as the claim returns, before any job is run, so the process
+/// around the worker can report every job that reached an end (the result is
+/// not lost if the run that follows fails).
+///
 /// # Errors
 ///
 /// [`JobStoreError::Unavailable`] when the store fails around the claim or the
@@ -132,13 +139,17 @@ pub fn run_next<S: ArtifactStore + JobStore>(
     worker: &WorkerId,
     config: &WorkerConfig,
     pace: &dyn Pace,
+    on_settled: &mut dyn FnMut(&JobRecord),
 ) -> Result<Step, JobStoreError> {
-    let Some(claimed) = store.claim_job(JobClaim {
+    let claim = store.claim_job(JobClaim {
         worker,
         now: clock.now(),
         lease_ms: config.lease_ms,
-    })?
-    else {
+    })?;
+    for record in &claim.settled {
+        on_settled(record);
+    }
+    let Some(claimed) = claim.claimed else {
         return Ok(Step::Idle);
     };
     let (job, lease) = (claimed.job, claimed.lease);
@@ -189,7 +200,10 @@ impl Checkpoints<'_> {
     /// and the final one before the result is written renew the lease and read
     /// the cancel request. `Ok(None)` means go on.
     fn reach(&mut self, last: bool) -> Option<Verified> {
-        if self.pace.shutdown_requested() {
+        // The final checkpoint ignores a stop request: the verification is
+        // complete, so its result is recorded and the worker stops after it
+        // (it starts no new job). Only unfinished work is given back.
+        if !last && self.pace.shutdown_requested() {
             return Some(Verified::Shutdown);
         }
         let now = self.clock.now();
@@ -210,9 +224,11 @@ impl Checkpoints<'_> {
             }
             Ok(Checkpoint::CancelRequested) => Some(Verified::Cancelled),
             Err(JobStoreError::LeaseLost) => Some(Verified::LeaseLost),
-            // A renewal that fails is tried again at the next checkpoint. If
-            // the lease expires meanwhile, the write of the result is
-            // rejected, which is the safe end.
+            // A renewal that fails is tried again at the next checkpoint. The
+            // write of the result does not look at the clock: it is accepted
+            // while the worker's fence is the job's current claim, even after
+            // the lease time passed, and rejected once another worker claimed
+            // the job or a purge revoked it. The fence decides, not the time.
             Err(_) => None,
         }
     }

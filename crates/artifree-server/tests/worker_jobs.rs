@@ -13,7 +13,9 @@ use artifree_domain::SourceRevision;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
 use artifree_domain::job::VerifyReport;
-use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, MAX_FINDINGS, Problem, WorkerId};
+use artifree_domain::job::{
+    JobFailure, JobId, JobKind, JobState, MAX_ATTEMPTS, MAX_FINDINGS, Problem, WorkerId,
+};
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision};
 use artifree_ports::artifact_store::{
@@ -23,7 +25,7 @@ use artifree_ports::artifact_store::{
     UnreferencedContent,
 };
 use artifree_ports::job_store::{
-    Checkpoint, ClaimedJob, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord, JobStore,
+    Checkpoint, Claim, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord, JobStore,
     JobStoreError, Lease, NewJob, Retry,
 };
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
@@ -195,12 +197,12 @@ impl JobStore for Flaky {
     fn list_jobs(&self, listing: JobListing<'_>) -> Result<Vec<JobRecord>, JobStoreError> {
         self.inner.list_jobs(listing)
     }
-    fn claim_job(&self, claim: JobClaim<'_>) -> Result<Option<ClaimedJob>, JobStoreError> {
+    fn claim_job(&self, claim: JobClaim<'_>) -> Result<Claim, JobStoreError> {
         if take(&self.faults.claims_unavailable) {
             return Err(JobStoreError::Unavailable("injected".to_owned()));
         }
         let claimed = self.inner.claim_job(claim)?;
-        if claimed.is_some()
+        if claimed.claimed.is_some()
             && let Some(hook) = self.faults.after_claim.borrow_mut().take()
         {
             hook();
@@ -372,7 +374,44 @@ impl Fixture {
     }
 
     fn run_with(&self, who: &str, pace: &Hooks<'_>) -> Result<Step, JobStoreError> {
-        run_next(&self.store, &self.clock, &worker(who), &self.config, pace)
+        run_next(
+            &self.store,
+            &self.clock,
+            &worker(who),
+            &self.config,
+            pace,
+            &mut |_| {},
+        )
+    }
+
+    /// One round that also returns the jobs the claim ended on the way.
+    fn run_settling(&self, who: &str) -> Result<(Step, Vec<JobRecord>), JobStoreError> {
+        let settled = RefCell::new(Vec::new());
+        let step = run_next(
+            &self.store,
+            &self.clock,
+            &worker(who),
+            &self.config,
+            &Hooks {
+                files_started: Cell::new(0),
+                shutdown_after: None,
+                on_file: &nothing,
+            },
+            &mut |record| settled.borrow_mut().push(record.clone()),
+        )?;
+        Ok((step, settled.into_inner()))
+    }
+
+    /// Claims the job and lets its worker die: the lease is left to expire.
+    fn abandon(&self, who: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let claim = self.store.inner.claim_job(JobClaim {
+            worker: &worker(who),
+            now: self.clock.now(),
+            lease_ms: LEASE,
+        })?;
+        claim.claimed.ok_or("no job was due")?;
+        self.clock.advance(i64::try_from(LEASE)? + 1);
+        Ok(())
     }
 
     fn job(&self, id: &JobId) -> Result<JobRecord, Box<dyn std::error::Error>> {
@@ -656,7 +695,10 @@ fn heartbeats_keep_a_slow_job_from_being_taken_over() -> TestResult {
                 now: fixture.clock.now(),
                 lease_ms: LEASE,
             }),
-            Ok(Some(_))
+            Ok(Claim {
+                claimed: Some(_),
+                ..
+            })
         ) {
             stolen.set(true);
         }
@@ -925,5 +967,146 @@ fn a_job_claimed_just_before_a_purge_does_not_run_on_what_is_left() -> TestResul
 
     assert!(matches!(step, Step::LeaseLost(_)), "{step:?}");
     assert_eq!(fixture.job(&id)?.state, JobState::Cancelled);
+    Ok(())
+}
+
+// --- jobs a claim ends, shutdown at the end, trash during a run -------------
+
+#[test]
+fn a_job_ended_by_the_claim_is_reported_once_through_the_loop() -> TestResult {
+    let fixture = Fixture::new()?;
+    let exhausted = fixture.enqueue("exhausted")?;
+    for number in 0..MAX_ATTEMPTS {
+        fixture.abandon(&format!("dead{number}"))?;
+    }
+    let (step, settled) = fixture.run_settling("a")?;
+
+    assert!(matches!(step, Step::Idle), "{step:?}");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0].id, exhausted);
+    assert_eq!(settled[0].state, JobState::Failed);
+    assert_eq!(settled[0].failure, Some(JobFailure::LeaseExpired));
+    // Nothing is reported twice.
+    let (_, again) = fixture.run_settling("a")?;
+    assert!(again.is_empty());
+
+    let cancelled = fixture.enqueue("cancelled")?;
+    fixture.abandon("dead")?;
+    let key = parsed("test-key-stop");
+    fixture.store.inner.cancel_job(JobCancel {
+        request: RequestIdentity {
+            actor: &fixture.owner,
+            key: &key,
+            fingerprint: RequestFingerprint([7; 32]),
+        },
+        job: &cancelled,
+        now: fixture.clock.now(),
+    })?;
+    let (step, settled) = fixture.run_settling("a")?;
+    assert!(matches!(step, Step::Idle), "{step:?}");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(
+        (settled[0].id.clone(), settled[0].state),
+        (cancelled, JobState::Cancelled)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_job_ended_by_the_claim_is_reported_before_the_next_job_runs() -> TestResult {
+    let fixture = Fixture::new()?;
+    let exhausted = fixture.enqueue("exhausted")?;
+    for number in 0..MAX_ATTEMPTS {
+        fixture.abandon(&format!("dead{number}"))?;
+    }
+    let next = {
+        let key = parsed("test-key-next");
+        fixture
+            .store
+            .inner
+            .enqueue_job(NewJob {
+                request: RequestIdentity {
+                    actor: &fixture.owner,
+                    key: &key,
+                    fingerprint: RequestFingerprint([8; 32]),
+                },
+                artifact: &fixture.artifact,
+                revision: SourceRevision(1),
+                kind: JobKind::VerifyRevision,
+                now: fixture.clock.now(),
+            })?
+            .job
+            .id
+    };
+
+    let (step, settled) = fixture.run_settling("a")?;
+
+    assert_eq!(
+        settled.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        [&exhausted]
+    );
+    assert_eq!(finished(step)?.id, next, "and the next job ran");
+    Ok(())
+}
+
+#[test]
+fn a_stop_request_after_the_last_file_still_records_the_finished_result() -> TestResult {
+    let fixture = Fixture::new()?;
+    let id = fixture.enqueue("one")?;
+
+    // The flag turns on while the third and last file is read.
+    let step = fixture.run_with(
+        "a",
+        &Hooks {
+            files_started: Cell::new(0),
+            shutdown_after: Some(3),
+            on_file: &nothing,
+        },
+    )?;
+
+    let ended = finished(step)?;
+    assert_eq!(
+        (ended.id, ended.state, ended.attempts),
+        (id, JobState::Succeeded, 1),
+        "the work was done, so it is recorded instead of rerun"
+    );
+    // A job that is not finished is still given back (see the test above).
+    Ok(())
+}
+
+#[test]
+fn trashing_the_artifact_during_a_run_does_not_stop_it() -> TestResult {
+    let fixture = Fixture::new()?;
+    let id = fixture.enqueue("one")?;
+    let on_file = |number: usize| {
+        if number == 2 {
+            let moved = fixture.store.inner.update_metadata(MetadataUpdate {
+                request: RequestIdentity {
+                    actor: &fixture.owner,
+                    key: &parsed("test-key-trash"),
+                    fingerprint: RequestFingerprint([5; 32]),
+                },
+                artifact: &fixture.artifact,
+                base: MetadataRevision(1),
+                title: None,
+                pinned: None,
+                deleted: Some(true),
+            });
+            assert!(moved.is_ok(), "{moved:?}");
+        }
+    };
+
+    let step = fixture.run_with(
+        "a",
+        &Hooks {
+            files_started: Cell::new(0),
+            shutdown_after: None,
+            on_file: &on_file,
+        },
+    )?;
+
+    let ended = finished(step)?;
+    assert_eq!((ended.id, ended.state), (id, JobState::Succeeded));
+    assert_eq!(ended.report.map(|report| report.files_checked), Some(3));
     Ok(())
 }
