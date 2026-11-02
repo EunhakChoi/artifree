@@ -21,6 +21,7 @@ import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
 import { checkRuntime } from './smoke-runtime.mjs';
+import { checkStaticDefault } from './smoke-static-default.mjs';
 import { checkTrash } from './smoke-trash.mjs';
 import { checkWorkspace } from './smoke-workspace.mjs';
 
@@ -318,6 +319,10 @@ try {
     server: api,
     checkAccessibility,
   });
+  const staticDefault = await checkStaticDefault({
+    browser,
+    binary: serverBinary,
+  });
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
   await checkAccessibility('dark-workspace-preview');
   await page.getByRole('button', { name: 'Toggle color theme' }).click();
@@ -492,6 +497,7 @@ try {
     incompleteLocks,
     strictRecovery,
     runtime,
+    staticDefault,
     handoff,
     artifactConsole,
     expectedApiFailures,

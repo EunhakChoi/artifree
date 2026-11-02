@@ -363,6 +363,43 @@ function sameHandoff(left: Handoff, right: Handoff): boolean {
   );
 }
 
+/**
+ * How a failure message may name the server, and whether the original error
+ * may travel with it. A runtime's network error can quote the URL it was given,
+ * so a credentialed, query-bearing, or otherwise unusual address is shown
+ * only as a generic label and its errors lose their `cause`.
+ */
+interface Address {
+  readonly label: string;
+  /** An http(s) address without credentials, query, or fragment. */
+  readonly plain: boolean;
+}
+
+function describeAddress(baseUrl: string): Address {
+  if (baseUrl === '') return { label: 'this origin', plain: true };
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return { label: 'the configured server', plain: false };
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:')
+    return { label: 'the configured server', plain: false };
+  return {
+    label: `${url.origin}${url.pathname}`.replace(/\/+$/, ''),
+    plain:
+      url.username === '' &&
+      url.password === '' &&
+      !baseUrl.includes('?') &&
+      !baseUrl.includes('#'),
+  };
+}
+
+/** The `cause` option for a failure: the error itself, or nothing. */
+function causeOf(keep: boolean, error: unknown): { cause?: unknown } {
+  return keep ? { cause: error } : {};
+}
+
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
 export class ArtifreeClient {
   private runtimeSession: string | undefined;
@@ -376,11 +413,13 @@ export class ArtifreeClient {
   readonly subscribeRuntimeGrants = this.runtimeGrants.subscribe;
   readonly runtimeGrantSnapshot = this.runtimeGrants.snapshot;
   private readonly baseUrl: string;
+  private readonly address: Address;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(configuration: ClientConfiguration) {
     this.baseUrl = configuration.baseUrl.replace(/\/+$/, '');
+    this.address = describeAddress(this.baseUrl);
     this.accessToken = configuration.accessToken;
     this.fetchImpl =
       configuration.fetch ?? ((input, init) => fetch(input, init));
@@ -664,7 +703,7 @@ export class ArtifreeClient {
       );
     }
     return changeFeedEvents(
-      decodeText(response.body, options.signal),
+      decodeText(response.body, options.signal, this.address.plain),
       options.signal,
     );
   }
@@ -799,7 +838,7 @@ export class ArtifreeClient {
     )
       throw connectionReplaced();
     const response = await this.send('POST', '/v1/handoffs', { body: request });
-    const handoff = parseHandoff(await readJson(response));
+    const handoff = parseHandoff(await readJson(response, this.address.plain));
     const selection = handoff?.selection;
     if (
       response.status !== 201 ||
@@ -1121,8 +1160,12 @@ export class ArtifreeClient {
       return new Uint8Array(await response.arrayBuffer());
     } catch (error: unknown) {
       throw new ArtifreeApiError(
-        `The connection to ${this.baseUrl || 'this origin'} ended while reading ${what}.`,
-        { status: response.status, code: 'network_error', cause: error },
+        `The connection to ${this.address.label} ended while reading ${what}.`,
+        {
+          status: response.status,
+          code: 'network_error',
+          ...causeOf(this.address.plain, error),
+        },
       );
     }
   }
@@ -1134,7 +1177,7 @@ export class ArtifreeClient {
     request: Omit<SendOptions, 'headers'> = {},
   ): Promise<T> {
     const response = await this.send(method, path, request);
-    const parsed = parse(await readJson(response));
+    const parsed = parse(await readJson(response, this.address.plain));
     if (parsed === undefined)
       throw new ArtifreeApiError(
         `${method} ${path} returned a body that does not match the contract.`,
@@ -1174,14 +1217,18 @@ export class ArtifreeClient {
       response = await this.fetchImpl(`${this.baseUrl}${path}`, init);
     } catch (error: unknown) {
       throw new ArtifreeApiError(
-        `Could not reach the Artifree API at ${this.baseUrl || 'this origin'}.`,
-        { status: 0, code: 'network_error', cause: error },
+        `Could not reach the Artifree API at ${this.address.label}.`,
+        {
+          status: 0,
+          code: 'network_error',
+          ...causeOf(this.address.plain, error),
+        },
       );
     }
     if (response.ok) return response;
     // Also a proxy's error page may say when to retry.
     const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
-    const failure = parseError(await readJson(response));
+    const failure = parseError(await readJson(response, this.address.plain));
     // HTTP 429 means too many requests whoever answered it, so a proxy's
     // refusal without an API body is a rate limit too.
     const limited = response.status === 429;
@@ -1219,6 +1266,7 @@ export class ArtifreeClient {
 async function* decodeText(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
+  keepCause: boolean,
 ): AsyncGenerator<string> {
   const reader = body.getReader();
   const cancel = (): void => {
@@ -1238,7 +1286,7 @@ async function* decodeText(
         throw new ArtifreeApiError('The change feed connection was lost.', {
           status: 0,
           code: 'network_error',
-          cause: error,
+          ...causeOf(keepCause, error),
         });
       }
       if (chunk.done) {
@@ -1263,7 +1311,10 @@ export function parseRetryAfter(value: string | null): number | undefined {
   return Number(value);
 }
 
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(
+  response: Response,
+  keepCause: boolean,
+): Promise<unknown> {
   let text: string;
   try {
     text = await response.text();
@@ -1274,7 +1325,7 @@ async function readJson(response: Response): Promise<unknown> {
       {
         status: response.status,
         code: 'network_error',
-        cause: error,
+        ...causeOf(keepCause, error),
       },
     );
   }

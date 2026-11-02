@@ -28,8 +28,10 @@ import { extract, verifyChecksum, verifyManifest } from './verify-release.mjs';
  * image metadata, health, the packaged web page, create/save/preview with the
  * packaged CLI against the published ports, a read-only root filesystem,
  * graceful stop, restart on the same named volume, MCP staying loopback-only
- * through a published port, and two refused configurations. Requires Docker
- * and Node; throws on the first failure and removes what it created.
+ * through a published port, and three refused configurations. The server is
+ * configured by environment variables, the way a container normally is
+ * (decision 0028). Requires Docker and Node; throws on the first failure and
+ * removes what it created.
  */
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -107,6 +109,30 @@ export function checkImageConfig(config) {
   assert.equal(config.Cmd ?? null, null);
 }
 
+/** The frame-ancestors list the checked container is configured with. */
+export const CONTAINER_FRAME_ANCESTORS =
+  'http://127.0.0.1:* http://container-ui.test';
+
+/**
+ * The server settings of the checked container, as environment variables and
+ * not as arguments after the image name (decision 0028).
+ */
+export function containerEnvironment({ apiPort, contentPort }) {
+  return {
+    ARTIFREE_CONTENT_ORIGIN: `http://127.0.0.1:${contentPort}`,
+    ARTIFREE_ALLOWED_HOSTS: `127.0.0.1:${apiPort}`,
+    ARTIFREE_FRAME_ANCESTORS: CONTAINER_FRAME_ANCESTORS,
+  };
+}
+
+/** `docker run` options that set each variable of `environment`. */
+export function environmentOptions(environment) {
+  return Object.entries(environment).flatMap(([name, value]) => [
+    '--env',
+    `${name}=${value}`,
+  ]);
+}
+
 /** Starts a detached, locked-down container and returns its handle. */
 function startContainer({ image, name, volume, apiPort, contentPort, extra }) {
   dockerOk([
@@ -129,11 +155,8 @@ function startContainer({ image, name, volume, apiPort, contentPort, extra }) {
     `127.0.0.1:${apiPort}:7410`,
     '--publish',
     `127.0.0.1:${contentPort}:7411`,
+    ...environmentOptions(containerEnvironment({ apiPort, contentPort })),
     image,
-    '--content-origin',
-    `http://127.0.0.1:${contentPort}`,
-    '--allowed-host',
-    `127.0.0.1:${apiPort}`,
     ...(extra ?? []),
   ]);
 }
@@ -159,10 +182,11 @@ function stopCleanly(name) {
 
 /**
  * Requires a container started with `args` to exit nonzero within 30 s with
- * logs matching `pattern`. One that is still running then was accepted, and
- * is removed with its anonymous volumes.
+ * logs matching `pattern` and, when given, not matching `forbidden`. One that
+ * is still running then was accepted, and is removed with its anonymous
+ * volumes.
  */
-export async function refusedRun(args, pattern) {
+export async function refusedRun(args, pattern, forbidden) {
   const name = `artifree-refused-${randomBytes(4).toString('hex')}`;
   try {
     dockerOk([
@@ -193,7 +217,10 @@ export async function refusedRun(args, pattern) {
       '0',
       `The container exited cleanly: ${args.join(' ')}`,
     );
-    assert.match(docker(['logs', name]).stderr, pattern);
+    const logs = docker(['logs', name]);
+    assert.match(logs.stderr, pattern);
+    if (forbidden !== undefined)
+      assert.doesNotMatch(`${logs.stdout}${logs.stderr}`, forbidden);
   } finally {
     docker(['rm', '--force', '--volumes', name]);
   }
@@ -267,6 +294,16 @@ export async function verifyContainer(archive) {
         `The preview must be on the separate origin: ${exercised.previewUrl}`,
       );
 
+      // ARTIFREE_FRAME_ANCESTORS reached the preview policy.
+      const policy =
+        (await fetch(exercised.previewUrl)).headers.get(
+          'content-security-policy',
+        ) ?? '';
+      assert.ok(
+        policy.endsWith(`frame-ancestors ${CONTAINER_FRAME_ANCESTORS}`),
+        `The preview policy must carry the variable's list: ${policy}`,
+      );
+
       // Docker publishes through a bridge, so the server sees a non-loopback
       // peer: MCP stays refused unless --allow-remote-mcp is set (0024).
       const mcp = await fetch(`${apiUrl}/mcp`, {
@@ -307,15 +344,27 @@ export async function verifyContainer(archive) {
       throw error;
     }
 
+    // Equal origins, declared by variables, stop the server.
     await refusedRun(
       [
+        ...environmentOptions({
+          ARTIFREE_API_ORIGIN: 'https://same.example',
+          ARTIFREE_CONTENT_ORIGIN: 'https://same.example',
+        }),
         image,
-        '--api-origin',
-        'https://same.example',
-        '--content-origin',
-        'https://same.example',
       ],
       /must differ/,
+    );
+    // An invalid value stops the server and is not repeated in the logs.
+    await refusedRun(
+      [
+        ...environmentOptions({
+          ARTIFREE_CONTENT_ORIGIN: 'https://user:hunter2@preview.example:65536',
+        }),
+        image,
+      ],
+      /ARTIFREE_CONTENT_ORIGIN must be a valid HTTP or HTTPS origin/,
+      /hunter2/,
     );
     // A bind mount other users can enter is refused before any data is read.
     const open = join(scratch, 'open-data');

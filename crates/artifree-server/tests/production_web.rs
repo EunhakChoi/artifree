@@ -313,43 +313,43 @@ async fn cors_origin_normalization_and_preview_isolation() -> TestResult {
 
     // 5. Exact normalize_origin behavior across IPv4 and IPv6 variations
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[::1]:80/").as_deref(),
+        artifree_server::origin::normalize_origin("http://[::1]:80/").as_deref(),
         Ok("http://[::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[::1]").as_deref(),
+        artifree_server::origin::normalize_origin("http://[::1]").as_deref(),
         Ok("http://[::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[0:0:0:0:0:0:0:1]:80/").as_deref(),
+        artifree_server::origin::normalize_origin("http://[0:0:0:0:0:0:0:1]:80/").as_deref(),
         Ok("http://[::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[0:0:0:0:0:0:0:1]:7411/").as_deref(),
+        artifree_server::origin::normalize_origin("http://[0:0:0:0:0:0:0:1]:7411/").as_deref(),
         Ok("http://[::1]:7411")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://[::1]:7411/").as_deref(),
+        artifree_server::origin::normalize_origin("http://[::1]:7411/").as_deref(),
         Ok("http://[::1]:7411")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("https://[2001:db8::1]:443/").as_deref(),
+        artifree_server::origin::normalize_origin("https://[2001:db8::1]:443/").as_deref(),
         Ok("https://[2001:db8::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin(
+        artifree_server::origin::normalize_origin(
             "https://[2001:0db8:0000:0000:0000:0000:0000:0001]:443/"
         )
         .as_deref(),
         Ok("https://[2001:db8::1]")
     );
     assert_eq!(
-        artifree_server::http::normalize_origin("http://localhost:80/").as_deref(),
+        artifree_server::origin::normalize_origin("http://localhost:80/").as_deref(),
         Ok("http://localhost")
     );
-    assert!(artifree_server::http::normalize_origin("invalid-origin").is_err());
-    assert!(artifree_server::http::normalize_origin("data:text/html,secret").is_err());
-    assert!(artifree_server::http::normalize_origin("file:///etc/passwd").is_err());
+    assert!(artifree_server::origin::normalize_origin("invalid-origin").is_err());
+    assert!(artifree_server::origin::normalize_origin("data:text/html,secret").is_err());
+    assert!(artifree_server::origin::normalize_origin("file:///etc/passwd").is_err());
     Ok(())
 }
 

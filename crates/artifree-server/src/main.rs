@@ -18,9 +18,15 @@ use std::time::Duration;
 
 use artifree_server::changes;
 use artifree_server::limits::RequestLimits;
+use artifree_server::origin::normalize_origin;
+use artifree_server::preview::normalize_frame_ancestors;
+use artifree_server::proxy::IpNetwork;
 use artifree_server::serve::{self, ServeOptions};
 
 mod maintenance;
+mod serve_env;
+
+use serve_env::{Given, ServeEnv};
 
 fn main() -> ExitCode {
     match run() {
@@ -47,12 +53,10 @@ fn run() -> Result<(), String> {
     let args = args
         .into_iter()
         .map(|argument| {
-            argument.into_string().map_err(|argument| {
-                format!(
-                    "Unknown arguments. {} is not valid UTF-8.",
-                    argument.to_string_lossy()
-                )
-            })
+            // The argument is not shown: it may hold a credential.
+            argument
+                .into_string()
+                .map_err(|_| "Unknown arguments. An argument is not valid UTF-8.".to_owned())
         })
         .collect::<Result<Vec<String>, String>>()?;
     match args.as_slice() {
@@ -75,7 +79,7 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         [command, options @ ..] if command == "serve" => {
-            let options = parse_serve(options)?;
+            let options = parse_serve(options, &ServeEnv::from_process())?;
             serve::run(options, |ready| {
                 let mut line = serde_json::json!({
                     "event": "ready",
@@ -165,28 +169,43 @@ fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
             "--requests-per-minute" => flags.limits.per_minute = limit(flag, &value()?)?,
             "--concurrent-requests" => flags.limits.concurrent = limit(flag, &value()?)?,
             "--change-streams" => flags.change_streams = limit(flag, &value()?)?,
-            other => {
-                return Err(format!(
-                    "Unknown arguments. Unrecognized serve option {other}; use --help."
-                ));
-            }
+            other => return Err(unrecognized_option(other)),
         }
     }
     Ok(flags)
 }
 
-fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
+/// The error for an argument that is not a serve option. Only text that looks
+/// like an option name is shown, and only the part before any `=`: the rest
+/// may hold a value such as a credential.
+fn unrecognized_option(argument: &str) -> String {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    let looks_like_option = name.strip_prefix("--").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    if looks_like_option {
+        format!(
+            "Unknown arguments. Unrecognized serve option {name}; give an option's value as the next argument and see --help."
+        )
+    } else {
+        "Unknown arguments. An argument is not a serve option; see --help.".to_owned()
+    }
+}
+
+/// Reads `serve` options. Errors name the flag or variable in effect and
+/// never repeat an operator-supplied value (decision 0028).
+fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeOptions, String> {
     let flags = parse_serve_flags(arguments)?;
 
     let explicit_web_dir = match flags.cli_web_dir {
         Some(dir) => Some(dir),
-        None => std::env::var("ARTIFREE_WEB_DIR")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from),
+        None => env.text(serve_env::WEB_DIR).map(PathBuf::from),
     };
 
-    let lan_ip = resolve_lan_ip(flags.cli_lan)?;
+    let lan_ip = resolve_lan_ip(env, flags.cli_lan.as_deref())?;
     let (default_api, default_content, default_origin) = resolve_lan_defaults(lan_ip);
 
     let api_str = flags.explicit_api_listen.unwrap_or(default_api);
@@ -195,37 +214,45 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         .clone()
         .unwrap_or(default_content);
     let resolved_content_origin = resolve_content_origin(
-        flags.explicit_content_origin,
+        env,
+        flags.explicit_content_origin.as_deref(),
         flags.explicit_content_listen.is_some(),
         default_origin,
     )?;
-    let resolved_api_origin = resolve_api_origin(flags.explicit_api_origin)?;
+    let resolved_api_origin = resolve_api_origin(env, flags.explicit_api_origin.as_deref())?;
 
     if let (Some(api_orig), Some(content_orig)) = (&resolved_api_origin, &resolved_content_origin)
         && api_orig == content_orig
     {
         return Err(
-            "--content-origin must differ from --api-origin to maintain preview sandbox isolation"
+            "--content-origin must differ from --api-origin to maintain preview sandbox isolation (also when they are set by ARTIFREE_CONTENT_ORIGIN and ARTIFREE_API_ORIGIN)"
                 .to_owned(),
         );
     }
 
-    let trusted_proxies = resolve_trusted_proxies(flags.cli_trusted_proxies)?;
+    let trusted_proxies = resolve_trusted_proxies(env, &flags.cli_trusted_proxies)?;
     let allowed_hosts = resolve_allowed_hosts(
-        flags.cli_allowed_hosts,
+        env,
+        &flags.cli_allowed_hosts,
         resolved_api_origin.as_deref(),
         lan_ip,
     );
-    let allowed_origins =
-        resolve_allowed_origins(flags.cli_allowed_origins, resolved_api_origin.as_deref());
+    let allowed_origins = resolve_allowed_origins(
+        env,
+        &flags.cli_allowed_origins,
+        resolved_api_origin.as_deref(),
+    )?;
     let allow_remote_mcp = flags.cli_allow_remote_mcp
-        || std::env::var("ARTIFREE_ALLOW_REMOTE_MCP").is_ok_and(|v| v == "true" || v == "1");
+        || env
+            .text(serve_env::ALLOW_REMOTE_MCP)
+            .is_some_and(|v| v == "true" || v == "1");
 
-    let frame_ancestors = derive_frame_ancestors(
-        flags.explicit_frame_ancestors,
+    let frame_ancestors = resolve_frame_ancestors(
+        env,
+        flags.explicit_frame_ancestors.as_deref(),
         &api_str,
         resolved_api_origin.as_deref(),
-    );
+    )?;
 
     let address = |flag: &str, value: &str| {
         value
@@ -233,7 +260,8 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
             .map_err(|_| format!("{flag} must be an IP address and port, such as 127.0.0.1:7410."))
     };
 
-    let loopback_api_address = resolve_loopback_listen(flags.explicit_loopback_listen)?;
+    let loopback_api_address =
+        resolve_loopback_listen(env, flags.explicit_loopback_listen.as_deref())?;
 
     Ok(ServeOptions {
         data_dir: flags
@@ -273,80 +301,73 @@ fn parse_preview_ttl(value: &str) -> Result<Duration, String> {
 }
 
 /// Resolves an optional LAN IP address from CLI flag or environment variable.
-fn resolve_lan_ip(cli_lan: Option<String>) -> Result<Option<IpAddr>, String> {
-    let explicit_lan = match cli_lan {
-        Some(lan) => Some(lan),
-        None => std::env::var("ARTIFREE_LAN").ok().filter(|s| !s.is_empty()),
+fn resolve_lan_ip(env: &ServeEnv, cli_lan: Option<&str>) -> Result<Option<IpAddr>, String> {
+    let Some(given) = env.lenient("--lan", cli_lan, serve_env::LAN) else {
+        return Ok(None);
     };
-    match explicit_lan {
-        Some(val) => {
-            let unbracketed = val
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
-                .unwrap_or(&val);
-            let ip: IpAddr = unbracketed
-                .parse()
-                .map_err(|_| format!("--lan must be an IP address (IPv4 or IPv6), got {val:?}"))?;
-            if ip.is_unspecified() {
-                return Err(format!(
-                    "--lan must be a specific IP address (IPv4 or IPv6), not an unspecified address ({val}). Use --api-listen and --content-listen to bind to wildcard addresses."
-                ));
-            }
-            Ok(Some(ip))
-        }
-        None => Ok(None),
+    let unbracketed = given
+        .text
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(given.text);
+    let ip: IpAddr = unbracketed
+        .parse()
+        .map_err(|_| format!("{} must be an IP address (IPv4 or IPv6).", given.name))?;
+    if ip.is_unspecified() {
+        return Err(format!(
+            "{} must be a specific IP address (IPv4 or IPv6), not an unspecified address. Use --api-listen and --content-listen to bind to wildcard addresses.",
+            given.name
+        ));
     }
+    Ok(Some(ip))
+}
+
+/// Validates an origin setting and returns its canonical form.
+fn origin_setting(given: Given<'_>) -> Result<String, String> {
+    normalize_origin(given.text).map_err(|error| {
+        format!(
+            "{} must be a valid HTTP or HTTPS origin: {error}.",
+            given.name
+        )
+    })
 }
 
 /// Resolves preview content origin, validating and normalizing explicit origin.
+/// The flag wins over `ARTIFREE_CONTENT_ORIGIN`; an empty variable is unset.
 fn resolve_content_origin(
-    explicit: Option<String>,
+    env: &ServeEnv,
+    flag: Option<&str>,
     explicit_content_listen: bool,
     default_origin: Option<String>,
 ) -> Result<Option<String>, String> {
-    match explicit {
-        Some(origin) => {
-            let canon = artifree_server::http::normalize_origin(&origin).map_err(|e| {
-                format!(
-                    "--content-origin must be a valid HTTP or HTTPS origin, got {origin:?}: {e}"
-                )
-            })?;
-            Ok(Some(canon))
-        }
-        None => {
-            if explicit_content_listen {
-                Ok(None)
-            } else {
-                Ok(default_origin)
-            }
-        }
+    match env.strict("--content-origin", flag, serve_env::CONTENT_ORIGIN)? {
+        Some(given) => origin_setting(given).map(Some),
+        None if explicit_content_listen => Ok(None),
+        None => Ok(default_origin),
     }
 }
 
 /// Resolves an optional loopback listener for MCP peer isolation in LAN mode.
-fn resolve_loopback_listen(explicit: Option<String>) -> Result<Option<SocketAddr>, String> {
-    let raw = match explicit {
-        Some(addr) => Some(addr),
-        None => std::env::var("ARTIFREE_LOOPBACK_LISTEN")
-            .ok()
-            .filter(|s| !s.is_empty()),
+fn resolve_loopback_listen(
+    env: &ServeEnv,
+    flag: Option<&str>,
+) -> Result<Option<SocketAddr>, String> {
+    let Some(given) = env.lenient("--loopback-listen", flag, serve_env::LOOPBACK_LISTEN) else {
+        return Ok(None);
     };
-    match raw {
-        Some(val) => {
-            let addr = val.parse::<SocketAddr>().map_err(|_| {
-                "--loopback-listen must be an IP address and port, such as 127.0.0.1:7410."
-                    .to_owned()
-            })?;
-            if !addr.ip().is_loopback() {
-                return Err(
-                    "--loopback-listen must be a loopback IP address, such as 127.0.0.1 or ::1."
-                        .to_owned(),
-                );
-            }
-            Ok(Some(addr))
-        }
-        None => Ok(None),
+    let addr = given.text.parse::<SocketAddr>().map_err(|_| {
+        format!(
+            "{} must be an IP address and port, such as 127.0.0.1:7410.",
+            given.name
+        )
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(format!(
+            "{} must be a loopback IP address, such as 127.0.0.1 or ::1.",
+            given.name
+        ));
     }
+    Ok(Some(addr))
 }
 
 /// Resolves default listen addresses and preview origin for a given optional LAN IP.
@@ -372,15 +393,27 @@ fn resolve_lan_defaults(lan_ip: Option<IpAddr>) -> (String, String, Option<Strin
     }
 }
 
-/// Derives CSP frame-ancestors based on explicit setting, API listener address, or public API origin.
-fn derive_frame_ancestors(
-    explicit: Option<String>,
+/// Resolves CSP `frame-ancestors`: the flag, else `ARTIFREE_FRAME_ANCESTORS`,
+/// else a default derived from the API listener or public origin.
+fn resolve_frame_ancestors(
+    env: &ServeEnv,
+    flag: Option<&str>,
     api_address: &str,
     api_origin: Option<&str>,
-) -> String {
-    if let Some(ancestors) = explicit {
-        return ancestors;
+) -> Result<String, String> {
+    match env.strict("--frame-ancestors", flag, serve_env::FRAME_ANCESTORS)? {
+        Some(given) => normalize_frame_ancestors(given.text).map_err(|reason| {
+            format!(
+                "{} must be a space-separated frame-ancestors source list: {reason}.",
+                given.name
+            )
+        }),
+        None => Ok(derive_frame_ancestors(api_address, api_origin)),
     }
+}
+
+/// Derives CSP frame-ancestors from the API listener address or public API origin.
+fn derive_frame_ancestors(api_address: &str, api_origin: Option<&str>) -> String {
     if let Some(origin) = api_origin {
         return format!("{origin} {}", serve::DEFAULT_FRAME_ANCESTORS);
     }
@@ -401,80 +434,45 @@ fn derive_frame_ancestors(
 }
 
 /// Resolves public API origin, validating and normalizing explicit origin.
-fn resolve_api_origin(explicit: Option<String>) -> Result<Option<String>, String> {
-    let raw = match explicit {
-        Some(origin) => Some(origin),
-        None => std::env::var("ARTIFREE_API_ORIGIN")
-            .ok()
-            .filter(|s| !s.is_empty()),
-    };
-    match raw {
-        Some(origin) => {
-            let canon = artifree_server::http::normalize_origin(&origin).map_err(|e| {
-                format!("--api-origin must be a valid HTTP or HTTPS origin, got {origin:?}: {e}")
-            })?;
-            Ok(Some(canon))
-        }
-        None => Ok(None),
-    }
+fn resolve_api_origin(env: &ServeEnv, flag: Option<&str>) -> Result<Option<String>, String> {
+    env.lenient("--api-origin", flag, serve_env::API_ORIGIN)
+        .map(origin_setting)
+        .transpose()
 }
 
 /// Resolves trusted proxy IP/CIDR list from CLI arguments and environment variables.
-fn resolve_trusted_proxies(
-    cli_proxies: Vec<String>,
-) -> Result<Vec<artifree_server::proxy::IpNetwork>, String> {
-    let mut result = Vec::new();
-    for entry in cli_proxies {
-        for part in entry.split(',') {
-            let part = part.trim();
-            if !part.is_empty() {
-                let net: artifree_server::proxy::IpNetwork = part.parse()?;
-                result.push(net);
-            }
-        }
-    }
-    if let Ok(env_proxies) = std::env::var("ARTIFREE_TRUSTED_PROXIES") {
-        for part in env_proxies.split(',') {
-            let part = part.trim();
-            if !part.is_empty() {
-                let net: artifree_server::proxy::IpNetwork = part.parse()?;
-                result.push(net);
-            }
-        }
-    }
-    Ok(result)
+fn resolve_trusted_proxies(env: &ServeEnv, flags: &[String]) -> Result<Vec<IpNetwork>, String> {
+    env.entries("--trusted-proxy", flags, serve_env::TRUSTED_PROXIES)
+        .into_iter()
+        .map(|given| {
+            given.text.parse::<IpNetwork>().map_err(|reason| {
+                format!(
+                    "{} entries must be an IP address or CIDR network: {reason}.",
+                    given.name
+                )
+            })
+        })
+        .collect()
 }
 
 /// Resolves allowed hosts, incorporating explicit hosts, environment variables, API origin host, and LAN IP.
 fn resolve_allowed_hosts(
-    cli_hosts: Vec<String>,
+    env: &ServeEnv,
+    flags: &[String],
     api_origin: Option<&str>,
     lan_ip: Option<IpAddr>,
 ) -> Vec<String> {
-    let mut result = Vec::new();
-    for entry in cli_hosts {
-        for part in entry.split(',') {
-            let part = part.trim();
-            if !part.is_empty() && !result.iter().any(|h: &String| h.eq_ignore_ascii_case(part)) {
-                result.push(part.to_owned());
-            }
+    let mut result: Vec<String> = Vec::new();
+    let mut add = |host: String| {
+        if !result.iter().any(|known| known.eq_ignore_ascii_case(&host)) {
+            result.push(host);
         }
+    };
+    for given in env.entries("--allowed-host", flags, serve_env::ALLOWED_HOSTS) {
+        add(given.text.to_owned());
     }
-    if let Ok(env_hosts) = std::env::var("ARTIFREE_ALLOWED_HOSTS") {
-        for part in env_hosts.split(',') {
-            let part = part.trim();
-            if !part.is_empty() && !result.iter().any(|h: &String| h.eq_ignore_ascii_case(part)) {
-                result.push(part.to_owned());
-            }
-        }
-    }
-    if let Some(origin) = api_origin
-        && let Some(host) = artifree_server::http::origin_host(origin)
-        && !result
-            .iter()
-            .any(|h: &String| h.eq_ignore_ascii_case(&host))
-    {
-        result.push(host);
+    if let Some(host) = api_origin.and_then(artifree_server::origin::origin_host) {
+        add(host);
     }
     if let Some(ip) = lan_ip {
         let ip_str = if ip.is_ipv6() {
@@ -482,21 +480,10 @@ fn resolve_allowed_hosts(
         } else {
             format!("{ip}")
         };
-        let host_port = format!("{ip_str}:7410");
-        if !result
-            .iter()
-            .any(|h: &String| h.eq_ignore_ascii_case(&ip_str))
-        {
-            result.push(ip_str);
-        }
-        if !result
-            .iter()
-            .any(|h: &String| h.eq_ignore_ascii_case(&host_port))
-        {
-            result.push(host_port);
-        }
+        add(ip_str.clone());
+        add(format!("{ip_str}:7410"));
     }
-    for lb in &[
+    for loopback in [
         "localhost",
         "127.0.0.1",
         "[::1]",
@@ -504,38 +491,32 @@ fn resolve_allowed_hosts(
         "127.0.0.1:7410",
         "[::1]:7410",
     ] {
-        if !result.iter().any(|h: &String| h.eq_ignore_ascii_case(lb)) {
-            result.push((*lb).to_owned());
-        }
+        add(loopback.to_owned());
     }
     result
 }
 
 /// Resolves allowed CORS origins, incorporating explicit origins, environment variables, and API origin.
-fn resolve_allowed_origins(cli_origins: Vec<String>, api_origin: Option<&str>) -> Vec<String> {
-    let mut result = Vec::new();
-    for entry in cli_origins {
-        for part in entry.split(',') {
-            let part = part.trim();
-            if !part.is_empty() && !result.contains(&part.to_owned()) {
-                result.push(part.to_owned());
-            }
-        }
-    }
-    if let Ok(env_origins) = std::env::var("ARTIFREE_ALLOWED_ORIGINS") {
-        for part in env_origins.split(',') {
-            let part = part.trim();
-            if !part.is_empty() && !result.contains(&part.to_owned()) {
-                result.push(part.to_owned());
-            }
+///
+/// The list is built once here and not read again while the server runs.
+fn resolve_allowed_origins(
+    env: &ServeEnv,
+    flags: &[String],
+    api_origin: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut result: Vec<String> = Vec::new();
+    for given in env.entries("--allowed-origin", flags, serve_env::ALLOWED_ORIGINS) {
+        let origin = origin_setting(given)?;
+        if !result.contains(&origin) {
+            result.push(origin);
         }
     }
     if let Some(origin) = api_origin
-        && !result.contains(&origin.to_owned())
+        && !result.iter().any(|known| known == origin)
     {
         result.push(origin.to_owned());
     }
-    result
+    Ok(result)
 }
 
 /// A request limit: a whole number from 1 to 100000.
@@ -570,7 +551,7 @@ Options:
   --api-listen <addr:port>      API address [default: {api}]
   --loopback-listen <addr:port> Dedicated loopback API address for MCP in LAN mode
   --content-listen <addr:port>  Preview address [default: {content}]
-  --content-origin <origin>     Public preview origin, if proxied
+  --content-origin <origin>     Public preview origin, if proxied (or ARTIFREE_CONTENT_ORIGIN)
   --api-origin <origin>         Public API and web origin, if proxied (or ARTIFREE_API_ORIGIN)
   --trusted-proxy <cidr>        Trusted reverse proxy IP or CIDR (or ARTIFREE_TRUSTED_PROXIES).
                                 The proxy must append (or overwrite) the client
@@ -584,11 +565,19 @@ Options:
                                 it /mcp admits only a known loopback client: connect
                                 local agents directly, not through a trusted proxy.
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
+                                (or ARTIFREE_FRAME_ANCESTORS)
   --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
   --request-burst <n>           Requests accepted at once [default: {burst}]
   --requests-per-minute <n>     Sustained request rate [default: {rate}]
   --concurrent-requests <n>     Requests running at once [default: {concurrent}]
   --change-streams <n>          Open change streams [default: {streams}]
+
+A flag wins over its environment variable, and an empty variable counts as
+unset. An invalid value stops the server; the message names the flag or
+variable and the rule, never the value. Origins are http(s)://host[:port] with
+no credentials, path, query or fragment. The allowed hosts and origins, trusted
+proxies, and frame ancestors are read once at start; changing them needs a
+restart.
 
 Request limits apply per actor to HTTP and MCP together; a refused request
 gets 429 rate_limited with Retry-After and is not processed. Opening a change
@@ -615,86 +604,96 @@ running server.",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serve_env::{
+        ALLOW_REMOTE_MCP, ALLOWED_HOSTS, ALLOWED_ORIGINS, API_ORIGIN, CONTENT_ORIGIN,
+        FRAME_ANCESTORS, LAN, LOOPBACK_LISTEN, TRUSTED_PROXIES, WEB_DIR,
+    };
+
+    const SECRET: &str = "hunter2";
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
     }
 
-    #[test]
-    fn unspecified_lan_is_rejected() {
-        let res_v4 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "0.0.0.0"]));
-        let err_v4 = res_v4.err().unwrap_or_default();
-        assert!(err_v4.contains("not an unspecified address (0.0.0.0)"));
+    /// Parses with no environment at all, whatever the test process holds.
+    fn parse(list: &[&str]) -> Result<ServeOptions, String> {
+        parse_with(&ServeEnv::default(), list)
+    }
 
-        let res_v6 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "::"]));
-        let err_v6 = res_v6.err().unwrap_or_default();
-        assert!(err_v6.contains("not an unspecified address (::)"));
+    fn parse_with(env: &ServeEnv, list: &[&str]) -> Result<ServeOptions, String> {
+        let mut all = vec!["--data-dir", "/tmp"];
+        all.extend_from_slice(list);
+        parse_serve(&args(&all), env)
+    }
 
-        let res_v6_bracket = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "[::]"]));
-        let err_v6_bracket = res_v6_bracket.err().unwrap_or_default();
-        assert!(err_v6_bracket.contains("not an unspecified address ([::])"));
+    fn refusal(env: &ServeEnv, list: &[&str]) -> String {
+        match parse_with(env, list) {
+            Ok(options) => panic!("expected a refusal, got {options:?}"),
+            Err(message) => message,
+        }
     }
 
     #[test]
-    fn bracketed_and_unbracketed_lan_are_accepted() -> Result<(), Box<dyn std::error::Error>> {
-        let opts_bracket_v6 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "[::1]"]))
-            .map_err(|e| format!("bracketed loopback: {e}"))?;
-        assert_eq!(opts_bracket_v6.api_address.to_string(), "[::1]:7410");
+    fn unspecified_lan_is_rejected() {
+        for address in ["0.0.0.0", "::", "[::]"] {
+            let error = refusal(&ServeEnv::default(), &["--lan", address]);
+            assert!(
+                error.starts_with("--lan must be a specific IP address")
+                    && error.contains("not an unspecified address"),
+                "{address}: {error}"
+            );
+        }
+        let from_variable = refusal(&ServeEnv::default().with(LAN, "0.0.0.0"), &[]);
+        assert!(
+            from_variable.starts_with("ARTIFREE_LAN must be"),
+            "{from_variable}"
+        );
+    }
+
+    #[test]
+    fn bracketed_and_unbracketed_lan_are_accepted() -> Result<(), String> {
+        let loopback = parse(&["--lan", "[::1]"])?;
+        assert_eq!(loopback.api_address.to_string(), "[::1]:7410");
         assert_eq!(
-            opts_bracket_v6.content_origin.as_deref(),
+            loopback.content_origin.as_deref(),
             Some("http://[::1]:7411")
         );
 
-        let opts_bracket_lan =
-            parse_serve(&args(&["--data-dir", "/tmp", "--lan", "[2001:db8::1]"]))
-                .map_err(|e| format!("bracketed LAN: {e}"))?;
+        let lan = parse(&["--lan", "[2001:db8::1]"])?;
+        assert_eq!(lan.api_address.to_string(), "[2001:db8::1]:7410");
         assert_eq!(
-            opts_bracket_lan.api_address.to_string(),
-            "[2001:db8::1]:7410"
-        );
-        assert_eq!(
-            opts_bracket_lan.content_origin.as_deref(),
+            lan.content_origin.as_deref(),
             Some("http://[2001:db8::1]:7411")
         );
 
-        let opts_v4 = parse_serve(&args(&["--data-dir", "/tmp", "--lan", "192.168.1.50"]))
-            .map_err(|e| format!("LAN IPv4: {e}"))?;
-        assert_eq!(opts_v4.api_address.to_string(), "192.168.1.50:7410");
+        let v4 = parse(&["--lan", "192.168.1.50"])?;
+        assert_eq!(v4.api_address.to_string(), "192.168.1.50:7410");
         assert_eq!(
-            opts_v4.content_origin.as_deref(),
+            v4.content_origin.as_deref(),
             Some("http://192.168.1.50:7411")
         );
         Ok(())
     }
 
     #[test]
-    fn content_origin_validation_and_normalization() -> Result<(), Box<dyn std::error::Error>> {
-        let opts = parse_serve(&args(&[
-            "--data-dir",
-            "/tmp",
-            "--content-origin",
-            "http://[0:0:0:0:0:0:0:1]:80/",
-        ]))
-        .map_err(|e| format!("expanded IPv6 origin: {e}"))?;
-        assert_eq!(opts.content_origin.as_deref(), Some("http://[::1]"));
+    fn content_origin_validation_and_normalization() -> Result<(), String> {
+        let options = parse(&["--content-origin", "http://[0:0:0:0:0:0:0:1]:80/"])?;
+        assert_eq!(options.content_origin.as_deref(), Some("http://[::1]"));
 
-        let res = parse_serve(&args(&[
-            "--data-dir",
-            "/tmp",
-            "--content-origin",
-            "not-a-valid-url",
-        ]));
-        let err = res.err().unwrap_or_default();
-        assert!(err.contains("--content-origin must be a valid HTTP or HTTPS origin"));
+        let error = refusal(
+            &ServeEnv::default(),
+            &["--content-origin", "not-a-valid-url"],
+        );
+        assert!(
+            error.starts_with("--content-origin must be a valid HTTP or HTTPS origin"),
+            "{error}"
+        );
         Ok(())
     }
 
     #[test]
-    fn api_origin_and_content_origin_separation() -> Result<(), Box<dyn std::error::Error>> {
-        // Differing origins are accepted
-        let opts = parse_serve(&args(&[
-            "--data-dir",
-            "/tmp",
+    fn api_origin_and_content_origin_separation() -> Result<(), String> {
+        let options = parse(&[
             "--api-origin",
             "https://artifree.example.com",
             "--content-origin",
@@ -702,39 +701,387 @@ mod tests {
             "--trusted-proxy",
             "127.0.0.1,10.0.0.0/8",
             "--allow-remote-mcp",
-        ]))
-        .map_err(|e| format!("valid remote proxy options: {e}"))?;
-
+        ])?;
         assert_eq!(
-            opts.api_origin.as_deref(),
+            options.api_origin.as_deref(),
             Some("https://artifree.example.com")
         );
         assert_eq!(
-            opts.content_origin.as_deref(),
+            options.content_origin.as_deref(),
             Some("https://preview.example.com")
         );
-        assert!(opts.allow_remote_mcp);
-        assert_eq!(opts.trusted_proxies.len(), 2);
+        assert!(options.allow_remote_mcp);
+        assert_eq!(options.trusted_proxies.len(), 2);
         assert!(
-            opts.allowed_hosts
+            options
+                .allowed_hosts
                 .iter()
                 .any(|h| h == "artifree.example.com")
         );
 
-        // Identical origins are strictly rejected to maintain sandbox isolation
-        let conflict = parse_serve(&args(&[
-            "--data-dir",
-            "/tmp",
-            "--api-origin",
-            "https://artifree.example.com",
-            "--content-origin",
-            "https://artifree.example.com",
-        ]));
-        let err = conflict.err().unwrap_or_default();
-        assert!(err.contains(
-            "--content-origin must differ from --api-origin to maintain preview sandbox isolation"
-        ));
+        let conflict = refusal(
+            &ServeEnv::default(),
+            &[
+                "--api-origin",
+                "https://artifree.example.com",
+                "--content-origin",
+                "https://ARTIFREE.example.com:443",
+            ],
+        );
+        assert!(
+            conflict.contains("--content-origin must differ from --api-origin"),
+            "{conflict}"
+        );
+        Ok(())
+    }
 
+    #[test]
+    fn the_content_origin_variable_is_used_without_a_flag() -> Result<(), String> {
+        let env = ServeEnv::default().with(CONTENT_ORIGIN, "https://Preview.example:443");
+        let options = parse_with(&env, &[])?;
+        assert_eq!(
+            options.content_origin.as_deref(),
+            Some("https://preview.example")
+        );
+        // An explicit --content-listen does not by itself discard the variable.
+        let listen = parse_with(&env, &["--content-listen", "0.0.0.0:7411"])?;
+        assert_eq!(
+            listen.content_origin.as_deref(),
+            Some("https://preview.example")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flags_win_over_the_new_variables() -> Result<(), String> {
+        let env = ServeEnv::default()
+            .with(CONTENT_ORIGIN, "https://from-env.example")
+            .with(FRAME_ANCESTORS, "https://env-ui.example");
+        let options = parse_with(
+            &env,
+            &[
+                "--content-origin",
+                "https://from-flag.example",
+                "--frame-ancestors",
+                "https://flag-ui.example",
+            ],
+        )?;
+        assert_eq!(
+            options.content_origin.as_deref(),
+            Some("https://from-flag.example")
+        );
+        assert_eq!(options.frame_ancestors, "https://flag-ui.example");
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_variable_is_unset_but_an_empty_flag_is_refused() -> Result<(), String> {
+        let env = ServeEnv::default()
+            .with(CONTENT_ORIGIN, "")
+            .with(FRAME_ANCESTORS, "");
+        let options = parse_with(&env, &[])?;
+        assert_eq!(options.content_origin, None);
+        assert_eq!(options.frame_ancestors, serve::DEFAULT_FRAME_ANCESTORS);
+
+        let empty_flag = refusal(&ServeEnv::default(), &["--frame-ancestors", ""]);
+        assert!(
+            empty_flag.starts_with("--frame-ancestors must be"),
+            "{empty_flag}"
+        );
+        let empty_flag = refusal(&ServeEnv::default(), &["--content-origin", " "]);
+        assert!(
+            empty_flag.starts_with("--content-origin must be"),
+            "{empty_flag}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_variable_that_is_not_utf8_matters_only_without_its_flag() -> Result<(), String> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let bytes = || OsString::from_vec(vec![b'h', 0xff]);
+        let env = ServeEnv::default()
+            .with(CONTENT_ORIGIN, bytes())
+            .with(FRAME_ANCESTORS, bytes());
+        let flagged = parse_with(
+            &env,
+            &[
+                "--content-origin",
+                "https://preview.example",
+                "--frame-ancestors",
+                "'self'",
+            ],
+        )?;
+        assert_eq!(
+            flagged.content_origin.as_deref(),
+            Some("https://preview.example")
+        );
+        let content = refusal(&env, &["--frame-ancestors", "'self'"]);
+        assert!(
+            content.starts_with("ARTIFREE_CONTENT_ORIGIN is not valid UTF-8"),
+            "{content}"
+        );
+        let ancestors = refusal(&env, &["--content-origin", "https://preview.example"]);
+        assert!(
+            ancestors.starts_with("ARTIFREE_FRAME_ANCESTORS is not valid UTF-8"),
+            "{ancestors}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn frame_ancestors_accepts_the_documented_sources() -> Result<(), String> {
+        for list in [
+            "*",
+            "'self'",
+            "https:",
+            "https://ui.example http://localhost:*",
+            "  https://ui.example   'self' ",
+        ] {
+            let from_flag = parse(&["--frame-ancestors", list])?.frame_ancestors;
+            let from_env =
+                parse_with(&ServeEnv::default().with(FRAME_ANCESTORS, list), &[])?.frame_ancestors;
+            assert_eq!(from_flag, from_env, "list {list:?}");
+            assert_eq!(
+                from_flag,
+                list.split_whitespace().collect::<Vec<_>>().join(" ")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn frame_ancestors_refuses_directives_and_commas_without_echoing_them() {
+        for list in [
+            "",
+            "   ",
+            "https://ui.example; script-src hunter2",
+            "https://ui.example,https://other.example",
+            "https://user:hunter2@ui.example,",
+            "https://ui.example\u{7f}hunter2",
+            "https://ünï.example/hunter2",
+        ] {
+            let flag = refusal(&ServeEnv::default(), &["--frame-ancestors", list]);
+            assert!(
+                flag.starts_with("--frame-ancestors must be"),
+                "{list:?}: {flag}"
+            );
+            let mut messages = vec![flag];
+            if !list.is_empty() {
+                messages.push(refusal(
+                    &ServeEnv::default().with(FRAME_ANCESTORS, list),
+                    &[],
+                ));
+            }
+            for message in messages {
+                assert!(!message.contains(SECRET), "{list:?}: {message}");
+            }
+        }
+    }
+
+    /// Credentialed text that fails an early check must not appear anywhere.
+    const HOSTILE_ORIGINS: [&str; 9] = [
+        "ftp://user:hunter2@leak",
+        "user:hunter2@leak",
+        "hunter2",
+        "https://user:hunter2@leak:65536",
+        "https://user:hunter2@leak:notaport",
+        "https://user:hunter2@",
+        "https://user:hunter2@[not-an-ip]",
+        "https://user:hunter2@ho st",
+        "https//user:p%40ss-hunter2@leak",
+    ];
+
+    #[test]
+    fn origin_errors_never_repeat_a_credentialed_value() {
+        for value in HOSTILE_ORIGINS {
+            for flag in ["--content-origin", "--api-origin", "--allowed-origin"] {
+                let message = refusal(&ServeEnv::default(), &[flag, value]);
+                assert!(message.starts_with(flag), "{flag} {value}: {message}");
+                assert!(!message.contains(SECRET), "{flag} {value}: {message}");
+                assert!(!message.contains("leak"), "{flag} {value}: {message}");
+            }
+            for variable in [CONTENT_ORIGIN, API_ORIGIN, ALLOWED_ORIGINS] {
+                let message = refusal(&ServeEnv::default().with(variable, value), &[]);
+                assert!(
+                    message.starts_with(variable),
+                    "{variable} {value}: {message}"
+                );
+                assert!(!message.contains(SECRET), "{variable} {value}: {message}");
+            }
+        }
+        // The same inside a comma list, after an entry that is fine.
+        let message = refusal(
+            &ServeEnv::default().with(ALLOWED_ORIGINS, "https://ok.example, ftp://u:hunter2@h"),
+            &[],
+        );
+        assert!(
+            message.starts_with(ALLOWED_ORIGINS) && !message.contains(SECRET),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn other_settings_never_repeat_a_credentialed_value() {
+        let hostile = "https://user:hunter2@leak";
+        for flag in [
+            "--lan",
+            "--api-listen",
+            "--loopback-listen",
+            "--content-listen",
+            "--trusted-proxy",
+            "--preview-ttl-seconds",
+            "--request-burst",
+            "--requests-per-minute",
+            "--concurrent-requests",
+            "--change-streams",
+        ] {
+            let message = refusal(&ServeEnv::default(), &[flag, hostile]);
+            assert!(!message.contains(SECRET), "{flag}: {message}");
+            assert!(!message.contains("leak"), "{flag}: {message}");
+        }
+        for variable in [LAN, LOOPBACK_LISTEN, TRUSTED_PROXIES] {
+            let message = refusal(&ServeEnv::default().with(variable, hostile), &[]);
+            assert!(message.starts_with(variable), "{variable}: {message}");
+            assert!(!message.contains(SECRET), "{variable}: {message}");
+        }
+        let cidr = refusal(
+            &ServeEnv::default(),
+            &["--trusted-proxy", "10.0.0.0/hunter2,127.0.0.1"],
+        );
+        assert!(
+            cidr.starts_with("--trusted-proxy entries") && !cidr.contains(SECRET),
+            "{cidr}"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_option_is_named_only_when_it_looks_like_one() {
+        let named = |argument: &str| {
+            let Err(message) = parse_serve(&args(&[argument]), &ServeEnv::default()) else {
+                panic!("{argument} must be refused");
+            };
+            assert!(!message.contains(SECRET), "{argument}: {message}");
+            assert!(!message.contains("leak"), "{argument}: {message}");
+            message
+        };
+        for argument in [
+            "--content-origin=https://user:hunter2@leak",
+            "--no-such-flag=hunter2",
+        ] {
+            let message = named(argument);
+            let name = argument.split('=').next().unwrap_or_default();
+            assert!(
+                message.contains(&format!("serve option {name};")),
+                "{argument}: {message}"
+            );
+        }
+        for argument in [
+            "--content-origin https://user:hunter2@leak",
+            "--content-origin:https://user:hunter2@leak",
+            "--CONTENT-ORIGIN=https://user:hunter2@leak",
+            "-content-origin=https://user:hunter2@leak",
+            "https://user:hunter2@leak",
+            "hunter2",
+            "--=hunter2",
+            "--",
+            "--hunter2$=x",
+        ] {
+            let message = named(argument);
+            assert!(
+                message.contains("An argument is not a serve option"),
+                "{argument}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_value_names_the_flag_only() {
+        let Err(message) = parse_serve(&args(&["--content-origin"]), &ServeEnv::default()) else {
+            panic!("a flag without a value must be refused");
+        };
+        assert!(
+            message.contains("--content-origin requires a value"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_port_never_reaches_the_cors_allow_list() -> Result<(), String> {
+        for entry in [
+            "https://ui.example:65536",
+            "https://ui.example:abc",
+            "https://ui.example:",
+            "https://ui.example:0",
+            "https://ui.example:08080x",
+            "https://ui.example:-1",
+        ] {
+            let flag = refusal(&ServeEnv::default(), &["--allowed-origin", entry]);
+            assert!(
+                flag.starts_with("--allowed-origin must be"),
+                "{entry}: {flag}"
+            );
+            let mixed = refusal(
+                &ServeEnv::default(),
+                &["--allowed-origin", &format!("https://ok.example,{entry}")],
+            );
+            assert!(
+                mixed.starts_with("--allowed-origin must be"),
+                "{entry}: {mixed}"
+            );
+            let variable = refusal(&ServeEnv::default().with(ALLOWED_ORIGINS, entry), &[]);
+            assert!(variable.starts_with(ALLOWED_ORIGINS), "{entry}: {variable}");
+        }
+        for entry in ["*", "ui.example", "https://ui.example/app", "null"] {
+            refusal(&ServeEnv::default(), &["--allowed-origin", entry]);
+        }
+        let options = parse_with(
+            &ServeEnv::default().with(
+                ALLOWED_ORIGINS,
+                "HTTPS://UI.example:443, https://b.example:8443/",
+            ),
+            &["--allowed-origin", "https://ui.example"],
+        )?;
+        assert_eq!(
+            options.allowed_origins,
+            ["https://ui.example", "https://b.example:8443"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn older_variables_keep_their_meaning() -> Result<(), String> {
+        let env = ServeEnv::default()
+            .with(WEB_DIR, "/srv/web")
+            .with(ALLOW_REMOTE_MCP, "1")
+            .with(ALLOWED_HOSTS, "Artifree.example, ,artifree.EXAMPLE")
+            .with(TRUSTED_PROXIES, "10.0.0.0/8")
+            .with(LOOPBACK_LISTEN, "127.0.0.1:9000")
+            .with(API_ORIGIN, "https://api.example");
+        let options = parse_with(&env, &[])?;
+        assert_eq!(
+            options.web_dir.as_deref(),
+            Some(std::path::Path::new("/srv/web"))
+        );
+        assert!(options.allow_remote_mcp);
+        assert_eq!(options.trusted_proxies.len(), 1);
+        assert_eq!(
+            options.loopback_api_address,
+            Some("127.0.0.1:9000".parse().map_err(|_| "addr")?)
+        );
+        assert_eq!(options.api_origin.as_deref(), Some("https://api.example"));
+        let hosts: Vec<&str> = options.allowed_hosts.iter().map(String::as_str).collect();
+        assert_eq!(&hosts[..2], ["Artifree.example", "api.example"]);
+        assert!(
+            options
+                .allowed_origins
+                .contains(&"https://api.example".to_owned())
+        );
+        // An empty or false-looking value does not enable remote MCP.
+        let off = parse_with(&ServeEnv::default().with(ALLOW_REMOTE_MCP, "yes"), &[])?;
+        assert!(!off.allow_remote_mcp);
         Ok(())
     }
 }

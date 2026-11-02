@@ -1,7 +1,9 @@
 # Container image
 
 Status: O03b, implemented as a build recipe and a CI check
-([decision 0026](decisions/0026-container-image.md)). **No image is published.**
+([decision 0026](decisions/0026-container-image.md)); settings can be declared as
+environment variables ([decision 0028](decisions/0028-static-web-defaults.md)).
+**No image is published.**
 There is no registry, tag, or signature; you build the image from a release
 archive yourself. The image was built and run only by the `Container image` CI
 job, on GitHub's `ubuntu-24.04` runner. It has not been run on any other host,
@@ -25,7 +27,7 @@ to arm64 and the x86-64 binary would not run): no ARM image, no Alpine/musl, no 
 | Data        | volume `/data` (database and `access-token`), mode 700, owned by the user                                           |
 | Ports       | `7410` API and web workspace; `7411` preview content, a separate origin                                             |
 | Command     | `artifree-server serve --data-dir /data --web-dir /app/web --api-listen 0.0.0.0:7410 --content-listen 0.0.0.0:7411` |
-| Your flags  | everything after the image name is appended; server environment variables (`ARTIFREE_*`) work as usual              |
+| Your flags  | everything after the image name is appended; server environment variables (`ARTIFREE_*`) work as usual, see below   |
 | Healthcheck | `GET /healthz` on `127.0.0.1:7410` inside the container, using the shell already in the image                       |
 | Not inside  | Node.js (the bundled CLI in `/app/cli` cannot run there), curl, any package manager step                            |
 
@@ -77,6 +79,48 @@ docker exec artifree cat /data/access-token      # paste into http://127.0.0.1:7
   and run it on the same volume. Take a backup first
   ([backup guide](backup-restore.md#containers), commands not run in CI); there
   is no downgrade.
+
+## Settings as environment variables
+
+Every setting the container needs can be passed with `docker run --env` (or an
+env file) instead of arguments after the image name:
+
+| Variable                                                                         | Same as              | Notes                                                                             |
+| -------------------------------------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------- |
+| `ARTIFREE_CONTENT_ORIGIN`                                                        | `--content-origin`   | Public preview origin. Required in practice (see above).                          |
+| `ARTIFREE_FRAME_ANCESTORS`                                                       | `--frame-ancestors`  | Space-separated CSP sources allowed to embed previews. Replaces the default list. |
+| `ARTIFREE_API_ORIGIN`                                                            | `--api-origin`       | Public API and web origin behind a proxy.                                         |
+| `ARTIFREE_ALLOWED_HOSTS`, `ARTIFREE_ALLOWED_ORIGINS`, `ARTIFREE_TRUSTED_PROXIES` | the repeated flags   | Comma-separated. Added to anything the flags give.                                |
+| `ARTIFREE_ALLOW_REMOTE_MCP`                                                      | `--allow-remote-mcp` | `true` or `1`. Read the MCP section first.                                        |
+| `ARTIFREE_LAN`, `ARTIFREE_LOOPBACK_LISTEN`, `ARTIFREE_WEB_DIR`                   | the matching flags   | The image's fixed `--web-dir` and listen flags win over them.                     |
+
+```sh
+docker run -d --name artifree --platform linux/amd64 --read-only \
+  -v artifree-data:/data -p 127.0.0.1:7410:7410 -p 127.0.0.1:7411:7411 \
+  --env ARTIFREE_CONTENT_ORIGIN=http://127.0.0.1:7411 \
+  --env 'ARTIFREE_FRAME_ANCESTORS=http://127.0.0.1:* https://ui.example.app' \
+  artifree:local
+```
+
+- **A flag wins over its variable.** An empty variable counts as unset. For
+  `ARTIFREE_CONTENT_ORIGIN` and `ARTIFREE_FRAME_ANCESTORS`, a value that is not
+  valid UTF-8 stops the server unless the flag is given; for the older
+  variables, an empty or non-UTF-8 value is silently ignored.
+- **A bad value stops the server** with a nonzero exit and a message on stderr
+  (so in `docker logs`) that names the variable or flag and the rule, never the
+  value. Origins must be `http(s)://host[:port]` with no user name, password,
+  path, query or fragment, and a port from 1 to 65535. An `--allowed-origin`
+  entry like `*`, a bare host or `https://ui.example:65536` is an error (it
+  used to be accepted and never match). A frame-ancestors list must not be
+  empty or contain `;` or `,`.
+- **Changing a setting needs a new container** (or a restart): the CORS
+  allow-list, allowed hosts, trusted proxies and frame ancestors are read once
+  at start-up. A restart drops preview links, runtime sessions and agent
+  handoffs, which are held in memory; the data volume is untouched. There is
+  no reload.
+- Two things are still shown in errors: the socket address when binding a port
+  fails (it was parsed as an IP address and port), and file-system paths such as
+  the data directory.
 
 ## Behind a reverse proxy
 
@@ -134,8 +178,13 @@ the `Release archive` job, then `scripts/verify-container.mjs`:
 - confirms `/mcp` is refused from the published port;
 - stops with SIGTERM and requires exit status 0, starts a new container on the
   same volume, and finds revision 2;
-- requires two refusals: equal `--api-origin` and `--content-origin`, and a
-  bind-mounted data directory that other users can enter.
+- starts the container with `ARTIFREE_CONTENT_ORIGIN`,
+  `ARTIFREE_ALLOWED_HOSTS` and `ARTIFREE_FRAME_ANCESTORS` instead of
+  arguments, and checks that the preview's CSP carries the frame-ancestors list;
+- requires three refusals: equal API and preview origins declared by
+  `ARTIFREE_API_ORIGIN` and `ARTIFREE_CONTENT_ORIGIN`, an invalid
+  `ARTIFREE_CONTENT_ORIGIN` whose log must not contain the password inside it,
+  and a bind-mounted data directory that other users can enter.
 
 Not checked: any registry, other CPUs, older Docker versions, rootless Docker
 or Podman, Kubernetes, `docker compose`, a reverse proxy in front of the

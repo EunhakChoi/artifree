@@ -53,7 +53,9 @@ moves to O03c. The web-workspace gaps found while writing the guides are O03d.
    Equal API and preview origins are refused at startup (decision 0024) and the
    CI job requires that refusal through the image. We did not add an
    environment variable or a refusing wrapper script: that would be a new
-   configuration surface for one deployment form (see O03d).
+   configuration surface for one deployment form (see O03d). _Amended by
+   [0028](0028-static-web-defaults.md): `ARTIFREE_CONTENT_ORIGIN` and
+   `ARTIFREE_FRAME_ANCESTORS` now exist, as the server's variables._
 6. **MCP remains loopback-only in the image.** Docker delivers published-port
    traffic from the bridge, so the server sees a non-loopback peer and returns
    403 for `/mcp`. This is the intended default and CI asserts it. The guides
@@ -89,7 +91,8 @@ moves to O03c. The web-workspace gaps found while writing the guides are O03d.
   publishing, signing/provenance, and the glibc floor policy are O03c.
 - The static web workspace has no build-time default server, and
   `--frame-ancestors`/`--content-origin` have no environment variables, which
-  makes container and static-UI setups argument-only. Tracked as O03d.
+  makes container and static-UI setups argument-only. Tracked as O03d; _done in
+  [0028](0028-static-web-defaults.md)._
 - Client locality behind a proxy follows the amendment of 2026-11-01 in
   [0024](0024-https-proxy-and-remote-access.md): a missing, all-trusted, or
   disagreeing forwarding chain is an unknown client and `/mcp` returns 403. The

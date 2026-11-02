@@ -172,7 +172,10 @@ test('unspecified lan addresses are rejected and bracketed lan is accepted', asy
     { encoding: 'utf8', timeout: 5000 },
   );
   assert.notEqual(v4Result.status, 0);
-  assert.match(v4Result.stderr, /not an unspecified address \(0\.0\.0\.0\)/);
+  assert.match(
+    v4Result.stderr,
+    /^--lan must be a specific IP address.*not an unspecified address/,
+  );
 
   // 2. Unspecified IPv6 ::
   const v6Result = spawnSync(
@@ -181,7 +184,10 @@ test('unspecified lan addresses are rejected and bracketed lan is accepted', asy
     { encoding: 'utf8', timeout: 5000 },
   );
   assert.notEqual(v6Result.status, 0);
-  assert.match(v6Result.stderr, /not an unspecified address \(::\)/);
+  assert.match(
+    v6Result.stderr,
+    /^--lan must be a specific IP address.*not an unspecified address/,
+  );
 
   // 3. Unspecified bracketed IPv6 [::]
   const v6BracketResult = spawnSync(
@@ -190,7 +196,10 @@ test('unspecified lan addresses are rejected and bracketed lan is accepted', asy
     { encoding: 'utf8', timeout: 5000 },
   );
   assert.notEqual(v6BracketResult.status, 0);
-  assert.match(v6BracketResult.stderr, /not an unspecified address \(\[::\]\)/);
+  assert.match(
+    v6BracketResult.stderr,
+    /^--lan must be a specific IP address.*not an unspecified address/,
+  );
 
   // 4. Bracketed loopback IPv6 [::1] is accepted
   const bracketV6Server = await startServer(

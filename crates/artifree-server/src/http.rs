@@ -10,7 +10,7 @@
 //! behind the same token.
 
 use std::future::poll_fn;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,7 +34,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -46,6 +46,7 @@ use crate::handoffs::Handoffs;
 use crate::limits::{Limiter, Refusal, RequestLimits};
 use crate::mcp;
 use crate::operations::{self, ApiError};
+use crate::origin::normalize_origin;
 use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::runtime_sessions::RuntimeSessions;
@@ -137,11 +138,16 @@ impl AppState {
         settings: Settings,
     ) -> Result<Self, String> {
         let mut settings = settings;
+        // These are the same checks the command line applies; repeating them
+        // keeps a caller of the library from reaching the allow-list or the
+        // preview policy with an origin that was never validated.
         if !settings.content_origin.is_empty() {
-            settings.content_origin = normalize_origin(&settings.content_origin)?;
+            settings.content_origin = normalize_origin(&settings.content_origin)
+                .map_err(|error| format!("preview content origin: {error}"))?;
         }
         if let Some(ref api_origin) = settings.api_origin {
-            let canon = normalize_origin(api_origin)?;
+            let canon =
+                normalize_origin(api_origin).map_err(|error| format!("API origin: {error}"))?;
             if !settings.content_origin.is_empty() && canon == settings.content_origin {
                 return Err(
                     "preview content origin must differ from API origin to maintain sandbox isolation"
@@ -150,6 +156,15 @@ impl AppState {
             }
             settings.api_origin = Some(canon);
         }
+        let mut allowed_origins = Vec::with_capacity(settings.allowed_origins.len());
+        for entry in &settings.allowed_origins {
+            let canon = normalize_origin(entry)
+                .map_err(|error| format!("an allowed CORS origin: {error}"))?;
+            if !allowed_origins.contains(&canon) {
+                allowed_origins.push(canon);
+            }
+        }
+        settings.allowed_origins = allowed_origins;
         let owner: ActorId = "local"
             .parse()
             .map_err(|error| format!("built-in owner actor: {error}"))?;
@@ -719,73 +734,6 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
         HeaderValue::from_static("Content-Range, Retry-After, Location"),
     );
     response
-}
-
-/// Normalizes an origin URL into canonical `<scheme>://<host>[:<port>]` format
-/// per standard URL origin serialization (RFC 5952 canonical compressed IPv6 and omitted default ports).
-///
-/// # Errors
-/// Returns an error if `raw` is not a valid absolute HTTP or HTTPS URL, or represents an opaque origin.
-pub fn normalize_origin(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("origin must not be empty".to_owned());
-    }
-    let uri: Uri = trimmed
-        .parse()
-        .map_err(|e| format!("invalid URL {raw:?}: {e}"))?;
-
-    let Some(scheme) = uri.scheme_str() else {
-        return Err(format!("origin {raw:?} must include an absolute scheme"));
-    };
-    let scheme_lower = scheme.to_ascii_lowercase();
-    if scheme_lower != "http" && scheme_lower != "https" {
-        return Err(format!(
-            "origin {raw:?} must use http or https scheme, got {scheme:?}"
-        ));
-    }
-
-    let Some(authority) = uri.authority() else {
-        return Err(format!("origin {raw:?} must include an authority/host"));
-    };
-
-    let host = authority.host();
-    if host.is_empty() {
-        return Err(format!("origin {raw:?} host must not be empty"));
-    }
-
-    let canonical_host =
-        if let Some(v6_str) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-            let ip: Ipv6Addr = v6_str
-                .parse()
-                .map_err(|e| format!("invalid IPv6 host {host:?} in origin {raw:?}: {e}"))?;
-            format!("[{ip}]")
-        } else if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            ip.to_string()
-        } else {
-            host.to_ascii_lowercase()
-        };
-
-    let port = authority.port_u16();
-    let is_default_port = matches!(
-        (scheme_lower.as_str(), port),
-        ("http", Some(80)) | ("https", Some(443)) | (_, None)
-    );
-
-    if is_default_port {
-        Ok(format!("{scheme_lower}://{canonical_host}"))
-    } else if let Some(p) = port {
-        Ok(format!("{scheme_lower}://{canonical_host}:{p}"))
-    } else {
-        Ok(format!("{scheme_lower}://{canonical_host}"))
-    }
-}
-
-/// Extracts the host authority from a valid HTTP or HTTPS origin string.
-#[must_use]
-pub fn origin_host(origin: &str) -> Option<String> {
-    let uri: axum::http::Uri = origin.parse().ok()?;
-    uri.authority().map(|a| a.as_str().to_owned())
 }
 
 async fn no_store(mut response: Response) -> Response {
