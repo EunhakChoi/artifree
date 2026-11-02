@@ -90,7 +90,10 @@ export function ConnectForm({
                 placeholder="http://127.0.0.1:7410"
                 aria-invalid={serverProblem !== undefined}
                 value={serverUrl}
-                onChange={(event) => setServerUrl(event.target.value)}
+                onChange={(event) => {
+                  setServerUrl(event.target.value);
+                  setServerProblem(undefined);
+                }}
               />
               <FieldDescription>
                 {defaultServerUrl === ''

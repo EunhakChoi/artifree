@@ -632,6 +632,16 @@ fn resolve_allowed_origins(
             }
             let canon = artifree_server::http::normalize_origin(part)
                 .map_err(|e| format!("{source} must list HTTP or HTTPS origins: {e}"))?;
+            // A CORS origin has no path, query, or fragment; normalizing drops
+            // them and would quietly grant what was not written.
+            let has_more = part.parse::<axum::http::Uri>().is_ok_and(|uri| {
+                (uri.path() != "/" && !uri.path().is_empty()) || uri.query().is_some()
+            });
+            if has_more || part.contains('#') {
+                return Err(format!(
+                    "{source} must list origins without a path, query, or fragment, such as https://ui.example.app."
+                ));
+            }
             if !result.contains(&canon) {
                 result.push(canon);
             }
@@ -1077,12 +1087,15 @@ mod tests {
             "ui.example.app",
             "ftp://ui.example.app",
             "https://u:p@ui.example.app",
+            "https://ui.example.app/app",
+            "https://ui.example.app/?x=1",
+            "https://ui.example.app/#top",
         ] {
             let err = parse_serve_with(&base_args(&["--allowed-origin", bad]), ServeEnv::default())
                 .err()
                 .unwrap_or_default();
             assert!(
-                err.starts_with("--allowed-origin must list HTTP or HTTPS origins"),
+                err.starts_with("--allowed-origin must list "),
                 "{bad:?} must be refused, got {err:?}"
             );
         }

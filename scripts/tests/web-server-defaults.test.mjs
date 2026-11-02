@@ -137,6 +137,11 @@ test('an invalid stored address is skipped for the default', () => {
     buildDefault: configured,
   });
   assert.equal(result.url, 'https://default.example');
+  assert.equal(result.notices.length, 1);
+  assert.match(
+    result.notices[0],
+    /^The server address kept for this tab was ignored\./,
+  );
 });
 
 test("an invalid build-time default is shown and leaves today's behavior", () => {

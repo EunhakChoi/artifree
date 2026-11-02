@@ -65,7 +65,10 @@ default when there is one, otherwise the page's own origin; the field is filled
 with the default so the person sees where the token will go. The `?server=`
 override keeps its rule that it suppresses restoring a stored token (0022); the
 default does not, because the stored token is already scoped to the origin it
-was typed for.
+was typed for. With a build default the empty field therefore cannot mean the
+page's own origin; type that origin in full, or build without the default. An
+address kept for the tab that fails validation (for example one stored by an
+earlier version) is reported and skipped.
 
 ### 2. Server addresses are validated
 
@@ -142,9 +145,15 @@ supported and none were added.
 typed, so `https://UI.example.app/` or `https://ui.example.app:443` never
 matched the browser's `https://ui.example.app`, and the failure looked like a
 CORS error in the browser. Entries are now normalized with the same function as
-request origins and an entry that is not an `http(s)` origin stops the server at
-start-up (`*` never worked and is now an error). This is the one change to the
-CORS list itself.
+request origins, and an entry that is not an `http(s)` origin, or that carries a
+path, query, or fragment (which normalizing would drop and so widen), stops the
+server at start-up. `*` never worked and is now an error. This is the one change
+to the CORS list itself, and it is **a compatibility change**: an existing
+`--allowed-origin` or `ARTIFREE_ALLOWED_ORIGINS` value that was tolerated and
+never matched now prevents start-up, so fix such an entry before upgrading.
+Non-UTF-8 values of the older variables (`ARTIFREE_ALLOWED_ORIGINS`,
+`ARTIFREE_ALLOWED_HOSTS`, ...) are still ignored silently as before; only the two
+new variables refuse them.
 
 ## Verification
 

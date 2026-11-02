@@ -59,6 +59,9 @@ export function resolveInitialServer(input: {
   if (input.stored !== null && input.stored !== '') {
     const checked = parseServerUrl(input.stored);
     if (checked.ok) return { url: checked.url, fromQuery, notices };
+    notices.push(
+      `The server address kept for this tab was ignored. ${checked.reason}`,
+    );
   }
   return { url: buildDefault.url, fromQuery, notices };
 }

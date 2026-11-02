@@ -11,7 +11,8 @@ const api = process.env.ARTIFREE_API_URL ?? 'http://127.0.0.1:7410';
 const proxy = { '/v1': { target: api, changeOrigin: false } };
 
 // A static build can carry a default API server (decision 0028). Refuse a bad
-// address here so a broken page is never published. The page checks it again.
+// address when the config loads (build, dev server, and preview alike) so a
+// broken page is never published. The page checks it again.
 function checkDefaultServer(mode: string): void {
   const env = loadEnv(
     mode,
