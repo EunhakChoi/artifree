@@ -212,16 +212,23 @@ reverse proxy. Neither was run.
 
 ## Static web workspace on another host (for example Vercel)
 
-**This works today without code changes** when the API is served over HTTPS
-(browsers block an HTTPS page from calling a plain-HTTP API). The built web
-workspace is plain static files, and its API address can be chosen at run time.
+**The server address can be built into the page** (decision 0028), and the API
+must be served over HTTPS (browsers block an HTTPS page from calling a
+plain-HTTP API). The built web workspace is plain static files.
 
-1. Build: `npm ci && npm run build`. Publish the contents of `apps/web/dist`
-   as a static site (on Vercel, deploy that directory as static output). The
-   workspace has no client-side path routes, so no rewrite rules are needed.
+1. Build with the API address as the default server:
+   `npm ci && VITE_ARTIFREE_SERVER=https://api.example.com npm run build`.
+   Publish the contents of `apps/web/dist` as a static site (on Vercel, deploy
+   that directory as static output). The workspace has no client-side path
+   routes, so no rewrite rules are needed. The build stops if the value is not
+   an absolute `http` or `https` address without a user name, password, query
+   or fragment (an empty `?` or `#` counts); the message does not repeat it.
+   Leave the variable unset, or set it empty, for a build that uses the page's
+   own origin; Vite also reads it from `apps/web/.env*` files.
 2. Run the API on its own public HTTPS origin and preview origin (see the
    proxy example), and allow the UI origin to call it and to frame previews.
-   With the UI at `https://ui.example.app`:
+   With the UI at `https://ui.example.app`, either as arguments or, for a
+   container or service manager, as environment variables:
 
    ```sh
    artifree-server serve --data-dir ./data \
@@ -232,36 +239,57 @@ workspace is plain static files, and its API address can be chosen at run time.
      --frame-ancestors https://ui.example.app
    ```
 
-   Both extra flags are needed. Without `--allowed-origin` the browser's CORS
-   check fails; without `--frame-ancestors` previews are blocked from rendering in
-   the UI (the CSP default lists only the API origin and loopback). Note that
-   `--frame-ancestors` replaces the default list instead of extending it, and has
-   no environment variable. `--api-origin` also adds the API's own origin to
-   the allowed CORS origins.
+   ```sh
+   ARTIFREE_API_ORIGIN=https://api.example.com \
+   ARTIFREE_CONTENT_ORIGIN=https://preview.example.com \
+   ARTIFREE_TRUSTED_PROXIES=127.0.0.1/32 \
+   ARTIFREE_ALLOWED_ORIGINS=https://ui.example.app \
+   ARTIFREE_FRAME_ANCESTORS=https://ui.example.app \
+   artifree-server serve --data-dir ./data
+   ```
 
-3. Open `https://ui.example.app/?server=https://api.example.com`, paste the
-   access token, and connect. A server address given in the URL suppresses restoring a
-   stored token (decision 0022), so the token is entered again.
+   Both UI settings are needed. Without an allowed origin the browser's CORS
+   check fails; without frame ancestors previews are blocked from rendering in
+   the UI (the CSP default lists only the API origin and loopback). Note that
+   `--frame-ancestors` replaces the default list instead of extending it. A flag
+   wins over its variable, and an empty variable counts as unset.
+   `--api-origin` also adds the API's own origin to the allowed CORS origins.
+   Entries that are not valid origins (`*`, a bare host, a path, a port above 65535) stop start-up; the error names the flag or variable, not the value.
+
+3. Open `https://ui.example.app/`, paste the access token, and connect; the
+   Server URL field starts with the built-in address and an empty field means
+   that address. `https://ui.example.app/?server=https://other.example.com`
+   uses another server instead. Which server the page starts with, first match
+   wins: the `?server=` link, an address chosen earlier in the tab, the build
+   default, the page's own origin. A source that is not a valid address is
+   skipped and explained on the connect form, never requested. A server address
+   given in the URL, or any skipped address, suppresses restoring a stored token
+   (decision 0022, 0028), so the token is entered again. The built-in address
+   is not stored in the tab.
 
 Limits and risks:
 
 - A `?server=<url>` link makes whoever opens it send their token to the
   named server. Only use links you built yourself, and never open one from
-  someone else.
+  someone else. A built-in default is only as trustworthy as the build that
+  made it.
 - The API still needs the headers and post-setup check of rule 5 and the
   check above; the static host does not change them.
 - The static host serves the code that handles your token. A compromised
   deployment or an account takeover on that host can steal it. Use a dedicated
   agent token (decision 0023) for browsers on such a host if you want to
   revoke it separately.
-- There is no build-time default server address. Every new tab needs the
-  `?server=` URL or the Server URL field. A default and environment variables
-  for the container's remaining flags are tracked as roadmap item O03d.
+- The default is chosen at build time: another API address needs another
+  build. There is no runtime configuration file (a request and a console error
+  for the common no-file case).
 - Previews are separate from the UI in origin, not from the network
   (decision 0003). Their frame can navigate elsewhere.
 - Hosting platforms' preview deployments get new origins; each needs adding to
-  `--allowed-origin` and `--frame-ancestors`, which cannot be changed without a
-  restart.
+  the allowed origins and the frame ancestors. **Those lists are read once when
+  the server starts, so the change needs a restart** (no reload exists). A
+  restart keeps the data and drops preview links, runtime sessions and agent
+  handoffs, which live in memory. If the new list has an invalid entry, the
+  server refuses to start instead of keeping the old list.
 
 ## What was actually run
 
@@ -269,7 +297,9 @@ Limits and risks:
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | A static copy of `apps/web/dist` on `http://ui.test:5000` talks to a server with `--api-origin http://api.test:7410 --content-origin http://content.test:7411 --allowed-origin http://ui.test:5000 --frame-ancestors http://ui.test:5000`: list loads and a preview renders in its frame | Once, by hand, in Playwright Chromium on a development machine; the three names were mapped to `127.0.0.1` by the browser. Plain HTTP on one host. Not in CI |
 | The same setup without `--frame-ancestors` shows the list but the preview is blocked by CSP `frame-ancestors`; without `--allowed-origin` the list never loads (CORS)                                                                                                                    | Same manual run                                                                                                                                              |
-| The container image builds, runs read-only as uid 10001, stays healthy, saves, restarts on the same volume, and refuses two misconfigurations                                                                                                                                            | Only in the CI job `Container image` ([container guide](container.md))                                                                                       |
+| The container image builds, runs read-only as uid 10001, configured by `ARTIFREE_*` variables, stays healthy, saves, restarts on the same volume, and refuses three misconfigurations                                                                                                    | Only in the CI job `Container image` ([container guide](container.md))                                                                                       |
+| A static build with `VITE_ARTIFREE_SERVER` served by a plain static file server on one loopback port talks to a real server on another port (allowed origin and frame ancestors set), a `?server=` link overrides it, and rejected addresses are explained and never requested           | Browser smoke test in CI (Chromium and Firefox), plain HTTP on loopback. No hosting service, no HTTPS                                                        |
+| `artifree-server` with `ARTIFREE_CONTENT_ORIGIN` and `ARTIFREE_FRAME_ANCESTORS` only: readiness line and preview CSP; invalid values stop it without repeating the value                                                                                                                 | Automated test of the real binary on the build host (`container-env.test.mjs`), not inside Docker                                                            |
 | HTTPS proxy behavior (forwarded headers, Host, MCP, preview CSP, change feed)                                                                                                                                                                                                            | Decision 0024's automated test with a Node TLS proxy on one host                                                                                             |
 | Caddy, Cloudflare Tunnel, ngrok, Tailscale, Headscale, Vercel, `docker compose`, any real certificate, any second machine, the public internet                                                                                                                                           | Not run                                                                                                                                                      |
 | Codex and Pi connecting to Artifree                                                                                                                                                                                                                                                      | Not run in this change; their status is unchanged from [MCP guide](mcp.md) and the roadmap                                                                   |

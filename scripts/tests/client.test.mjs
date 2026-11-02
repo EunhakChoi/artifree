@@ -2342,3 +2342,121 @@ test('What onEvent throws ends following, even an API error', async () => {
   assert.equal(error, thrown);
   assert.equal(requests, 1, 'a handler failure was retried');
 });
+
+// A runtime's network error can quote the URL it was given, passwords
+// included (decision 0028). The client shows at most origin + path and
+// attaches the original error only for a plain http(s) address.
+const SECRET = 'hunter2';
+const ID = `art_${'1'.repeat(32)}`;
+const addresses = [
+  ['plain', 'http://127.0.0.1:7410', 'http://127.0.0.1:7410', true],
+  [
+    'plain with a path',
+    'https://api.example/prefix/',
+    'https://api.example/prefix',
+    true,
+  ],
+  ['the page origin', '', 'this origin', true],
+  ['a path on the page origin', '/api/', '/api', true],
+  [
+    'a protocol-relative address',
+    `//user:${SECRET}@api.example`,
+    'the configured server',
+    false,
+  ],
+  [
+    'credentials',
+    `https://user:${SECRET}@api.example/prefix`,
+    'https://api.example/prefix',
+    false,
+  ],
+  [
+    'a query',
+    `https://api.example/x?key=${SECRET}`,
+    'https://api.example/x',
+    false,
+  ],
+  [
+    'a fragment',
+    `https://api.example/x#${SECRET}`,
+    'https://api.example/x',
+    false,
+  ],
+  ['an empty query', 'https://api.example?', 'https://api.example', false],
+  [
+    'a missing colon',
+    `https//user:p%40ss-${SECRET}`,
+    'the configured server',
+    false,
+  ],
+  [
+    'an opaque URL',
+    `user:${SECRET}@api.example`,
+    'the configured server',
+    false,
+  ],
+  [
+    'another scheme',
+    `ftp://user:${SECRET}@api.example`,
+    'the configured server',
+    false,
+  ],
+];
+
+for (const [name, baseUrl, label, plain] of addresses) {
+  const quoting = new TypeError(`fetch failed for ${baseUrl}/v1/x`);
+
+  test(`a send failure names ${name} as ${label} and ${plain ? 'keeps' : 'drops'} its cause`, async () => {
+    const client = new ArtifreeClient({
+      baseUrl,
+      accessToken: 'token',
+      fetch: async () => {
+        throw quoting;
+      },
+    });
+    const error = await failure(client.getArtifact(ID));
+    assert.equal(error.code, 'network_error');
+    assert.equal(
+      error.message,
+      `Could not reach the Artifree API at ${label}.`,
+    );
+    assert.equal(error.cause, plain ? quoting : undefined);
+    assert.ok(!error.message.includes(SECRET));
+  });
+
+  test(`a failure while reading a file names ${name} as ${label} and ${plain ? 'keeps' : 'drops'} its cause`, async () => {
+    const body = new TypeError(`terminated ${baseUrl}`);
+    const response = new Response('x');
+    Object.defineProperty(response, 'arrayBuffer', {
+      value: () => Promise.reject(body),
+    });
+    const client = new ArtifreeClient({
+      baseUrl,
+      accessToken: 'token',
+      fetch: async () => response,
+    });
+    const error = await failure(client.readFile(ID, 1, 'index.html'));
+    assert.equal(error.code, 'network_error');
+    assert.equal(
+      error.message,
+      `The connection to ${label} ended while reading index.html.`,
+    );
+    assert.equal(error.cause, plain ? body : undefined);
+  });
+
+  test(`a failure while reading JSON from ${name} ${plain ? 'keeps' : 'drops'} its cause`, async () => {
+    const body = new TypeError(`terminated ${baseUrl}`);
+    const response = new Response('{}');
+    Object.defineProperty(response, 'text', {
+      value: () => Promise.reject(body),
+    });
+    const client = new ArtifreeClient({
+      baseUrl,
+      accessToken: 'token',
+      fetch: async () => response,
+    });
+    const error = await failure(client.getArtifact(ID));
+    assert.equal(error.code, 'network_error');
+    assert.equal(error.cause, plain ? body : undefined);
+  });
+}

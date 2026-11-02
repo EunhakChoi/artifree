@@ -808,20 +808,54 @@ async fn serve(state: &AppState, secret: &str, path: Option<PackagePath>) -> Res
     }
 }
 
+/// Checks a CSP `frame-ancestors` source list and returns it with single
+/// spaces between sources (`*`, `'self'`, `https:`, `https://ui.example:*`, ...).
+///
+/// A list is refused when it is empty, or when a character could end the
+/// directive (`;`) or is not a visible ASCII character. A comma is refused
+/// too: it separates sources only in other headers, so a comma here is almost
+/// always a list written in the wrong syntax. The error is a fixed reason and
+/// never repeats the list.
+///
+/// # Errors
+///
+/// A static reason for the first rule the list breaks.
+pub fn normalize_frame_ancestors(raw: &str) -> Result<String, &'static str> {
+    let sources: Vec<&str> = raw.split_whitespace().collect();
+    if sources.is_empty() {
+        return Err("the source list is empty");
+    }
+    for source in &sources {
+        if source.contains([';', ',']) {
+            return Err("sources are separated by spaces and must not contain ; or ,");
+        }
+        if !source.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err("sources must be visible ASCII");
+        }
+    }
+    // `'none'` is valid only alone; browsers drop a directive that mixes it
+    // with other sources, which would leave embedding unrestricted.
+    if sources.len() > 1 && sources.iter().any(|s| s.eq_ignore_ascii_case("'none'")) {
+        return Err("'none' cannot be combined with other sources");
+    }
+    Ok(sources.join(" "))
+}
+
 /// Builds the content CSP from settings.
 ///
 /// # Errors
 ///
 /// When the configured origin or frame ancestors are not a valid header value.
 pub fn content_policy(content_origin: &str, frame_ancestors: &str) -> Result<HeaderValue, String> {
+    let frame_ancestors = normalize_frame_ancestors(frame_ancestors)
+        .map_err(|reason| format!("frame ancestors: {reason}"))?;
     let policy = format!(
         "sandbox {SANDBOX}; default-src {content_origin} data: blob:; \
          script-src {content_origin} 'unsafe-inline' 'unsafe-eval' data: blob:; \
          style-src {content_origin} 'unsafe-inline' data:; connect-src {content_origin}; \
          form-action 'none'; base-uri 'none'; frame-ancestors {frame_ancestors}"
     );
-    HeaderValue::from_str(&policy)
-        .map_err(|_| "content origin and frame ancestors must be visible ASCII".to_owned())
+    HeaderValue::from_str(&policy).map_err(|_| "content origin must be visible ASCII".to_owned())
 }
 
 fn security_headers(state: &AppState) -> HeaderMap {
@@ -863,10 +897,40 @@ fn plain(status: StatusCode, message: &'static str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewTickets, RuntimeIssueError, runtime_marker};
+    use super::{PreviewTickets, RuntimeIssueError, normalize_frame_ancestors, runtime_marker};
     use artifree_domain::SourceRevision;
     use artifree_domain::identity::{ActorId, ArtifactId};
     use std::time::Duration;
+
+    #[test]
+    fn frame_ancestors_keep_the_documented_sources_and_refuse_the_rest() {
+        for (list, expected) in [
+            ("*", "*"),
+            ("'self'", "'self'"),
+            ("https:", "https:"),
+            (
+                "  https://ui.example:*   'self' ",
+                "https://ui.example:* 'self'",
+            ),
+            ("'none'", "'none'"),
+        ] {
+            assert_eq!(normalize_frame_ancestors(list), Ok(expected.to_owned()));
+        }
+        for list in [
+            "",
+            " \t ",
+            "https://a.example; sandbox",
+            "https://a.example,https://b.example",
+            "'none' https://a.example",
+            "https://\u{e4}.example",
+            "https://a.example\u{7f}",
+        ] {
+            assert!(
+                normalize_frame_ancestors(list).is_err(),
+                "list {list:?} must be refused"
+            );
+        }
+    }
 
     #[test]
     fn only_an_unambiguous_first_head_child_can_enable_runtime()

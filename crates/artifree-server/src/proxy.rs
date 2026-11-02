@@ -62,27 +62,29 @@ impl IpNetwork {
 }
 
 impl FromStr for IpNetwork {
-    type Err = String;
+    type Err = &'static str;
 
+    /// The error is a fixed reason; it never repeats the text, which may be a
+    /// value an operator pasted from somewhere else (decision 0028).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let trimmed = s.trim();
         if let Some((ip_str, prefix_str)) = trimmed.split_once('/') {
             let ip: IpAddr = ip_str
                 .parse()
-                .map_err(|e| format!("invalid IP address in CIDR {trimmed:?}: {e}"))?;
+                .map_err(|_| "the address before / is not an IP address")?;
             let prefix: u8 = prefix_str
                 .parse()
-                .map_err(|e| format!("invalid prefix length in CIDR {trimmed:?}: {e}"))?;
+                .map_err(|_| "the prefix length after / is not a number from 0 to 128")?;
             match ip {
                 IpAddr::V4(addr) => {
                     if prefix > 32 {
-                        return Err(format!("IPv4 prefix length must be <= 32 in {trimmed:?}"));
+                        return Err("an IPv4 prefix length must be at most 32");
                     }
                     Ok(Self::V4 { addr, prefix })
                 }
                 IpAddr::V6(addr) => {
                     if prefix > 128 {
-                        return Err(format!("IPv6 prefix length must be <= 128 in {trimmed:?}"));
+                        return Err("an IPv6 prefix length must be at most 128");
                     }
                     Ok(Self::V6 { addr, prefix })
                 }
@@ -94,7 +96,7 @@ impl FromStr for IpNetwork {
                 .unwrap_or(trimmed);
             let ip: IpAddr = unbracketed
                 .parse()
-                .map_err(|e| format!("invalid IP address or CIDR {trimmed:?}: {e}"))?;
+                .map_err(|_| "it is not an IP address or CIDR network")?;
             match ip {
                 IpAddr::V4(addr) => Ok(Self::V4 { addr, prefix: 32 }),
                 IpAddr::V6(addr) => Ok(Self::V6 { addr, prefix: 128 }),
@@ -456,6 +458,26 @@ pub fn normalize_host(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_network_is_never_quoted() {
+        for text in [
+            "hunter2",
+            "hunter2/24",
+            "10.0.0.0/hunter2",
+            "10.0.0.0/33",
+            "::1/129",
+            "https://user:hunter2@host",
+        ] {
+            let Err(error) = text.parse::<IpNetwork>() else {
+                panic!("{text} must be refused");
+            };
+            assert!(
+                !error.contains("hunter2") && !error.contains("host"),
+                "{text}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn ip_network_parsing_and_matching() -> Result<(), String> {

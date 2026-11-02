@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { PlugIcon } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -12,29 +13,54 @@ import {
 import {
   Field,
   FieldDescription,
+  FieldError,
   FieldGroup,
   FieldLabel,
 } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { parseServerUrl } from './server-url';
 
 interface ConnectFormProps {
   /** Optional initial server URL (defaults to empty string for current origin). */
   initialServerUrl?: string;
-  /** Receives a non-empty token and server URL (empty string for current origin); the caller verifies it with the server. */
+  /** The server an empty field leads to; empty means the page's own origin. */
+  defaultServerUrl?: string;
+  /** Why an address was ignored while the page started; shown above the form. */
+  notices?: readonly string[];
+  /**
+   * Receives a non-empty token and a checked server URL, or an empty string
+   * for the default server; the caller verifies it with the server.
+   */
   onConnect: (token: string, serverUrl: string) => void;
 }
 
 /** Asks for the access token printed into the server's data directory. */
 export function ConnectForm({
   initialServerUrl = '',
+  defaultServerUrl = '',
+  notices = [],
   onConnect,
 }: ConnectFormProps) {
   const [serverUrl, setServerUrl] = useState(initialServerUrl);
   const [token, setToken] = useState('');
+  const [serverError, setServerError] = useState<string>();
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     const trimmedToken = token.trim();
-    if (trimmedToken !== '') onConnect(trimmedToken, serverUrl.trim());
+    if (trimmedToken === '') return;
+    if (serverUrl.trim() === '') {
+      onConnect(trimmedToken, '');
+      return;
+    }
+    // The address is checked before any request; it is not repeated back.
+    const result = parseServerUrl(serverUrl);
+    if (!result.ok) {
+      setServerError(
+        `This server address cannot be used because ${result.reason}.`,
+      );
+      return;
+    }
+    onConnect(trimmedToken, result.url);
   }
   return (
     <Card>
@@ -49,6 +75,16 @@ export function ConnectForm({
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {notices.length > 0 && (
+          <Alert className="mb-4">
+            <AlertTitle>Server address ignored</AlertTitle>
+            <AlertDescription>
+              {notices.map((notice) => (
+                <p key={notice}>{notice}</p>
+              ))}
+            </AlertDescription>
+          </Alert>
+        )}
         <form onSubmit={submit}>
           <FieldGroup>
             <Field>
@@ -60,12 +96,27 @@ export function ConnectForm({
                 spellCheck={false}
                 placeholder="http://127.0.0.1:7410"
                 value={serverUrl}
-                onChange={(event) => setServerUrl(event.target.value)}
+                aria-invalid={serverError !== undefined}
+                onChange={(event) => {
+                  setServerUrl(event.target.value);
+                  setServerError(undefined);
+                }}
               />
               <FieldDescription>
-                Leave empty to use the current origin. Remote servers must have
-                CORS enabled.
+                Leave empty to use{' '}
+                {defaultServerUrl === '' ? (
+                  'the current origin'
+                ) : (
+                  <>
+                    the address built into this page,{' '}
+                    <code>{defaultServerUrl}</code>
+                  </>
+                )}
+                . Remote servers must have CORS enabled.
               </FieldDescription>
+              {serverError !== undefined && (
+                <FieldError>{serverError}</FieldError>
+              )}
             </Field>
             <Field>
               <FieldLabel htmlFor="access-token">Access token</FieldLabel>

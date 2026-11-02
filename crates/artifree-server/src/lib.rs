@@ -9,6 +9,7 @@ mod inventory;
 pub mod limits;
 pub mod mcp;
 mod operations;
+pub mod origin;
 pub mod preview;
 pub mod proxy;
 mod ranges;

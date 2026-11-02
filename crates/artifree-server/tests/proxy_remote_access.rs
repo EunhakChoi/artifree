@@ -743,3 +743,60 @@ async fn api_origin_and_content_origin_conflict_rejected() -> TestResult {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn an_allowed_origin_is_validated_and_canonicalized_when_the_state_is_built() -> TestResult {
+    // A port that is out of range must stop construction; it must not become
+    // the default-port origin of the same host.
+    for entry in [
+        "https://dashboard.example.com:65536",
+        "https://dashboard.example.com:abc",
+        "*",
+        "dashboard.example.com",
+    ] {
+        let result = ProxyHarness::new(
+            Vec::new(),
+            vec!["artifree.example.com".into()],
+            vec![entry.into()],
+            Some("https://artifree.example.com".into()),
+            "https://preview.example.com".into(),
+            false,
+        );
+        let Err(error) = result else {
+            panic!("{entry} must be refused");
+        };
+        assert!(error.to_string().contains("allowed CORS origin"), "{error}");
+    }
+
+    // A spelling that differs from the browser's Origin header still matches.
+    let harness = ProxyHarness::new(
+        Vec::new(),
+        vec!["artifree.example.com".into()],
+        vec!["HTTPS://Dashboard.Example.com:443/".into()],
+        Some("https://artifree.example.com".into()),
+        "https://preview.example.com".into(),
+        false,
+    )?;
+    let req = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/v1/artifacts")
+        .header(header::HOST, "artifree.example.com")
+        .header(header::ORIGIN, "https://dashboard.example.com")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .body(Body::empty())?;
+    let res = harness.api.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The browser's origin with an out-of-range port is refused, not read as
+    // the default port.
+    let req = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/v1/artifacts")
+        .header(header::HOST, "artifree.example.com")
+        .header(header::ORIGIN, "https://dashboard.example.com:65536")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .body(Body::empty())?;
+    let res = harness.api.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}

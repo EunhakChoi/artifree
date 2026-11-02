@@ -84,11 +84,17 @@ a token. LAN and HTTPS reverse-proxy operation use the flags of decisions
 [0022](decisions/0022-production-web-and-api-serving.md) and
 [0024](decisions/0024-https-proxy-and-remote-access.md) (`--lan`, `--api-origin`,
 `--content-origin`, `--trusted-proxy`, `--allowed-host`); nothing in the
-package changes them.
+package changes them. The same settings can be given as `ARTIFREE_*` variables
+([decision 0028](decisions/0028-static-web-defaults.md), `artifree-server --help`);
+a flag wins, and an invalid value stops the server with a message that names the
+flag or variable and not the value.
 
 Startup refuses, with a message on stderr and a nonzero exit, a missing web
-directory or one without `index.html`, and an `--api-origin` equal to
-`--content-origin`. It does not create a service, daemon, or autostart entry;
+directory or one without `index.html`, an `--api-origin` equal to
+`--content-origin`, and an origin that is not `http(s)://host[:port]` with a
+port from 1 to 65535. The packaged web workspace is built without a default
+server; to bake one in, build the web app yourself with `VITE_ARTIFREE_SERVER`
+([remote access](remote-access.md)). It does not create a service, daemon, or autostart entry;
 use your platform's supervisor (systemd, a Windows service wrapper) if you want
 one.
 

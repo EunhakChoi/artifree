@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { createInterface } from 'node:readline';
 
 /**
@@ -33,6 +34,15 @@ export function buildServer(root, { release = false } = {}) {
       return message.executable;
   }
   throw new Error('Cargo did not report the artifree-server executable.');
+}
+
+/** A port that was free a moment ago on the loopback interface. */
+export async function freePort() {
+  const probe = createServer();
+  await new Promise((done) => probe.listen(0, '127.0.0.1', done));
+  const { port } = probe.address();
+  await new Promise((done) => probe.close(done));
+  return port;
 }
 
 /**

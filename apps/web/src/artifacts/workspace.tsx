@@ -27,6 +27,13 @@ import { KeptDrafts } from './kept-drafts';
 import type { PageDrafts } from './page-drafts';
 import { pageVisibility } from './page-visibility';
 import { RequestGate } from './request-gate';
+import {
+  defaultServer,
+  resolveInitialServer,
+  serverToKeep,
+  tokenStorageKey,
+} from './server-url';
+import type { InitialServer } from './server-url';
 import { TrashNav } from './trash-list';
 import { useLiveWorkspace } from './use-live-workspace';
 import type { FeedState } from './use-live-workspace';
@@ -34,41 +41,38 @@ import { describeFailure, useRequest } from './use-request';
 
 const SERVER_KEY = 'artifree.serverUrl';
 
-function readInitialServerUrl(): { url: string; fromQuery: boolean } {
+// The server a static build was made for (`VITE_ARTIFREE_SERVER`, decision
+// 0028). The build refuses a value that parseServerUrl would refuse.
+const buildDefault: unknown = import.meta.env.VITE_ARTIFREE_SERVER;
+const BUILD_DEFAULT =
+  typeof buildDefault === 'string' && buildDefault.trim() !== ''
+    ? buildDefault
+    : undefined;
+
+// Where an empty server field leads: the build default, else the page's origin.
+const DEFAULT_SERVER = defaultServer(BUILD_DEFAULT);
+
+function readInitialServer(): InitialServer {
+  let stored: string | undefined;
   try {
-    const params = new URLSearchParams(window.location.search);
-    const queryServer = params.get('server');
-    if (queryServer !== null && queryServer.trim() !== '') {
-      return { url: queryServer.trim(), fromQuery: true };
-    }
-    const stored = sessionStorage.getItem(SERVER_KEY);
-    return { url: stored ?? '', fromQuery: false };
+    stored = sessionStorage.getItem(SERVER_KEY) ?? undefined;
   } catch {
-    return { url: '', fromQuery: false };
+    // Without storage nothing was kept for this tab.
   }
+  return resolveInitialServer({
+    search: window.location.search,
+    stored,
+    buildDefault: BUILD_DEFAULT,
+  });
 }
 
 function tokenKeyForServer(serverUrl: string): string {
-  try {
-    const origin = serverUrl
-      ? new URL(serverUrl, window.location.origin).origin
-      : window.location.origin;
-    return `artifree.accessToken.${origin}`;
-  } catch {
-    return `artifree.accessToken.${serverUrl || 'default'}`;
-  }
+  return tokenStorageKey(serverUrl, window.location.origin);
 }
 
-function storedToken(
-  serverUrl: string,
-  fromQuery: boolean,
-): string | undefined {
-  if (fromQuery) {
-    return undefined;
-  }
-  const key = tokenKeyForServer(serverUrl);
+function storedToken(serverUrl: string): string | undefined {
   try {
-    return sessionStorage.getItem(key) ?? undefined;
+    return sessionStorage.getItem(tokenKeyForServer(serverUrl)) ?? undefined;
   } catch {
     return undefined;
   }
@@ -84,9 +88,9 @@ function storeToken(token: string | undefined, serverUrl: string): void {
   }
 }
 
-function storeServerUrl(serverUrl: string): void {
+function storeServerUrl(serverUrl: string | undefined): void {
   try {
-    if (!serverUrl) sessionStorage.removeItem(SERVER_KEY);
+    if (serverUrl === undefined) sessionStorage.removeItem(SERVER_KEY);
     else sessionStorage.setItem(SERVER_KEY, serverUrl);
   } catch {
     // Without storage the server lives only in memory for this page.
@@ -98,17 +102,22 @@ function storeServerUrl(serverUrl: string): void {
  * `drafts` belongs to the page and outlives every connection.
  */
 export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
-  const [initialConfig] = useState(readInitialServerUrl);
+  const [initialConfig] = useState(readInitialServer);
   const [serverUrl, setServerUrl] = useState<string>(initialConfig.url);
+  const [notices, setNotices] = useState<readonly string[]>(
+    initialConfig.notices,
+  );
   const [token, setToken] = useState<string | undefined>(() =>
-    storedToken(initialConfig.url, initialConfig.fromQuery),
+    initialConfig.restoreToken ? storedToken(initialConfig.url) : undefined,
   );
 
   function connect(newToken: string | undefined, newServerUrl?: string): void {
     const effectiveServer =
       newServerUrl !== undefined ? newServerUrl : serverUrl;
+    // The person acted, so what the form told them has been seen.
+    setNotices([]);
     setServerUrl(effectiveServer);
-    storeServerUrl(effectiveServer);
+    storeServerUrl(serverToKeep(effectiveServer, BUILD_DEFAULT));
     storeToken(newToken, effectiveServer);
     setToken(newToken);
   }
@@ -117,7 +126,13 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
     return (
       <ConnectForm
         initialServerUrl={serverUrl}
-        onConnect={(tok, srv) => connect(tok, srv)}
+        defaultServerUrl={DEFAULT_SERVER}
+        notices={notices}
+        // An empty field means the default, so the form never needs to name
+        // "the page's own origin" separately.
+        onConnect={(tok, srv) =>
+          connect(tok, srv === '' ? DEFAULT_SERVER : srv)
+        }
       />
     );
   }

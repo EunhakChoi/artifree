@@ -49,6 +49,14 @@ cargo run -p artifree-server -- serve \
   --allow-remote-mcp
 ```
 
+Container and service files can use the variables `ARTIFREE_API_ORIGIN`,
+`ARTIFREE_CONTENT_ORIGIN`, `ARTIFREE_FRAME_ANCESTORS`, `ARTIFREE_ALLOWED_ORIGINS`
+and others instead of flags (a flag wins; see `artifree-server --help`). A static
+copy of the web workspace on another host can be built with
+`VITE_ARTIFREE_SERVER=https://api.example.com npm run build` to start with that
+server ([remote access](docs/remote-access.md)). Allow-lists are read at start-up;
+changing them needs a restart.
+
 The proxy must append (or overwrite) the client address in `X-Forwarded-For` or
 `Forwarded` and strip the header it does not use. A request with no client
 address, or a chain made only of trusted proxies, has an unknown client, and
