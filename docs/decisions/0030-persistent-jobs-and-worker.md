@@ -123,7 +123,11 @@ true`: a job moves on after the request that created it, so replaying
    `cancelled`; any other expired lease is claimed again. Only jobs of an
    artifact outside the trash are due (decision 4). A claim returns the jobs
    it ended this way together with the job it claimed, and the worker reports
-   each as a `job` event, so no job reaches an end unseen.
+   each as a `job` event after the claim commits. An end is reported when the
+   worker survives to print it: a worker killed between the commit and the
+   output line leaves the job ended in the store with no event, and a rollback
+   loses nothing, so the next claim settles it again. The record stays
+   readable through `get_job`.
 9. **Attempts and retry.** `max_attempts` is 3. A graceful shutdown is not
    an attempt: it gives the attempt back (`attempts` is reduced; the fence is
    not, so the released run still cannot write). Only `storage_unavailable`
@@ -176,6 +180,10 @@ worker run --data-dir <dir> [--once] [--poll-ms n] [--lease-secs n]
     the server need not be running. It never creates a database (a missing one
     is an error), and a database of a newer schema is refused as for every
     open. An empty file is not a database: it is refused and left as it was.
+    The open runs the schema upgrade, so a worker upgrades an older database
+    as the server does, and whichever opens it first does so: take the backup
+    with the new build before starting either (the upgrade procedure in the
+    backup guide).
     `--once` stops when no job is due (a job waiting for a retry is not due).
     Defaults: poll 1 s (10 ms to 60 s), lease 30 s (1 s to 1 h). An idle poll
     only reads (a hint that something is due); the write lock is taken when a

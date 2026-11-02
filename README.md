@@ -105,7 +105,7 @@ that revision from the database and reports `ok` or the first 50 mismatches;
 and stop it. Nothing starts a worker: the server does not, and the container
 runs only the server, so a job stays `queued` until an operator runs
 `artifree-server worker run --data-dir <dir>` (`--once` stops when nothing is
-due). A job runs trusted server code, with no sandbox and no network; it is
+due). A job runs trusted server code, with no sandbox, and it uses no network; it is
 not the isolated execution that builds of React sources or model calls will
 need. Cancelling stops work and never rolls anything back. Job changes are
 not in the change feed and the web workspace has no job view; poll `job show`.

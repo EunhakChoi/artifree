@@ -143,8 +143,10 @@ request_key_reused`. A new key with a stale base is `content_conflict`
      transaction. `cleanup_runs` is a table of its own because a `request_keys`
      row names an artifact and a revision, which a cleanup has none of;
      widening that table would have weakened its foreign keys for every
-     artifact. It holds counts and the key, never a digest, name, or content,
-     so the claim that kept rows hold no content stays true.
+     artifact. It holds counts, the key, and a request fingerprint (a SHA-256
+     over the operation and the base set digest), never a list of blob
+     digests, a name, a title, or content, so the claim that kept rows hold
+     no content stays true.
    - **Key retention.** These keys are kept for the life of the database like
      all request keys (decision 11): no TTL, and a restore brings them along
      (tested). So a retry is answered with the original report however late it
