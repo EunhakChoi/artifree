@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import vm from 'node:vm';
 import {
   ArtifreeApiError,
   ArtifreeClient,
+  JsonText,
   encodeFile,
   newIdempotencyKey,
   newRandomId,
@@ -2283,6 +2285,12 @@ test('A duplicate names the revision and title; a copy must say what it copied',
     });
   assert.deepEqual((await duplicate({})).copied, ['files']);
   await duplicate({ title: 'Mine' });
+  copied = ['files', 'data'];
+  assert.deepEqual((await duplicate({ copy_data: true })).copied, [
+    'files',
+    'data',
+  ]);
+  copied = ['files'];
   assert.deepEqual(sent, [
     [
       `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
@@ -2292,13 +2300,416 @@ test('A duplicate names the revision and title; a copy must say what it copied',
       `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
       '{"title":"Mine"}',
     ],
+    [
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
+      '{"copy_data":true}',
+    ],
   ]);
   // A part this client does not know could be data it would not report.
-  for (const parts of [undefined, 'files', ['files', 'data']]) {
+  for (const parts of [undefined, 'files', ['files', 'assets']]) {
     copied = parts;
     const error = await failure(duplicate({}));
     assert.equal(error.code, 'invalid_response', String(parts));
   }
+});
+
+// Application data (decision 0031).
+
+const dataRoute = `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/data`;
+const dataWrite = {
+  artifact_id: artifact.id,
+  path: 'a/b',
+  data_version: 1,
+  changed: true,
+  replayed: false,
+};
+
+test('Data requests carry the path, the base version, and the key, and the text they are given', async () => {
+  const sent = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([init.method, String(url), init.headers, init.body]);
+      return Response.json(dataWrite);
+    },
+  });
+  const options = { idempotencyKey: 'test-key-1' };
+  await client.setData(
+    artifact.id,
+    { path: 'a/b', base_data_version: 0, value: { x: [1, null] } },
+    options,
+  );
+  await client.updateData(
+    artifact.id,
+    { path: '', base_data_version: 1, patch: { x: null } },
+    options,
+  );
+  await client.deleteData(
+    artifact.id,
+    { path: 'a', base_data_version: 2 },
+    options,
+  );
+  // Text goes as written: what JSON.parse would change reaches the server.
+  const text = '{"a":1,"a":2,"big":9007199254740993}';
+  await client.setData(
+    artifact.id,
+    { path: 'raw', base_data_version: 3, value: new JsonText(text) },
+    options,
+  );
+  const [set, update, remove, raw] = sent;
+  assert.deepEqual(
+    [set[0], set[1], set[3]],
+    [
+      'PUT',
+      dataRoute,
+      '{"base_data_version":0,"path":"a/b","value":{"x":[1,null]}}',
+    ],
+  );
+  assert.deepEqual(
+    [update[0], update[1], update[3]],
+    [
+      'PATCH',
+      dataRoute,
+      '{"base_data_version":1,"path":"","patch":{"x":null}}',
+    ],
+  );
+  assert.deepEqual(
+    [remove[0], remove[1], remove[3]],
+    ['DELETE', dataRoute, '{"path":"a","base_data_version":2}'],
+  );
+  assert.equal(raw[3], `{"base_data_version":3,"path":"raw","value":${text}}`);
+  for (const call of sent) {
+    const headers = new Headers(call[2]);
+    assert.equal(headers.get('idempotency-key'), 'test-key-1');
+    assert.equal(headers.get('content-type'), 'application/json');
+  }
+});
+
+test('A value that JSON.stringify would change silently is refused before anything is sent', async () => {
+  const sent = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([String(url), init.body]);
+      return Response.json(dataWrite);
+    },
+  });
+  const options = { idempotencyKey: 'test-key-1' };
+  const cycle = {};
+  cycle.self = cycle;
+  const deep = [];
+  let inner = deep;
+  for (let level = 0; level < 100; level += 1) {
+    const next = [];
+    inner.push(next);
+    inner = next;
+  }
+  for (const [what, bad] of [
+    ['NaN', { n: Number.NaN }],
+    ['Infinity', [Number.POSITIVE_INFINITY]],
+    ['-Infinity', { a: { b: Number.NEGATIVE_INFINITY } }],
+    ['undefined member', { a: undefined }],
+    ['undefined element', [1, undefined]],
+    ['undefined', undefined],
+    ['function', { f() {} }],
+    ['symbol', { s: Symbol('s') }],
+    ['bigint', { big: 10n }],
+    ['Date', { when: new Date(0) }],
+    ['Map', { map: new Map() }],
+    ['class instance', { box: new (class Box {})() }],
+    ['cycle', cycle],
+    ['depth', deep],
+  ]) {
+    for (const call of [
+      () =>
+        client.setData(
+          artifact.id,
+          { path: 'a', base_data_version: 0, value: bad },
+          options,
+        ),
+      () =>
+        client.updateData(
+          artifact.id,
+          { path: 'a', base_data_version: 0, patch: bad },
+          options,
+        ),
+    ]) {
+      const error = await failure(call());
+      assert.deepEqual(
+        [error.status, error.code],
+        [0, 'invalid_request'],
+        what,
+      );
+      assert.match(error.message, /JsonText/, what);
+    }
+  }
+  for (const base_data_version of [-1, 1.5, Number.NaN, 2 ** 53]) {
+    const error = await failure(
+      client.deleteData(artifact.id, { path: 'a', base_data_version }, options),
+    );
+    assert.equal(error.code, 'invalid_request', String(base_data_version));
+  }
+  assert.deepEqual(sent, [], 'nothing reached the network');
+  // The good values and the exact-text escape hatch still go.
+  await client.setData(
+    artifact.id,
+    {
+      path: 'a',
+      base_data_version: 0,
+      value: { ok: [1.5, null, 'x', true, {}] },
+    },
+    options,
+  );
+  await client.setData(
+    artifact.id,
+    { path: 'a', base_data_version: 0, value: new JsonText('{"n":1e999}') },
+    options,
+  );
+  assert.equal(sent.length, 2);
+});
+
+test('Arrays with holes and objects JSON.stringify would rewrite are refused, and the copy is what is sent', async () => {
+  const sent = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push(init.body);
+      return Response.json(dataWrite);
+    },
+  });
+  const options = { idempotencyKey: 'test-key-1' };
+  const store = (value) =>
+    client.setData(
+      artifact.id,
+      { path: 'a', base_data_version: 0, value },
+      options,
+    );
+  const extra = [1, 2];
+  extra.note = 'x';
+  // An array whose given indexes are holes (`delete` leaves the length alone).
+  const holey = (items, ...holes) => {
+    const array = [...items];
+    for (const index of holes) delete array[index];
+    return array;
+  };
+  const huge = [];
+  huge.length = 2 ** 31;
+  const holeAndExtra = holey([0, 1], 0);
+  holeAndExtra.note = 'x';
+  const tagged = [1];
+  tagged.toJSON = () => 'replaced';
+  const hidden = {};
+  Object.defineProperty(hidden, 'h', { value: 1, enumerable: false });
+  const accessor = {
+    get n() {
+      return 1;
+    },
+  };
+  const symbolic = { [Symbol('s')]: 1 };
+  const holes = /holes or properties/;
+  for (const [what, bad, why] of [
+    ['one hole', holey([0], 0), holes],
+    ['hole in the middle', holey([1, 0, 3], 1), holes],
+    ['trailing hole', holey([1, 2, 0], 2), holes],
+    ['hole nested in an object', { a: { b: holey([0, 1], 0) } }, holes],
+    ['huge sparse array', huge, holes],
+    ['array with a property', extra, holes],
+    ['a hole hidden by an extra property', holeAndExtra, /is missing/],
+    ['array with toJSON', tagged, holes],
+    ['object with toJSON function', { toJSON: () => 'x' }, /function/],
+    ['getter', accessor, /getter or setter/],
+    [
+      'array getter',
+      Object.defineProperty([0], '0', { get: () => 1 }),
+      /getter or setter/,
+    ],
+    ['hidden property', hidden, /hidden from JSON.stringify/],
+    ['symbol-keyed property', symbolic, /symbol-keyed/],
+    [
+      'Date from another realm',
+      vm.runInNewContext('new Date(0)'),
+      /only plain objects/,
+    ],
+    [
+      'class instance from another realm',
+      vm.runInNewContext('new (class B {})()'),
+      /only plain objects/,
+    ],
+    [
+      'object with a null prototype and a hole',
+      Object.assign(Object.create(null), { a: holey([0, 1], 0) }),
+      holes,
+    ],
+  ]) {
+    const error = await failure(store(bad));
+    assert.deepEqual([error.status, error.code], [0, 'invalid_request'], what);
+    assert.match(error.message, /JsonText/, what);
+    assert.match(error.message, why, what);
+  }
+  assert.deepEqual(sent, [], 'nothing reached the network');
+
+  // A proxy is read once: what it answers on the first read is what is sent.
+  let reads = 0;
+  const shifting = new Proxy(
+    { n: 1 },
+    {
+      getOwnPropertyDescriptor(target, name) {
+        reads += 1;
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, name);
+        return reads > 1 && descriptor
+          ? { ...descriptor, value: 'changed' }
+          : descriptor;
+      },
+      get() {
+        throw new Error('the value must not be read again');
+      },
+    },
+  );
+  await store(shifting);
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"n":1}}',
+  );
+
+  // Accepted: other realms, -0 (written as 0), a toJSON that is only data, and
+  // a member named __proto__ as JSON.parse would make it.
+  await store(vm.runInNewContext('({a:[1,{b:2}]})'));
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"a":[1,{"b":2}]}}',
+  );
+  await store([-0]);
+  assert.equal(sent.at(-1), '{"base_data_version":0,"path":"a","value":[0]}');
+  await store({ toJSON: 'data' });
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"toJSON":"data"}}',
+  );
+  await store(JSON.parse('{"__proto__":{"x":1}}'));
+  assert.equal(
+    sent.at(-1),
+    '{"base_data_version":0,"path":"a","value":{"__proto__":{"x":1}}}',
+  );
+  assert.equal(sent.length, 5);
+});
+
+test('Reading data encodes the path and checks what comes back', async () => {
+  const urls = [];
+  let answer;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url) => {
+      urls.push(String(url));
+      return Response.json(answer);
+    },
+  });
+  const base = { artifact_id: artifact.id, data_version: 2, exists: true };
+  answer = { ...base, path: '', value: { a: 1 } };
+  assert.deepEqual(await client.getData(artifact.id), answer);
+  assert.deepEqual(await client.getData(artifact.id, ''), answer);
+  answer = { ...base, path: 'a/b', value: null };
+  assert.deepEqual(await client.getData(artifact.id, 'a/b'), answer);
+  answer = { ...base, path: 'a/b', exists: false };
+  assert.deepEqual(await client.getData(artifact.id, 'a/b'), answer);
+  assert.deepEqual(urls, [
+    dataRoute,
+    dataRoute,
+    `${dataRoute}?path=a%2Fb`,
+    `${dataRoute}?path=a%2Fb`,
+  ]);
+
+  for (const broken of [
+    { ...base, path: 'a' },
+    { ...base, path: 'a', exists: false, value: 1 },
+    { ...base, path: '', value: [1] },
+    { ...base, path: '', value: 'text' },
+    { ...base, path: 'a', value: undefined },
+    { ...base, path: 'a', value: 1, data_version: -1 },
+    { ...base, path: 'a', value: 1, data_version: '2' },
+    { ...base, path: 'a', value: 1, exists: 'yes' },
+    { ...base, path: 7, value: 1 },
+    { ...base, path: 'a', value: 1, artifact_id: 7 },
+  ]) {
+    answer = broken;
+    assert.equal(
+      (await failure(client.getData(artifact.id, 'a'))).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
+  const written = clientWith(() => Response.json({ ...dataWrite, changed: 1 }));
+  assert.equal(
+    (
+      await failure(
+        written.deleteData(
+          artifact.id,
+          { path: 'a', base_data_version: 0 },
+          { idempotencyKey: 'test-key-1' },
+        ),
+      )
+    ).code,
+    'invalid_response',
+  );
+});
+
+test('A data conflict carries the current data version, and the data codes keep their names', async () => {
+  for (const [status, code] of [
+    [409, 'data_conflict'],
+    [409, 'data_path_conflict'],
+    [422, 'data_too_large'],
+  ]) {
+    const client = clientWith(() =>
+      Response.json(
+        {
+          error: {
+            code,
+            message: 'no',
+            ...(code === 'data_conflict' ? { current_data_version: 7 } : {}),
+          },
+        },
+        { status },
+      ),
+    );
+    const error = await failure(
+      client.setData(
+        artifact.id,
+        { path: 'a', base_data_version: 0, value: 1 },
+        { idempotencyKey: 'test-key-1' },
+      ),
+    );
+    assert.deepEqual(
+      [error.status, error.code, error.currentDataVersion],
+      [status, code, code === 'data_conflict' ? 7 : undefined],
+    );
+  }
+  const malformed = clientWith(() =>
+    Response.json(
+      {
+        error: {
+          code: 'data_conflict',
+          message: 'no',
+          current_data_version: -1,
+        },
+      },
+      { status: 409 },
+    ),
+  );
+  assert.equal(
+    (
+      await failure(
+        malformed.setData(
+          artifact.id,
+          { path: 'a', base_data_version: 0, value: 1 },
+          { idempotencyKey: 'test-key-1' },
+        ),
+      )
+    ).code,
+    'invalid_response',
+  );
 });
 
 // The change feed. Each rule below is one way an earlier version failed:

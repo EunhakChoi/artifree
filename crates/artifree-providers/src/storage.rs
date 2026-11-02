@@ -39,6 +39,7 @@
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
+mod data;
 mod jobs;
 
 use std::collections::BTreeMap;
@@ -47,7 +48,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::schema;
 use artifree_domain::change::{ChangeSequence, FeedId};
-use artifree_domain::identity::{ActorId, ArtifactId, Title, UnixMillis};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
@@ -219,7 +220,7 @@ impl ArtifactStore for SqliteStore {
         self.write(|transaction| {
             // A copy needs its source in place; any other create, nothing.
             let source = match request.source {
-                Some(source) => in_place(transaction, source)?.map(|_| ()),
+                Some(source) => in_place(transaction, source.artifact)?.map(|_| ()),
                 None => Some(()),
             };
             match settle(key_use(transaction, request.request)?, source)? {
@@ -266,6 +267,11 @@ impl ArtifactStore for SqliteStore {
                 request.package,
                 now,
             )?;
+            // The copy's data is its own rows, written with the create, so a
+            // later write to either space never reaches the other (0031).
+            if let Some(source) = request.source.filter(|source| source.copy_data) {
+                data::copy_space(transaction, source.artifact, &id, request.request.actor)?;
+            }
             let position = (revision, metadata);
             record_key(transaction, request.request, &id, position, now)?;
             record_change(transaction, &id, ChangeKind::Created, position, now)?;
@@ -458,6 +464,8 @@ impl ArtifactStore for SqliteStore {
             let now = commit_time(transaction)?;
             let next = MetadataRevision(current.metadata_revision.0 + 1);
             remove_files(transaction, request.artifact)?;
+            // Application data is erased with the files (decision 0031).
+            data::erase_for_purge(transaction, request.artifact)?;
             // Jobs pinned to the revisions that were just removed end, and
             // what they found about the files is erased (decision 0030).
             jobs::revoke_for_purge(transaction, request.artifact, now)?;
@@ -553,19 +561,9 @@ impl ArtifactStore for SqliteStore {
                     delivery: Delivery::Replayed,
                 });
             }
-            // The key space is shared with the requests that name an artifact
-            // and with the requests that enqueue or cancel a job (0030).
-            let named_artifact: bool = transaction
-                .query_row(
-                    "SELECT EXISTS (SELECT 1 FROM request_keys
-                                    WHERE actor = ?1 AND request_key = ?2)
-                         OR EXISTS (SELECT 1 FROM job_requests
-                                    WHERE actor = ?1 AND request_key = ?2)",
-                    params![identity.actor.as_str(), identity.key.as_str()],
-                    |row| row.get(0),
-                )
-                .map_err(unavailable)?;
-            if named_artifact {
+            // The key space is shared with every other kind of request: those
+            // that name an artifact, jobs (0030), and application data (0031).
+            if key_used_elsewhere(transaction, identity.actor, identity.key, "cleanup_runs")? {
                 return Err(StoreError::RequestKeyReused);
             }
             let found = count_unreferenced(transaction)?;
@@ -797,17 +795,9 @@ fn key_use(
     transaction: &Transaction<'_>,
     request: RequestIdentity<'_>,
 ) -> Result<KeyUse, StoreError> {
-    // A key a cleanup or a job request ran under belongs to that request
-    // alone (decisions 0029 and 0030).
-    let elsewhere: bool = transaction
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM cleanup_runs WHERE actor = ?1 AND request_key = ?2)
-                 OR EXISTS (SELECT 1 FROM job_requests WHERE actor = ?1 AND request_key = ?2)",
-            params![request.actor.as_str(), request.key.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)?;
-    if elsewhere {
+    // A key a cleanup, a job request, or a data write ran under belongs to
+    // that request alone (decisions 0029, 0030, and 0031).
+    if key_used_elsewhere(transaction, request.actor, request.key, "request_keys")? {
         return Ok(KeyUse::Reused);
     }
     let stored: Option<(Vec<u8>, String, i64, i64, bool)> = transaction
@@ -844,6 +834,40 @@ fn key_use(
     } else {
         KeyUse::Same(id, position)
     })
+}
+
+/// Every table that keeps request keys. A key is one space per actor across
+/// them: a key any of them holds cannot start a request of another kind. A test
+/// compares this list with the tables that have a `request_key` column, so a
+/// later table cannot be left out.
+pub(crate) const KEY_TABLES: [&str; 4] = [
+    "request_keys",
+    "cleanup_runs",
+    "job_requests",
+    "data_requests",
+];
+
+/// Whether the actor's key is held by a table other than `own` (one of
+/// [`KEY_TABLES`]), that is, by a request of another kind.
+pub(crate) fn key_used_elsewhere(
+    connection: &Connection,
+    actor: &ActorId,
+    key: &RequestKey,
+    own: &str,
+) -> Result<bool, StoreError> {
+    let tests: Vec<String> = KEY_TABLES
+        .iter()
+        .filter(|table| **table != own)
+        .map(|table| {
+            format!("EXISTS (SELECT 1 FROM {table} WHERE actor = ?1 AND request_key = ?2)")
+        })
+        .collect();
+    let query = format!("SELECT {}", tests.join(" OR "));
+    connection
+        .query_row(&query, params![actor.as_str(), key.as_str()], |row| {
+            row.get(0)
+        })
+        .map_err(unavailable)
 }
 
 /// How a write goes on after [`settle`].
@@ -1488,6 +1512,32 @@ mod tests {
         fn drop(&mut self) {
             drop(std::fs::remove_dir_all(&self.directory));
         }
+    }
+
+    /// The shared key space is only as wide as `KEY_TABLES`. A table that keeps
+    /// request keys and is missing from it would let its keys be used again by
+    /// another kind of request, so the list is compared with the schema.
+    #[test]
+    fn every_table_that_keeps_request_keys_is_in_the_shared_key_space() -> TestResult {
+        let directory =
+            std::env::temp_dir().join(format!("artifree-key-tables-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&directory));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(DATABASE_FILE);
+        SqliteStore::open(&path)?;
+        let connection = Connection::open(&path)?;
+        let with_keys: std::collections::BTreeSet<String> = connection
+            .prepare(
+                "SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c
+                 WHERE m.type = 'table' AND c.name = 'request_key'",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let listed: std::collections::BTreeSet<String> =
+            KEY_TABLES.iter().map(|table| (*table).to_owned()).collect();
+        drop(std::fs::remove_dir_all(&directory));
+        assert_eq!(with_keys, listed);
+        Ok(())
     }
 
     /// The control: read with no transaction, a purge between the header and

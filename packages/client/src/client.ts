@@ -1,5 +1,6 @@
 import type {
   AgentSession,
+  AppData,
   Artifact,
   ArtifactList,
   CommitResponse,
@@ -8,6 +9,8 @@ import type {
   CancelJobRequest,
   CancelJobResponse,
   CreateTokenResponse,
+  DataWriteResponse,
+  DeleteDataRequest,
   DuplicateArtifactRequest,
   DuplicateArtifactResponse,
   EnqueueJobRequest,
@@ -16,6 +19,7 @@ import type {
   Handoff,
   Job,
   JobList,
+  JsonValue,
   ListArtifactsQuery,
   ListJobsQuery,
   Preview,
@@ -28,6 +32,7 @@ import type {
   RuntimeGrant,
   RuntimeView,
   SaveRevisionRequest,
+  SetDataRequest,
   StageHandoffRequest,
   TokenList,
   RemoveUnreferencedContentRequest,
@@ -35,6 +40,7 @@ import type {
   UnreferencedContent,
   UpdateArtifactRequest,
   UpdateArtifactResponse,
+  UpdateDataRequest,
 } from '@artifree/contracts';
 import {
   type ChangeFeedEvent,
@@ -45,11 +51,13 @@ import {
 import { ArtifreeApiError } from './errors.js';
 import {
   parseAgentSessions,
+  parseAppData,
   parseArtifact,
   parseArtifactList,
   parseCommit,
   parseCreateToken,
   parseCancelJob,
+  parseDataWrite,
   parseDuplicate,
   parseEnqueueJob,
   parseError,
@@ -250,8 +258,158 @@ function statedPart(
   return exact ? { size, length: end - range.offset } : undefined;
 }
 
+/**
+ * JSON text that {@link ArtifreeClient.setData} and
+ * {@link ArtifreeClient.updateData} send exactly as written, instead of
+ * serializing a JavaScript value. A JavaScript value cannot hold what the
+ * server refuses to guess at: a repeated member name or an integer beyond
+ * 2^53 - 1 is already changed by the time it is a value; a JavaScript value
+ * that `JSON.stringify` would change silently is refused before it is sent:
+ * `NaN` and `Infinity`, `undefined`, functions (a `toJSON` function too),
+ * symbols, a `bigint`, a `Date` or class instance, an array with holes or extra
+ * properties, and a getter, a hidden property or a symbol-keyed one. Only `-0`
+ * is let through, and is written as `0`. Plain objects and arrays from another
+ * realm are accepted. The server parses the text under the rules of application data and rejects with
+ * `invalid_request` what is not JSON or breaks them.
+ */
+export class JsonText {
+  readonly text: string;
+
+  constructor(text: string) {
+    this.text = text;
+  }
+}
+
+/** A value to store: JSON the client serializes, or {@link JsonText}. */
+export type DataInput = JsonValue | JsonText;
+
+/** {@link SetDataRequest} whose `value` can be {@link JsonText}. */
+export type SetDataInput = Omit<SetDataRequest, 'value'> & {
+  readonly value: DataInput;
+};
+
+/** {@link UpdateDataRequest} whose `patch` can be {@link JsonText}. */
+export type UpdateDataInput = Omit<UpdateDataRequest, 'patch'> & {
+  readonly patch: DataInput;
+};
+
+const DATA_VALUE_LEVELS = 64;
+
+function notData(where: string, why: string): ArtifreeApiError {
+  return new ArtifreeApiError(
+    `${where} cannot be sent as application data: ${why}. Use a JSON value, or JsonText for exact text.`,
+    { status: 0, code: 'invalid_request' },
+  );
+}
+
+/** The value of own data property `name`, read once; refuses anything else. */
+function ownData(
+  holder: object,
+  name: string,
+  where: string,
+  what: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(holder, name);
+  if (descriptor === undefined) throw notData(where, `${what} is missing`);
+  if (!('value' in descriptor))
+    throw notData(where, `${what} is a getter or setter, not a value`);
+  if (descriptor.enumerable !== true)
+    throw notData(where, `${what} is hidden from JSON.stringify`);
+  return descriptor.value;
+}
+
+/**
+ * Returns a plain copy of `value`, or throws unless `JSON.stringify` would
+ * write `value` faithfully. The copy is what is serialized, and every property
+ * is read exactly once, so a getter, a proxy or a mutation after the check
+ * cannot change what is sent. `JSON.stringify` would otherwise turn `NaN` and
+ * `Infinity` into `null`, drop members that are `undefined`, functions, or
+ * symbols, turn such array elements and array holes into `null`, ignore
+ * symbol-keyed, non-enumerable and non-index array properties, call a
+ * `toJSON` function, throw on a `bigint` or a cycle, and write a `Date`, a
+ * `Map`, or a class instance as something else. All of those are refused.
+ * An array is anything `Array.isArray` accepts; an object is plain when its
+ * prototype is `null` or itself has none, so a value from another realm
+ * (`vm`, an iframe) is accepted. `-0` is the one change that is allowed: it is
+ * written as `0`. The server's own rules (the size of numbers, limits) are
+ * left to the server.
+ */
+function plainData(value: unknown, where: string, levels: number): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value))
+      throw notData(where, `${String(value)} is not a JSON number`);
+    return value;
+  }
+  if (typeof value !== 'object')
+    throw notData(where, `a ${typeof value} has no JSON form`);
+  if (levels <= 0)
+    throw notData(where, 'it nests too deeply, or refers to itself');
+  const keys = Reflect.ownKeys(value);
+  if (Array.isArray(value)) {
+    const length = value.length;
+    // Own keys are the indexes and `length`; a hole or extra property breaks
+    // the count before any loop runs, so `new Array(1e9)` is cheap to refuse.
+    if (keys.length !== length + 1)
+      throw notData(
+        where,
+        'the array has holes or properties beyond its elements',
+      );
+    const items: unknown[] = [];
+    for (let index = 0; index < length; index += 1)
+      items.push(
+        plainData(
+          ownData(value, String(index), `${where}[${index}]`, 'the element'),
+          `${where}[${index}]`,
+          levels - 1,
+        ),
+      );
+    return items;
+  }
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (prototype !== null && Object.getPrototypeOf(prototype) !== null)
+    throw notData(where, 'only plain objects and arrays have a JSON form');
+  const members: [string, unknown][] = [];
+  for (const key of keys) {
+    if (typeof key === 'symbol')
+      throw notData(where, 'a symbol-keyed property has no JSON form');
+    const at = `${where}.${key}`;
+    members.push([
+      key,
+      plainData(ownData(value, key, at, 'the member'), at, levels - 1),
+    ]);
+  }
+  return Object.fromEntries(members);
+}
+
+function checkBase(base: number): void {
+  if (!Number.isSafeInteger(base) || base < 0)
+    throw notData('base_data_version', 'it is not a whole number from 0');
+}
+
+/**
+ * The text of a data write. Members are written in a fixed order; a
+ * {@link JsonText} goes in as it is, the rest is checked and then written
+ * through `JSON.stringify`.
+ */
+function dataBodyText(
+  request: { readonly path: string; readonly base_data_version: number },
+  field: 'value' | 'patch',
+  input: DataInput,
+): string {
+  checkBase(request.base_data_version);
+  let text: string;
+  if (input instanceof JsonText) text = input.text;
+  else {
+    text = JSON.stringify(plainData(input, field, DATA_VALUE_LEVELS));
+  }
+  return `{"base_data_version":${JSON.stringify(request.base_data_version)},"path":${JSON.stringify(request.path)},"${field}":${text}}`;
+}
+
 interface SendOptions {
-  readonly mutation?: { body: unknown; idempotencyKey: string } | undefined;
+  readonly mutation?:
+    { body: unknown; idempotencyKey: string; text?: string } | undefined;
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal | undefined;
@@ -571,8 +729,9 @@ export class ArtifreeClient {
   /**
    * Creates an artifact whose revision 1 has the files of `revision` of
    * `id`, with its own history: unpinned, and named `request.title` or the
-   * source's title followed by " (Copy)". Only files are copied
-   * (`copied`).
+   * source's title followed by " (Copy)". The files are copied, and the
+   * source's application data too when `request.copy_data` is true; `copied`
+   * lists what the copy received.
    */
   async duplicateArtifact(
     id: string,
@@ -630,6 +789,116 @@ export class ArtifreeClient {
       `/v1/artifacts/${encodeURIComponent(id)}/purge`,
       parsePurge,
       { mutation: { body: request, idempotencyKey: options.idempotencyKey } },
+    );
+  }
+
+  /**
+   * Reads the value at `path` of your application data for the artifact
+   * (decision 0031), with the data space's `data_version`, which is the
+   * `base_data_version` of the next write. Without a `path`, or with the empty
+   * path, it reads the root, which always exists. Nothing at the path is not
+   * an error: the answer has `exists: false`. Rejects with `invalid_request`
+   * for a path that breaks the grammar, and with `not_found` for an artifact
+   * that is missing, in the trash, purged, or someone else's. Previews and
+   * runtime frames cannot read this data.
+   */
+  async getData(
+    artifactId: string,
+    path: string | undefined = undefined,
+    options: ReadOptions = {},
+  ): Promise<AppData> {
+    const query =
+      path === undefined || path === ''
+        ? ''
+        : `?path=${encodeURIComponent(path)}`;
+    return this.json(
+      'GET',
+      `/v1/artifacts/${encodeURIComponent(artifactId)}/data${query}`,
+      parseAppData,
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Replaces the value at `request.path`, making the objects above it that
+   * are missing, if the data is still at `request.base_data_version`. The
+   * value can be `null`, which a merge patch cannot store. At the root it
+   * must be an object. Rejects with `data_conflict` and `currentDataVersion`
+   * when another write won, `data_path_conflict` when a value that is not an
+   * object is in the way, `data_too_large`, `invalid_request` (path, JSON, or
+   * a rule of the value), and `request_key_reused`. Writing what is already
+   * there changes nothing and keeps the version (`changed: false`). A retry
+   * with the same key and request resolves with the original answer and
+   * `replayed: true`. Nothing keeps the value that is replaced.
+   */
+  async setData(
+    artifactId: string,
+    request: SetDataInput,
+    options: MutationOptions,
+  ): Promise<DataWriteResponse> {
+    return this.dataWrite(
+      'PUT',
+      artifactId,
+      dataBodyText(request, 'value', request.value),
+      options,
+    );
+  }
+
+  /**
+   * Applies a JSON Merge Patch (RFC 7396) at `request.path`: objects merge
+   * member by member, a member set to `null` is removed, and arrays and
+   * scalars replace what is there. A `null` patch removes the value at the
+   * path. The rules and rejections are those of {@link setData}.
+   */
+  async updateData(
+    artifactId: string,
+    request: UpdateDataInput,
+    options: MutationOptions,
+  ): Promise<DataWriteResponse> {
+    return this.dataWrite(
+      'PATCH',
+      artifactId,
+      dataBodyText(request, 'patch', request.patch),
+      options,
+    );
+  }
+
+  /**
+   * Removes the value at `request.path`; the empty path empties the whole
+   * space. Removing what is not there succeeds with `changed: false`. The
+   * rules and rejections are those of {@link setData}.
+   */
+  async deleteData(
+    artifactId: string,
+    request: DeleteDataRequest,
+    options: MutationOptions,
+  ): Promise<DataWriteResponse> {
+    checkBase(request.base_data_version);
+    return this.dataWrite(
+      'DELETE',
+      artifactId,
+      JSON.stringify(request),
+      options,
+    );
+  }
+
+  private async dataWrite(
+    method: string,
+    artifactId: string,
+    text: string,
+    options: MutationOptions,
+  ): Promise<DataWriteResponse> {
+    return this.json(
+      method,
+      `/v1/artifacts/${encodeURIComponent(artifactId)}/data`,
+      parseDataWrite,
+      {
+        mutation: {
+          body: undefined,
+          text,
+          idempotencyKey: options.idempotencyKey,
+        },
+      },
     );
   }
 
@@ -1369,7 +1638,7 @@ export class ArtifreeClient {
     if (mutation !== undefined) {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;
-      init.body = JSON.stringify(mutation.body);
+      init.body = mutation.text ?? JSON.stringify(mutation.body);
     } else if (body !== undefined) {
       headers['content-type'] = 'application/json';
       init.body = JSON.stringify(body);
@@ -1413,6 +1682,9 @@ export class ArtifreeClient {
         : {}),
       ...(typeof failure.current_metadata_revision === 'number'
         ? { currentMetadataRevision: failure.current_metadata_revision }
+        : {}),
+      ...(typeof failure.current_data_version === 'number'
+        ? { currentDataVersion: failure.current_data_version }
         : {}),
       ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });

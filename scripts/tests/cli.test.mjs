@@ -419,3 +419,192 @@ test('CLI job commands send the right requests and refuse bad usage before sendi
     server.close();
   }
 });
+
+test('CLI data commands refuse a bad command line before sending, and send JSON text as written', async () => {
+  const requests = [];
+  const artifactId = `art_${'1'.repeat(32)}`;
+  const server = createServer((request, response) => {
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+    });
+    request.on('end', () => {
+      requests.push([
+        request.method,
+        request.url,
+        request.headers['idempotency-key'],
+        body === '' ? undefined : body,
+      ]);
+      response.setHeader('content-type', 'application/json');
+      if (request.headers['idempotency-key'] === 'cli-data-conflict') {
+        response.statusCode = 409;
+        response.end(
+          JSON.stringify({
+            error: {
+              code: 'data_conflict',
+              message: 'stale',
+              current_data_version: 4,
+            },
+          }),
+        );
+      } else if (request.method === 'GET')
+        response.end(
+          JSON.stringify({
+            artifact_id: artifactId,
+            path: '',
+            data_version: 0,
+            exists: true,
+            value: {},
+          }),
+        );
+      else
+        response.end(
+          JSON.stringify({
+            artifact_id: artifactId,
+            path: 'a',
+            data_version: 1,
+            changed: true,
+            replayed: false,
+          }),
+        );
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address !== null && typeof address === 'object');
+    const env = {
+      ...process.env,
+      ARTIFREE_URL: `http://127.0.0.1:${address.port}`,
+      ARTIFREE_TOKEN: 'f'.repeat(64),
+    };
+    delete env.ARTIFREE_TOKEN_FILE;
+    const run = async (args) => {
+      try {
+        const { stdout, stderr } = await promisify(execFile)(
+          process.execPath,
+          ['apps/cli/dist/main.js', 'data', ...args],
+          { cwd: root, env, timeout: 10_000 },
+        );
+        return { status: 0, stdout, stderr };
+      } catch (error) {
+        return {
+          status: error.code,
+          stdout: error.stdout,
+          stderr: error.stderr,
+        };
+      }
+    };
+    const base = ['--path', 'a', '--base-data-version', '0'];
+    for (const bad of [
+      ['get'],
+      ['get', artifactId, 'extra'],
+      ['set', artifactId, ...base],
+      ['set', artifactId, ...base, '--value', '1', '--value-file', 'x'],
+      ['set', artifactId, '--base-data-version', '0', '--value', '1'],
+      ['set', artifactId, '--path', 'a', '--value', '1'],
+      [
+        'set',
+        artifactId,
+        ...base.slice(0, 2),
+        '--base-data-version',
+        '-1',
+        '--value',
+        '1',
+      ],
+      [
+        'set',
+        artifactId,
+        ...base.slice(0, 2),
+        '--base-data-version',
+        '1.5',
+        '--value',
+        '1',
+      ],
+      ['update', artifactId, ...base],
+      ['delete', artifactId, '--path', 'a'],
+      ['delete', artifactId, ...base, '--value', '1'],
+      ['frobnicate'],
+    ]) {
+      const refused = await run(bad);
+      assert.equal(refused.status, 2, bad.join(' '));
+      assert.equal(refused.stdout, '', bad.join(' '));
+    }
+    assert.deepEqual(requests, [], 'a bad command line sent a request');
+
+    // The text reaches the server exactly: a repeated name and a large
+    // integer are what JSON.parse would have changed.
+    const text = '{"a":1,"a":2,"big":9007199254740993}';
+    const set = await run([
+      'set',
+      artifactId,
+      ...base,
+      '--value',
+      text,
+      '--idempotency-key',
+      'cli-data-key-1',
+    ]);
+    assert.equal(set.status, 0, set.stderr);
+    assert.equal(JSON.parse(set.stdout).data_version, 1);
+    await run([
+      'update',
+      artifactId,
+      '--path',
+      '',
+      '--base-data-version',
+      '1',
+      '--patch',
+      '{"x":null}',
+      '--idempotency-key',
+      'cli-data-key-2',
+    ]);
+    await run([
+      'delete',
+      artifactId,
+      '--path',
+      'a/b',
+      '--base-data-version',
+      '2',
+      '--idempotency-key',
+      'cli-data-key-3',
+    ]);
+    await run(['get', artifactId]);
+    await run(['get', artifactId, '--path', 'a/b']);
+    const url = `/v1/artifacts/${artifactId}/data`;
+    assert.deepEqual(requests, [
+      [
+        'PUT',
+        url,
+        'cli-data-key-1',
+        `{"base_data_version":0,"path":"a","value":${text}}`,
+      ],
+      [
+        'PATCH',
+        url,
+        'cli-data-key-2',
+        '{"base_data_version":1,"path":"","patch":{"x":null}}',
+      ],
+      ['DELETE', url, 'cli-data-key-3', '{"path":"a/b","base_data_version":2}'],
+      ['GET', url, undefined, undefined],
+      ['GET', `${url}?path=a%2Fb`, undefined, undefined],
+    ]);
+
+    // The version to write against is printed when the write was stale.
+    const stale = await run([
+      'set',
+      artifactId,
+      ...base,
+      '--value',
+      '1',
+      '--idempotency-key',
+      'cli-data-conflict',
+    ]);
+    assert.equal(stale.status, 1);
+    assert.equal(stale.stdout, '');
+    assert.match(stale.stderr, /^error\[data_conflict\]: stale\n/);
+    assert.match(stale.stderr, /^current_data_version=4$/m);
+  } finally {
+    server.close();
+  }
+});

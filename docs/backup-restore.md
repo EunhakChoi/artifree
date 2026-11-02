@@ -3,7 +3,7 @@
 Status: O04, implemented ([decision 0027](decisions/0027-backup-restore-and-schema-upgrade.md)).
 Everything the server persists is in one SQLite file, `artifree.sqlite3`, in
 the `--data-dir`: artifacts, revisions and file bytes, request keys, the change
-feed, titles, pins and the trash, and the access token records. `backup` copies
+feed, titles, pins and the trash, application data (decision 0031), and the access token records. `backup` copies
 that file consistently; `restore` builds a new data directory from the copy.
 
 A backup holds what the database held when it was taken. **A purge (decision 0029) does not reach earlier backups:** an artifact removed for good is still
@@ -24,6 +24,12 @@ returns the first run's report). Delete old backups yourself when they must not 
 artifact. Purge and cleanup overwrite the freed pages of the database file
 (`secure_delete`), but a copy can remain in a write-ahead log (`-wal`) that has
 not been checkpointed and truncated yet; stopping the server does that.
+
+Application data (decision 0031) is in the backup too, with its versions and its
+request keys. **A purge deletes the artifact's data, but a backup made before the
+purge still holds it, and restoring that backup brings it back.** A backup
+taken after a purge holds none of the artifact's data; its data request keys keep the key, the version,
+and whether it changed, with the fingerprint blanked.
 
 Not part of a backup, by design:
 
@@ -127,6 +133,9 @@ artifree-server serve --data-dir /path/to/new-data ...
   restored directory runs the job again under a new fence (decision 0030). A
   worker process is never part of a backup; start one on the restored directory
   if you want queued jobs to run.
+- Application data is restored whole, with its versions: a client that read
+  `data_version` 7 after the backup was taken sees an older version and
+  value, and its write against 7 is refused as `data_conflict`.
 - Request keys are restored, so a client retrying a request that committed
   before the backup gets its original result, and a key reused for different
   content is still a conflict. Commits made after the backup are not there.
@@ -138,7 +147,7 @@ artifree-server serve --data-dir /path/to/new-data ...
 ## Upgrade between versions
 
 1. Back up the running server with the **new** build's `backup` command. It
-   reads schema versions 1 to 8, so it works on a directory written by a
+   reads schema versions 1 to 9, so it works on a directory written by a
    release that has no `backup` command. If you cannot run the new binary
    against the old directory, stop the old server and copy its whole data
    directory instead.
@@ -154,7 +163,7 @@ artifree-server serve --data-dir /path/to/new-data ...
    go back to the previous binary only with a backup taken before the upgrade,
    restored into a new directory.
 
-Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, an index on
+Schema 9 adds the application data tables (decision 0031). Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, an index on
 file content, and the `cleanup_runs` table (decision 0029). Schema 6 adds the token table to the versioned
 schema. A server of an older release that is started again on a directory this
 build upgraded will refuse it.
@@ -209,6 +218,6 @@ Notes:
 - That a backup and a running server never delay each other. Under WAL SQLite
   readers do not block the writer; commit latency during a backup was not measured.
 - Restoring a backup made by a different build than this one, other than the
-  schema versions 1 to 7 fixtures in the tests.
+  schema versions 1 to 8 fixtures in the tests.
 - A worker process taking over a restored `running` job on another operating
   system or file system; the restore test exercises the lease expiry only.

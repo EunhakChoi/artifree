@@ -5,18 +5,19 @@
 //! error semantics; only the framing differs.
 
 use artifree_contracts::api::{
-    AgentSessionList, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
+    AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
     CommitResponse, ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest, EnqueueJobResponse,
-    ErrorBody, ErrorCode, ExportRuntime, FileChange as WireChange, FileUpload, Handoff,
-    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
-    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, ListArtifactsQuery,
-    ListJobsQuery, ListSort, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
-    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
-    Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
-    RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse,
+    EnqueueJobRequest, EnqueueJobResponse, ErrorBody, ErrorCode, ExportRuntime,
+    FileChange as WireChange, FileUpload, Handoff, HandoffState, Job as WireJob,
+    JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult,
+    JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
+    Preview, PurgeArtifactRequest, PurgeArtifactResponse, RemoveUnreferencedContentRequest,
+    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
+    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
     SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
-    UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
@@ -25,6 +26,8 @@ use artifree_core::artifacts::{
 use artifree_core::jobs::JobPageSize;
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
+use artifree_domain::AppDataVersion;
+use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
@@ -68,6 +71,7 @@ impl ApiError {
                 message: message.into(),
                 current_revision: None,
                 current_metadata_revision: None,
+                current_data_version: None,
             },
             range_size: None,
         }
@@ -129,7 +133,6 @@ impl From<ArtifactError> for ApiError {
     fn from(error: ArtifactError) -> Self {
         let message = error.to_string();
         match error {
-            ArtifactError::InvalidPackage(_) => Self::unprocessable(message),
             ArtifactError::NotFound(_) => {
                 Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
             }
@@ -156,6 +159,23 @@ impl From<ArtifactError> for ApiError {
             }
             ArtifactError::TooManyJobs => {
                 Self::new(StatusCode::CONFLICT, ErrorCode::TooManyJobs, message)
+            }
+            ArtifactError::DataConflict { current } => {
+                let mut conflict =
+                    Self::new(StatusCode::CONFLICT, ErrorCode::DataConflict, message);
+                conflict.body.current_data_version = Some(current.0);
+                conflict
+            }
+            ArtifactError::Data(DataError::PathConflict) => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::DataPathConflict, message)
+            }
+            ArtifactError::Data(DataError::TooLarge(_)) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::DataTooLarge,
+                message,
+            ),
+            ArtifactError::InvalidPackage(_) | ArtifactError::Data(_) => {
+                Self::unprocessable(message)
             }
             ArtifactError::InvalidPageToken => Self::invalid(format!("page_token: {message}")),
             ArtifactError::InvalidRange(RangeError::PastEnd { size }) => {
@@ -344,8 +364,11 @@ pub(crate) async fn duplicate(
         .map(|title| title.parse())
         .transpose()
         .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
+    let copy_data = request.copy_data.unwrap_or(false);
     let receipt = state
-        .run(move |artifacts| artifacts.duplicate(&actor, &key, &id, revision, title.as_ref()))
+        .run(move |artifacts| {
+            artifacts.duplicate(&actor, &key, &id, revision, title.as_ref(), copy_data)
+        })
         .await?;
     let CommitResponse {
         artifact,
@@ -355,7 +378,11 @@ pub(crate) async fn duplicate(
     Ok(DuplicateArtifactResponse {
         artifact,
         revision,
-        copied: vec![CopiedPart::Files],
+        copied: if copy_data {
+            vec![CopiedPart::Files, CopiedPart::Data]
+        } else {
+            vec![CopiedPart::Files]
+        },
         replayed,
     })
 }
@@ -1292,6 +1319,142 @@ pub(crate) async fn cancel_job(
     Ok(CancelJobResponse {
         job: job_dto(&receipt.job),
         replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+/// Parses a data path. A path that breaks the grammar is refused with the rule,
+/// never with the path.
+pub(crate) fn data_path(field: &str, value: &str) -> Result<DataPath, ApiError> {
+    value
+        .parse()
+        .map_err(|error: DataError| ApiError::unprocessable(format!("{field}: {error}")))
+}
+
+/// Applies the rules of application data to a value as it was sent.
+fn data_value(field: &str, value: &JsonValue) -> Result<DataValue, ApiError> {
+    DataValue::parse(value.get()).map_err(|error| match error {
+        DataError::TooLarge(_) => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::DataTooLarge,
+            format!("{field}: {error}"),
+        ),
+        _ => ApiError::unprocessable(format!("{field}: {error}")),
+    })
+}
+
+/// The value at a path of the actor's data space of an artifact.
+pub(crate) async fn read_data(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    path: Option<&str>,
+) -> Result<AppData, ApiError> {
+    let id = artifact_id(id)?;
+    let path = data_path("path", path.unwrap_or_default())?;
+    let wire_path = path.to_string();
+    let artifact = id.to_string();
+    let read = state
+        .run(move |artifacts| artifacts.data(&actor, &id, &path))
+        .await?;
+    Ok(AppData {
+        artifact_id: artifact,
+        path: wire_path,
+        data_version: read.version.0,
+        exists: read.value.is_some(),
+        value: read
+            .value
+            .and_then(|value| JsonValue::from_text(value.to_canonical())),
+    })
+}
+
+pub(crate) async fn set_data(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: SetDataRequest,
+) -> Result<DataWriteResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let path = data_path("path", &request.path)?;
+    let value = data_value("value", &request.value)?;
+    write_data(
+        state,
+        actor,
+        key,
+        id,
+        request.base_data_version,
+        DataChange::Set { path, value },
+    )
+    .await
+}
+
+pub(crate) async fn update_data(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: UpdateDataRequest,
+) -> Result<DataWriteResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let path = data_path("path", &request.path)?;
+    let merge = data_value("patch", &request.patch)?;
+    write_data(
+        state,
+        actor,
+        key,
+        id,
+        request.base_data_version,
+        DataChange::Merge { path, patch: merge },
+    )
+    .await
+}
+
+pub(crate) async fn delete_data(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: DeleteDataRequest,
+) -> Result<DataWriteResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let path = data_path("path", &request.path)?;
+    write_data(
+        state,
+        actor,
+        key,
+        id,
+        request.base_data_version,
+        DataChange::Remove { path },
+    )
+    .await
+}
+
+async fn write_data(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: ArtifactId,
+    base: u64,
+    change: DataChange,
+) -> Result<DataWriteResponse, ApiError> {
+    let now = state.clock().now();
+    let artifact = id.to_string();
+    let path = match &change {
+        DataChange::Set { path, .. }
+        | DataChange::Merge { path, .. }
+        | DataChange::Remove { path } => path.to_string(),
+    };
+    let outcome = state
+        .run(move |artifacts| {
+            artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)
+        })
+        .await?;
+    Ok(DataWriteResponse {
+        artifact_id: artifact,
+        path,
+        data_version: outcome.version.0,
+        changed: outcome.changed,
+        replayed: outcome.delivery == Delivery::Replayed,
     })
 }
 

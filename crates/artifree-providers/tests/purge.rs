@@ -11,7 +11,7 @@ use artifree_domain::identity::{ActorId, ArtifactId, RequestKey};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactStore, ChangeKind, CleanupReceipt, CleanupRequest, CommitReceipt,
-    ContentSetDigest, Delivery, ListOrder, NewArtifact, PurgeReceipt, PurgeRequest,
+    ContentSetDigest, CopySource, Delivery, ListOrder, NewArtifact, PurgeReceipt, PurgeRequest,
     RequestFingerprint, RequestIdentity, StoreError, UnreferencedContent,
 };
 use artifree_providers::backup::{backup, restore};
@@ -110,7 +110,10 @@ impl Fixture {
             kind: ArtifactKind::App,
             title: &parsed("Copy"),
             package: &package(&[("index.html", SECOND), ("style.css", "h1{}")]),
-            source: Some(&source.artifact.id),
+            source: Some(CopySource {
+                artifact: &source.artifact.id,
+                copy_data: false,
+            }),
         })
     }
 

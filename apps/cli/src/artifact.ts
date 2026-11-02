@@ -32,7 +32,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact save <id> --base <revision>
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
   artifree artifact restore <id> <revision> --base <revision>
-  artifree artifact duplicate <id> <revision> [--title <title>]
+  artifree artifact duplicate <id> <revision> [--title <title>] [--copy-data]
   artifree artifact rename <id> <title> --base-metadata <n>
   artifree artifact pin <id> --base-metadata <n>
   artifree artifact unpin <id> --base-metadata <n>
@@ -69,7 +69,9 @@ restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
 revision, with its own history; it is unpinned and named --title or the
-source's title followed by " (Copy)". Only files are copied.
+source's title followed by " (Copy)". Only files are copied, unless
+--copy-data also gives the copy its own copy of your application data for the
+source (artifree data --help), as it is when the copy is made.
 export writes a ZIP archive of one revision's files, at their package paths
 and byte for byte, with the manifest .artifree-export.json, to a new file
 (--output; an existing file is never replaced). It prints the archive's size
@@ -521,6 +523,7 @@ async function duplicate(args: string[]): Promise<void> {
     options: {
       ...connectionOptions,
       title: { type: 'string' },
+      'copy-data': { type: 'boolean' },
       'idempotency-key': { type: 'string' },
     },
     allowPositionals: true,
@@ -535,7 +538,10 @@ async function duplicate(args: string[]): Promise<void> {
       client.duplicateArtifact(
         id,
         revision,
-        values.title === undefined ? {} : { title: values.title },
+        {
+          ...(values.title === undefined ? {} : { title: values.title }),
+          ...(values['copy-data'] === true ? { copy_data: true } : {}),
+        },
         { idempotencyKey },
       ),
   );

@@ -1,6 +1,7 @@
 /** HTTP API v1 client for browsers and Node.js. */
 export {
   ArtifreeClient,
+  JsonText,
   encodeFile,
   newIdempotencyKey,
   newRandomId,
@@ -9,6 +10,9 @@ export {
 } from './client.js';
 export type {
   ClientConfiguration,
+  DataInput,
+  SetDataInput,
+  UpdateDataInput,
   FilePart,
   FileRange,
   MutationOptions,

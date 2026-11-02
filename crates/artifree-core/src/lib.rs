@@ -3,6 +3,7 @@
 
 pub mod agent_handoff;
 pub mod artifacts;
+pub mod data;
 pub mod documents;
 pub mod jobs;
 pub mod listing;

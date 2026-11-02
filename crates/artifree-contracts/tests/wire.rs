@@ -1,7 +1,7 @@
 //! Behavioral checks for the public contracts' Serde boundary.
 use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
-    Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
+    AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
     DuplicateArtifactResponse, ErrorResponse, FeedPosition, Preview, PurgeArtifactResponse,
     RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeConnection, RuntimeGrant,
     RuntimeView, SaveRevisionRequest, SourceExportManifest, UnreferencedContent,
@@ -203,4 +203,32 @@ fn response_schemas_describe_what_the_server_writes() {
     .filter_map(|(name, differs)| differs.then_some(name))
     .collect();
     assert_eq!(differing, Vec::<&str>::new());
+}
+
+/// A value that was stored as `null` is not an absent value (decision 0031):
+/// both read back through serde as they were written.
+#[test]
+fn app_data_tells_a_stored_null_from_no_value() {
+    let read = |text: &str| serde_json::from_str::<AppData>(text);
+    let head = r#""artifact_id":"art_1","path":"a","data_version":3"#;
+    let stored_null = read(&format!(r#"{{{head},"exists":true,"value":null}}"#))
+        .unwrap_or_else(|error| panic!("a stored null must read: {error}"));
+    assert_eq!(
+        stored_null
+            .value
+            .as_ref()
+            .map(artifree_contracts::api::JsonValue::get),
+        Some("null")
+    );
+    let absent = read(&format!(r#"{{{head},"exists":false}}"#))
+        .unwrap_or_else(|error| panic!("an absent value must read: {error}"));
+    assert_eq!(absent.value, None);
+    // And each writes back as it was read.
+    let text = |data: &AppData| serde_json::to_string(data).unwrap_or_default();
+    assert!(
+        text(&stored_null).contains(r#""value":null"#),
+        "{}",
+        text(&stored_null)
+    );
+    assert!(!text(&absent).contains("value"), "{}", text(&absent));
 }

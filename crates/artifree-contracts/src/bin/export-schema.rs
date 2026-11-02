@@ -15,16 +15,17 @@
 )]
 
 use artifree_contracts::api::{
-    AgentSessionList, Artifact, ArtifactChange, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest, CreateTokenRequest,
-    CreateTokenResponse, DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest,
-    EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList,
-    ListArtifactsQuery, ListJobsQuery, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
+    AgentSessionList, AppData, Artifact, ArtifactChange, ArtifactList, CancelJobRequest,
+    CancelJobResponse, CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
+    CreateTokenRequest, CreateTokenResponse, DataWriteResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest, EnqueueJobResponse,
+    ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery,
+    ListJobsQuery, Preview, PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionList, RotateTokenResponse, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
-    RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
-    SourceExportManifest, StageHandoffRequest, TokenInfo, TokenList, UnreferencedContent,
-    UpdateArtifactRequest, UpdateArtifactResponse,
+    RuntimeMetadataRequest, RuntimeView, SaveRevisionRequest, SetDataRequest,
+    SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo, TokenList,
+    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -75,11 +76,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<CancelJobResponse>(),
         generator.subschema_for::<Job>(),
         generator.subschema_for::<JobList>(),
+        generator.subschema_for::<AppData>(),
+        generator.subschema_for::<SetDataRequest>(),
+        generator.subschema_for::<UpdateDataRequest>(),
+        generator.subschema_for::<DeleteDataRequest>(),
+        generator.subschema_for::<DataWriteResponse>(),
     ];
     // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();
     generator.subschema_for::<DuplicateArtifactRequest>();
     generator.subschema_for::<ListJobsQuery>();
+    // The read query has one optional field, so the root would accept any
+    // empty object.
+    generator.subschema_for::<ReadDataQuery>();
     // The cancel body has no fields, so the root would accept any empty object.
     generator.subschema_for::<CancelJobRequest>();
     let api = serde_json::json!({

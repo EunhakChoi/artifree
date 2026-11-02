@@ -86,7 +86,7 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 | `create_artifact`          | `title`, `files`, `idempotency_key`                                                                     | `{ artifact, revision, replayed }`         |
 | `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                            | `{ artifact, revision, replayed }`         |
 | `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                           | `{ artifact, revision, replayed }`         |
-| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, `idempotency_key`                                          | `{ artifact, revision, copied, replayed }` |
+| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, `idempotency_key`                    | `{ artifact, revision, copied, replayed }` |
 | `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
 | `list_revisions`           | `artifact_id`                                                                                           | `{ revisions }`, newest first              |
 | `get_revision`             | `artifact_id`, `revision`                                                                               | one revision manifest                      |
@@ -99,6 +99,10 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 | `get_job`                  | `job_id`                                                                                                | one job                                    |
 | `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                           | `{ jobs, next_page_token? }`               |
 | `cancel_job`               | `job_id`, `idempotency_key`                                                                             | `{ job, replayed }`                        |
+| `get_data`                 | `artifact_id`, optional `path`                                                                          | `{ data_version, exists, value? }`         |
+| `set_data`                 | `artifact_id`, `path`, `base_data_version`, `value` (JSON text), `idempotency_key`                      | `{ data_version, changed, replayed }`      |
+| `update_data`              | `artifact_id`, `path`, `base_data_version`, `patch` (JSON text), `idempotency_key`                      | `{ data_version, changed, replayed }`      |
+| `delete_data`              | `artifact_id`, `path`, `base_data_version`, `idempotency_key`                                           | `{ data_version, changed, replayed }`      |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
@@ -138,8 +142,10 @@ revisions can be compared without reading unchanged files (decision
 one revision, with its own history; it is unpinned and named `title` or the
 source's title followed by " (Copy)". It needs no `base_revision`, and a retry
 with the same key returns the same copy. `copied` lists what the copy received:
-only `files`, since artifacts have no application data or uploaded assets yet
-(decision [0012](decisions/0012-duplicate-artifacts.md)).
+`files`, and `data` when `copy_data` is true, which gives the copy its own copy of
+your application data as it is when the copy commits (decision
+[0031](decisions/0031-app-data.md)); uploaded assets do not exist yet and are
+never copied (decision [0012](decisions/0012-duplicate-artifacts.md)).
 `read_file` with `offset` and `length` reads part of a file: `length` bytes
 at most from `offset`, ending before a UTF-8 character it would split, so
 each part of a text file is text. Read on from the returned `next_offset`,
@@ -220,6 +226,49 @@ most 16 jobs may be open per actor, the owner's and all agent tokens' together
 (`too_many_jobs`, 409); a
 cancel of a finished job is `job_ended` (409).
 
+### Application data
+
+An artifact can keep one JSON object of data for you, with its own
+`data_version` (0 until written) that has nothing to do with its revisions: saving
+or restoring a revision does not change it, and it is not in a revision, a
+preview, or an export. **A page running in a preview cannot read or write it.**
+Only these tools, HTTP, and the CLI can ([decision
+0031](decisions/0031-app-data.md)).
+
+`get_data` reads the value at a `path`: up to 16 segments of 1-64 letters, digits,
+`_`, or `-`, separated by `/`, such as `todos/first`; no path, or the empty one, is
+the root. A path addresses object members and never enters an array. A path with
+nothing at it succeeds with `exists: false`. Read `data_version` and send it as
+`base_data_version` in the next write; if another write won, the call fails with
+`data_conflict` and `current_data_version`, and nothing is written. A write that
+changes nothing keeps the version (`changed: false`).
+
+`set_data` replaces the value at the path and makes the objects above it that are
+missing; the root must be given an object, and `null` can be stored. `update_data`
+applies a JSON Merge Patch (RFC 7396): objects merge member by member, a `null`
+member is removed, arrays and scalars replace what is there wholesale (an array is
+never merged inside), and a patch cannot store `null` in an object. At the root the
+patch must be an object: a `null` patch there is `invalid_request`, and
+`set_data` with `{}` empties everything. `delete_data`
+removes the value at the path (the empty path empties everything); removing what
+is not there succeeds and changes nothing. A value in the way that is not an
+object is `data_path_conflict`.
+
+`value` and `patch` are **JSON text strings**, such as `"{\"done\":false}"`, not
+nested JSON, so that the server sees exactly what you wrote: a repeated member
+name or a number with a magnitude beyond 2^53-1 in any spelling (`9007199254740993`,
+`9007199254740993.0`, `1e16`, `-9223372036854775808`) is `invalid_request` instead
+of being changed silently. Three more things about numbers: `1e999` is refused
+because it is not finite; `0.1e-400`, too small for a double, is accepted and
+stored as `0`; and `1.0` is accepted and stored as `1`. Text that is not JSON at
+all is `invalid_request` too. Limits: 256 KiB per value, 1 MiB and 10,000 values per space, 32 levels
+(`data_too_large`). **The three write tools are marked destructive: nothing keeps
+the value they replace, so an overwrite cannot be undone** (a duplicate with
+`copy_data` is the only snapshot). Retries follow the same key rules as every
+write, and keys are shared with all other requests. Data is not pushed: poll
+`get_data` and compare `data_version`. An artifact in the trash or purged, and
+another actor's artifact, answer `not_found`; a purge erases the data.
+
 ## Errors and retries
 
 A failed tool call returns `isError: true` with the HTTP API error body:
@@ -237,6 +286,9 @@ A failed tool call returns `isError: true` with the HTTP API error body:
 | Code                 | What to do                                                                  |
 | -------------------- | --------------------------------------------------------------------------- |
 | `revision_conflict`  | Nothing was written. Read the current files, reapply, save on the new base. |
+| `data_conflict`      | `current_data_version` is newer. Read the data, reapply, write on that.     |
+| `data_path_conflict` | A value in the path is not an object. Read it, then set or pick a path.     |
+| `data_too_large`     | A value, the data, or its nesting is over the limit. Send less.             |
 | `request_key_reused` | The key was used for different content. Use a new key for a new change.     |
 | `invalid_request`    | Fix the arguments named in the message; the key is not reserved.            |
 | `not_found`          | The artifact, revision, file, or job does not exist or is not yours.        |

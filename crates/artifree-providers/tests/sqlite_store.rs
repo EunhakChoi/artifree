@@ -13,7 +13,7 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, CommitReceipt,
-    Delivery, ListOrder, ListPosition, MetadataReceipt, MetadataUpdate, NewArtifact,
+    CopySource, Delivery, ListOrder, ListPosition, MetadataReceipt, MetadataUpdate, NewArtifact,
     RequestFingerprint, RequestIdentity, RevisionCommit, StoreError,
 };
 use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
@@ -1211,7 +1211,10 @@ fn copy_of(
         kind: ArtifactKind::App,
         title: &parsed("Copy"),
         package: &package(&[("index.html", "<h1>copy</h1>")]),
-        source: Some(&source.artifact.id),
+        source: Some(CopySource {
+            artifact: &source.artifact.id,
+            copy_data: false,
+        }),
     })
 }
 

@@ -339,6 +339,40 @@ async fn another_owners_artifact_is_not_found_through_every_tool() -> TestResult
 }
 
 #[tokio::test]
+async fn another_owners_data_is_not_found_through_every_data_tool() -> TestResult {
+    let harness = Harness::new();
+    let id = harness.foreign_artifact("shared-key-1")?;
+    for (tool, arguments) in [
+        ("get_data", json!({ "artifact_id": id })),
+        (
+            "set_data",
+            json!({
+                "artifact_id": id, "path": "a", "base_data_version": 0, "value": "1",
+                "idempotency_key": "mine-data-1"
+            }),
+        ),
+        (
+            "update_data",
+            json!({
+                "artifact_id": id, "path": "a", "base_data_version": 0, "patch": "{}",
+                "idempotency_key": "mine-data-2"
+            }),
+        ),
+        (
+            "delete_data",
+            json!({
+                "artifact_id": id, "path": "a", "base_data_version": 0,
+                "idempotency_key": "mine-data-3"
+            }),
+        ),
+    ] {
+        let result = harness.call(tool, arguments).await?;
+        assert_eq!(error_code(&result), "not_found", "{tool}: {result}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unknown_tool_is_a_protocol_error() -> TestResult {
     let harness = Harness::new();
     let (status, body) = harness
@@ -585,6 +619,368 @@ async fn the_job_tools_say_what_they_change() -> TestResult {
         assert_eq!(tool["annotations"]["openWorldHint"], false, "{name}");
         let required = tool["inputSchema"]["required"].to_string();
         assert_eq!(required.contains("idempotency_key"), !read_only, "{name}");
+    }
+    Ok(())
+}
+
+/// The tools of application data (decision 0031) answer as the HTTP routes do,
+/// and take their values as JSON text so that a repeated member name is seen.
+#[tokio::test]
+async fn agents_read_and_write_application_data_with_the_http_semantics() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "data-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+
+    let empty = harness
+        .call("get_data", json!({ "artifact_id": artifact }))
+        .await?;
+    assert_eq!(
+        empty["structuredContent"],
+        json!({ "artifact_id": artifact, "path": "", "data_version": 0, "exists": true, "value": {} })
+    );
+
+    let set = json!({
+        "artifact_id": artifact, "path": "todos/first", "base_data_version": 0,
+        "value": "{\"done\":false,\"tags\":[\"a\"]}", "idempotency_key": "data-set-1"
+    });
+    let written = harness.call("set_data", set.clone()).await?;
+    assert_eq!(written["isError"], false, "{written}");
+    assert_eq!(
+        written["structuredContent"],
+        json!({ "artifact_id": artifact, "path": "todos/first", "data_version": 1,
+                "changed": true, "replayed": false })
+    );
+    let replay = harness.call("set_data", set).await?;
+    assert_eq!(replay["structuredContent"]["replayed"], true, "{replay}");
+
+    let patched = harness
+        .call(
+            "update_data",
+            json!({
+                "artifact_id": artifact, "path": "todos/first", "base_data_version": 1,
+                "patch": "{\"done\":true,\"tags\":null}", "idempotency_key": "data-update-1"
+            }),
+        )
+        .await?;
+    assert_eq!(patched["structuredContent"]["data_version"], 2, "{patched}");
+    let read = harness
+        .call(
+            "get_data",
+            json!({ "artifact_id": artifact, "path": "todos" }),
+        )
+        .await?;
+    assert_eq!(
+        read["structuredContent"]["value"],
+        json!({ "first": { "done": true } })
+    );
+
+    let stale = harness
+        .call(
+            "set_data",
+            json!({
+                "artifact_id": artifact, "path": "todos/first", "base_data_version": 1,
+                "value": "1", "idempotency_key": "data-set-stale"
+            }),
+        )
+        .await?;
+    assert_eq!(error_code(&stale), "data_conflict");
+    assert_eq!(
+        stale["structuredContent"]["error"]["current_data_version"], 2,
+        "{stale}"
+    );
+
+    let removed = harness
+        .call(
+            "delete_data",
+            json!({
+                "artifact_id": artifact, "path": "todos/first", "base_data_version": 2,
+                "idempotency_key": "data-delete-1"
+            }),
+        )
+        .await?;
+    assert_eq!(removed["structuredContent"]["data_version"], 3, "{removed}");
+    let gone = harness
+        .call(
+            "get_data",
+            json!({ "artifact_id": artifact, "path": "todos/first" }),
+        )
+        .await?;
+    assert_eq!(gone["structuredContent"]["exists"], false);
+    assert!(gone["structuredContent"].get("value").is_none(), "{gone}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn data_requests_that_cannot_be_served_get_the_http_error_codes() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "data-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+    let first = harness
+        .call(
+            "set_data",
+            json!({
+                "artifact_id": artifact, "path": "a", "base_data_version": 0, "value": "5",
+                "idempotency_key": "data-set-1"
+            }),
+        )
+        .await?;
+    assert_eq!(first["isError"], false, "{first}");
+    for (tool, arguments, code) in [
+        (
+            "set_data",
+            json!({ "artifact_id": artifact, "path": "a", "base_data_version": 0, "value": "6",
+                    "idempotency_key": "data-set-1" }),
+            "request_key_reused",
+        ),
+        (
+            "set_data",
+            json!({ "artifact_id": artifact, "path": "a/b", "base_data_version": 1, "value": "1",
+                    "idempotency_key": "data-set-3" }),
+            "data_path_conflict",
+        ),
+        (
+            "set_data",
+            json!({ "artifact_id": artifact, "path": "b", "base_data_version": 1,
+                    "value": "{\"x\":1,\"x\":2}", "idempotency_key": "data-set-4" }),
+            "invalid_request",
+        ),
+        (
+            "set_data",
+            json!({ "artifact_id": artifact, "path": "b", "base_data_version": 1,
+                    "value": "9007199254740993", "idempotency_key": "data-set-5" }),
+            "invalid_request",
+        ),
+        (
+            "set_data",
+            json!({ "artifact_id": artifact, "path": "b", "base_data_version": 1,
+                    "value": format!("{}1{}", "[".repeat(100), "]".repeat(100)), "idempotency_key": "data-set-6" }),
+            "data_too_large",
+        ),
+        (
+            "set_data",
+            json!({ "artifact_id": artifact, "path": "b", "base_data_version": 1,
+                    "value": {"x": 1}, "idempotency_key": "data-set-7" }),
+            "invalid_request",
+        ),
+        (
+            "set_data",
+            json!({ "artifact_id": artifact, "path": "../b", "base_data_version": 1,
+                    "value": "1", "idempotency_key": "data-set-8" }),
+            "invalid_request",
+        ),
+        (
+            "update_data",
+            json!({ "artifact_id": artifact, "path": "", "base_data_version": 1,
+                    "patch": "[1]", "idempotency_key": "data-update-1" }),
+            "invalid_request",
+        ),
+        (
+            "delete_data",
+            json!({ "artifact_id": artifact, "path": "a", "base_data_version": 1 }),
+            "invalid_request",
+        ),
+        (
+            "get_data",
+            json!({ "artifact_id": "art_00000000000000000000000000000000" }),
+            "not_found",
+        ),
+    ] {
+        let refused = harness.call(tool, arguments.clone()).await?;
+        assert_eq!(error_code(&refused), code, "{tool} {arguments}: {refused}");
+    }
+    Ok(())
+}
+
+/// Only the tools that overwrite data without keeping it are marked
+/// destructive; the rest of the catalog keeps its hints.
+#[tokio::test]
+async fn the_data_tools_say_what_they_change() -> TestResult {
+    let harness = Harness::new();
+    let (_, body) = harness.post(rpc(Some(TOKEN), &list_tools())?).await?;
+    let listed: Value = serde_json::from_slice(&body)?;
+    let tools = listed["result"]["tools"].as_array().ok_or("tools")?;
+    for (name, read_only) in [
+        ("get_data", true),
+        ("set_data", false),
+        ("update_data", false),
+        ("delete_data", false),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .ok_or_else(|| format!("{name} is not offered"))?;
+        assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{name}");
+        assert_eq!(tool["annotations"]["destructiveHint"], !read_only, "{name}");
+        assert_eq!(tool["annotations"]["openWorldHint"], false, "{name}");
+        let required = tool["inputSchema"]["required"].to_string();
+        assert_eq!(required.contains("idempotency_key"), !read_only, "{name}");
+    }
+    let destructive: Vec<&str> = tools
+        .iter()
+        .filter(|tool| tool["annotations"]["destructiveHint"] == true)
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(destructive, ["set_data", "update_data", "delete_data"]);
+    Ok(())
+}
+
+/// Duplicating with `copy_data` copies the data in the same call, as over HTTP.
+#[tokio::test]
+async fn duplicate_artifact_copies_data_only_when_asked() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "dup-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+    harness
+        .call(
+            "set_data",
+            json!({
+                "artifact_id": artifact, "path": "a", "base_data_version": 0, "value": "1",
+                "idempotency_key": "dup-set-1"
+            }),
+        )
+        .await?;
+    let plain = harness
+        .call(
+            "duplicate_artifact",
+            json!({ "artifact_id": artifact, "revision": 1, "idempotency_key": "dup-plain-1" }),
+        )
+        .await?;
+    assert_eq!(
+        plain["structuredContent"]["copied"],
+        json!(["files"]),
+        "{plain}"
+    );
+    let with = harness
+        .call(
+            "duplicate_artifact",
+            json!({ "artifact_id": artifact, "revision": 1, "copy_data": true,
+                    "idempotency_key": "dup-data-1" }),
+        )
+        .await?;
+    assert_eq!(
+        with["structuredContent"]["copied"],
+        json!(["files", "data"]),
+        "{with}"
+    );
+    let copy = with["structuredContent"]["artifact"]["id"].clone();
+    let copied = harness
+        .call("get_data", json!({ "artifact_id": copy }))
+        .await?;
+    assert_eq!(copied["structuredContent"]["value"], json!({ "a": 1 }));
+    let uncopied = harness
+        .call(
+            "get_data",
+            json!({ "artifact_id": plain["structuredContent"]["artifact"]["id"] }),
+        )
+        .await?;
+    assert_eq!(uncopied["structuredContent"]["data_version"], 0);
+    Ok(())
+}
+
+/// Text that is not JSON, and numbers outside what a double holds exactly in
+/// any spelling, are `invalid_request` through both tools that take text, with
+/// no panic (`i64::MIN` once overflowed `abs`).
+#[tokio::test]
+async fn data_tools_refuse_text_that_is_not_data_without_panicking() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "num-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+    // Not JSON at all, whichever tool takes it.
+    let not_json = ["{", "1 2", "", "NaN"];
+    // JSON, but a number the rules refuse: alone for `set_data`, and as a
+    // member of an object patch for `update_data`.
+    let numbers = [
+        "-9223372036854775808",
+        "9223372036854775807",
+        "18446744073709551615",
+        "9007199254740992",
+        "-9007199254740992",
+        "9007199254740993.0",
+        "9.007199254740993e15",
+        "1e16",
+        "1e20",
+        "-1.5e300",
+        "1e999",
+        "[-9223372036854775808]",
+    ];
+    let mut cases: Vec<(&str, &str, String)> = Vec::new();
+    for text in not_json {
+        cases.push(("set_data", "value", text.to_owned()));
+        cases.push(("update_data", "patch", text.to_owned()));
+    }
+    for text in numbers {
+        cases.push(("set_data", "value", text.to_owned()));
+        cases.push(("update_data", "patch", format!(r#"{{"x":{text}}}"#)));
+    }
+    for (index, (tool, field, text)) in cases.into_iter().enumerate() {
+        let mut arguments = json!({
+            "artifact_id": artifact, "path": "n", "base_data_version": 0,
+            "idempotency_key": format!("num-refused-{index}")
+        });
+        arguments[field] = json!(text);
+        // A handler that panics never answers; bound the wait so that it is a
+        // failure of this test and not a hang.
+        let result = tokio::time::timeout(Duration::from_secs(30), harness.call(tool, arguments))
+            .await
+            .map_err(|_| format!("{tool} {text:?} was never answered"))??;
+        assert_eq!(
+            error_code(&result),
+            "invalid_request",
+            "{tool} {text:?}: {result}"
+        );
+    }
+    // The bounds themselves are accepted, in either spelling.
+    for (index, text) in [
+        "9007199254740991",
+        "-9007199254740991",
+        "9007199254740991.0",
+        "1.5e3",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = harness
+            .call(
+                "set_data",
+                json!({
+                    "artifact_id": artifact, "path": "ok", "base_data_version": index,
+                    "value": text, "idempotency_key": format!("num-ok-{index}")
+                }),
+            )
+            .await?;
+        assert_eq!(result["isError"], false, "{text}: {result}");
     }
     Ok(())
 }

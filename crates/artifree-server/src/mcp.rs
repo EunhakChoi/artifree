@@ -14,17 +14,19 @@ use std::sync::Arc;
 
 use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
-    CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest,
+    CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest, DeleteDataRequest,
     DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest, EnqueueJobResponse,
-    ErrorResponse, ListArtifactsQuery, ListJobsQuery, RestoreRevisionRequest, SaveRevisionRequest,
-    UpdateArtifactRequest, UpdateArtifactResponse,
+    ErrorResponse, JsonValue, ListArtifactsQuery, ListJobsQuery, RestoreRevisionRequest,
+    SaveRevisionRequest, SetDataRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest,
 };
 use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, CancelJobArguments,
-    CreateArtifactArguments, DuplicateArtifactArguments, EnqueueJobArguments, FileArguments,
-    FileContent, JobArguments, ListJobsArguments, PollHandoffArguments,
-    RegisterHandoffSessionArguments, RestoreRevisionArguments, RevisionArguments,
-    SaveRevisionArguments, ToolDefinition, UpdateArtifactArguments,
+    CreateArtifactArguments, DeleteDataArguments, DuplicateArtifactArguments, EnqueueJobArguments,
+    FileArguments, FileContent, GetDataArguments, JobArguments, ListJobsArguments,
+    PollHandoffArguments, RegisterHandoffSessionArguments, RestoreRevisionArguments,
+    RevisionArguments, SaveRevisionArguments, SetDataArguments, ToolDefinition,
+    UpdateArtifactArguments, UpdateDataArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
@@ -250,6 +252,93 @@ async fn dispatch(
     Some(outcome)
 }
 
+/// Routes the application data tools (decision 0031): the same operations as
+/// the data routes of HTTP, so keys, access, errors, and limits are the same.
+async fn dispatch_data(
+    state: &AppState,
+    actor: ActorId,
+    name: &str,
+    arguments: Value,
+) -> Option<Result<Value, ApiError>> {
+    let outcome = match name {
+        "get_data" => {
+            json(async {
+                let GetDataArguments { artifact_id, path } = parse(arguments)?;
+                operations::read_data(state, actor, &artifact_id, path.as_deref()).await
+            })
+            .await
+        }
+        "set_data" => {
+            json(async {
+                let SetDataArguments {
+                    artifact_id,
+                    path,
+                    base_data_version,
+                    value,
+                    idempotency_key,
+                } = parse(arguments)?;
+                let key = operations::request_key("idempotency_key", &idempotency_key)?;
+                let value = json_text("value", value)?;
+                let request = SetDataRequest {
+                    path,
+                    base_data_version,
+                    value,
+                };
+                operations::set_data(state, actor, key, &artifact_id, request).await
+            })
+            .await
+        }
+        "update_data" => {
+            json(async {
+                let UpdateDataArguments {
+                    artifact_id,
+                    path,
+                    base_data_version,
+                    patch,
+                    idempotency_key,
+                } = parse(arguments)?;
+                let key = operations::request_key("idempotency_key", &idempotency_key)?;
+                let patch = json_text("patch", patch)?;
+                let request = UpdateDataRequest {
+                    path,
+                    base_data_version,
+                    patch,
+                };
+                operations::update_data(state, actor, key, &artifact_id, request).await
+            })
+            .await
+        }
+        "delete_data" => {
+            json(async {
+                let DeleteDataArguments {
+                    artifact_id,
+                    path,
+                    base_data_version,
+                    idempotency_key,
+                } = parse(arguments)?;
+                let key = operations::request_key("idempotency_key", &idempotency_key)?;
+                let request = DeleteDataRequest {
+                    path,
+                    base_data_version,
+                };
+                operations::delete_data(state, actor, key, &artifact_id, request).await
+            })
+            .await
+        }
+        _ => return dispatch_handoffs(state, actor, name, arguments).await,
+    };
+    Some(outcome)
+}
+
+/// A JSON value given as text, as the tools of application data take it. Text
+/// that is not JSON at all is `invalid_request` as a malformed body is over
+/// HTTP (`400`); text that is JSON but breaks the rules of application data is
+/// refused later, by the same code as over HTTP (decision 0031).
+fn json_text(field: &str, text: String) -> Result<JsonValue, ApiError> {
+    JsonValue::from_text(text)
+        .ok_or_else(|| ApiError::invalid(format!("{field}: not valid JSON text")))
+}
+
 /// Routes the job tools (decision 0030): the same operations as the job
 /// routes of HTTP, so keys, access, errors, and limits are the same.
 async fn dispatch_jobs(
@@ -280,7 +369,7 @@ async fn dispatch_jobs(
             .await
         }
         "cancel_job" => json(cancel_job(state, actor, arguments)).await,
-        _ => return dispatch_handoffs(state, actor, name, arguments).await,
+        _ => return dispatch_data(state, actor, name, arguments).await,
     };
     Some(outcome)
 }
@@ -457,10 +546,11 @@ async fn duplicate_artifact(
         artifact_id,
         revision,
         title,
+        copy_data,
         idempotency_key,
     } = parse(arguments)?;
     let key = operations::request_key("idempotency_key", &idempotency_key)?;
-    let request = DuplicateArtifactRequest { title };
+    let request = DuplicateArtifactRequest { title, copy_data };
     operations::duplicate(state, actor, key, &artifact_id, revision, request).await
 }
 
@@ -548,7 +638,7 @@ fn tool(definition: ToolDefinition) -> Result<Tool, ErrorData> {
     .with_annotations(
         ToolAnnotations::new()
             .read_only(effect.read_only())
-            .destructive(false)
+            .destructive(effect.destructive())
             .idempotent(effect.idempotent())
             .open_world(false),
     ))

@@ -36,6 +36,48 @@
       ],
       "type": "object"
     },
+    "AppData": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/data`: the value at a path of the\ncaller's data space of the artifact, and the version of the space. A path\nwith nothing at it is a successful read with `exists` false.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space: the `base_data_version` of the next\nwrite. 0 for a space nobody wrote. It is unrelated to the source\nrevision and to the metadata revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exists": {
+          "description": "Whether anything is at the path. The root always exists.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The path that was read, as parsed.",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value at the path, present when `exists` is true. It can be\n`null`: a member set to `null`, which is present as `null`, unlike a\nvalue that is not there, which has no `value` member."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "data_version",
+        "exists"
+      ],
+      "type": "object"
+    },
     "Artifact": {
       "additionalProperties": false,
       "description": "Artifact metadata.",
@@ -308,6 +350,11 @@
           "const": "files",
           "description": "The files of the chosen revision, byte for byte.",
           "type": "string"
+        },
+        {
+          "const": "data",
+          "description": "The source's application data as of the copy, as the copy's own data\nspace. Listed only when the request asked for it; a source whose data\nspace is empty copies nothing, and the copy's data space is then empty.",
+          "type": "string"
         }
       ]
     },
@@ -392,10 +439,74 @@
       ],
       "type": "object"
     },
+    "DataWriteResponse": {
+      "additionalProperties": false,
+      "description": "Response of the three writes of application data.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "changed": {
+          "description": "Whether the request altered the data space.",
+          "type": "boolean"
+        },
+        "data_version": {
+          "description": "The version of the data space after the request. A change that altered\nnothing leaves the version where it was. On a replay it is the version\nthe original request left, not the current one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The path that was written, as parsed.",
+          "type": "string"
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key already did it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "data_version",
+        "changed",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "DeleteDataRequest": {
+      "additionalProperties": false,
+      "description": "Body of `DELETE /v1/artifacts/{id}/data`, with an `Idempotency-Key`\nheader: removes the value at a path.",
+      "properties": {
+        "base_data_version": {
+          "description": "The version of the data space this change was prepared against.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Where; the empty string is the root and empties the space. Removing\nwhat is not there succeeds and changes nothing.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "base_data_version"
+      ],
+      "type": "object"
+    },
     "DuplicateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:\ncreates an artifact from the files of that revision.",
       "properties": {
+        "copy_data": {
+          "description": "Whether the copy also receives a copy of the source's application\ndata, as its own independent data space. By default `false`: the copy\nreceives files only. The data copied is the source's data when the copy\ncommits, whichever revision the files come from.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "title": {
           "description": "Display title of the copy, 1-200 characters. Without it the copy is\nnamed after the source's current title followed by \" (Copy)\".",
           "type": [
@@ -415,7 +526,7 @@
           "description": "The copy as of the duplicate this request identifies, unpinned and\nwith its own history. On a replay it can be older than the copy's\ncurrent state."
         },
         "copied": {
-          "description": "What the copy received. This version has no application data or\nuploaded assets, so it copies files only.",
+          "description": "What the copy received: `files`, and `data` when the request asked for\nit. Uploaded assets do not exist yet and are never copied.",
           "items": {
             "$ref": "#/$defs/CopiedPart"
           },
@@ -485,6 +596,15 @@
         "code": {
           "$ref": "#/$defs/ErrorCode",
           "description": "Category for programmatic handling."
+        },
+        "current_data_version": {
+          "description": "The current data version, present for `data_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "current_metadata_revision": {
           "description": "The current metadata revision, present for `metadata_conflict`.",
@@ -561,6 +681,21 @@
         {
           "const": "content_conflict",
           "description": "The unreferenced content is no longer the set the dry run reported, so\nnothing was deleted. Run the dry run again.",
+          "type": "string"
+        },
+        {
+          "const": "data_conflict",
+          "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+          "type": "string"
+        },
+        {
+          "const": "data_path_conflict",
+          "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+          "type": "string"
+        },
+        {
+          "const": "data_too_large",
+          "description": "The change would exceed a limit of application data: the value, the\ndata space, the number of values in it, or how deeply they nest.\nNothing was written.",
           "type": "string"
         },
         {
@@ -1171,6 +1306,29 @@
         }
       ]
     },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "object"
+        },
+        {
+          "type": "array"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers, and a number too small for a double (0.1e-400) is stored as 0; 1e999 is refused as not finite."
+    },
     "ListArtifactsQuery": {
       "additionalProperties": false,
       "description": "Query parameters of `GET /v1/artifacts`, all optional. Without any, the\nresponse lists up to 500 artifacts, most recently updated first.",
@@ -1337,6 +1495,20 @@
         "purged_at_ms",
         "replayed"
       ],
+      "type": "object"
+    },
+    "ReadDataQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data`.",
+      "properties": {
+        "path": {
+          "description": "The path to read: `/`-separated segments of 1-64 ASCII letters,\ndigits, `_`, or `-`, at most 16. Absent or empty is the root, which is\nalways an object. This is the decoded value of the query parameter.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "RemoveUnreferencedContentRequest": {
@@ -1713,6 +1885,32 @@
       ],
       "type": "object"
     },
+    "SetDataRequest": {
+      "additionalProperties": false,
+      "description": "Body of `PUT /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:\nreplaces the value at a path.",
+      "properties": {
+        "base_data_version": {
+          "description": "The version of the data space this change was prepared against. The\nwrite fails with `data_conflict` unless it is still current.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Where; the empty string is the root, whose value must be an object and\nreplaces the whole space. Objects above the path that are missing are\nmade; a value in the way that is not an object is `data_path_conflict`.",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/JsonValue",
+          "description": "The new value. It can be `null`: unlike a patch, a set stores it."
+        }
+      },
+      "required": [
+        "path",
+        "base_data_version",
+        "value"
+      ],
+      "type": "object"
+    },
     "SetRuntimeGrantRequest": {
       "additionalProperties": false,
       "description": "Replaces the grant only if the user observed the same source and grant.",
@@ -2022,6 +2220,32 @@
         "replayed"
       ],
       "type": "object"
+    },
+    "UpdateDataRequest": {
+      "additionalProperties": false,
+      "description": "Body of `PATCH /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:\napplies a JSON Merge Patch (RFC 7396) at a path. Objects merge member by\nmember, a `null` member removes that member, and arrays and scalars replace\nwhat is there wholesale. A merge patch cannot store `null` in an object;\nuse a set for that.",
+      "properties": {
+        "base_data_version": {
+          "description": "The version of the data space this change was prepared against.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "$ref": "#/$defs/JsonValue",
+          "description": "The merge patch. A `null` patch at a path removes what is there."
+        },
+        "path": {
+          "description": "Where; the empty string is the root, whose patch must be an object.\nObjects above the path that are missing are made, unless the patch is\n`null`; a value in the way that is not an object is\n`data_path_conflict`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "base_data_version",
+        "patch"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://artifree.invalid/schemas/api-v1.json",
@@ -2152,6 +2376,21 @@
     },
     {
       "$ref": "#/$defs/JobList"
+    },
+    {
+      "$ref": "#/$defs/AppData"
+    },
+    {
+      "$ref": "#/$defs/SetDataRequest"
+    },
+    {
+      "$ref": "#/$defs/UpdateDataRequest"
+    },
+    {
+      "$ref": "#/$defs/DeleteDataRequest"
+    },
+    {
+      "$ref": "#/$defs/DataWriteResponse"
     }
   ],
   "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",

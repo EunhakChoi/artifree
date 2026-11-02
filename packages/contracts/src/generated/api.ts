@@ -45,7 +45,12 @@ export type ApiBody =
   | EnqueueJobResponse
   | CancelJobResponse
   | Job
-  | JobList;
+  | JobList
+  | AppData
+  | SetDataRequest
+  | UpdateDataRequest
+  | DeleteDataRequest
+  | DataWriteResponse;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -81,7 +86,7 @@ export type ArtifactKind = 'app' | 'document' | 'slides' | 'dashboard' | 'design
 /**
  * A part of an artifact that a duplicate copies.
  */
-export type CopiedPart = 'files';
+export type CopiedPart = 'files' | 'data';
 /**
  * Delivery state; acknowledgement is receipt, not model completion.
  */
@@ -99,6 +104,9 @@ export type ErrorCode =
   | 'metadata_conflict'
   | 'not_in_trash'
   | 'content_conflict'
+  | 'data_conflict'
+  | 'data_path_conflict'
+  | 'data_too_large'
   | 'job_ended'
   | 'too_many_jobs'
   | 'request_key_reused'
@@ -144,6 +152,18 @@ export type JobVerdict = 'ok' | 'mismatch';
  * terminal: a job there never changes again.
  */
 export type JobState = 'queued' | 'running' | 'retry_scheduled' | 'succeeded' | 'failed' | 'cancelled';
+/**
+ * Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers, and a number too small for a double (0.1e-400) is stored as 0; 1e999 is refused as not finite.
+ */
+export type JsonValue =
+  | {
+      [k: string]: unknown;
+    }
+  | unknown[]
+  | string
+  | number
+  | boolean
+  | null;
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -325,8 +345,8 @@ export interface RevisionFile {
 export interface DuplicateArtifactResponse {
   artifact: Artifact;
   /**
-   * What the copy received. This version has no application data or
-   * uploaded assets, so it copies files only.
+   * What the copy received: `files`, and `data` when the request asked for
+   * it. Uploaded assets do not exist yet and are never copied.
    */
   copied: CopiedPart[];
   /**
@@ -771,6 +791,10 @@ export interface ErrorResponse {
 export interface ErrorBody {
   code: ErrorCode;
   /**
+   * The current data version, present for `data_conflict`.
+   */
+  current_data_version?: number | null;
+  /**
    * The current metadata revision, present for `metadata_conflict`.
    */
   current_metadata_revision?: number | null;
@@ -1080,6 +1104,118 @@ export interface JobList {
    */
   next_page_token?: string | null;
 }
+/**
+ * Response of `GET /v1/artifacts/{id}/data`: the value at a path of the
+ * caller's data space of the artifact, and the version of the space. A path
+ * with nothing at it is a successful read with `exists` false.
+ */
+export interface AppData {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space: the `base_data_version` of the next
+   * write. 0 for a space nobody wrote. It is unrelated to the source
+   * revision and to the metadata revision.
+   */
+  data_version: number;
+  /**
+   * Whether anything is at the path. The root always exists.
+   */
+  exists: boolean;
+  /**
+   * The path that was read, as parsed.
+   */
+  path: string;
+  /**
+   * The value at the path, present when `exists` is true. It can be
+   * `null`: a member set to `null`, which is present as `null`, unlike a
+   * value that is not there, which has no `value` member.
+   */
+  value?: JsonValue | null;
+}
+/**
+ * Body of `PUT /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:
+ * replaces the value at a path.
+ */
+export interface SetDataRequest {
+  /**
+   * The version of the data space this change was prepared against. The
+   * write fails with `data_conflict` unless it is still current.
+   */
+  base_data_version: number;
+  /**
+   * Where; the empty string is the root, whose value must be an object and
+   * replaces the whole space. Objects above the path that are missing are
+   * made; a value in the way that is not an object is `data_path_conflict`.
+   */
+  path: string;
+  value: JsonValue;
+}
+/**
+ * Body of `PATCH /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:
+ * applies a JSON Merge Patch (RFC 7396) at a path. Objects merge member by
+ * member, a `null` member removes that member, and arrays and scalars replace
+ * what is there wholesale. A merge patch cannot store `null` in an object;
+ * use a set for that.
+ */
+export interface UpdateDataRequest {
+  /**
+   * The version of the data space this change was prepared against.
+   */
+  base_data_version: number;
+  patch: JsonValue;
+  /**
+   * Where; the empty string is the root, whose patch must be an object.
+   * Objects above the path that are missing are made, unless the patch is
+   * `null`; a value in the way that is not an object is
+   * `data_path_conflict`.
+   */
+  path: string;
+}
+/**
+ * Body of `DELETE /v1/artifacts/{id}/data`, with an `Idempotency-Key`
+ * header: removes the value at a path.
+ */
+export interface DeleteDataRequest {
+  /**
+   * The version of the data space this change was prepared against.
+   */
+  base_data_version: number;
+  /**
+   * Where; the empty string is the root and empties the space. Removing
+   * what is not there succeeds and changes nothing.
+   */
+  path: string;
+}
+/**
+ * Response of the three writes of application data.
+ */
+export interface DataWriteResponse {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * Whether the request altered the data space.
+   */
+  changed: boolean;
+  /**
+   * The version of the data space after the request. A change that altered
+   * nothing leaves the version where it was. On a replay it is the version
+   * the original request left, not the current one.
+   */
+  data_version: number;
+  /**
+   * The path that was written, as parsed.
+   */
+  path: string;
+  /**
+   * True when an earlier request with the same key already did it.
+   */
+  replayed: boolean;
+}
 
 /**
  * Order of `GET /v1/artifacts`. Ties are broken by identifier.
@@ -1145,6 +1281,13 @@ export interface CancelJobRequest {}
  * creates an artifact from the files of that revision.
  */
 export interface DuplicateArtifactRequest {
+  /**
+   * Whether the copy also receives a copy of the source's application
+   * data, as its own independent data space. By default `false`: the copy
+   * receives files only. The data copied is the source's data when the copy
+   * commits, whichever revision the files come from.
+   */
+  copy_data?: boolean | null;
   /**
    * Display title of the copy, 1-200 characters. Without it the copy is
    * named after the source's current title followed by " (Copy)".

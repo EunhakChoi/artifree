@@ -609,7 +609,7 @@ test('tools/list serves the generated catalog in both protocol eras', async () =
         assert.deepEqual(tool.outputSchema, expected.outputSchema);
         assert.deepEqual(tool.annotations, {
           readOnlyHint: expected.effect === 'read',
-          destructiveHint: false,
+          destructiveHint: expected.effect === 'data',
           idempotentHint: !['issue_link', 'issue_session'].includes(
             expected.effect,
           ),
@@ -826,6 +826,112 @@ test('Job tools conform to the contract, share HTTP semantics, and report errors
       );
       await refused(client, 'get_job', { job_id: 'job_missing' }, 'not_found');
       for (const result of [queued, replay, shown, listed, cancelled])
+        assert.ok(validate(result), JSON.stringify(validate.errors));
+    }, era);
+  }
+});
+
+test('Data tools conform to the contract, share HTTP semantics, and take values as JSON text', async () => {
+  const validate = createAjv().compile(apiSchema);
+  for (const era of Object.keys(ERAS)) {
+    await withClient(async (client) => {
+      const created = await ok(client, 'create_artifact', {
+        title: `Data ${era}`,
+        files: [utf8('index.html', '<p>d</p>')],
+        idempotency_key: freshKey(),
+      });
+      const artifact_id = created.artifact.id;
+      const empty = await ok(client, 'get_data', { artifact_id });
+      assert.deepEqual(
+        [empty.data_version, empty.exists, empty.value],
+        [0, true, {}],
+      );
+      const request = {
+        artifact_id,
+        path: 'todos/first',
+        base_data_version: 0,
+        value: '{"done":false,"n":1.0}',
+        idempotency_key: freshKey(),
+      };
+      const written = await ok(client, 'set_data', request);
+      assert.deepEqual(
+        [written.data_version, written.changed, written.replayed],
+        [1, true, false],
+      );
+      const replay = await ok(client, 'set_data', request);
+      assert.deepEqual([replay.data_version, replay.replayed], [1, true]);
+      // HTTP and MCP share one data space and one key space.
+      const viaHttp = await api(
+        `/v1/artifacts/${artifact_id}/data?path=todos%2Ffirst`,
+      );
+      assert.equal(viaHttp.status, 200);
+      assert.deepEqual(viaHttp.body.value, { done: false, n: 1 });
+      const patched = await ok(client, 'update_data', {
+        artifact_id,
+        path: 'todos/first',
+        base_data_version: 1,
+        patch: '{"done":true,"n":null}',
+        idempotency_key: freshKey(),
+      });
+      assert.equal(patched.data_version, 2);
+      const read = await ok(client, 'get_data', {
+        artifact_id,
+        path: 'todos',
+      });
+      assert.deepEqual(read.value, { first: { done: true } });
+      const stale = await refused(
+        client,
+        'set_data',
+        { ...request, idempotency_key: freshKey() },
+        'data_conflict',
+      );
+      assert.equal(stale.current_data_version, 2);
+      // A repeated member name reaches the server as written and is refused.
+      await refused(
+        client,
+        'set_data',
+        {
+          ...request,
+          path: 'dup',
+          base_data_version: 2,
+          value: '{"a":1,"a":2}',
+          idempotency_key: freshKey(),
+        },
+        'invalid_request',
+      );
+      await refused(
+        client,
+        'set_data',
+        { ...request, path: 'other' },
+        'request_key_reused',
+      );
+      const removed = await ok(client, 'delete_data', {
+        artifact_id,
+        path: 'todos/first',
+        base_data_version: 2,
+        idempotency_key: freshKey(),
+      });
+      assert.deepEqual([removed.data_version, removed.changed], [3, true]);
+      const gone = await ok(client, 'get_data', {
+        artifact_id,
+        path: 'todos/first',
+      });
+      assert.deepEqual([gone.exists, 'value' in gone], [false, false]);
+      await refused(
+        client,
+        'get_data',
+        { artifact_id: 'art_missing' },
+        'not_found',
+      );
+      for (const result of [
+        empty,
+        written,
+        replay,
+        read,
+        patched,
+        removed,
+        gone,
+      ])
         assert.ok(validate(result), JSON.stringify(validate.errors));
     }, era);
   }
