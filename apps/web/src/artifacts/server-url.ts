@@ -15,7 +15,7 @@ const PORT_ZERO = 'its port is 0, which no server listens on';
  * Checks a server address from any source: the `?server=` link, the connect
  * form, a value kept for the tab, or the build default. It must be an
  * absolute `http` or `https` address without credentials, query, or fragment
- * (an empty `?` or `#` counts), and not name port 0. On success `url` is `origin + path` without a
+ * (an empty `?` or `#` counts), and must not name port 0. On success `url` is `origin + path` without a
  * trailing slash. The reason never repeats the text, which may hold a secret.
  */
 export function parseServerUrl(text: string): ServerUrlResult {

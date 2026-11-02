@@ -66,8 +66,11 @@ failures are one line on stderr and exit status 1, and leave no output file.
   and flushed (a permission or file-system error), the backup is kept and the
   command still succeeds and prints its JSON line. The removal is retried once;
   if it fails again stderr gets one `warning:` line that names the leftover
-  `.artifree-scratch-<random>` directory and the reason, and exit status is 0. Check stderr for it, and delete the directory when no backup or restore is
-  running. For `restore` the leftover is inside the new data directory.
+  `.artifree-scratch-<random>` directory and the reason, and the exit status
+  stays zero. Check stderr for it, and delete the directory when no backup or
+  restore is running. For `restore` the leftover is inside the new data
+  directory. The removal is not flushed, so a crash right after a successful
+  run can leave the directory without a warning.
 - On Unix the finished file and the directory entry are flushed to disk before
   success is reported. Windows has no standard-library directory flush, so
   there the entry is as durable as the file system makes it. On a file system

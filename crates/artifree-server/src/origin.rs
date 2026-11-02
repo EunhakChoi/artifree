@@ -168,7 +168,8 @@ fn canonical_host(host: &str) -> Result<String, OriginError> {
 
 /// Whether the last label of `host` is a number the way a browser's IPv4
 /// parser reads one: only decimal digits, or `0x` or `0X` followed by hex
-/// digits (possibly none).
+/// digits (possibly none). A trailing dot leaves an empty last label, which
+/// the label check in `canonical_host` refuses.
 fn ends_in_a_number(host: &str) -> bool {
     let last = host.rsplit('.').next().unwrap_or(host);
     let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));

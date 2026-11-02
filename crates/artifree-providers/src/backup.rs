@@ -27,8 +27,10 @@
 //! every error path the process survives. A scratch directory that cannot be
 //! removed after the result was published does not undo that result: the
 //! output stays, the removal is retried once, and if it still fails the
-//! directory is reported as [`Report::leftover`]. A killed process also leaves
-//! its directory. A leftover is safe to delete when no backup or restore is
+//! directory is reported as [`Report::leftover`]. The removal comes after the
+//! output was flushed and is not flushed itself, so a crash right after the
+//! command returned can also leave the directory. A killed process leaves its
+//! directory too. A leftover is safe to delete when no backup or restore is
 //! running.
 
 use std::fmt;
