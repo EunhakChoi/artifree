@@ -337,8 +337,10 @@ fn an_actor_may_have_sixteen_jobs_waiting_or_running_and_no_more() -> TestResult
         Delivery::Replayed,
         "a retry is not a new job and needs no room"
     );
-    // The limit counts one actor's jobs.
-    fixture.enqueue_as(&actor("other"), "other", 2, 1_000)?;
+    // The limit counts one actor's jobs. The other actor's job is not due
+    // yet, so the claim below takes one of the first actor's jobs and never
+    // depends on how jobs created at the same instant are ordered.
+    fixture.enqueue_as(&actor("other"), "other", 2, 5_000)?;
     // Running jobs count; a job that ended makes room.
     let running = fixture.claimed("a", 1_000)?;
     assert_eq!(
