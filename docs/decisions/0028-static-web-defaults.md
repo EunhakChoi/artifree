@@ -65,7 +65,12 @@ default when there is one, otherwise the page's own origin; the field is filled
 with the default so the person sees where the token will go. The `?server=`
 override keeps its rule that it suppresses restoring a stored token (0022); the
 default does not, because the stored token is already scoped to the origin it
-was typed for. With a build default the empty field therefore cannot mean the
+was typed for. **A notice also suppresses restoring the token** (`restoreToken`
+is false whenever initialization produced a notice): the notices are shown on
+the connect form only, so a token restored for the fallback server would skip
+the form and the person would never learn that the address they set had been
+dropped and requests were going elsewhere. They enter the token again, with the
+reason in front of them. With a build default the empty field therefore cannot mean the
 page's own origin; type that origin in full, or build without the default. An
 address kept for the tab that fails validation (for example one stored by an
 earlier version) is reported and skipped.
@@ -74,13 +79,15 @@ earlier version) is reported and skipped.
 
 One function (`parseServerUrl`) validates every source: the link, the form, the
 tab setting, and the build default. It accepts only absolute `http:` and
-`https:` addresses, refuses credentials, a query string, and a fragment, and
+`https:` addresses, refuses credentials, a query string, and a fragment (an empty one, as in
+`https://x/?` or `https://x/#`, counts: the text is checked as well as the
+parsed address, because `new URL` reports both as none), and
 returns the canonical form (lowercase host, default port dropped, no trailing
 slash; a path prefix is kept because the client appends `/v1` to it). A
 refused link or form entry is explained on the connect form, nothing is sent to
 it, and the connection stays on the default. The messages never repeat the
 address, since it may hold a secret. **A rejected `?server=` link still
-suppresses restoring a stored token** (`fromQuery` stays true): the link tried
+suppresses restoring a stored token** (a link was present): the link tried
 to name a server, so the page does not guess which stored token the person
 meant, and a token is never offered to a server chosen by a link after the link
 failed. The cost is that the person enters the token again for the stored or
@@ -115,17 +122,33 @@ differ from --api-origin ...`). `ARTIFREE_API_ORIGIN` errors name the variable.
 - **Errors about serve settings never quote a value the operator wrote.** A
   rejected origin, source list, address, CIDR, or argument may carry a password
   (`https://user:secret@host`), and these messages go to stderr and container
-  logs. This holds for every branch, not only the credentials check: a bad
-  scheme, port, or host in a credentialed value fails earlier, so
-  `normalize_origin` describes what is wrong without quoting the value or any
-  part of it. The same rule covers `--frame-ancestors`, `--lan`,
-  `--trusted-proxy`, and unrecognized `serve` arguments (`--content-origin=VALUE`
-  names only `--content-origin`). The TypeScript client, whose address comes from `--server` or
-  `ARTIFREE_SERVER`, drops credentials from the address in its network-error
-  messages. `backup` and `restore` still name an
-  unrecognized option, because their arguments are paths. The tests assert that a
-  password in an origin that fails a scheme, port, host, or form check never
-  reaches stderr.
+  logs. This holds for every branch of the origin check, not only the
+  credentials check: a bad scheme, port, or host in a credentialed value fails
+  earlier, so `normalize_origin` describes what is wrong without quoting the
+  value or any part of it. The same rule covers `--frame-ancestors` (the
+  refused character is not shown either, since it may be part of a password),
+  `--lan`, `--loopback-listen`, and `--trusted-proxy`. A `serve` argument that
+  is not a known option is named only when its text up to the first `=` is a
+  plain option name (`--` and then lowercase letters, digits, and `-`); the
+  part after `=` is never shown. A flag and its value joined inside one
+  argument by a space or a colon, an upper-case or single-dash form, and a bare
+  value are not quoted at all. A secret that is itself written as a plain
+  option name (`--hunter2`) cannot be told from a mistyped option and is
+  shown. The TypeScript client, whose address comes from `--server` or
+  `ARTIFREE_SERVER`, shows an `http(s)` address as its origin and path only (no
+  credentials, query, or fragment), shows anything else as "the configured
+  server", and drops the failed request's own error from `cause` when the
+  address was not plain, because that error can quote the whole address.
+  `backup` and `restore` still name an unrecognized option, because their
+  arguments are paths. The tests assert that a password in an origin that fails
+  a scheme, port, host, or form check never reaches stderr.
+- **Messages name the flag or variable in effect** for the origins, the
+  frame-ancestors list, the allowed origins, `--lan`, `--loopback-listen`, and
+  the trusted proxies. The other settings are not validated as strictly:
+  `ARTIFREE_ALLOW_REMOTE_MCP` is on only for `true` or `1` and anything else is
+  silently off, `ARTIFREE_ALLOWED_HOSTS` is not validated, and the older
+  variables ignore a value that is not valid UTF-8. These are existing
+  behaviors that this change did not alter; `docs/container.md` says so.
 - Parsing takes every `ARTIFREE_*` variable from one `ServeEnv` value read at
   start-up, not from the process environment at each use, so the unit tests
   give it exactly the variables they mean and pass on a machine that has others

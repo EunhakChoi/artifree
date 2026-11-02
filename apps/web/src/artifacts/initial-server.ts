@@ -26,10 +26,24 @@ export function checkBuildDefault(raw: string): BuildDefault {
 export interface InitialServer {
   /** The API address, or an empty string for the page's own origin. */
   readonly url: string;
-  /** True when `?server=` was present; a stored token is then not restored. */
-  readonly fromQuery: boolean;
+  /**
+   * Whether a token kept for this tab may be restored without asking. It is
+   * not when `?server=` was present (the link names a server, whether or not
+   * it was usable) or when there is a notice: the notice is shown only on the
+   * connect form, and a restored token would skip that form and send requests
+   * to a server the person was never told had replaced the one they set.
+   */
+  readonly restoreToken: boolean;
   /** Something the person should be told, such as a refused address. */
   readonly notices: readonly string[];
+}
+
+function result(
+  url: string,
+  fromQuery: boolean,
+  notices: readonly string[],
+): InitialServer {
+  return { url, restoreToken: !fromQuery && notices.length === 0, notices };
 }
 
 /**
@@ -51,17 +65,17 @@ export function resolveInitialServer(input: {
   const fromQuery = queryServer !== null && queryServer.trim() !== '';
   if (fromQuery) {
     const checked = parseServerUrl(queryServer);
-    if (checked.ok) return { url: checked.url, fromQuery, notices };
+    if (checked.ok) return result(checked.url, fromQuery, notices);
     notices.push(
       `The server address in the link was ignored. ${checked.reason}`,
     );
   }
   if (input.stored !== null && input.stored !== '') {
     const checked = parseServerUrl(input.stored);
-    if (checked.ok) return { url: checked.url, fromQuery, notices };
+    if (checked.ok) return result(checked.url, fromQuery, notices);
     notices.push(
       `The server address kept for this tab was ignored. ${checked.reason}`,
     );
   }
-  return { url: buildDefault.url, fromQuery, notices };
+  return result(buildDefault.url, fromQuery, notices);
 }

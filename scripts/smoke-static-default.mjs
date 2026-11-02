@@ -26,11 +26,13 @@ const mime = {
  */
 export async function checkStaticDefault({ browser, root, serverBinary, qa }) {
   const scratch = await mkdtemp(join(tmpdir(), 'artifree-static-default-'));
-  const defaultApi = await startServer(serverBinary, join(scratch, 'default'));
-  const otherApi = await startServer(serverBinary, join(scratch, 'other'));
+  let defaultApi;
+  let otherApi;
   let staticServer;
   let context;
   try {
+    defaultApi = await startServer(serverBinary, join(scratch, 'default'));
+    otherApi = await startServer(serverBinary, join(scratch, 'other'));
     await api(defaultApi, 'POST', '/v1/artifacts', {
       title: 'Default server artifact',
       files: [{ path: 'index.html', encoding: 'utf8', content: '<p>d</p>' }],
@@ -86,8 +88,15 @@ export async function checkStaticDefault({ browser, root, serverBinary, qa }) {
     const origin = `http://127.0.0.1:${port}`;
 
     context = await browser.newContext();
-    const open = async (query = '') => {
+    const open = async (query = '', storage = {}) => {
       const page = await context.newPage();
+      if (Object.keys(storage).length > 0) {
+        await page.addInitScript((entries) => {
+          for (const [key, value] of Object.entries(entries)) {
+            window.sessionStorage.setItem(key, value);
+          }
+        }, storage);
+      }
       page.setDefaultTimeout(10_000);
       const apiHosts = new Set();
       const errors = [];
@@ -170,6 +179,26 @@ export async function checkStaticDefault({ browser, root, serverBinary, qa }) {
       assert.deepEqual([...refused.apiHosts], [], unsafe);
     }
 
+    // A tab that kept an unusable address and a token for the default server
+    // must not skip the notice: the form is shown, nothing is requested.
+    const legacy = await open('', {
+      'artifree.serverUrl': 'javascript:alert(1)',
+      [`artifree.accessToken.${new URL(defaultApi.api_url).origin}`]:
+        defaultApi.token,
+    });
+    await expect(
+      legacy.workspace.getByText(
+        'The server address kept for this tab was ignored.',
+      ),
+    ).toBeVisible();
+    await expect(
+      legacy.workspace.getByRole('heading', { name: 'Connect to your server' }),
+    ).toBeVisible();
+    await expect(legacy.workspace.getByLabel('Server URL')).toHaveValue(
+      defaultApi.api_url,
+    );
+    assert.deepEqual([...legacy.apiHosts], []);
+
     // A refused address typed into the form is explained and sends nothing.
     const typed = await open();
     await typed.workspace
@@ -186,17 +215,17 @@ export async function checkStaticDefault({ browser, root, serverBinary, qa }) {
     ).toBeVisible();
     assert.deepEqual([...typed.apiHosts], []);
 
-    for (const tracked of [byDefault, cleared, linked, typed]) {
+    for (const tracked of [byDefault, cleared, linked, legacy, typed]) {
       assert.deepEqual(tracked.errors, [], 'Browser JavaScript errors.');
     }
-    return { status: 'passed', pages: 7 };
+    return { status: 'passed', pages: 8 };
   } finally {
     await context?.close();
     await new Promise((closed) =>
       staticServer === undefined ? closed() : staticServer.close(closed),
     );
-    await defaultApi.stop();
-    await otherApi.stop();
+    await defaultApi?.stop();
+    await otherApi?.stop();
     await rm(scratch, { recursive: true, force: true });
     await rm(join(qa, 'static-default-dist'), { recursive: true, force: true });
   }

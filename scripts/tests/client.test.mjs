@@ -2344,8 +2344,9 @@ test('What onEvent throws ends following, even an API error', async () => {
 });
 
 test('A network failure names the server without its credentials', async () => {
-  const unreachable = async () => {
-    throw new TypeError('fetch failed');
+  // Like a real fetch, the failure quotes the whole address it was given.
+  const unreachable = async (input) => {
+    throw new TypeError(`fetch failed for ${input}`);
   };
   const cases = [
     ['http://user:hunter2-secret@api.invalid:7410/', 'http://api.invalid:7410'],
@@ -2353,9 +2354,19 @@ test('A network failure names the server without its credentials', async () => {
       'https://user:hunter2-secret@api.invalid/prefix',
       'https://api.invalid/prefix',
     ],
+    [
+      'https://api.invalid/prefix?token=hunter2-secret',
+      'https://api.invalid/prefix',
+    ],
+    ['https://api.invalid/#hunter2-secret', 'https://api.invalid'],
+    ['https://api.invalid?hunter2-secret', 'https://api.invalid'],
     ['not a url with hunter2-secret@x', 'the configured server'],
     ['user:hunter2-secret@host.invalid:80', 'the configured server'],
     ['ftp://user:hunter2-secret@host.invalid', 'the configured server'],
+    // The `@` is hidden, so no `@` test could catch these.
+    ['https//user:hunter2-secret%40host.invalid', 'the configured server'],
+    ['hunter2-secret', 'the configured server'],
+    ['/relative/hunter2-secret', 'the configured server'],
     ['', 'this origin'],
   ];
   for (const [baseUrl, shown] of cases) {
@@ -2369,5 +2380,32 @@ test('A network failure names the server without its credentials', async () => {
     assert.equal(error.code, 'network_error', baseUrl);
     assert.ok(!error.message.includes('hunter2-secret'), error.message);
     assert.ok(error.message.endsWith(`at ${shown}.`), error.message);
+    // The error the fetch raised quoted the address, so it is not kept for
+    // anything that prints the error object, unless the address was plain.
+    assert.equal(
+      error.cause === undefined,
+      baseUrl.includes('hunter2-secret'),
+      baseUrl,
+    );
+    assert.ok(
+      !JSON.stringify(error, Object.getOwnPropertyNames(error)).includes(
+        'hunter2-secret',
+      ),
+      baseUrl,
+    );
   }
+});
+
+test('A network failure for a plain address keeps the cause for debugging', async () => {
+  const refusal = new TypeError('connect ECONNREFUSED');
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410/',
+    accessToken: 't',
+    fetch: async () => {
+      throw refusal;
+    },
+  });
+  const error = await client.listArtifacts().catch((reason) => reason);
+  assert.equal(error.cause, refusal);
+  assert.ok(error.message.endsWith('at http://127.0.0.1:7410.'), error.message);
 });

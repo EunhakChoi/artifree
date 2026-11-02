@@ -31,7 +31,14 @@ export function parseServerUrl(raw: string): ServerUrlResult {
   if (parsed.username !== '' || parsed.password !== '') {
     return { ok: false, reason: 'The address must not contain credentials.' };
   }
-  if (parsed.search !== '' || parsed.hash !== '') {
+  // The text is checked as well: `new URL` reports an empty query (`/?`) or
+  // fragment (`/#`) as none at all, and the rule is that neither is present.
+  if (
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    text.includes('?') ||
+    text.includes('#')
+  ) {
     return {
       ok: false,
       reason: 'The address must not have a query string or fragment.',

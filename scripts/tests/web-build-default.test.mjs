@@ -52,8 +52,10 @@ async function bundleText(outDir) {
   return texts.join('\n');
 }
 
-test('a build without the variable has no default server', async () => {
-  const result = build('none', undefined);
+test('a build with an empty variable has no default server, whatever an env file says', async () => {
+  // A process variable beats every `apps/web/.env*` file in Vite, so the empty
+  // value keeps this case independent of a developer's ignored local files.
+  const result = build('none', '');
   assert.equal(result.status, 0, result.stderr + result.stdout);
   assert.ok(!(await bundleText(result.outDir)).includes(marker));
 });

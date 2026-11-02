@@ -117,17 +117,31 @@ struct CliServeFlags {
     change_streams: u32,
 }
 
+/// Whether `text` is a plain long option name: `--` and then only lowercase
+/// letters, digits, and `-`.
+fn is_option_name(text: &str) -> bool {
+    text.strip_prefix("--").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
+}
+
 /// Describes an argument that is not a serve option without quoting a value.
 ///
 /// A mistyped `--content-origin=https://user:secret@host` must not put the
-/// secret into the error, so only the option name before `=` is named, and an
-/// argument that is not an option is not quoted at all.
+/// secret into the error. The text is named only when it is a plain option
+/// name, or such a name followed by `=` (the value after `=` is never shown).
+/// Anything else, such as a flag and its value joined by a space or a colon
+/// inside one argument, or a bare value, is not quoted at all.
 fn unrecognized_option(argument: &str) -> String {
-    let what = if argument.starts_with("--") {
-        let name = argument.split('=').next().unwrap_or(argument);
+    let name = argument.split('=').next().unwrap_or_default();
+    let what = if is_option_name(name) {
         format!("Unrecognized serve option {name}")
     } else {
-        "Unexpected argument that is not an option".to_owned()
+        "Unexpected argument that is not a plain option name (not shown, in case it holds a secret)"
+            .to_owned()
     };
     format!("Unknown arguments. {what}; use --help.")
 }
@@ -319,7 +333,7 @@ fn parse_serve_with(arguments: &[String], env: ServeEnv) -> Result<ServeOptions,
     let resolved_content_origin = resolved_content_origin.map(|setting| setting.origin);
 
     let trusted_proxies =
-        resolve_trusted_proxies(flags.cli_trusted_proxies, env.trusted_proxies.as_deref())?;
+        resolve_trusted_proxies(&flags.cli_trusted_proxies, env.trusted_proxies.as_deref())?;
     let allowed_hosts = resolve_allowed_hosts(
         flags.cli_allowed_hosts,
         env.allowed_hosts.as_deref(),
@@ -399,21 +413,23 @@ fn resolve_lan_ip(
     env_lan: Option<String>,
 ) -> Result<Option<IpAddr>, String> {
     let explicit_lan = match cli_lan {
-        Some(lan) => Some(lan),
-        None => env_lan.filter(|s| !s.is_empty()),
+        Some(lan) => Some((lan, "--lan")),
+        None => env_lan
+            .filter(|s| !s.is_empty())
+            .map(|lan| (lan, "ARTIFREE_LAN")),
     };
     match explicit_lan {
-        Some(val) => {
+        Some((val, source)) => {
             let unbracketed = val
                 .strip_prefix('[')
                 .and_then(|s| s.strip_suffix(']'))
                 .unwrap_or(&val);
             let ip: IpAddr = unbracketed
                 .parse()
-                .map_err(|_| "--lan must be an IP address (IPv4 or IPv6).".to_owned())?;
+                .map_err(|_| format!("{source} must be an IP address (IPv4 or IPv6)."))?;
             if ip.is_unspecified() {
                 return Err(format!(
-                    "--lan must be a specific IP address (IPv4 or IPv6), not an unspecified address ({val}). Use --api-listen and --content-listen to bind to wildcard addresses."
+                    "{source} must be a specific IP address (IPv4 or IPv6), not an unspecified address ({val}). Use --api-listen and --content-listen to bind to wildcard addresses."
                 ));
             }
             Ok(Some(ip))
@@ -456,20 +472,20 @@ fn resolve_loopback_listen(
     env_listen: Option<String>,
 ) -> Result<Option<SocketAddr>, String> {
     let raw = match explicit {
-        Some(addr) => Some(addr),
-        None => env_listen.filter(|s| !s.is_empty()),
+        Some(addr) => Some((addr, "--loopback-listen")),
+        None => env_listen
+            .filter(|s| !s.is_empty())
+            .map(|addr| (addr, "ARTIFREE_LOOPBACK_LISTEN")),
     };
     match raw {
-        Some(val) => {
+        Some((val, source)) => {
             let addr = val.parse::<SocketAddr>().map_err(|_| {
-                "--loopback-listen must be an IP address and port, such as 127.0.0.1:7410."
-                    .to_owned()
+                format!("{source} must be an IP address and port, such as 127.0.0.1:7410.")
             })?;
             if !addr.ip().is_loopback() {
-                return Err(
-                    "--loopback-listen must be a loopback IP address, such as 127.0.0.1 or ::1."
-                        .to_owned(),
-                );
+                return Err(format!(
+                    "{source} must be a loopback IP address, such as 127.0.0.1 or ::1."
+                ));
             }
             Ok(Some(addr))
         }
@@ -551,12 +567,12 @@ fn validate_frame_ancestors(value: &str, source: &str) -> Result<String, String>
             "{source} must list at least one source; an empty list would let any page embed previews."
         ));
     }
-    if let Some(bad) = trimmed
+    if trimmed
         .chars()
-        .find(|c| matches!(c, ';' | ',') || !(c.is_ascii_graphic() || *c == ' '))
+        .any(|c| matches!(c, ';' | ',') || !(c.is_ascii_graphic() || c == ' '))
     {
         return Err(format!(
-            "{source} must be space-separated sources in visible ASCII without ';' or ',', found {bad:?}."
+            "{source} must be space-separated sources in visible ASCII without ';' or ','."
         ));
     }
     Ok(trimmed.to_owned())
@@ -588,24 +604,21 @@ fn resolve_api_origin(
 
 /// Resolves trusted proxy IP/CIDR list from CLI arguments and environment variables.
 fn resolve_trusted_proxies(
-    cli_proxies: Vec<String>,
+    cli_proxies: &[String],
     env_proxies: Option<&str>,
 ) -> Result<Vec<artifree_server::proxy::IpNetwork>, String> {
     let mut result = Vec::new();
-    for entry in cli_proxies {
+    let entries = cli_proxies
+        .iter()
+        .map(|entry| ("--trusted-proxy", entry.as_str()))
+        .chain(env_proxies.map(|entry| ("ARTIFREE_TRUSTED_PROXIES", entry)));
+    for (source, entry) in entries {
         for part in entry.split(',') {
             let part = part.trim();
             if !part.is_empty() {
-                let net: artifree_server::proxy::IpNetwork = part.parse()?;
-                result.push(net);
-            }
-        }
-    }
-    if let Some(env_proxies) = env_proxies {
-        for part in env_proxies.split(',') {
-            let part = part.trim();
-            if !part.is_empty() {
-                let net: artifree_server::proxy::IpNetwork = part.parse()?;
+                let net: artifree_server::proxy::IpNetwork = part
+                    .parse()
+                    .map_err(|e| format!("{source} lists an entry that is not usable: {e}"))?;
                 result.push(net);
             }
         }
@@ -1096,8 +1109,8 @@ mod tests {
             ("   ", "at least one source"),
             ("https://a.example; script-src *", "';'"),
             ("https://a.example,https://b.example", "','"),
-            ("https://a.example\nhttps://b.example", "'\\n'"),
-            ("https://ä.example", "'ä'"),
+            ("https://a.example\nhttps://b.example", "visible ASCII"),
+            ("https://ä.example", "visible ASCII"),
         ];
         for (bad, expected) in cases {
             let from_env = parse_serve_with(&base_args(&[]), serve_env(None, Some(bad)))
@@ -1252,12 +1265,108 @@ mod tests {
             stray.starts_with("Unknown arguments.") && !stray.contains(SECRET),
             "a stray value is not quoted: {stray:?}"
         );
+        // A flag and its value in one argument are not an option name, however
+        // they are joined, and no part of them is shown.
+        for joined in [
+            format!("--content-origin {sensitive}"),
+            format!("--content-origin:{sensitive}"),
+            format!("--content-origin\t{sensitive}"),
+            format!("--Content-Origin={sensitive}"),
+            format!("-{SECRET}"),
+            format!("--content-origin\u{a0}{sensitive}"),
+            SECRET.to_owned(),
+        ] {
+            let error = parse_serve(&base_args(&[&joined]))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                error.starts_with("Unknown arguments.") && !error.contains(SECRET),
+                "{joined:?} must not be quoted, got {error:?}"
+            );
+            assert!(
+                !error.contains("content-origin") || joined.contains('='),
+                "{joined:?}: only a name followed by '=' is named, got {error:?}"
+            );
+        }
         let equals = parse_serve(&base_args(&[&with_equals]))
             .err()
             .unwrap_or_default();
         assert!(
             equals.contains("--content-origin") && !equals.contains(SECRET),
             "the option name is kept, its value is not: {equals:?}"
+        );
+    }
+
+    #[test]
+    fn frame_ancestors_errors_do_not_show_the_character_that_was_refused() {
+        // A refused character may belong to a password, so it is not printed.
+        for bad in ['\u{20ac}', '\u{1}', '\u{e9}', '\u{7f}'] {
+            let value = format!("https://a.example {bad}");
+            let from_flag = parse_serve(&base_args(&["--frame-ancestors", &value]))
+                .err()
+                .unwrap_or_default();
+            let from_env = parse_serve_with(&base_args(&[]), serve_env(None, Some(&value)))
+                .err()
+                .unwrap_or_default();
+            for error in [from_flag, from_env] {
+                assert!(
+                    error.contains("visible ASCII")
+                        && !error.contains(bad)
+                        && !error.contains(&bad.escape_unicode().to_string())
+                        && !error.contains(&format!("{bad:?}")),
+                    "{bad:?} must not appear in {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn network_settings_name_the_flag_or_variable_in_effect() {
+        let bad = "not-an-address";
+        let env = |lan: Option<&str>, loopback: Option<&str>, proxies: Option<&str>| ServeEnv {
+            lan: lan.map(str::to_owned),
+            loopback_listen: loopback.map(str::to_owned),
+            trusted_proxies: proxies.map(str::to_owned),
+            ..ServeEnv::default()
+        };
+        let refused = |args: &[&str], env: ServeEnv| {
+            parse_serve_with(&base_args(args), env)
+                .err()
+                .unwrap_or_default()
+        };
+        assert!(refused(&["--lan", bad], ServeEnv::default()).starts_with("--lan must"));
+        assert!(refused(&[], env(Some(bad), None, None)).starts_with("ARTIFREE_LAN must"));
+        assert!(
+            refused(&["--lan", "0.0.0.0"], ServeEnv::default()).starts_with("--lan must"),
+            "unspecified address from the flag"
+        );
+        assert!(
+            refused(&[], env(Some("0.0.0.0"), None, None)).starts_with("ARTIFREE_LAN must"),
+            "unspecified address from the variable"
+        );
+        assert!(
+            refused(&["--loopback-listen", bad], ServeEnv::default())
+                .starts_with("--loopback-listen must")
+        );
+        assert!(
+            refused(&[], env(None, Some(bad), None)).starts_with("ARTIFREE_LOOPBACK_LISTEN must")
+        );
+        assert!(
+            refused(&[], env(None, Some("10.0.0.1:7410"), None))
+                .starts_with("ARTIFREE_LOOPBACK_LISTEN must be a loopback")
+        );
+        assert!(
+            refused(&["--trusted-proxy", bad], ServeEnv::default())
+                .starts_with("--trusted-proxy lists")
+        );
+        assert!(
+            refused(&[], env(None, None, Some("10.0.0.0/8,not-an-address")))
+                .starts_with("ARTIFREE_TRUSTED_PROXIES lists")
+        );
+        // A flag in effect hides the variable, so it is the flag that is named.
+        assert!(
+            refused(&["--lan", bad], env(Some("192.168.1.2"), None, None))
+                .starts_with("--lan must")
         );
     }
 

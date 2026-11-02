@@ -363,27 +363,39 @@ function sameHandoff(left: Handoff, right: Handoff): boolean {
   );
 }
 
+/** How error messages name the server, and whether the address is plain. */
+interface ServerLabel {
+  readonly text: string;
+  /**
+   * True when `text` is the address as given. When it is not, the address may
+   * have held a secret, so the error a failed `fetch` raised for it (which can
+   * quote the whole address) is not passed on as `cause`.
+   */
+  readonly plain: boolean;
+}
+
 /**
  * The server address for error messages. The address comes from a flag or an
- * environment variable and may hold a password (`http://user:secret@host`),
- * which must not reach a terminal or a log, so credentials are dropped; an
- * address that cannot be read as a URL is shown only when it has no `@`.
+ * environment variable and may hold a password (`http://user:secret@host`) or
+ * a token in the query or fragment, none of which may reach a terminal or a
+ * log. An `http:` or `https:` address is shown as its origin and path only;
+ * anything else is not shown at all, since text that is not an address cannot
+ * be told apart from a secret (`https//user:p%40ss` hides its `@`).
  */
-function describeServer(baseUrl: string): string {
-  if (baseUrl === '') return 'this origin';
+function describeServer(baseUrl: string): ServerLabel {
+  if (baseUrl === '') return { text: 'this origin', plain: true };
   try {
     const url = new URL(baseUrl);
-    // Only a hierarchical address has a username to drop. Something like
-    // `user:secret@host` parses as an opaque `user:` URL whose href holds it all.
+    // Only a hierarchical address has parts to drop. Something like
+    // `user:secret@host` parses as an opaque `user:` URL.
     if (url.protocol === 'http:' || url.protocol === 'https:') {
-      url.username = '';
-      url.password = '';
-      return url.href.replace(/\/+$/, '');
+      const text = `${url.origin}${url.pathname}`.replace(/\/+$/, '');
+      return { text, plain: text === baseUrl };
     }
   } catch {
     // Unreadable as a URL: handled below.
   }
-  return baseUrl.includes('@') ? 'the configured server' : baseUrl;
+  return { text: 'the configured server', plain: false };
 }
 
 /** HTTP API v1 client. Every method rejects with `ArtifreeApiError`. */
@@ -401,12 +413,16 @@ export class ArtifreeClient {
   private readonly baseUrl: string;
   /** The server address as messages show it: never with credentials. */
   private readonly serverLabel: string;
+  /** Whether a failed request's own error may be kept as `cause`. */
+  private readonly keepRequestCause: boolean;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(configuration: ClientConfiguration) {
     this.baseUrl = configuration.baseUrl.replace(/\/+$/, '');
-    this.serverLabel = describeServer(this.baseUrl);
+    const label = describeServer(this.baseUrl);
+    this.serverLabel = label.text;
+    this.keepRequestCause = label.plain;
     this.accessToken = configuration.accessToken;
     this.fetchImpl =
       configuration.fetch ?? ((input, init) => fetch(input, init));
@@ -1201,7 +1217,11 @@ export class ArtifreeClient {
     } catch (error: unknown) {
       throw new ArtifreeApiError(
         `Could not reach the Artifree API at ${this.serverLabel}.`,
-        { status: 0, code: 'network_error', cause: error },
+        {
+          status: 0,
+          code: 'network_error',
+          ...(this.keepRequestCause ? { cause: error } : {}),
+        },
       );
     }
     if (response.ok) return response;

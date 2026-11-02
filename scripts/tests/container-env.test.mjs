@@ -218,6 +218,16 @@ const leaking = [
     {},
     [`--content-origin=${withPassword('https://user@host.example.test')}`],
   ],
+  [
+    'a flag and its credentialed value joined by a space in one argument',
+    {},
+    [`--content-origin ${withPassword('https://user@host.example.test')}`],
+  ],
+  [
+    'a flag and its credentialed value joined by a colon in one argument',
+    {},
+    [`--content-origin:${withPassword('https://user@host.example.test')}`],
+  ],
 ];
 for (const [name, variables, args] of leaking) {
   test(`a refusal of ${name} does not print the password`, () => {

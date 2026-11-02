@@ -69,9 +69,9 @@ function tokenKeyForServer(serverUrl: string): string {
 
 function storedToken(
   serverUrl: string,
-  fromQuery: boolean,
+  restoreToken: boolean,
 ): string | undefined {
-  if (fromQuery) {
+  if (!restoreToken) {
     return undefined;
   }
   const key = tokenKeyForServer(serverUrl);
@@ -110,7 +110,7 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
   const defaultServer = checkBuildDefault(buildDefault).url;
   const [serverUrl, setServerUrl] = useState<string>(initialConfig.url);
   const [token, setToken] = useState<string | undefined>(() =>
-    storedToken(initialConfig.url, initialConfig.fromQuery),
+    storedToken(initialConfig.url, initialConfig.restoreToken),
   );
 
   function connect(newToken: string | undefined, newServerUrl?: string): void {

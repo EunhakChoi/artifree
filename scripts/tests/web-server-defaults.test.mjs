@@ -52,6 +52,9 @@ const refused = [
   ['https://user@api.example.com', /credentials/],
   ['https://api.example.com/?token=1', /query string or fragment/],
   ['https://api.example.com/#x', /query string or fragment/],
+  ['https://api.example.com/?', /query string or fragment/],
+  ['https://api.example.com/#', /query string or fragment/],
+  ['https://api.example.com?', /query string or fragment/],
 ];
 for (const [raw, reason] of refused) {
   test(`a server address of ${JSON.stringify(raw)} is refused`, () => {
@@ -68,7 +71,7 @@ const configured = 'https://Default.example/';
 test('without any setting the page uses its own origin, as before', () => {
   assert.deepEqual(
     resolveInitialServer({ search: '', stored: null, buildDefault: none }),
-    { url: '', fromQuery: false, notices: [] },
+    { url: '', restoreToken: true, notices: [] },
   );
 });
 
@@ -79,7 +82,7 @@ test('the build-time default is used (and normalized) when nothing else names a 
       stored: null,
       buildDefault: configured,
     }),
-    { url: 'https://default.example', fromQuery: false, notices: [] },
+    { url: 'https://default.example', restoreToken: true, notices: [] },
   );
 });
 
@@ -91,7 +94,7 @@ test('?server= beats the tab setting and the default, and withholds a stored tok
   });
   assert.deepEqual(result, {
     url: 'https://link.example',
-    fromQuery: true,
+    restoreToken: false,
     notices: [],
   });
 });
@@ -103,7 +106,7 @@ test('the address kept for this tab beats the default', () => {
     buildDefault: configured,
   });
   assert.equal(result.url, 'https://tab.example');
-  assert.equal(result.fromQuery, false);
+  assert.equal(result.restoreToken, true);
 });
 
 const unsafeLinks = [
@@ -120,7 +123,7 @@ for (const link of unsafeLinks) {
       buildDefault: configured,
     });
     assert.equal(result.url, 'https://default.example');
-    assert.equal(result.fromQuery, true, 'a stored token stays withheld');
+    assert.equal(result.restoreToken, false, 'a stored token stays withheld');
     assert.equal(result.notices.length, 1);
     assert.match(
       result.notices[0],
@@ -144,6 +147,32 @@ test('an invalid stored address is skipped for the default', () => {
   );
 });
 
+test('a notice always reaches the person: no stored token is restored past it', () => {
+  // The notice is shown only on the connect form. A token restored for the
+  // fallback server would skip that form and the address would be dropped
+  // without a word.
+  const cases = [
+    { stored: 'javascript:alert(1)', buildDefault: configured },
+    { stored: 'https://user:secret@tab.example', buildDefault: none },
+    { stored: 'tab.example', buildDefault: none },
+    { stored: 'https://tab.example', buildDefault: 'ftp://default.example' },
+  ];
+  for (const { stored, buildDefault } of cases) {
+    const result = resolveInitialServer({ search: '', stored, buildDefault });
+    assert.equal(result.notices.length >= 1, true, stored);
+    assert.equal(result.restoreToken, false, stored);
+  }
+  // Without a notice the token is restored, as before.
+  assert.equal(
+    resolveInitialServer({
+      search: '',
+      stored: 'https://tab.example',
+      buildDefault: configured,
+    }).restoreToken,
+    true,
+  );
+});
+
 test("an invalid build-time default is shown and leaves today's behavior", () => {
   const result = resolveInitialServer({
     search: '',
@@ -151,7 +180,11 @@ test("an invalid build-time default is shown and leaves today's behavior", () =>
     buildDefault: 'ftp://default.example',
   });
   assert.equal(result.url, '');
-  assert.equal(result.fromQuery, false);
+  assert.equal(
+    result.restoreToken,
+    false,
+    'the notice is only on the connect form',
+  );
   assert.equal(result.notices.length, 1);
   assert.match(
     result.notices[0],
