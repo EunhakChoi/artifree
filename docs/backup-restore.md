@@ -26,6 +26,19 @@ that the snapshot can be restored (it runs the same check, upgrade and schema
 comparison that `restore` does) before it reports success. On success stdout is
 one JSON line, `{"event":"backup","output":...,"schema_version":...,"bytes":...}`;
 failures are one line on stderr and exit status 1, and leave no output file.
+`restore` prints `{"event":"restore","data_dir":...,"schema_version":...,"bytes":...}`.
+
+- **Paths that are not UTF-8.** Then `output` (`data_dir` for `restore`) is the
+  path converted lossily, so it does not name a real file, and the line also
+  has `"path_utf8":false` and the exact path: `"path_bytes"`, an array of the
+  path's bytes, on Unix, or `"path_wide"`, an array of UTF-16 code units, on
+  Windows. A UTF-8 path has neither extra field. A script that needs the path
+  should use the value it passed in.
+- **Closed or failing stdout.** The result is written once the backup is
+  published and proven, and nothing written afterwards can remove it. A closed
+  stdout (a pipe whose reader went away) is ignored and the exit status stays 0.
+  Any other failure to write the line (for example a full disk) exits 1 with a
+  message on stderr that says the backup succeeded and was kept.
 
 - `--output` must not exist; nothing is ever replaced. Its directory must exist,
   be writable and support hard links, and have space for the snapshot (plus
@@ -45,9 +58,16 @@ failures are one line on stderr and exit status 1, and leave no output file.
   the wrong owner in the data directory. Paths that are not UTF-8 work on
   Unix; on Windows they must be valid Unicode.
 - The command works in a directory named `.artifree-scratch-<random>` beside the
-  output and removes it on every failure. If the process is killed (SIGKILL,
-  power loss) that directory stays; delete such leftovers when no backup or
-  restore is running.
+  output (inside the new data directory for `restore`) and removes it on every
+  failure the process survives. If the process is killed (SIGKILL, power loss)
+  that directory stays; delete such leftovers when no backup or restore is
+  running.
+- If the scratch directory cannot be removed after the backup was published
+  and flushed (a permission or file-system error), the backup is kept and the
+  command still succeeds and prints its JSON line. The removal is retried once;
+  if it fails again stderr gets one `warning:` line that names the leftover
+  `.artifree-scratch-<random>` directory and the reason, and exit status is 0. Check stderr for it, and delete the directory when no backup or restore is
+  running. For `restore` the leftover is inside the new data directory.
 - On Unix the finished file and the directory entry are flushed to disk before
   success is reported. Windows has no standard-library directory flush, so
   there the entry is as durable as the file system makes it. On a file system

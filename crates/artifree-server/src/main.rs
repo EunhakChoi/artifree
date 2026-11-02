@@ -732,6 +732,18 @@ mod tests {
             conflict.contains("--content-origin must differ from --api-origin"),
             "{conflict}"
         );
+
+        // A browser reads 0x7f.0.0.1 as 127.0.0.1, one origin with the API's.
+        let encoded = refusal(
+            &ServeEnv::default(),
+            &[
+                "--api-origin",
+                "http://127.0.0.1:7410",
+                "--content-origin",
+                "http://0x7f.0.0.1:7410",
+            ],
+        );
+        assert!(encoded.contains("--content-origin"), "{encoded}");
         Ok(())
     }
 

@@ -220,3 +220,112 @@ fn arguments_that_are_not_utf8_do_not_panic() -> TestResult {
     }
     Ok(())
 }
+
+/// A path that is not UTF-8 is given exactly, in `path_bytes`, beside a
+/// lossy string and `path_utf8: false`; a UTF-8 path has neither extra field.
+#[cfg(unix)]
+#[test]
+fn a_backup_path_that_is_not_utf8_is_reported_exactly() -> TestResult {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let scratch = Scratch::new("utf8-result");
+    let data = data_dir_with_database(&scratch.0)?;
+    let output = scratch
+        .0
+        .join(OsString::from_vec(b"b\xff\xfe.sqlite3".to_vec()));
+
+    let saved = run(&[
+        "backup".as_ref(),
+        "--data-dir".as_ref(),
+        data.as_os_str(),
+        "--output".as_ref(),
+        output.as_os_str(),
+    ])?;
+
+    let saved = one_json_line(&saved)?;
+    assert!(output.is_file(), "the backup exists at the exact path");
+    assert_eq!(saved["path_utf8"], false);
+    assert_eq!(
+        saved["path_bytes"],
+        serde_json::json!(output.as_os_str().as_bytes().to_vec())
+    );
+    assert!(
+        saved["output"]
+            .as_str()
+            .is_some_and(|text| text.contains('\u{fffd}')),
+        "{saved}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_utf8_path_has_no_path_utf8_field() -> TestResult {
+    let scratch = Scratch::new("utf8-plain");
+    let data = data_dir_with_database(&scratch.0)?;
+    let output = scratch.0.join("plain.sqlite3");
+
+    let saved = run(&[
+        "backup".as_ref(),
+        "--data-dir".as_ref(),
+        data.as_os_str(),
+        "--output".as_ref(),
+        output.as_os_str(),
+    ])?;
+
+    let saved = one_json_line(&saved)?;
+    assert!(saved.get("path_utf8").is_none() && saved.get("path_bytes").is_none());
+    Ok(())
+}
+
+/// A reader that closed stdout before the backup finished does not turn the
+/// published backup into a panic (exit code 101) or a failure.
+#[test]
+fn a_closed_stdout_does_not_fail_a_published_backup() -> TestResult {
+    let scratch = Scratch::new("closed-stdout");
+    let data = data_dir_with_database(&scratch.0)?;
+    let output = scratch.0.join("backup.sqlite3");
+    let (reader, writer) = std::io::pipe()?;
+    drop(reader);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_artifree-server"))
+        .args(["backup".as_ref(), "--data-dir".as_ref(), data.as_os_str()])
+        .args(["--output".as_ref(), output.as_os_str()])
+        .stdout(writer)
+        .output()?;
+
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    assert!(output.is_file(), "the backup stays");
+    Ok(())
+}
+
+/// Any other failure to write the result is an error, whose message says the
+/// backup itself was kept.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_stdout_is_an_error_that_says_the_backup_was_kept() -> TestResult {
+    let scratch = Scratch::new("full-stdout");
+    let data = data_dir_with_database(&scratch.0)?;
+    let output = scratch.0.join("backup.sqlite3");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_artifree-server"))
+        .args(["backup".as_ref(), "--data-dir".as_ref(), data.as_os_str()])
+        .args(["--output".as_ref(), output.as_os_str()])
+        .stdout(std::fs::OpenOptions::new().write(true).open("/dev/full")?)
+        .output()?;
+
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8(result.stderr)?;
+    assert!(
+        stderr.contains("succeeded and was kept") && stderr.contains("stdout"),
+        "{stderr}"
+    );
+    assert!(output.is_file(), "the backup stays");
+    Ok(())
+}

@@ -9,12 +9,13 @@ export type ServerUrlResult =
 const NOT_ABSOLUTE = 'it is not a valid absolute http or https address';
 const CREDENTIALS = 'it contains a user name or password';
 const QUERY_OR_FRAGMENT = 'it contains a query or fragment';
+const PORT_ZERO = 'its port is 0, which no server listens on';
 
 /**
  * Checks a server address from any source: the `?server=` link, the connect
  * form, a value kept for the tab, or the build default. It must be an
  * absolute `http` or `https` address without credentials, query, or fragment
- * (an empty `?` or `#` counts). On success `url` is `origin + path` without a
+ * (an empty `?` or `#` counts), and not name port 0. On success `url` is `origin + path` without a
  * trailing slash. The reason never repeats the text, which may hold a secret.
  */
 export function parseServerUrl(text: string): ServerUrlResult {
@@ -39,6 +40,9 @@ export function parseServerUrl(text: string): ServerUrlResult {
   }
   if (parsed.username !== '' || parsed.password !== '')
     return refused(CREDENTIALS);
+  // `URL` accepts port 0 (and `:00`) and reports it as '0'; the server refuses
+  // it, so an address with it would build and then fail when used.
+  if (parsed.port === '0') return refused(PORT_ZERO);
   return {
     ok: true,
     url: `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, ''),
@@ -124,9 +128,12 @@ export function resolveInitialServer(input: {
 }
 
 /**
- * The server address worth keeping for the tab, or undefined. The page's own
- * origin and the build default are not kept: they are what a new tab starts
- * with anyway, and keeping them would pin an old default.
+ * The server address worth keeping for the tab, or undefined. An empty
+ * address (the page's own origin, chosen by leaving the field empty) and the
+ * build default are not kept: they are what a new tab starts with anyway, and
+ * keeping them would pin an old default. A full address that happens to equal
+ * the page's own origin is kept like any address the person typed, since with
+ * a build default present it is the only way to choose the page's origin.
  */
 export function serverToKeep(
   url: string,
