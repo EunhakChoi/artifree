@@ -129,9 +129,11 @@ function startContainer({ image, name, volume, apiPort, contentPort, extra }) {
     `127.0.0.1:${apiPort}:7410`,
     '--publish',
     `127.0.0.1:${contentPort}:7411`,
+    // Declared as the documented run command does (decision 0028): without
+    // it the preview origin would be http://0.0.0.0:7411 and previews fail.
+    '--env',
+    `ARTIFREE_CONTENT_ORIGIN=http://127.0.0.1:${contentPort}`,
     image,
-    '--content-origin',
-    `http://127.0.0.1:${contentPort}`,
     '--allowed-host',
     `127.0.0.1:${apiPort}`,
     ...(extra ?? []),
@@ -316,6 +318,22 @@ export async function verifyContainer(archive) {
         'https://same.example',
       ],
       /must differ/,
+    );
+    // The same refusal when both origins come from the environment, and a
+    // bad variable is refused by name.
+    await refusedRun(
+      [
+        '--env',
+        'ARTIFREE_API_ORIGIN=https://same.example',
+        '--env',
+        'ARTIFREE_CONTENT_ORIGIN=https://same.example',
+        image,
+      ],
+      /must differ/,
+    );
+    await refusedRun(
+      ['--env', 'ARTIFREE_CONTENT_ORIGIN=ftp://preview.example', image],
+      /ARTIFREE_CONTENT_ORIGIN must be a valid HTTP or HTTPS origin/,
     );
     // A bind mount other users can enter is refused before any data is read.
     const open = join(scratch, 'open-data');

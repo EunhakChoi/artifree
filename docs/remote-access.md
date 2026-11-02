@@ -1,7 +1,8 @@
 # Remote access guides
 
 Status: O03b ([decision 0026](decisions/0026-container-image.md)), documentation
-only. These guides rest on the server flags of decisions
+only; O03d ([decision 0028](decisions/0028-static-web-defaults.md)) added the
+static build default and the environment variables used below. These guides rest on the server flags of decisions
 [0022](decisions/0022-production-web-and-api-serving.md),
 [0023](decisions/0023-single-owner-token-management.md), and
 [0024](decisions/0024-https-proxy-and-remote-access.md). **None of the third-party
@@ -71,7 +72,9 @@ example runs Artifree from the [container](container.md) and Caddy as sibling
 containers on a network with a fixed subnet, so `--trusted-proxy` can be
 a single address. Artifree publishes no port to the host; only Caddy does.
 
-`compose.yaml` (not run; `docker compose` was not available):
+`compose.yaml` (not run; `docker compose` was not available). The settings are
+the environment variables of [the container guide](container.md#settings-by-environment-variable);
+the flags of the same name work too:
 
 ```yaml
 services:
@@ -81,10 +84,10 @@ services:
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
     volumes: ['artifree-data:/data']
-    command:
-      - --api-origin=https://artifree.example.com
-      - --content-origin=https://preview.example.com
-      - --trusted-proxy=172.28.0.2/32
+    environment:
+      ARTIFREE_API_ORIGIN: https://artifree.example.com
+      ARTIFREE_CONTENT_ORIGIN: https://preview.example.com
+      ARTIFREE_TRUSTED_PROXIES: 172.28.0.2/32
     networks: [edge]
   caddy:
     image: caddy:2 # pin a digest for real use
@@ -212,13 +215,26 @@ reverse proxy. Neither was run.
 
 ## Static web workspace on another host (for example Vercel)
 
-**This works today without code changes** when the API is served over HTTPS
-(browsers block an HTTPS page from calling a plain-HTTP API). The built web
-workspace is plain static files, and its API address can be chosen at run time.
+**This works when the API is served over HTTPS** (browsers block an HTTPS page
+from calling a plain-HTTP API). The built web workspace is plain static files.
+Which API it talks to can be set when it is built (the default) or chosen in
+the page (`?server=` or the Server URL field).
 
-1. Build: `npm ci && npm run build`. Publish the contents of `apps/web/dist`
-   as a static site (on Vercel, deploy that directory as static output). The
-   workspace has no client-side path routes, so no rewrite rules are needed.
+1. Build with the API address as the default, and publish the contents of
+   `apps/web/dist` as a static site (on Vercel, set `VITE_ARTIFREE_SERVER` in the
+   project's environment variables and deploy that directory as static output):
+
+   ```sh
+   npm ci && VITE_ARTIFREE_SERVER=https://api.example.com npm run build
+   ```
+
+   The address must be an absolute `http://` or `https://` address without
+   credentials, query, or fragment (a path prefix is kept); anything else fails
+   the build. Without the variable the page behaves as before (it uses its own
+   origin). Release archives are built without it, because `artifree-server`
+   serves their web files itself. The workspace has no client-side path routes,
+   so no rewrite rules are needed.
+
 2. Run the API on its own public HTTPS origin and preview origin (see the
    proxy example), and allow the UI origin to call it and to frame previews.
    With the UI at `https://ui.example.app`:
@@ -232,44 +248,57 @@ workspace is plain static files, and its API address can be chosen at run time.
      --frame-ancestors https://ui.example.app
    ```
 
-   Both extra flags are needed. Without `--allowed-origin` the browser's CORS
-   check fails; without `--frame-ancestors` previews are blocked from rendering in
-   the UI (the CSP default lists only the API origin and loopback). Note that
-   `--frame-ancestors` replaces the default list instead of extending it, and has
-   no environment variable. `--api-origin` also adds the API's own origin to
-   the allowed CORS origins.
+   In a container the same values are variables: `ARTIFREE_API_ORIGIN`,
+   `ARTIFREE_CONTENT_ORIGIN`, `ARTIFREE_TRUSTED_PROXIES`,
+   `ARTIFREE_ALLOWED_ORIGINS=https://ui.example.app`, and
+   `ARTIFREE_FRAME_ANCESTORS=https://ui.example.app`.
 
-3. Open `https://ui.example.app/?server=https://api.example.com`, paste the
-   access token, and connect. A server address given in the URL suppresses restoring a
-   stored token (decision 0022), so the token is entered again.
+   Both UI settings are needed. Without the allowed origin the browser's CORS
+   check fails; without the frame ancestor previews are blocked from rendering in
+   the UI (the CSP default lists only the API origin and loopback). Note that
+   `--frame-ancestors` replaces the default list instead of extending it.
+   `--api-origin` also adds the API's own origin to the allowed CORS origins.
+   Allowed origins are normalized like the browser's (`https://UI.example.app/`
+   matches `https://ui.example.app`); an entry that is not an `http(s)` origin
+   stops the server at start-up.
+
+3. Open `https://ui.example.app/`, paste the access token, and connect. The
+   Server URL field already holds the default. A link with
+   `?server=https://other.example.com` replaces it for that tab. A server address
+   in the URL suppresses restoring a stored token (decision 0022), so the token
+   is entered again; the default does not.
 
 Limits and risks:
 
 - A `?server=<url>` link makes whoever opens it send their token to the
   named server. Only use links you built yourself, and never open one from
-  someone else.
+  someone else. The page refuses addresses that are not `http(s)` or that carry
+  credentials, but it cannot tell a friendly server from a hostile one.
 - The API still needs the headers and post-setup check of rule 5 and the
   check above; the static host does not change them.
-- The static host serves the code that handles your token. A compromised
-  deployment or an account takeover on that host can steal it. Use a dedicated
+- The static host serves the code that handles your token, and the default
+  address is part of that code. A compromised deployment or an account takeover
+  on that host can steal the token or point the page elsewhere. Use a dedicated
   agent token (decision 0023) for browsers on such a host if you want to
   revoke it separately.
-- There is no build-time default server address. Every new tab needs the
-  `?server=` URL or the Server URL field. A default and environment variables
-  for the container's remaining flags are tracked as roadmap item O03d.
+- The default is fixed at build time. To change it, rebuild and redeploy.
 - Previews are separate from the UI in origin, not from the network
   (decision 0003). Their frame can navigate elsewhere.
 - Hosting platforms' preview deployments get new origins; each needs adding to
-  `--allowed-origin` and `--frame-ancestors`, which cannot be changed without a
-  restart.
+  `--allowed-origin` and `--frame-ancestors`. There is no wildcard, and these
+  lists are read once at start-up, so adding one means restarting the server.
+  Serve the UI from a stable name (a production alias) to avoid this. See
+  [decision 0028](decisions/0028-static-web-defaults.md#changing-the-cors-allow-list-needs-a-restart).
 
 ## What was actually run
 
-| Claim                                                                                                                                                                                                                                                                                    | Where it ran                                                                                                                                                 |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A static copy of `apps/web/dist` on `http://ui.test:5000` talks to a server with `--api-origin http://api.test:7410 --content-origin http://content.test:7411 --allowed-origin http://ui.test:5000 --frame-ancestors http://ui.test:5000`: list loads and a preview renders in its frame | Once, by hand, in Playwright Chromium on a development machine; the three names were mapped to `127.0.0.1` by the browser. Plain HTTP on one host. Not in CI |
-| The same setup without `--frame-ancestors` shows the list but the preview is blocked by CSP `frame-ancestors`; without `--allowed-origin` the list never loads (CORS)                                                                                                                    | Same manual run                                                                                                                                              |
-| The container image builds, runs read-only as uid 10001, stays healthy, saves, restarts on the same volume, and refuses two misconfigurations                                                                                                                                            | Only in the CI job `Container image` ([container guide](container.md))                                                                                       |
-| HTTPS proxy behavior (forwarded headers, Host, MCP, preview CSP, change feed)                                                                                                                                                                                                            | Decision 0024's automated test with a Node TLS proxy on one host                                                                                             |
-| Caddy, Cloudflare Tunnel, ngrok, Tailscale, Headscale, Vercel, `docker compose`, any real certificate, any second machine, the public internet                                                                                                                                           | Not run                                                                                                                                                      |
-| Codex and Pi connecting to Artifree                                                                                                                                                                                                                                                      | Not run in this change; their status is unchanged from [MCP guide](mcp.md) and the roadmap                                                                   |
+| Claim                                                                                                                                                                                                                                                                                    | Where it ran                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A static copy of `apps/web/dist` on `http://ui.test:5000` talks to a server with `--api-origin http://api.test:7410 --content-origin http://content.test:7411 --allowed-origin http://ui.test:5000 --frame-ancestors http://ui.test:5000`: list loads and a preview renders in its frame | Once, by hand, in Playwright Chromium on a development machine; the three names were mapped to `127.0.0.1` by the browser. Plain HTTP on one host. Not in CI           |
+| The same setup without `--frame-ancestors` shows the list but the preview is blocked by CSP `frame-ancestors`; without `--allowed-origin` the list never loads (CORS)                                                                                                                    | Same manual run                                                                                                                                                        |
+| A static build made with `VITE_ARTIFREE_SERVER` on a plain file server (its own origin) reads the default server, a `?server=` link overrides it, unsafe links and typed addresses are refused before any request, and the build fails on a bad value                                    | The browser smoke suite (`npm run test:smoke`), Chromium and Firefox, loopback and plain HTTP, run on a development machine and in CI. Not a real static host or HTTPS |
+| `ARTIFREE_CONTENT_ORIGIN` and `ARTIFREE_FRAME_ANCESTORS` reach the preview policy of the real server binary, flags win, bad values stop it                                                                                                                                               | Node tests against the built binary (`container-env.test.mjs`); the image itself only in the CI job `Container image`                                                  |
+| The container image builds, runs read-only as uid 10001, stays healthy, saves, restarts on the same volume, and refuses two misconfigurations                                                                                                                                            | Only in the CI job `Container image` ([container guide](container.md))                                                                                                 |
+| HTTPS proxy behavior (forwarded headers, Host, MCP, preview CSP, change feed)                                                                                                                                                                                                            | Decision 0024's automated test with a Node TLS proxy on one host                                                                                                       |
+| Caddy, Cloudflare Tunnel, ngrok, Tailscale, Headscale, Vercel, `docker compose`, any real certificate, any second machine, the public internet                                                                                                                                           | Not run                                                                                                                                                                |
+| Codex and Pi connecting to Artifree                                                                                                                                                                                                                                                      | Not run in this change; their status is unchanged from [MCP guide](mcp.md) and the roadmap                                                                             |

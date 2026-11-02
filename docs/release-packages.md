@@ -83,8 +83,10 @@ of `token_file` (`<data-dir>/access-token`). `GET /healthz` answers `ok` without
 a token. LAN and HTTPS reverse-proxy operation use the flags of decisions
 [0022](decisions/0022-production-web-and-api-serving.md) and
 [0024](decisions/0024-https-proxy-and-remote-access.md) (`--lan`, `--api-origin`,
-`--content-origin`, `--trusted-proxy`, `--allowed-host`); nothing in the
-package changes them.
+`--content-origin`, `--trusted-proxy`, `--allowed-host`; the origin settings also
+have `ARTIFREE_*` variables, see the [container guide](container.md#settings-by-environment-variable)); nothing in the
+package changes them. The packaged web files are built without a default server
+(decision 0028).
 
 Startup refuses, with a message on stderr and a nonzero exit, a missing web
 directory or one without `index.html`, and an `--api-origin` equal to

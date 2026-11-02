@@ -22,6 +22,8 @@ import { emptiness, inView, isFiltered, queryKey } from './list-query';
 import { START, navigate, opened } from './navigation';
 import type { NavigationEvent } from './navigation';
 import { ConnectForm } from './connect-form';
+import { checkBuildDefault, resolveInitialServer } from './initial-server';
+import type { InitialServer } from './initial-server';
 import { CreateDialog } from './create-dialog';
 import { KeptDrafts } from './kept-drafts';
 import type { PageDrafts } from './page-drafts';
@@ -34,18 +36,24 @@ import { describeFailure, useRequest } from './use-request';
 
 const SERVER_KEY = 'artifree.serverUrl';
 
-function readInitialServerUrl(): { url: string; fromQuery: boolean } {
+// Set when a static build is made (VITE_ARTIFREE_SERVER, decision 0028); a
+// page served by artifree-server itself is built without it.
+const BUILD_DEFAULT_SERVER: unknown = import.meta.env['VITE_ARTIFREE_SERVER'];
+const buildDefault =
+  typeof BUILD_DEFAULT_SERVER === 'string' ? BUILD_DEFAULT_SERVER : '';
+
+function readInitialServer(): InitialServer {
+  let stored: string | null = null;
   try {
-    const params = new URLSearchParams(window.location.search);
-    const queryServer = params.get('server');
-    if (queryServer !== null && queryServer.trim() !== '') {
-      return { url: queryServer.trim(), fromQuery: true };
-    }
-    const stored = sessionStorage.getItem(SERVER_KEY);
-    return { url: stored ?? '', fromQuery: false };
+    stored = sessionStorage.getItem(SERVER_KEY);
   } catch {
-    return { url: '', fromQuery: false };
+    // Without storage there is no address kept for this tab.
   }
+  return resolveInitialServer({
+    search: window.location.search,
+    stored,
+    buildDefault,
+  });
 }
 
 function tokenKeyForServer(serverUrl: string): string {
@@ -98,15 +106,18 @@ function storeServerUrl(serverUrl: string): void {
  * `drafts` belongs to the page and outlives every connection.
  */
 export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
-  const [initialConfig] = useState(readInitialServerUrl);
+  const [initialConfig] = useState(readInitialServer);
+  const defaultServer = checkBuildDefault(buildDefault).url;
   const [serverUrl, setServerUrl] = useState<string>(initialConfig.url);
   const [token, setToken] = useState<string | undefined>(() =>
     storedToken(initialConfig.url, initialConfig.fromQuery),
   );
 
   function connect(newToken: string | undefined, newServerUrl?: string): void {
+    // An empty address means "the default": the built-in default when there
+    // is one, otherwise the page's own origin.
     const effectiveServer =
-      newServerUrl !== undefined ? newServerUrl : serverUrl;
+      newServerUrl === undefined ? serverUrl : newServerUrl || defaultServer;
     setServerUrl(effectiveServer);
     storeServerUrl(effectiveServer);
     storeToken(newToken, effectiveServer);
@@ -117,6 +128,8 @@ export function ArtifactWorkspace({ drafts }: { drafts: PageDrafts }) {
     return (
       <ConnectForm
         initialServerUrl={serverUrl}
+        defaultServerUrl={defaultServer}
+        notices={initialConfig.notices}
         onConnect={(tok, srv) => connect(tok, srv)}
       />
     );

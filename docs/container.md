@@ -1,7 +1,9 @@
 # Container image
 
 Status: O03b, implemented as a build recipe and a CI check
-([decision 0026](decisions/0026-container-image.md)). **No image is published.**
+([decision 0026](decisions/0026-container-image.md)); O03d added environment
+variables for the origin settings
+([decision 0028](decisions/0028-static-web-defaults.md)). **No image is published.**
 There is no registry, tag, or signature; you build the image from a release
 archive yourself. The image was built and run only by the `Container image` CI
 job, on GitHub's `ubuntu-24.04` runner. It has not been run on any other host,
@@ -25,7 +27,7 @@ to arm64 and the x86-64 binary would not run): no ARM image, no Alpine/musl, no 
 | Data        | volume `/data` (database and `access-token`), mode 700, owned by the user                                           |
 | Ports       | `7410` API and web workspace; `7411` preview content, a separate origin                                             |
 | Command     | `artifree-server serve --data-dir /data --web-dir /app/web --api-listen 0.0.0.0:7410 --content-listen 0.0.0.0:7411` |
-| Your flags  | everything after the image name is appended; server environment variables (`ARTIFREE_*`) work as usual              |
+| Your flags  | everything after the image name is appended; the `ARTIFREE_*` variables below work as usual (a flag wins)           |
 | Healthcheck | `GET /healthz` on `127.0.0.1:7410` inside the container, using the shell already in the image                       |
 | Not inside  | Node.js (the bundled CLI in `/app/cli` cannot run there), curl, any package manager step                            |
 
@@ -49,23 +51,26 @@ docker build --platform linux/amd64 -t artifree:local -f deploy/container/Docker
 ## Run on one machine
 
 The preview origin must be given, because the container cannot know which
-address your browser uses for port 7411:
+address your browser uses for port 7411. It can be a flag after the image name
+or the variable `ARTIFREE_CONTENT_ORIGIN`:
 
 ```sh
 docker volume create artifree-data
 docker run -d --name artifree --restart unless-stopped --platform linux/amd64 \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v artifree-data:/data \
+  -e ARTIFREE_CONTENT_ORIGIN=http://127.0.0.1:7411 \
   -p 127.0.0.1:7410:7410 -p 127.0.0.1:7411:7411 \
-  artifree:local --content-origin http://127.0.0.1:7411
+  artifree:local
 docker exec artifree cat /data/access-token      # paste into http://127.0.0.1:7410
 ```
 
-- Without `--content-origin` the server reports `http://0.0.0.0:7411` as the
-  preview origin, which a browser cannot use.
+- Without `--content-origin` or `ARTIFREE_CONTENT_ORIGIN` the server reports
+  `http://0.0.0.0:7411` as the preview origin, which a browser cannot use.
 - Publishing on other host ports (`-p 127.0.0.1:9000:7410`) changes the `Host`
   the server sees. Add `--allowed-host 127.0.0.1:9000` and set
-  `--content-origin` to the matching preview port. Keep the in-container
+  `--content-origin` (or `ARTIFREE_CONTENT_ORIGIN`) to the matching preview
+  port. Keep the in-container
   ports at 7410 and 7411; the healthcheck follows 7410.
 - Publish to `127.0.0.1` unless you mean to expose the port. Anything reachable
   on the published port can attempt to authenticate with the token.
@@ -77,6 +82,33 @@ docker exec artifree cat /data/access-token      # paste into http://127.0.0.1:7
   and run it on the same volume. Take a backup first
   ([backup guide](backup-restore.md#containers), commands not run in CI); there
   is no downgrade.
+
+## Settings by environment variable
+
+Every origin and proxy setting can be declared without arguments, for example in
+a compose file or an env file (decisions
+[0022](decisions/0022-production-web-and-api-serving.md),
+[0024](decisions/0024-https-proxy-and-remote-access.md),
+[0028](decisions/0028-static-web-defaults.md)):
+
+| Variable                    | Same as flag         | Value                                                      |
+| --------------------------- | -------------------- | ---------------------------------------------------------- |
+| `ARTIFREE_API_ORIGIN`       | `--api-origin`       | public origin of the API and web workspace                 |
+| `ARTIFREE_CONTENT_ORIGIN`   | `--content-origin`   | public origin of previews; must differ from the API origin |
+| `ARTIFREE_FRAME_ANCESTORS`  | `--frame-ancestors`  | space-separated CSP sources allowed to embed previews      |
+| `ARTIFREE_ALLOWED_ORIGINS`  | `--allowed-origin`   | comma-separated origins allowed to call the API (CORS)     |
+| `ARTIFREE_ALLOWED_HOSTS`    | `--allowed-host`     | comma-separated `Host` values                              |
+| `ARTIFREE_TRUSTED_PROXIES`  | `--trusted-proxy`    | comma-separated proxy addresses or CIDR ranges             |
+| `ARTIFREE_ALLOW_REMOTE_MCP` | `--allow-remote-mcp` | `true` or `1`                                              |
+
+A flag wins over its variable for the single-value settings
+(`--api-origin`, `--content-origin`, `--frame-ancestors`); the list settings
+use both, and `--allow-remote-mcp` is on if either is set. An empty variable is
+the same as an unset one. An invalid value stops the server with a message that
+names the variable (CI checks `ARTIFREE_CONTENT_ORIGIN` through the image).
+`ARTIFREE_FRAME_ANCESTORS` replaces the default list, as the flag does. Changing
+any of these needs a new container (or a restart): the server reads them once
+at start-up ([restart note](decisions/0028-static-web-defaults.md#changing-the-cors-allow-list-needs-a-restart)).
 
 ## Behind a reverse proxy
 
@@ -134,8 +166,12 @@ the `Release archive` job, then `scripts/verify-container.mjs`:
 - confirms `/mcp` is refused from the published port;
 - stops with SIGTERM and requires exit status 0, starts a new container on the
   same volume, and finds revision 2;
-- requires two refusals: equal `--api-origin` and `--content-origin`, and a
-  bind-mounted data directory that other users can enter.
+- starts the image with `ARTIFREE_CONTENT_ORIGIN` (not the flag), so a
+  working preview shows the variable was read;
+- requires four refusals: equal `--api-origin` and `--content-origin`, the
+  same pair given as `ARTIFREE_API_ORIGIN` and `ARTIFREE_CONTENT_ORIGIN`, an
+  `ARTIFREE_CONTENT_ORIGIN` with the wrong scheme, and a bind-mounted data
+  directory that other users can enter.
 
 Not checked: any registry, other CPUs, older Docker versions, rootless Docker
 or Podman, Kubernetes, `docker compose`, a reverse proxy in front of the

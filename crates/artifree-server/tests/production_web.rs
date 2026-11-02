@@ -353,6 +353,23 @@ async fn cors_origin_normalization_and_preview_isolation() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn origins_with_credentials_are_refused_without_echoing_them() {
+    for with_credentials in [
+        "https://user:secret@preview.example.com",
+        "https://user@preview.example.com:8443/",
+        "http://:secret@127.0.0.1:7411",
+    ] {
+        assert_eq!(
+            artifree_server::http::normalize_origin(with_credentials)
+                .err()
+                .as_deref(),
+            Some("origin must not contain credentials"),
+            "{with_credentials} must be refused, not have its credentials dropped"
+        );
+    }
+}
+
 #[tokio::test]
 async fn healthz_endpoint_is_unauthenticated_and_outside_spa_fallback() -> TestResult {
     let harness = WebTestHarness::new("http://127.0.0.1:7411")?;

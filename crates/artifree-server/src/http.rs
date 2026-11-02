@@ -749,6 +749,13 @@ pub fn normalize_origin(raw: &str) -> Result<String, String> {
         return Err(format!("origin {raw:?} must include an authority/host"));
     };
 
+    // An origin names a host; credentials in it would be silently dropped
+    // below and hide a mistake (or a secret pasted into a deployment file).
+    if authority.as_str().contains('@') {
+        // The value is not echoed: it may be a secret.
+        return Err("origin must not contain credentials".to_owned());
+    }
+
     let host = authority.host();
     if host.is_empty() {
         return Err(format!("origin {raw:?} host must not be empty"));

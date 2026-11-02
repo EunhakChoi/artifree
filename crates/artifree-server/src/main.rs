@@ -175,7 +175,69 @@ fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
     Ok(flags)
 }
 
+/// Settings that a flag can also take from the environment, read once.
+///
+/// Only the settings added by decision 0028 are held here; older variables
+/// are read where they are used. A variable that is set but empty counts as
+/// unset, so a container file can declare `ARTIFREE_CONTENT_ORIGIN=` to mean
+/// "not configured".
+#[derive(Debug, Default)]
+struct ServeEnv {
+    content_origin: Option<String>,
+    frame_ancestors: Option<String>,
+}
+
+impl ServeEnv {
+    fn from_process() -> Result<Self, String> {
+        Ok(Self {
+            content_origin: env_setting("ARTIFREE_CONTENT_ORIGIN")?,
+            frame_ancestors: env_setting("ARTIFREE_FRAME_ANCESTORS")?,
+        })
+    }
+}
+
+/// Reads one environment variable; unset and empty are `None`.
+fn env_setting(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8.")),
+    }
+}
+
+/// A setting value and the flag or variable it came from, so errors name
+/// what the operator actually wrote.
+struct Sourced {
+    value: String,
+    source: &'static str,
+}
+
+/// Picks the flag over the environment variable; the default is the caller's
+/// fallback when both are absent.
+fn flag_over_env(
+    flag: Option<String>,
+    flag_name: &'static str,
+    env: Option<String>,
+    env_name: &'static str,
+) -> Option<Sourced> {
+    flag.map(|value| Sourced {
+        value,
+        source: flag_name,
+    })
+    .or_else(|| {
+        env.map(|value| Sourced {
+            value,
+            source: env_name,
+        })
+    })
+}
+
 fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
+    parse_serve_with(arguments, ServeEnv::from_process()?)
+}
+
+fn parse_serve_with(arguments: &[String], env: ServeEnv) -> Result<ServeOptions, String> {
     let flags = parse_serve_flags(arguments)?;
 
     let explicit_web_dir = match flags.cli_web_dir {
@@ -195,7 +257,12 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         .clone()
         .unwrap_or(default_content);
     let resolved_content_origin = resolve_content_origin(
-        flags.explicit_content_origin,
+        flag_over_env(
+            flags.explicit_content_origin,
+            "--content-origin",
+            env.content_origin,
+            "ARTIFREE_CONTENT_ORIGIN",
+        ),
         flags.explicit_content_listen.is_some(),
         default_origin,
     )?;
@@ -217,15 +284,20 @@ fn parse_serve(arguments: &[String]) -> Result<ServeOptions, String> {
         lan_ip,
     );
     let allowed_origins =
-        resolve_allowed_origins(flags.cli_allowed_origins, resolved_api_origin.as_deref());
+        resolve_allowed_origins(&flags.cli_allowed_origins, resolved_api_origin.as_deref())?;
     let allow_remote_mcp = flags.cli_allow_remote_mcp
         || std::env::var("ARTIFREE_ALLOW_REMOTE_MCP").is_ok_and(|v| v == "true" || v == "1");
 
     let frame_ancestors = derive_frame_ancestors(
-        flags.explicit_frame_ancestors,
+        flag_over_env(
+            flags.explicit_frame_ancestors,
+            "--frame-ancestors",
+            env.frame_ancestors,
+            "ARTIFREE_FRAME_ANCESTORS",
+        ),
         &api_str,
         resolved_api_origin.as_deref(),
-    );
+    )?;
 
     let address = |flag: &str, value: &str| {
         value
@@ -300,17 +372,14 @@ fn resolve_lan_ip(cli_lan: Option<String>) -> Result<Option<IpAddr>, String> {
 
 /// Resolves preview content origin, validating and normalizing explicit origin.
 fn resolve_content_origin(
-    explicit: Option<String>,
+    explicit: Option<Sourced>,
     explicit_content_listen: bool,
     default_origin: Option<String>,
 ) -> Result<Option<String>, String> {
     match explicit {
-        Some(origin) => {
-            let canon = artifree_server::http::normalize_origin(&origin).map_err(|e| {
-                format!(
-                    "--content-origin must be a valid HTTP or HTTPS origin, got {origin:?}: {e}"
-                )
-            })?;
+        Some(Sourced { value, source }) => {
+            let canon = artifree_server::http::normalize_origin(&value)
+                .map_err(|e| format!("{source} must be a valid HTTP or HTTPS origin: {e}"))?;
             Ok(Some(canon))
         }
         None => {
@@ -373,31 +442,65 @@ fn resolve_lan_defaults(lan_ip: Option<IpAddr>) -> (String, String, Option<Strin
 }
 
 /// Derives CSP frame-ancestors based on explicit setting, API listener address, or public API origin.
+///
+/// # Errors
+///
+/// When an explicit value is not a plain source list; see
+/// [`validate_frame_ancestors`].
 fn derive_frame_ancestors(
-    explicit: Option<String>,
+    explicit: Option<Sourced>,
     api_address: &str,
     api_origin: Option<&str>,
-) -> String {
-    if let Some(ancestors) = explicit {
-        return ancestors;
+) -> Result<String, String> {
+    if let Some(Sourced { value, source }) = explicit {
+        return validate_frame_ancestors(&value, source);
     }
     if let Some(origin) = api_origin {
-        return format!("{origin} {}", serve::DEFAULT_FRAME_ANCESTORS);
+        return Ok(format!("{origin} {}", serve::DEFAULT_FRAME_ANCESTORS));
     }
     let Ok(addr) = api_address.parse::<SocketAddr>() else {
-        return serve::DEFAULT_FRAME_ANCESTORS.to_owned();
+        return Ok(serve::DEFAULT_FRAME_ANCESTORS.to_owned());
     };
     let ip = addr.ip();
     if ip.is_loopback() || ip.is_unspecified() {
-        serve::DEFAULT_FRAME_ANCESTORS.to_owned()
+        Ok(serve::DEFAULT_FRAME_ANCESTORS.to_owned())
     } else {
         let formatted_ip = if ip.is_ipv6() {
             format!("[{ip}]")
         } else {
             format!("{ip}")
         };
-        format!("http://{formatted_ip}:* {}", serve::DEFAULT_FRAME_ANCESTORS)
+        Ok(format!(
+            "http://{formatted_ip}:* {}",
+            serve::DEFAULT_FRAME_ANCESTORS
+        ))
     }
+}
+
+/// Accepts a space-separated CSP source list and refuses what would change
+/// the policy around it.
+///
+/// An empty list is refused because browsers ignore an empty
+/// `frame-ancestors` directive and then allow every embedder. `;` would start
+/// another directive in the preview policy, and `,` is not a separator in
+/// this list. The value is otherwise passed through, so source expressions
+/// such as `'self'`, `https:`, and `http://host:*` stay available.
+fn validate_frame_ancestors(value: &str, source: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "{source} must list at least one source; an empty list would let any page embed previews."
+        ));
+    }
+    if let Some(bad) = trimmed
+        .chars()
+        .find(|c| matches!(c, ';' | ',') || !(c.is_ascii_graphic() || *c == ' '))
+    {
+        return Err(format!(
+            "{source} must be space-separated sources in visible ASCII without ';' or ',', found {bad:?} in {value:?}."
+        ));
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Resolves public API origin, validating and normalizing explicit origin.
@@ -410,9 +513,8 @@ fn resolve_api_origin(explicit: Option<String>) -> Result<Option<String>, String
     };
     match raw {
         Some(origin) => {
-            let canon = artifree_server::http::normalize_origin(&origin).map_err(|e| {
-                format!("--api-origin must be a valid HTTP or HTTPS origin, got {origin:?}: {e}")
-            })?;
+            let canon = artifree_server::http::normalize_origin(&origin)
+                .map_err(|e| format!("--api-origin must be a valid HTTP or HTTPS origin: {e}"))?;
             Ok(Some(canon))
         }
         None => Ok(None),
@@ -512,30 +614,42 @@ fn resolve_allowed_hosts(
 }
 
 /// Resolves allowed CORS origins, incorporating explicit origins, environment variables, and API origin.
-fn resolve_allowed_origins(cli_origins: Vec<String>, api_origin: Option<&str>) -> Vec<String> {
-    let mut result = Vec::new();
-    for entry in cli_origins {
+///
+/// Each entry is normalized like the origin of a request, so `https://UI.example.app/`
+/// and `https://ui.example.app:443` match the browser's `https://ui.example.app`.
+/// An entry that is not an HTTP or HTTPS origin is refused instead of
+/// silently never matching.
+fn resolve_allowed_origins(
+    cli_origins: &[String],
+    api_origin: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut add = |source: &str, entry: &str| -> Result<(), String> {
         for part in entry.split(',') {
             let part = part.trim();
-            if !part.is_empty() && !result.contains(&part.to_owned()) {
-                result.push(part.to_owned());
+            if part.is_empty() {
+                continue;
+            }
+            let canon = artifree_server::http::normalize_origin(part)
+                .map_err(|e| format!("{source} must list HTTP or HTTPS origins: {e}"))?;
+            if !result.contains(&canon) {
+                result.push(canon);
             }
         }
+        Ok(())
+    };
+    for entry in cli_origins {
+        add("--allowed-origin", entry)?;
     }
     if let Ok(env_origins) = std::env::var("ARTIFREE_ALLOWED_ORIGINS") {
-        for part in env_origins.split(',') {
-            let part = part.trim();
-            if !part.is_empty() && !result.contains(&part.to_owned()) {
-                result.push(part.to_owned());
-            }
-        }
+        add("ARTIFREE_ALLOWED_ORIGINS", &env_origins)?;
     }
     if let Some(origin) = api_origin
         && !result.contains(&origin.to_owned())
     {
         result.push(origin.to_owned());
     }
-    result
+    Ok(result)
 }
 
 /// A request limit: a whole number from 1 to 100000.
@@ -570,7 +684,7 @@ Options:
   --api-listen <addr:port>      API address [default: {api}]
   --loopback-listen <addr:port> Dedicated loopback API address for MCP in LAN mode
   --content-listen <addr:port>  Preview address [default: {content}]
-  --content-origin <origin>     Public preview origin, if proxied
+  --content-origin <origin>     Public preview origin, if proxied (or ARTIFREE_CONTENT_ORIGIN)
   --api-origin <origin>         Public API and web origin, if proxied (or ARTIFREE_API_ORIGIN)
   --trusted-proxy <cidr>        Trusted reverse proxy IP or CIDR (or ARTIFREE_TRUSTED_PROXIES).
                                 The proxy must append (or overwrite) the client
@@ -583,12 +697,18 @@ Options:
   --allow-remote-mcp            Permit remote authenticated MCP connections. Without
                                 it /mcp admits only a known loopback client: connect
                                 local agents directly, not through a trusted proxy.
-  --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
+  --frame-ancestors <sources>   CSP frame-ancestors, replacing the default list
+                                (or ARTIFREE_FRAME_ANCESTORS) [default: {ancestors}]
   --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
   --request-burst <n>           Requests accepted at once [default: {burst}]
   --requests-per-minute <n>     Sustained request rate [default: {rate}]
   --concurrent-requests <n>     Requests running at once [default: {concurrent}]
   --change-streams <n>          Open change streams [default: {streams}]
+
+Where an option names an environment variable, the flag wins over the variable
+and the variable over the default; an empty variable counts as unset. The list
+options (--trusted-proxy, --allowed-host, --allowed-origin) use both, and
+--allow-remote-mcp is on if either the flag or the variable enables it.
 
 Request limits apply per actor to HTTP and MCP together; a refused request
 gets 429 rate_limited with Retry-After and is not processed. Opening a change
@@ -736,5 +856,235 @@ mod tests {
         ));
 
         Ok(())
+    }
+    fn serve_env(content_origin: Option<&str>, frame_ancestors: Option<&str>) -> ServeEnv {
+        ServeEnv {
+            content_origin: content_origin.map(str::to_owned),
+            frame_ancestors: frame_ancestors.map(str::to_owned),
+        }
+    }
+
+    fn base_args(extra: &[&str]) -> Vec<String> {
+        let mut list = vec!["--data-dir", "/tmp"];
+        list.extend_from_slice(extra);
+        args(&list)
+    }
+
+    #[test]
+    fn content_origin_comes_from_the_environment_when_no_flag_is_given() -> Result<(), String> {
+        let opts = parse_serve_with(
+            &base_args(&[]),
+            serve_env(Some("https://Preview.Example.com:443/"), None),
+        )?;
+        assert_eq!(
+            opts.content_origin.as_deref(),
+            Some("https://preview.example.com"),
+            "the variable is normalized like the flag"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn content_origin_flag_beats_the_environment() -> Result<(), String> {
+        let opts = parse_serve_with(
+            &base_args(&["--content-origin", "https://flag.example.com"]),
+            serve_env(Some("https://env.example.com"), None),
+        )?;
+        assert_eq!(
+            opts.content_origin.as_deref(),
+            Some("https://flag.example.com")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn content_origin_environment_beats_the_lan_default() -> Result<(), String> {
+        let opts = parse_serve_with(
+            &base_args(&["--lan", "192.168.1.50"]),
+            serve_env(Some("https://env.example.com"), None),
+        )?;
+        assert_eq!(
+            opts.content_origin.as_deref(),
+            Some("https://env.example.com")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn content_origin_defaults_without_flag_or_variable() -> Result<(), String> {
+        let opts = parse_serve_with(&base_args(&["--lan", "192.168.1.50"]), ServeEnv::default())?;
+        assert_eq!(
+            opts.content_origin.as_deref(),
+            Some("http://192.168.1.50:7411"),
+            "the LAN default is unchanged"
+        );
+        let plain = parse_serve_with(&base_args(&[]), ServeEnv::default())?;
+        assert_eq!(plain.content_origin, None);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_content_origin_variable_is_refused_and_named() {
+        for bad in [
+            "not-a-url",
+            "ftp://preview.example.com",
+            "https://user:pw@preview.example.com",
+            "javascript:alert(1)",
+            " ",
+        ] {
+            let err = parse_serve_with(&base_args(&[]), serve_env(Some(bad), None))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                err.contains("ARTIFREE_CONTENT_ORIGIN must be a valid HTTP or HTTPS origin"),
+                "{bad:?} must be refused naming the variable, got {err:?}"
+            );
+            assert!(!err.contains("pw"), "an error must not echo credentials");
+        }
+    }
+
+    #[test]
+    fn invalid_content_origin_flag_is_refused_even_when_the_variable_is_valid() {
+        let err = parse_serve_with(
+            &base_args(&["--content-origin", "ftp://x.example.com"]),
+            serve_env(Some("https://env.example.com"), None),
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(
+            err.contains("--content-origin must be a valid HTTP or HTTPS origin"),
+            "the flag is the value in effect, so its error is reported: {err:?}"
+        );
+    }
+
+    #[test]
+    fn content_origin_variable_equal_to_the_api_origin_is_refused() {
+        let err = parse_serve_with(
+            &base_args(&["--api-origin", "https://artifree.example.com"]),
+            serve_env(Some("https://artifree.example.com"), None),
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(err.contains("--content-origin must differ from --api-origin"));
+    }
+
+    #[test]
+    fn frame_ancestors_follow_flag_then_variable_then_default() -> Result<(), String> {
+        let from_env = parse_serve_with(
+            &base_args(&[]),
+            serve_env(None, Some("https://ui.example.app")),
+        )?;
+        assert_eq!(from_env.frame_ancestors, "https://ui.example.app");
+
+        let from_flag = parse_serve_with(
+            &base_args(&["--frame-ancestors", "https://flag.example.app"]),
+            serve_env(None, Some("https://ui.example.app")),
+        )?;
+        assert_eq!(from_flag.frame_ancestors, "https://flag.example.app");
+
+        let default = parse_serve_with(&base_args(&[]), ServeEnv::default())?;
+        assert_eq!(default.frame_ancestors, serve::DEFAULT_FRAME_ANCESTORS);
+
+        let with_api_origin = parse_serve_with(
+            &base_args(&["--api-origin", "https://api.example.com"]),
+            ServeEnv::default(),
+        )?;
+        assert_eq!(
+            with_api_origin.frame_ancestors,
+            format!("https://api.example.com {}", serve::DEFAULT_FRAME_ANCESTORS),
+            "the API origin is still added to the default list"
+        );
+        let replaced = parse_serve_with(
+            &base_args(&["--api-origin", "https://api.example.com"]),
+            serve_env(None, Some("https://ui.example.app")),
+        )?;
+        assert_eq!(
+            replaced.frame_ancestors, "https://ui.example.app",
+            "an explicit list replaces the default, as the flag does"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_frame_ancestors_are_refused_from_flag_and_variable() {
+        let cases = [
+            ("", "at least one source"),
+            ("   ", "at least one source"),
+            ("https://a.example; script-src *", "';'"),
+            ("https://a.example,https://b.example", "','"),
+            ("https://a.example\nhttps://b.example", "'\\n'"),
+            ("https://ä.example", "'ä'"),
+        ];
+        for (bad, expected) in cases {
+            let from_env = parse_serve_with(&base_args(&[]), serve_env(None, Some(bad)))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                from_env.contains("ARTIFREE_FRAME_ANCESTORS") && from_env.contains(expected),
+                "variable {bad:?} must be refused with {expected:?}, got {from_env:?}"
+            );
+            let from_flag =
+                parse_serve_with(&base_args(&["--frame-ancestors", bad]), ServeEnv::default())
+                    .err()
+                    .unwrap_or_default();
+            assert!(
+                from_flag.contains("--frame-ancestors") && from_flag.contains(expected),
+                "flag {bad:?} must be refused with {expected:?}, got {from_flag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_ancestors_keep_source_expressions_in_use_today() -> Result<(), String> {
+        for good in [
+            "'self'",
+            "'none'",
+            "https:",
+            "http://127.0.0.1:* http://localhost:* http://insecure.invalid",
+            "https://ui.example.app http://[::1]:*",
+        ] {
+            let opts = parse_serve_with(
+                &base_args(&["--frame-ancestors", good]),
+                ServeEnv::default(),
+            )?;
+            assert_eq!(opts.frame_ancestors, good);
+        }
+        Ok(())
+    }
+    #[test]
+    fn allowed_origins_are_normalized_like_request_origins() -> Result<(), String> {
+        let opts = parse_serve_with(
+            &base_args(&[
+                "--allowed-origin",
+                "https://UI.example.app/,https://ui.example.app:443",
+                "--allowed-origin",
+                "http://[0:0:0:0:0:0:0:1]:8080",
+            ]),
+            ServeEnv::default(),
+        )?;
+        assert_eq!(
+            opts.allowed_origins,
+            ["https://ui.example.app", "http://[::1]:8080"],
+            "case, trailing slash, default port, and IPv6 spelling are canonical, with duplicates dropped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn allowed_origins_that_could_never_match_are_refused() {
+        for bad in [
+            "*",
+            "ui.example.app",
+            "ftp://ui.example.app",
+            "https://u:p@ui.example.app",
+        ] {
+            let err = parse_serve_with(&base_args(&["--allowed-origin", bad]), ServeEnv::default())
+                .err()
+                .unwrap_or_default();
+            assert!(
+                err.starts_with("--allowed-origin must list HTTP or HTTPS origins"),
+                "{bad:?} must be refused, got {err:?}"
+            );
+        }
     }
 }

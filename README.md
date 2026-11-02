@@ -49,6 +49,13 @@ cargo run -p artifree-server -- serve \
   --allow-remote-mcp
 ```
 
+Each origin setting also has an environment variable (`ARTIFREE_API_ORIGIN`,
+`ARTIFREE_CONTENT_ORIGIN`, `ARTIFREE_FRAME_ANCESTORS`, ...; a flag wins), listed
+in the [container guide](docs/container.md#settings-by-environment-variable). A
+static build of the web workspace can carry a default server:
+`VITE_ARTIFREE_SERVER=https://api.example.com npm run build`
+([decision 0028](docs/decisions/0028-static-web-defaults.md)).
+
 The proxy must append (or overwrite) the client address in `X-Forwarded-For` or
 `Forwarded` and strip the header it does not use. A request with no client
 address, or a chain made only of trusted proxies, has an unknown client, and

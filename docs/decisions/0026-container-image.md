@@ -98,3 +98,11 @@ moves to O03c. The web-workspace gaps found while writing the guides are O03d.
 - Not verified: other CPUs, rootless Docker, Podman, Kubernetes, compose,
   bind-mount ownership workflows other than the refusal, any named third-party
   service, the public internet. Codex and Pi were not run.
+
+## Amendment 2026-11-02
+
+[0028](0028-static-web-defaults.md) closes the O03d gaps recorded above:
+`ARTIFREE_CONTENT_ORIGIN` and `ARTIFREE_FRAME_ANCESTORS` now exist, and a static
+web build can carry a default server. Rule 5's statement that an environment
+variable would be a new surface no longer stands; the image and its entrypoint
+are unchanged.
