@@ -5,6 +5,7 @@
 //! and change feed sequence have independent lifecycles.
 
 pub mod change;
+pub mod data;
 pub mod identity;
 pub mod job;
 pub mod package;
@@ -76,6 +77,14 @@ pub struct MetadataRevision(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DocumentSequence(pub u64);
 
-/// The version of a running application's data.
+/// The version of the application data of one actor and artifact (decision
+/// 0031). It is 0 for a space nobody wrote, and every write that changes the
+/// space raises it by one. It is unrelated to the source revision and to the
+/// metadata revision, and a source restore does not move it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AppDataVersion(pub u64);
+
+impl AppDataVersion {
+    /// The version of a space that was never written.
+    pub const EMPTY: Self = Self(0);
+}

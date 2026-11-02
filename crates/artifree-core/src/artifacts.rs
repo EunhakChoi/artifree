@@ -8,22 +8,24 @@
 //! 0013). A purged artifact (decision 0029) is missing to every request,
 //! the replay of an earlier one included, except the retry of its purge.
 //! Commit success means durable acceptance. Source history is kept
-//! separate from future application data and access policy. A duplicate
-//! copies files only, since artifacts have no application data or uploaded
-//! assets yet. Publishing is not implemented.
+//! separate from application data (decision 0031, [`crate::data`]) and access
+//! policy. A duplicate copies files, and the data space only when asked;
+//! artifacts have no uploaded assets yet. Publishing is not implemented.
 
 use std::fmt;
 
+use artifree_domain::AppDataVersion;
 use artifree_domain::change::ChangeSequence;
+use artifree_domain::data::DataError;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::job::JobState;
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
-    CommitReceipt, ContentSetDigest, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
-    PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
-    UnreferencedContent,
+    CommitReceipt, ContentSetDigest, CopySource, MetadataReceipt, MetadataUpdate, NewArtifact,
+    PurgeReceipt, PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit,
+    RevisionRecord, StoreError, UnreferencedContent,
 };
 use sha2::{Digest, Sha256};
 
@@ -95,6 +97,15 @@ pub enum ArtifactError {
     /// The actor already has the largest number of jobs waiting or running
     /// (decision 0030).
     TooManyJobs,
+    /// The application data was prepared against an older version; nothing
+    /// was written (decision 0031).
+    DataConflict {
+        /// The version the data is at.
+        current: AppDataVersion,
+    },
+    /// A data path, value, or change breaks the rules of a data space
+    /// (decision 0031).
+    Data(DataError),
     /// Storage failed. The request may be retried with the same key.
     Unavailable(String),
 }
@@ -132,6 +143,12 @@ impl fmt::Display for ArtifactError {
             }
             Self::TooManyJobs => formatter
                 .write_str("too many jobs are waiting or running; wait for one or cancel one"),
+            Self::DataConflict { current } => write!(
+                formatter,
+                "the data changed; the current data version is {}",
+                current.0
+            ),
+            Self::Data(error) => write!(formatter, "{error}"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -326,7 +343,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// Creates an artifact owned by `actor` whose revision 1 has the files
     /// of `revision` of `id`, byte for byte, with its own history. The title
     /// is `title`, or the source's current title followed by " (Copy)"; the
-    /// copy is not pinned. Only files are copied. The source is not touched.
+    /// copy is not pinned. The files are copied; the source's application data
+    /// (decision 0031) is copied only with `copy_data`, as the copy's own
+    /// space, in the same transaction, from the source as it is when the copy
+    /// commits and whatever `revision` is: data has no revisions. The source
+    /// is not touched.
     ///
     /// Retrying with the same key returns the original receipt even after
     /// the source was renamed, revised, or purged; the copy has its own
@@ -344,6 +365,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         id: &ArtifactId,
         revision: SourceRevision,
         title: Option<&Title>,
+        copy_data: bool,
     ) -> Result<CommitReceipt, ArtifactError> {
         let mut hasher = Fingerprint::new("duplicate");
         hasher.field(id.as_str().as_bytes());
@@ -356,6 +378,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
                 hasher.field(title.as_str().as_bytes());
             }
             None => hasher.field(b"copy title"),
+        }
+        // Only a copy that takes the data says so: the keys of copies made
+        // before application data existed keep their fingerprints.
+        if copy_data {
+            hasher.field(b"copy data");
         }
         let request = RequestIdentity {
             actor,
@@ -381,7 +408,10 @@ impl<S: ArtifactStore> ArtifactService<S> {
             package: &package,
             // The store refuses the copy unless its source is still outside
             // the trash when the copy commits.
-            source: Some(id),
+            source: Some(CopySource {
+                artifact: id,
+                copy_data,
+            }),
         })?;
         Ok(receipt)
     }

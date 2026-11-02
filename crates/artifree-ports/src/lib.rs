@@ -1,9 +1,10 @@
 //! Outbound dependency boundary. Concrete SDKs and database drivers belong in
 //! `artifree-providers`. Each family gains operation signatures with its first
 //! behavior contract, including errors and commit semantics; artifact storage,
-//! tokens, and jobs have one so far.
+//! tokens, jobs, and application data have one so far.
 
 pub mod artifact_store;
+pub mod data_store;
 pub mod job_store;
 pub mod token_store;
 

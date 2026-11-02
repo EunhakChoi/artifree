@@ -29,7 +29,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/cli",
         ComponentStatus::Implemented,
-        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; build inventory.",
+        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory.",
     ),
     (
         "runtime",
@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, and a sandboxed preview origin.",
+        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes, and a sandboxed preview origin.",
     ),
     (
         "domain",
@@ -56,7 +56,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-domain",
         ComponentStatus::Implemented,
-        "Validated identifiers, portable file packages, separate version counters, and feed cursors.",
+        "Validated identifiers, portable file packages, application data values and paths, separate version counters, and feed cursors.",
     ),
     (
         "artifacts",
@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions, restores, duplicates (files only), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned.",
+        "Create, conditional revisions, restores, duplicates (files, and data when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned.",
     ),
     (
         "policy",
@@ -81,9 +81,9 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Data & documents",
         Layer::Logic,
         "Rust",
-        "crates/artifree-core/src/documents.rs",
-        ComponentStatus::Planned,
-        "Structured edits and separately versioned application data.",
+        "crates/artifree-core/src/data.rs",
+        ComponentStatus::Implemented,
+        "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Structured edits, change subscriptions, queries, and access from the content runtime are planned.",
     ),
     (
         "jobs",
@@ -110,7 +110,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust · SQLite",
         "crates/artifree-providers/src/storage.rs",
         ComponentStatus::Implemented,
-        "Local SQLite with atomic commits, a change feed and job leases in the same transactions, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned.",
+        "Local SQLite with atomic commits, a change feed and job leases in the same transactions, per-actor application data, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned.",
     ),
     (
         "models",
@@ -164,6 +164,6 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/client",
         ComponentStatus::Implemented,
-        "Fetch-based HTTP API v1 client with structured errors and change feed following.",
+        "Fetch-based HTTP API v1 client with structured errors, change feed following, and application data reads and writes.",
     ),
 ];

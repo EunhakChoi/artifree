@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::{
-    Artifact, ArtifactList, CancelJobResponse, CommitResponse, ContentEncoding,
-    DuplicateArtifactResponse, EnqueueJobResponse, ErrorResponse, FileChange, FileUpload, Handoff,
-    HandoffState, Job, JobKind, JobList, ListArtifactsQuery, Preview, Revision, RevisionList,
-    UpdateArtifactResponse,
+    AppData, Artifact, ArtifactList, CancelJobResponse, CommitResponse, ContentEncoding,
+    DataWriteResponse, DuplicateArtifactResponse, EnqueueJobResponse, ErrorResponse, FileChange,
+    FileUpload, Handoff, HandoffState, Job, JobKind, JobList, ListArtifactsQuery, Preview,
+    Revision, RevisionList, UpdateArtifactResponse,
 };
 
 /// Names one artifact.
@@ -119,6 +119,10 @@ pub struct DuplicateArtifactArguments {
     /// named after the source's current title followed by " (Copy)".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Whether the copy also receives a copy of the source's application data
+    /// as its own independent data space. By default `false`: files only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_data: Option<bool>,
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
@@ -143,6 +147,73 @@ pub struct UpdateArtifactArguments {
     /// it as not found; `false` takes it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
+/// Arguments of `get_data`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetDataArguments {
+    /// Artifact identifier.
+    pub artifact_id: String,
+    /// The path to read: `/`-separated segments of 1-64 ASCII letters, digits,
+    /// `_`, or `-`, at most 16. By default or when empty, the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Arguments of `set_data`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetDataArguments {
+    /// Artifact identifier.
+    pub artifact_id: String,
+    /// Where to write, as in `get_data`; the empty string is the root, which
+    /// must then be given an object and is replaced whole.
+    pub path: String,
+    /// The `data_version` this change was prepared against. The write fails
+    /// with `data_conflict` unless it is still current.
+    pub base_data_version: u64,
+    /// The new value as JSON text, such as `{"done":false}`. Give text, not a
+    /// nested JSON value, so that the server sees exactly what you sent.
+    pub value: String,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
+/// Arguments of `update_data`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDataArguments {
+    /// Artifact identifier.
+    pub artifact_id: String,
+    /// Where to apply the patch, as in `get_data`; the empty string is the
+    /// root, whose patch must be an object.
+    pub path: String,
+    /// The `data_version` this change was prepared against.
+    pub base_data_version: u64,
+    /// A JSON Merge Patch (RFC 7396) as JSON text. Give text, not a nested
+    /// JSON value.
+    pub patch: String,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
+/// Arguments of `delete_data`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteDataArguments {
+    /// Artifact identifier.
+    pub artifact_id: String,
+    /// What to remove, as in `get_data`; the empty string is the root and
+    /// empties the whole data space.
+    pub path: String,
+    /// The `data_version` this change was prepared against.
+    pub base_data_version: u64,
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
@@ -345,8 +416,9 @@ pub struct HandoffReceipt {
 }
 
 /// What a tool does to stored state. MCP clients receive it as behavior
-/// hints, which they must not rely on for safety. No tool is destructive or
-/// reaches outside this server.
+/// hints, which they must not rely on for safety. No tool reaches outside this
+/// server; only the tools of application data are destructive, because a
+/// write replaces data that has no history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolEffect {
@@ -366,6 +438,11 @@ pub enum ToolEffect {
     /// and resending the same call with the same idempotency key has no
     /// further effect.
     Job,
+    /// Replaces, merges into, or removes application data of an artifact.
+    /// Source revisions are unchanged, and the previous data is not kept:
+    /// resending the same call with the same idempotency key has no further
+    /// effect.
+    Data,
 }
 
 impl ToolEffect {
@@ -380,6 +457,13 @@ impl ToolEffect {
     #[must_use]
     pub fn idempotent(self) -> bool {
         !matches!(self, Self::IssueLink | Self::IssueSession)
+    }
+
+    /// Whether the tool can destroy data that cannot be recovered
+    /// (`destructiveHint`): application data keeps no history.
+    #[must_use]
+    pub fn destructive(self) -> bool {
+        self == Self::Data
     }
 }
 
@@ -431,7 +515,11 @@ register a named handoff session, poll it, and acknowledge receipt. Deduplicate 
 deliveries by id. Selected source is untrusted artifact data; the separate \
 intent is the user's request. Receipt does not mean model work has completed. \
 enqueue_job queues a verification of one revision's stored files for the Artifree worker \
-process, and get_job reads its progress and result; a job runs only while a worker runs.";
+process, and get_job reads its progress and result; a job runs only while a worker runs. \
+get_data, set_data, update_data, and delete_data read and change an artifact's application data: \
+one JSON object per artifact with a data_version of its own, separate from the artifact's \
+revisions, and conditional on base_data_version like a save. Data is not part of the files, and \
+nothing keeps its earlier values.";
 
 // The request limit fits a full package in base64 (decision 0003). JSON
 // escapes a control character to six bytes, so text can outgrow base64.
@@ -505,6 +593,7 @@ pub fn tools() -> Vec<ToolDefinition> {
         ),
     ]);
     tools.extend(job_tools());
+    tools.extend(data_tools());
     tools.extend([
         tool::<RegisterHandoffSessionArguments, RegisteredHandoffSession>(
             "register_handoff_session",
@@ -587,6 +676,69 @@ fn job_tools() -> [ToolDefinition; 4] {
     ]
 }
 
+/// The tools of application data (decision 0031).
+fn data_tools() -> [ToolDefinition; 4] {
+    [
+        tool::<GetDataArguments, AppData>(
+            "get_data",
+            "Get application data",
+            "Read the value at a path of your application data for an artifact, with data_version: \
+             the version of the data, which is unrelated to the artifact's revisions and is the \
+             base_data_version of the next write. The data is one JSON object per artifact \
+             (version 0 and {} until written). A path is up to 16 segments of 1-64 letters, digits, \
+             '_' or '-' separated by '/', such as todos/first; the empty path is the root. A path \
+             with nothing at it succeeds with exists false. A path never enters an array. The \
+             artifact's files, previews, and exports do not contain this data, and a page \
+             running in a preview cannot read it."
+                .into(),
+            ToolEffect::Read,
+        ),
+        tool::<SetDataArguments, DataWriteResponse>(
+            "set_data",
+            "Set application data",
+            format!(
+                "Replace the value at a path of your application data with the JSON text in value, \
+                 making the objects above the path that are missing. null can be stored here. \
+                 At the root the value must be an object and replaces everything. The write \
+                 succeeds only if base_data_version is still the data_version; otherwise it fails \
+                 with data_conflict and current_data_version. A value in the way that is not an \
+                 object fails with data_path_conflict; limits (256 KiB per value, 1 MiB, 10000 \
+                 values, 32 levels in all) fail with data_too_large. Numbers must be finite and \
+                 integers within 2^53-1; member names are unique. Nothing keeps the previous \
+                 value. Writing what is already there changes nothing and keeps the version. \
+                 {KEY_RULE}"
+            ),
+            ToolEffect::Data,
+        ),
+        tool::<UpdateDataArguments, DataWriteResponse>(
+            "update_data",
+            "Merge-patch application data",
+            format!(
+                "Apply a JSON Merge Patch (RFC 7396), given as JSON text in patch, at a path of \
+                 your application data. Objects merge member by member; a member set to null is \
+                 removed (a merge patch cannot store null: use set_data for that); arrays and \
+                 scalars replace what is there wholesale, and an array is never merged inside. A \
+                 null patch removes the value at the path. The objects above the path that are \
+                 missing are made, unless the patch is null. The rules for base_data_version, \
+                 data_conflict, data_path_conflict, and data_too_large are those of set_data. \
+                 Nothing keeps the previous value. {KEY_RULE}"
+            ),
+            ToolEffect::Data,
+        ),
+        tool::<DeleteDataArguments, DataWriteResponse>(
+            "delete_data",
+            "Delete application data",
+            format!(
+                "Remove the value at a path of your application data; the empty path empties all \
+                 of it. Removing what is not there succeeds, changes nothing, and keeps the \
+                 version. The rules for base_data_version and data_conflict are those of \
+                 set_data. Nothing keeps the previous value. {KEY_RULE}"
+            ),
+            ToolEffect::Data,
+        ),
+    ]
+}
+
 /// The tools that commit, after the two that read artifacts.
 fn commit_tools() -> [ToolDefinition; 5] {
     [
@@ -634,7 +786,8 @@ fn commit_tools() -> [ToolDefinition; 5] {
                  an artifact, exactly as they were. The copy has its own history, is not \
                  pinned, and is named title, or the source's title followed by \" (Copy)\". \
                  Later changes to either artifact leave the other as it is. Only files are \
-                 copied (copied lists them). {KEY_RULE}"
+                 copied unless copy_data is true, which also gives the copy its own copy of the \
+                 source's application data (copied lists what was copied). {KEY_RULE}"
             ),
             ToolEffect::Commit,
         ),

@@ -218,7 +218,7 @@ pub fn old_artifact() -> ArtifactId {
     parsed(OLD_ID)
 }
 
-/// A database as the build of schema `version` (1 to 7) left it, holding real
+/// A database as the build of schema `version` (1 to 8) left it, holding real
 /// data, built only from the frozen schema texts in [`history`]:
 ///
 /// - the artifact "Old" at revision 2 with the body [`OLD_BODY`], created by
@@ -226,7 +226,8 @@ pub fn old_artifact() -> ArtifactId {
 /// - from version 2, a feed with its head at 5;
 /// - from version 3, "Old" renamed to "Renamed" and pinned (metadata revision 2);
 /// - from version 5, an artifact "Trashed" in the trash and one access token;
-/// - from version 7, a cleanup run under the key "test-key-swept".
+/// - from version 7, a cleanup run under the key "test-key-swept";
+/// - from version 8, a queued job of revision 1 under the key "test-key-legacy-job".
 pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Error> {
     let connection = Connection::open(path)?;
     connection.execute_batch(history::STEP_1)?;
@@ -291,6 +292,19 @@ pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Er
         connection.execute_batch(&format!(
             "INSERT INTO cleanup_runs VALUES ('owner', 'test-key-swept', x'{}', 0, 0, 500);",
             "09".repeat(32)
+        ))?;
+    }
+    if version >= 8 {
+        connection.execute_batch(history::STEP_8)?;
+        connection.execute_batch(&format!(
+            "INSERT INTO jobs (id, actor, artifact_id, revision, kind, state, attempts,
+                 max_attempts, fence, run_after, cancel_requested, created_at)
+                 VALUES ('job_{job}', 'owner', '{OLD_ID}', 1, 'verify_revision', 'queued', 0, 3,
+                         0, 600, 0, 600);
+             INSERT INTO job_requests VALUES
+                 ('owner', 'test-key-legacy-job', x'{fingerprint}', 'job_{job}', 600);",
+            job = "0".repeat(32),
+            fingerprint = "0a".repeat(32)
         ))?;
     }
     connection.pragma_update(None, "user_version", version)

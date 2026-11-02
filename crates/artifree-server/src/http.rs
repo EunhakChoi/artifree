@@ -17,14 +17,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    AgentSessionList, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DuplicateArtifactRequest, EnqueueJobRequest,
-    EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest, Job, JobList,
-    ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
-    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
-    Revision, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
-    RuntimeMetadataRequest, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
-    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse,
+    Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
+    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
+    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
+    RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
+    SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest, UnreferencedContent,
+    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::jobs::{Clock, SystemClock};
@@ -61,6 +62,12 @@ use crate::web::WebAssets;
 /// framing. Clients send a file as UTF-8 text only when its JSON escaping is
 /// no larger than base64, so this bound holds for either encoding.
 pub const MAX_BODY_BYTES: usize = 36 * 1024 * 1024;
+
+/// Largest accepted body of a write to application data (decision 0031): a
+/// value or patch of at most [`artifree_domain::data::MAX_VALUE_BYTES`] bytes
+/// of JSON, the path, and the version. A request this large still fails the
+/// limits of the data itself when the value is over its own bound.
+pub const MAX_DATA_BODY_BYTES: usize = artifree_domain::data::MAX_VALUE_BYTES + 8 * 1024;
 
 /// Server settings that adapters need at request time.
 #[derive(Debug, Clone)]
@@ -328,6 +335,15 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/v1/artifacts/{id}/jobs",
             get(list_artifact_jobs).post(enqueue_job),
+        )
+        .route(
+            "/v1/artifacts/{id}/data",
+            get(read_data)
+                .put(set_data)
+                .patch(update_data)
+                .delete(delete_data)
+                // Inside the API-wide limit, so this one applies.
+                .layer(DefaultBodyLimit::max(MAX_DATA_BODY_BYTES)),
         )
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(show_job))
@@ -1017,6 +1033,86 @@ async fn enqueue_job(
         operations::enqueue_job(&state, actor, key, &id, request).await?;
     let location = format!("/v1/jobs/{}", response.job.id);
     Ok(created(&location, Json(response)))
+}
+
+/// Why the body of a data write was refused. The size limit of these routes is
+/// not the API-wide one.
+fn data_body_error(rejection: &JsonRejection) -> ApiError {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::PayloadTooLarge,
+            format!("request body exceeds {MAX_DATA_BODY_BYTES} bytes"),
+        );
+    }
+    ApiError::invalid(rejection.body_text())
+}
+
+/// Reads a value of the caller's application data (decision 0031). An agent
+/// token may: it authenticates as the same owner and reads what the owner
+/// reads.
+async fn read_data(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<ReadDataQuery>, QueryRejection>,
+) -> Result<Json<AppData>, ApiError> {
+    let Path(id) = path?;
+    operations::artifact_id(&id)?;
+    let Query(ReadDataQuery { path: at }) = query?;
+    Ok(Json(
+        operations::read_data(&state, actor, &id, at.as_deref()).await?,
+    ))
+}
+
+/// Replaces a value of application data. An agent token may write data: it
+/// is bounded, conditional on the version, and keyed, but nothing keeps the
+/// value it replaces (decision 0031).
+async fn set_data(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<SetDataRequest>, JsonRejection>,
+) -> Result<Json<DataWriteResponse>, ApiError> {
+    let Path(id) = path?;
+    operations::artifact_id(&id)?;
+    let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
+    Ok(Json(
+        operations::set_data(&state, actor, key, &id, request).await?,
+    ))
+}
+
+/// Applies a JSON Merge Patch to application data.
+async fn update_data(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<UpdateDataRequest>, JsonRejection>,
+) -> Result<Json<DataWriteResponse>, ApiError> {
+    let Path(id) = path?;
+    operations::artifact_id(&id)?;
+    let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
+    Ok(Json(
+        operations::update_data(&state, actor, key, &id, request).await?,
+    ))
+}
+
+/// Removes a value of application data.
+async fn delete_data(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<DeleteDataRequest>, JsonRejection>,
+) -> Result<Json<DataWriteResponse>, ApiError> {
+    let Path(id) = path?;
+    operations::artifact_id(&id)?;
+    let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
+    Ok(Json(
+        operations::delete_data(&state, actor, key, &id, request).await?,
+    ))
 }
 
 async fn list_jobs(

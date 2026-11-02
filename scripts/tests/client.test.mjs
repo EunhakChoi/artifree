@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   ArtifreeApiError,
   ArtifreeClient,
+  JsonText,
   encodeFile,
   newIdempotencyKey,
   newRandomId,
@@ -2283,6 +2284,12 @@ test('A duplicate names the revision and title; a copy must say what it copied',
     });
   assert.deepEqual((await duplicate({})).copied, ['files']);
   await duplicate({ title: 'Mine' });
+  copied = ['files', 'data'];
+  assert.deepEqual((await duplicate({ copy_data: true })).copied, [
+    'files',
+    'data',
+  ]);
+  copied = ['files'];
   assert.deepEqual(sent, [
     [
       `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
@@ -2292,13 +2299,206 @@ test('A duplicate names the revision and title; a copy must say what it copied',
       `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
       '{"title":"Mine"}',
     ],
+    [
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
+      '{"copy_data":true}',
+    ],
   ]);
   // A part this client does not know could be data it would not report.
-  for (const parts of [undefined, 'files', ['files', 'data']]) {
+  for (const parts of [undefined, 'files', ['files', 'assets']]) {
     copied = parts;
     const error = await failure(duplicate({}));
     assert.equal(error.code, 'invalid_response', String(parts));
   }
+});
+
+// Application data (decision 0031).
+
+const dataRoute = `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/data`;
+const dataWrite = {
+  artifact_id: artifact.id,
+  path: 'a/b',
+  data_version: 1,
+  changed: true,
+  replayed: false,
+};
+
+test('Data requests carry the path, the base version, and the key, and the text they are given', async () => {
+  const sent = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([init.method, String(url), init.headers, init.body]);
+      return Response.json(dataWrite);
+    },
+  });
+  const options = { idempotencyKey: 'test-key-1' };
+  await client.setData(
+    artifact.id,
+    { path: 'a/b', base_data_version: 0, value: { x: [1, null] } },
+    options,
+  );
+  await client.updateData(
+    artifact.id,
+    { path: '', base_data_version: 1, patch: { x: null } },
+    options,
+  );
+  await client.deleteData(
+    artifact.id,
+    { path: 'a', base_data_version: 2 },
+    options,
+  );
+  // Text goes as written: what JSON.parse would change reaches the server.
+  const text = '{"a":1,"a":2,"big":9007199254740993}';
+  await client.setData(
+    artifact.id,
+    { path: 'raw', base_data_version: 3, value: new JsonText(text) },
+    options,
+  );
+  const [set, update, remove, raw] = sent;
+  assert.deepEqual(
+    [set[0], set[1], set[3]],
+    [
+      'PUT',
+      dataRoute,
+      '{"base_data_version":0,"path":"a/b","value":{"x":[1,null]}}',
+    ],
+  );
+  assert.deepEqual(
+    [update[0], update[1], update[3]],
+    [
+      'PATCH',
+      dataRoute,
+      '{"base_data_version":1,"path":"","patch":{"x":null}}',
+    ],
+  );
+  assert.deepEqual(
+    [remove[0], remove[1], remove[3]],
+    ['DELETE', dataRoute, '{"path":"a","base_data_version":2}'],
+  );
+  assert.equal(raw[3], `{"base_data_version":3,"path":"raw","value":${text}}`);
+  for (const call of sent) {
+    const headers = new Headers(call[2]);
+    assert.equal(headers.get('idempotency-key'), 'test-key-1');
+    assert.equal(headers.get('content-type'), 'application/json');
+  }
+});
+
+test('Reading data encodes the path and checks what comes back', async () => {
+  const urls = [];
+  let answer;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url) => {
+      urls.push(String(url));
+      return Response.json(answer);
+    },
+  });
+  const base = { artifact_id: artifact.id, data_version: 2, exists: true };
+  answer = { ...base, path: '', value: { a: 1 } };
+  assert.deepEqual(await client.getData(artifact.id), answer);
+  assert.deepEqual(await client.getData(artifact.id, ''), answer);
+  answer = { ...base, path: 'a/b', value: null };
+  assert.deepEqual(await client.getData(artifact.id, 'a/b'), answer);
+  answer = { ...base, path: 'a/b', exists: false };
+  assert.deepEqual(await client.getData(artifact.id, 'a/b'), answer);
+  assert.deepEqual(urls, [
+    dataRoute,
+    dataRoute,
+    `${dataRoute}?path=a%2Fb`,
+    `${dataRoute}?path=a%2Fb`,
+  ]);
+
+  for (const broken of [
+    { ...base, path: 'a' },
+    { ...base, path: 'a', exists: false, value: 1 },
+    { ...base, path: '', value: [1] },
+    { ...base, path: '', value: 'text' },
+    { ...base, path: 'a', value: undefined },
+    { ...base, path: 'a', value: 1, data_version: -1 },
+    { ...base, path: 'a', value: 1, data_version: '2' },
+    { ...base, path: 'a', value: 1, exists: 'yes' },
+    { ...base, path: 7, value: 1 },
+    { ...base, path: 'a', value: 1, artifact_id: 7 },
+  ]) {
+    answer = broken;
+    assert.equal(
+      (await failure(client.getData(artifact.id, 'a'))).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
+  const written = clientWith(() => Response.json({ ...dataWrite, changed: 1 }));
+  assert.equal(
+    (
+      await failure(
+        written.deleteData(
+          artifact.id,
+          { path: 'a', base_data_version: 0 },
+          { idempotencyKey: 'test-key-1' },
+        ),
+      )
+    ).code,
+    'invalid_response',
+  );
+});
+
+test('A data conflict carries the current data version, and the data codes keep their names', async () => {
+  for (const [status, code] of [
+    [409, 'data_conflict'],
+    [409, 'data_path_conflict'],
+    [422, 'data_too_large'],
+  ]) {
+    const client = clientWith(() =>
+      Response.json(
+        {
+          error: {
+            code,
+            message: 'no',
+            ...(code === 'data_conflict' ? { current_data_version: 7 } : {}),
+          },
+        },
+        { status },
+      ),
+    );
+    const error = await failure(
+      client.setData(
+        artifact.id,
+        { path: 'a', base_data_version: 0, value: 1 },
+        { idempotencyKey: 'test-key-1' },
+      ),
+    );
+    assert.deepEqual(
+      [error.status, error.code, error.currentDataVersion],
+      [status, code, code === 'data_conflict' ? 7 : undefined],
+    );
+  }
+  const malformed = clientWith(() =>
+    Response.json(
+      {
+        error: {
+          code: 'data_conflict',
+          message: 'no',
+          current_data_version: -1,
+        },
+      },
+      { status: 409 },
+    ),
+  );
+  assert.equal(
+    (
+      await failure(
+        malformed.setData(
+          artifact.id,
+          { path: 'a', base_data_version: 0, value: 1 },
+          { idempotencyKey: 'test-key-1' },
+        ),
+      )
+    ).code,
+    'invalid_response',
+  );
 });
 
 // The change feed. Each rule below is one way an earlier version failed:

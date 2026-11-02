@@ -1,11 +1,13 @@
 import type {
   AgentSession,
+  AppData,
   Artifact,
   ArtifactKind,
   ArtifactList,
   ChangeKind,
   CommitResponse,
   CopiedPart,
+  DataWriteResponse,
   DuplicateArtifactResponse,
   ErrorBody,
   ErrorCode,
@@ -23,6 +25,7 @@ import type {
   JobResult,
   JobState,
   JobVerdict,
+  JsonValue,
   Preview,
   PurgeArtifactResponse,
   RemoveUnreferencedContentResponse,
@@ -84,6 +87,9 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   job_ended: true,
   too_many_jobs: true,
   content_conflict: true,
+  data_conflict: true,
+  data_path_conflict: true,
+  data_too_large: true,
   request_key_reused: true,
   payload_too_large: true,
   range_not_satisfiable: true,
@@ -105,7 +111,7 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
 
 // A record for the same reason as the error codes: a part added later must
 // be accepted here before a copy is reported to callers.
-const COPIED_PARTS: Record<CopiedPart, true> = { files: true };
+const COPIED_PARTS: Record<CopiedPart, true> = { files: true, data: true };
 
 function isCopiedPart(value: unknown): value is CopiedPart {
   return typeof value === 'string' && Object.hasOwn(COPIED_PARTS, value);
@@ -263,6 +269,54 @@ export function parseDuplicate(
     : undefined;
   if (commit === undefined || copied === undefined) return undefined;
   return { ...commit, copied };
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value)) ||
+    Array.isArray(value) ||
+    isRecord(value)
+  );
+}
+
+/** Parses `GET /v1/artifacts/{id}/data`. */
+export function parseAppData(value: unknown): AppData | undefined {
+  if (!isRecord(value)) return undefined;
+  const { artifact_id, path, data_version, exists } = value;
+  if (
+    typeof artifact_id !== 'string' ||
+    typeof path !== 'string' ||
+    !isCount(data_version) ||
+    typeof exists !== 'boolean'
+  )
+    return undefined;
+  const base = { artifact_id, path, data_version, exists };
+  // A stored null is present as null; where nothing is, the value is absent.
+  if (!exists) return Object.hasOwn(value, 'value') ? undefined : base;
+  if (!Object.hasOwn(value, 'value')) return undefined;
+  const found: unknown = value.value;
+  // The root is an object, and any value is JSON the browser parsed.
+  if (!isJsonValue(found) || (path === '' && !isRecord(found)))
+    return undefined;
+  return { ...base, value: found };
+}
+
+/** Parses the response of a write to application data. */
+export function parseDataWrite(value: unknown): DataWriteResponse | undefined {
+  if (!isRecord(value)) return undefined;
+  const { artifact_id, path, data_version, changed, replayed } = value;
+  if (
+    typeof artifact_id !== 'string' ||
+    typeof path !== 'string' ||
+    !isCount(data_version) ||
+    typeof changed !== 'boolean' ||
+    typeof replayed !== 'boolean'
+  )
+    return undefined;
+  return { artifact_id, path, data_version, changed, replayed };
 }
 
 /** Parses the response of a metadata update. */
@@ -729,13 +783,19 @@ export function parseJobList(value: unknown): JobList | undefined {
 export function parseError(value: unknown): ErrorBody | undefined {
   if (!isRecord(value) || !isRecord(value.error)) return undefined;
   const code = errorCode(value.error.code);
-  const { message, current_revision, current_metadata_revision } = value.error;
+  const {
+    message,
+    current_revision,
+    current_metadata_revision,
+    current_data_version,
+  } = value.error;
   if (code === undefined || typeof message !== 'string') return undefined;
   const body: ErrorBody = { code, message };
   // The schema allows null as well as absence; both mean "not a conflict".
   for (const [name, count] of [
     ['current_revision', current_revision],
     ['current_metadata_revision', current_metadata_revision],
+    ['current_data_version', current_data_version],
   ] as const) {
     if (count === undefined || count === null) continue;
     if (!isCount(count)) return undefined;

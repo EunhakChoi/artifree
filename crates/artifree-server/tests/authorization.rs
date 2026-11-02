@@ -5,9 +5,10 @@ use std::str::FromStr;
 
 use artifree_core::artifacts::{ArtifactError, ArtifactService, MetadataChange, Missing};
 use artifree_core::listing::ListQuery;
-use artifree_domain::identity::{ActorId, RequestKey, Title};
+use artifree_domain::data::{DataChange, DataPath, DataValue};
+use artifree_domain::identity::{ActorId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FileChange, FilePackage, PackagePath};
-use artifree_domain::{MetadataRevision, SourceRevision};
+use artifree_domain::{AppDataVersion, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::Delivery;
 use artifree_providers::storage::SqliteStore;
 
@@ -193,6 +194,88 @@ fn another_actor_cannot_purge_or_learn_of_a_purge() -> TestResult {
     assert_eq!(replay.delivery, Delivery::Replayed);
     // Another actor cannot recover or read it either.
     assert_eq!(service.revisions(&intruder, &id).map(|_| ()), hidden);
+    Ok(())
+}
+
+/// Application data (decision 0031) is the owner's: another actor can neither
+/// read nor write it, and is told the same as for an artifact that is not there.
+/// Each actor's data space is its own, and so are its keys.
+#[test]
+fn another_actor_can_neither_read_nor_write_application_data() -> TestResult {
+    let directory =
+        TempDir(std::env::temp_dir().join(format!("artifree-authz-data-{}", std::process::id())));
+    std::fs::create_dir_all(&directory.0)?;
+    let service = ArtifactService::new(SqliteStore::open(&directory.0.join("db.sqlite3"))?);
+    let owner: ActorId = parsed("owner");
+    let intruder: ActorId = parsed("intruder");
+    let package = FilePackage::new(vec![(PackagePath::entry(), b"<p>secret</p>".to_vec())])?;
+    let id = service
+        .create(
+            &owner,
+            &parsed::<RequestKey>("owner-key-1"),
+            &parsed::<Title>("Private"),
+            &package,
+        )?
+        .artifact
+        .id;
+    let hidden = Err(ArtifactError::NotFound(Missing::Artifact));
+    let path: DataPath = parsed("secret");
+    let set = DataChange::Set {
+        path: path.clone(),
+        value: DataValue::parse("\"kept\"")?,
+    };
+    let now = UnixMillis(1);
+    service.write_data(
+        &owner,
+        &parsed::<RequestKey>("owner-key-2"),
+        &id,
+        AppDataVersion(0),
+        &set,
+        now,
+    )?;
+
+    assert_eq!(service.data(&intruder, &id, &path).map(|_| ()), hidden);
+    let overwrite = DataChange::Set {
+        path: path.clone(),
+        value: DataValue::parse("\"defaced\"")?,
+    };
+    for (key, base) in [("intruder-key-1", 0), ("intruder-key-2", 1)] {
+        assert_eq!(
+            service
+                .write_data(
+                    &intruder,
+                    &parsed::<RequestKey>(key),
+                    &id,
+                    AppDataVersion(base),
+                    &overwrite,
+                    now,
+                )
+                .map(|_| ()),
+            hidden,
+            "{key}"
+        );
+    }
+    // The owner's retry of their own request is theirs alone to replay.
+    assert_eq!(
+        service
+            .write_data(
+                &intruder,
+                &parsed::<RequestKey>("owner-key-2"),
+                &id,
+                AppDataVersion(0),
+                &set,
+                now,
+            )
+            .map(|_| ()),
+        hidden,
+        "keys are per actor"
+    );
+    let read = service.data(&owner, &id, &path)?;
+    assert_eq!(
+        (read.version, read.value.map(|value| value.to_canonical())),
+        (AppDataVersion(1), Some("\"kept\"".to_owned())),
+        "a rejected actor must not write"
+    );
     Ok(())
 }
 

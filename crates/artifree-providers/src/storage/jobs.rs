@@ -28,7 +28,7 @@ use artifree_ports::job_store::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use super::{SqliteStore, corrupt, random_bytes, unavailable};
+use super::{SqliteStore, corrupt, key_used_elsewhere, random_bytes, unavailable};
 
 /// The columns of a job row, in the order [`RawJob::from_row`] reads them.
 const COLUMNS: &str = "id, actor, artifact_id, revision, kind, state, cancel_requested, attempts,
@@ -167,7 +167,10 @@ fn written(connection: &Connection, id: &JobId) -> Result<JobRecord, StoreError>
 
 /// Whether the artifact exists outside the trash and is not purged: the
 /// state in which a job can be enqueued, cancelled, and read.
-fn artifact_in_place(connection: &Connection, id: &ArtifactId) -> Result<bool, StoreError> {
+pub(super) fn artifact_in_place(
+    connection: &Connection,
+    id: &ArtifactId,
+) -> Result<bool, StoreError> {
     connection
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM artifacts
@@ -202,16 +205,9 @@ fn key_of(connection: &Connection, request: RequestIdentity<'_>) -> Result<Key, 
             Ok(Key::Reused)
         };
     }
-    // One key space per actor with the requests that name an artifact and
-    // with cleanups (decisions 0029 and 0030).
-    let elsewhere: bool = connection
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM request_keys WHERE actor = ?1 AND request_key = ?2)
-                 OR EXISTS (SELECT 1 FROM cleanup_runs WHERE actor = ?1 AND request_key = ?2)",
-            params![request.actor.as_str(), request.key.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)?;
+    // One key space per actor with every other kind of request (decisions
+    // 0029, 0030, and 0031).
+    let elsewhere = key_used_elsewhere(connection, request.actor, request.key, "job_requests")?;
     Ok(if elsewhere { Key::Reused } else { Key::Unused })
 }
 

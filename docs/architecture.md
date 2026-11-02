@@ -142,10 +142,14 @@ in the Rust core.
 | `GET /v1/jobs`                                                                     | The actor's jobs, newest first, pages             |
 | `GET /v1/jobs/{id}`                                                                | One job: state, attempts, result or failure       |
 | `POST /v1/jobs/{id}/cancel`                                                        | Stop a job (`Idempotency-Key`); not a rollback    |
+| `GET /v1/artifacts/{id}/data`                                                      | Read your application data at a `?path=`          |
+| `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version) |
+| `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)           |
+| `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, with a body)   |
 
-Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"? } }` with
+Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"? } }` with
 `invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `not_found` (404),
-`revision_conflict`, `metadata_conflict`, `job_ended`, and `too_many_jobs` (409), `request_key_reused` (422), `payload_too_large`
+`revision_conflict`, `metadata_conflict`, `data_conflict`, `data_path_conflict`, `job_ended`, and `too_many_jobs` (409), `request_key_reused` and `data_too_large` (422), `payload_too_large`
 (413), `range_not_satisfiable` (416 with `Content-Range: bytes */{size}`), `rate_limited` (429 with
 `Retry-After`; this attempt was not processed),
 `unavailable` (503, retry with the same key), and `internal` (500).
@@ -171,12 +175,16 @@ failures.
 `POST /mcp` serves MCP Streamable HTTP through the official Rust SDK, `rmcp`,
 statelessly and with JSON responses, for protocol versions up to 2026-07-28.
 It requires the same bearer token, accepts only loopback `Host` names, and
-refuses requests carrying an `Origin`. Eighteen tools are served. Eleven
+refuses requests carrying an `Origin`. Twenty-two tools are served. Eleven
 mirror the artifact HTTP routes: `list_artifacts`, `get_artifact`,
 `create_artifact`, `save_revision`, `restore_revision`, `duplicate_artifact`,
 `update_artifact`, `list_revisions`, `get_revision`, `read_file`, and
 `create_preview`. Four mirror the job routes: `enqueue_job`, `get_job`,
-`list_jobs`, and `cancel_job` ([0030](decisions/0030-persistent-jobs-and-worker.md)). Results
+`list_jobs`, and `cancel_job` ([0030](decisions/0030-persistent-jobs-and-worker.md)).
+Four mirror the application data routes: `get_data`, `set_data`, `update_data`,
+and `delete_data` ([0031](decisions/0031-app-data.md)); the three that write
+take their value as JSON text and are marked destructive, since nothing keeps
+what they replace. Results
 are the HTTP API v1 bodies; failures are those error bodies with
 `isError: true`. MCP requests share the per-actor request limits with HTTP;
 a refused call is an HTTP `429`. The generated catalog is
@@ -262,6 +270,21 @@ The job runs trusted code in that process: it is not R02's isolated execution,
 and no builds, models, or untrusted code run. Job changes are not in the change
 feed, and the web workspace has no job view. Agent tokens may enqueue, read,
 list, and cancel jobs (the four MCP tools), at most 16 open jobs per actor.
+R06 adds application data ([0031](decisions/0031-app-data.md)): one JSON
+object per actor and artifact with its own `data_version` (schema 9),
+unrelated to the source revision and untouched by saving or restoring one.
+Paths are `/`-separated segments that address object members; values are strict
+JSON, canonicalized, and limited (256 KiB per value, 1 MiB and 10,000 values per
+space, 32 levels). A write is conditional on `base_data_version` and keyed, in
+the key space shared with artifact, cleanup, and job requests; a write that
+changes nothing keeps the version. `update` is an RFC 7396 merge patch, `set`
+can store `null`, and a path through a value that is not an object is
+`data_path_conflict`. HTTP, the MCP tools, the client, and the CLI share one
+core service, and issued agent tokens may use them. A duplicate copies the
+data only with `copy_data`. Data is not in the change feed, a revision, or an
+export, a purge erases it, and **no page can read or write it: the runtime
+bridge grants only `metadata.read`**. Subscriptions and queries (R07) and
+assets (R09) are not implemented.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

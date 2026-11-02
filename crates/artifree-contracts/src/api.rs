@@ -93,6 +93,12 @@ pub struct DuplicateArtifactRequest {
     /// named after the source's current title followed by " (Copy)".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Whether the copy also receives a copy of the source's application
+    /// data, as its own independent data space. By default `false`: the copy
+    /// receives files only. The data copied is the source's data when the copy
+    /// commits, whichever revision the files come from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_data: Option<bool>,
 }
 
 /// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or
@@ -278,6 +284,10 @@ pub struct CommitResponse {
 pub enum CopiedPart {
     /// The files of the chosen revision, byte for byte.
     Files,
+    /// The source's application data as of the copy, as the copy's own data
+    /// space. Listed only when the request asked for it; a source whose data
+    /// space is empty copies nothing, and the copy's data space is then empty.
+    Data,
 }
 
 /// Response of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`.
@@ -290,8 +300,8 @@ pub struct DuplicateArtifactResponse {
     pub artifact: Artifact,
     /// Revision 1 of the copy.
     pub revision: Revision,
-    /// What the copy received. This version has no application data or
-    /// uploaded assets, so it copies files only.
+    /// What the copy received: `files`, and `data` when the request asked for
+    /// it. Uploaded assets do not exist yet and are never copied.
     pub copied: Vec<CopiedPart>,
     /// True when an earlier request with the same key already created it.
     pub replayed: bool,
@@ -628,6 +638,156 @@ pub struct JobList {
     /// Pass as `page_token` to read the next page; absent on the last page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_page_token: Option<String>,
+}
+
+/// A JSON value of any shape, kept as the text it arrived as so that the server
+/// applies the rules of application data (decision 0031) to what was sent:
+/// duplicate member names, numbers beyond what a double holds exactly, and
+/// the size are checked by the server, not lost to a parser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JsonValue(Box<serde_json::value::RawValue>);
+
+impl JsonValue {
+    /// The value's JSON text.
+    #[must_use]
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+
+    /// A value from JSON text, or `None` when the text is not JSON.
+    #[must_use]
+    pub fn from_text(text: String) -> Option<Self> {
+        serde_json::value::RawValue::from_string(text)
+            .ok()
+            .map(Self)
+    }
+}
+
+impl PartialEq for JsonValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Eq for JsonValue {}
+
+impl JsonSchema for JsonValue {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "JsonValue".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "Any JSON value. Objects have unique member names, and numbers are finite; an integer must be within +-(2^53 - 1).",
+            "anyOf": [
+                { "type": "object" },
+                { "type": "array" },
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "boolean" },
+                { "type": "null" }
+            ]
+        })
+    }
+}
+
+/// Query of `GET /v1/artifacts/{id}/data`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadDataQuery {
+    /// The path to read: `/`-separated segments of 1-64 ASCII letters,
+    /// digits, `_`, or `-`, at most 16. Absent or empty is the root, which is
+    /// always an object. This is the decoded value of the query parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Response of `GET /v1/artifacts/{id}/data`: the value at a path of the
+/// caller's data space of the artifact, and the version of the space. A path
+/// with nothing at it is a successful read with `exists` false.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppData {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The path that was read, as parsed.
+    pub path: String,
+    /// The version of the data space: the `base_data_version` of the next
+    /// write. 0 for a space nobody wrote. It is unrelated to the source
+    /// revision and to the metadata revision.
+    pub data_version: u64,
+    /// Whether anything is at the path. The root always exists.
+    pub exists: bool,
+    /// The value at the path, present when `exists` is true. It can be
+    /// `null`: a member set to `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<JsonValue>,
+}
+
+/// Body of `PUT /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:
+/// replaces the value at a path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetDataRequest {
+    /// Where; the empty string is the root, whose value must be an object and
+    /// replaces the whole space. Objects above the path that are missing are
+    /// made; a value in the way that is not an object is `data_path_conflict`.
+    pub path: String,
+    /// The version of the data space this change was prepared against. The
+    /// write fails with `data_conflict` unless it is still current.
+    pub base_data_version: u64,
+    /// The new value. It can be `null`: unlike a patch, a set stores it.
+    pub value: JsonValue,
+}
+
+/// Body of `PATCH /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:
+/// applies a JSON Merge Patch (RFC 7396) at a path. Objects merge member by
+/// member, a `null` member removes that member, and arrays and scalars replace
+/// what is there wholesale. A merge patch cannot store `null` in an object;
+/// use a set for that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDataRequest {
+    /// Where; the empty string is the root, whose patch must be an object.
+    /// Objects above the path that are missing are made, unless the patch is
+    /// `null`; a value in the way that is not an object is
+    /// `data_path_conflict`.
+    pub path: String,
+    /// The version of the data space this change was prepared against.
+    pub base_data_version: u64,
+    /// The merge patch. A `null` patch at a path removes what is there.
+    pub patch: JsonValue,
+}
+
+/// Body of `DELETE /v1/artifacts/{id}/data`, with an `Idempotency-Key`
+/// header: removes the value at a path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteDataRequest {
+    /// Where; the empty string is the root and empties the space. Removing
+    /// what is not there succeeds and changes nothing.
+    pub path: String,
+    /// The version of the data space this change was prepared against.
+    pub base_data_version: u64,
+}
+
+/// Response of the three writes of application data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataWriteResponse {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The path that was written, as parsed.
+    pub path: String,
+    /// The version of the data space after the request. A change that altered
+    /// nothing leaves the version where it was. On a replay it is the version
+    /// the original request left, not the current one.
+    pub data_version: u64,
+    /// Whether the request altered the data space.
+    pub changed: bool,
+    /// True when an earlier request with the same key already did it.
+    pub replayed: bool,
 }
 
 /// Response of `GET /v1/artifacts/{id}/revisions`.
@@ -1002,6 +1162,17 @@ pub enum ErrorCode {
     /// The unreferenced content is no longer the set the dry run reported, so
     /// nothing was deleted. Run the dry run again.
     ContentConflict,
+    /// The base data version is not current; read the data again and reapply
+    /// the change. Nothing was written.
+    DataConflict,
+    /// The path crosses a value that is not an object, so a write cannot make
+    /// room below it. Nothing was written; set the value at a shorter path
+    /// first, or write somewhere else.
+    DataPathConflict,
+    /// The change would exceed a limit of application data: the value, the
+    /// data space, the number of values in it, or how deeply they nest.
+    /// Nothing was written.
+    DataTooLarge,
     /// The job already succeeded, failed, or was cancelled, so it cannot be
     /// cancelled. Nothing was changed.
     JobEnded,
@@ -1042,6 +1213,9 @@ pub struct ErrorBody {
     /// The current metadata revision, present for `metadata_conflict`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_metadata_revision: Option<u64>,
+    /// The current data version, present for `data_conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_data_version: Option<u64>,
 }
 
 /// Body of every non-2xx JSON response.

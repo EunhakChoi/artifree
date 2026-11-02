@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA: &str = "
 CREATE TABLE artifacts (
@@ -287,6 +287,33 @@ CREATE TABLE job_findings (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// Added in schema version 9 (decision 0031): application data. A data space
+/// is one JSON object per actor and artifact, kept as canonical text with its
+/// own version; the version is not the source revision or the metadata
+/// revision. `data_requests` holds the keys of data writes: the version a key
+/// left the space at, and whether it changed anything. It is a table of its own
+/// because a `request_keys` row names a source revision, which a data write has
+/// none of. Neither table holds a content digest or a blob.
+const DATA_SCHEMA: &str = "
+CREATE TABLE app_data (
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    actor TEXT NOT NULL,
+    data_version INTEGER NOT NULL CHECK (data_version >= 1),
+    document TEXT NOT NULL CHECK (json_valid(document) AND json_type(document) = 'object'),
+    PRIMARY KEY (artifact_id, actor)
+) STRICT;
+CREATE TABLE data_requests (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    data_version INTEGER NOT NULL CHECK (data_version >= 0),
+    changed INTEGER NOT NULL CHECK (changed IN (0, 1)),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -353,6 +380,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if version < 8 {
         transaction.execute_batch(JOB_SCHEMA).map_err(unavailable)?;
+    }
+    if version < 9 {
+        transaction
+            .execute_batch(DATA_SCHEMA)
+            .map_err(unavailable)?;
     }
     transaction
         .execute_batch(TOKEN_SCHEMA)

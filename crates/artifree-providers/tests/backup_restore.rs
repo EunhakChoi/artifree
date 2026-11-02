@@ -9,14 +9,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use artifree_domain::SourceRevision;
 use artifree_domain::change::ChangeSequence;
+use artifree_domain::data::{DataChange, DataValue};
 use artifree_domain::identity::{TokenId, UnixMillis};
 use artifree_domain::job::{Finding, JobKind, JobState, Problem, VerifyReport, WorkerId};
+use artifree_domain::{AppDataVersion, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactStore, CommitReceipt, Delivery, ListOrder, StoreError,
 };
-use artifree_ports::artifact_store::{RequestFingerprint, RequestIdentity};
+use artifree_ports::artifact_store::{PurgeRequest, RequestFingerprint, RequestIdentity};
+use artifree_ports::data_store::{DataStore, DataWrite};
 use artifree_ports::job_store::{JobClaim, JobStore, NewJob};
 use artifree_ports::token_store::{NewTokenRecord, TokenStore};
 use artifree_providers::backup::{BackupError, SCRATCH_PREFIX, backup, restore};
@@ -133,6 +135,12 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
         )),
         "missing table" => mutate("DROP TABLE request_keys"),
         "missing job table" => mutate("DROP TABLE job_findings"),
+        "missing data table" => mutate("DROP TABLE data_requests"),
+        "dropped data document check" => mutate(&rewritten_schema(
+            "app_data",
+            "CHECK (json_valid(document) AND json_type(document) = ''object'')",
+            "",
+        )),
         "dropped job state check" => mutate(&rewritten_schema(
             "jobs",
             "CHECK (attempts <= max_attempts)",
@@ -192,7 +200,7 @@ fn refusable(case: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-const REFUSED: [&str; 22] = [
+const REFUSED: [&str; 24] = [
     "newer schema",
     "empty file",
     "unrelated database",
@@ -204,6 +212,8 @@ const REFUSED: [&str; 22] = [
     "changed column default",
     "missing table",
     "missing job table",
+    "missing data table",
+    "dropped data document check",
     "dropped job state check",
     "missing index",
     "missing token index",
@@ -327,7 +337,7 @@ fn a_backup_is_one_private_file_without_scratch_leftovers() -> TestResult {
 
 #[test]
 fn an_older_backup_keeps_its_version_and_a_restore_upgrades_it() -> TestResult {
-    for version in 1..=6 {
+    for version in 1..=8 {
         let layout = Layout::new();
         historical_database(&layout.database(), version)?;
         let source = files_of(&layout.data());
@@ -581,6 +591,106 @@ fn request_keys_replay_after_a_restore() -> TestResult {
     let first_again = create_demo(&restored, &owner, &key("a"), "A", "<h1>a</h1>")?;
     assert_eq!(first_again.delivery, Delivery::Replayed);
     assert_eq!(first_again.artifact.id, created.artifact.id);
+    Ok(())
+}
+
+/// Application data (decision 0031) is rows of the database, so a backup
+/// carries it and a restore serves the same answers: the space, its version,
+/// and the replay of the keys that wrote it.
+#[test]
+fn application_data_and_its_keys_survive_a_restore() -> TestResult {
+    let layout = Layout::new();
+    let store = SqliteStore::open(&layout.database())?;
+    let owner = actor("owner");
+    let created = create_demo(&store, &owner, &key("a"), "A", "<h1>a</h1>")?;
+    let write = |target: &SqliteStore, name: &str, base: u64, text: &str| {
+        let change = DataChange::Set {
+            path: parsed("note"),
+            value: DataValue::parse(text).map_err(|error| error.to_string())?,
+        };
+        target
+            .write_data(DataWrite {
+                request: RequestIdentity {
+                    actor: &owner,
+                    key: &key(name),
+                    fingerprint: RequestFingerprint(digest(&format!("{base} {text}"))),
+                },
+                artifact: &created.artifact.id,
+                base: AppDataVersion(base),
+                change: &change,
+                now: UnixMillis(1),
+            })
+            .map_err(|error| error.to_string())
+    };
+    let first = write(&store, "d1", 0, "\"one\"")?;
+    write(&store, "d2", 1, "\"two\"")?;
+    backup(&layout.data(), &layout.output())?;
+    // Written after the backup: not in the restored copy.
+    write(&store, "d3", 2, "\"three\"")?;
+    restore(&layout.output(), &layout.target())?;
+    let restored = SqliteStore::open(&database_in(&layout.target()))?;
+
+    let snapshot = restored.read_data(&created.artifact.id, &owner)?;
+    assert_eq!(snapshot.version, AppDataVersion(2));
+    assert_eq!(snapshot.space.to_canonical(), "{\"note\":\"two\"}");
+    // The original request replays with the version it produced.
+    let replay = write(&restored, "d1", 0, "\"one\"")?;
+    assert_eq!(replay.delivery, Delivery::Replayed);
+    assert_eq!(replay.version, first.version);
+    assert_eq!(
+        write(&restored, "d1", 0, "\"other\"").err(),
+        Some("request key was already used for a different request".to_owned())
+    );
+    // The history goes on from the restored version.
+    assert_eq!(
+        write(&restored, "d4", 2, "\"four\"")?.version,
+        AppDataVersion(3)
+    );
+    Ok(())
+}
+
+/// A purge erases data from the live database, not from a backup made before
+/// it (decision 0031, decision 0029): restoring that backup brings the artifact
+/// and its data back as they were.
+#[test]
+fn a_backup_made_before_a_purge_still_holds_the_purged_data() -> TestResult {
+    let layout = Layout::new();
+    let store = SqliteStore::open(&layout.database())?;
+    let owner = actor("owner");
+    let created = create_demo(&store, &owner, &key("a"), "A", "<h1>a</h1>")?;
+    let change = DataChange::Set {
+        path: parsed("secret"),
+        value: DataValue::parse("\"still here\"")?,
+    };
+    store.write_data(DataWrite {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("d1"),
+            fingerprint: RequestFingerprint(digest("d1")),
+        },
+        artifact: &created.artifact.id,
+        base: AppDataVersion(0),
+        change: &change,
+        now: UnixMillis(1),
+    })?;
+    backup(&layout.data(), &layout.output())?;
+    update_metadata(&store, &created, &key("delete"), 1, None, None, Some(true))?;
+    store.purge_artifact(PurgeRequest {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("purge"),
+            fingerprint: RequestFingerprint(digest("purge")),
+        },
+        artifact: &created.artifact.id,
+        base: MetadataRevision(2),
+    })?;
+    assert!(store.read_data(&created.artifact.id, &owner).is_err());
+
+    restore(&layout.output(), &layout.target())?;
+    let restored = SqliteStore::open(&database_in(&layout.target()))?;
+
+    let snapshot = restored.read_data(&created.artifact.id, &owner)?;
+    assert_eq!(snapshot.space.to_canonical(), "{\"secret\":\"still here\"}");
     Ok(())
 }
 

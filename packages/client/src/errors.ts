@@ -12,6 +12,8 @@ export class ArtifreeApiError extends Error {
   readonly currentRevision: number | undefined;
   /** The current metadata revision when `code` is `metadata_conflict`. */
   readonly currentMetadataRevision: number | undefined;
+  /** The current data version when `code` is `data_conflict`. */
+  readonly currentDataVersion: number | undefined;
   /** Seconds to wait before retrying, from `Retry-After`, when given. */
   readonly retryAfterSeconds: number | undefined;
 
@@ -22,6 +24,7 @@ export class ArtifreeApiError extends Error {
       code: FailureCode;
       currentRevision?: number;
       currentMetadataRevision?: number;
+      currentDataVersion?: number;
       retryAfterSeconds?: number;
       cause?: unknown;
     },
@@ -32,6 +35,7 @@ export class ArtifreeApiError extends Error {
     this.code = details.code;
     this.currentRevision = details.currentRevision;
     this.currentMetadataRevision = details.currentMetadataRevision;
+    this.currentDataVersion = details.currentDataVersion;
     this.retryAfterSeconds = details.retryAfterSeconds;
   }
 }

@@ -72,6 +72,22 @@ function jobCli(server, args) {
   return result;
 }
 
+function dataCli(server, args) {
+  const env = {
+    ...process.env,
+    ARTIFREE_URL: server.api_url,
+    ARTIFREE_TOKEN: server.token,
+  };
+  delete env.ARTIFREE_TOKEN_FILE;
+  const result = spawnSync(
+    process.execPath,
+    ['apps/cli/dist/main.js', 'data', ...args],
+    { cwd: root, encoding: 'utf8', timeout: 20_000, env },
+  );
+  if (result.error) throw result.error;
+  return result;
+}
+
 /** Runs `artifree-server worker run --once` and returns its JSON lines. */
 function drainJobs(data) {
   const result = spawnSync(
@@ -1059,5 +1075,152 @@ test('CLI queues a verification job that a separate worker process finishes', as
     assert.match(missing.stderr, /^error\[not_found\]/);
   } finally {
     await server.stop();
+  }
+});
+
+test('CLI keeps application data per artifact, with versions, across a restart, and copies it only when asked', async () => {
+  const data = dataDirectory('cli-app-data');
+  const site = await freshDirectory('cli-app-data-site');
+  await writeFile(join(site, 'index.html'), '<p>data</p>');
+  const write = (id, version, path, value, key) => [
+    'set',
+    id,
+    '--path',
+    path,
+    '--base-data-version',
+    String(version),
+    '--value',
+    value,
+    '--idempotency-key',
+    key,
+  ];
+  const first = await startServer(binary, data);
+  let id;
+  try {
+    id = json(cli(first, ['create', '--title', 'Data', '--dir', site])).artifact
+      .id;
+    const empty = json(dataCli(first, ['get', id]));
+    assert.deepEqual(
+      [empty.data_version, empty.exists, empty.value],
+      [0, true, {}],
+    );
+    const set = json(
+      dataCli(
+        first,
+        write(id, 0, 'todos/first', '{"done":false}', 'cli-app-1'),
+      ),
+    );
+    assert.deepEqual(
+      [set.data_version, set.changed, set.replayed],
+      [1, true, false],
+    );
+    assert.equal(
+      json(
+        dataCli(
+          first,
+          write(id, 0, 'todos/first', '{"done":false}', 'cli-app-1'),
+        ),
+      ).replayed,
+      true,
+    );
+    const patched = json(
+      dataCli(first, [
+        'update',
+        id,
+        '--path',
+        'todos/first',
+        '--base-data-version',
+        '1',
+        '--patch',
+        '{"done":true,"tags":["a"]}',
+      ]),
+    );
+    assert.equal(patched.data_version, 2);
+
+    // A stale write fails and says which version is current.
+    const stale = dataCli(first, write(id, 1, 'x', '1', 'cli-app-2'));
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /^error\[data_conflict\]/);
+    assert.match(stale.stderr, /^current_data_version=2$/m);
+
+    // What JSON.parse would silently change is refused by the server.
+    for (const value of ['{"a":1,"a":2}', '9007199254740993']) {
+      const refused = dataCli(first, write(id, 2, 'x', value, 'cli-app-3'));
+      assert.equal(refused.status, 1, value);
+      assert.match(refused.stderr, /^error\[invalid_request\]/, value);
+    }
+    const valueFile = join(site, 'value.json');
+    await writeFile(valueFile, '{"from":"file"}');
+    const fromFile = json(
+      dataCli(first, [
+        'set',
+        id,
+        '--path',
+        'file',
+        '--base-data-version',
+        '2',
+        '--value-file',
+        valueFile,
+      ]),
+    );
+    assert.equal(fromFile.data_version, 3);
+
+    // A new revision is not a data change.
+    await writeFile(join(site, 'index.html'), '<p>data v2</p>');
+    json(cli(first, ['save', id, '--base', '1', '--dir', site]));
+    assert.equal(json(dataCli(first, ['get', id])).data_version, 3);
+  } finally {
+    await first.stop();
+  }
+
+  const second = await startServer(binary, data);
+  try {
+    const kept = json(dataCli(second, ['get', id]));
+    assert.equal(kept.data_version, 3);
+    assert.deepEqual(kept.value, {
+      todos: { first: { done: true, tags: ['a'] } },
+      file: { from: 'file' },
+    });
+    assert.equal(
+      json(dataCli(second, ['get', id, '--path', 'todos/second'])).exists,
+      false,
+    );
+
+    const plain = json(cli(second, ['duplicate', id, '1']));
+    assert.deepEqual(plain.copied, ['files']);
+    assert.equal(
+      json(dataCli(second, ['get', plain.artifact.id])).data_version,
+      0,
+    );
+    const copy = json(cli(second, ['duplicate', id, '1', '--copy-data']));
+    assert.deepEqual(copy.copied, ['files', 'data']);
+    const copied = json(dataCli(second, ['get', copy.artifact.id]));
+    assert.deepEqual(copied.value, kept.value);
+    assert.equal(copied.data_version, 1);
+
+    // The copy is its own space.
+    json(
+      dataCli(second, [
+        'delete',
+        copy.artifact.id,
+        '--path',
+        '',
+        '--base-data-version',
+        '1',
+      ]),
+    );
+    assert.deepEqual(
+      json(dataCli(second, ['get', copy.artifact.id])).value,
+      {},
+    );
+    assert.equal(json(dataCli(second, ['get', id])).data_version, 3);
+
+    // In the trash, nothing about the data is there to read or write.
+    json(cli(second, ['delete', id, '--base-metadata', '1']));
+    const hidden = dataCli(second, ['get', id]);
+    assert.equal(hidden.status, 1);
+    assert.match(hidden.stderr, /^error\[not_found\]/);
+  } finally {
+    await second.stop();
   }
 });

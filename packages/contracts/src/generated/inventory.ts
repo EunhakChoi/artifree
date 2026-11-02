@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.8.0",
+  "contract_version": "0.9.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -27,7 +27,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "apps/cli",
       "status": "implemented",
-      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; build inventory."
+      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory."
     },
     {
       "id": "runtime",
@@ -45,7 +45,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes, and a sandboxed preview origin."
     },
     {
       "id": "domain",
@@ -54,7 +54,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-domain",
       "status": "implemented",
-      "summary": "Validated identifiers, portable file packages, separate version counters, and feed cursors."
+      "summary": "Validated identifiers, portable file packages, application data values and paths, separate version counters, and feed cursors."
     },
     {
       "id": "artifacts",
@@ -63,7 +63,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/artifacts.rs",
       "status": "implemented",
-      "summary": "Create, conditional revisions, restores, duplicates (files only), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned."
+      "summary": "Create, conditional revisions, restores, duplicates (files, and data when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned."
     },
     {
       "id": "policy",
@@ -79,9 +79,9 @@ export const scaffoldDescription: ServiceDescription = {
       "name": "Data & documents",
       "layer": "logic",
       "language": "Rust",
-      "path": "crates/artifree-core/src/documents.rs",
-      "status": "planned",
-      "summary": "Structured edits and separately versioned application data."
+      "path": "crates/artifree-core/src/data.rs",
+      "status": "implemented",
+      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Structured edits, change subscriptions, queries, and access from the content runtime are planned."
     },
     {
       "id": "jobs",
@@ -108,7 +108,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust · SQLite",
       "path": "crates/artifree-providers/src/storage.rs",
       "status": "implemented",
-      "summary": "Local SQLite with atomic commits, a change feed and job leases in the same transactions, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned."
+      "summary": "Local SQLite with atomic commits, a change feed and job leases in the same transactions, per-actor application data, shared file content with cleanup of what nothing refers to, and tombstones for purged artifacts; PostgreSQL planned."
     },
     {
       "id": "models",
@@ -162,7 +162,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/client",
       "status": "implemented",
-      "summary": "Fetch-based HTTP API v1 client with structured errors and change feed following."
+      "summary": "Fetch-based HTTP API v1 client with structured errors, change feed following, and application data reads and writes."
     }
   ],
   "package_rules": {

@@ -93,7 +93,19 @@ pub struct NewArtifact<'a> {
     /// The artifact a copy is made from. The create is refused as
     /// [`StoreError::NotFound`] unless it is outside the trash when the
     /// create commits.
-    pub source: Option<&'a ArtifactId>,
+    pub source: Option<CopySource<'a>>,
+}
+
+/// The artifact a copy is made from, and what besides its files comes along.
+#[derive(Debug, Clone, Copy)]
+pub struct CopySource<'a> {
+    /// The source artifact.
+    pub artifact: &'a ArtifactId,
+    /// Whether the source's application data (decision 0031) is copied into
+    /// the new artifact's own data space, for the actor making the copy, in
+    /// the same transaction as the create. The copy's data starts at version 1
+    /// when the source's space has any member, and is not written otherwise.
+    pub copy_data: bool,
 }
 
 /// A request to append a revision when the artifact is still at `base`.

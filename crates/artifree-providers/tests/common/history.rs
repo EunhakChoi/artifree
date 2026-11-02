@@ -207,3 +207,59 @@ INSERT INTO changes_v7 (sequence, artifact_id, kind, revision, metadata_revision
 DROP TABLE changes;
 ALTER TABLE changes_v7 RENAME TO changes;
 ";
+
+/// Added in schema version 8 (decision 0030): persistent jobs, the keys of the
+/// requests that enqueued and cancelled them, and the mismatches a
+/// verification found.
+pub const STEP_8: &str = "
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('verify_revision')),
+    state TEXT NOT NULL CHECK (state IN
+        ('queued', 'running', 'retry_scheduled', 'succeeded', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
+    fence INTEGER NOT NULL CHECK (fence >= 0),
+    run_after INTEGER NOT NULL,
+    worker TEXT,
+    lease_expires_at INTEGER,
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    failure TEXT CHECK (failure IN
+        ('revision_unavailable', 'storage_unavailable', 'lease_expired', 'internal')),
+    files_checked INTEGER CHECK (files_checked >= 0),
+    bytes_checked INTEGER CHECK (bytes_checked >= 0),
+    mismatch_count INTEGER CHECK (mismatch_count >= 0),
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    CHECK (attempts <= max_attempts),
+    CHECK ((state = 'running') = (worker IS NOT NULL AND lease_expires_at IS NOT NULL)),
+    CHECK ((state IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
+    CHECK ((state = 'failed') = (failure IS NOT NULL)),
+    CHECK (state = 'succeeded'
+        OR (files_checked IS NULL AND bytes_checked IS NULL AND mismatch_count IS NULL))
+) STRICT;
+CREATE INDEX jobs_by_actor ON jobs (actor, created_at DESC, id);
+CREATE INDEX jobs_by_artifact ON jobs (artifact_id, created_at DESC, id);
+CREATE INDEX jobs_by_state ON jobs (state, run_after);
+CREATE TABLE job_requests (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    job_id TEXT NOT NULL REFERENCES jobs (id),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE job_findings (
+    job_id TEXT NOT NULL REFERENCES jobs (id),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    path TEXT NOT NULL,
+    problem TEXT NOT NULL CHECK (problem IN
+        ('digest_mismatch', 'size_mismatch', 'content_missing')),
+    PRIMARY KEY (job_id, ordinal)
+) STRICT, WITHOUT ROWID;
+";

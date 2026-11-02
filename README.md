@@ -110,6 +110,23 @@ not the isolated execution that builds of React sources or model calls will
 need. Cancelling stops work and never rolls anything back. Job changes are
 not in the change feed and the web workspace has no job view; poll `job show`.
 
+Each artifact can keep application data: one JSON object per owner, with its own
+`data_version` that is unrelated to the artifact's revisions
+([decision 0031](docs/decisions/0031-app-data.md)). `artifree data get <id>
+[--path todos/first]` reads it; `data set`, `data update` (a JSON Merge Patch),
+and `data delete` need `--path`, `--base-data-version` (the version you read),
+and an optional `--idempotency-key`. A stale base fails with `data_conflict`
+and the current version, and a write that changes nothing keeps the version.
+Values are strict JSON sent as written (a repeated member name or an integer
+beyond 2^53-1 is refused), at most 256 KiB each and 1 MiB in all. Saving or
+restoring a revision does not change the data, and `artifact duplicate
+--copy-data` gives a copy its own copy of it. Issued agent tokens and MCP tools
+(`get_data`, `set_data`, `update_data`, `delete_data`) may read and write it;
+there is no history, so an overwrite cannot be undone, and a purge erases it.
+**A page running in a preview cannot read or write this data** (there is no
+runtime bridge for it), it is not in a revision or an export, and the web
+workspace has no data view or subscriptions; poll `data get`.
+
 For development with live reloading, Vite is still available:
 
 ```sh
@@ -190,8 +207,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0026](docs/decisions/0026-container-image.md),
 [0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md),
 [0028](docs/decisions/0028-static-web-defaults.md),
-[0029](docs/decisions/0029-retention-and-cleanup.md), and
-[0030](docs/decisions/0030-persistent-jobs-and-worker.md)).
+[0029](docs/decisions/0029-retention-and-cleanup.md),
+[0030](docs/decisions/0030-persistent-jobs-and-worker.md), and
+[0031](docs/decisions/0031-app-data.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
