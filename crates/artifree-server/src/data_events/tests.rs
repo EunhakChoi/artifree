@@ -714,7 +714,7 @@ async fn a_missing_trashed_or_foreign_artifact_is_the_same_404_and_holds_nothing
 }
 
 #[tokio::test]
-async fn trashing_and_purging_end_open_streams_and_leave_nothing_behind() -> TestResult {
+async fn trashing_ends_open_streams_and_purged_data_cannot_be_followed() -> TestResult {
     let harness = Harness::new(quick())?;
     let id = harness.create(OWNER, "create-8").await?;
     harness.set(&id, 0, "secret", &json!({ "k": "v" })).await?;

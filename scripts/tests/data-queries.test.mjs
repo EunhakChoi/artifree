@@ -646,6 +646,18 @@ test('a too_large event is permanent whether first or newer, and the stream is n
   }
 });
 
+for (const [name, first, second] of [
+  ['the same version', snap(3), change(3)],
+  ['a lower version', snap(3), change(2)],
+]) {
+  test(`${name} within one connection is an invalid response`, async () => {
+    const run = await follow([streamResponse(sse(first, second))]);
+    assert.equal(run.outcome.error?.code, 'invalid_response');
+    assert.match(run.outcome.error.message, /does not exceed/);
+    assert.equal(run.calls.length, 1);
+  });
+}
+
 test('a reconnect may repeat the last version and may not go below it', async () => {
   const same = await follow([
     streamResponse(sse(snap(1), change(4))),
@@ -868,6 +880,24 @@ test('an abort during the request resolves', async () => {
         queueMicrotask(() => controller.abort());
       }),
   );
+  await followData(client, ARTIFACT, {
+    path: 'todos',
+    signal: controller.signal,
+    onEvent: () => {},
+  });
+});
+
+test('a permanent error that arrives after the abort resolves', async () => {
+  const controller = new AbortController();
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:1',
+    accessToken: 'secret',
+    // A fetch that ignores its signal and answers late.
+    fetch: async () => {
+      controller.abort();
+      return errorResponse(404, {}, 'not_found');
+    },
+  });
   await followData(client, ARTIFACT, {
     path: 'todos',
     signal: controller.signal,

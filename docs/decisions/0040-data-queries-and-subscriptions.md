@@ -86,8 +86,9 @@ path, data_version, exists, value?}`.
    cannot fail or wait, so a committed write is never refused or delayed by a
    subscriber. A stream that is woken, or whose 15 s heartbeat is due, reads
    the space from storage. Writes by another process arrive at the next
-   heartbeat. Trashing, purging, and metadata updates also send the
+   heartbeat. A committed metadata update (trashing is one) also sends the
    notification, so that a stream ends at once rather than at the heartbeat.
+   A purge needs the artifact in the trash, so no stream is open by then.
 6. **Pacing.** A stream reads at most once per `min interval` (250 ms): wakes
    within it are coalesced into one read at its end, so a busy writer costs
    at most four reads per second per stream. The loop decides in this order:
@@ -192,15 +193,16 @@ path, data_version, exists, value?}`.
 ## Tests
 
 Server: `crates/artifree-domain/src/members.rs` (order by UTF-8 bytes against
-UTF-16 order, cursor, limit, both bounds, `too_large`, a non-collection),
-`crates/artifree-server/src/data_events.rs` (the pace decision for any
-instants; the table of places; the revoke table), `tests/data_subscriptions.rs`
-(each route, every refusal, snapshot then change, coalescing and strictly
-increasing versions, `too_large`, lifetime and heartbeat with a busy writer,
-trash, purge, disabled user, revoked token, shutdown, the limits and that a
-refused request reads nothing, that a write succeeds while a subscriber
-holds its place), and the route table of `tests/multi_user.rs`. Client:
-`scripts/tests/data-queries.test.mjs`.
+UTF-16 order, cursor, limit, both bounds and one byte over each, `too_large`,
+a non-collection), `crates/artifree-server/src/data_events/tests.rs` (the pace
+decision for any instants; the table of places; every refusal reads no
+storage; snapshot then change, coalescing and strictly increasing versions,
+`too_large`, lifetime and heartbeat with a busy writer, trash, a corrupt
+stored space, disabled user, revoked token, shutdown, the limits, that a write
+succeeds while subscribers hold their places, and that opens on a one-thread
+runtime with one blocking thread do not deadlock),
+`crates/artifree-server/tests/data_members.rs` (the members route), and the
+route table of `tests/multi_user.rs`. Client: `scripts/tests/data-queries.test.mjs`.
 
 ## Alternatives
 

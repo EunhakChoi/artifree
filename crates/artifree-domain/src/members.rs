@@ -268,12 +268,20 @@ mod tests {
     fn a_value_over_the_member_bound_is_marked_and_has_no_text() {
         let big = "x".repeat(MAX_MEMBER_VALUE_BYTES);
         let exact = "y".repeat(MAX_MEMBER_VALUE_BYTES - 2);
-        let space = space(&format!(r#"{{"big":"{big}","exact":"{exact}"}}"#));
+        let one_over = "z".repeat(MAX_MEMBER_VALUE_BYTES - 1);
+        let space = space(&format!(
+            r#"{{"big":"{big}","exact":"{exact}","over":"{one_over}"}}"#
+        ));
         let page = space.members(&query("", Select::Values, 5, None));
         assert_eq!(page.members[0].value, MemberValue::TooLarge);
         assert!(
             matches!(&page.members[1].value, MemberValue::Text(t) if t.len() == MAX_MEMBER_VALUE_BYTES),
             "a value of exactly the bound is carried"
+        );
+        assert_eq!(
+            page.members[2].value,
+            MemberValue::TooLarge,
+            "a value one byte over the bound is marked"
         );
         let names_only = space.members(&query("", Select::Names, 5, None));
         assert!(

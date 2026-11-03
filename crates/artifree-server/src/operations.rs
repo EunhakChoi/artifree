@@ -543,7 +543,6 @@ pub(crate) async fn purge(
         .await?;
     if receipt.delivery == Delivery::Committed {
         state.feed().committed();
-        state.data_streams().notify();
     }
     Ok(PurgeArtifactResponse {
         artifact_id: receipt.artifact.to_string(),
