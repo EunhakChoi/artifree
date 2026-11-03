@@ -77,6 +77,8 @@ pub struct Ready {
     pub content_origin: String,
     /// File holding the access token.
     pub token_file: PathBuf,
+    /// Directory holding the database and the token.
+    pub data_dir: PathBuf,
 }
 
 /// Opens storage, binds both listeners, reports readiness, and serves until
@@ -151,6 +153,7 @@ async fn serve_listeners(
         loopback_api_url,
         content_origin,
         token_file,
+        data_dir: options.data_dir.clone(),
     });
     let streams = state.clone();
     let api_server = axum::serve(
@@ -200,7 +203,7 @@ async fn serve_listeners(
     Ok(())
 }
 
-fn build_settings(
+pub(crate) fn build_settings(
     options: &ServeOptions,
     bound_api_addr: SocketAddr,
     content_origin: String,
@@ -255,7 +258,7 @@ async fn bind(address: SocketAddr) -> Result<TcpListener, String> {
         .map_err(|error| format!("cannot listen on {address}: {error}"))
 }
 
-fn local_address(listener: &TcpListener) -> Result<SocketAddr, String> {
+pub(crate) fn local_address(listener: &TcpListener) -> Result<SocketAddr, String> {
     listener
         .local_addr()
         .map_err(|error| format!("cannot read the bound address: {error}"))
