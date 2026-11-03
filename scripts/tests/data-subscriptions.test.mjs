@@ -302,6 +302,45 @@ test('Pages list the members by name bytes and a cursor walks them without repea
   }
 });
 
+test('A member too large for a page is listed by name and read with a get', async () => {
+  const server = await startServer(binary, join(scratch, 'too-large'));
+  const client = clientOf(server);
+  const id = await artifactOf(client);
+  const write = writer(client, id);
+  try {
+    // Each write is within the value limit; together they are not within a page.
+    const part = 'x'.repeat(250 * 1024);
+    await write.set('items/big/a', part);
+    await write.set('items/big/b', part);
+    await write.set('items/big/c', part);
+    const last = await write.set('items/small', { n: 1 });
+    const result = await listDataMembers(client, id, {
+      path: 'items',
+      select: 'values',
+    });
+    assert.ok(
+      validate.members(result),
+      JSON.stringify(validate.members.errors),
+    );
+    assert.deepEqual(result.canonical.members, [
+      { name: 'big', too_large: true },
+      { name: 'small', value: { n: 1 } },
+    ]);
+    assert.equal(result.canonical.data_version, last);
+    // The value is not lost: a get reads it.
+    const read = await client.getData(id, 'items/big');
+    assert.deepEqual(Object.keys(read.value), ['a', 'b', 'c']);
+    // As names nothing is withheld.
+    const names = await listDataMembers(client, id, { path: 'items' });
+    assert.deepEqual(names.canonical.members, [
+      { name: 'big' },
+      { name: 'small' },
+    ]);
+  } finally {
+    await server.stop();
+  }
+});
+
 test('A follower crosses a crash and a restart; the server resets it only when it cannot continue', async () => {
   const dataDir = join(scratch, 'restart');
   const listen = ['--api-listen', `127.0.0.1:${await freePort()}`];

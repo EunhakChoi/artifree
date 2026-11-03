@@ -118,6 +118,22 @@ test('A stored null is a value of a member; names are checked by UTF-8 bytes', a
   assert.ok(Object.hasOwn(result.canonical.members[0], 'value'));
 });
 
+test('A member too large for a page is accepted without its value, and only then', async () => {
+  const body = page(
+    {
+      members: [
+        { name: 'big', too_large: true },
+        { name: 'small', value: [1] },
+      ],
+    },
+    { select: 'values' },
+  );
+  const { client } = scripted(() => Response.json(body));
+  const result = await listDataMembers(client, ARTIFACT, { select: 'values' });
+  assert.deepEqual(result.canonical.members, body.canonical.members);
+  assert.ok(!Object.hasOwn(result.canonical.members[0], 'value'));
+});
+
 const BREAKS = [
   ['names out of order', page({ members: [{ name: 'b' }, { name: 'a' }] }), {}],
   ['a repeated name', page({ members: [{ name: 'a' }, { name: 'a' }] }), {}],
@@ -158,9 +174,28 @@ const BREAKS = [
     {},
   ],
   ['members of an object that is not there', page({ exists: false }), {}],
+  [
+    'too_large with a value',
+    page(
+      { members: [{ name: 'a', too_large: true, value: 1 }] },
+      { select: 'values' },
+    ),
+    { select: 'values' },
+  ],
+  [
+    'too_large that is false',
+    page({ members: [{ name: 'a', too_large: false }] }, { select: 'values' }),
+    { select: 'values' },
+  ],
+  [
+    'too_large on a page of names',
+    page({ members: [{ name: 'a', too_large: true }] }),
+    {},
+  ],
   ['a negative version', page({ data_version: -1 }), {}],
   ['a path that breaks the grammar', page({}, { path: 'a//b' }), {}],
   ['a limit of zero', page({}, { limit: 0 }), {}],
+  ['a limit above the maximum', page({}, { limit: 101 }), {}],
   [
     'another select than asked',
     page({ members: [] }, { select: 'values' }),
@@ -332,7 +367,10 @@ test('A successful answer that is not an event stream is invalid_response', asyn
 });
 
 /** Follows until `wanted` events arrived; every answer is used in turn. */
-async function followed(answers, { wanted, path, after } = {}) {
+async function followed(
+  answers,
+  { wanted, path, after, retryDelayMs = { min: 1, max: 2 } } = {},
+) {
   const controller = new AbortController();
   const events = [];
   const disconnects = [];
@@ -342,7 +380,7 @@ async function followed(answers, { wanted, path, after } = {}) {
   });
   await followData(client, ARTIFACT, {
     signal: controller.signal,
-    retryDelayMs: { min: 1, max: 2 },
+    retryDelayMs,
     ...(path === undefined ? {} : { path }),
     ...(after === undefined ? {} : { after }),
     onEvent(event) {
@@ -410,7 +448,7 @@ test('Following reconnects from the last cursor after a loss, a 429, or a 5xx, w
     [undefined, undefined, 1],
     [0, 'network_error', 2],
     [502, 'invalid_response', 2],
-    [429, 'rate_limited', 0],
+    [429, 'rate_limited', 1],
   ]);
 });
 
@@ -441,6 +479,51 @@ test('Following stops on a failure a retry cannot fix', async () => {
     const error = await failure(followed([answer]));
     assert.deepEqual([error.status, error.code], expected);
   }
+});
+
+test('A Retry-After is kept between the configured delays, never a hot loop', async () => {
+  const limited = (seconds) =>
+    Response.json(
+      { error: { code: 'rate_limited', message: 'too many streams' } },
+      { status: 429, headers: { 'retry-after': String(seconds) } },
+    );
+  const seconds = [0, 1, 3600];
+  const { client } = scripted((url, init, count) =>
+    limited(seconds[count - 1]),
+  );
+  const controller = new AbortController();
+  const delays = [];
+  // Aborting at the third wait ends the test even when a delay was not capped.
+  await followData(client, ARTIFACT, {
+    signal: controller.signal,
+    retryDelayMs: { min: 20, max: 60 },
+    onEvent() {},
+    onDisconnect(error, retryInMs) {
+      delays.push(retryInMs);
+      if (delays.length === seconds.length) controller.abort();
+    },
+  });
+  assert.deepEqual(
+    delays,
+    [20, 60, 60],
+    'zero waits the minimum, an hour the maximum',
+  );
+});
+
+test('A stream the server accepts and closes at once keeps backing off', async () => {
+  const result = await followed(
+    [
+      () => stream([]),
+      () => stream([]),
+      () => stream([]),
+      () => stream([sse('snapshot', snapshot(1))]),
+    ],
+    { wanted: 1, retryDelayMs: { min: 10, max: 30 } },
+  );
+  assert.deepEqual(
+    result.disconnects.map(([, , delay]) => delay),
+    [10, 20, 30],
+  );
 });
 
 test('What onEvent throws ends following and is not retried', async () => {

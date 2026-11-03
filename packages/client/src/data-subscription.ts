@@ -23,6 +23,8 @@ import { isCount, isCursor, isJsonValue, isRecord } from './responses.js';
 
 /** A path of the data space: segments of `[A-Za-z0-9_-]` joined by `/`. */
 const DATA_PATH = /^([A-Za-z0-9_-]{1,64}(\/[A-Za-z0-9_-]{1,64}){0,15})?$/;
+/** The most members a page may hold (`limit` of the contract). */
+const MAX_MEMBERS_LIMIT = 100;
 /** A data cursor: `d.`, a feed identity, and a canonical data version. */
 const DATA_CURSOR = /^d\.[0-9a-f]{32}\.(0|[1-9][0-9]{0,19})$/;
 
@@ -105,11 +107,18 @@ function parseMember(
   select: DataMemberSelect,
 ): DataMember | undefined {
   if (!isRecord(value) || typeof value.name !== 'string') return undefined;
+  const { name, too_large } = value;
   const carries = Object.hasOwn(value, 'value');
-  if (select === 'names') return carries ? undefined : { name: value.name };
+  // `too_large` is only ever `true`, and only where values were selected.
+  if (too_large !== undefined && too_large !== true) return undefined;
+  if (select === 'names')
+    return carries || too_large !== undefined
+      ? undefined
+      : { name: value.name };
+  if (too_large === true) return carries ? undefined : { name, too_large };
   const found: unknown = value.value;
   if (!carries || !isJsonValue(found)) return undefined;
-  return { name: value.name, value: found };
+  return { name, value: found };
 }
 
 /** A parsed query: an absent `prefix` or `after` is left out, never null. */
@@ -127,6 +136,7 @@ function parseQuery(value: unknown): ParsedQuery | undefined {
     (select !== 'names' && select !== 'values') ||
     !isCount(limit) ||
     limit < 1 ||
+    limit > MAX_MEMBERS_LIMIT ||
     (prefix !== undefined && prefix !== null && typeof prefix !== 'string') ||
     (after !== undefined && after !== null && typeof after !== 'string')
   )
@@ -143,8 +153,9 @@ function parseQuery(value: unknown): ParsedQuery | undefined {
 /**
  * Parses `GET /v1/artifacts/{id}/data/members`. Beyond the shape it checks
  * what the contract promises of a page: at most `limit` members, strictly
- * ascending, all after `after` and starting with `prefix`, values exactly when
- * they were selected, and `next_after` the last name or absent.
+ * ascending, all after `after` and starting with `prefix`, a value exactly when
+ * values were selected and the member fits a page (otherwise `too_large`),
+ * and `next_after` the last name or absent.
  */
 export function parseDataMembers(value: unknown): DataMembers | undefined {
   if (!isRecord(value) || typeof value.artifact_id !== 'string')
@@ -366,9 +377,9 @@ export interface FollowDataOptions {
     retryInMs: number,
   ) => void;
   /**
-   * Reconnection delays: from `min`, doubling after each failed attempt up to
-   * `max`, in milliseconds. A `Retry-After` from the server is used instead
-   * when given.
+   * Reconnection delays: from `min`, doubling after each attempt that
+   * delivered nothing, up to `max`, in milliseconds. A `Retry-After` from the
+   * server is used instead when given, kept between `min` and `max`.
    */
   readonly retryDelayMs?: { readonly min: number; readonly max: number };
 }
@@ -401,9 +412,11 @@ export async function followData(
         ...(cursor === undefined ? {} : { after: cursor }),
         signal,
       });
-      attempt = 0;
       onConnect?.();
       for await (const event of events) {
+        // Only a stream that delivered something is healthy: one the server
+        // accepts and closes at once keeps backing off.
+        attempt = 0;
         cursor = dataCursorOf(event);
         try {
           onEvent(event);
@@ -420,10 +433,12 @@ export async function followData(
     }
     if (rejected !== undefined) throw rejected.error;
     if (signal.aborted) return;
+    // A `Retry-After` is honored between the configured bounds: 0 is not a
+    // license to reconnect in a hot loop, and a long wait is capped.
     const retryInMs =
       failure?.retryAfterSeconds === undefined
         ? Math.min(max, min * 2 ** attempt)
-        : failure.retryAfterSeconds * 1000;
+        : Math.min(max, Math.max(min, failure.retryAfterSeconds * 1000));
     attempt += 1;
     onDisconnect?.(failure, retryInMs);
     await sleep(retryInMs, signal);
