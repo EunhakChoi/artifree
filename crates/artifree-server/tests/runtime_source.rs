@@ -1619,6 +1619,38 @@ async fn a_granted_write_refuses_arguments_that_break_the_rules_and_saves_nothin
 }
 
 #[tokio::test]
+async fn content_text_over_the_base64_limit_is_refused_before_it_is_decoded() -> TestResult {
+    let harness = Harness::new();
+    let frame = frame(&harness, &EDITING, &["source.write"]).await?;
+    // One character over the longest text a 1 MiB file encodes to. Neither
+    // text is valid base64 (the first has a stray length, the second `!`s),
+    // so only a length check ahead of the decoder gives the size message.
+    let limit = 1_398_104;
+    for (name, content) in [
+        ("one character over", "A".repeat(limit + 1)),
+        ("not base64 at all", "!".repeat(limit + 4)),
+    ] {
+        let reply = harness
+            .send(post(
+                &frame.route("source/write"),
+                &frame.body(
+                    json!({"retry_id": "retry-0001", "path": "notes.txt", "content": content}),
+                ),
+            )?)
+            .await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{name}");
+        assert_eq!(reply.code(), "invalid_request", "{name}");
+        assert_eq!(
+            reply.json()?["error"]["message"],
+            "content is larger than the write limit",
+            "{name}"
+        );
+    }
+    assert_eq!(revision_count(&harness, &frame.id).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_write_route_judges_the_shared_path_fixture() -> TestResult {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../contracts/fixtures/package-paths.json"
@@ -1830,6 +1862,109 @@ async fn the_same_retry_identity_in_another_artifact_view_or_generation_is_anoth
 }
 
 #[tokio::test]
+async fn keys_that_start_like_the_old_frame_prefix_are_ordinary_keys() -> TestResult {
+    let harness = Harness::new();
+    let frame = frame(&harness, &EDITING, &["source.write"]).await?;
+    let first = write(
+        &harness,
+        &frame,
+        "retry-0001",
+        "notes.txt",
+        SAVED.as_bytes(),
+    )
+    .await?;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.code());
+    // A key that was valid before frame writes existed is still valid, and it
+    // is not the frame's: the owner's save under it is its own request.
+    let url = format!("/v1/artifacts/{}/revisions", frame.id);
+    // The text the frame's key had when the prefix was `rtw:` is an ordinary
+    // key too, and it does not collide with the frame's.
+    let old_spelling = format!("rtw:{}:{}:1:retry-0001", frame.id, frame.view);
+    let owner_keys = [
+        (2, "rtw:request-1".to_owned(), "one"),
+        (3, "RTW:request-1".to_owned(), "two"),
+        (4, old_spelling, "three"),
+    ];
+    for (base, key, content) in owner_keys {
+        let body = json!({
+            "base_revision": base,
+            "changes": [{"op": "put", "path": "notes.txt", "encoding": "utf8", "content": content}]
+        });
+        let saved = harness.send(post_keyed(&url, &key, &body)?).await?;
+        assert_eq!(saved.status, StatusCode::CREATED, "{key}: {}", saved.code());
+    }
+    assert_eq!(revision_count(&harness, &frame.id).await?, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_frame_write_is_found_again_by_its_retry_after_the_store_is_reopened() -> TestResult {
+    let harness = Harness::new();
+    let frame = frame(&harness, &EDITING, &["source.write"]).await?;
+    let first = write(
+        &harness,
+        &frame,
+        "retry-0001",
+        "notes.txt",
+        SAVED.as_bytes(),
+    )
+    .await?;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.code());
+    // The server restarts between the commit and the retry: only the stored
+    // key can tell the retry from a new save. The page opens a new
+    // connection and the same view again.
+    let restarted = Harness::at(
+        harness.directory.clone(),
+        false,
+        RequestLimits::default(),
+        plentiful(),
+    );
+    let mut again = Frame {
+        id: frame.id.clone(),
+        session: open_session(&restarted).await?,
+        initialization: String::new(),
+        generation: frame.generation,
+        grant_version: 0,
+        view: frame.view.clone(),
+        revision: frame.revision,
+    };
+    let granted = restarted
+        .send(grant_request_at(
+            &again.session,
+            &again.id,
+            1,
+            2,
+            0,
+            &["source.write"],
+        )?)
+        .await?;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.code());
+    again.grant_version = granted.json()?["version"].as_u64().ok_or("version")?;
+    issue(&restarted, &again, 1)
+        .await?
+        .get("initialization")
+        .and_then(Value::as_str)
+        .ok_or("init")?
+        .clone_into(&mut again.initialization);
+    let retried = write(
+        &restarted,
+        &again,
+        "retry-0001",
+        "notes.txt",
+        SAVED.as_bytes(),
+    )
+    .await?;
+    assert_eq!(retried.status, StatusCode::OK, "{}", retried.code());
+    assert_eq!(retried.json()?, first.json()?);
+    assert_eq!(
+        revision_count(&restarted, &frame.id).await?,
+        2,
+        "no second revision"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn no_idempotency_key_an_owner_or_agent_sends_can_use_the_frame_namespace() -> TestResult {
     let harness = Harness::new();
     let frame = frame(&harness, &EDITING, &["source.write"]).await?;
@@ -1843,11 +1978,11 @@ async fn no_idempotency_key_an_owner_or_agent_sends_can_use_the_frame_namespace(
     .await?;
     assert_eq!(first.status, StatusCode::OK, "{}", first.code());
     // The exact key the server derived for that save, and spelling variants.
-    let derived = format!("rtw:{}:{}:1:retry-0001", frame.id, frame.view);
+    let derived = format!("rtw~{}:{}:1:retry-0001", frame.id, frame.view);
     for key in [
         derived.clone(),
         derived.to_uppercase(),
-        "rtw:anything-at-all".to_owned(),
+        "rtw~anything-at-all".to_owned(),
     ] {
         let replay = harness
             .send(post_keyed(

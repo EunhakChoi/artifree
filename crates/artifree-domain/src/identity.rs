@@ -176,18 +176,21 @@ impl fmt::Display for ActorId {
 /// A key that makes a mutating request safe to retry.
 ///
 /// Keys are scoped to the actor that sent them. A caller-chosen key (an HTTP
-/// `Idempotency-Key`, an MCP argument) is parsed with [`FromStr`], which
-/// refuses the reserved namespace of runtime frame writes
-/// ([`RUNTIME_WRITE_PREFIX`]); the only way to build a key in that namespace
-/// is [`RequestKey::runtime_write`]. A frame's retry identity can therefore
-/// never equal, and never be made equal by, a key an agent or the owner's
-/// own client sends.
+/// `Idempotency-Key`, an MCP argument) is parsed with [`FromStr`], whose
+/// grammar has not changed: 8 to 128 ASCII letters, digits and `-_.:`. The
+/// key of a runtime frame write is built only by
+/// [`RequestKey::runtime_write`] and starts with [`RUNTIME_WRITE_PREFIX`],
+/// which holds a character outside that grammar. No text can therefore parse
+/// to a frame's key, a frame's retry identity can never equal, or be made
+/// equal by, a key an agent or the owner's own client sends, and no key that
+/// parsed before the namespace existed is refused now.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestKey(String);
 
-/// The start of every key [`RequestKey::runtime_write`] builds. No key parsed
-/// from text may start with it, in any letter case.
-pub const RUNTIME_WRITE_PREFIX: &str = "rtw:";
+/// The start of every key [`RequestKey::runtime_write`] builds. Its `~` is
+/// outside the grammar [`FromStr`] accepts, so no parsed key can contain it.
+/// Do not change it to a character that grammar accepts.
+pub const RUNTIME_WRITE_PREFIX: &str = "rtw~";
 
 /// Longest retry identity a runtime frame supplies, so that the whole key
 /// stays within 128 characters: the prefix, an artifact identifier, a
@@ -259,15 +262,6 @@ impl FromStr for RequestKey {
     type Err = InvalidValue;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let reserved = value
-            .get(..RUNTIME_WRITE_PREFIX.len())
-            .is_some_and(|start| start.eq_ignore_ascii_case(RUNTIME_WRITE_PREFIX));
-        if reserved {
-            return Err(InvalidValue {
-                what: "request key",
-                rule: "the prefix 'rtw:' is reserved",
-            });
-        }
         if (8..=128).contains(&value.len())
             && value
                 .bytes()
@@ -425,29 +419,48 @@ mod tests {
     }
 
     #[test]
-    fn the_runtime_write_namespace_cannot_be_parsed_from_text() {
+    fn keys_that_looked_like_the_old_runtime_prefix_still_parse() {
+        // Keys that were valid before the frame-write namespace existed.
         for value in [
-            "rtw:anything-at-all",
+            "rtw:request-1",
             "RTW:anything-at-all",
-            "rTw:anything-at-all",
-            "rtw:",
+            "rtw:abcdefgh",
+            "rtw-anything",
+            "xrtw:anything",
         ] {
+            assert_eq!(
+                value
+                    .parse::<RequestKey>()
+                    .map(|key| key.as_str().to_owned()),
+                Ok(value.to_owned()),
+                "refused {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_text_parses_to_a_runtime_write_key() {
+        let artifact = ArtifactId::from_random([7; 16]);
+        let built = RequestKey::runtime_write(&artifact, "v", 1, "retry-0001")
+            .map(|key| key.as_str().to_owned())
+            .unwrap_or_default();
+        assert!(built.starts_with(RUNTIME_WRITE_PREFIX), "{built:?}");
+        // The key a frame write has is not accepted back as text, in any
+        // letter case, so no caller can replay or forge it by echoing it.
+        for value in [built.clone(), built.to_uppercase(), built.to_lowercase()] {
             assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
         }
-        // Only the prefix is reserved, not the letters.
-        assert!("rtw-anything".parse::<RequestKey>().is_ok());
-        assert!("xrtw:anything".parse::<RequestKey>().is_ok());
-        // A key built by the constructor is not accepted back as text, so no
-        // caller can replay or forge a frame's key by echoing one.
-        let artifact = ArtifactId::from_random([7; 16]);
-        let built = RequestKey::runtime_write(&artifact, "v", 1, "retry-0001");
-        let built = built.map(|key| key.as_str().to_owned());
+        // The prefix itself holds a character the grammar refuses, so no
+        // spelling of it can parse.
         assert!(
-            built
-                .as_deref()
-                .is_ok_and(|key| key.parse::<RequestKey>().is_err()),
-            "{built:?}"
+            RUNTIME_WRITE_PREFIX
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))),
+            "{RUNTIME_WRITE_PREFIX:?} is inside the public key grammar"
         );
+        for value in ["rtw~request-1", "rtw~anything-at-all"] {
+            assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
     }
 
     #[test]

@@ -359,16 +359,34 @@ async function checkStaleSnapshot(browser, origin, server, artifact) {
   const opened = await open(browser, origin, server, artifact);
   try {
     await allow(opened, 'Allow download requests', 'source.download');
+    // The wait is for the view the frame now shows: the runtime-views answer
+    // whose url is the iframe's current src. That answer reaches the test
+    // through a separate channel from the page's own update of src, so it is
+    // awaited with the same budget as every other wait in this file. A failure
+    // says which urls were recorded and which src was shown, so that a repeat
+    // of the one unexplained CI timeout names its cause.
     let view;
-    await expect
-      .poll(async () => {
-        const src = await opened.element.getAttribute('src');
-        view = (await opened.views()).find(
-          (candidate) => candidate.url === src,
-        );
-        return view !== undefined;
-      })
-      .toBe(true);
+    let shown;
+    let seen = [];
+    try {
+      await expect
+        .poll(
+          async () => {
+            shown = await opened.element.getAttribute('src');
+            const recorded = await opened.views();
+            seen = recorded.map((candidate) => candidate.url);
+            view = recorded.find((candidate) => candidate.url === shown);
+            return view !== undefined;
+          },
+          { timeout: 20_000 },
+        )
+        .toBe(true);
+    } catch (error) {
+      throw new Error(
+        `No runtime view was recorded for src ${shown}; recorded: ${JSON.stringify(seen)}`,
+        { cause: error },
+      );
+    }
     await api(
       server,
       'PUT',

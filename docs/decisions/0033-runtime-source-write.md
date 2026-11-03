@@ -63,13 +63,19 @@ revision_conflict` with `current_revision`; bytes equal to the file's
    current bytes give `422` (nothing is saved: a revision that changes nothing is
    refused by the package rules); a path or package that breaks the rules gives
    `422`. A viewer is not a case here (decision 9).
-5. **The idempotency key is derived, in a namespace no other caller can
-   produce.** `rtw:{artifact}:{view}:{generation}:{retry_id}`, built only by
-   `RequestKey::runtime_write` in `artifree-domain`. Every other way to make a
-   key (`FromStr`, which the HTTP header, the MCP tools and the CLI use)
-   **rejects the prefix `rtw:`, case-insensitively**, so an owner or an agent
-   cannot send a key that lands in a frame's namespace or reuse the key of a
-   frame's retry. The frame supplies only `retry_id`: 8 to 36 characters of
+5. **The idempotency key is derived, in a namespace no text can produce.**
+   `rtw~{artifact}:{view}:{generation}:{retry_id}`, built only by
+   `RequestKey::runtime_write` in `artifree-domain`. The `~` is a character the
+   public key grammar (8 to 128 ASCII letters, digits and `-_.:`, which
+   `FromStr` parses for the HTTP header, the MCP tools and the CLI) does not
+   accept, so no text input can parse to a frame's key and the grammar itself
+   is unchanged: every key that was valid before this decision is still valid,
+   `rtw:...` ones included, and none of them is a frame's key. An owner or an
+   agent therefore cannot send a key that lands in a frame's namespace or
+   reuse the key of a frame's retry. Reserving a prefix inside the grammar was
+   rejected because it would refuse keys that are already valid. The stored key is read back only as a bound SQL value, never
+   parsed again, so a frame's key written before a restart is found by its
+   retry after the store is reopened. The frame supplies only `retry_id`: 8 to 36 characters of
    `A-Za-z0-9_-`. The parts that make the scope (artifact, view, generation) must
    be what they claim, so that no choice of `retry_id` can blur one scope into
    another; the longest key is 127 characters. The store still scopes keys per
@@ -192,8 +198,9 @@ revision_conflict` with `current_revision`; bytes equal to the file's
 
 ## Tests
 
-Rust: `artifree-domain` (the `rtw:` prefix is not parseable, scopes differ,
-the longest key, parts that blur a scope are refused);
+Rust: `artifree-domain` (keys that start `rtw:` parse as before, no text parses to
+a frame's key, scopes differ, the longest key, parts that blur a scope are
+refused);
 `crates/artifree-server/tests/runtime_source.rs` (the new revision has exactly
 the bytes sent; a new path adds a file and the largest binary file survives;
 writing and reading are separate consents in both directions; a missing binding
@@ -201,7 +208,10 @@ or grant changes nothing; authorization before the judgement of arguments;
 arguments that break the rules save nothing; the shared path fixture; a view
 that is not the head conflicts; a retry gets the first outcome and the view
 commits once; the same retry identity elsewhere is another request; no key an
-owner or agent can send reaches the frame namespace; the write body limit is
+owner or agent can send reaches the frame namespace, and `rtw:` keys, the old
+spelling of a frame's key included, are ordinary keys; a frame's retry is found
+again after the store is reopened; text over the base64 limit is refused before
+it is decoded; the write body limit is
 this route's only; a trashed artifact), `runtime_tests.rs` (a revoke during the
 write withholds the receipt and not the revision; another actor cannot write
 through the owner's view), the pure `judge` cases of `runtime_source.rs`

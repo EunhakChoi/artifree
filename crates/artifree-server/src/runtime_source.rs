@@ -13,10 +13,10 @@
 use std::num::NonZeroU64;
 
 use artifree_contracts::api::{
-    ErrorCode, MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BYTES,
-    RuntimeDownloadKind, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeSourceList,
-    RuntimeSourcePart, RuntimeSourceReadRequest, RuntimeSourceWriteReceipt,
-    RuntimeSourceWriteRequest,
+    ErrorCode, MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64,
+    MAX_RUNTIME_SOURCE_WRITE_BYTES, RuntimeDownloadKind, RuntimeDownloadOffer,
+    RuntimeDownloadRequest, RuntimeSourceList, RuntimeSourcePart, RuntimeSourceReadRequest,
+    RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::parts::{Boundary, ByteRange, FilePart};
@@ -387,6 +387,9 @@ pub(crate) async fn write(
     let (artifact, base) = (granted.artifact.clone(), granted.revision);
     let saved = state
         .run(move |artifacts| {
+            // `save` takes the change by value, and the read-back compares the
+            // stored bytes with the sent ones, so this is the one copy of the
+            // content that is made.
             let change = FileChange::Put {
                 path: path.clone(),
                 content: content.clone(),
@@ -499,9 +502,13 @@ fn judge(
 }
 
 /// The bytes of a frame's file: standard base64 with padding, of at most
-/// [`MAX_RUNTIME_SOURCE_WRITE_BYTES`] bytes. The request body is already
-/// bounded by the route's own limit, so the text is never longer than that.
+/// [`MAX_RUNTIME_SOURCE_WRITE_BYTES`] bytes. The route's body limit leaves
+/// room for text longer than that, so the length is judged first and an
+/// over-long text is refused without allocating a buffer for it.
 fn decoded(text: &str) -> Result<Vec<u8>, ApiError> {
+    if text.len() as u64 > MAX_RUNTIME_SOURCE_WRITE_BASE64 {
+        return Err(ApiError::invalid("content is larger than the write limit"));
+    }
     let bytes = BASE64
         .decode(text)
         .map_err(|_| ApiError::invalid("content is not valid base64"))?;
