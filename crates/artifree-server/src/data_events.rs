@@ -8,7 +8,9 @@
 //! state shared between streams is a wake-up signal and the counts of open
 //! streams. Each stream is produced by its own task into a channel of one
 //! event; while the reader is behind, the task keeps only the newest state it
-//! has read and still notices that the artifact is gone.
+//! has read and still notices that the artifact is gone. Only a write to data
+//! in this process wakes a stream; a trash, a purge, or a write by another
+//! process is seen at the next heartbeat read, not at each commit of anyone.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -198,17 +200,18 @@ pub(crate) async fn stream(
     let watched = operations::data_path("path", at.as_deref().unwrap_or_default())?;
     let streams = state.data_streams();
     let feed = state.feed();
-    // Subscribe before the first read, so a commit after it wakes the stream.
+    // Subscribe before the first read, so a data write after it wakes the stream.
     let wakes = streams.wakes.subscribe();
-    let commits = feed.subscribe_commits();
     let closing = feed.subscribe_closing();
-    // The first read is also the access check: an artifact the caller cannot
-    // see ends here, having taken no place and registered nothing.
-    let first = read_state(&state, &auth.actor, &artifact, &watched).await?;
+    // The place comes first, so that a request the limits refuse costs no
+    // storage work. It is held only while the request lasts if the first read,
+    // which is also the access check, fails: an artifact the caller cannot see
+    // leaves no place taken and nothing registered.
     let slot = match streams.open(&auth.actor) {
         Ok(slot) => slot,
         Err(refusal) => return Ok(too_many_streams(refusal)),
     };
+    let first = read_state(&state, &auth.actor, &artifact, &watched).await?;
     let (revoked, registration) = if let Some(token_id) = &auth.token_id {
         let (tx, rx) = watch::channel(false);
         let Some(registration) = feed.register_token_stream(&auth.actor, token_id, tx) else {
@@ -237,7 +240,6 @@ pub(crate) async fn stream(
         deadline: Instant::now() + settings.lifetime,
         sender,
         wakes,
-        commits,
         closing,
         revoked,
         _slot: slot,
@@ -353,7 +355,6 @@ struct Producer {
     deadline: Instant,
     sender: mpsc::Sender<Result<Event, Infallible>>,
     wakes: watch::Receiver<()>,
-    commits: watch::Receiver<()>,
     closing: watch::Receiver<bool>,
     revoked: Option<watch::Receiver<bool>>,
     /// Held until the producer ends.
@@ -385,24 +386,17 @@ impl Producer {
                 .is_some_and(|revoked| *revoked.borrow())
     }
 
-    /// Waits for something to do: a commit or a data write in this process, or
-    /// the heartbeat; or for a reason to stop.
+    /// Waits for something to do: a data write in this process, or the
+    /// heartbeat; or for a reason to stop.
     async fn signal(&mut self) -> Signal {
-        let deadline = self.deadline;
-        let until = (Instant::now() + self.settings.heartbeat).min(deadline);
-        tokio::select! {
-            biased;
-            () = stopped(&mut self.closing, &mut self.revoked, &self.sender) => Signal::Stop,
-            changed = self.commits.changed() => {
-                if changed.is_ok() { Signal::Wake } else { Signal::Stop }
-            }
-            changed = self.wakes.changed() => {
-                if changed.is_ok() { Signal::Wake } else { Signal::Stop }
-            }
-            () = tokio::time::sleep_until(until) => {
-                if Instant::now() >= deadline { Signal::Stop } else { Signal::Wake }
-            }
-        }
+        let until = (Instant::now() + self.settings.heartbeat).min(self.deadline);
+        wait_for_signal(
+            stopped(&mut self.closing, &mut self.revoked, &self.sender),
+            &mut self.wakes,
+            self.deadline,
+            until,
+        )
+        .await
     }
 
     /// Reads the current state, at most once per `min_read_interval`.
@@ -414,6 +408,8 @@ impl Producer {
                 () = stopped(&mut self.closing, &mut self.revoked, &self.sender) => {
                     return Err(Stopped);
                 }
+                // The wait for the interval does not outlast the lifetime.
+                () = tokio::time::sleep_until(self.deadline) => return Err(Stopped),
                 () = tokio::time::sleep_until(ready) => {}
             }
         }
@@ -500,6 +496,32 @@ impl Producer {
     }
 }
 
+/// Waits for the first of: a reason to stop, a write to data, and the
+/// heartbeat at `until` (never later than `deadline`). Whether the lifetime has
+/// ended is decided first and without waiting: a timer that is already past
+/// still takes a turn of the clock to fire, and a write that is always waiting
+/// would be chosen over it every time, keeping the stream alive for ever.
+async fn wait_for_signal(
+    stop: impl Future<Output = ()>,
+    wakes: &mut watch::Receiver<()>,
+    deadline: Instant,
+    until: Instant,
+) -> Signal {
+    if Instant::now() >= deadline {
+        return Signal::Stop;
+    }
+    tokio::select! {
+        biased;
+        () = stop => Signal::Stop,
+        changed = wakes.changed() => {
+            if changed.is_ok() { Signal::Wake } else { Signal::Stop }
+        }
+        () = tokio::time::sleep_until(until.min(deadline)) => {
+            if Instant::now() >= deadline { Signal::Stop } else { Signal::Wake }
+        }
+    }
+}
+
 /// Completes when the stream must end: the server is shutting down, the
 /// user or token was revoked, or the reader left.
 async fn stopped(
@@ -524,7 +546,9 @@ mod tests {
     use artifree_domain::data::DataValue;
     use artifree_domain::identity::ActorId;
 
-    use super::{DataStreamSettings, DataStreams, Decision, Refusal, decide, newest};
+    use super::{
+        DataStreamSettings, DataStreams, Decision, Refusal, Signal, decide, newest, wait_for_signal,
+    };
 
     fn actor(number: u8) -> Result<ActorId, Box<dyn std::error::Error>> {
         Ok(format!("u-{number:032x}").parse()?)
@@ -586,6 +610,32 @@ mod tests {
         assert_eq!(decide(Some(v(3)), v(9)), Decision::Send("change"));
         assert_eq!(decide(Some(v(3)), v(3)), Decision::Skip);
         assert_eq!(decide(Some(v(3)), v(2)), Decision::Regressed);
+    }
+
+    #[tokio::test]
+    async fn the_end_of_the_lifetime_wins_over_wake_ups_that_never_pause() {
+        let now = tokio::time::Instant::now();
+        let (writer, mut wakes) = tokio::sync::watch::channel(());
+        // A write is waiting, as it always is when writes never pause.
+        writer.send_replace(());
+        let signal = wait_for_signal(
+            std::future::pending(),
+            &mut wakes,
+            now,
+            now + Duration::from_secs(9),
+        )
+        .await;
+        assert_eq!(signal, Signal::Stop, "the lifetime had ended");
+        // Before the lifetime ends, the same write is a wake-up.
+        writer.send_replace(());
+        let signal = wait_for_signal(
+            std::future::pending(),
+            &mut wakes,
+            now + Duration::from_secs(60),
+            now + Duration::from_secs(9),
+        )
+        .await;
+        assert_eq!(signal, Signal::Wake);
     }
 
     #[test]

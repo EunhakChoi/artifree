@@ -96,11 +96,6 @@ impl Feed {
         self.commits.subscribe()
     }
 
-    /// A receiver that sees the commit wake-ups from now on.
-    pub(crate) fn subscribe_commits(&self) -> watch::Receiver<()> {
-        self.commits.subscribe()
-    }
-
     /// A receiver that turns true when the server starts shutting down.
     pub(crate) fn subscribe_closing(&self) -> watch::Receiver<bool> {
         self.closing.subscribe()

@@ -863,12 +863,16 @@ async fn another_user_finds_exactly_what_a_missing_artifact_gives() -> TestResul
 
 #[tokio::test]
 async fn a_missing_or_foreign_artifact_takes_no_slot_and_evicts_nothing() -> TestResult {
-    let harness = Harness::new(quick(1, 2));
+    // A long heartbeat keeps the open streams from reading storage again
+    // while the test changes it.
+    let harness = Harness::new(DataStreamSettings {
+        heartbeat: Duration::from_secs(30),
+        ..quick(2, 3)
+    });
     let alice = harness.person("alice").await?;
     let bob = harness.person("bob").await?;
     let hers = harness.artifact_for(&alice.secret, "hers").await?;
     let his = harness.artifact_for(&bob.secret, "his").await?;
-    // Bob's one place is in use.
     let mut open = harness.follow_as(&bob.secret, &his, "").await?;
     open.expect("snapshot").await?;
     for _ in 0..20 {
@@ -877,20 +881,160 @@ async fn a_missing_or_foreign_artifact_takes_no_slot_and_evicts_nothing() -> Tes
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
     }
-    // Nothing was taken from the process either: Alice still has her place.
+    // None of those kept a place: Bob can still open his second stream and
+    // Alice her first, which fills the process.
+    let mut second = harness.follow_as(&bob.secret, &his, "").await?;
+    second.expect("snapshot").await?;
     let mut hers_stream = harness.follow_as(&alice.secret, &hers, "").await?;
     hers_stream.expect("snapshot").await?;
-    // Bob's stream is still the one he opened, and it still gets changes.
+    // Bob's streams are still the ones he opened, and they still get changes.
     let written = harness
         .set_as(&bob.secret, &his, "", 0, &json!({ "k": 1 }))
         .await?;
     assert_eq!(written.status, StatusCode::OK);
-    let change = open.expect("change").await?;
-    assert_eq!(change.data["data_version"], 1);
+    assert_eq!(open.expect("change").await?.data["data_version"], 1);
+    assert_eq!(second.expect("change").await?.data["data_version"], 1);
     Ok(())
 }
 
-// Streams --------------------------------------------------------------------
+#[tokio::test]
+async fn a_request_the_limits_refuse_costs_no_storage_read() -> TestResult {
+    let harness = Harness::new(DataStreamSettings {
+        heartbeat: Duration::from_secs(30),
+        ..quick(1, 8)
+    });
+    let id = harness.artifact("limit-reads").await?;
+    let other = harness.artifact("limit-reads-other").await?;
+    // A space must exist for the damage below to reach it.
+    harness.set(&id, "n", 0, &json!(1)).await?;
+    harness.set(&other, "n", 0, &json!(1)).await?;
+    let mut open = harness.follow(&id, "?path=n").await?;
+    open.expect("snapshot").await?;
+    // Storage can no longer be read for anyone: a request that reads it fails
+    // with 503 or ends the stream. The one place of the actor is in use.
+    harness.raw("UPDATE app_data SET data_version = 7, document = '{\"n\":{\"a\":1,\"a\":2}}'")?;
+    for target in [
+        id.as_str(),
+        other.as_str(),
+        "art_00000000000000000000000000000000",
+    ] {
+        let response = harness.open_as(OWNER, target, "?path=n", None).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "{target}: the limit is answered before storage is read"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn commits_that_do_not_touch_this_data_do_not_wake_a_stream() -> TestResult {
+    let harness = Harness::new(DataStreamSettings {
+        heartbeat: Duration::from_secs(30),
+        ..quick(1, 8)
+    });
+    let id = harness.artifact("quiet").await?;
+    // A space must exist for the damage below to reach it.
+    harness.set(&id, "n", 0, &json!(1)).await?;
+    let mut open = harness.follow(&id, "?path=n").await?;
+    open.expect("snapshot").await?;
+    // A read now would fail and end the stream, so a stream that read after
+    // each commit of anyone would end here.
+    harness.raw("UPDATE app_data SET data_version = 7, document = '{\"n\":{\"a\":1,\"a\":2}}'")?;
+    // Commits of other artifacts, each of which wakes the change feed.
+    let unrelated = harness.artifact("unrelated").await?;
+    for pinned in [true, false, true] {
+        let meta = harness
+            .owner("GET", &format!("/v1/artifacts/{unrelated}"), None)
+            .await?
+            .json()?;
+        let base = meta["metadata_revision"].as_u64().ok_or("metadata")?;
+        let patched = harness
+            .owner(
+                "PATCH",
+                &format!("/v1/artifacts/{unrelated}"),
+                Some(&json!({ "base_metadata_revision": base, "pinned": pinned })),
+            )
+            .await?;
+        assert_eq!(patched.status, StatusCode::OK, "{}", patched.text);
+    }
+    // A negative cannot be waited for; a stream that was going to read would
+    // have done so within milliseconds, and this waits far longer.
+    let still_open = tokio::time::timeout(Duration::from_millis(800), open.ends()).await;
+    assert!(still_open.is_err(), "the stream read storage and ended");
+    // It still holds its place.
+    let refused = harness.open_as(OWNER, &id, "?path=n", None).await?;
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    Ok(())
+}
+
+/// Writes every few milliseconds, as long as the future is polled.
+async fn write_without_pause(harness: &Harness, id: &str) -> TestResult {
+    let mut version = 0;
+    for number in 0.. {
+        version = harness.set(id, "n", version, &json!(number)).await?;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stream_ends_at_its_lifetime_however_often_writes_wake_it() -> TestResult {
+    let harness = Harness::new(DataStreamSettings {
+        lifetime: Duration::from_millis(700),
+        // Reads are not held back, so only the deadline can end the stream.
+        min_read_interval: Duration::from_millis(1),
+        ..quick(1, 8)
+    });
+    let id = harness.artifact("lifetime-busy").await?;
+    let other = harness.artifact("lifetime-busy-other").await?;
+    let mut events = harness.follow(&id, "?path=n").await?;
+    events.expect("snapshot").await?;
+    // The writes come faster than the read interval for the whole lifetime;
+    // the end must still come, and bounded: `ends` fails after 10 s.
+    let started = tokio::time::Instant::now();
+    let ended = tokio::select! {
+        ended = events.ends() => ended?,
+        failed = write_without_pause(&harness, &id) => {
+            return Err(format!("the writer stopped first: {failed:?}").into());
+        }
+    };
+    assert!(!ended.is_empty(), "the writes were sent while it lived");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "ended after {:?}",
+        started.elapsed()
+    );
+    // And its place is free again.
+    eventually("the place of a stream at its lifetime", || async {
+        Ok(harness.open_as(OWNER, &other, "", None).await?.status() == StatusCode::OK)
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_wait_for_the_read_interval_does_not_outlast_the_lifetime() -> TestResult {
+    let harness = Harness::new(DataStreamSettings {
+        lifetime: Duration::from_millis(600),
+        min_read_interval: Duration::from_secs(4),
+        ..quick(1, 8)
+    });
+    let id = harness.artifact("lifetime-interval").await?;
+    let mut events = harness.follow(&id, "?path=n").await?;
+    events.expect("snapshot").await?;
+    harness.set(&id, "n", 0, &json!(1)).await?;
+    // The stream wants to read, but only 4 s after its last read; its
+    // lifetime ends long before.
+    let started = tokio::time::Instant::now();
+    assert!(events.ends().await?.is_empty());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "ended after {:?}",
+        started.elapsed()
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn a_stream_sends_a_snapshot_and_then_each_new_state_in_order() -> TestResult {
