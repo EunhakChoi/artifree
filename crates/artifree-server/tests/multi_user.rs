@@ -1365,12 +1365,11 @@ async fn trashed_artifact(
 }
 
 #[tokio::test]
-async fn a_user_purges_their_own_trash_with_the_usual_rules_and_nobody_elses() -> TestResult {
+async fn nobody_else_can_purge_what_a_user_trashed() -> TestResult {
     let harness = Harness::new();
     let alice = harness.person("alice").await?;
     let bob = harness.person("bob").await?;
     let (id, base) = trashed_artifact(&harness, &alice.secret, "alice-old").await?;
-    let (bobs, bobs_base) = trashed_artifact(&harness, &bob.secret, "bob-old").await?;
     let path = format!("/v1/artifacts/{id}/purge");
     let body = json!({ "base_metadata_revision": base });
 
@@ -1432,7 +1431,20 @@ async fn a_user_purges_their_own_trash_with_the_usual_rules_and_nobody_elses() -
         .await?;
     assert_eq!(admin.status, StatusCode::NOT_FOUND, "{}", admin.text);
 
-    // The usual rules: a stale base is a conflict that removes nothing.
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_user_purges_their_own_trashed_artifact_under_the_usual_rules() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let bob = harness.person("bob").await?;
+    let (id, base) = trashed_artifact(&harness, &alice.secret, "alice-old").await?;
+    let (bobs, bobs_base) = trashed_artifact(&harness, &bob.secret, "bob-old").await?;
+    let path = format!("/v1/artifacts/{id}/purge");
+    let body = json!({ "base_metadata_revision": base });
+
+    // A stale base is a conflict that removes nothing.
     let stale = harness
         .send(
             "POST",
