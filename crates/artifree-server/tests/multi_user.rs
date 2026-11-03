@@ -743,6 +743,9 @@ enum Holder {
     /// Closing is idempotent: the holder gets a success, and anyone else the
     /// same success, which closes nothing of the holder's.
     Closes,
+    /// An event stream: the holder gets a success whose body never ends, so
+    /// only the status is read; anyone else is told the name does not exist.
+    Streams,
 }
 
 /// What a caller of the isolation table holds.
@@ -790,7 +793,7 @@ const ROOM_ROUTE: &str = "/v1/runtime-sessions/{session}/artifacts/{artifact}/ro
     reason = "A table of every route reads best as one list."
 )]
 fn http_cases() -> Vec<Case> {
-    use Holder::{Closes, Purges, Reaches, Succeeds};
+    use Holder::{Closes, Purges, Reaches, Streams, Succeeds};
     vec![
         case("show", "GET", "/v1/artifacts/{artifact}", None, Succeeds),
         case(
@@ -835,6 +838,20 @@ fn http_cases() -> Vec<Case> {
             "/v1/artifacts/{artifact}/data",
             None,
             Succeeds,
+        ),
+        case(
+            "data members",
+            "GET",
+            "/v1/artifacts/{artifact}/data/members?path=notes&select=values",
+            None,
+            Succeeds,
+        ),
+        case(
+            "data events",
+            "GET",
+            "/v1/artifacts/{artifact}/data/events?path=notes",
+            None,
+            Streams,
         ),
         case(
             "agent sessions",
@@ -1274,6 +1291,27 @@ async fn state_is_untouched(harness: &Harness, alice: &Person, ids: &Ids) -> Tes
 async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids) -> TestResult {
     for (number, case) in http_cases().iter().enumerate() {
         let key = format!("alice-case-{number:03}");
+        if case.holder == Holder::Streams {
+            // Only the status: the body of an open stream never ends.
+            let response = harness
+                .api
+                .clone()
+                .oneshot(
+                    Request::get(ids.fill(case.route))
+                        .header(header::AUTHORIZATION, format!("Bearer {}", alice.secret))
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert!(
+                response.status().is_success(),
+                "alice: {} ({} {}): {}",
+                case.name,
+                case.method,
+                case.route,
+                response.status()
+            );
+            continue;
+        }
         let reply = harness
             .send(
                 case.method,
@@ -1284,7 +1322,7 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
             )
             .await?;
         match case.holder {
-            Holder::Succeeds | Holder::Closes | Holder::Purges => assert!(
+            Holder::Succeeds | Holder::Closes | Holder::Purges | Holder::Streams => assert!(
                 reply.status.is_success(),
                 "alice: {} ({} {}): {} {}",
                 case.name,
@@ -2757,11 +2795,13 @@ fn every_registration_that_outlives_a_request_is_confirmed_against_the_generatio
     let confirmations = |source: &str| source.matches(".ensure_current(").count();
     assert_eq!(confirmations(include_str!("../src/operations.rs")), 4);
     assert_eq!(confirmations(include_str!("../src/changes.rs")), 1);
+    assert_eq!(confirmations(include_str!("../src/data_events.rs")), 1);
     for (file, source) in [
         ("http.rs", include_str!("../src/http.rs")),
         ("mcp.rs", include_str!("../src/mcp.rs")),
         ("operations.rs", include_str!("../src/operations.rs")),
         ("changes.rs", include_str!("../src/changes.rs")),
+        ("data_events.rs", include_str!("../src/data_events.rs")),
     ] {
         assert!(
             !source.contains("ensure_enabled("),
