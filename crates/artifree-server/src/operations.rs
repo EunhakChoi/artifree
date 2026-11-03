@@ -7,12 +7,13 @@
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
     CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
-    CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
-    ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
-    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
-    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
-    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
+    CreateRuntimeViewRequest, DataMember, DataMembers, DataMembersQuery, DataSelect,
+    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse,
+    EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody, ErrorCode, ExportRuntime,
+    FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff, HandoffState,
+    Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch,
+    JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery,
+    ListDataMembersQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
     PurgeArtifactResponse, RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse,
     RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
     RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
@@ -30,6 +31,7 @@ use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
+use artifree_domain::data_members::{DEFAULT_PAGE_MEMBERS, Member, MemberQuery, MemberSelect};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
@@ -1526,6 +1528,87 @@ pub(crate) async fn read_data(
     })
 }
 
+/// Canonical JSON text as a wire value. The domain wrote the text, so text
+/// that is not JSON is a fault of the server and is never dropped or replaced
+/// by an absent value.
+pub(crate) fn canonical_json(text: String) -> Result<JsonValue, ApiError> {
+    JsonValue::from_text(text).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            "a stored value could not be written as JSON",
+        )
+    })
+}
+
+/// One page of the members of an object in the actor's data space of an
+/// artifact (decision 0040).
+pub(crate) async fn data_members(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    query: ListDataMembersQuery,
+) -> Result<DataMembers, ApiError> {
+    let id = artifact_id(id)?;
+    let path = data_path("path", query.path.as_deref().unwrap_or_default())?;
+    let select = query.select.unwrap_or_default();
+    let limit = query
+        .limit
+        .unwrap_or_else(|| u64::try_from(DEFAULT_PAGE_MEMBERS).unwrap_or(u64::MAX));
+    let member_query = MemberQuery::new(
+        path,
+        query.prefix.unwrap_or_default(),
+        match select {
+            DataSelect::Names => MemberSelect::Names,
+            DataSelect::Values => MemberSelect::Values,
+        },
+        usize::try_from(limit).unwrap_or(usize::MAX),
+        query.after,
+    )
+    .map_err(|error| ApiError::unprocessable(error.to_string()))?;
+    let echo = DataMembersQuery {
+        path: member_query.path().to_string(),
+        prefix: member_query.prefix().to_owned(),
+        select,
+        limit,
+        after: member_query.after().map(str::to_owned),
+    };
+    let artifact = id.to_string();
+    let read = state
+        .run(move |artifacts| artifacts.data_members(&actor, &id, &member_query))
+        .await?;
+    let members = read
+        .page
+        .members
+        .into_iter()
+        .map(|member| match member {
+            Member::Name(name) => Ok(DataMember {
+                name,
+                value: None,
+                too_large: None,
+            }),
+            Member::Value { name, canonical } => Ok(DataMember {
+                name,
+                value: Some(canonical_json(canonical)?),
+                too_large: None,
+            }),
+            Member::TooLarge(name) => Ok(DataMember {
+                name,
+                value: None,
+                too_large: Some(true),
+            }),
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(DataMembers {
+        artifact_id: artifact,
+        query: echo,
+        data_version: read.version.0,
+        collection: read.page.collection,
+        members,
+        next_after: read.page.next_after,
+    })
+}
+
 pub(crate) async fn set_data(
     state: &AppState,
     actor: ActorId,
@@ -1608,6 +1691,10 @@ async fn write_data(
             artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)
         })
         .await?;
+    // After the commit, and infallible: a subscription never fails a write.
+    if outcome.delivery == Delivery::Committed && outcome.changed {
+        state.data_streams().changed();
+    }
     Ok(DataWriteResponse {
         artifact_id: artifact,
         path,
@@ -1895,5 +1982,17 @@ mod tests {
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(manifest.files[0].sha256, "07".repeat(32));
         Ok(())
+    }
+
+    #[test]
+    fn stored_text_that_is_not_json_is_a_server_error_and_never_an_absent_value() {
+        let fault = canonical_json("{\"a\":".to_owned());
+        assert_eq!(
+            fault.as_ref().err().map(|error| error.status),
+            Some(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+        let text = "{\"a\":[1,true,null]}";
+        let value = canonical_json(text.to_owned());
+        assert_eq!(value.as_ref().ok().map(JsonValue::get), Some(text));
     }
 }

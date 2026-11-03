@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.14.0",
+  "contract_version": "0.15.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -81,7 +81,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/data.rs",
       "status": "implemented",
-      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Structured edits, change subscriptions, queries, and access from the content runtime are planned."
+      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Bounded member queries and per-path change streams (snapshot, then the newest state; no replay) over HTTP and the TypeScript client (decision 0040). Structured edits, MCP and CLI queries or subscriptions, and access from the content runtime are planned."
     },
     {
       "id": "jobs",
@@ -162,7 +162,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/client",
       "status": "implemented",
-      "summary": "Fetch-based HTTP API v1 client with structured errors, change feed following, and application data reads and writes."
+      "summary": "Fetch-based HTTP API v1 client with structured errors, change feed following, application data reads and writes, member queries, and data stream following."
     }
   ],
   "package_rules": {

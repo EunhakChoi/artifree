@@ -18,10 +18,11 @@ use std::time::Duration;
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest,
-    DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode,
-    ErrorResponse, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
-    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
+    DeleteDataRequest, DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest, Job, JobList,
+    ListArtifactsQuery, ListDataMembersQuery, ListJobsQuery, PurgeArtifactRequest,
+    PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
     RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
@@ -51,6 +52,7 @@ use axum::{Json, Router};
 
 use crate::auth::{AccessToken, AuthContext};
 use crate::changes::{self, Feed};
+use crate::data_events::{self, DataStreamSettings, DataStreams};
 use crate::handoffs::Handoffs;
 use crate::limits::{Limiter, Refusal, RequestLimits, Slots};
 use crate::mcp;
@@ -98,6 +100,8 @@ pub struct Settings {
     pub room_clock: Arc<dyn RoomClock>,
     /// Change streams one actor may keep open, at least 1.
     pub change_streams: u32,
+    /// Limits and intervals of data streams (decision 0040).
+    pub data_streams: DataStreamSettings,
     /// Optional public API and web origin, such as `https://artifree.example.com`.
     pub api_origin: Option<String>,
     /// Trusted reverse proxy networks.
@@ -123,6 +127,7 @@ impl Default for Settings {
             room_limits: RequestLimits::ROOM,
             room_clock: Arc::new(ProcessClock::new()),
             change_streams: crate::changes::DEFAULT_STREAMS_PER_ACTOR,
+            data_streams: DataStreamSettings::default(),
             api_origin: None,
             trusted_proxies: Vec::new(),
             allowed_hosts: Vec::new(),
@@ -155,6 +160,7 @@ struct Shared {
     /// Downloads being built, per actor (decision 0032).
     download_builds: Slots,
     feed: Feed,
+    data_streams: DataStreams,
     draining: AtomicUsize,
     settings: Settings,
     content_policy: HeaderValue,
@@ -206,6 +212,7 @@ impl AppState {
         if settings.change_streams == 0 {
             return Err("change streams per actor must be at least 1".into());
         }
+        let data_streams = DataStreams::new(settings.data_streams.validate()?);
         let started_at = crate::tokens::iso_now();
         Ok(Self {
             shared: Arc::new(Shared {
@@ -222,6 +229,7 @@ impl AppState {
                 rooms: RoomHub::new(Arc::clone(&settings.room_clock)),
                 download_builds: Slots::new(crate::runtime_source::MAX_DOWNLOAD_BUILDS),
                 feed: Feed::new(settings.change_streams),
+                data_streams,
                 draining: AtomicUsize::new(0),
                 settings,
                 content_policy,
@@ -252,6 +260,10 @@ impl AppState {
 
     pub(crate) fn feed(&self) -> &Feed {
         &self.shared.feed
+    }
+
+    pub(crate) fn data_streams(&self) -> &DataStreams {
+        &self.shared.data_streams
     }
 
     pub(crate) fn download_builds(&self) -> &Slots {
@@ -453,6 +465,8 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
                 // Inside the API-wide limit, so this one applies.
                 .layer(DefaultBodyLimit::max(MAX_DATA_BODY_BYTES)),
         )
+        .route("/v1/artifacts/{id}/data/members", get(list_data_members))
+        .route("/v1/artifacts/{id}/data/events", get(data_events::stream))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(show_job))
         .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))
@@ -1310,6 +1324,22 @@ async fn read_data(
     let Query(ReadDataQuery { path: at }) = query?;
     Ok(Json(
         operations::read_data(&state, actor, &id, at.as_deref()).await?,
+    ))
+}
+
+/// Lists the members of an object in the caller's application data, a page at
+/// a time (decision 0040). An agent token may, as it may read data.
+async fn list_data_members(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<ListDataMembersQuery>, QueryRejection>,
+) -> Result<Json<DataMembers>, ApiError> {
+    let Path(id) = path?;
+    operations::artifact_id(&id)?;
+    let Query(query) = query?;
+    Ok(Json(
+        operations::data_members(&state, actor, &id, query).await?,
     ))
 }
 

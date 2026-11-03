@@ -222,6 +222,7 @@ fn build_settings(
         room_limits: RequestLimits::ROOM,
         room_clock: std::sync::Arc::new(crate::rooms::ProcessClock::new()),
         change_streams: options.change_streams,
+        data_streams: crate::data_events::DataStreamSettings::default(),
         api_origin: options.api_origin.clone(),
         trusted_proxies: options.trusted_proxies.clone(),
         allowed_hosts,

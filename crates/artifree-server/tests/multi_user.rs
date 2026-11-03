@@ -129,6 +129,18 @@ impl Harness {
         };
         let response = self.api.clone().oneshot(request).await?;
         let status = response.status();
+        // An event stream does not end; the answer is its status. Dropping
+        // the body closes the stream.
+        if response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"))
+        {
+            return Ok(Reply {
+                status,
+                text: String::new(),
+            });
+        }
         let bytes = to_bytes(response.into_body(), usize::MAX).await?;
         Ok(Reply {
             status,
@@ -833,6 +845,20 @@ fn http_cases() -> Vec<Case> {
             "data",
             "GET",
             "/v1/artifacts/{artifact}/data",
+            None,
+            Succeeds,
+        ),
+        case(
+            "data members",
+            "GET",
+            "/v1/artifacts/{artifact}/data/members?path=notes&select=values",
+            None,
+            Succeeds,
+        ),
+        case(
+            "data events",
+            "GET",
+            "/v1/artifacts/{artifact}/data/events?path=notes",
             None,
             Succeeds,
         ),

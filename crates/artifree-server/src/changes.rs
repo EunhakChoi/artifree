@@ -46,8 +46,10 @@ struct StreamRegistrations {
     streams: Vec<(u64, ActorId, TokenId, watch::Sender<bool>)>,
 }
 
+/// A stream's entry in the registry that a disable or a revocation walks;
+/// dropping it removes the entry.
 #[derive(Debug)]
-struct TokenStreamRegistration {
+pub(crate) struct TokenStreamRegistration {
     id: u64,
     registrations: Arc<Mutex<StreamRegistrations>>,
 }
@@ -94,6 +96,16 @@ impl Feed {
         self.commits.subscribe()
     }
 
+    /// A receiver that sees the commit wake-ups from now on.
+    pub(crate) fn subscribe_commits(&self) -> watch::Receiver<()> {
+        self.commits.subscribe()
+    }
+
+    /// A receiver that turns true when the server starts shutting down.
+    pub(crate) fn subscribe_closing(&self) -> watch::Receiver<bool> {
+        self.closing.subscribe()
+    }
+
     /// Ends every open stream and every stream opened later.
     pub(crate) fn close(&self) {
         self.closing.send_replace(true);
@@ -122,7 +134,7 @@ impl Feed {
         }
     }
 
-    fn register_token_stream(
+    pub(crate) fn register_token_stream(
         &self,
         actor: &ActorId,
         token_id: &TokenId,
@@ -376,7 +388,8 @@ impl Producer {
     }
 }
 
-async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
+/// Completes when the receiver turns true; never, when there is none.
+pub(crate) async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
     if let Some(rx) = receiver {
         let _ = rx.wait_for(|revoked| *revoked).await;
     } else {
@@ -394,7 +407,7 @@ fn event(name: &str, cursor: &str, data: &impl serde::Serialize) -> Result<Event
 }
 
 /// The events a producer sends, as the response body's stream.
-struct Events(mpsc::Receiver<Result<Event, Infallible>>);
+pub(crate) struct Events(pub(crate) mpsc::Receiver<Result<Event, Infallible>>);
 
 impl Stream for Events {
     type Item = Result<Event, Infallible>;
