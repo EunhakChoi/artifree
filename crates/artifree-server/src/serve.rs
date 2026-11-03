@@ -2,7 +2,7 @@
 //! preview content listener.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use artifree_providers::data_dir;
@@ -13,7 +13,9 @@ use tokio::net::TcpListener;
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
+use crate::one_shot::{self, StopWatch};
 use crate::preview;
+pub use crate::sweep::SweepReport;
 use crate::web::WebAssets;
 
 /// Default API address; loopback only.
@@ -24,15 +26,41 @@ pub const DEFAULT_CONTENT_ADDRESS: &str = "127.0.0.1:7411";
 pub const DEFAULT_FRAME_ANCESTORS: &str = "http://127.0.0.1:* http://localhost:* http://[::1]:*";
 /// Default preview link lifetime.
 pub const DEFAULT_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
+/// Longest accepted one-shot session lifetime: seven days.
+pub const MAX_ONE_SHOT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Longest accepted preview link lifetime. Links are bearer credentials, and
 /// the bound keeps expiry arithmetic far from overflow.
 pub const MAX_PREVIEW_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Where `serve` keeps its data, and so how long the data lives.
+#[derive(Debug, Clone)]
+pub enum DataLocation {
+    /// A directory the operator names and keeps (decision 0003).
+    Persistent {
+        /// Directory holding the database and access token.
+        data_dir: PathBuf,
+    },
+    /// A new temporary directory, deleted when the process ends (decision
+    /// 0039).
+    OneShot(OneShot),
+}
+
+/// The one-shot session settings of `serve --one-shot-ttl-seconds`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneShot {
+    /// Total lifetime of the process, counted from the start of `serve`
+    /// (start-up time included). From 1 second to [`MAX_ONE_SHOT_TTL`].
+    pub ttl: Duration,
+    /// Directory in which the session directory is created; the system
+    /// temporary directory when `None`. It must already exist.
+    pub session_root: Option<PathBuf>,
+}
+
 /// Options of `artifree-server serve`.
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
-    /// Directory holding the database and access token.
-    pub data_dir: PathBuf,
+    /// Where the database and access token live.
+    pub data: DataLocation,
     /// Directory holding production web assets to serve alongside the API.
     pub web_dir: Option<PathBuf>,
     /// API listen address. Port 0 picks a free port.
@@ -77,46 +105,133 @@ pub struct Ready {
     pub content_origin: String,
     /// File holding the access token.
     pub token_file: PathBuf,
+    /// Directory holding the database and the token file.
+    pub data_dir: PathBuf,
+    /// Present only in a one-shot session.
+    pub session: Option<SessionReady>,
+}
+
+/// What a one-shot session adds to [`Ready`].
+#[derive(Debug, Clone)]
+pub struct SessionReady {
+    /// The lifetime that was asked for, counted from the start of `serve`.
+    pub ttl: Duration,
+    /// What the sweep of earlier, killed sessions did.
+    pub sweep: SweepReport,
+}
+
+/// The opened data directory of a server about to run.
+#[derive(Debug)]
+pub(crate) struct Opened {
+    store: SqliteStore,
+    token_store: SqliteTokenStore,
+    token: AccessToken,
+    data_dir: PathBuf,
+    token_file: PathBuf,
+}
+
+/// Prepares `data_dir` and opens the database and the access token in it.
+pub(crate) fn open_data(data_dir: &Path) -> Result<Opened, String> {
+    data_dir::prepare_data_dir(data_dir)?;
+    let db_path = data_dir.join(DATABASE_FILE);
+    let store = SqliteStore::open(&db_path).map_err(|error| error.to_string())?;
+    let token_store = SqliteTokenStore::open(&db_path).map_err(|error| error.to_string())?;
+    let token_file = data_dir.join("access-token");
+    let token = AccessToken::load_or_create(&token_file)
+        .map_err(|error| format!("access token {}: {error}", token_file.display()))?;
+    Ok(Opened {
+        store,
+        token_store,
+        token,
+        data_dir: data_dir.to_path_buf(),
+        token_file,
+    })
+}
+
+/// A runtime for the listeners.
+pub(crate) fn build_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("cannot start the async runtime: {error}"))
+}
+
+/// What ends the listeners: the process's own signals (persistent mode), or a
+/// session's stop with a bounded drain (decision 0039).
+#[derive(Debug, Clone)]
+pub(crate) enum Shutdown {
+    Process,
+    Session(StopWatch),
+}
+
+impl Shutdown {
+    async fn wait(&self) {
+        match self {
+            Self::Process => shutdown_signal().await,
+            Self::Session(watch) => watch.wait().await,
+        }
+    }
+
+    fn is_stopping(&self) -> bool {
+        match self {
+            Self::Process => false,
+            Self::Session(watch) => watch.requested(),
+        }
+    }
+
+    /// How long open connections may take after the stop, if bounded.
+    fn drain(&self) -> Option<Duration> {
+        match self {
+            Self::Process => None,
+            Self::Session(_) => Some(one_shot::DRAIN),
+        }
+    }
 }
 
 /// Opens storage, binds both listeners, reports readiness, and serves until
-/// interrupted (Ctrl+C, or SIGTERM on Unix).
+/// interrupted (Ctrl+C, or SIGTERM on Unix); a one-shot session also ends at
+/// its TTL and deletes its data directory on the way out (decision 0039).
 ///
 /// # Errors
 ///
 /// When the data directory, database, token, runtime, or a listener cannot be
-/// set up, when the data directory is accessible to other users (Unix), or
-/// when a listener fails while serving.
-pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
-    data_dir::prepare_data_dir(&options.data_dir)?;
-    let db_path = options.data_dir.join(DATABASE_FILE);
-    let store = SqliteStore::open(&db_path).map_err(|error| error.to_string())?;
-    let token_store = SqliteTokenStore::open(&db_path).map_err(|error| error.to_string())?;
-    let token_file = options.data_dir.join("access-token");
-    let token = AccessToken::load_or_create(&token_file)
-        .map_err(|error| format!("access token {}: {error}", token_file.display()))?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("cannot start the async runtime: {error}"))?;
-    runtime.block_on(serve_listeners(
-        options,
+/// set up, when the data directory is accessible to other users (Unix), when
+/// `on_ready` fails, when a listener fails while serving, or when a one-shot
+/// session's directory cannot be removed.
+pub fn run(
+    options: ServeOptions,
+    on_ready: impl FnOnce(&Ready) -> Result<(), String>,
+) -> Result<(), String> {
+    match options.data.clone() {
+        DataLocation::Persistent { data_dir } => {
+            let opened = open_data(&data_dir)?;
+            let runtime = build_runtime()?;
+            runtime.block_on(serve_listeners(
+                options,
+                opened,
+                None,
+                Shutdown::Process,
+                on_ready,
+            ))
+        }
+        DataLocation::OneShot(one_shot) => one_shot::run(options, &one_shot, on_ready),
+    }
+}
+
+pub(crate) async fn serve_listeners(
+    options: ServeOptions,
+    opened: Opened,
+    session: Option<SessionReady>,
+    shutdown: Shutdown,
+    on_ready: impl FnOnce(&Ready) -> Result<(), String>,
+) -> Result<(), String> {
+    let Opened {
         store,
         token_store,
         token,
+        data_dir,
         token_file,
-        on_ready,
-    ))
-}
-
-async fn serve_listeners(
-    options: ServeOptions,
-    store: SqliteStore,
-    token_store: SqliteTokenStore,
-    token: AccessToken,
-    token_file: PathBuf,
-    on_ready: impl FnOnce(&Ready),
-) -> Result<(), String> {
+    } = opened;
     let api = bind(options.api_address).await?;
     let content = bind(options.content_address).await?;
     let api_url = match options.api_origin.as_deref() {
@@ -145,21 +260,42 @@ async fn serve_listeners(
     } else {
         None
     };
+    if shutdown.is_stopping() {
+        // A stop (a signal or the TTL) arrived while starting: no readiness.
+        return Ok(());
+    }
     on_ready(&Ready {
         api_url,
         web_url,
         loopback_api_url,
         content_origin,
         token_file,
-    });
+        data_dir,
+        session,
+    })?;
+    serve_until_stopped(api, content, loopback, state, web_assets, shutdown).await
+}
+
+/// Serves the listeners until `shutdown`; a session's connections then get
+/// their bounded drain.
+async fn serve_until_stopped(
+    api: TcpListener,
+    content: TcpListener,
+    loopback: Option<TcpListener>,
+    state: AppState,
+    web_assets: Option<WebAssets>,
+    shutdown: Shutdown,
+) -> Result<(), String> {
     let streams = state.clone();
+    let (api_stop, loopback_stop, content_stop) =
+        (shutdown.clone(), shutdown.clone(), shutdown.clone());
     let api_server = axum::serve(
         api,
         http::router_with_web(state.clone(), web_assets.clone())
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        api_stop.wait().await;
         // Open change streams would otherwise keep the server running.
         streams.close_streams();
     });
@@ -169,35 +305,50 @@ async fn serve_listeners(
             http::router_with_web(state.clone(), web_assets)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move { loopback_stop.wait().await })
     });
     let content_server = axum::serve(
         content,
         preview::router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal());
-    tokio::try_join!(
-        async {
-            api_server
-                .await
-                .map_err(|error| format!("API listener failed: {error}"))
-        },
-        async {
-            content_server
-                .await
-                .map_err(|error| format!("content listener failed: {error}"))
-        },
-        async {
-            if let Some(server) = loopback_server {
-                server
+    .with_graceful_shutdown(async move { content_stop.wait().await });
+    let serving = async {
+        tokio::try_join!(
+            async {
+                api_server
                     .await
-                    .map_err(|error| format!("loopback API listener failed: {error}"))
-            } else {
-                Ok(())
-            }
-        },
-    )?;
-    Ok(())
+                    .map_err(|error| format!("API listener failed: {error}"))
+            },
+            async {
+                content_server
+                    .await
+                    .map_err(|error| format!("content listener failed: {error}"))
+            },
+            async {
+                if let Some(server) = loopback_server {
+                    server
+                        .await
+                        .map_err(|error| format!("loopback API listener failed: {error}"))
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        Ok(())
+    };
+    let Some(limit) = shutdown.drain() else {
+        return serving.await;
+    };
+    // A client that never finishes must not keep the session's data alive:
+    // after the stop, connections get `limit`, then serving is abandoned and
+    // the caller drops the runtime, which drops them.
+    tokio::select! {
+        result = serving => result,
+        () = async {
+            shutdown.wait().await;
+            tokio::time::sleep(limit).await;
+        } => Ok(()),
+    }
 }
 
 fn build_settings(

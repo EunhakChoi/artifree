@@ -21,9 +21,10 @@ use artifree_server::limits::RequestLimits;
 use artifree_server::origin::normalize_origin;
 use artifree_server::preview::normalize_frame_ancestors;
 use artifree_server::proxy::IpNetwork;
-use artifree_server::serve::{self, ServeOptions};
+use artifree_server::serve::{self, DataLocation, OneShot, Ready, ServeOptions};
 
 mod maintenance;
+mod ready_line;
 mod serve_env;
 mod worker_command;
 
@@ -84,32 +85,46 @@ fn run() -> Result<(), String> {
         }
         [command, options @ ..] if command == "serve" => {
             let options = parse_serve(options, &ServeEnv::from_process())?;
+            let one_shot = matches!(options.data, DataLocation::OneShot(_));
             serve::run(options, |ready| {
-                let mut line = serde_json::json!({
-                    "event": "ready",
-                    "api_url": ready.api_url,
-                    "content_origin": ready.content_origin,
-                    "token_file": ready.token_file,
-                });
-                if let Some(ref web_url) = ready.web_url {
-                    line["web_url"] = serde_json::json!(web_url);
+                ready_line::write(&mut std::io::stdout().lock(), ready)?;
+                if one_shot {
+                    tell_one_shot(ready);
                 }
-                if let Some(ref loopback_url) = ready.loopback_api_url {
-                    line["loopback_api_url"] = serde_json::json!(loopback_url);
-                }
-                println!("{line}");
-                // A supervisor waits for this line; a failed flush only delays it.
-                if std::io::stdout().flush().is_err() {
-                    eprintln!("Could not flush the readiness line.");
-                }
-            })
+                Ok(())
+            })?;
+            if one_shot {
+                // Reached only when the data directory was removed.
+                writeln!(
+                    std::io::stderr(),
+                    "The one-shot session ended and its data directory was deleted."
+                )
+                .ok();
+            }
+            Ok(())
         }
         _ => Err("Unknown arguments. Use --help.".into()),
     }
 }
 
+/// Tells a person on stderr what a one-shot session keeps (nothing).
+fn tell_one_shot(ready: &Ready) {
+    let ttl = ready
+        .session
+        .as_ref()
+        .map_or(0, |session| session.ttl.as_secs());
+    writeln!(
+        std::io::stderr(),
+        "One-shot session: nothing is kept. {} and everything in it, including the access token, is deleted when this process ends: after {ttl} seconds in total (start-up time included), on SIGINT or SIGTERM, or on a start-up failure. A killed process leaves it for the next one-shot start to sweep. A tunnel or proxy lifetime is a separate setting that Artifree does not implement.",
+        ready.data_dir.display()
+    )
+    .ok();
+}
+
 struct CliServeFlags {
     data_dir: Option<PathBuf>,
+    one_shot_ttl: Option<Duration>,
+    session_root: Option<PathBuf>,
     cli_web_dir: Option<PathBuf>,
     cli_lan: Option<String>,
     explicit_api_listen: Option<String>,
@@ -130,6 +145,8 @@ struct CliServeFlags {
 fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
     let mut flags = CliServeFlags {
         data_dir: None,
+        one_shot_ttl: None,
+        session_root: None,
         cli_web_dir: None,
         cli_lan: None,
         explicit_api_listen: None,
@@ -156,6 +173,8 @@ fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
         };
         match flag.as_str() {
             "--data-dir" => flags.data_dir = Some(PathBuf::from(value()?)),
+            "--one-shot-ttl-seconds" => flags.one_shot_ttl = Some(parse_one_shot_ttl(&value()?)?),
+            "--session-root" => flags.session_root = Some(PathBuf::from(value()?)),
             "--web-dir" => flags.cli_web_dir = Some(PathBuf::from(value()?)),
             "--lan" => flags.cli_lan = Some(value()?),
             "--api-listen" => flags.explicit_api_listen = Some(value()?),
@@ -268,9 +287,7 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeOptions, Str
         resolve_loopback_listen(env, flags.explicit_loopback_listen.as_deref())?;
 
     Ok(ServeOptions {
-        data_dir: flags
-            .data_dir
-            .ok_or("serve requires --data-dir <directory>.")?,
+        data: data_location(flags.data_dir, flags.one_shot_ttl, flags.session_root)?,
         web_dir: explicit_web_dir,
         api_address: address("--api-listen", &api_str)?,
         loopback_api_address,
@@ -286,6 +303,54 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeOptions, Str
         limits: flags.limits,
         change_streams: flags.change_streams,
     })
+}
+
+/// Chooses persistent or one-shot storage. The two exclude each other and a
+/// one-shot session needs an explicit lifetime: there is no default, so the
+/// mode exists only when asked for (decision 0039).
+fn data_location(
+    data_dir: Option<PathBuf>,
+    one_shot_ttl: Option<Duration>,
+    session_root: Option<PathBuf>,
+) -> Result<DataLocation, String> {
+    match (data_dir, one_shot_ttl, session_root) {
+        (Some(_), Some(_), _) => Err(
+            "--data-dir and --one-shot-ttl-seconds cannot be combined: a one-shot session keeps its data in a new temporary directory and deletes it, and --data-dir names a directory that is kept."
+                .to_owned(),
+        ),
+        (Some(data_dir), None, None) => Ok(DataLocation::Persistent { data_dir }),
+        (Some(_), None, Some(_)) => Err(
+            "--session-root only applies with --one-shot-ttl-seconds; a --data-dir is used where it is."
+                .to_owned(),
+        ),
+        (None, Some(ttl), session_root) => Ok(DataLocation::OneShot(OneShot { ttl, session_root })),
+        (None, None, Some(_)) => {
+            Err("--session-root only applies with --one-shot-ttl-seconds.".to_owned())
+        }
+        (None, None, None) => Err(
+            "serve requires --data-dir <directory> (kept), or --one-shot-ttl-seconds <n> for a temporary session that is deleted."
+                .to_owned(),
+        ),
+    }
+}
+
+/// Parses the one-shot session lifetime from a CLI argument.
+fn parse_one_shot_ttl(value: &str) -> Result<Duration, String> {
+    let range = || {
+        format!(
+            "--one-shot-ttl-seconds must be a whole number from 1 to {}.",
+            serve::MAX_ONE_SHOT_TTL.as_secs()
+        )
+    };
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(range());
+    }
+    let seconds: u64 = value.parse().map_err(|_| range())?;
+    let ttl = Duration::from_secs(seconds);
+    if seconds == 0 || ttl > serve::MAX_ONE_SHOT_TTL {
+        return Err(range());
+    }
+    Ok(ttl)
 }
 
 /// Parses the preview link lifetime from a CLI argument.
@@ -537,6 +602,7 @@ fn print_help() {
 
 Usage:
   artifree-server serve --data-dir <dir> [options]
+  artifree-server serve --one-shot-ttl-seconds <n> [--session-root <dir>] [options]
   artifree-server backup --data-dir <dir> --output <file>
   artifree-server restore --input <file> --data-dir <dir>
   artifree-server worker run --data-dir <dir> [--once]
@@ -545,12 +611,29 @@ Usage:
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or
 SIGTERM. When both listeners are ready it prints one JSON line on stdout:
 {{\"event\":\"ready\",\"api_url\":...,\"content_origin\":...,\"token_file\":...}}
-Clients authenticate with the bearer token stored in token_file.
+Clients authenticate with the bearer token stored in token_file. The line also
+has mode (persistent or one_shot) and data_dir.
 
 Options:
-  --data-dir <dir>              SQLite database and access token (required).
+  --data-dir <dir>              SQLite database and access token. It is kept.
                                 On Unix it is created with mode 700, and a
                                 directory other users can access is refused.
+                                Give this or --one-shot-ttl-seconds, not both.
+  --one-shot-ttl-seconds <n>    A one-shot session: a new private temporary data
+                                directory, empty, with a new token, deleted when
+                                the process ends (after n seconds, 1-604800, in
+                                total from the start of serve; on SIGINT or
+                                SIGTERM; on a start-up failure). Nothing is kept,
+                                and a session is never resumed. There is no
+                                default lifetime. It adds session_ttl_seconds and
+                                sweep to the readiness line. A tunnel lifetime is
+                                separate and not implemented.
+  --session-root <dir>          Where the session directory is created, with
+                                --one-shot-ttl-seconds [default: the system
+                                temporary directory]. It must exist. The next
+                                one-shot start under it removes the directories
+                                of sessions that were killed, when their owner is
+                                proven gone (Linux only; see decision 0039).
   --web-dir <dir>               Directory holding production web assets (or ARTIFREE_WEB_DIR)
   --lan <ip>                    Bind listeners to explicit LAN IP (or ARTIFREE_LAN)
   --api-listen <addr:port>      API address [default: {api}]
@@ -1103,6 +1186,105 @@ mod tests {
         // An empty or false-looking value does not enable remote MCP.
         let off = parse_with(&ServeEnv::default().with(ALLOW_REMOTE_MCP, "yes"), &[])?;
         assert!(!off.allow_remote_mcp);
+        Ok(())
+    }
+
+    fn parse_only(list: &[&str]) -> Result<ServeOptions, String> {
+        parse_serve(&args(list), &ServeEnv::default())
+    }
+
+    #[test]
+    fn a_one_shot_session_needs_an_explicit_lifetime_and_has_no_default() -> Result<(), String> {
+        let options = parse_only(&["--one-shot-ttl-seconds", "90"])?;
+        assert!(matches!(
+            options.data,
+            DataLocation::OneShot(OneShot { ttl, session_root: None }) if ttl == Duration::from_secs(90)
+        ));
+        let rooted = parse_only(&["--session-root", "/var/tmp", "--one-shot-ttl-seconds", "1"])?;
+        assert!(matches!(
+            rooted.data,
+            DataLocation::OneShot(OneShot { ttl, session_root: Some(ref root) })
+                if ttl == Duration::from_secs(1) && root.as_path() == std::path::Path::new("/var/tmp")
+        ));
+        let Err(neither) = parse_only(&[]) else {
+            return Err("serve with neither storage option must be refused".into());
+        };
+        assert!(
+            neither.contains("--data-dir") && neither.contains("--one-shot-ttl-seconds"),
+            "{neither}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_one_shot_lifetime_accepts_one_second_to_seven_days_only() -> Result<(), String> {
+        for ok in ["1", "604800"] {
+            parse_only(&["--one-shot-ttl-seconds", ok])?;
+        }
+        for bad in [
+            "0",
+            "604801",
+            "-1",
+            "1.5",
+            "",
+            "1h",
+            "+5",
+            "99999999999999999999",
+        ] {
+            let Err(message) = parse_only(&["--one-shot-ttl-seconds", bad]) else {
+                return Err(format!("{bad:?} must be refused"));
+            };
+            assert!(
+                message
+                    .starts_with("--one-shot-ttl-seconds must be a whole number from 1 to 604800"),
+                "{bad:?}: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn contradictory_storage_options_are_refused_with_the_reason() {
+        let cases: [(&[&str], &str); 4] = [
+            (
+                &["--data-dir", "/tmp/d", "--one-shot-ttl-seconds", "5"],
+                "cannot be combined",
+            ),
+            (
+                &[
+                    "--one-shot-ttl-seconds",
+                    "5",
+                    "--data-dir",
+                    "/tmp/d",
+                    "--session-root",
+                    "/tmp",
+                ],
+                "cannot be combined",
+            ),
+            (
+                &["--data-dir", "/tmp/d", "--session-root", "/tmp"],
+                "--session-root only applies with --one-shot-ttl-seconds",
+            ),
+            (
+                &["--session-root", "/tmp"],
+                "--session-root only applies with --one-shot-ttl-seconds",
+            ),
+        ];
+        for (list, expected) in cases {
+            let Err(message) = parse_only(list) else {
+                panic!("{list:?} must be refused");
+            };
+            assert!(message.contains(expected), "{list:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_persistent_data_dir_parses_as_before() -> Result<(), String> {
+        let options = parse_only(&["--data-dir", "/srv/artifree"])?;
+        assert!(matches!(
+            options.data,
+            DataLocation::Persistent { ref data_dir } if data_dir.as_path() == std::path::Path::new("/srv/artifree")
+        ));
         Ok(())
     }
 }
