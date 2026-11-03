@@ -380,7 +380,9 @@ content as a user (cleanup is administrator-only).
 `GET /v1/artifacts/{id}/data/members` lists the members of the object at a
 `path` in your own data: ordered by the UTF-8 bytes of the names, at most
 `limit` (1 to 100, 50 by default) per page, optionally only names with a
-`prefix`, as `names` or with their `values` (at most 512 KiB a page). A page
+`prefix`, as `names` or with their `values` (at most 512 KiB a page; a member
+whose name and value exceed that is listed with `too_large: true` and no value,
+and `GET data` reads it). A page
 repeats the query as parsed, reports its `data_version`, and gives `next_after`
 when more follow; pass it back as `after`. Pages are not pinned to one version
 (the space keeps no history): a member that exists throughout appears once, in

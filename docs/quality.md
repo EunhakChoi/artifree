@@ -342,8 +342,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   sharing, OAuth, or a web screen for users, because none exist.
 - Data queries and subscriptions (decision 0038): domain tests for the query
   rules (every parameter's bounds, ordering by UTF-8 bytes including characters
-  outside the basic plane, paging, prefix and cursor, the 512 KiB value bound with
-  the first member always included, a path that is not an object), for the
+  outside the basic plane, paging, prefix and cursor, the exact 512 KiB value bound with a member that cannot fit a page listed
+  as `too_large`, a path that is not an object), for the
   data cursor (a change feed cursor and every non-canonical form are refused)
   and for the projection of a write onto a watched path; unit tests of the
   retained window (contiguity, trimming by count and bytes, an oversize write,

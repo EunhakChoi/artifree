@@ -52,9 +52,14 @@ workspace does not use them.
    writes before the cursor are never seen. Nothing repeats, because the next
    page starts strictly after the last name sent.
 3. **Bounds.** A page has at most `limit` members and, with `select=values`,
-   at most 512 KiB of member names and canonical values (the first member is
-   always included, so a page always makes progress: a value is at most 256
-   KiB). `next_after` is present exactly when a further matching member
+   at most 512 KiB of member names and canonical values, exactly. A member
+   whose name and canonical value together exceed that cannot fit a page by
+   itself (a subtree can grow to the space limit of 1 MiB through several
+   permitted writes), so it is listed by name with `too_large: true` and no
+   `value`; the client reads it with `GET data` at its path. Its weight in the
+   page is its name alone (a name is at most 256 bytes), so every member fits
+   an empty page and a listing always makes progress. `too_large` is absent
+   otherwise and is never sent for `select=names`. `next_after` is present exactly when a further matching member
    exists. The query reads only the caller's space of an artifact the caller
    may read; its cost is bounded by the space (1 MiB).
 4. **Normal form.** The response repeats the query as parsed and completed
@@ -122,8 +127,16 @@ data_version, path, exists, value?}`, the value at the path as of that
     artifact, the last writes in process memory: at most 64 writes and 256 KiB
     of values (a write larger than the byte bound is not retained and also
     breaks the window). At most 256 windows are kept in the process and 32 per
-    actor, least recently written first; a window with an open stream is never
-    dropped. A cursor is continued only when the window holds every write after
+    actor, least recently written first; a window with an open stream or a
+    write in flight is never dropped. When no window can be dropped to make
+    room, a new one is **not** made: a stream is refused with `429
+rate_limited` and `Retry-After: 5` (the message names the server's
+    subscriptions, not the caller's), and a write goes ahead without a window
+    (nothing streams that space, and the next stream anchors a new one from
+    storage). The registry never exceeds 256 windows or 32 per actor. A window
+    is made only for an artifact the actor may use: access is checked first,
+    so requests for names that are missing, in the trash, purged, or another
+    user's make no window and evict none. A cursor is continued only when the window holds every write after
     it. Otherwise the server sends `reset` with a current snapshot: the cursor
     is older than the window, is ahead of the data, names another database
     (a restore; the cursor carries the feed identity of 0006), or the window
@@ -131,12 +144,21 @@ data_version, path, exists, value?}`, the value at the path as of that
     cursor from before a restart is reset unless nothing was written since. A
     write that this process did not make (another process on the same database)
     is noticed at the next check and resets the streams behind it. A check
-    runs every 15 seconds and after any commit of this process, and also ends a
-    stream whose artifact went to the trash or was purged.
+    runs every 15 seconds and after any commit of this process (so each commit
+    makes every open data stream read its own space once: reads grow with
+    streams times commits, bounded by the stream limits and the request rate),
+    and also ends a stream whose artifact went to the trash or was purged.
 11. **Order inside the process.** A write and the recording of its event
-    happen under one lock per space, so the window lists the writes in the
-    order they committed. A data write over HTTP and over MCP both pass
-    through that one place.
+    happen under one lock per space (the gate), so the window lists the writes
+    in the order they committed. A data write over HTTP and over MCP both pass
+    through that one place. The gate is awaited before a blocking thread is
+    asked for, never inside the blocking task: a reader holds the gate while it
+    waits for a thread, so a thread parked on the gate could starve it. Once a
+    write has committed, nothing about the window may fail it: when the event
+    cannot be recorded (the merged value cannot be read back, or the window's
+    lock was poisoned) the window is forgotten and its streams are woken, so
+    they reset; a window that cannot be forgotten is dropped from the registry
+    and its streams end, and the client's reconnect is reset.
 
 ### Access and limits
 
@@ -175,10 +197,12 @@ data_version, path, exists, value?}`, the value at the path as of that
 ### Surface
 
 16. **Contract 0.15.0:** `ListDataMembersQuery`, `DataMembers` (with
-    `DataMembersQuery`, `CanonicalMembers`, `DataMember`), the event data
+    `DataMembersQuery`, `CanonicalMembers`, `DataMember` with its `too_large`), the event data
     `DataSnapshotEvent`, `DataChangeEvent`, `DataPosition`, `ReadDataEventsQuery`.
     The TypeScript client: `listDataMembers`, `openData`, `followData` (the
-    retry rule of 0006 decision 10, restarting from the last cursor), and
+    retry rule of 0006 decision 10, restarting from the last cursor; a
+    `Retry-After` is kept between the minimum and maximum delay, and a stream
+    that delivered nothing before it ended keeps backing off), and
     `applyDataEvent`, a small reducer used by the tests and available to apps.
     Their module is imported only by callers that use it: the web entry does
     not grow.
@@ -202,6 +226,12 @@ data_version, path, exists, value?}`, the value at the path as of that
 - **No pinned pages**: a page is not tied to the version of the page before
   it (decision 2).
 - **No event rate limit** beyond the request rate of the writer (decision 14).
+- **No cap on the length of one event line** in the client's event-stream
+  parser, which the change feed shares; the server is the one the token
+  names, and the parser is not changed here to keep the web entry as it is.
+- **Data versions above 2^53 - 1** are refused by the client as an invalid
+  response (a version rises by one per changing write, so it is unreachable in
+  practice).
 - No claim of network isolation or of frame capability enforcement.
 
 ## Tests
@@ -214,8 +244,12 @@ the real router the behavior named above: ordering, cursor stability under
 concurrent writes, snapshot then replay with no gap and no duplicate across a
 reconnect, `reset` past the window and for another database, concurrent
 writers against a mirrored state, the 404 for another user, disabling closing
-streams, the stream limit, and a client that goes away freeing its place.
-TypeScript: the client against the real server binary, including a restart.
+streams, the stream limit, and a client that goes away freeing its place; in
+process, a registry of held windows that refuses instead of growing, requests
+for missing artifacts that make and evict no window, writers that never park a
+blocking thread on the gate (a pool of two threads, six writers, and a reader
+that holds the gate), a write that survives a poisoned or unreadable window,
+and a member too large for a page. TypeScript: the client against the real server binary, including a restart.
 Important tests were checked to fail when the guarded behavior is broken
 (mutation notes are in the pull request).
 
