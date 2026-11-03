@@ -2,10 +2,11 @@
 use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
-    DuplicateArtifactResponse, ErrorResponse, FeedPosition, MAX_DOWNLOAD_NAME,
-    MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64, MAX_RUNTIME_SOURCE_WRITE_BYTES,
-    Preview, PurgeArtifactResponse, RemoveUnreferencedContentResponse, Revision, RevisionList,
-    RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
+    DuplicateArtifactResponse, EditFilesRequest, ErrorBody, ErrorResponse, FeedPosition,
+    MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64,
+    MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview, PurgeArtifactResponse,
+    RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeConnection,
+    RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
     RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView,
     SaveRevisionRequest, SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
 };
@@ -302,4 +303,66 @@ fn runtime_source_write_bounds_are_the_published_ones() {
     // base64 writes as 349,526 groups of four characters with padding.
     assert_eq!(MAX_RUNTIME_SOURCE_WRITE_BYTES, 1_048_576);
     assert_eq!(MAX_RUNTIME_SOURCE_WRITE_BASE64, 349_526 * 4);
+}
+
+fn edit_request() -> Value {
+    serde_json::json!({
+        "base_revision": 3,
+        "edits": [
+            {
+                "op": "put", "path": "index.html", "encoding": "utf8",
+                "content": "<p>x</p>", "expect": "0".repeat(64)
+            },
+            { "op": "put", "path": "new.css", "encoding": "utf8", "content": "", "expect": "absent" },
+            { "op": "delete", "path": "old.css", "expect": "f".repeat(64) }
+        ]
+    })
+}
+
+/// An edit carries the condition on its own file (decision 0035): there is no
+/// default, and the shape is the same as a save's change plus `expect`.
+#[test]
+fn edit_request_round_trips_and_every_edit_states_its_condition() -> Result<(), serde_json::Error> {
+    let expected = edit_request();
+    let parsed: EditFilesRequest = serde_json::from_value(expected.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, expected);
+
+    for index in 0..3 {
+        let mut request = edit_request();
+        request["edits"][index]
+            .as_object_mut()
+            .map(|edit| edit.remove("expect"));
+        let refused = serde_json::from_value::<EditFilesRequest>(request);
+        assert!(
+            refused.is_err_and(|error| error.to_string().contains("missing field `expect`")),
+            "edit {index} without a condition"
+        );
+    }
+    let mut renamed = edit_request();
+    renamed["edits"][2]["op"] = Value::String("rename".into());
+    assert!(serde_json::from_value::<EditFilesRequest>(renamed).is_err());
+    Ok(())
+}
+
+/// The numbers the prose and the schema state are the server's (decision
+/// 0035): at most 512 edits, 32 listed conflicts, and conditions that are
+/// `absent` or 64 lowercase hexadecimal digits.
+#[test]
+fn edit_bounds_and_conditions_are_the_published_ones() {
+    let schema = |value: Result<Value, serde_json::Error>| {
+        value.unwrap_or_else(|error| panic!("schema: {error}"))
+    };
+    let generator = SchemaSettings::draft2020_12().into_generator();
+    let request = schema(serde_json::to_value(
+        generator.clone().into_root_schema_for::<EditFilesRequest>(),
+    ));
+    let error = schema(serde_json::to_value(
+        generator.into_root_schema_for::<ErrorBody>(),
+    ));
+    assert_eq!(request["properties"]["edits"]["maxItems"], 512);
+    assert_eq!(error["properties"]["conflicting_files"]["maxItems"], 32);
+    let put = &request["$defs"]["FileEdit"]["oneOf"][0]["properties"]["expect"];
+    let delete = &request["$defs"]["FileEdit"]["oneOf"][1]["properties"]["expect"];
+    assert_eq!(put["pattern"], "^(absent|[0-9a-f]{64})$");
+    assert_eq!(delete["pattern"], "^[0-9a-f]{64}$");
 }

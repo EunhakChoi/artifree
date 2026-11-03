@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { ArtifreeApiError } from '@artifree/client';
+import { ArtifreeApiError, FileConflictError } from '@artifree/client';
 import { scaffoldDescription } from '@artifree/contracts';
 import { runArtifact, UsageError } from './artifact.js';
 import { runContent } from './content.js';
@@ -115,6 +115,13 @@ try {
       );
     if (error.currentDataVersion !== undefined)
       console.error(`current_data_version=${error.currentDataVersion}`);
+    if (error instanceof FileConflictError) {
+      for (const file of error.files)
+        console.error(
+          `conflict ${file.path} ${file.current_sha256 ?? 'absent'}`,
+        );
+      console.error(`conflicts=${error.total}`);
+    }
     process.exitCode = 1;
   } else if (isUsageError(error)) {
     console.error(error instanceof Error ? error.message : 'Invalid usage.');

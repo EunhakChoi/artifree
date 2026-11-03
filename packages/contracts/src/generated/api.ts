@@ -6,6 +6,7 @@
 export type ApiBody =
   | CreateArtifactRequest
   | SaveRevisionRequest
+  | EditFilesRequest
   | RestoreRevisionRequest
   | UpdateArtifactRequest
   | CommitResponse
@@ -92,6 +93,42 @@ export type FileChange =
       path: string;
     };
 /**
+ * One edit of an edit request: a change to one file and the condition on
+ * that file alone (decision 0035).
+ */
+export type FileEdit =
+  | {
+      /**
+       * Complete new content.
+       */
+      content: string;
+      encoding: ContentEncoding;
+      /**
+       * What the file must be in the current revision: `absent` when the
+       * path must not be a file (a create), or the lowercase hexadecimal
+       * SHA-256 digest of the bytes the file must have (a replace).
+       */
+      expect: string;
+      op: 'put';
+      /**
+       * Portable relative path.
+       */
+      path: string;
+    }
+  | {
+      /**
+       * The lowercase hexadecimal SHA-256 digest of the bytes the file
+       * must have in the current revision. `absent` is refused: deleting
+       * what is not there is no edit.
+       */
+      expect: string;
+      op: 'delete';
+      /**
+       * Portable relative path.
+       */
+      path: string;
+    };
+/**
  * Source model family of an artifact. Only `app` can be created by this
  * version; the other families are reserved for planned source models.
  */
@@ -118,6 +155,7 @@ export type ErrorCode =
   | 'not_found'
   | 'runtime_session_expired'
   | 'revision_conflict'
+  | 'file_conflict'
   | 'metadata_conflict'
   | 'not_in_trash'
   | 'content_conflict'
@@ -223,6 +261,26 @@ export interface SaveRevisionRequest {
    * most 512 changes, each to a different path.
    */
   changes: FileChange[];
+}
+/**
+ * Body of `POST /v1/artifacts/{id}/edits`: commits changes to some files as
+ * the next revision, each applied only if its own file is as expected in the
+ * **current** revision. One file that is not rejects all of them with
+ * `file_conflict`.
+ */
+export interface EditFilesRequest {
+  /**
+   * The revision the caller read the expected digests from. It is not a
+   * condition: files that no edit names may have changed since. It must be
+   * a revision the artifact has.
+   */
+  base_revision: number;
+  /**
+   * At least one edit and at most 512, each to a different path.
+   *
+   * @maxItems 512
+   */
+  edits: FileEdit[];
 }
 /**
  * Body of `POST /v1/artifacts/{id}/revisions/{revision}/restore`: commits
@@ -1168,6 +1226,18 @@ export interface ErrorResponse {
 export interface ErrorBody {
   code: ErrorCode;
   /**
+   * The first files, in path order, whose edits did not hold; present for
+   * `file_conflict`, together with `current_revision`. At most 32.
+   *
+   * @maxItems 32
+   */
+  conflicting_files?: ConflictingFile[] | null;
+  /**
+   * How many edits did not hold, at least the length of `conflicting_files`;
+   * present for `file_conflict`.
+   */
+  conflicting_files_total?: number | null;
+  /**
    * The current data version, present for `data_conflict`.
    */
   current_data_version?: number | null;
@@ -1183,6 +1253,20 @@ export interface ErrorBody {
    * Human-readable explanation; not a stable contract.
    */
   message: string;
+}
+/**
+ * A file named by an edit that is not as expected, with what it is now.
+ */
+export interface ConflictingFile {
+  /**
+   * Lowercase hexadecimal SHA-256 digest of the file in the current
+   * revision, or null when the path is not a file of it. Always present.
+   */
+  current_sha256: string | null;
+  /**
+   * The edited path.
+   */
+  path: string;
 }
 /**
  * Data of a `change` event of `GET /v1/changes`: one commit that wrote a

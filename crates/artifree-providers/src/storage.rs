@@ -49,13 +49,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::schema;
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
-use artifree_domain::package::{FilePackage, PackagePath};
+use artifree_domain::package::{FilePackage, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord,
-    CleanupReceipt, CleanupRequest, CommitReceipt, ContentSetDigest, Delivery, FileEntry,
-    ListOrder, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest,
-    RequestIdentity, RevisionCommit, RevisionRecord, StoreError, UnreferencedContent,
+    CleanupReceipt, CleanupRequest, CommitReceipt, ConditionalCommit, ContentSetDigest, Delivery,
+    FileEntry, ListOrder, MAX_LISTED_MISMATCHES, MetadataReceipt, MetadataUpdate, NewArtifact,
+    PurgeReceipt, PurgeRequest, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    UnreferencedContent, unmet_expectations,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -294,38 +295,57 @@ impl ArtifactStore for SqliteStore {
             if same_files(transaction, request.artifact, request.base, request.package)? {
                 return Err(StoreError::Unchanged);
             }
-            let next = SourceRevision(current.current_revision.0 + 1);
-            let now = commit_time(transaction)?;
-            transaction
-                .execute(
-                    "UPDATE artifacts SET current_revision = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![request.artifact.as_str(), sql_revision(next)?, now.0],
-                )
-                .map_err(unavailable)?;
-            insert_revision(
+            append_revision(
                 transaction,
-                request.artifact,
-                next,
                 request.request,
+                request.artifact,
+                &current,
                 request.package,
-                now,
-            )?;
-            let position = (next, current.metadata_revision);
-            record_key(
+            )
+        })
+    }
+
+    fn commit_edits(&self, request: ConditionalCommit<'_>) -> Result<CommitReceipt, StoreError> {
+        self.write(|transaction| {
+            let target = in_place(transaction, request.artifact)?;
+            let current = match settle(key_use(transaction, request.request)?, target)? {
+                Settled::Replay(id, position) => return replayed(transaction, &id, position),
+                Settled::Proceed(current) => current,
+            };
+            // The head read here is the head this transaction appends to: the
+            // writer lock is held until the commit, so the expectations are
+            // judged against the very revision the new one follows.
+            let head = revision_record(transaction, request.artifact, current.current_revision)?
+                .ok_or_else(|| corrupt("the current revision has no listing"))?;
+            let mut unmet = unmet_expectations(request.edits, &head.files);
+            if !unmet.is_empty() {
+                let total = unmet.len();
+                unmet.truncate(MAX_LISTED_MISMATCHES);
+                return Err(StoreError::FilesChanged {
+                    current: current.current_revision,
+                    mismatches: unmet,
+                    total,
+                });
+            }
+            let base = package_of(transaction, request.artifact, current.current_revision)?
+                .ok_or_else(|| corrupt("the current revision has no files"))?;
+            let changes = request
+                .edits
+                .iter()
+                .map(|edit| edit.change.clone())
+                .collect();
+            let package = match base.apply(changes) {
+                Ok(package) => package,
+                Err(PackageError::Unchanged) => return Err(StoreError::Unchanged),
+                Err(error) => return Err(StoreError::Package(error)),
+            };
+            append_revision(
                 transaction,
                 request.request,
                 request.artifact,
-                position,
-                now,
-            )?;
-            record_change(
-                transaction,
-                request.artifact,
-                ChangeKind::Revised,
-                position,
-                now,
-            )?;
-            committed(transaction, request.artifact, position)
+                &current,
+                &package,
+            )
         })
     }
 
@@ -653,30 +673,7 @@ impl ArtifactStore for SqliteStore {
         id: &ArtifactId,
         revision: SourceRevision,
     ) -> Result<Option<FilePackage>, StoreError> {
-        let connection = self.connect()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT f.path, b.content FROM revision_files f
-                 JOIN blobs b ON b.digest = f.digest
-                 WHERE f.artifact_id = ?1 AND f.revision = ?2 ORDER BY f.path",
-            )
-            .map_err(unavailable)?;
-        let rows = statement
-            .query_map(params![id.as_str(), sql_revision(revision)?], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(unavailable)?;
-        let mut files = Vec::new();
-        for row in rows {
-            let (path, content) = row.map_err(unavailable)?;
-            files.push((stored_path(&path)?, content));
-        }
-        if files.is_empty() {
-            return Ok(None);
-        }
-        FilePackage::new(files)
-            .map(Some)
-            .map_err(|error| StoreError::Unavailable(format!("stored package is invalid: {error}")))
+        package_of(&self.connect()?, id, revision)
     }
 
     fn revision_file(
@@ -984,6 +981,61 @@ fn count_unreferenced(connection: &Connection) -> Result<UnreferencedContent, St
         bytes,
         digest: ContentSetDigest(hasher.finalize().into()),
     })
+}
+
+/// The complete files of one revision, read through `connection`.
+fn package_of(
+    connection: &Connection,
+    id: &ArtifactId,
+    revision: SourceRevision,
+) -> Result<Option<FilePackage>, StoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT f.path, b.content FROM revision_files f
+             JOIN blobs b ON b.digest = f.digest
+             WHERE f.artifact_id = ?1 AND f.revision = ?2 ORDER BY f.path",
+        )
+        .map_err(unavailable)?;
+    let rows = statement
+        .query_map(params![id.as_str(), sql_revision(revision)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(unavailable)?;
+    let mut files = Vec::new();
+    for row in rows {
+        let (path, content) = row.map_err(unavailable)?;
+        files.push((stored_path(&path)?, content));
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    FilePackage::new(files)
+        .map(Some)
+        .map_err(|error| StoreError::Unavailable(format!("stored package is invalid: {error}")))
+}
+
+/// Appends `package` as the revision after `current`, with the request key
+/// and the change feed entry, in the caller's write transaction.
+fn append_revision(
+    transaction: &Transaction<'_>,
+    request: RequestIdentity<'_>,
+    artifact: &ArtifactId,
+    current: &ArtifactRecord,
+    package: &FilePackage,
+) -> Result<CommitReceipt, StoreError> {
+    let next = SourceRevision(current.current_revision.0 + 1);
+    let now = commit_time(transaction)?;
+    transaction
+        .execute(
+            "UPDATE artifacts SET current_revision = ?2, updated_at = ?3 WHERE id = ?1",
+            params![artifact.as_str(), sql_revision(next)?, now.0],
+        )
+        .map_err(unavailable)?;
+    insert_revision(transaction, artifact, next, request, package, now)?;
+    let position = (next, current.metadata_revision);
+    record_key(transaction, request, artifact, position, now)?;
+    record_change(transaction, artifact, ChangeKind::Revised, position, now)?;
+    committed(transaction, artifact, position)
 }
 
 fn insert_revision(

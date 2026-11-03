@@ -328,6 +328,28 @@
       ],
       "type": "object"
     },
+    "ConflictingFile": {
+      "additionalProperties": false,
+      "description": "A file named by an edit that is not as expected, with what it is now.",
+      "properties": {
+        "current_sha256": {
+          "description": "Lowercase hexadecimal SHA-256 digest of the file in the current\nrevision, or null when the path is not a file of it. Always present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The edited path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "current_sha256"
+      ],
+      "type": "object"
+    },
     "ContentEncoding": {
       "description": "Byte encoding of a file's `content` string.",
       "oneOf": [
@@ -549,6 +571,31 @@
       ],
       "type": "object"
     },
+    "EditFilesRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/artifacts/{id}/edits`: commits changes to some files as\nthe next revision, each applied only if its own file is as expected in the\n**current** revision. One file that is not rejects all of them with\n`file_conflict`.",
+      "properties": {
+        "base_revision": {
+          "description": "The revision the caller read the expected digests from. It is not a\ncondition: files that no edit names may have changed since. It must be\na revision the artifact has.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "edits": {
+          "description": "At least one edit and at most 512, each to a different path.",
+          "items": {
+            "$ref": "#/$defs/FileEdit"
+          },
+          "maxItems": 512,
+          "type": "array"
+        }
+      },
+      "required": [
+        "base_revision",
+        "edits"
+      ],
+      "type": "object"
+    },
     "EnqueueJobRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts/{id}/jobs`, with an `Idempotency-Key` header:\nenqueues a job for one revision of the artifact.",
@@ -596,6 +643,26 @@
         "code": {
           "$ref": "#/$defs/ErrorCode",
           "description": "Category for programmatic handling."
+        },
+        "conflicting_files": {
+          "description": "The first files, in path order, whose edits did not hold; present for\n`file_conflict`, together with `current_revision`. At most 32.",
+          "items": {
+            "$ref": "#/$defs/ConflictingFile"
+          },
+          "maxItems": 32,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "conflicting_files_total": {
+          "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "current_data_version": {
           "description": "The current data version, present for `data_conflict`.",
@@ -666,6 +733,11 @@
         {
           "const": "revision_conflict",
           "description": "The base revision is not current; reload and reapply the change.",
+          "type": "string"
+        },
+        {
+          "const": "file_conflict",
+          "description": "A file named by an edit is not as the edit expects it in the current\nrevision (`POST /v1/artifacts/{id}/edits` only). Nothing was written,\nnot even the other edits. The error lists the files and the current\nrevision; read them again and edit again. The strict commands never\nanswer this: for them a head that moved is `revision_conflict`.",
           "type": "string"
         },
         {
@@ -831,6 +903,71 @@
           "required": [
             "op",
             "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FileEdit": {
+      "description": "One edit of an edit request: a change to one file and the condition on\nthat file alone (decision 0035).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Create or replace a file.",
+          "properties": {
+            "content": {
+              "description": "Complete new content.",
+              "type": "string"
+            },
+            "encoding": {
+              "$ref": "#/$defs/ContentEncoding",
+              "description": "How `content` encodes the bytes."
+            },
+            "expect": {
+              "description": "What the file must be in the current revision: `absent` when the\npath must not be a file (a create), or the lowercase hexadecimal\nSHA-256 digest of the bytes the file must have (a replace).",
+              "pattern": "^(absent|[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "op": {
+              "const": "put",
+              "type": "string"
+            },
+            "path": {
+              "description": "Portable relative path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "encoding",
+            "content",
+            "expect"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Remove an existing file.",
+          "properties": {
+            "expect": {
+              "description": "The lowercase hexadecimal SHA-256 digest of the bytes the file\nmust have in the current revision. `absent` is refused: deleting\nwhat is not there is no edit.",
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "op": {
+              "const": "delete",
+              "type": "string"
+            },
+            "path": {
+              "description": "Portable relative path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "expect"
           ],
           "type": "object"
         }
@@ -2783,6 +2920,9 @@
     },
     {
       "$ref": "#/$defs/SaveRevisionRequest"
+    },
+    {
+      "$ref": "#/$defs/EditFilesRequest"
     },
     {
       "$ref": "#/$defs/RestoreRevisionRequest"

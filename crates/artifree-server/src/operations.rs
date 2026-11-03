@@ -6,18 +6,19 @@
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
-    CommitResponse, ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse,
-    EnqueueJobRequest, EnqueueJobResponse, ErrorBody, ErrorCode, ExportRuntime,
-    FileChange as WireChange, FileUpload, Handoff, HandoffState, Job as WireJob,
-    JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult,
-    JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
-    Preview, PurgeArtifactRequest, PurgeArtifactResponse, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
-    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
-    SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
+    CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
+    ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
+    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
+    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
+    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
+    PurgeArtifactResponse, RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse,
+    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
+    RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
+    SourceExportFormat, SourceExportManifest, StageHandoffRequest,
+    UnreferencedContent as WireContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
@@ -36,8 +37,8 @@ use artifree_domain::package::{
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, ListOrder, RevisionRecord,
-    UnreferencedContent,
+    ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
+    ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
 use artifree_ports::job_store::JobRecord;
 use artifree_providers::archive::{self, ArchiveEntry};
@@ -46,6 +47,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::auth::hex;
+use crate::changes::Feed;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
 use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey};
@@ -57,7 +59,8 @@ use crate::runtime_sessions::{GrantScope, SessionError};
 #[derive(Debug)]
 pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
-    pub(crate) body: ErrorBody,
+    /// Boxed so that a `Result` carrying an error stays small.
+    pub(crate) body: Box<ErrorBody>,
     /// For `range_not_satisfiable`, the file's size, which HTTP states in
     /// `Content-Range`.
     pub(crate) range_size: Option<u64>,
@@ -67,13 +70,15 @@ impl ApiError {
     pub(crate) fn new(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             status,
-            body: ErrorBody {
+            body: Box::new(ErrorBody {
                 code,
                 message: message.into(),
                 current_revision: None,
                 current_metadata_revision: None,
                 current_data_version: None,
-            },
+                conflicting_files: None,
+                conflicting_files_total: None,
+            }),
             range_size: None,
         }
     }
@@ -143,6 +148,26 @@ impl From<ArtifactError> for ApiError {
                 conflict.body.current_revision = Some(current.0);
                 conflict
             }
+            ArtifactError::FilesChanged {
+                current,
+                files,
+                total,
+            } => {
+                let mut conflict =
+                    Self::new(StatusCode::CONFLICT, ErrorCode::FileConflict, message);
+                conflict.body.current_revision = Some(current.0);
+                conflict.body.conflicting_files = Some(
+                    files
+                        .into_iter()
+                        .map(|file| ConflictingFile {
+                            path: file.path.to_string(),
+                            current_sha256: file.current.map(|digest| hex(&digest)),
+                        })
+                        .collect(),
+                );
+                conflict.body.conflicting_files_total = Some(total as u64);
+                conflict
+            }
             ArtifactError::MetadataConflict { current } => {
                 let mut conflict =
                     Self::new(StatusCode::CONFLICT, ErrorCode::MetadataConflict, message);
@@ -188,7 +213,7 @@ impl From<ArtifactError> for ApiError {
                 ErrorCode::RequestKeyReused,
                 message,
             ),
-            ArtifactError::Unavailable(_) => Self::new(
+            ArtifactError::Unavailable(_) | ArtifactError::EditUnverified => Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorCode::Unavailable,
                 message,
@@ -331,6 +356,90 @@ pub(crate) async fn save(
         .run(move |artifacts| artifacts.save(&actor, &key, &id, base, changes))
         .await?;
     Ok(announce(state, receipt))
+}
+
+pub(crate) async fn edit_files(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: EditFilesRequest,
+) -> Result<CommitResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let base = SourceRevision(request.base_revision);
+    too_many("edits", request.edits.len(), MAX_CHANGES)?;
+    let mut edits = Vec::with_capacity(request.edits.len());
+    for (index, edit) in request.edits.into_iter().enumerate() {
+        let field = format!("edits[{index}]");
+        edits.push(match edit {
+            WireEdit::Put {
+                path,
+                encoding,
+                content,
+                expect,
+            } => FileEdit {
+                expect: expectation(&format!("{field}.expect"), &expect, true)?,
+                change: FileChange::Put {
+                    path: package_path(&format!("{field}.path"), &path)?,
+                    content: decode(&format!("{field}.content"), encoding, content)?,
+                },
+            },
+            WireEdit::Delete { path, expect } => FileEdit {
+                expect: expectation(&format!("{field}.expect"), &expect, false)?,
+                change: FileChange::Delete {
+                    path: package_path(&format!("{field}.path"), &path)?,
+                },
+            },
+        });
+    }
+    let outcome = state
+        .run(move |artifacts| artifacts.edit_files(&actor, &key, &id, base, &edits))
+        .await;
+    announce_edit(state.feed(), outcome)
+}
+
+/// The answer to an edit. An edit that committed but could not be verified
+/// is still an error, yet its revision exists: the change streams are woken
+/// for it as for any commit.
+fn announce_edit(
+    feed: &Feed,
+    outcome: Result<CommitReceipt, ArtifactError>,
+) -> Result<CommitResponse, ApiError> {
+    match outcome {
+        Ok(receipt) => {
+            if receipt.delivery == Delivery::Committed {
+                feed.committed();
+            }
+            Ok(commit_response(receipt))
+        }
+        Err(error) => {
+            if error.committed_a_revision() {
+                feed.committed();
+            }
+            Err(error.into())
+        }
+    }
+}
+
+/// The condition an edit states: `absent` where `may_be_absent`, otherwise
+/// a digest.
+fn expectation(field: &str, value: &str, may_be_absent: bool) -> Result<FileExpectation, ApiError> {
+    if value == "absent" {
+        if may_be_absent {
+            return Ok(FileExpectation::Absent);
+        }
+        return Err(ApiError::unprocessable(format!(
+            "{field}: deleting a file that is not there is not an edit; give the file's sha256"
+        )));
+    }
+    parse_sha256(value)
+        .map(FileExpectation::Sha256)
+        .ok_or_else(|| {
+            ApiError::unprocessable(format!(
+                "{field}: must be {}64 lowercase hexadecimal digits",
+                if may_be_absent { "\"absent\" or " } else { "" }
+            ))
+        })
 }
 
 pub(crate) async fn restore(
@@ -1579,6 +1688,99 @@ mod tests {
     fn u32_at(bytes: &[u8], at: usize) -> Result<usize, Box<dyn Error>> {
         let value = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
         Ok(usize::try_from(value)?)
+    }
+
+    fn receipt(delivery: Delivery) -> Result<CommitReceipt, Box<dyn Error>> {
+        let artifact = ArtifactRecord {
+            id: format!("art_{}", "a".repeat(32)).parse()?,
+            owner: "owner".parse()?,
+            kind: ArtifactKind::App,
+            title: "Edit".parse()?,
+            pinned: false,
+            current_revision: SourceRevision(2),
+            metadata_revision: MetadataRevision(1),
+            deleted_at: None,
+            created_at: UnixMillis(0),
+            updated_at: UnixMillis(1),
+        };
+        let revision = RevisionRecord {
+            revision: SourceRevision(2),
+            created_by: "owner".parse()?,
+            created_at: UnixMillis(1),
+            files: Vec::new(),
+        };
+        Ok(CommitReceipt {
+            artifact,
+            revision,
+            delivery,
+        })
+    }
+
+    #[test]
+    fn an_edit_wakes_the_change_streams_whenever_it_committed_a_revision()
+    -> Result<(), Box<dyn Error>> {
+        let cases: [(&str, Result<CommitReceipt, ArtifactError>, bool); 8] = [
+            ("committed", Ok(receipt(Delivery::Committed)?), true),
+            ("replayed", Ok(receipt(Delivery::Replayed)?), false),
+            (
+                "committed but not as asked",
+                Err(ArtifactError::EditNotAsRequested),
+                true,
+            ),
+            (
+                "committed but not checked",
+                Err(ArtifactError::EditUnverified),
+                true,
+            ),
+            (
+                "refused for its files",
+                Err(ArtifactError::FilesChanged {
+                    current: SourceRevision(2),
+                    files: Vec::new(),
+                    total: 1,
+                }),
+                false,
+            ),
+            (
+                "store down before the commit",
+                Err(ArtifactError::Unavailable("down".into())),
+                false,
+            ),
+            ("key reused", Err(ArtifactError::RequestKeyReused), false),
+            (
+                "missing",
+                Err(ArtifactError::NotFound(Missing::Artifact)),
+                false,
+            ),
+        ];
+        for (what, outcome, wakes) in cases {
+            let feed = Feed::new(4);
+            let heard = feed.wakeups();
+            let answer = announce_edit(&feed, outcome);
+            assert_eq!(
+                heard.has_changed()?,
+                wakes,
+                "{what}: the streams are woken exactly when a revision was committed"
+            );
+            assert_eq!(
+                answer.is_ok(),
+                what == "committed" || what == "replayed",
+                "{what}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_edit_committed_but_not_verified_is_an_error_with_its_own_status() {
+        assert_eq!(
+            ApiError::from(ArtifactError::EditNotAsRequested).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ApiError::from(ArtifactError::EditUnverified).status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::fmt;
 
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
-use artifree_domain::package::{FilePackage, PackagePath};
+use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 
 /// Stored metadata of an artifact.
@@ -106,6 +106,79 @@ pub struct CopySource<'a> {
     /// the same transaction as the create. The copy's data starts at version 1
     /// when the source's space has any member, and is not written otherwise.
     pub copy_data: bool,
+}
+
+/// What a file must be like in the artifact's current revision for an edit
+/// of it to apply (decision 0035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileExpectation {
+    /// The path is not a file of the current revision.
+    Absent,
+    /// The path is a file of the current revision with this SHA-256 digest.
+    Sha256([u8; 32]),
+}
+
+/// One change to a file and the condition on that file alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEdit {
+    /// The change; it names the path.
+    pub change: FileChange,
+    /// What the file at that path must be in the current revision.
+    pub expect: FileExpectation,
+}
+
+/// The upper bound on the mismatches a [`StoreError::FilesChanged`] lists.
+pub const MAX_LISTED_MISMATCHES: usize = 32;
+
+/// A file whose current state does not meet the expectation of its edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMismatch {
+    /// The edited path.
+    pub path: PackagePath,
+    /// The digest of the file in the current revision, or `None` when the
+    /// path is not a file of it.
+    pub current: Option<[u8; 32]>,
+}
+
+/// The mismatches of `edits` against the files of the current revision, in
+/// path order; empty when every expectation holds. A path of `edits` that
+/// repeats is judged once per edit.
+#[must_use]
+pub fn unmet_expectations(edits: &[FileEdit], files: &[FileEntry]) -> Vec<FileMismatch> {
+    let mut unmet: Vec<FileMismatch> = edits
+        .iter()
+        .filter_map(|edit| {
+            let path = edit.change.path();
+            let current = files
+                .iter()
+                .find(|entry| &entry.path == path)
+                .map(|entry| entry.sha256);
+            let holds = match (edit.expect, current) {
+                (FileExpectation::Absent, None) => true,
+                (FileExpectation::Sha256(expected), Some(actual)) => expected == actual,
+                _ => false,
+            };
+            (!holds).then(|| FileMismatch {
+                path: path.clone(),
+                current,
+            })
+        })
+        .collect();
+    unmet.sort_by(|left, right| left.path.cmp(&right.path));
+    unmet
+}
+
+/// A request to append a revision that changes some files, when each of them
+/// is in the state its edit expects. Files that no edit names are carried
+/// over from the current revision, whatever revision that is.
+#[derive(Debug, Clone, Copy)]
+pub struct ConditionalCommit<'a> {
+    /// Retry identity of the committing actor.
+    pub request: RequestIdentity<'a>,
+    /// Artifact to change.
+    pub artifact: &'a ArtifactId,
+    /// The edits, each to a different path; at least one.
+    pub edits: &'a [FileEdit],
 }
 
 /// A request to append a revision when the artifact is still at `base`.
@@ -229,18 +302,25 @@ impl ContentSetDigest {
     /// hexadecimal digits, nothing else.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        let bytes = text.as_bytes();
-        if bytes.len() != 64 {
-            return None;
-        }
-        let mut digest = [0_u8; 32];
-        for (slot, pair) in digest.iter_mut().zip(bytes.chunks_exact(2)) {
-            let high = lowercase_hex(pair[0])?;
-            let low = lowercase_hex(pair[1])?;
-            *slot = (high << 4) | low;
-        }
-        Some(Self(digest))
+        parse_sha256(text).map(Self)
     }
+}
+
+/// A SHA-256 digest written as exactly 64 lowercase hexadecimal digits,
+/// nothing else.
+#[must_use]
+pub fn parse_sha256(text: &str) -> Option<[u8; 32]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (slot, pair) in digest.iter_mut().zip(bytes.chunks_exact(2)) {
+        let high = lowercase_hex(pair[0])?;
+        let low = lowercase_hex(pair[1])?;
+        *slot = (high << 4) | low;
+    }
+    Some(digest)
 }
 
 fn lowercase_hex(byte: u8) -> Option<u8> {
@@ -394,6 +474,18 @@ pub enum StoreError {
     RequestKeyReused,
     /// The files are those of the base revision; nothing was written.
     Unchanged,
+    /// An edit's file is not in the state it expects; nothing was written.
+    FilesChanged {
+        /// The revision that is current now.
+        current: SourceRevision,
+        /// The first mismatches in path order, at most
+        /// [`MAX_LISTED_MISMATCHES`].
+        mismatches: Vec<FileMismatch>,
+        /// How many edits mismatch, listed or not.
+        total: usize,
+    },
+    /// The edits do not make a valid package; nothing was written.
+    Package(PackageError),
     /// Storage could not complete the operation; the outcome is not committed
     /// unless a later retry with the same key reports it.
     Unavailable(String),
@@ -417,6 +509,12 @@ impl fmt::Display for StoreError {
                 formatter.write_str("request key was already used for a different request")
             }
             Self::Unchanged => formatter.write_str("the files are those of the base revision"),
+            Self::FilesChanged { current, total, .. } => write!(
+                formatter,
+                "{total} edited files are not as expected in revision {}",
+                current.0
+            ),
+            Self::Package(error) => write!(formatter, "invalid package: {error}"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -459,6 +557,21 @@ pub trait ArtifactStore {
     /// [`StoreError::Unchanged`], [`StoreError::RequestKeyReused`], or
     /// [`StoreError::Unavailable`].
     fn commit_revision(&self, request: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError>;
+
+    /// Appends the next revision with the edits applied to the files of the
+    /// current revision if every edit's file is in the state it expects and
+    /// the result differs from the current revision, or returns the stored
+    /// receipt of an identical earlier request (decision 0035). The request
+    /// key, the expectations, and the commit are decided in one atomic step
+    /// against one current revision, so no writer can land between them. The
+    /// key of a request that fails is not recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NotFound`], [`StoreError::FilesChanged`],
+    /// [`StoreError::Package`], [`StoreError::Unchanged`],
+    /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
+    fn commit_edits(&self, request: ConditionalCommit<'_>) -> Result<CommitReceipt, StoreError>;
 
     /// Changes the title, pin, or trash state if the metadata is still at
     /// `base`, or returns the stored receipt of an identical earlier request.
@@ -598,4 +711,84 @@ pub trait ArtifactStore {
         after: ChangeSequence,
         limit: usize,
     ) -> Result<ChangePage, StoreError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(name: &str) -> PackagePath {
+        let Ok(path) = name.parse() else {
+            panic!("{name} is not a package path");
+        };
+        path
+    }
+
+    fn entry(name: &str, digest: u8) -> FileEntry {
+        FileEntry {
+            path: path(name),
+            size: 1,
+            sha256: [digest; 32],
+        }
+    }
+
+    fn put(name: &str, expect: FileExpectation) -> FileEdit {
+        FileEdit {
+            change: FileChange::Put {
+                path: path(name),
+                content: Vec::new(),
+            },
+            expect,
+        }
+    }
+
+    #[test]
+    fn each_expectation_is_judged_against_its_own_file() {
+        let files = [entry("a.txt", 1), entry("b.txt", 2)];
+        let edits = [
+            put("d.txt", FileExpectation::Sha256([3; 32])),
+            put("b.txt", FileExpectation::Sha256([9; 32])),
+            put("a.txt", FileExpectation::Sha256([1; 32])),
+            put("c.txt", FileExpectation::Absent),
+        ];
+        assert_eq!(
+            unmet_expectations(&edits, &files),
+            [
+                FileMismatch {
+                    path: path("b.txt"),
+                    current: Some([2; 32]),
+                },
+                FileMismatch {
+                    path: path("d.txt"),
+                    current: None,
+                },
+            ],
+            "a held, c is absent as expected; b differs, d is missing; path order, not request order"
+        );
+        let taken = [put("a.txt", FileExpectation::Absent)];
+        assert_eq!(
+            unmet_expectations(&taken, &files),
+            [FileMismatch {
+                path: path("a.txt"),
+                current: Some([1; 32]),
+            }],
+            "a create of an existing path"
+        );
+    }
+
+    #[test]
+    fn a_digest_is_exactly_64_lowercase_hexadecimal_digits() {
+        let text = "0f".repeat(32);
+        assert_eq!(parse_sha256(&text), Some([0x0f; 32]));
+        for bad in [
+            "0F".repeat(32),
+            "0f".repeat(31),
+            format!("{text}0"),
+            "0g".repeat(32),
+            String::new(),
+            " ".repeat(64),
+        ] {
+            assert_eq!(parse_sha256(&bad), None, "{bad:?}");
+        }
+    }
 }

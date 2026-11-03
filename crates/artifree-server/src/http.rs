@@ -19,8 +19,8 @@ use std::time::Duration;
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
     CreateArtifactRequest, CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest,
-    DuplicateArtifactRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse,
-    Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
+    DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode,
+    ErrorResponse, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
     PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
@@ -385,6 +385,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
             "/v1/artifacts/{id}/revisions",
             get(list_revisions).post(save_revision),
         )
+        .route("/v1/artifacts/{id}/edits", axum::routing::post(edit_files))
         .route(
             "/v1/artifacts/{id}/revisions/{revision}",
             get(show_revision),
@@ -918,7 +919,7 @@ impl IntoResponse for ApiError {
             self.body.code,
             ErrorCode::Unavailable | ErrorCode::RateLimited
         );
-        let mut response = (self.status, Json(ErrorResponse { error: self.body })).into_response();
+        let mut response = (self.status, Json(ErrorResponse { error: *self.body })).into_response();
         if self.status == StatusCode::UNAUTHORIZED {
             response
                 .headers_mut()
@@ -1072,6 +1073,24 @@ async fn save_revision(
     operations::artifact_id(&id)?;
     let Json(request) = body?;
     let response = operations::save(&state, actor, key, &id, request).await?;
+    let location = format!(
+        "/v1/artifacts/{}/revisions/{}",
+        response.artifact.id, response.revision.revision
+    );
+    Ok(created(&location, Json(response)))
+}
+
+async fn edit_files(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    IdempotencyKey(key): IdempotencyKey,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<EditFilesRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path(id) = path?;
+    operations::artifact_id(&id)?;
+    let Json(request) = body?;
+    let response = operations::edit_files(&state, actor, key, &id, request).await?;
     let location = format!(
         "/v1/artifacts/{}/revisions/{}",
         response.artifact.id, response.revision.revision

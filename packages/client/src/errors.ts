@@ -16,16 +16,23 @@ export class ArtifreeApiError extends Error {
   readonly currentDataVersion: number | undefined;
   /** Seconds to wait before retrying, from `Retry-After`, when given. */
   readonly retryAfterSeconds: number | undefined;
+  /**
+   * The JSON the server answered with, as parsed and not otherwise checked,
+   * for the modules that understand an error code the client class does
+   * not (see `editFiles`). Absent when the answer was not an API error.
+   */
+  readonly body: unknown;
 
   constructor(
     message: string,
     details: {
       status: number;
       code: FailureCode;
-      currentRevision?: number;
-      currentMetadataRevision?: number;
-      currentDataVersion?: number;
-      retryAfterSeconds?: number;
+      currentRevision?: number | undefined;
+      currentMetadataRevision?: number | undefined;
+      currentDataVersion?: number | undefined;
+      retryAfterSeconds?: number | undefined;
+      body?: unknown;
       cause?: unknown;
     },
   ) {
@@ -37,6 +44,7 @@ export class ArtifreeApiError extends Error {
     this.currentMetadataRevision = details.currentMetadataRevision;
     this.currentDataVersion = details.currentDataVersion;
     this.retryAfterSeconds = details.retryAfterSeconds;
+    this.body = details.body;
   }
 }
 

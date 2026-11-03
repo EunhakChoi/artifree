@@ -20,6 +20,7 @@ export type {
   RuntimeViewOptions,
 } from './client.js';
 export { cursorOf } from './change-feed.js';
+export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export {
   MAX_DOWNLOAD_NAME_CHARS,
   MAX_SOURCE_PART_BYTES,

@@ -3,12 +3,15 @@ import { parseArgs } from 'node:util';
 import {
   ArtifreeApiError,
   ArtifreeClient,
+  editFiles,
+  readRevision,
   encodeFile,
   newIdempotencyKey,
 } from '@artifree/client';
 import type {
   Artifact,
   FileChange,
+  FileEdit,
   ListArtifactsQuery,
   UpdateArtifactRequest,
 } from '@artifree/contracts';
@@ -31,6 +34,9 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact create --title <title> (--dir <dir> | --file <path>...)
   artifree artifact save <id> --base <revision>
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
+  artifree artifact edit <id> --base <revision>
+      ([--put <package-path>=<local-path>]... [--delete <package-path>]...)
+      [--expect <package-path>=<sha256|absent>]...
   artifree artifact restore <id> <revision> --base <revision>
   artifree artifact duplicate <id> <revision> [--title <title>] [--copy-data]
   artifree artifact rename <id> <title> --base-metadata <n>
@@ -65,6 +71,21 @@ was recovered and deleted again since. It needs the owner's access token: an
 issued agent token is refused with 403 forbidden. A retry with the same
 --idempotency-key returns the original result; every other request that named
 the artifact is then not_found. Copies made from it are not affected.
+edit changes some files even if the artifact moved on since --base, which is
+the revision you read, not a condition: each --put or --delete applies only if
+that file in the current revision is exactly as it was in --base (a --put of
+a path --base lacks needs the path to be absent now). If any file is not, the
+whole edit is refused with error[file_conflict], the current revision, and one
+conflict line per file (path and its current SHA-256, or absent) on stderr;
+nothing is written. Files you name nothing for carry over as they are now. It
+never merges: a file is replaced whole. save keeps its stricter rule.
+edit reads --base from the server to fill in each condition. --expect states
+a condition yourself (the file's SHA-256 in lowercase hex, or absent for a
+--put of a new file); when every --put and --delete path has one, nothing is
+read first and the request is sent as given. To retry an edit whose answer was
+lost after the artifact moved to the trash, repeat the same command with an
+--expect for every path and the same --idempotency-key: the server then
+returns the original result. Without --expect the retry fails with not_found.
 restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
@@ -81,7 +102,7 @@ bytes from --offset (default 0), or to the end of the file without --length.
 A range that starts at or past the end of the file is refused. history lists
 each file's size and SHA-256.
 
-create, save, restore, duplicate, rename, pin, unpin, delete, recover, and
+create, save, edit, restore, duplicate, rename, pin, unpin, delete, recover, and
 purge accept --idempotency-key <key>. Without it a new key is
 generated and reported on stderr if the outcome is unknown; retry with that key
 to get the original result instead of a duplicate. save --dir replaces the
@@ -159,6 +180,8 @@ export async function runArtifact(args: string[]): Promise<void> {
       return create(rest);
     case 'save':
       return save(rest);
+    case 'edit':
+      return edit(rest);
     case 'restore':
       return restore(rest);
     case 'duplicate':
@@ -481,6 +504,107 @@ async function save(args: string[]): Promise<void> {
         { base_revision: base, changes },
         { idempotencyKey },
       ),
+  );
+  print(result);
+}
+
+const DIGEST = /^[0-9a-f]{64}$/;
+
+/**
+ * The conditions of `--expect <package-path>=<sha256|absent>`, by path. A
+ * condition names a path that `--put` or `--delete` edits, and only once.
+ */
+function explicitConditions(
+  values: string[],
+  edited: ReadonlySet<string>,
+): Map<string, string> {
+  const conditions = new Map<string, string>();
+  for (const value of values) {
+    const separator = value.lastIndexOf('=');
+    const path = value.slice(0, Math.max(separator, 0));
+    const condition = value.slice(separator + 1);
+    if (separator <= 0 || (condition !== 'absent' && !DIGEST.test(condition)))
+      throw new UsageError(
+        `--expect expects <package-path>=<64 lowercase hex digits|absent>, got ${value}.`,
+      );
+    if (conditions.has(path))
+      throw new UsageError(`--expect ${path} is given twice.`);
+    if (!edited.has(path))
+      throw new UsageError(`--expect ${path}: no --put or --delete names it.`);
+    conditions.set(path, condition);
+  }
+  return conditions;
+}
+
+async function edit(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      ...connectionOptions,
+      base: { type: 'string' },
+      put: { type: 'string', multiple: true },
+      delete: { type: 'string', multiple: true },
+      expect: { type: 'string', multiple: true },
+      'idempotency-key': { type: 'string' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = ''] = single(positionals, ['id']);
+  if (values.base === undefined)
+    throw new UsageError(
+      'edit requires --base <revision>, the revision you read the files from.',
+    );
+  const base = positiveNumber(values.base, '--base');
+  const puts = (values.put ?? []).map(splitPut);
+  const deletes = values.delete ?? [];
+  if (puts.length === 0 && deletes.length === 0)
+    throw new UsageError('edit requires at least one --put or --delete.');
+  const paths = [...puts.map(([path]) => path), ...deletes];
+  const named = new Set<string>();
+  for (const path of paths) {
+    if (named.has(path))
+      throw new UsageError(
+        `${path} is named twice in --put and --delete; an edit changes a file once.`,
+      );
+    named.add(path);
+  }
+  const explicit = explicitConditions(values.expect ?? [], named);
+  const client = await connect(values);
+  // With a condition for every path the request is sent as given, without
+  // reading the artifact first: the server judges the base and the files,
+  // and the retry of an edit that committed can be replayed even when the
+  // artifact has since moved to the trash. Otherwise the missing conditions
+  // are the files of the revision the caller read.
+  const digests = new Map<string, string>();
+  if (paths.some((path) => !explicit.has(path))) {
+    const baseRevision = await readRevision(client, id, base);
+    for (const file of baseRevision.files) digests.set(file.path, file.sha256);
+  }
+  const edits: FileEdit[] = [];
+  for (const [path, location] of puts) {
+    edits.push({
+      op: 'put',
+      ...encodeFile(path, await readRegularFile(location)),
+      expect: explicit.get(path) ?? digests.get(path) ?? 'absent',
+    });
+  }
+  for (const path of deletes) {
+    const expect = explicit.get(path) ?? digests.get(path);
+    if (expect === undefined)
+      throw new UsageError(
+        `--delete ${path}: revision ${base} has no such file.`,
+      );
+    if (expect === 'absent')
+      throw new UsageError(
+        `--delete ${path}: a delete needs the digest of the file, not absent.`,
+      );
+    edits.push({ op: 'delete', path, expect });
+  }
+  const result = await mutate(
+    values['idempotency-key'] ?? newIdempotencyKey(),
+    (idempotencyKey) =>
+      editFiles(client, id, { base_revision: base, edits }, { idempotencyKey }),
   );
   print(result);
 }

@@ -158,7 +158,11 @@ node apps/cli/dist/main.js token create "My Agent"
 
 Results are JSON on stdout; failures go to stderr with exit code 1 (API) or 2
 (usage). A save names its base revision and fails with `revision_conflict` if
-another save won. Retrying with the same `--idempotency-key` returns the
+another save won. `artifact edit` is the separate command for changing some
+files when the head moved on: each file must still be as it was in `--base`, or
+the whole edit fails with `file_conflict` and writes nothing
+([decision 0035](docs/decisions/0035-per-file-conditional-edit.md)); it is not
+a merge. Retrying with the same `--idempotency-key` returns the
 original result instead of committing twice. The HTTP API is summarized in the
 [architecture document](docs/architecture.md#http-api-v1).
 
@@ -220,8 +224,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0030](docs/decisions/0030-persistent-jobs-and-worker.md),
 [0031](docs/decisions/0031-app-data.md), and
 [0032](docs/decisions/0032-runtime-source-read-and-download.md),
-[0033](docs/decisions/0033-runtime-source-write.md), and
-[0034](docs/decisions/0034-room-and-presence.md)).
+[0033](docs/decisions/0033-runtime-source-write.md),
+[0034](docs/decisions/0034-room-and-presence.md), and
+[0035](docs/decisions/0035-per-file-conditional-edit.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

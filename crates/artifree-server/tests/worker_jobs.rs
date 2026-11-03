@@ -20,8 +20,8 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
-    CommitReceipt, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest,
-    RequestFingerprint, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    CommitReceipt, ConditionalCommit, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
+    PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
     UnreferencedContent,
 };
 use artifree_ports::job_store::{
@@ -109,6 +109,9 @@ impl ArtifactStore for Flaky {
     }
     fn commit_revision(&self, request: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError> {
         self.inner.commit_revision(request)
+    }
+    fn commit_edits(&self, request: ConditionalCommit<'_>) -> Result<CommitReceipt, StoreError> {
+        self.inner.commit_edits(request)
     }
     fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
         self.inner.update_metadata(request)

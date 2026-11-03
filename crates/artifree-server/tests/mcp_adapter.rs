@@ -304,6 +304,16 @@ async fn another_owners_artifact_is_not_found_through_every_tool() -> TestResult
             }),
         ),
         (
+            "edit_files",
+            json!({
+                "artifact_id": id, "base_revision": 1, "idempotency_key": "mine-key-5",
+                "edits": [{
+                    "op": "put", "path": "index.html", "encoding": "utf8",
+                    "content": "x", "expect": "absent"
+                }]
+            }),
+        ),
+        (
             "restore_revision",
             json!({
                 "artifact_id": id, "revision": 1, "base_revision": 1,
@@ -462,6 +472,101 @@ async fn agents_rename_pin_and_page_through_artifacts() -> TestResult {
     Ok(())
 }
 
+/// `edit_files` answers as `POST /v1/artifacts/{id}/edits` does (decision 0035).
+#[tokio::test]
+async fn agents_edit_files_with_the_http_semantics() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "edit-create-1",
+                "files": [
+                    { "path": "index.html", "encoding": "utf8", "content": "<p>1</p>" },
+                    { "path": "notes.txt", "encoding": "utf8", "content": "n1" }
+                ]
+            }),
+        )
+        .await?;
+    let id = created["structuredContent"]["artifact"]["id"].clone();
+    let notes = created["structuredContent"]["revision"]["files"]
+        .as_array()
+        .and_then(|files| files.iter().find(|file| file["path"] == "notes.txt"))
+        .map(|file| file["sha256"].clone())
+        .ok_or("notes.txt is listed")?;
+    let index = created["structuredContent"]["revision"]["files"]
+        .as_array()
+        .and_then(|files| files.iter().find(|file| file["path"] == "index.html"))
+        .map(|file| file["sha256"].clone())
+        .ok_or("index.html is listed")?;
+    let moved = harness
+        .call(
+            "save_revision",
+            json!({
+                "artifact_id": id, "base_revision": 1, "idempotency_key": "edit-save-1",
+                "changes": [{ "op": "put", "path": "index.html", "encoding": "utf8", "content": "<p>2</p>" }]
+            }),
+        )
+        .await?;
+    assert_eq!(moved["isError"], false, "{moved}");
+    let edit = |key: &str, path: &str, expect: &Value| {
+        json!({
+            "artifact_id": id, "base_revision": 1, "idempotency_key": key,
+            "edits": [{
+                "op": "put", "path": path, "encoding": "utf8", "content": "changed",
+                "expect": expect
+            }]
+        })
+    };
+
+    let stale_index = harness
+        .call("edit_files", edit("edit-key-1", "index.html", &index))
+        .await?;
+    assert_eq!(error_code(&stale_index), "file_conflict", "{stale_index}");
+    let error = &stale_index["structuredContent"]["error"];
+    assert_eq!(error["current_revision"], 2);
+    assert_eq!(error["conflicting_files_total"], 1);
+    assert_eq!(error["conflicting_files"][0]["path"], "index.html");
+    assert_ne!(error["conflicting_files"][0]["current_sha256"], index);
+
+    // The same stale base, a file nobody touched: the edit applies.
+    let call = edit("edit-key-2", "notes.txt", &notes);
+    let edited = harness.call("edit_files", call.clone()).await?;
+    assert_eq!(edited["isError"], false, "{edited}");
+    assert_eq!(edited["structuredContent"]["revision"]["revision"], 3);
+    assert_eq!(edited["structuredContent"]["replayed"], false);
+    let replayed = harness.call("edit_files", call).await?;
+    assert_eq!(replayed["structuredContent"]["replayed"], true);
+
+    let strict = harness
+        .call(
+            "save_revision",
+            json!({
+                "artifact_id": id, "base_revision": 1, "idempotency_key": "edit-save-2",
+                "changes": [{ "op": "put", "path": "notes.txt", "encoding": "utf8", "content": "x" }]
+            }),
+        )
+        .await?;
+    assert_eq!(error_code(&strict), "revision_conflict", "{strict}");
+
+    for (what, arguments) in [
+        (
+            "a digest in upper case",
+            edit("edit-key-3", "notes.txt", &json!("A".repeat(64))),
+        ),
+        (
+            "no edit",
+            json!({
+                "artifact_id": id, "base_revision": 1, "idempotency_key": "edit-key-4", "edits": []
+            }),
+        ),
+    ] {
+        let refused = harness.call("edit_files", arguments).await?;
+        assert_eq!(error_code(&refused), "invalid_request", "{what}: {refused}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn agents_enqueue_read_list_and_cancel_jobs_with_the_http_semantics() -> TestResult {
     let harness = Harness::new();
@@ -605,6 +710,7 @@ async fn the_job_tools_say_what_they_change() -> TestResult {
     let listed: Value = serde_json::from_slice(&body)?;
     let tools = listed["result"]["tools"].as_array().ok_or("tools")?;
     for (name, read_only) in [
+        ("edit_files", false),
         ("enqueue_job", false),
         ("get_job", true),
         ("list_jobs", true),

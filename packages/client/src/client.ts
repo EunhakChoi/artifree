@@ -1694,7 +1694,13 @@ export class ArtifreeClient {
     }
   }
 
-  private async json<T>(
+  /**
+   * Sends one request and parses its JSON answer, failing with the client's
+   * errors. Public so that a call used by few callers can live in a module of
+   * its own instead of adding a method here (see `editFiles`): this class is
+   * in the main bundle, which has no room. Prefer the named methods.
+   */
+  async json<T>(
     method: string,
     path: string,
     parse: (value: unknown) => T | undefined,
@@ -1752,7 +1758,8 @@ export class ArtifreeClient {
     if (response.ok) return response;
     // Also a proxy's error page may say when to retry.
     const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
-    const failure = parseError(await readJson(response, this.address.plain));
+    const answer = await readJson(response, this.address.plain);
+    const failure = parseError(answer);
     // HTTP 429 means too many requests whoever answered it, so a proxy's
     // refusal without an API body is a rate limit too.
     const limited = response.status === 429;
@@ -1770,15 +1777,10 @@ export class ArtifreeClient {
     throw new ArtifreeApiError(failure.message, {
       status: response.status,
       code: limited ? 'rate_limited' : failure.code,
-      ...(typeof failure.current_revision === 'number'
-        ? { currentRevision: failure.current_revision }
-        : {}),
-      ...(typeof failure.current_metadata_revision === 'number'
-        ? { currentMetadataRevision: failure.current_metadata_revision }
-        : {}),
-      ...(typeof failure.current_data_version === 'number'
-        ? { currentDataVersion: failure.current_data_version }
-        : {}),
+      body: answer,
+      currentRevision: failure.current_revision ?? undefined,
+      currentMetadataRevision: failure.current_metadata_revision ?? undefined,
+      currentDataVersion: failure.current_data_version ?? undefined,
       ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });
   }

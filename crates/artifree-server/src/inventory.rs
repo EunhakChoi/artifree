@@ -29,7 +29,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/cli",
         ComponentStatus::Implemented,
-        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory.",
+        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, edit, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory.",
     ),
     (
         "runtime",
@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions, restores, duplicates (files, and data when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned.",
+        "Create, conditional revisions, per-file edits, restores, duplicates (files, and data when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; publish planned.",
     ),
     (
         "policy",

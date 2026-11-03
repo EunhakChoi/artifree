@@ -9,7 +9,7 @@ use artifree_domain::data::{DataChange, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FileChange, FilePackage, PackagePath};
 use artifree_domain::{AppDataVersion, MetadataRevision, SourceRevision};
-use artifree_ports::artifact_store::Delivery;
+use artifree_ports::artifact_store::{Delivery, FileEdit, FileExpectation};
 use artifree_providers::storage::SqliteStore;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -123,6 +123,59 @@ fn another_actor_can_neither_see_nor_change_an_artifact() -> TestResult {
     assert_eq!(
         service.read_file(&owner, &id, SourceRevision(1), &PackagePath::entry())?,
         b"<p>secret</p>"
+    );
+    Ok(())
+}
+
+/// An edit, none, and a path edited twice are all answered as for an unknown
+/// artifact: the artifact is judged before the request is.
+#[test]
+fn another_actor_cannot_edit_files_or_learn_what_the_edit_would_hold() -> TestResult {
+    let directory =
+        TempDir(std::env::temp_dir().join(format!("artifree-authz-edit-{}", std::process::id())));
+    std::fs::create_dir_all(&directory.0)?;
+    let service = ArtifactService::new(SqliteStore::open(&directory.0.join("db.sqlite3"))?);
+    let owner: ActorId = parsed("owner");
+    let intruder: ActorId = parsed("intruder");
+    let package = FilePackage::new(vec![(PackagePath::entry(), b"<p>secret</p>".to_vec())])?;
+    let created = service.create(
+        &owner,
+        &parsed::<RequestKey>("owner-key-1"),
+        &parsed::<Title>("Private"),
+        &package,
+    )?;
+    let id = created.artifact.id;
+    let hidden = Err(ArtifactError::NotFound(Missing::Artifact));
+    let would_hold = FileEdit {
+        change: FileChange::Put {
+            path: PackagePath::entry(),
+            content: b"<p>defaced</p>".to_vec(),
+        },
+        expect: FileExpectation::Absent,
+    };
+    for (key, edits) in [
+        ("intruder-key-4", vec![would_hold.clone()]),
+        ("intruder-key-5", Vec::new()),
+        ("intruder-key-6", vec![would_hold.clone(), would_hold]),
+    ] {
+        assert_eq!(
+            service
+                .edit_files(
+                    &intruder,
+                    &parsed::<RequestKey>(key),
+                    &id,
+                    SourceRevision(1),
+                    &edits
+                )
+                .map(|_| ()),
+            hidden,
+            "{key}"
+        );
+    }
+    assert_eq!(
+        service.artifact(&owner, &id)?.current_revision,
+        SourceRevision(1),
+        "a rejected actor must not write"
     );
     Ok(())
 }
