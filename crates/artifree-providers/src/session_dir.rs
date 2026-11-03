@@ -227,6 +227,10 @@ impl Marker {
             Some(line) => Some(line.strip_prefix("start ")?.parse().ok()?),
             None => None,
         };
+        // Nothing may follow: a marker with extra lines is not one we wrote.
+        if lines.next().is_some() {
+            return None;
+        }
         Some(Self { pid, start })
     }
 
@@ -485,6 +489,12 @@ mod tests {
             })
         );
         for bad in [
+            // Lines after the last known field: not a marker we wrote.
+            "artifree-session 1\npid 42\nstart 7\nextra\n",
+            "artifree-session 1\npid 42\nstart 7\n\n",
+            "artifree-session 1\npid 42\nstart 7\nstart 8\n",
+            "artifree-session 1\npid 42\nstart 7\npid 9\n",
+            "artifree-session 1\npid 42\nstart 7 8\n",
             "",
             "artifree-session 1\n",
             "artifree-session 1\nPID 4\n",
