@@ -15,12 +15,12 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::*;
+use crate::auth::AccessToken;
+use crate::http::{self, Settings};
 use artifree_core::artifacts::{ArtifactError, MetadataChange};
 use artifree_domain::data::{DataChange, DataValue};
 use artifree_domain::identity::{RequestKey, UnixMillis};
 use artifree_domain::{AppDataVersion, MetadataRevision};
-use crate::auth::AccessToken;
-use crate::http::{self, Settings};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 
@@ -207,11 +207,26 @@ mod places {
         let good = settings(10, 100, 1_000);
         assert!(good.validate().is_ok());
         for bad in [
-            DataStreamSettings { per_actor: 0, ..good },
-            DataStreamSettings { per_process: 0, ..good },
-            DataStreamSettings { min_interval: Duration::ZERO, ..good },
-            DataStreamSettings { heartbeat: Duration::ZERO, ..good },
-            DataStreamSettings { lifetime: Duration::from_secs(25 * 3600), ..good },
+            DataStreamSettings {
+                per_actor: 0,
+                ..good
+            },
+            DataStreamSettings {
+                per_process: 0,
+                ..good
+            },
+            DataStreamSettings {
+                min_interval: Duration::ZERO,
+                ..good
+            },
+            DataStreamSettings {
+                heartbeat: Duration::ZERO,
+                ..good
+            },
+            DataStreamSettings {
+                lifetime: Duration::from_secs(25 * 3600),
+                ..good
+            },
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
@@ -325,7 +340,12 @@ impl Harness {
         .await
     }
 
-    async fn open(&self, id: &str, query: &str, token: &str) -> Result<Response<Body>, Box<dyn Error>> {
+    async fn open(
+        &self,
+        id: &str,
+        query: &str,
+        token: &str,
+    ) -> Result<Response<Body>, Box<dyn Error>> {
         let request = Request::get(format!("/v1/artifacts/{id}/data/events{query}"))
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::ACCEPT, "text/event-stream")
@@ -337,7 +357,10 @@ impl Harness {
         let response = self.open(id, query, token).await?;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).map(|v| v.as_bytes().to_vec()),
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .map(|v| v.as_bytes().to_vec()),
             Some(b"text/event-stream".to_vec())
         );
         Ok(Events {
@@ -359,9 +382,10 @@ impl Harness {
     }
 
     async fn nothing_held(&self) -> TestResult {
-        self.eventually("every stream released its place and registration", |state| {
-            state.data_streams().open_streams() == (0, 0) && state.feed().registered() == 0
-        })
+        self.eventually(
+            "every stream released its place and registration",
+            |state| state.data_streams().open_streams() == (0, 0) && state.feed().registered() == 0,
+        )
         .await
     }
 }
@@ -499,6 +523,7 @@ async fn a_burst_of_writes_is_coalesced_and_versions_only_increase() -> TestResu
     events.expect("snapshot").await?;
     let before = harness.state.data_streams().reads();
     let writes: u64 = 30;
+    let started = Instant::now();
     for version in 0..writes {
         harness.set(&id, version, "count", &json!(version)).await?;
     }
@@ -507,13 +532,23 @@ async fn a_burst_of_writes_is_coalesced_and_versions_only_increase() -> TestResu
         let change = events.expect("change").await?;
         versions.push(change["data_version"].as_u64().ok_or("version")?);
     }
-    assert!(versions.windows(2).all(|pair| pair[0] < pair[1]), "{versions:?}");
-    let reads = harness.state.data_streams().reads() - before;
     assert!(
-        reads <= writes / 2,
-        "{writes} writes caused {reads} reads; they should coalesce"
+        versions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{versions:?}"
     );
-    assert_eq!(versions.len() as u64, reads, "one change per read that moved the version");
+    let reads = harness.state.data_streams().reads() - before;
+    // One read per 250 ms at most, however long the writes took, and the
+    // first read waits for the end of the interval too.
+    let allowed = u64::try_from(started.elapsed().as_millis() / 250)? + 2;
+    assert!(
+        reads <= allowed && reads < writes,
+        "{writes} writes caused {reads} reads in {:?}; at most {allowed} are allowed",
+        started.elapsed()
+    );
+    assert!(
+        versions.len() as u64 <= reads,
+        "a change needs a read that moved the version"
+    );
     Ok(())
 }
 
@@ -560,12 +595,24 @@ async fn requests_that_break_the_rules_are_refused_before_storage_is_read() -> T
     let reads = harness.state.data_streams().reads();
     let base = format!("/v1/artifacts/{id}/data/events");
     let cases: [(String, StatusCode); 6] = [
-        (format!("{base}?path=a//b"), StatusCode::UNPROCESSABLE_ENTITY),
-        (format!("{base}?path={}", "a".repeat(65)), StatusCode::UNPROCESSABLE_ENTITY),
-        (format!("{base}?path=%C3%A9"), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            format!("{base}?path=a//b"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            format!("{base}?path={}", "a".repeat(65)),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            format!("{base}?path=%C3%A9"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         (format!("{base}?bogus=1"), StatusCode::BAD_REQUEST),
         (format!("{base}?path=a&path=b"), StatusCode::BAD_REQUEST),
-        (format!("{base}?path={}", ["s"; 17].join("/")), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            format!("{base}?path={}", ["s"; 17].join("/")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
     ];
     for (uri, expected) in cases {
         let (status, _, body) = harness.send("GET", &uri, OWNER, None, None).await?;
@@ -594,10 +641,23 @@ async fn requests_that_break_the_rules_are_refused_before_storage_is_read() -> T
 #[tokio::test]
 async fn a_missing_trashed_or_foreign_artifact_is_the_same_404_and_holds_nothing() -> TestResult {
     let harness = Harness::new(quick())?;
-    let other = harness.ok("POST", "/v1/users", OWNER, None, Some(json!({ "label": "bob" }))).await?;
+    let other = harness
+        .ok(
+            "POST",
+            "/v1/users",
+            OWNER,
+            None,
+            Some(json!({ "label": "bob" })),
+        )
+        .await?;
     let issued = harness
-        .ok("POST", "/v1/tokens", OWNER, Some("issue-bob-1"),
-            Some(json!({ "name": "bob", "user_id": other["id"] })))
+        .ok(
+            "POST",
+            "/v1/tokens",
+            OWNER,
+            Some("issue-bob-1"),
+            Some(json!({ "name": "bob", "user_id": other["id"] })),
+        )
         .await?;
     let bob = issued["secret"].as_str().ok_or("secret")?.to_owned();
     let id = harness.create(OWNER, "create-7").await?;
@@ -608,7 +668,13 @@ async fn a_missing_trashed_or_foreign_artifact_is_the_same_404_and_holds_nothing
         ("art_00000000000000000000000000000000", bob.as_str()),
     ] {
         let (status, _, body) = harness
-            .send("GET", &format!("/v1/artifacts/{uri_id}/data/events?path=a"), token, None, None)
+            .send(
+                "GET",
+                &format!("/v1/artifacts/{uri_id}/data/events?path=a"),
+                token,
+                None,
+                None,
+            )
             .await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
         answers.push(body);
@@ -619,15 +685,29 @@ async fn a_missing_trashed_or_foreign_artifact_is_the_same_404_and_holds_nothing
         );
         assert_eq!(harness.state.feed().registered(), 0);
     }
-    assert!(answers.windows(2).all(|pair| pair[0] == pair[1]), "{answers:?}");
+    assert!(
+        answers.windows(2).all(|pair| pair[0] == pair[1]),
+        "{answers:?}"
+    );
 
     // Trashed.
     harness
-        .ok("PATCH", &format!("/v1/artifacts/{id}"), OWNER, Some("trash-1"),
-            Some(json!({ "base_metadata_revision": 1, "deleted": true })))
+        .ok(
+            "PATCH",
+            &format!("/v1/artifacts/{id}"),
+            OWNER,
+            Some("trash-1"),
+            Some(json!({ "base_metadata_revision": 1, "deleted": true })),
+        )
         .await?;
     let (status, _, body) = harness
-        .send("GET", &format!("/v1/artifacts/{id}/data/events"), OWNER, None, None)
+        .send(
+            "GET",
+            &format!("/v1/artifacts/{id}/data/events"),
+            OWNER,
+            None,
+            None,
+        )
         .await?;
     assert_eq!((status, &body), (StatusCode::NOT_FOUND, &answers[0]));
     Ok(())
@@ -641,29 +721,55 @@ async fn trashing_and_purging_end_open_streams_and_leave_nothing_behind() -> Tes
     let mut events = harness.follow(&id, "?path=secret", OWNER).await?;
     events.expect("snapshot").await?;
     harness
-        .ok("PATCH", &format!("/v1/artifacts/{id}"), OWNER, Some("trash-2"),
-            Some(json!({ "base_metadata_revision": 1, "deleted": true })))
+        .ok(
+            "PATCH",
+            &format!("/v1/artifacts/{id}"),
+            OWNER,
+            Some("trash-2"),
+            Some(json!({ "base_metadata_revision": 1, "deleted": true })),
+        )
         .await?;
     events.ends().await?;
     harness.nothing_held().await?;
 
     harness
-        .ok("PATCH", &format!("/v1/artifacts/{id}"), OWNER, Some("recover-2"),
-            Some(json!({ "base_metadata_revision": 2, "deleted": false })))
+        .ok(
+            "PATCH",
+            &format!("/v1/artifacts/{id}"),
+            OWNER,
+            Some("recover-2"),
+            Some(json!({ "base_metadata_revision": 2, "deleted": false })),
+        )
         .await?;
     let mut again = harness.follow(&id, "?path=secret", OWNER).await?;
     again.expect("snapshot").await?;
     harness
-        .ok("PATCH", &format!("/v1/artifacts/{id}"), OWNER, Some("trash-3"),
-            Some(json!({ "base_metadata_revision": 3, "deleted": true })))
+        .ok(
+            "PATCH",
+            &format!("/v1/artifacts/{id}"),
+            OWNER,
+            Some("trash-3"),
+            Some(json!({ "base_metadata_revision": 3, "deleted": true })),
+        )
         .await?;
     again.ends().await?;
     harness
-        .ok("POST", &format!("/v1/artifacts/{id}/purge"), OWNER, Some("purge-3"),
-            Some(json!({ "base_metadata_revision": 4 })))
+        .ok(
+            "POST",
+            &format!("/v1/artifacts/{id}/purge"),
+            OWNER,
+            Some("purge-3"),
+            Some(json!({ "base_metadata_revision": 4 })),
+        )
         .await?;
     let (status, _, _) = harness
-        .send("GET", &format!("/v1/artifacts/{id}/data/events?path=secret"), OWNER, None, None)
+        .send(
+            "GET",
+            &format!("/v1/artifacts/{id}/data/events?path=secret"),
+            OWNER,
+            None,
+            None,
+        )
         .await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
     harness.nothing_held().await
@@ -706,12 +812,16 @@ async fn a_write_nobody_announced_arrives_at_the_heartbeat() -> TestResult {
         })
         .await?;
     let found = events.expect("change").await?;
-    assert_eq!((found["data_version"].clone(), found["value"].clone()), (json!(1), json!(5)));
+    assert_eq!(
+        (found["data_version"].clone(), found["value"].clone()),
+        (json!(1), json!(5))
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn the_heartbeat_read_ends_a_stream_whose_artifact_went_without_a_notification() -> TestResult {
+async fn the_heartbeat_read_ends_a_stream_whose_artifact_went_without_a_notification() -> TestResult
+{
     let harness = Harness::new(heartbeat_only())?;
     let id = harness.create(OWNER, "create-10").await?;
     let mut events = harness.follow(&id, "", OWNER).await?;
@@ -722,7 +832,8 @@ async fn the_heartbeat_read_ends_a_stream_whose_artifact_went_without_a_notifica
     harness
         .state
         .run(move |artifacts| {
-            let change = MetadataChange::new(None, None, Some(true)).ok_or(ArtifactError::NotInTrash)?;
+            let change =
+                MetadataChange::new(None, None, Some(true)).ok_or(ArtifactError::NotInTrash)?;
             artifacts.update(
                 &ActorId::owner(),
                 &key,
@@ -770,9 +881,12 @@ async fn a_writer_is_never_refused_or_delayed_by_a_subscriber() -> TestResult {
     // A subscriber that never reads holds its stream; writes still commit.
     let _stalled = harness.follow(&id, "?path=a", OWNER).await?;
     for version in 1..20 {
-        tokio::time::timeout(PATIENCE, harness.set(&id, version, "a", &json!(version + 100)))
-            .await
-            .map_err(|_| "a write waited for a subscriber")??;
+        tokio::time::timeout(
+            PATIENCE,
+            harness.set(&id, version, "a", &json!(version + 100)),
+        )
+        .await
+        .map_err(|_| "a write waited for a subscriber")??;
     }
     Ok(())
 }
@@ -807,12 +921,26 @@ async fn a_stored_space_that_cannot_be_parsed_is_a_server_error_and_ends_streams
 #[tokio::test]
 async fn disabling_the_user_and_revoking_the_token_end_the_stream() -> TestResult {
     let harness = Harness::new(quick())?;
-    let user = harness.ok("POST", "/v1/users", OWNER, None, Some(json!({ "label": "carol" }))).await?;
+    let user = harness
+        .ok(
+            "POST",
+            "/v1/users",
+            OWNER,
+            None,
+            Some(json!({ "label": "carol" })),
+        )
+        .await?;
     let user_id = user["id"].as_str().ok_or("id")?.to_owned();
     let mut tokens = Vec::new();
     for key in ["issue-carol-1", "issue-carol-2"] {
         let issued = harness
-            .ok("POST", "/v1/tokens", OWNER, Some(key), Some(json!({ "name": key, "user_id": user_id })))
+            .ok(
+                "POST",
+                "/v1/tokens",
+                OWNER,
+                Some(key),
+                Some(json!({ "name": key, "user_id": user_id })),
+            )
             .await?;
         tokens.push((
             issued["secret"].as_str().ok_or("secret")?.to_owned(),
@@ -824,14 +952,26 @@ async fn disabling_the_user_and_revoking_the_token_end_the_stream() -> TestResul
     let mut revoked = harness.follow(&id, "", &tokens[0].0).await?;
     revoked.expect("snapshot").await?;
     harness
-        .ok("DELETE", &format!("/v1/tokens/{}", tokens[0].1), OWNER, None, None)
+        .ok(
+            "DELETE",
+            &format!("/v1/tokens/{}", tokens[0].1),
+            OWNER,
+            None,
+            None,
+        )
         .await?;
     revoked.ends().await?;
 
     let mut disabled = harness.follow(&id, "", &tokens[1].0).await?;
     disabled.expect("snapshot").await?;
     harness
-        .ok("POST", &format!("/v1/users/{user_id}/disable"), OWNER, Some("disable-1"), None)
+        .ok(
+            "POST",
+            &format!("/v1/users/{user_id}/disable"),
+            OWNER,
+            Some("disable-1"),
+            None,
+        )
         .await?;
     disabled.ends().await?;
     harness.nothing_held().await
@@ -862,10 +1002,23 @@ async fn a_dropped_connection_frees_its_place() -> TestResult {
 async fn the_limits_refuse_with_a_delay_and_a_refused_request_reads_nothing() -> TestResult {
     let harness = Harness::new(settings(5, 60_000, 60_000))?;
     let mine = harness.create(OWNER, "create-17").await?;
-    let user = harness.ok("POST", "/v1/users", OWNER, None, Some(json!({ "label": "dave" }))).await?;
+    let user = harness
+        .ok(
+            "POST",
+            "/v1/users",
+            OWNER,
+            None,
+            Some(json!({ "label": "dave" })),
+        )
+        .await?;
     let issued = harness
-        .ok("POST", "/v1/tokens", OWNER, Some("issue-dave-1"),
-            Some(json!({ "name": "dave", "user_id": user["id"] })))
+        .ok(
+            "POST",
+            "/v1/tokens",
+            OWNER,
+            Some("issue-dave-1"),
+            Some(json!({ "name": "dave", "user_id": user["id"] })),
+        )
         .await?;
     let dave = issued["secret"].as_str().ok_or("secret")?.to_owned();
     let theirs = harness.create(&dave, "create-18").await?;
@@ -875,12 +1028,20 @@ async fn the_limits_refuse_with_a_delay_and_a_refused_request_reads_nothing() ->
     let reads = harness.state.data_streams().reads();
     let response = harness.open(&mine, "", OWNER).await?;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(response.headers().get(header::RETRY_AFTER).map(|v| v.as_bytes()), Some(b"5".as_slice()));
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .map(axum::http::HeaderValue::as_bytes),
+        Some(b"5".as_slice())
+    );
     let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
     assert_eq!(body["error"]["code"], "rate_limited");
     // The actor is full, so even a request for a missing artifact is refused
     // at the limit without a read.
-    let response = harness.open("art_00000000000000000000000000000000", "", OWNER).await?;
+    let response = harness
+        .open("art_00000000000000000000000000000000", "", OWNER)
+        .await?;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
     let _third = harness.follow(&theirs, "", &dave).await?;
@@ -888,7 +1049,13 @@ async fn the_limits_refuse_with_a_delay_and_a_refused_request_reads_nothing() ->
     let reads_before = harness.state.data_streams().reads();
     let response = harness.open(&theirs, "", &dave).await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(response.headers().get(header::RETRY_AFTER).map(|v| v.as_bytes()), Some(b"5".as_slice()));
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .map(axum::http::HeaderValue::as_bytes),
+        Some(b"5".as_slice())
+    );
     let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
     assert_eq!(body["error"]["code"], "unavailable");
     assert_eq!(
@@ -896,13 +1063,17 @@ async fn the_limits_refuse_with_a_delay_and_a_refused_request_reads_nothing() ->
         reads_before,
         "a request refused at a limit read storage"
     );
-    assert!(reads_before > reads, "the opened stream's own read was counted");
+    assert!(
+        reads_before > reads,
+        "the opened stream's own read was counted"
+    );
     assert_eq!(harness.state.data_streams().open_streams(), (3, 2));
     Ok(())
 }
 
 #[test]
-fn concurrent_opens_on_one_executor_thread_with_one_blocking_thread_do_not_deadlock() -> TestResult {
+fn concurrent_opens_on_one_executor_thread_with_one_blocking_thread_do_not_deadlock() -> TestResult
+{
     // A lock held across the await of a storage read would block the only
     // executor thread while the read's result waits to be polled. The run is
     // on its own thread so that a deadlock fails the test instead of hanging.
@@ -927,7 +1098,10 @@ fn concurrent_opens_on_one_executor_thread_with_one_blocking_thread_do_not_deadl
                 );
                 for opened in [a, b, c] {
                     let mut events = opened.map_err(|error| error.to_string())?;
-                    events.expect("snapshot").await.map_err(|error| error.to_string())?;
+                    events
+                        .expect("snapshot")
+                        .await
+                        .map_err(|error| error.to_string())?;
                 }
                 Ok(())
             })

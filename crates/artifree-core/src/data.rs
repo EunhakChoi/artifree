@@ -10,8 +10,8 @@
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
-use artifree_domain::members::{Members, MembersQuery};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
+use artifree_domain::members::{Members, MembersQuery};
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
 use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWrite};
 

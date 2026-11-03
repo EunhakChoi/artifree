@@ -202,10 +202,9 @@ impl DataStreams {
 
     #[cfg(test)]
     pub(crate) fn open_streams(&self) -> (u32, usize) {
-        self.table
-            .lock()
-            .map(|table| (table.total, table.by_actor.len()))
-            .unwrap_or((u32::MAX, usize::MAX))
+        self.table.lock().map_or((u32::MAX, usize::MAX), |table| {
+            (table.total, table.by_actor.len())
+        })
     }
 }
 
@@ -331,9 +330,15 @@ impl Frame {
 }
 
 /// The event for what `read` found at `path` of `artifact`.
-fn frame(artifact: &str, path: &str, read: DataRead) -> Result<Frame, ApiError> {
-    let text = read.value.as_ref().map(artifree_domain::data::DataValue::to_canonical);
-    if text.as_ref().is_some_and(|text| text.len() > EVENT_VALUE_BYTES) {
+fn frame(artifact: &str, path: &str, read: &DataRead) -> Result<Frame, ApiError> {
+    let text = read
+        .value
+        .as_ref()
+        .map(artifree_domain::data::DataValue::to_canonical);
+    if text
+        .as_ref()
+        .is_some_and(|text| text.len() > EVENT_VALUE_BYTES)
+    {
         return Ok(Frame::TooLarge(DataTooLarge {
             artifact_id: artifact.to_owned(),
             path: path.to_owned(),
@@ -369,7 +374,7 @@ impl Target {
             .run(move |artifacts| artifacts.data(&target.actor, &target.artifact, &target.path))
             .await
             .map_err(ApiError::from)?;
-        frame(&self.artifact_text, &self.path_text, read)
+        frame(&self.artifact_text, &self.path_text, &read)
     }
 }
 

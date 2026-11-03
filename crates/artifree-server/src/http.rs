@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse, DeleteDataRequest,
-    DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode,
-    ErrorResponse, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery,
-    ListDataMembersQuery, ListJobsQuery,
-    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
+    DeleteDataRequest, DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest, Job, JobList,
+    ListArtifactsQuery, ListDataMembersQuery, ListJobsQuery, PurgeArtifactRequest,
+    PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
     RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
@@ -497,14 +497,8 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
                 // Inside the API-wide limit, so this one applies.
                 .layer(DefaultBodyLimit::max(MAX_DATA_BODY_BYTES)),
         )
-        .route(
-            "/v1/artifacts/{id}/data/members",
-            get(list_data_members),
-        )
-        .route(
-            "/v1/artifacts/{id}/data/events",
-            get(data_events::stream),
-        )
+        .route("/v1/artifacts/{id}/data/members", get(list_data_members))
+        .route("/v1/artifacts/{id}/data/events", get(data_events::stream))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(show_job))
         .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))

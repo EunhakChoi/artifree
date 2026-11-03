@@ -138,10 +138,9 @@ impl DataSpace {
             };
         };
         let rest: Box<dyn Iterator<Item = (&String, &DataValue)>> = match &query.after {
-            Some(after) => Box::new(map.range::<str, _>((
-                Bound::Excluded(after.as_str()),
-                Bound::Unbounded,
-            ))),
+            Some(after) => {
+                Box::new(map.range::<str, _>((Bound::Excluded(after.as_str()), Bound::Unbounded)))
+            }
             None => Box::new(map.iter()),
         };
         let mut members: Vec<Member> = Vec::new();
@@ -190,14 +189,15 @@ mod tests {
     use super::*;
 
     fn space(text: &str) -> DataSpace {
-        DataValue::parse(text)
-            .ok()
-            .and_then(|value| DataSpace::new(value).ok())
-            .unwrap_or_else(|| panic!("{text}: not a space"))
+        // As the store reads a space back: a space may exceed the size of one
+        // written value.
+        DataSpace::from_canonical(text).unwrap_or_else(|error| panic!("{error}: not a space"))
     }
 
     fn query(path: &str, select: Select, limit: usize, after: Option<&str>) -> MembersQuery {
-        let path = path.parse().unwrap_or_else(|error| panic!("{path}: {error}"));
+        let path = path
+            .parse()
+            .unwrap_or_else(|error| panic!("{path}: {error}"));
         MembersQuery::new(path, select, Some(limit), after.map(str::to_owned))
             .unwrap_or_else(|error| panic!("query: {error}"))
     }
@@ -276,7 +276,12 @@ mod tests {
             "a value of exactly the bound is carried"
         );
         let names_only = space.members(&query("", Select::Names, 5, None));
-        assert!(names_only.members.iter().all(|m| m.value == MemberValue::Hidden));
+        assert!(
+            names_only
+                .members
+                .iter()
+                .all(|m| m.value == MemberValue::Hidden)
+        );
     }
 
     #[test]

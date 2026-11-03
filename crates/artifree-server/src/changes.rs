@@ -102,7 +102,9 @@ impl Feed {
     /// How many streams are registered for revocation, for tests.
     #[cfg(test)]
     pub(crate) fn registered(&self) -> usize {
-        self.registrations.lock().map_or(usize::MAX, |reg| reg.streams.len())
+        self.registrations
+            .lock()
+            .map_or(usize::MAX, |reg| reg.streams.len())
     }
 
     /// A receiver that turns true when the server starts shutting down.

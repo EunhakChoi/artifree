@@ -72,7 +72,10 @@ impl Harness {
         let response = self.api.clone().oneshot(request).await?;
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await?;
-        Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
+        Ok((
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        ))
     }
 
     async fn ok(
@@ -90,7 +93,9 @@ impl Harness {
     async fn artifact(&self, key: &str) -> Result<String, Box<dyn std::error::Error>> {
         let page = json!({ "title": "Members", "files": [
             { "path": "index.html", "encoding": "utf8", "content": "<p>1</p>" }] });
-        let made = self.ok("POST", "/v1/artifacts", Some(key), Some(page)).await?;
+        let made = self
+            .ok("POST", "/v1/artifacts", Some(key), Some(page))
+            .await?;
         Ok(made["artifact"]["id"].as_str().ok_or("id")?.to_owned())
     }
 
@@ -107,8 +112,13 @@ impl Harness {
     }
 
     async fn members(&self, id: &str, query: &str) -> Result<Value, Box<dyn std::error::Error>> {
-        self.ok("GET", &format!("/v1/artifacts/{id}/data/members{query}"), None, None)
-            .await
+        self.ok(
+            "GET",
+            &format!("/v1/artifacts/{id}/data/members{query}"),
+            None,
+            None,
+        )
+        .await
     }
 }
 
@@ -129,7 +139,12 @@ fn names(page: &Value) -> Vec<&str> {
 async fn the_default_page_lists_names_and_echoes_the_normalized_query() -> TestResult {
     let harness = Harness::new()?;
     let id = harness.artifact("create-1").await?;
-    harness.fill(&id, &json!({ "b": 2, "a": 1, "todos": { "y": true, "x": null } })).await?;
+    harness
+        .fill(
+            &id,
+            &json!({ "b": 2, "a": 1, "todos": { "y": true, "x": null } }),
+        )
+        .await?;
     let page = harness.members(&id, "").await?;
     assert_eq!(
         page,
@@ -173,7 +188,10 @@ async fn pages_chain_by_next_after_in_utf8_byte_order() -> TestResult {
     // U+10000 is a surrogate pair in UTF-16 and sorts last in UTF-8; U+FF5E
     // is one unit above it in UTF-16 and sorts before it in UTF-8.
     harness
-        .fill(&id, &json!({ "\u{10000}": 1, "\u{ff5e}": 2, "a": 3, "B": 4, "é": 5 }))
+        .fill(
+            &id,
+            &json!({ "\u{10000}": 1, "\u{ff5e}": 2, "a": 3, "B": 4, "é": 5 }),
+        )
         .await?;
     let mut seen: Vec<String> = Vec::new();
     let mut after: Option<String> = None;
@@ -201,7 +219,17 @@ async fn pages_chain_by_next_after_in_utf8_byte_order() -> TestResult {
 }
 
 fn percent(text: &str) -> String {
-    text.bytes().map(|byte| format!("%{byte:02X}")).collect()
+    let mut encoded = String::new();
+    for byte in text.bytes() {
+        encoded.push('%');
+        for nibble in [byte >> 4, byte & 0x0f] {
+            encoded.push(
+                char::from_digit(u32::from(nibble), 16)
+                    .map_or('0', |digit| digit.to_ascii_uppercase()),
+            );
+        }
+    }
+    encoded
 }
 
 #[tokio::test]
@@ -210,14 +238,18 @@ async fn values_that_are_too_large_are_marked_and_pages_stay_within_their_bound(
     let id = harness.artifact("create-3").await?;
     let big = "x".repeat(33 * 1024);
     let medium = "m".repeat(30 * 1024);
-    harness.fill(&id, &json!({ "big": big, "small": 1 })).await?;
+    harness
+        .fill(&id, &json!({ "big": big, "small": 1 }))
+        .await?;
     for n in 0..9_u64 {
         harness
             .ok(
                 "PUT",
                 &format!("/v1/artifacts/{id}/data"),
                 Some(&format!("medium-{id}-{n}")),
-                Some(json!({ "path": format!("m{n}"), "base_data_version": n + 1, "value": medium })),
+                Some(
+                    json!({ "path": format!("m{n}"), "base_data_version": n + 1, "value": medium }),
+                ),
             )
             .await?;
     }
@@ -227,15 +259,23 @@ async fn values_that_are_too_large_are_marked_and_pages_stay_within_their_bound(
     for member in members {
         let value = member.get("value").is_some();
         let large = member.get("too_large").is_some();
-        assert!(value ^ large, "exactly one of value and too_large: {member}");
+        assert!(
+            value ^ large,
+            "exactly one of value and too_large: {member}"
+        );
     }
     let carried: usize = members
         .iter()
         .filter_map(|member| member["value"].as_str())
         .map(|text| text.len() + 2)
         .sum();
-    assert!(carried <= 256 * 1024, "{carried} bytes of values in one page");
-    let next = page["next_after"].as_str().ok_or("the page should end early")?;
+    assert!(
+        carried <= 256 * 1024,
+        "{carried} bytes of values in one page"
+    );
+    let next = page["next_after"]
+        .as_str()
+        .ok_or("the page should end early")?;
     assert!(names(&page).len() < 11);
     // Names do not carry values, so one page lists them all.
     let all = harness.members(&id, "?limit=100").await?;
@@ -243,7 +283,10 @@ async fn values_that_are_too_large_are_marked_and_pages_stay_within_their_bound(
     assert!(all.get("next_after").is_none());
     assert!(all["members"][0].get("too_large").is_none());
     let rest = harness
-        .members(&id, &format!("?select=values&limit=100&after={}", percent(next)))
+        .members(
+            &id,
+            &format!("?select=values&limit=100&after={}", percent(next)),
+        )
         .await?;
     assert!(!names(&rest).is_empty());
     Ok(())
@@ -253,9 +296,18 @@ async fn values_that_are_too_large_are_marked_and_pages_stay_within_their_bound(
 async fn a_path_without_an_object_is_an_empty_page_not_an_error() -> TestResult {
     let harness = Harness::new()?;
     let id = harness.artifact("create-4").await?;
-    harness.fill(&id, &json!({ "list": [1, 2], "text": "x", "empty": {} })).await?;
-    for (path, collection) in [("nothing", false), ("list", false), ("text", false), ("empty", true)] {
-        let page = harness.members(&id, &format!("?path={path}&select=values")).await?;
+    harness
+        .fill(&id, &json!({ "list": [1, 2], "text": "x", "empty": {} }))
+        .await?;
+    for (path, collection) in [
+        ("nothing", false),
+        ("list", false),
+        ("text", false),
+        ("empty", true),
+    ] {
+        let page = harness
+            .members(&id, &format!("?path={path}&select=values"))
+            .await?;
         assert_eq!(page["is_collection"], collection, "{path}: {page}");
         assert_eq!(page["members"], json!([]), "{path}");
         assert!(page.get("next_after").is_none());
@@ -263,7 +315,10 @@ async fn a_path_without_an_object_is_an_empty_page_not_an_error() -> TestResult 
     // A space nobody wrote is the empty root at version 0.
     let fresh = harness.artifact("create-5").await?;
     let page = harness.members(&fresh, "").await?;
-    assert_eq!((page["data_version"].clone(), page["is_collection"].clone()), (json!(0), json!(true)));
+    assert_eq!(
+        (page["data_version"].clone(), page["is_collection"].clone()),
+        (json!(0), json!(true))
+    );
     Ok(())
 }
 
@@ -282,58 +337,103 @@ async fn parameters_out_of_range_are_refused_with_their_rule() -> TestResult {
         ("?select=keys".into(), StatusCode::BAD_REQUEST),
         ("?after=".into(), StatusCode::UNPROCESSABLE_ENTITY),
         (format!("?after={long}"), StatusCode::UNPROCESSABLE_ENTITY),
-        (format!("?after={two_byte}"), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            format!("?after={two_byte}"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         ("?path=/a".into(), StatusCode::UNPROCESSABLE_ENTITY),
         ("?path=a/".into(), StatusCode::UNPROCESSABLE_ENTITY),
         ("?path=a//b".into(), StatusCode::UNPROCESSABLE_ENTITY),
         ("?path=a%20b".into(), StatusCode::UNPROCESSABLE_ENTITY),
-        (format!("?path={}", "a".repeat(65)), StatusCode::UNPROCESSABLE_ENTITY),
-        (format!("?path={}", ["s"; 17].join("/")), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            format!("?path={}", "a".repeat(65)),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            format!("?path={}", ["s"; 17].join("/")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         ("?bogus=1".into(), StatusCode::BAD_REQUEST),
         ("?limit=1&limit=2".into(), StatusCode::BAD_REQUEST),
     ];
     for (query, expected) in cases {
         let (status, body) = harness
-            .send("GET", &format!("/v1/artifacts/{id}/data/members{query}"), OWNER, None, None)
+            .send(
+                "GET",
+                &format!("/v1/artifacts/{id}/data/members{query}"),
+                OWNER,
+                None,
+                None,
+            )
             .await?;
         assert_eq!(status, expected, "{query}: {body}");
         assert!(body["error"]["message"].is_string(), "{query}: {body}");
     }
     // The bounds themselves are accepted.
-    for query in ["?limit=1", "?limit=100", &format!("?after={}", "a".repeat(256)),
-                  &format!("?path={}", ["s"; 16].join("/"))] {
+    for query in [
+        "?limit=1",
+        "?limit=100",
+        &format!("?after={}", "a".repeat(256)),
+        &format!("?path={}", ["s"; 16].join("/")),
+    ] {
         harness.members(&id, query).await?;
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn missing_foreign_and_trashed_artifacts_are_the_same_404_and_a_token_is_required() -> TestResult {
+async fn missing_foreign_and_trashed_artifacts_are_the_same_404_and_a_token_is_required()
+-> TestResult {
     let harness = Harness::new()?;
     let id = harness.artifact("create-7").await?;
     harness.fill(&id, &json!({ "a": 1 })).await?;
-    let user = harness.ok("POST", "/v1/users", None, Some(json!({ "label": "eve" }))).await?;
+    let user = harness
+        .ok("POST", "/v1/users", None, Some(json!({ "label": "eve" })))
+        .await?;
     let issued = harness
-        .ok("POST", "/v1/tokens", Some("issue-eve-1"),
-            Some(json!({ "name": "eve", "user_id": user["id"] })))
+        .ok(
+            "POST",
+            "/v1/tokens",
+            Some("issue-eve-1"),
+            Some(json!({ "name": "eve", "user_id": user["id"] })),
+        )
         .await?;
     let eve = issued["secret"].as_str().ok_or("secret")?;
     let missing = "art_00000000000000000000000000000000";
     let mut answers = Vec::new();
     for (target, token) in [(id.as_str(), eve), (missing, eve), (missing, OWNER)] {
         let (status, body) = harness
-            .send("GET", &format!("/v1/artifacts/{target}/data/members"), token, None, None)
+            .send(
+                "GET",
+                &format!("/v1/artifacts/{target}/data/members"),
+                token,
+                None,
+                None,
+            )
             .await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
         answers.push(body);
     }
-    assert!(answers.windows(2).all(|pair| pair[0] == pair[1]), "{answers:?}");
+    assert!(
+        answers.windows(2).all(|pair| pair[0] == pair[1]),
+        "{answers:?}"
+    );
     harness
-        .ok("PATCH", &format!("/v1/artifacts/{id}"), Some("trash-1"),
-            Some(json!({ "base_metadata_revision": 1, "deleted": true })))
+        .ok(
+            "PATCH",
+            &format!("/v1/artifacts/{id}"),
+            Some("trash-1"),
+            Some(json!({ "base_metadata_revision": 1, "deleted": true })),
+        )
         .await?;
     let (status, body) = harness
-        .send("GET", &format!("/v1/artifacts/{id}/data/members"), OWNER, None, None)
+        .send(
+            "GET",
+            &format!("/v1/artifacts/{id}/data/members"),
+            OWNER,
+            None,
+            None,
+        )
         .await?;
     assert_eq!((status, &body), (StatusCode::NOT_FOUND, &answers[0]));
     let response = harness
@@ -346,16 +446,28 @@ async fn missing_foreign_and_trashed_artifacts_are_the_same_404_and_a_token_is_r
 }
 
 #[tokio::test]
-async fn an_agent_token_of_the_owner_reads_members_and_a_user_reads_only_its_own_space() -> TestResult {
+async fn an_agent_token_of_the_owner_reads_members_and_a_user_reads_only_its_own_space()
+-> TestResult {
     let harness = Harness::new()?;
     let id = harness.artifact("create-8").await?;
     harness.fill(&id, &json!({ "a": 1 })).await?;
     let agent = harness
-        .ok("POST", "/v1/tokens", Some("issue-agent-1"), Some(json!({ "name": "agent" })))
+        .ok(
+            "POST",
+            "/v1/tokens",
+            Some("issue-agent-1"),
+            Some(json!({ "name": "agent" })),
+        )
         .await?;
     let secret = agent["secret"].as_str().ok_or("secret")?;
     let (status, page) = harness
-        .send("GET", &format!("/v1/artifacts/{id}/data/members?select=values"), secret, None, None)
+        .send(
+            "GET",
+            &format!("/v1/artifacts/{id}/data/members?select=values"),
+            secret,
+            None,
+            None,
+        )
         .await?;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["members"], json!([{ "name": "a", "value": 1 }]));
