@@ -58,7 +58,8 @@ mode they are in.
    signal (item 6). The TTL is a deadline for the process, not a quota on
    requests.
 6. **Cleanup in every exit path.** The directory is removed on TTL expiry,
-   SIGINT, SIGTERM (Ctrl+C on Windows), a startup failure, a failed readiness
+   SIGINT, SIGTERM, SIGHUP (the signal of a closed terminal; on Windows only
+   Ctrl+C is handled), a startup failure, a failed readiness
    callback, a listener failure, and a panic that unwinds. Order matters and is
    fixed: (a) the signal handlers are installed **before** the directory is
    created, by building the runtime first; a signal that arrives later is
@@ -84,8 +85,10 @@ mode they are in.
    is an error, exit code 1, and the cleanup of item 6. A one-shot session
    writes to stderr that nothing is kept, which directory is deleted, and when.
    The line stays one JSON object; stdout holds nothing else. Persistent mode
-   now builds its line the same fallible way (its bytes only gain the two
-   fields), so that a non-UTF-8 `--data-dir` is an error instead of a panic.
+   builds its line the same fallible way (its bytes only gain the two fields)
+   but keeps its earlier behavior when the line cannot be written: the server
+   logs the problem on stderr and keeps serving, where a one-shot session would
+   end.
 8. **Crash cleanup: a later one-shot start may sweep.** A killed session leaves
    its directory. The next one-shot start sweeps the session root (never the
    persistent mode, never an unrelated start). Because deleting a live

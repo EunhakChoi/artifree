@@ -159,6 +159,7 @@ fn parse_stat(pid: u32, bytes: &[u8]) -> Option<Stat> {
 mod tests {
     use super::*;
     use std::error::Error;
+    #[cfg(unix)]
     use std::io::Write;
     use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -232,6 +233,7 @@ mod tests {
     }
 
     /// Says on stderr that a test could not run here (it did not fail).
+    #[cfg(unix)]
     fn skipped(reason: &str) {
         let _ = writeln!(std::io::stderr(), "skipped: {reason}");
     }

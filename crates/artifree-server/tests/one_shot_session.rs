@@ -14,7 +14,9 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -357,8 +359,9 @@ fn stderr_tells_a_person_that_nothing_is_kept_and_that_a_tunnel_is_separate() ->
 // Every way out removes the directory.
 
 #[test]
-fn sigterm_and_sigint_remove_the_directory_and_exit_cleanly() -> TestResult {
-    for signal in ["TERM", "INT"] {
+fn sigterm_sigint_and_sighup_remove_the_directory_and_exit_cleanly() -> TestResult {
+    // SIGHUP is what closing the terminal sends.
+    for signal in ["TERM", "INT", "HUP"] {
         let scratch = Scratch::new("signals")?;
         let root = scratch.root()?;
         let mut server = Server::one_shot(&root, "600")?;
@@ -703,6 +706,58 @@ fn persistent_mode_keeps_its_data_and_token_and_reports_its_mode() -> TestResult
     let api = ready["api_url"].as_str().ok_or("api_url")?;
     assert_eq!(http(api, "GET", "/healthz", None, None, None)?.0, 200);
     second.stop_cleanly("TERM")?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn persistent_mode_keeps_serving_when_its_readiness_line_cannot_be_written() -> TestResult {
+    let scratch = Scratch::new("persistent-full")?;
+    let data = scratch.join("kept");
+    // A port that was free a moment ago; the readiness line cannot say which.
+    let probe = TcpListener::bind("127.0.0.1:0")?;
+    let address = probe.local_addr()?.to_string();
+    drop(probe);
+    let full = fs::OpenOptions::new().write(true).open("/dev/full")?;
+    let mut server = Server::start_with_stdout(
+        &[
+            "--data-dir",
+            &data.to_string_lossy(),
+            "--api-listen",
+            &address,
+        ],
+        &[],
+        Stdio::from(full),
+    )?;
+    let base = format!("http://{address}");
+    let give_up = Instant::now() + PATIENCE;
+    loop {
+        match http(&base, "GET", "/healthz", None, None, None) {
+            Ok((200, _)) => break,
+            other if Instant::now() >= give_up => {
+                return Err(format!("the server never answered: {other:?}").into());
+            }
+            _ => thread::sleep(STEP),
+        }
+    }
+    assert!(
+        server.child.try_wait()?.is_none(),
+        "it must still be running"
+    );
+    server.signal("TERM")?;
+    let status = server.wait()?;
+    let stderr = server.stderr();
+    assert!(status.success(), "{status:?}: {stderr}");
+    assert!(
+        stderr.contains("cannot write the readiness line"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("keeps running"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(
+        data.join("access-token").exists(),
+        "persistent data is kept"
+    );
     Ok(())
 }
 

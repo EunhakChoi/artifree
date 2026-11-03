@@ -91,6 +91,7 @@ fn request(sender: &watch::Sender<bool>) {
 struct Signals {
     interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
 }
 
 #[cfg(unix)]
@@ -103,6 +104,8 @@ impl Signals {
         Ok(Self {
             interrupt: handler(SignalKind::interrupt(), "SIGINT")?,
             terminate: handler(SignalKind::terminate(), "SIGTERM")?,
+            // Closing the terminal sends SIGHUP; it ends the session like SIGTERM.
+            hangup: handler(SignalKind::hangup(), "SIGHUP")?,
         })
     }
 
@@ -111,6 +114,7 @@ impl Signals {
         tokio::select! {
             _ = self.interrupt.recv() => {}
             _ = self.terminate.recv() => {}
+            _ = self.hangup.recv() => {}
         }
     }
 }

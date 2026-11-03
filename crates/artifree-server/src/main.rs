@@ -87,7 +87,16 @@ fn run() -> Result<(), String> {
             let options = parse_serve(options, &ServeEnv::from_process())?;
             let one_shot = matches!(options.data, DataLocation::OneShot(_));
             serve::run(options, |ready| {
-                ready_line::write(&mut std::io::stdout().lock(), ready)?;
+                match ready_line::write(&mut std::io::stdout().lock(), ready) {
+                    Ok(()) => {}
+                    // A one-shot session whose supervisor cannot read the line
+                    // would run unseen: it ends, and its data is deleted.
+                    Err(error) if one_shot => return Err(error),
+                    // Persistent mode keeps serving, as it always has (0039).
+                    Err(error) => {
+                        writeln!(std::io::stderr(), "{error}; the server keeps running.").ok();
+                    }
+                }
                 if one_shot {
                     tell_one_shot(ready);
                 }
@@ -115,7 +124,7 @@ fn tell_one_shot(ready: &Ready) {
         .map_or(0, |session| session.ttl.as_secs());
     writeln!(
         std::io::stderr(),
-        "One-shot session: nothing is kept. {} and everything in it, including the access token, is deleted when this process ends: after {ttl} seconds in total (start-up time included), on SIGINT or SIGTERM, or on a start-up failure. A killed process leaves it for the next one-shot start to sweep. A tunnel or proxy lifetime is a separate setting that Artifree does not implement.",
+        "One-shot session: nothing is kept. {} and everything in it, including the access token, is deleted when this process ends: after {ttl} seconds in total (start-up time included), on SIGINT, SIGTERM or SIGHUP, or on a start-up failure. A killed process leaves it for the next one-shot start to sweep. A tunnel or proxy lifetime is a separate setting that Artifree does not implement.",
         ready.data_dir.display()
     )
     .ok();
@@ -622,8 +631,8 @@ Options:
   --one-shot-ttl-seconds <n>    A one-shot session: a new private temporary data
                                 directory, empty, with a new token, deleted when
                                 the process ends (after n seconds, 1-604800, in
-                                total from the start of serve; on SIGINT or
-                                SIGTERM; on a start-up failure). Nothing is kept,
+                                total from the start of serve; on SIGINT,
+                                SIGTERM or SIGHUP; on a start-up failure). Nothing is kept,
                                 and a session is never resumed. There is no
                                 default lifetime. It adds session_ttl_seconds and
                                 sweep to the readiness line. A tunnel lifetime is
