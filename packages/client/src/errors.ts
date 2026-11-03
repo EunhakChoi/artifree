@@ -39,3 +39,20 @@ export class ArtifreeApiError extends Error {
     this.retryAfterSeconds = details.retryAfterSeconds;
   }
 }
+
+/**
+ * A runtime call that was not sent because the runtime connection it belongs
+ * to was closed or replaced. It carries its own marker so that a caller can
+ * tell it from any other failure that happens to share its status and code.
+ */
+export class RuntimeConnectionReplacedError extends ArtifreeApiError {
+  /** Always true; the marker callers test, whichever realm made the error. */
+  readonly connectionReplaced = true;
+
+  constructor() {
+    super('The runtime connection was closed or replaced.', {
+      status: 0,
+      code: 'invalid_request',
+    });
+  }
+}

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::auth::hex;
+use crate::runtime_policy::{Capability, CapabilitySet};
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
@@ -43,7 +44,17 @@ pub(crate) enum SessionError {
 #[derive(Debug, Clone, Copy)]
 struct Grant {
     version: u64,
-    allowed: bool,
+    capabilities: CapabilitySet,
+}
+
+/// Why a view's grant does not permit a capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantDenied {
+    /// The connection is closed or expired: the view no longer exists.
+    Closed,
+    /// The connection lives, but this grant version does not include the
+    /// capability: it was revoked, replaced, or never given.
+    NotGranted,
 }
 
 #[derive(Debug)]
@@ -79,7 +90,7 @@ impl RuntimeSession {
     pub(crate) fn with_grant<T>(
         &self,
         scope: &GrantScope,
-        issue: impl FnOnce(u64, bool) -> T,
+        issue: impl FnOnce(u64, CapabilitySet) -> T,
     ) -> Result<T, SessionError> {
         let state = self.state.lock().map_err(|_| SessionError::Unavailable)?;
         if !Self::active(&state) {
@@ -88,7 +99,7 @@ impl RuntimeSession {
         let grant = state.grants.get(scope);
         Ok(issue(
             grant.map_or(0, |grant| grant.version),
-            grant.is_some_and(|grant| grant.allowed),
+            grant.map_or_else(CapabilitySet::default, |grant| grant.capabilities),
         ))
     }
 
@@ -96,7 +107,7 @@ impl RuntimeSession {
     pub(crate) fn set_grant(
         &self,
         scope: GrantScope,
-        metadata_read: bool,
+        capabilities: CapabilitySet,
         expected_version: u64,
     ) -> Result<u64, SessionError> {
         let mut state = self.state.lock().map_err(|_| SessionError::Unavailable)?;
@@ -105,7 +116,7 @@ impl RuntimeSession {
         }
         let current = state.grants.get(&scope).copied().unwrap_or(Grant {
             version: 0,
-            allowed: false,
+            capabilities: CapabilitySet::default(),
         });
         if expected_version != current.version {
             return Err(SessionError::Conflict);
@@ -123,23 +134,36 @@ impl RuntimeSession {
             scope,
             Grant {
                 version: next,
-                allowed: metadata_read,
+                capabilities,
             },
         );
         Ok(next)
     }
 
-    /// Every RPC checks the exact grant bound to its view.
-    pub(crate) fn permits(&self, scope: &GrantScope, version: u64) -> bool {
+    /// Every RPC checks the exact grant bound to its view, for the one
+    /// capability it needs. A grant is a set; another capability's consent
+    /// never stands in for this one.
+    pub(crate) fn permits(
+        &self,
+        scope: &GrantScope,
+        version: u64,
+        capability: Capability,
+    ) -> Result<(), GrantDenied> {
         let Ok(state) = self.state.lock() else {
-            return false;
+            return Err(GrantDenied::Closed);
         };
-        Self::active(&state)
-            && version != 0
-            && state
-                .grants
-                .get(scope)
-                .is_some_and(|grant| grant.allowed && grant.version == version)
+        if !Self::active(&state) {
+            return Err(GrantDenied::Closed);
+        }
+        let granted = version != 0
+            && state.grants.get(scope).is_some_and(|grant| {
+                grant.version == version && grant.capabilities.contains(capability)
+            });
+        if granted {
+            Ok(())
+        } else {
+            Err(GrantDenied::NotGranted)
+        }
     }
 }
 
@@ -269,11 +293,43 @@ mod tests {
     use artifree_domain::SourceRevision;
     use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
-    use super::{GrantScope, RuntimeSessions, SessionError};
+    use super::{GrantDenied, GrantScope, RuntimeSessions, SessionError};
+    use crate::runtime_policy::{Capability, CapabilitySet, RuntimePolicy};
+
+    fn all() -> Result<CapabilitySet, Box<dyn std::error::Error>> {
+        let policy = RuntimePolicy::from_source(
+            true,
+            Some(
+                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read"]}"#,
+            ),
+        )?;
+        policy
+            .grant_of(&RuntimePolicy::supported())
+            .ok_or_else(|| "the fixture grant must be valid".into())
+    }
+
+    fn only(name: &str) -> Result<CapabilitySet, Box<dyn std::error::Error>> {
+        let policy = RuntimePolicy::from_source(
+            true,
+            Some(
+                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read"]}"#,
+            ),
+        )?;
+        policy
+            .grant_of(&[name.to_owned()])
+            .ok_or_else(|| "the fixture grant must be valid".into())
+    }
+
+    fn permits(session: &super::RuntimeSession, scope: &GrantScope, version: u64) -> bool {
+        session
+            .permits(scope, version, Capability::MetadataRead)
+            .is_ok()
+    }
 
     #[test]
     fn grant_revoke_regrant_and_logout_reject_old_bindings()
     -> Result<(), Box<dyn std::error::Error>> {
+        let on = only("metadata.read")?;
         let actor: ActorId = "local".parse()?;
         let other: ActorId = "other".parse()?;
         let sessions = RuntimeSessions::new(Duration::from_secs(60));
@@ -290,35 +346,35 @@ mod tests {
             SourceRevision(1),
             SourceRevision(1),
         );
-        assert!(!session.permits(&scope, 0));
+        assert!(!permits(&session, &scope, 0));
         let first = session
-            .set_grant(scope.clone(), true, 0)
+            .set_grant(scope.clone(), on, 0)
             .map_err(|e| format!("{e:?}"))?;
-        assert!(session.permits(&scope, first));
+        assert!(permits(&session, &scope, first));
         let other_revision =
             GrantScope::new(scope.artifact.clone(), SourceRevision(2), SourceRevision(1));
         let other_head =
             GrantScope::new(scope.artifact.clone(), SourceRevision(1), SourceRevision(2));
-        assert!(!session.permits(&other_revision, first));
-        assert!(!session.permits(&other_head, first));
+        assert!(!permits(&session, &other_revision, first));
+        assert!(!permits(&session, &other_head, first));
         let revoked = session
-            .set_grant(scope.clone(), false, first)
+            .set_grant(scope.clone(), CapabilitySet::default(), first)
             .map_err(|e| format!("{e:?}"))?;
-        assert!(!session.permits(&scope, first));
+        assert!(!permits(&session, &scope, first));
         assert!(matches!(
-            session.set_grant(scope.clone(), true, first),
+            session.set_grant(scope.clone(), on, first),
             Err(SessionError::Conflict)
         ));
         let second = session
-            .set_grant(scope.clone(), true, revoked)
+            .set_grant(scope.clone(), on, revoked)
             .map_err(|e| format!("{e:?}"))?;
         assert_ne!(first, second);
-        assert!(!session.permits(&scope, first));
-        assert!(session.permits(&scope, second));
+        assert!(!permits(&session, &scope, first));
+        assert!(permits(&session, &scope, second));
         sessions.close(&actor, &id).map_err(|e| format!("{e:?}"))?;
-        assert!(!session.permits(&scope, second));
+        assert!(!permits(&session, &scope, second));
         assert!(matches!(
-            session.set_grant(scope, true, second),
+            session.set_grant(scope, on, second),
             Err(SessionError::Closed)
         ));
         assert!(matches!(
@@ -386,6 +442,7 @@ mod tests {
     #[test]
     fn clearing_an_empty_grant_fences_a_late_permission_change()
     -> Result<(), Box<dyn std::error::Error>> {
+        let on = only("metadata.read")?;
         let actor: ActorId = "local".parse()?;
         let sessions = RuntimeSessions::new(Duration::from_secs(60));
         let id = sessions
@@ -400,18 +457,72 @@ mod tests {
             SourceRevision(1),
         );
         let barrier = session
-            .set_grant(scope.clone(), false, 0)
+            .set_grant(scope.clone(), CapabilitySet::default(), 0)
             .map_err(|error| format!("{error:?}"))?;
         assert_ne!(barrier, 0);
         assert!(matches!(
-            session.set_grant(scope.clone(), true, 0),
+            session.set_grant(scope.clone(), on, 0),
             Err(SessionError::Conflict)
         ));
-        assert!(!session.permits(&scope, barrier));
+        assert!(!permits(&session, &scope, barrier));
         let allowed = session
-            .set_grant(scope.clone(), true, barrier)
+            .set_grant(scope.clone(), on, barrier)
             .map_err(|error| format!("{error:?}"))?;
-        assert!(session.permits(&scope, allowed));
+        assert!(permits(&session, &scope, allowed));
+        Ok(())
+    }
+
+    #[test]
+    fn a_grant_is_a_set_and_each_capability_needs_its_own_consent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|error| format!("{error:?}"))?;
+        let session = sessions
+            .get(&actor, &id)
+            .map_err(|error| format!("{error:?}"))?;
+        let scope = GrantScope::new(
+            ArtifactId::from_random([1; 16]),
+            SourceRevision(1),
+            SourceRevision(1),
+        );
+        let read = session
+            .set_grant(scope.clone(), only("source.read")?, 0)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            session.permits(&scope, read, Capability::SourceRead),
+            Ok(())
+        );
+        assert_eq!(
+            session.permits(&scope, read, Capability::SourceDownload),
+            Err(GrantDenied::NotGranted),
+            "reading does not consent to downloading"
+        );
+        assert_eq!(
+            session.permits(&scope, read, Capability::MetadataRead),
+            Err(GrantDenied::NotGranted)
+        );
+        let everything = session
+            .set_grant(scope.clone(), all()?, read)
+            .map_err(|error| format!("{error:?}"))?;
+        for capability in Capability::ALL {
+            assert_eq!(session.permits(&scope, everything, capability), Ok(()));
+            assert_eq!(
+                session.permits(&scope, read, capability),
+                Err(GrantDenied::NotGranted),
+                "a replaced grant version is not honoured"
+            );
+        }
+        sessions
+            .close(&actor, &id)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            session.permits(&scope, everything, Capability::SourceRead),
+            Err(GrantDenied::Closed),
+            "a closed connection is not a revoked grant"
+        );
         Ok(())
     }
 

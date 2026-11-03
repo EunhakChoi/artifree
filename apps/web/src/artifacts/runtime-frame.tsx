@@ -1,7 +1,14 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import type { FrameRpc } from './frame-rpc';
+import type * as RuntimeHost from './runtime-host';
 
+// `allow-downloads` is the browser's own flag for a page that starts a
+// download itself. It is unrelated to the `source.download` capability, which
+// asks the workspace to offer a stored file and needs the user's confirmation
+// each time (decision 0032).
 const PREVIEW_SANDBOX =
   'allow-scripts allow-forms allow-modals allow-downloads';
 
@@ -19,7 +26,14 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Owns a single frame's initialization, message port and pending reads. */
+/**
+ * Owns a single frame's initialization, message port and pending calls. What
+ * the frame may ask is decided by `FrameRpc`, its budget and the offer desk
+ * (decision 0032); this component only wires them to the port. Those parts
+ * load on demand, and only for a view that is enabled: a plain preview never
+ * fetches them, and an enabled frame is not shown until they are here, so
+ * the connection its script announces on load is never missed.
+ */
 export function RuntimeFrame({
   client,
   view,
@@ -32,6 +46,25 @@ export function RuntimeFrame({
   const loads = useRef(0);
   const close = useRef<() => void>(() => undefined);
   const revokeTimer = useRef<number | undefined>(undefined);
+  const [host, setHost] = useState<typeof RuntimeHost>();
+  const [hostFailed, setHostFailed] = useState(false);
+  const desk = useMemo(() => host?.createDesk(), [host]);
+
+  useEffect(() => {
+    if (!view.enabled) return undefined;
+    let live = true;
+    void import('./runtime-host').then(
+      (loaded) => {
+        if (live) setHost(loaded);
+      },
+      () => {
+        if (live) setHostFailed(true);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [view.enabled]);
 
   useLayoutEffect(() => {
     // React StrictMode replays setup/cleanup synchronously. Only a cleanup
@@ -39,64 +72,23 @@ export function RuntimeFrame({
     window.clearTimeout(revokeTimer.current);
     let active = true;
     let port: MessagePort | undefined;
-    const pending = new Set<AbortController>();
+    let rpc: FrameRpc | undefined;
     const stop = (): void => {
       if (!active) return;
       active = false;
       port?.close();
-      for (const controller of pending) controller.abort();
-      pending.clear();
+      rpc?.close();
+      desk?.withdraw();
     };
     close.current = stop;
 
-    const respond = (channel: MessagePort, message: unknown): void => {
-      if (!active || performance.now() >= deadline || !record(message)) return;
-      const { id, type } = message;
-      if (
-        type !== 'metadata' ||
-        typeof id !== 'number' ||
-        !Number.isSafeInteger(id) ||
-        id < 1
-      )
-        return;
-      if (pending.size >= 64) {
-        channel.postMessage({ id, ok: false });
-        return;
-      }
-      const controller = new AbortController();
-      pending.add(controller);
-      void client
-        .runtimeMetadata(view, { signal: controller.signal })
-        .then(
-          (result) => {
-            if (!active || performance.now() >= deadline) return;
-            channel.postMessage({
-              id,
-              ok: true,
-              metadata: {
-                artifactId: result.artifact_id,
-                title: result.title,
-                currentRevision: result.current_revision,
-                metadataRevision: result.metadata_revision,
-              },
-            });
-          },
-          () => {
-            if (active && performance.now() < deadline)
-              channel.postMessage({ id, ok: false });
-          },
-        )
-        .finally(() => pending.delete(controller))
-        .catch((error: unknown) => {
-          console.error('The runtime message could not be delivered.', error);
-          stop();
-        });
-    };
     const connect = (event: MessageEvent<unknown>): void => {
       if (!record(event.data) || event.data.type !== 'artifree-runtime-connect')
         return;
       const candidate = event.ports[0];
       if (
+        host === undefined ||
+        desk === undefined ||
         !view.enabled ||
         !active ||
         loads.current > 1 ||
@@ -114,8 +106,19 @@ export function RuntimeFrame({
         return;
       }
       port = candidate;
-      port.onmessage = (message: MessageEvent<unknown>) =>
-        respond(candidate, message.data);
+      const served = host.createRpc({
+        client,
+        view,
+        desk,
+        deadline,
+        send: (reply, transfer) => {
+          if (active) candidate.postMessage(reply, transfer);
+        },
+      });
+      rpc = served;
+      candidate.onmessage = (message: MessageEvent<unknown>) => {
+        if (active) served.handle(message.data);
+      };
     };
     window.addEventListener('message', connect);
     const expiry = window.setTimeout(
@@ -128,23 +131,43 @@ export function RuntimeFrame({
       stop();
       revokeTimer.current = window.setTimeout(onClose, 0);
     };
-  }, [client, view, deadline, onClose]);
+  }, [client, view, deadline, onClose, host, desk]);
 
+  if (view.enabled && hostFailed)
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Preview unavailable</AlertTitle>
+        <AlertDescription>
+          The preview could not be prepared. Refresh the preview to try again.
+        </AlertDescription>
+      </Alert>
+    );
+  if (view.enabled && host === undefined)
+    return (
+      <output className="text-sm text-muted-foreground">
+        Preparing preview…
+      </output>
+    );
   return (
-    <iframe
-      ref={frame}
-      title={title}
-      src={view.url}
-      sandbox={PREVIEW_SANDBOX}
-      referrerPolicy="no-referrer"
-      className={className}
-      onLoad={() => {
-        loads.current += 1;
-        if (view.enabled && loads.current > 1) {
-          close.current();
-          onClose();
-        }
-      }}
-    />
+    <>
+      <iframe
+        ref={frame}
+        title={title}
+        src={view.url}
+        sandbox={PREVIEW_SANDBOX}
+        referrerPolicy="no-referrer"
+        className={className}
+        onLoad={() => {
+          loads.current += 1;
+          if (view.enabled && loads.current > 1) {
+            close.current();
+            onClose();
+          }
+        }}
+      />
+      {host === undefined || desk === undefined ? null : (
+        <host.DownloadPrompt desk={desk} />
+      )}
+    </>
   );
 }

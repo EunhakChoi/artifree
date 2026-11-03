@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.9.0",
+  "contract_version": "0.10.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -36,7 +36,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/runtime-sdk",
       "status": "implemented",
-      "summary": "An opted-in sandboxed frame reads its own artifact metadata with a connection-scoped grant; other runtime capabilities remain planned."
+      "summary": "An opted-in sandboxed frame reads its own artifact metadata, the files of its pinned revision, and asks for a user-confirmed download of them, each under its own connection-scoped grant; other runtime capabilities, including writing, remain planned."
     },
     {
       "id": "api",
@@ -72,7 +72,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/policy.rs",
       "status": "implemented",
-      "summary": "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks runtime metadata grants."
+      "summary": "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks runtime capability grants."
     },
     {
       "id": "documents",

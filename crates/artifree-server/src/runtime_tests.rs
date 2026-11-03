@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
     ContentEncoding, CreateArtifactRequest, CreateRuntimeViewRequest, FileChange, FileUpload,
-    Handoff, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest,
-    UpdateArtifactRequest,
+    Handoff, RuntimeDownloadKind, RuntimeDownloadRequest, RuntimeSourceReadRequest, RuntimeView,
+    SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::RegisteredHandoffSession;
 use artifree_domain::SourceRevision;
@@ -24,6 +24,7 @@ use tower::ServiceExt;
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
+use crate::runtime_source::{self, FrameCall};
 use crate::{changes, operations, preview};
 
 struct TestDirectory(PathBuf);
@@ -292,7 +293,10 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
         .await
         .map_err(|status| format!("view: {status}"))?;
     assert_eq!(declared.declared, ["future.write", "metadata.read"]);
-    assert_eq!(declared.supported, ["metadata.read"]);
+    assert_eq!(
+        declared.supported,
+        ["metadata.read", "source.download", "source.read"]
+    );
     let request = SetRuntimeGrantRequest {
         head_revision: 2,
         expected_version: 0,
@@ -325,7 +329,10 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
         .await
         .map_err(|status| format!("view: {status}"))?;
     assert!(omitted.declared.is_empty());
-    assert_eq!(omitted.supported, ["metadata.read"]);
+    assert_eq!(
+        omitted.supported,
+        ["metadata.read", "source.download", "source.read"]
+    );
     assert_eq!(
         change_grant(&state, &actor, &session, &omitted, true).await,
         Err(StatusCode::UNPROCESSABLE_ENTITY)
@@ -479,7 +486,11 @@ fn revocation_while_metadata_waits_rejects_its_late_result() -> Result<(), Box<d
             SourceRevision(1),
         );
         session_handle
-            .set_grant(scope, false, view.grant_version)
+            .set_grant(
+                scope,
+                crate::runtime_policy::CapabilitySet::default(),
+                view.grant_version,
+            )
             .map_err(|error| format!("{error:?}"))?;
         release.send(())?;
         assert!(matches!(request.await, Err(error) if error.status == StatusCode::NOT_FOUND));
@@ -487,6 +498,291 @@ fn revocation_while_metadata_waits_rejects_its_late_result() -> Result<(), Box<d
         Ok::<(), Box<dyn Error>>(())
     })?;
     Ok(())
+}
+
+/// A revision-2 view declaring both source capabilities, granted both and
+/// initialized, on an artifact that has `note.txt`.
+async fn source_view(
+    state: &AppState,
+    actor: &ActorId,
+) -> Result<(RuntimeView, String), Box<dyn Error>> {
+    let artifact = create_runtime_artifact(state, actor).await?;
+    save_fixture_file(
+        state,
+        actor,
+        &artifact,
+        1,
+        "artifree-runtime.json",
+        r#"{"sdk":"artifree.app.v1","capabilities":["source.read","source.download"]}"#,
+    )
+    .await?;
+    save_fixture_file(state, actor, &artifact, 2, "note.txt", "stored bytes").await?;
+    let session = operations::open_runtime_session(state, actor, None)
+        .map_err(|error| error.body.message)?
+        .session_id;
+    operations::set_runtime_grant(
+        state,
+        actor.clone(),
+        &session,
+        &artifact,
+        3,
+        SetRuntimeGrantRequest {
+            head_revision: 3,
+            expected_version: 0,
+            capabilities: vec!["source.download".into(), "source.read".into()],
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    let view = operations::create_runtime_view(
+        state,
+        actor.clone(),
+        None,
+        &artifact,
+        3,
+        CreateRuntimeViewRequest {
+            session_id: session.clone(),
+            view_id: "f".repeat(32),
+            generation: 1,
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    assert_eq!(view.granted, ["source.download", "source.read"]);
+    let path = view
+        .url
+        .strip_prefix("http://127.0.0.1:7411")
+        .ok_or("wrong preview origin")?;
+    let response = preview::router(state.clone())
+        .oneshot(Request::get(path).body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok((view, session))
+}
+
+/// Occupies the only blocking thread until the returned sender is used, so
+/// that the service call behind a request waits where the test wants it.
+async fn hold_blocking_thread()
+-> Result<(mpsc::Sender<()>, tokio::task::JoinHandle<()>), Box<dyn Error>> {
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, waiting) = mpsc::channel();
+    let blocker = tokio::task::spawn_blocking(move || {
+        let _sent = started.send(());
+        let _released = waiting.recv();
+    });
+    ready.await?;
+    Ok((release, blocker))
+}
+
+async fn pends<T>(request: &mut std::pin::Pin<Box<impl Future<Output = T>>>) -> bool {
+    poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await
+}
+
+/// Drives `request` to the point where its bytes were read but not yet
+/// returned, revokes the grant there, and lets it finish.
+async fn revoke_between_the_read_and_the_reply<T>(
+    state: &AppState,
+    actor: &ActorId,
+    session: &str,
+    view: &RuntimeView,
+    mut request: std::pin::Pin<Box<impl Future<Output = Result<T, operations::ApiError>>>>,
+) -> Result<Result<T, operations::ApiError>, Box<dyn Error>> {
+    // The first check waits for its artifact lookup behind the blocker.
+    let (release, blocker) = hold_blocking_thread().await?;
+    assert!(pends(&mut request).await);
+    release.send(())?;
+    blocker.await?;
+    // The lookup ran first in line. Hold the thread again before the request
+    // continues, so that its read of the bytes queues behind the blocker.
+    tokio::task::spawn_blocking(|| ()).await?;
+    let (release, blocker) = hold_blocking_thread().await?;
+    assert!(pends(&mut request).await, "the read must be waiting now");
+    let handle = state
+        .runtime_sessions()
+        .get(actor, session)
+        .map_err(|error| format!("{error:?}"))?;
+    let scope = crate::runtime_sessions::GrantScope::new(
+        view.artifact_id.parse()?,
+        SourceRevision(3),
+        SourceRevision(3),
+    );
+    handle
+        .set_grant(
+            scope,
+            crate::runtime_policy::CapabilitySet::default(),
+            view.grant_version,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+    release.send(())?;
+    blocker.await?;
+    Ok(request.await)
+}
+
+#[test]
+fn a_revocation_after_the_bytes_were_read_still_releases_none_of_them() -> Result<(), Box<dyn Error>>
+{
+    for operation in ["list", "read", "offer", "download"] {
+        let directory = TestDirectory::new()?;
+        let state = test_state(&directory)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()?;
+        runtime.block_on(async {
+            let actor: ActorId = "local".parse()?;
+            let (view, session) = source_view(&state, &actor).await?;
+            let call = FrameCall {
+                actor: &actor,
+                artifact: &view.artifact_id,
+                revision: view.revision,
+                view: &view.view_id,
+                generation: view.generation,
+                initialization: &view.initialization,
+            };
+            let file = RuntimeDownloadRequest {
+                initialization: view.initialization.clone(),
+                kind: RuntimeDownloadKind::File,
+                path: Some("note.txt".into()),
+            };
+            let read = RuntimeSourceReadRequest {
+                initialization: view.initialization.clone(),
+                path: "note.txt".into(),
+                offset: 0,
+                length: 5,
+            };
+            let status = match operation {
+                "list" => {
+                    let waiting = Box::pin(runtime_source::list(&state, &call));
+                    revoke_between_the_read_and_the_reply(&state, &actor, &session, &view, waiting)
+                        .await?
+                        .map(|_| ())
+                }
+                "read" => {
+                    let waiting = Box::pin(runtime_source::read(&state, &call, &read));
+                    revoke_between_the_read_and_the_reply(&state, &actor, &session, &view, waiting)
+                        .await?
+                        .map(|_| ())
+                }
+                "offer" => {
+                    let waiting = Box::pin(runtime_source::offer(&state, &call, &file));
+                    revoke_between_the_read_and_the_reply(&state, &actor, &session, &view, waiting)
+                        .await?
+                        .map(|_| ())
+                }
+                _ => {
+                    let waiting = Box::pin(runtime_source::download(&state, &call, &file));
+                    revoke_between_the_read_and_the_reply(&state, &actor, &session, &view, waiting)
+                        .await?
+                        .map(|_| ())
+                }
+            };
+            assert!(
+                matches!(status, Err(ref error) if error.status == StatusCode::FORBIDDEN),
+                "{operation}: {status:?}"
+            );
+            Ok::<(), Box<dyn Error>>(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn only_a_few_downloads_per_actor_are_built_at_once_and_each_frees_its_slot()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, _session) = source_view(&state, &actor).await?;
+        let call = FrameCall {
+            actor: &actor,
+            artifact: &view.artifact_id,
+            revision: view.revision,
+            view: &view.view_id,
+            generation: view.generation,
+            initialization: &view.initialization,
+        };
+        let archive = RuntimeDownloadRequest {
+            initialization: view.initialization.clone(),
+            kind: RuntimeDownloadKind::Archive,
+            path: None,
+        };
+        let file = RuntimeDownloadRequest {
+            initialization: view.initialization.clone(),
+            kind: RuntimeDownloadKind::File,
+            path: Some("note.txt".into()),
+        };
+        // Hold every slot the actor may use, as builds in progress would.
+        let mut held: Vec<_> = (0..runtime_source::MAX_DOWNLOAD_BUILDS)
+            .map(|_| state.download_builds().take(&actor))
+            .collect::<Result<_, _>>()
+            .map_err(|refusal| refusal.to_string())?;
+        for request in [&archive, &file] {
+            let refused = runtime_source::download(&state, &call, request).await;
+            assert!(
+                matches!(&refused, Err(error)
+                    if error.status == StatusCode::TOO_MANY_REQUESTS
+                        && error.body.code == artifree_contracts::api::ErrorCode::RateLimited),
+                "{:?}",
+                refused.map(|_| ())
+            );
+        }
+        // The refusal says when to retry, as every rate limit does.
+        let refusal = runtime_source::download(&state, &call, &archive)
+            .await
+            .err()
+            .ok_or("a download over the cap must be refused")?;
+        let response = axum::response::IntoResponse::into_response(refusal);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .map(axum::http::HeaderValue::as_bytes),
+            Some(b"1".as_slice())
+        );
+        // Only downloads are held back, and only for this actor.
+        let listed = runtime_source::list(&state, &call).await;
+        assert_eq!(listed.map(|list| list.revision).ok(), Some(view.revision));
+        let offered = runtime_source::offer(&state, &call, &file).await;
+        assert_eq!(
+            offered.map(|offer| offer.file_name).ok().as_deref(),
+            Some("note.txt")
+        );
+        let other: ActorId = "other".parse()?;
+        assert!(state.download_builds().take(&other).is_ok());
+        // One slot freed: a download is built, and its slot is freed when it
+        // returns, so the next one is built too.
+        held.pop();
+        let zipped = runtime_source::download(&state, &call, &archive).await;
+        assert_eq!(
+            zipped.map(|built| built.bytes.starts_with(b"PK")).ok(),
+            Some(true),
+            "an archive is a zip"
+        );
+        let stored = runtime_source::download(&state, &call, &file).await;
+        assert_eq!(
+            stored.map(|built| built.bytes).ok().as_deref(),
+            Some(b"stored bytes".as_slice())
+        );
+        // A download that fails also frees its slot.
+        let missing = RuntimeDownloadRequest {
+            path: Some("absent.txt".into()),
+            ..file.clone()
+        };
+        for _ in 0..4 {
+            let failed = runtime_source::download(&state, &call, &missing).await;
+            assert!(
+                matches!(&failed, Err(error) if error.status == StatusCode::NOT_FOUND),
+                "{:?}",
+                failed.map(|_| ())
+            );
+        }
+        drop(held);
+        Ok::<(), Box<dyn Error>>(())
+    })
 }
 
 #[test]

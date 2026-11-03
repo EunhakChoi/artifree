@@ -1035,6 +1035,123 @@ pub struct RuntimeMetadata {
     pub metadata_revision: u64,
 }
 
+/// Most bytes of one part a runtime frame reads from its source. A part
+/// travels as base64 in a JSON body, so this bounds the response too.
+pub const MAX_RUNTIME_SOURCE_PART_BYTES: u64 = 1_048_576;
+
+/// Longest file name a runtime download offers, in ASCII characters. It is
+/// the longest package path segment (100 bytes), so a file's name never
+/// needs shortening.
+pub const MAX_DOWNLOAD_NAME: usize = 100;
+
+/// Proves that the parent is listing the source of its initialized view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceListRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+}
+
+/// The files of the revision a runtime view is pinned to. The listing is
+/// that of the pinned revision, never of a newer one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceList {
+    /// The pinned revision.
+    pub revision: u64,
+    /// Its files in path order, each path once.
+    pub files: Vec<RevisionFile>,
+}
+
+/// Reads one part of one file of a runtime view's pinned revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceReadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// Package path of the file.
+    pub path: String,
+    /// The first byte to read, counted from 0. An offset past the end of
+    /// the file is refused; an offset at the end reads an empty final part.
+    pub offset: u64,
+    /// How many bytes at most, from 1 to 1,048,576. A part may be shorter at
+    /// the end of the file. Parts are cut at bytes, not characters.
+    #[schemars(range(min = 1, max = 1_048_576))]
+    pub length: u64,
+}
+
+/// Exactly the bytes of one part of a file, with what identifies the whole
+/// file. The bytes number `next_offset - offset`, or `size - offset` for the
+/// final part. A client checks that before it relies on the other numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourcePart {
+    /// Package path of the file, as requested.
+    pub path: String,
+    /// The pinned revision.
+    pub revision: u64,
+    /// Where `content` starts in the file, as requested.
+    pub offset: u64,
+    /// Where the next part starts: greater than `offset` and less than
+    /// `size`. Null once `content` reaches the end of the file.
+    #[schemars(required, extend("type" = ["integer", "null"]))]
+    pub next_offset: Option<u64>,
+    /// The whole file's size in bytes.
+    pub size: u64,
+    /// The whole file's SHA-256 digest, as 64 lowercase hex digits.
+    pub sha256: String,
+    /// The bytes of the part, as base64.
+    pub content: String,
+}
+
+/// What a runtime download offers the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDownloadKind {
+    /// One stored file of the pinned revision, byte for byte.
+    File,
+    /// The source export of the pinned revision (decision 0015).
+    Archive,
+}
+
+/// Asks whether, or asks for, a download of the pinned revision. The same
+/// body is used to check that an offer is allowed and, after the user
+/// confirmed, to fetch the bytes; the server decides afresh each time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDownloadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// What to download.
+    pub kind: RuntimeDownloadKind,
+    /// Package path of the file for `file`; null for `archive`.
+    #[serde(default)]
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub path: Option<String>,
+}
+
+/// What the server would hand over, without any of it. The workspace shows
+/// it to the user before they confirm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDownloadOffer {
+    /// What is offered.
+    pub kind: RuntimeDownloadKind,
+    /// Package path of the file for `file`; null for `archive`.
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub path: Option<String>,
+    /// The name to save under: at most 100 characters of
+    /// `A-Z a-z 0-9 . _ -`, not starting with a dot.
+    #[schemars(length(max = 100))]
+    pub file_name: String,
+    /// The file's size in bytes for `file`; null for `archive`.
+    #[schemars(required, extend("type" = ["integer", "null"]))]
+    pub size: Option<u64>,
+    /// The file's SHA-256 digest for `file`; null for `archive`.
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub sha256: Option<String>,
+}
+
 /// What a commit did to an artifact. A kind that a client does not know
 /// still means the artifact changed: read it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

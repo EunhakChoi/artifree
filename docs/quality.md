@@ -255,6 +255,32 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   acknowledgement, and an unknown grant carried across a view change until a
   confirmed clear fences its delayed request. A connection created after server restart has a fresh ID;
   the tests do not claim multi-user authentication.
+- Runtime source reading and download requests (decision 0032): Rust tests
+  assert, for each capability separately, that a binding failure is `404`, a
+  missing grant after a matching binding is `403`, a moved head is `409`, and a
+  trashed artifact is `404`, and that a revoke landing after the bytes were
+  read releases none of them. Parts are joined by digest (a non-ASCII text cut
+  inside a character, a binary file, an empty file), hostile, oversized,
+  nested and duplicate-field bodies get fixed messages, a flood of frame calls
+  leaves owner requests and the revoke served, a holder of `source.download`
+  cannot have more than two downloads built at once, every path-taking route
+  judges the shared path fixture, and a restart revokes. Node
+  tests run one fixture of accepted and refused parts through the client and the
+  frame script and the shared path fixture through the frame script and the host; check that a file download is the offered digest
+  (or is refused, also without `crypto.subtle`); classify every request kind
+  under server addresses with and without a path prefix; answer a call the host
+  cannot parse at once; hit the frame script's public methods with `null`,
+  arrays, primitives, `Proxy` objects, revoked proxies and throwing getters
+  without a leaked pending slot; and drive the host's token bucket, offer gate
+  (delay, trust, one at a time, cooldown, every withdrawal leaving no timer or
+  listener), call parser, pending cap and object-URL lifetime on an injected
+  clock. `scripts/smoke-source.mjs` runs Chromium and Firefox: the bytes a frame
+  read and the files the browser saved (a non-ASCII text, a binary file, the
+  archive) are compared by digest with the stored bytes; no grant, a decline's
+  cooldown, and a page whose snapshot still says "granted" after the server
+  revoked it open no prompt; an old generation and a moved head are refused.
+  Each guard was checked by breaking it and watching a test fail. These tests
+  do not show that a preview cannot use the network, and no MCP tool is involved.
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,

@@ -24,15 +24,167 @@ var __ArtifreeBootstrap = (() => {
   __export(bootstrap_exports, {
     start: () => start
   });
+
+  // packages/runtime-sdk/src/package-path.ts
+  var MAX_PATH_BYTES = 240;
+  var MAX_PATH_SEGMENTS = 8;
+  var MAX_SEGMENT_BYTES = 100;
+  var EXTENSION_LIST = [
+    "avif",
+    "css",
+    "csv",
+    "gif",
+    "htm",
+    "html",
+    "ico",
+    "jpeg",
+    "jpg",
+    "js",
+    "json",
+    "map",
+    "md",
+    "mjs",
+    "otf",
+    "png",
+    "svg",
+    "ttf",
+    "txt",
+    "wasm",
+    "webp",
+    "woff",
+    "woff2",
+    "xml"
+  ];
+  var EXTENSIONS = new Set(EXTENSION_LIST);
+  function isReservedDevice(segment) {
+    const stem = (segment.split(".", 1)[0] ?? "").toLowerCase();
+    return /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/u.test(stem);
+  }
+  function isPackagePath(path) {
+    if (path.length === 0 || path.length > MAX_PATH_BYTES) return false;
+    if (!/^[A-Za-z0-9._/-]+$/u.test(path)) return false;
+    const segments = path.split("/");
+    if (segments.length > MAX_PATH_SEGMENTS) return false;
+    for (const segment of segments) {
+      if (segment.length === 0 || segment.length > MAX_SEGMENT_BYTES)
+        return false;
+      if (segment.startsWith(".") || segment.endsWith(".")) return false;
+      if (isReservedDevice(segment)) return false;
+    }
+    const name = segments.at(-1) ?? "";
+    const dot = name.lastIndexOf(".");
+    return dot >= 0 && EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+  }
+
+  // packages/runtime-sdk/src/bootstrap.ts
+  var MAX_PART_BYTES = 1048576;
+  var MAX_PATH_CHARS = 1024;
+  var MAX_LISTED_FILES = 256;
+  var MAX_PENDING = 64;
+  var READ_TIMEOUT_MS = 1e4;
+  var DOWNLOAD_TIMEOUT_MS = 12e4;
+  var FAILURE_CODES = {
+    invalid_request: "The runtime request was not valid.",
+    denied: "The runtime request was not permitted.",
+    stale_view: "The runtime view is out of date.",
+    not_found: "The requested source was not found.",
+    rate_limited: "Too many runtime requests.",
+    declined: "The user declined the request.",
+    unavailable: "The runtime request is unavailable.",
+    expired: "The runtime view has expired."
+  };
+  var RuntimeRequestFailure = class extends Error {
+    code;
+    constructor(code, message) {
+      super(message ?? FAILURE_CODES[code]);
+      this.name = "RuntimeRequestFailure";
+      this.code = code;
+    }
+  };
+  function isFailureCode(value) {
+    return typeof value === "string" && Object.hasOwn(FAILURE_CODES, value);
+  }
   function record(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function count(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  }
+  function sha256(value) {
+    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+  }
+  function argument(value, allowed) {
+    try {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return void 0;
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== null && Object.getPrototypeOf(prototype) !== null)
+        return void 0;
+      const copy = /* @__PURE__ */ Object.create(null);
+      for (const key of Reflect.ownKeys(value)) {
+        if (typeof key !== "string" || !allowed.includes(key)) return void 0;
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (descriptor === void 0 || !("value" in descriptor) || descriptor.enumerable !== true)
+          return void 0;
+        copy[key] = descriptor.value;
+      }
+      return copy;
+    } catch {
+      return void 0;
+    }
   }
   function metadata(value) {
     if (!record(value)) return void 0;
     const { artifactId, title, currentRevision, metadataRevision } = value;
-    if (typeof artifactId !== "string" || typeof title !== "string" || typeof currentRevision !== "number" || typeof metadataRevision !== "number" || !Number.isSafeInteger(currentRevision) || !Number.isSafeInteger(metadataRevision) || currentRevision < 1 || metadataRevision < 1)
+    if (typeof artifactId !== "string" || typeof title !== "string" || !count(currentRevision) || !count(metadataRevision) || currentRevision < 1 || metadataRevision < 1)
       return void 0;
     return { artifactId, title, currentRevision, metadataRevision };
+  }
+  function sourceFile(value) {
+    if (!record(value)) return void 0;
+    const { path, size, sha256: digest, mediaType } = value;
+    if (typeof path !== "string" || path.length === 0 || path.length > MAX_PATH_CHARS || !count(size) || !sha256(digest) || typeof mediaType !== "string")
+      return void 0;
+    return { path, size, sha256: digest, mediaType };
+  }
+  function listing(value) {
+    if (!record(value)) return void 0;
+    const { revision, files } = value;
+    if (!count(revision) || revision < 1 || !Array.isArray(files) || files.length > MAX_LISTED_FILES)
+      return void 0;
+    const parsed = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const file of files) {
+      const item = sourceFile(file);
+      if (item === void 0 || seen.has(item.path)) return void 0;
+      seen.add(item.path);
+      parsed.push(item);
+    }
+    return { revision, files: parsed };
+  }
+  function part(value, asked) {
+    if (!record(value)) return void 0;
+    const { path, offset, nextOffset, size, sha256: digest, bytes } = value;
+    if (path !== asked.path || offset !== asked.offset || !count(size) || !sha256(digest) || !(bytes instanceof ArrayBuffer) || !(nextOffset === null || count(nextOffset)))
+      return void 0;
+    const received = bytes.byteLength;
+    if (offset > size || received > MAX_PART_BYTES || received > asked.length || (nextOffset === null ? received !== size - offset : nextOffset <= offset || nextOffset >= size || received !== nextOffset - offset || received !== asked.length))
+      return void 0;
+    return {
+      path,
+      offset,
+      nextOffset,
+      size,
+      sha256: digest,
+      bytes: new Uint8Array(bytes)
+    };
+  }
+  function receipt(value) {
+    if (!record(value)) return void 0;
+    const { started, kind, bytes } = value;
+    if (started !== true || kind !== "file" && kind !== "archive" || !count(bytes))
+      return void 0;
+    return { started, kind, bytes };
   }
   function start(config) {
     if (window.artifree !== void 0)
@@ -42,15 +194,26 @@ var __ArtifreeBootstrap = (() => {
     const waiting = /* @__PURE__ */ new Map();
     let next = 0;
     let closed = false;
-    channel.port1.onmessage = (event) => {
-      if (!record(event.data) || typeof event.data.id !== "number") return;
-      const pending = waiting.get(event.data.id);
-      if (pending === void 0) return;
-      waiting.delete(event.data.id);
+    const settle = (id) => {
+      const pending = waiting.get(id);
+      if (pending === void 0) return void 0;
+      waiting.delete(id);
       clearTimeout(pending.timeout);
-      const value = metadata(event.data.metadata);
-      if (event.data.ok === true && value !== void 0) pending.resolve(value);
-      else pending.reject(new Error("The runtime metadata request was refused."));
+      return pending;
+    };
+    channel.port1.onmessage = (event) => {
+      if (!record(event.data) || !count(event.data.id)) return;
+      const pending = settle(event.data.id);
+      if (pending === void 0) return;
+      if (event.data.ok !== true) {
+        const code = isFailureCode(event.data.code) ? event.data.code : "denied";
+        pending.reject(new RuntimeRequestFailure(code, pending.refusal));
+        return;
+      }
+      const value = pending.parse(event.data);
+      if (value === void 0)
+        pending.reject(new RuntimeRequestFailure("unavailable"));
+      else pending.resolve(value);
     };
     window.addEventListener(
       "pagehide",
@@ -59,7 +222,7 @@ var __ArtifreeBootstrap = (() => {
         channel.port1.close();
         for (const pending of waiting.values()) {
           clearTimeout(pending.timeout);
-          pending.reject(new Error("The runtime view closed."));
+          pending.reject(new RuntimeRequestFailure("expired"));
         }
         waiting.clear();
       },
@@ -75,37 +238,93 @@ var __ArtifreeBootstrap = (() => {
       "*",
       [channel.port2]
     );
+    function call(message, parse, options) {
+      if (closed || performance.now() >= deadline)
+        return Promise.reject(new RuntimeRequestFailure("expired"));
+      if (waiting.size >= MAX_PENDING)
+        return Promise.reject(new RuntimeRequestFailure("rate_limited"));
+      if (next === Number.MAX_SAFE_INTEGER)
+        return Promise.reject(new RuntimeRequestFailure("unavailable"));
+      const id = ++next;
+      return new Promise((resolve, reject) => {
+        const timeout = window.setTimeout(
+          () => {
+            if (settle(id) === void 0) return;
+            try {
+              channel.port1.postMessage({ type: "cancel", id });
+            } catch {
+            }
+            reject(
+              new RuntimeRequestFailure(
+                performance.now() >= deadline ? "expired" : "unavailable"
+              )
+            );
+          },
+          Math.min(options.timeout, Math.max(0, deadline - performance.now()))
+        );
+        waiting.set(id, {
+          parse,
+          resolve,
+          reject,
+          timeout,
+          refusal: options.refusal
+        });
+        try {
+          channel.port1.postMessage({ ...message, id });
+        } catch {
+          settle(id);
+          reject(new RuntimeRequestFailure("unavailable"));
+        }
+      });
+    }
+    const invalid = () => Promise.reject(new RuntimeRequestFailure("invalid_request"));
+    const source = Object.freeze({
+      list() {
+        return call({ type: "source.list" }, (reply) => listing(reply.listing), {
+          timeout: READ_TIMEOUT_MS
+        });
+      },
+      read(request) {
+        const fields = argument(request, ["path", "offset", "length"]);
+        if (fields === void 0) return invalid();
+        const { path, offset, length } = fields;
+        if (typeof path !== "string" || !isPackagePath(path) || !count(offset) || !count(length) || length < 1 || length > MAX_PART_BYTES)
+          return invalid();
+        const asked = { path, offset, length };
+        return call(
+          { type: "source.read", path, offset, length },
+          (reply) => part(reply.part, asked),
+          { timeout: READ_TIMEOUT_MS }
+        );
+      },
+      requestDownload(request) {
+        let path = null;
+        if (request !== void 0) {
+          const fields = argument(request, ["path"]);
+          const named = fields?.path;
+          if (fields === void 0 || typeof named !== "string" || !isPackagePath(named))
+            return invalid();
+          path = named;
+        }
+        return call(
+          {
+            type: "source.download",
+            kind: path === null ? "archive" : "file",
+            path
+          },
+          (reply) => receipt(reply.receipt),
+          { timeout: DOWNLOAD_TIMEOUT_MS }
+        );
+      }
+    });
     window.artifree = Object.freeze({
       currentMetadata() {
-        if (closed || performance.now() >= deadline)
-          return Promise.reject(new Error("The runtime view has expired."));
-        if (waiting.size >= 64)
-          return Promise.reject(
-            new Error("Too many runtime requests are pending.")
-          );
-        if (next === Number.MAX_SAFE_INTEGER)
-          return Promise.reject(
-            new Error("The runtime request limit was reached.")
-          );
-        const id = ++next;
-        return new Promise((resolve, reject) => {
-          const timeout = window.setTimeout(
-            () => {
-              waiting.delete(id);
-              reject(new Error("The runtime metadata request timed out."));
-            },
-            Math.min(1e4, Math.max(0, deadline - performance.now()))
-          );
-          waiting.set(id, { resolve, reject, timeout });
-          try {
-            channel.port1.postMessage({ type: "metadata", id });
-          } catch {
-            waiting.delete(id);
-            clearTimeout(timeout);
-            reject(new Error("The runtime view is unavailable."));
-          }
+        return call({ type: "metadata" }, (reply) => metadata(reply.metadata), {
+          timeout: READ_TIMEOUT_MS,
+          refusal: "The runtime metadata request was refused."
         });
-      }
+      },
+      source
     });
   }
   return __toCommonJS(bootstrap_exports);

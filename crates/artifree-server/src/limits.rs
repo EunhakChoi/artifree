@@ -40,6 +40,16 @@ impl Default for RequestLimits {
 }
 
 impl RequestLimits {
+    /// The budget for requests a runtime frame causes (decision 0032), kept
+    /// apart from the owner's so that a frame that floods the workspace
+    /// cannot use up the budget the owner's own requests, including revoking
+    /// the frame's grant, need: 60 at once, then 1200 per minute, 16 at a time.
+    pub const FRAME: Self = Self {
+        burst: 60,
+        per_minute: 1200,
+        concurrent: 16,
+    };
+
     /// Checks that every limit admits at least one request.
     ///
     /// # Errors
@@ -158,6 +168,62 @@ impl Drop for Permit {
     }
 }
 
+/// A small number of slots per actor for work that is expensive while it
+/// runs, such as building a download (decision 0032). Unlike [`Limiter`] it
+/// has no rate: a slot is taken for the work and freed when the work ends,
+/// whichever way it ends.
+#[derive(Debug)]
+pub(crate) struct Slots {
+    per_actor: u32,
+    held: Arc<Mutex<HashMap<ActorId, u32>>>,
+}
+
+impl Slots {
+    pub(crate) fn new(per_actor: u32) -> Self {
+        Self {
+            per_actor,
+            held: Arc::default(),
+        }
+    }
+
+    /// Takes one slot of `actor`, or says the actor is [`Refusal::Busy`].
+    pub(crate) fn take(&self, actor: &ActorId) -> Result<Slot, Refusal> {
+        let mut held = self.held.lock().map_err(|_| Refusal::Unavailable)?;
+        let count = held.entry(actor.clone()).or_default();
+        if *count >= self.per_actor {
+            return Err(Refusal::Busy);
+        }
+        *count += 1;
+        Ok(Slot {
+            held: Arc::clone(&self.held),
+            actor: actor.clone(),
+        })
+    }
+}
+
+/// One slot in use. Dropping it frees the slot, also when the work fails or
+/// its future is dropped.
+#[derive(Debug)]
+#[must_use = "dropping a slot frees it at once; hold it for the whole of the work"]
+pub(crate) struct Slot {
+    held: Arc<Mutex<HashMap<ActorId, u32>>>,
+    actor: ActorId,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // A poisoned lock fails every later `take` closed.
+        if let Ok(mut held) = self.held.lock()
+            && let Some(count) = held.get_mut(&self.actor)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                held.remove(&self.actor);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +316,23 @@ mod tests {
             assert!(limits.validate().is_err(), "{limits:?}");
         }
         assert!(RequestLimits::default().validate().is_ok());
+    }
+
+    #[test]
+    fn slots_are_capped_per_actor_and_freed_on_drop() {
+        let slots = Slots::new(2);
+        let agent = actor("agent");
+        let first = slots.take(&agent);
+        let second = slots.take(&agent);
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(slots.take(&agent).err(), Some(Refusal::Busy));
+        // Another actor has its own.
+        assert!(slots.take(&actor("other")).is_ok());
+        drop(first);
+        let third = slots.take(&agent);
+        assert!(third.is_ok(), "a freed slot can be taken again");
+        assert_eq!(slots.take(&agent).err(), Some(Refusal::Busy));
+        drop((second, third));
+        assert!(slots.take(&agent).is_ok());
     }
 }

@@ -1,10 +1,28 @@
 import { newRandomId } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
-import { useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useRef, useState, useSyncExternalStore } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { RuntimeFrame } from './runtime-frame';
 import { describeFailure, useRequest } from './use-request';
+
+// The runtime permission controls, and the frame component with the
+// workspace's side of the runtime bridge behind it, load when a preview is
+// first shown, not with the page: most sessions never open one, and the main
+// bundle stays under the build's size warning (decision 0032).
+const PREPARING = (
+  <output className="text-sm text-muted-foreground">Preparing preview…</output>
+);
+
+const RuntimePermissions = lazy(() =>
+  import('./runtime-permissions').then((module) => ({
+    default: module.RuntimePermissions,
+  })),
+);
+const RuntimeFrame = lazy(() =>
+  import('./runtime-frame').then((module) => ({
+    default: module.RuntimeFrame,
+  })),
+);
 
 interface PreviewFrameProps {
   client: ArtifreeClient;
@@ -107,10 +125,10 @@ export function PreviewFrame({
     );
   const view = preview.value.view;
   const grantStatus = client.runtimeGrantStatus(view);
-  async function changeGrant(allowed: boolean): Promise<void> {
+  async function changeGrant(capabilities: string[]): Promise<void> {
     setGrantError(undefined);
     try {
-      await client.setRuntimeGrant(view, allowed ? ['metadata.read'] : []);
+      await client.setRuntimeGrant(view, capabilities);
     } catch (error: unknown) {
       setGrantError(
         `Permission change was not confirmed: ${describeFailure(error)}`,
@@ -126,48 +144,13 @@ export function PreviewFrame({
         </Alert>
       )}
       {!view.enabled ? null : (
-        <section
-          aria-label="Runtime permissions"
-          className="flex flex-col gap-2 rounded-lg border p-3 text-sm"
-        >
-          <p>SDK: {view.sdk}</p>
-          <p>Declared: {view.declared.join(', ') || 'none'}</p>
-          <p>Supported: {view.supported.join(', ') || 'none'}</p>
-          {grantStatus === 'settled' ? (
-            <p>Granted: {view.granted.join(', ') || 'none'}</p>
-          ) : (
-            <p>
-              {grantStatus === 'pending'
-                ? 'Permission change pending.'
-                : 'Permission status is unknown. Clear access to resolve it.'}
-            </p>
-          )}
-          {grantStatus === 'unknown' ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void changeGrant(false)}
-            >
-              Resolve by revoking access
-            </Button>
-          ) : grantStatus === 'settled' &&
-            view.supported.includes('metadata.read') &&
-            view.declared.includes('metadata.read') ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                void changeGrant(!view.granted.includes('metadata.read'))
-              }
-            >
-              {view.granted.includes('metadata.read')
-                ? 'Revoke metadata access'
-                : 'Allow metadata access'}
-            </Button>
-          ) : null}
-        </section>
+        <Suspense fallback={null}>
+          <RuntimePermissions
+            view={view}
+            grantStatus={grantStatus}
+            onChange={(capabilities) => void changeGrant(capabilities)}
+          />
+        </Suspense>
       )}
       <Button
         type="button"
@@ -178,15 +161,17 @@ export function PreviewFrame({
         Refresh preview
       </Button>
       {grantStatus === 'settled' ? (
-        <RuntimeFrame
-          key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
-          client={client}
-          view={preview.value.view}
-          deadline={preview.value.deadline}
-          onClose={preview.value.close}
-          title={title}
-          className={className}
-        />
+        <Suspense fallback={PREPARING}>
+          <RuntimeFrame
+            key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
+            client={client}
+            view={preview.value.view}
+            deadline={preview.value.deadline}
+            onClose={preview.value.close}
+            title={title}
+            className={className}
+          />
+        </Suspense>
       ) : (
         <output className="text-sm text-muted-foreground">
           Preview paused while permission is unresolved.

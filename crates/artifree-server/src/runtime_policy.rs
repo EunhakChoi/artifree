@@ -7,9 +7,64 @@ use serde::Deserialize;
 pub(crate) const MANIFEST_PATH: &str = "artifree-runtime.json";
 pub(crate) const SDK_PIN: &str = "artifree.app.v1";
 pub(crate) const METADATA_READ: &str = "metadata.read";
+pub(crate) const SOURCE_READ: &str = "source.read";
+pub(crate) const SOURCE_DOWNLOAD: &str = "source.download";
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 const MAX_CAPABILITIES: usize = 32;
 const MAX_CAPABILITY_BYTES: usize = 64;
+
+/// A capability this server can grant. Declaring any other name is allowed
+/// and grants nothing (decision 0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Capability {
+    MetadataRead,
+    SourceDownload,
+    SourceRead,
+}
+
+impl Capability {
+    /// Every supported capability, in name order.
+    pub(crate) const ALL: [Self; 3] = [Self::MetadataRead, Self::SourceDownload, Self::SourceRead];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::MetadataRead => METADATA_READ,
+            Self::SourceDownload => SOURCE_DOWNLOAD,
+            Self::SourceRead => SOURCE_READ,
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| known.name() == name)
+    }
+
+    fn bit(self) -> u8 {
+        match self {
+            Self::MetadataRead => 1,
+            Self::SourceDownload => 2,
+            Self::SourceRead => 4,
+        }
+    }
+}
+
+/// A set of granted capabilities. Each capability is its own consent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CapabilitySet(u8);
+
+impl CapabilitySet {
+    pub(crate) fn contains(self, capability: Capability) -> bool {
+        self.0 & capability.bit() != 0
+    }
+
+    /// The names in the order of [`Capability::ALL`].
+    pub(crate) fn names(self) -> Vec<String> {
+        Capability::ALL
+            .into_iter()
+            .filter(|capability| self.contains(*capability))
+            .map(|capability| capability.name().to_owned())
+            .collect()
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,15 +118,22 @@ impl RuntimePolicy {
     }
 
     pub(crate) fn supported() -> Vec<String> {
-        vec![METADATA_READ.to_owned()]
+        CapabilitySet(Capability::ALL.iter().fold(0, |bits, c| bits | c.bit())).names()
     }
 
-    pub(crate) fn supports_grant(&self, requested: &[String]) -> bool {
-        match requested {
-            [] => true,
-            [name] => name == METADATA_READ && self.declared.contains(name),
-            _ => false,
+    /// The set a user may grant, or `None` when `requested` names a
+    /// capability that is undeclared, unsupported or repeated. An empty
+    /// request is the empty set, which clears the grant.
+    pub(crate) fn grant_of(&self, requested: &[String]) -> Option<CapabilitySet> {
+        let mut set = CapabilitySet::default();
+        for name in requested {
+            let capability = Capability::parse(name).filter(|_| self.declared.contains(name))?;
+            if set.contains(capability) {
+                return None;
+            }
+            set.0 |= capability.bit();
         }
+        Some(set)
     }
 }
 
@@ -87,7 +149,9 @@ fn valid_capability(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{METADATA_READ, RuntimePolicy};
+    use super::{
+        Capability, CapabilitySet, METADATA_READ, RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ,
+    };
 
     #[test]
     fn snapshot_omission_subset_and_clear_are_distinct_from_legacy_opt_in()
@@ -107,12 +171,48 @@ mod tests {
             true,
             Some(br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","future.write"]}"#),
         )?;
-        assert!(subset.supports_grant(&[METADATA_READ.to_owned()]));
-        assert!(!subset.supports_grant(&[METADATA_READ.to_owned(), METADATA_READ.to_owned()]));
-        assert!(!subset.supports_grant(&[METADATA_READ.to_owned(), "future.write".into()]));
-        assert!(!subset.supports_grant(&["future.write".into()]));
-        assert!(!omitted.supports_grant(&[METADATA_READ.to_owned()]));
-        assert!(subset.supports_grant(&[]));
+        assert!(subset.grant_of(&[METADATA_READ.to_owned()]).is_some());
+        assert!(
+            subset
+                .grant_of(&[METADATA_READ.to_owned(), METADATA_READ.to_owned()])
+                .is_none()
+        );
+        assert!(
+            subset
+                .grant_of(&[METADATA_READ.to_owned(), "future.write".into()])
+                .is_none()
+        );
+        assert!(subset.grant_of(&["future.write".into()]).is_none());
+        assert!(omitted.grant_of(&[METADATA_READ.to_owned()]).is_none());
+        assert_eq!(subset.grant_of(&[]).map(CapabilitySet::names), Some(vec![]));
+        Ok(())
+    }
+
+    #[test]
+    fn each_source_capability_is_declared_and_granted_on_its_own()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            RuntimePolicy::supported(),
+            [METADATA_READ, SOURCE_DOWNLOAD, SOURCE_READ]
+        );
+        let read_only = RuntimePolicy::from_source(
+            true,
+            Some(br#"{"sdk":"artifree.app.v1","capabilities":["source.read","source.download"]}"#),
+        )?;
+        let one = read_only
+            .grant_of(&[SOURCE_READ.to_owned()])
+            .ok_or("a declared capability must be grantable")?;
+        assert!(one.contains(Capability::SourceRead));
+        assert!(!one.contains(Capability::SourceDownload));
+        assert!(!one.contains(Capability::MetadataRead));
+        let both = read_only
+            .grant_of(&[SOURCE_DOWNLOAD.to_owned(), SOURCE_READ.to_owned()])
+            .ok_or("two declared capabilities must be grantable")?;
+        assert_eq!(both.names(), [SOURCE_DOWNLOAD, SOURCE_READ]);
+        // A capability the entry never declared cannot be granted.
+        assert!(read_only.grant_of(&[METADATA_READ.to_owned()]).is_none());
+        let legacy = RuntimePolicy::from_source(true, None)?;
+        assert!(legacy.grant_of(&[SOURCE_READ.to_owned()]).is_none());
         Ok(())
     }
 

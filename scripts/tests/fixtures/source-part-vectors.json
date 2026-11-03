@@ -1,0 +1,214 @@
+{
+  "description": "Parts of a file as a peer may state them. Every parser that reads a part (the client, the workspace host, the frame script) must judge these alike: valid parts are accepted, the rest refused. `bytes` is the number of bytes actually received; `request` is what was asked. A null next_offset means the bytes end exactly at size.",
+  "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "cases": [
+    {
+      "name": "first of several parts",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": 4, "size": 10 },
+      "bytes": 4,
+      "valid": true
+    },
+    {
+      "name": "middle part",
+      "request": { "path": "a.txt", "offset": 4, "length": 4 },
+      "reply": { "next_offset": 8, "size": 10 },
+      "bytes": 4,
+      "valid": true
+    },
+    {
+      "name": "final short part",
+      "request": { "path": "a.txt", "offset": 8, "length": 4 },
+      "reply": { "next_offset": null, "size": 10 },
+      "bytes": 2,
+      "valid": true
+    },
+    {
+      "name": "final part that fills the request exactly",
+      "request": { "path": "a.txt", "offset": 4, "length": 4 },
+      "reply": { "next_offset": null, "size": 8 },
+      "bytes": 4,
+      "valid": true
+    },
+    {
+      "name": "empty file",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": null, "size": 0 },
+      "bytes": 0,
+      "valid": true
+    },
+    {
+      "name": "offset at the end",
+      "request": { "path": "a.txt", "offset": 10, "length": 4 },
+      "reply": { "next_offset": null, "size": 10 },
+      "bytes": 0,
+      "valid": true
+    },
+    {
+      "name": "largest part",
+      "request": { "path": "a.txt", "offset": 0, "length": 1048576 },
+      "reply": { "next_offset": 1048576, "size": 3000000 },
+      "bytes": 1048576,
+      "valid": true
+    },
+
+    {
+      "name": "fewer bytes than the next offset says",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": 4, "size": 10 },
+      "bytes": 3,
+      "valid": false
+    },
+    {
+      "name": "more bytes than the next offset says",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": 4, "size": 10 },
+      "bytes": 5,
+      "valid": false
+    },
+    {
+      "name": "a part that is not the last but is shorter than asked",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": 2, "size": 10 },
+      "bytes": 2,
+      "valid": false
+    },
+    {
+      "name": "next offset equals the offset",
+      "request": { "path": "a.txt", "offset": 4, "length": 4 },
+      "reply": { "next_offset": 4, "size": 10 },
+      "bytes": 0,
+      "valid": false
+    },
+    {
+      "name": "next offset before the offset",
+      "request": { "path": "a.txt", "offset": 4, "length": 4 },
+      "reply": { "next_offset": 2, "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "next offset equal to the size",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": 4, "size": 4 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "next offset past the size",
+      "request": { "path": "a.txt", "offset": 0, "length": 8 },
+      "reply": { "next_offset": 8, "size": 6 },
+      "bytes": 8,
+      "valid": false
+    },
+    {
+      "name": "no next offset but bytes stop short of the size",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": null, "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "no next offset but more bytes than the size",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": null, "size": 3 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "offset past the size",
+      "request": { "path": "a.txt", "offset": 5, "length": 4 },
+      "reply": { "next_offset": null, "size": 3 },
+      "bytes": 0,
+      "valid": false
+    },
+    {
+      "name": "more bytes than were asked for",
+      "request": { "path": "a.txt", "offset": 0, "length": 2 },
+      "reply": { "next_offset": 4, "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "more than one mebibyte",
+      "request": { "path": "a.txt", "offset": 0, "length": 1048576 },
+      "reply": { "next_offset": 1048577, "size": 3000000 },
+      "bytes": 1048577,
+      "valid": false
+    },
+    {
+      "name": "negative size",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": null, "size": -1 },
+      "bytes": 0,
+      "valid": false
+    },
+    {
+      "name": "fractional size",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": null, "size": 1.5 },
+      "bytes": 1,
+      "valid": false
+    },
+    {
+      "name": "size beyond the safe integers",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": null, "size": 9007199254740992 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "fractional next offset",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": 4.5, "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "next offset as a string",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "next_offset": "4", "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "next offset missing",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "another path",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "path": "b.txt", "next_offset": 4, "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "another offset",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "offset": 1, "next_offset": 5, "size": 10 },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "digest in capitals",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": {
+        "sha256": "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+        "next_offset": 4,
+        "size": 10
+      },
+      "bytes": 4,
+      "valid": false
+    },
+    {
+      "name": "digest too short",
+      "request": { "path": "a.txt", "offset": 0, "length": 4 },
+      "reply": { "sha256": "0123", "next_offset": 4, "size": 10 },
+      "bytes": 4,
+      "valid": false
+    }
+  ]
+}

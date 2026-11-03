@@ -101,12 +101,36 @@ test('Requests are classified by what they change', () => {
     requestKind('POST', '/v1/artifacts/a/revisions/2/runtime-views'),
     'read',
   );
+  // What a runtime frame causes is its own kind (decision 0032).
+  for (const tail of [
+    'metadata',
+    'source/list',
+    'source/read',
+    'source/offer',
+    'source/download',
+  ])
+    assert.equal(
+      requestKind(
+        'POST',
+        `/v1/artifacts/a/revisions/2/runtime-views/view/3/${tail}`,
+      ),
+      'frame',
+      tail,
+    );
+  // Only those exact routes, and only as POST.
+  assert.equal(
+    requestKind(
+      'GET',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/list',
+    ),
+    'read',
+  );
   assert.equal(
     requestKind(
       'POST',
-      '/v1/artifacts/a/revisions/2/runtime-views/view/3/metadata',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write',
     ),
-    'read',
+    'write',
   );
   assert.equal(requestKind('DELETE', '/v1/runtime-views/view/3'), 'write');
   assert.equal(requestKind('POST', '/v1/other/runtime-views'), 'write');
@@ -114,6 +138,86 @@ test('Requests are classified by what they change', () => {
   assert.equal(requestKind('POST', '/v1/artifacts'), 'write');
   assert.equal(requestKind('POST', '/v1/artifacts/a/revisions'), 'write');
   assert.equal(requestKind('PATCH', '/v1/artifacts/a'), 'write');
+});
+
+const BASES = [
+  'http://h',
+  'http://h/',
+  'https://api.example/prefix',
+  'https://api.example/a/b/',
+  // A prefix that itself looks like a version segment.
+  'https://api.example/v1/api',
+];
+const FRAME_TAILS = [
+  'metadata',
+  'source/list',
+  'source/read',
+  'source/offer',
+  'source/download',
+];
+
+/** `base` joined with `path` the way the client does. */
+const joined = (base, path) => `${base.replace(/\/+$/, '')}${path}`;
+
+test('Every route family is recognized under any server path prefix', () => {
+  const families = [
+    ['GET', '/v1/artifacts', 'read'],
+    ['GET', '/v1/artifacts/a/revisions/2/files/index.html', 'read'],
+    ['GET', '/v1/changes', 'stream'],
+    ['POST', '/v1/artifacts/a/revisions/2/previews', 'read'],
+    ['POST', '/v1/artifacts/a/revisions/2/runtime-views', 'read'],
+    ...FRAME_TAILS.map((tail) => [
+      'POST',
+      `/v1/artifacts/a/revisions/2/runtime-views/view/3/${tail}`,
+      'frame',
+    ]),
+    ['POST', '/v1/artifacts', 'write'],
+    ['POST', '/v1/artifacts/a/revisions', 'write'],
+    ['PUT', '/v1/artifacts/a/revisions/2/files/index.html', 'write'],
+    ['DELETE', '/v1/runtime-views/view/3', 'write'],
+    [
+      'POST',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write',
+      'write',
+    ],
+    ['POST', '/v1/handoffs', 'write'],
+  ];
+  for (const base of BASES)
+    for (const [method, path, kind] of families)
+      assert.equal(
+        requestKind(method, joined(base, path)),
+        kind,
+        `${method} ${base} ${path}`,
+      );
+  // The same under a same-origin path prefix, with a query.
+  assert.equal(requestKind('GET', '/prefix/v1/artifacts?limit=5'), 'read');
+  assert.equal(requestKind('GET', '/prefix/v1/changes?x=1'), 'stream');
+  // A route name inside the prefix does not change what the tail is.
+  assert.equal(
+    requestKind('POST', 'https://h/previews/v1/artifacts/a/revisions'),
+    'write',
+  );
+});
+
+test('A frame refusal holds no owner read under a server path prefix', async () => {
+  for (const base of [
+    'https://api.example/prefix',
+    'https://api.example/a/b',
+  ]) {
+    const { api, gate } = setup();
+    const frame = `${base}/v1/artifacts/a/revisions/2/runtime-views/view/3/source/read`;
+    const owner = `${base}/v1/artifacts`;
+    gate.fetch(frame, { method: 'POST' });
+    await settle();
+    api.answer(0, limited(30));
+    await settle();
+    const read = gate.fetch(owner);
+    await settle();
+    // Sent at once: the frame's 429 started no pause.
+    assert.equal(api.sent.length, 2, base);
+    api.answer(1, Response.json({ artifacts: [] }));
+    assert.equal((await read).status, 200);
+  }
 });
 
 test('Reads are sent one at a time, in order; writes are not held', async () => {
@@ -136,6 +240,35 @@ test('Reads are sent one at a time, in order; writes are not held', async () => 
   assert.deepEqual(api.paths().at(-1), 'GET /v1/artifacts/a');
   api.answer(2);
   assert.equal((await second).status, 200);
+});
+
+test('A frame call is sent at once, and a refusal of it holds no owner read', async () => {
+  const { api, gate } = setup();
+  const frame = '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/read';
+  const owner = gate.fetch('/v1/artifacts');
+  gate.fetch(frame, { method: 'POST' });
+  gate.fetch(frame, { method: 'POST' });
+  await settle();
+  // Both frame calls went out beside the owner's read.
+  assert.deepEqual(api.paths().sort(), [
+    'GET /v1/artifacts',
+    `POST ${frame}`,
+    `POST ${frame}`,
+  ]);
+  const at = (path) => api.paths().indexOf(path);
+  // The server limits frames apart from the owner: a 429 for a frame call
+  // must not start the pause that holds every owner read.
+  api.answer(at(`POST ${frame}`), limited(30));
+  await settle();
+  api.answer(at('GET /v1/artifacts'), Response.json({ artifacts: [] }));
+  const answered = await owner;
+  assert.equal(answered.status, 200);
+  await answered.json();
+  const next = gate.fetch('/v1/artifacts/b');
+  await settle();
+  assert.equal(api.paths().at(-1), 'GET /v1/artifacts/b');
+  api.answer(api.sent.length - 1);
+  assert.equal((await next).status, 200);
 });
 
 test('A withdrawn read is never sent', async () => {

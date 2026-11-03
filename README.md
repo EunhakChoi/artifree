@@ -11,8 +11,10 @@ file-package artifacts are created, saved as immutable revisions with conflict
 detection and safe retries, and previewed in a sandbox on a separate origin —
 through the HTTP API, MCP tools for agents, the CLI, and the web workspace,
 stored in a local SQLite file. It is single-user and listens on loopback by
-default. A runtime preview may read its own artifact metadata through a
-bound bridge after a connection-scoped user grant. One persistent job, `verify_revision`, re-checks a revision's stored files
+default. A runtime preview may read its own artifact metadata, list and read
+the files of its pinned revision, and ask the user to save one of them or the
+source archive, each through a bound bridge after its own connection-scoped
+user grant; it cannot change anything. One persistent job, `verify_revision`, re-checks a revision's stored files
 against their digests in a separate worker process the operator starts
 (`artifree-server worker run`). Publishing, sharing, build and conversion
 workers, sandboxed execution of untrusted code, and multi-user authentication
@@ -130,8 +132,8 @@ restoring a revision does not change the data, and `artifact duplicate
 --copy-data` gives a copy its own copy of it. Issued agent tokens and MCP tools
 (`get_data`, `set_data`, `update_data`, `delete_data`) may read and write it;
 there is no history, so an overwrite cannot be undone, and a purge erases it.
-**A page running in a preview cannot read or write this data** (there is no
-runtime bridge for it), it is not in a revision or an export, and the web
+**A page running in a preview cannot read or write this data** (the runtime
+bridge has no data capability), it is not in a revision or an export, and the web
 workspace has no data view or subscriptions; poll `data get`.
 
 For development with live reloading, Vite is still available:
@@ -215,8 +217,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0027](docs/decisions/0027-backup-restore-and-schema-upgrade.md),
 [0028](docs/decisions/0028-static-web-defaults.md),
 [0029](docs/decisions/0029-retention-and-cleanup.md),
-[0030](docs/decisions/0030-persistent-jobs-and-worker.md), and
-[0031](docs/decisions/0031-app-data.md)).
+[0030](docs/decisions/0030-persistent-jobs-and-worker.md),
+[0031](docs/decisions/0031-app-data.md), and
+[0032](docs/decisions/0032-runtime-source-read-and-download.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -233,7 +236,9 @@ API, client, CLI, and web workspace (A07), and editing an artifact's files
 in the web workspace, saved as one revision (A09), with the draft kept in
 the browser and recovered by choice after a reload or a closed tab (A10);
 the browser must provide Web Locks to keep drafts safely. R04 adds the first
-runtime metadata read and R05 adds an explicit connection-scoped metadata grant.
+runtime metadata read, R05 adds an explicit connection-scoped metadata grant,
+and R11a adds read-only source listing and reading and user-confirmed download
+requests with their own grants.
 The source editor can stage a saved selection and, after review, send it to a
 registered MCP agent inbox (A08). The agent must poll and acknowledge; receipt
 does not establish that a model completed the requested work.
@@ -277,7 +282,29 @@ file specifies a complete declaration, for example:
 An omitted `capabilities` field or an empty list declares none. The workspace
 shows declared, supported and granted capabilities separately. Grants apply to
 one connection and source binding, can be revoked, and expire or disappear on
-server restart. No other runtime capability is implemented.
+server restart. Two more capabilities are implemented and are read-only
+(decision 0032):
+
+```json
+{
+  "sdk": "artifree.app.v1",
+  "capabilities": ["metadata.read", "source.read", "source.download"]
+}
+```
+
+`source.read` lets the preview list the files of its pinned revision and read
+them in parts (`window.artifree.source.list()` and `.read({ path, offset,
+length })`; a part has at most 1 MiB, and every part carries the whole file's
+SHA-256 and size). `source.download` lets it ask (`.requestDownload({ path })`,
+or without a path for the source archive) for the workspace to offer a file;
+the user confirms in the workspace, never in the frame, and the receipt
+`started` means only that the bytes were handed to the browser. Each is its own
+declaration, consent, and grant: reading does not allow a download request.
+The server checks the connection's grant and the artifact's current head on
+every call, so a revoked grant or a newer revision is refused. **Not
+implemented:** writing source from a preview (R11b), data access from a preview,
+subscriptions, uploaded assets, replacing a view in place, and any claim that a
+preview cannot use the network. No MCP tool was added or changed.
 
 ## Verification
 

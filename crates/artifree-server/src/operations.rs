@@ -47,8 +47,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use crate::auth::hex;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
-use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest};
-use crate::runtime_policy::{MANIFEST_PATH, METADATA_READ, RuntimePolicy, SDK_PIN};
+use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey};
+use crate::runtime_policy::{Capability, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
 use crate::runtime_sessions::{GrantScope, SessionError};
 
 /// A failed operation: the HTTP status and the contract error body. MCP
@@ -647,7 +647,7 @@ pub(crate) async fn preview(
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-fn validate_view(view_id: &str, generation: u64) -> Result<(), ApiError> {
+pub(crate) fn validate_view(view_id: &str, generation: u64) -> Result<(), ApiError> {
     if view_id.len() != 32
         || !view_id
             .bytes()
@@ -659,7 +659,7 @@ fn validate_view(view_id: &str, generation: u64) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn missing_view() -> ApiError {
+pub(crate) fn missing_view() -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
         ErrorCode::NotFound,
@@ -1009,18 +1009,14 @@ pub(crate) async fn set_runtime_grant(
     if record.current_revision.0 != request.head_revision {
         return Err(session_error(SessionError::Conflict));
     }
-    if !policy.supports_grant(&request.capabilities) {
+    let Some(capabilities) = policy.grant_of(&request.capabilities) else {
         return Err(ApiError::unprocessable(
             "grant must be a supported, declared subset",
         ));
-    }
+    };
     let scope = GrantScope::new(id, revision, record.current_revision);
     let version = session
-        .set_grant(
-            scope,
-            !request.capabilities.is_empty(),
-            request.expected_version,
-        )
+        .set_grant(scope, capabilities, request.expected_version)
         .map_err(session_error)?;
     Ok(RuntimeGrant { version })
 }
@@ -1053,8 +1049,8 @@ pub(crate) async fn create_runtime_view(
         })?;
     let (record, enabled, policy) = runtime_source(state, &actor, &id, revision).await?;
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
-    let (ticket, grant_version, allowed) = session
-        .with_grant(&scope, |version, allowed| {
+    let (ticket, grant_version, granted) = session
+        .with_grant(&scope, |version, granted| {
             let ticket = state.previews().issue_runtime(RuntimeTicketRequest {
                 actor,
                 token_id,
@@ -1075,7 +1071,7 @@ pub(crate) async fn create_runtime_view(
             {
                 return Err(RuntimeIssueError::Unavailable);
             }
-            Ok((ticket, version, allowed))
+            Ok((ticket, version, granted))
         })
         .map_err(session_error)?
         .map_err(|error| match error {
@@ -1109,11 +1105,7 @@ pub(crate) async fn create_runtime_view(
         } else {
             Vec::new()
         },
-        granted: if allowed {
-            vec![METADATA_READ.to_owned()]
-        } else {
-            Vec::new()
-        },
+        granted: granted.names(),
         grant_version,
         view_id: request.view_id,
         generation: request.generation,
@@ -1135,10 +1127,20 @@ pub(crate) async fn runtime_metadata(
     validate_view(view_id, generation)?;
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
+    let key = ViewKey {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view_id,
+        generation,
+        initialization,
+    };
+    // Any refusal is the same `404`: this route predates the capability
+    // distinction (decisions 0019 and 0020) and keeps its answers.
     let head = state
         .previews()
-        .runtime_access(&actor, &id, revision, view_id, generation, initialization)
-        .ok_or_else(missing_view)?;
+        .runtime_access(&key, Capability::MetadataRead)
+        .map_err(|_| missing_view())?;
     let lookup_actor = actor.clone();
     let lookup_id = id.clone();
     let record = state
@@ -1147,14 +1149,10 @@ pub(crate) async fn runtime_metadata(
     // Access and current source are read from the service on every RPC. A
     // concurrent view replacement or expiry is checked again after the read.
     if record.current_revision != head
-        || state.previews().runtime_access(
-            &actor,
-            &id,
-            revision,
-            view_id,
-            generation,
-            initialization,
-        ) != Some(head)
+        || state
+            .previews()
+            .runtime_access(&key, Capability::MetadataRead)
+            != Ok(head)
     {
         return Err(missing_view());
     }
@@ -1542,7 +1540,7 @@ fn artifact_dto(record: &ArtifactRecord) -> Artifact {
     }
 }
 
-fn revision_dto(record: RevisionRecord) -> Revision {
+pub(crate) fn revision_dto(record: RevisionRecord) -> Revision {
     Revision {
         revision: record.revision.0,
         created_by: record.created_by.to_string(),

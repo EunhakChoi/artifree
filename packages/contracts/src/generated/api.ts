@@ -32,6 +32,12 @@ export type ApiBody =
   | RuntimeGrant
   | RuntimeMetadataRequest
   | RuntimeMetadata
+  | RuntimeSourceListRequest
+  | RuntimeSourceList
+  | RuntimeSourceReadRequest
+  | RuntimeSourcePart
+  | RuntimeDownloadRequest
+  | RuntimeDownloadOffer
   | ErrorResponse
   | ArtifactChange
   | FeedPosition
@@ -91,6 +97,10 @@ export type CopiedPart = 'files' | 'data';
  * Delivery state; acknowledgement is receipt, not model completion.
  */
 export type HandoffState = 'staged' | 'queued' | 'offered' | 'blocked' | 'acknowledged' | 'cancelled' | 'expired';
+/**
+ * What a runtime download offers the user.
+ */
+export type RuntimeDownloadKind = 'file' | 'archive';
 /**
  * Machine-readable error category.
  */
@@ -778,6 +788,128 @@ export interface RuntimeMetadata {
    * Its current title.
    */
   title: string;
+}
+/**
+ * Proves that the parent is listing the source of its initialized view.
+ */
+export interface RuntimeSourceListRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+}
+/**
+ * The files of the revision a runtime view is pinned to. The listing is
+ * that of the pinned revision, never of a newer one.
+ */
+export interface RuntimeSourceList {
+  /**
+   * Its files in path order, each path once.
+   */
+  files: RevisionFile[];
+  /**
+   * The pinned revision.
+   */
+  revision: number;
+}
+/**
+ * Reads one part of one file of a runtime view's pinned revision.
+ */
+export interface RuntimeSourceReadRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * How many bytes at most, from 1 to 1,048,576. A part may be shorter at
+   * the end of the file. Parts are cut at bytes, not characters.
+   */
+  length: number;
+  /**
+   * The first byte to read, counted from 0. An offset past the end of
+   * the file is refused; an offset at the end reads an empty final part.
+   */
+  offset: number;
+  /**
+   * Package path of the file.
+   */
+  path: string;
+}
+/**
+ * Exactly the bytes of one part of a file, with what identifies the whole
+ * file. The bytes number `next_offset - offset`, or `size - offset` for the
+ * final part. A client checks that before it relies on the other numbers.
+ */
+export interface RuntimeSourcePart {
+  /**
+   * The bytes of the part, as base64.
+   */
+  content: string;
+  /**
+   * Where the next part starts: greater than `offset` and less than
+   * `size`. Null once `content` reaches the end of the file.
+   */
+  next_offset: number | null;
+  /**
+   * Where `content` starts in the file, as requested.
+   */
+  offset: number;
+  /**
+   * Package path of the file, as requested.
+   */
+  path: string;
+  /**
+   * The pinned revision.
+   */
+  revision: number;
+  /**
+   * The whole file's SHA-256 digest, as 64 lowercase hex digits.
+   */
+  sha256: string;
+  /**
+   * The whole file's size in bytes.
+   */
+  size: number;
+}
+/**
+ * Asks whether, or asks for, a download of the pinned revision. The same
+ * body is used to check that an offer is allowed and, after the user
+ * confirmed, to fetch the bytes; the server decides afresh each time.
+ */
+export interface RuntimeDownloadRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  kind: RuntimeDownloadKind;
+  /**
+   * Package path of the file for `file`; null for `archive`.
+   */
+  path?: string | null;
+}
+/**
+ * What the server would hand over, without any of it. The workspace shows
+ * it to the user before they confirm.
+ */
+export interface RuntimeDownloadOffer {
+  /**
+   * The name to save under: at most 100 characters of
+   * `A-Z a-z 0-9 . _ -`, not starting with a dot.
+   */
+  file_name: string;
+  kind: RuntimeDownloadKind;
+  /**
+   * Package path of the file for `file`; null for `archive`.
+   */
+  path: string | null;
+  /**
+   * The file's SHA-256 digest for `file`; null for `archive`.
+   */
+  sha256: string | null;
+  /**
+   * The file's size in bytes for `file`; null for `archive`.
+   */
+  size: number | null;
 }
 /**
  * Body of every non-2xx JSON response.

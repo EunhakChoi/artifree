@@ -112,6 +112,10 @@ export async function checkStaticDefault({ browser, binary }) {
       [defaultServer.api_url],
       'Every request goes to the build default, none to the static host.',
     );
+    // The preview of the first listed artifact loads parts of the page on
+    // demand. Reloading while that is in flight cancels the load and the
+    // browser reports it, so wait until the preview is on the page.
+    await expect(plain.page.locator('iframe').first()).toBeAttached();
     // A reload restores the token for the default: nothing was ignored.
     await plain.page.reload();
     await listed(plain, 'Default server artifact');

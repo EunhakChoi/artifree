@@ -52,11 +52,11 @@ import type { FeedChange } from './change-feed.js';
 
 type Fields = Readonly<Record<string, unknown>>;
 
-function isRecord(value: unknown): value is Fields {
+export function isRecord(value: unknown): value is Fields {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isCount(value: unknown): value is number {
+export function isCount(value: unknown): value is number {
   return Number.isSafeInteger(value) && typeof value === 'number' && value >= 0;
 }
 
@@ -180,7 +180,7 @@ function artifact(value: unknown): Artifact | undefined {
   };
 }
 
-function revisionFile(value: unknown): RevisionFile | undefined {
+export function revisionFile(value: unknown): RevisionFile | undefined {
   if (!isRecord(value)) return undefined;
   const { path, size, sha256, media_type } = value;
   if (
@@ -208,7 +208,7 @@ function revision(value: unknown): Revision | undefined {
   return { revision: number, created_by, created_at_ms, files };
 }
 
-function list<T>(
+export function list<T>(
   values: unknown,
   parse: (value: unknown) => T | undefined,
 ): T[] | undefined {
