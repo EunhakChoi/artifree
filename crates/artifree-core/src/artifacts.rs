@@ -87,9 +87,11 @@ pub enum ArtifactError {
     /// The edit committed but the stored revision is not what was asked for.
     /// The revision exists; the history shows it (decision 0035).
     EditNotAsRequested,
-    /// The edit committed but the store could not be read to check it. The
-    /// revision exists; a retry with the same key returns its receipt
-    /// (decision 0035).
+    /// The edit committed but checking it could not be completed: the store
+    /// could not be read, or a revision or file to compare was not there (the
+    /// artifact may have been purged meanwhile). The revision was committed;
+    /// a retry with the same key returns its receipt while the artifact
+    /// exists (decision 0035).
     EditUnverified,
     /// The metadata change was prepared against an older metadata revision;
     /// nothing was written.
@@ -152,7 +154,7 @@ impl fmt::Display for ArtifactError {
                 "the edit was saved but the stored revision is not what was asked for; check the history",
             ),
             Self::EditUnverified => formatter.write_str(
-                "the edit was saved but could not be checked; retry with the same key to get its receipt",
+                "the edit was committed but could not be verified; retry with the same key to get its receipt if the artifact still exists",
             ),
             Self::MetadataConflict { current } => write!(
                 formatter,
@@ -410,15 +412,22 @@ impl<S: ArtifactStore> ArtifactService<S> {
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or a
-    /// `base` it has no revision for, [`ArtifactError::InvalidPackage`] for no
-    /// edit, a path edited twice, a result that is no valid package, or one
-    /// that equals the current revision, [`ArtifactError::FilesChanged`],
-    /// [`ArtifactError::RequestKeyReused`],
-    /// [`ArtifactError::EditNotAsRequested`] or
-    /// [`ArtifactError::EditUnverified`] (the revision exists, see
-    /// [`ArtifactError::committed_a_revision`]), or
-    /// [`ArtifactError::Unavailable`].
+    /// Before anything is written: [`ArtifactError::NotFound`] for a missing,
+    /// inaccessible or trashed artifact, or a `base` it has no revision for
+    /// (or, on a retry, an artifact purged since the commit);
+    /// [`ArtifactError::InvalidPackage`] for no edit, a path edited twice, a
+    /// result that is no valid package, or one that equals the current
+    /// revision; [`ArtifactError::FilesChanged`];
+    /// [`ArtifactError::RequestKeyReused`]; and
+    /// [`ArtifactError::Unavailable`] when the store fails in the commit
+    /// itself, whose outcome is then unknown until a retry with the same key
+    /// reports it.
+    ///
+    /// After the commit no error is a plain one: the revision exists, as
+    /// [`ArtifactError::committed_a_revision`] says. A read-back that
+    /// disagrees is [`ArtifactError::EditNotAsRequested`]; one that cannot be
+    /// completed, whether for a store error or a revision or file that is not
+    /// there to read, is [`ArtifactError::EditUnverified`].
     pub fn edit_files(
         &self,
         actor: &ActorId,
@@ -450,43 +459,63 @@ impl<S: ArtifactStore> ArtifactService<S> {
             edits,
         })?;
         if receipt.delivery == Delivery::Committed {
-            self.read_back(id, &receipt.revision, edits)
-                .map_err(|error| match error {
-                    ArtifactError::Unavailable(_) => ArtifactError::EditUnverified,
-                    other => other,
-                })?;
+            self.read_back(id, &receipt.revision, edits)?;
         }
         Ok(receipt)
     }
 
     /// Reads the revision `committed` created and compares it with `edits`:
     /// the previous revision's files, changed only as the edits say, and the
-    /// bytes of every file put.
+    /// bytes of every file put. The edit has committed, so no failure here is
+    /// an ordinary one: a comparison that disagrees is
+    /// [`ArtifactError::EditNotAsRequested`], and anything that stops the
+    /// comparison, a store error or a revision or file that is not there to
+    /// read (the artifact may have been purged meanwhile), is
+    /// [`ArtifactError::EditUnverified`].
     fn read_back(
         &self,
         id: &ArtifactId,
         committed: &RevisionRecord,
         edits: &[FileEdit],
     ) -> Result<(), ArtifactError> {
-        let missing = || ArtifactError::NotFound(Missing::Artifact);
+        match self.matches_edits(id, committed, edits) {
+            Ok(Some(true)) => Ok(()),
+            Ok(Some(false)) => Err(ArtifactError::EditNotAsRequested),
+            Ok(None) | Err(_) => Err(ArtifactError::EditUnverified),
+        }
+    }
+
+    /// Whether the revision `committed` is as `edits` made it, or `None` when
+    /// a revision or file needed for the comparison is not there to read.
+    fn matches_edits(
+        &self,
+        id: &ArtifactId,
+        committed: &RevisionRecord,
+        edits: &[FileEdit],
+    ) -> Result<Option<bool>, StoreError> {
         let previous = SourceRevision(committed.revision.0.saturating_sub(1));
-        let after = self
-            .store
-            .revision(id, committed.revision)?
-            .ok_or_else(missing)?;
-        let before = self.store.revision(id, previous)?.ok_or_else(missing)?;
+        let Some(after) = self.store.revision(id, committed.revision)? else {
+            return Ok(None);
+        };
+        let Some(before) = self.store.revision(id, previous)? else {
+            return Ok(None);
+        };
         if !listing_is_as_edited(&before.files, &after.files, edits) {
-            return Err(ArtifactError::EditNotAsRequested);
+            return Ok(Some(false));
         }
         for edit in edits {
             if let FileChange::Put { path, content } = &edit.change {
-                let stored = self.store.revision_file(id, committed.revision, path)?;
-                if stored.as_deref() != Some(content.as_slice()) {
-                    return Err(ArtifactError::EditNotAsRequested);
+                // The listing has the file, so a file that cannot be read is
+                // a gap in what the store holds, not a different file.
+                let Some(stored) = self.store.revision_file(id, committed.revision, path)? else {
+                    return Ok(None);
+                };
+                if stored != *content {
+                    return Ok(Some(false));
                 }
             }
         }
-        Ok(())
+        Ok(Some(true))
     }
 
     /// Creates an artifact owned by `actor` whose revision 1 has the files

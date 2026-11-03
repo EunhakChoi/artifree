@@ -38,7 +38,8 @@ expect }` or `{ op: "delete", path, expect }`: the shape of a save's change
    path must not be a file) or the 64 lowercase hexadecimal digits of the
    SHA-256 of the bytes the file must have. A delete takes only a digest:
    deleting what is not there is no edit. Upper-case or short digests are
-   `422 invalid_request`. Content, encodings and paths are those of a save
+   `422 invalid_request`, and a delete that says `absent` gets its own message
+   (deleting a file that is not there is not an edit; give the sha256). Content, encodings and paths are those of a save
    (package path rules, 5 MiB per file, 25 MiB per package, 256 files).
 3. **What is compared.** The file **in the current revision when the commit
    happens** against the edit's `expect`. Not the base revision's file: the
@@ -120,20 +121,29 @@ IMMEDIATE` transaction: the request key lookup (replay, reuse, trash), the
     `edit_files` of an untouched file commit, at the service, over HTTP and over
     MCP; an edit and a save share a key space. `commit_revision` and its tests
     are not changed.
-12. **The new revision is read back.** After a new commit (not a replay),
-    `ArtifactService::edit_files` reads the revision and the one before it, and
-    checks: the listing is exactly the previous one with the edits applied (same
-    paths, and for each its size and SHA-256), and the stored bytes of every put
-    file equal the bytes sent. A mismatch is `500 internal` with a fixed message
-    that does not say which check failed; the revision exists, and the message
-    says to check the history. This is the server's check of its store, shared
-    by HTTP and MCP; the client function checks too (decision 13). Tests use a
-    store that misreports the bytes, a digest, and an extra file. If the store
-    cannot be read for the check, the commit also stands and the answer is
-    `503 unavailable` (the message says to retry with the same key, which
-    returns the receipt). In both cases the revision exists, so the operation
-    still wakes the change streams (SSE, the web workspace) as for any commit;
-    the error stays an error. A replay wakes nothing.
+12. **The new revision is read back, and nothing after the commit is a plain
+    error.** After a new commit (not a replay), `ArtifactService::edit_files`
+    reads the revision and the one before it, and checks: the listing is
+    exactly the previous one with the edits applied (same paths, and for each
+    its size and SHA-256), and the stored bytes of every put file equal the
+    bytes sent. A mismatch is `500 internal` with a fixed message that does not
+    say which check failed (`EditNotAsRequested`). Anything that stops the check
+    is `503 unavailable` (`EditUnverified`): a store error, a revision to
+    compare that is not there to read, or a put file that cannot be read though
+    the listing has it (the artifact may have been purged meanwhile). Its
+    message says the edit was committed but could not be verified, and to retry
+    with the same key, which returns the receipt while the artifact exists. So
+    after the commit no failure is a `404` or any other ordinary error; the
+    revision exists in every case, `committed_a_revision()` is true for both
+    errors, and the operation wakes the change streams (SSE, the web workspace)
+    as for any commit; the error stays an error. A replay wakes nothing. The
+    one case this cannot cover is a store error inside the commit itself, whose
+    outcome is unknown until a retry reports it (then the streams learn of it by
+    their periodic read). This is the server's check of its store, shared by
+    HTTP and MCP; the client function checks too (decision 13). Tests use a
+    store that misreports the bytes, a digest, and an extra file, and one that
+    cannot read, or does not have, the new revision, the previous one, or a put
+    file.
 13. **Clients.** The TypeScript function `editFiles(client, id, request,
 options)` is not a method of `ArtifreeClient`, because that class is in the
     web workspace's main bundle, which has no room (decision 0033); it reaches
@@ -148,7 +158,8 @@ options)` is not a method of `ArtifreeClient`, because that class is in the
     `artifree artifact edit <id> --base <n> (--put <path>=<local>)...
 (--delete <path>)...` sets each `expect` to the file's digest in revision
     `n`, read with one single-revision request (`absent` for a put of a path
-    `n` lacks); a delete of a path `n` lacks is a usage error. `--expect
+    `n` lacks); a delete of a path `n` lacks is a usage error, and so is a path named twice
+    in `--put` and `--delete`, before anything is read. `--expect
 <path>=<sha256|absent>` (repeatable) states a condition itself, for a path
     that `--put` or `--delete` names, once (usage errors otherwise; `absent` is
     not allowed for a delete). When every path has one, the CLI reads nothing
@@ -213,7 +224,7 @@ stored; eight racing edits of different files all apply; the trash),
 fingerprint), `crates/artifree-server/tests/file_edits.rs` (the strict save
 still conflicts where the edit of the same base applies, a conflict names the
 file, a store that misreports bytes, a digest or a file makes a 500 though the
-revision exists, a store that cannot be read makes a 503 though the revision exists (the operation wakes the change streams for both, a unit test), a replay is not read back, a key is shared with saves),
+revision exists, a store that cannot be read, or lacks the new revision, the previous one or a put file, makes a 503 though the revision exists (the operation wakes the change streams for both, a unit test), a replay is not read back, a key is shared with saves),
 `authorization.rs` (another actor, an empty request, a repeating request),
 `http_api.rs` (the contrast over HTTP, the conflict body, replay after the head
 moved and in another order, twelve refused requests that write nothing and
@@ -229,7 +240,8 @@ numbers do not fit, the client's bound of 32 listed files held to the schema's
 edit past a moved head, a refused edit with its stderr lines, nothing written,
 replay under the same key, a create and a delete, usage errors, the retry of a
 lost answer from the trash with `--expect` and not without it, a stated
-condition replacing the derived one, malformed `--expect` values, the bodies
+condition replacing the derived one, malformed `--expect` values, a path named twice refused before any server is
+asked, the bodies
 against the API schema).
 
 ## Alternatives

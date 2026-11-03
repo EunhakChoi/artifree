@@ -424,8 +424,13 @@ fn announce_edit(
 /// The condition an edit states: `absent` where `may_be_absent`, otherwise
 /// a digest.
 fn expectation(field: &str, value: &str, may_be_absent: bool) -> Result<FileExpectation, ApiError> {
-    if may_be_absent && value == "absent" {
-        return Ok(FileExpectation::Absent);
+    if value == "absent" {
+        if may_be_absent {
+            return Ok(FileExpectation::Absent);
+        }
+        return Err(ApiError::unprocessable(format!(
+            "{field}: deleting a file that is not there is not an edit; give the file's sha256"
+        )));
     }
     parse_sha256(value)
         .map(FileExpectation::Sha256)

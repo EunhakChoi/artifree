@@ -561,7 +561,15 @@ async function edit(args: string[]): Promise<void> {
   if (puts.length === 0 && deletes.length === 0)
     throw new UsageError('edit requires at least one --put or --delete.');
   const paths = [...puts.map(([path]) => path), ...deletes];
-  const explicit = explicitConditions(values.expect ?? [], new Set(paths));
+  const named = new Set<string>();
+  for (const path of paths) {
+    if (named.has(path))
+      throw new UsageError(
+        `${path} is named twice in --put and --delete; an edit changes a file once.`,
+      );
+    named.add(path);
+  }
+  const explicit = explicitConditions(values.expect ?? [], named);
   const client = await connect(values);
   // With a condition for every path the request is sent as given, without
   // reading the artifact first: the server judges the base and the files,

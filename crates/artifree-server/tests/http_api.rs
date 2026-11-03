@@ -829,6 +829,22 @@ async fn refused_edits_write_nothing_and_do_not_use_their_key() -> TestResult {
         counted.json()?["error"]["message"],
         "at most 512 edits are allowed"
     );
+    // A delete cannot expect absence, and the answer says what to give.
+    let absent_delete = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &edit_body(
+                1,
+                &[json!({ "op": "delete", "path": "index.html", "expect": "absent" })],
+            ),
+        )?)
+        .await?;
+    assert_eq!(absent_delete.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        absent_delete.json()?["error"]["message"],
+        "edits[0].expect: deleting a file that is not there is not an edit; give the file's sha256"
+    );
     let missing_condition = harness
         .send(post(
             &edits_of(&id),

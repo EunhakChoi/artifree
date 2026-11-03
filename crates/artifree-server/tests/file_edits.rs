@@ -57,6 +57,16 @@ const OTHER_DIGEST: u8 = 2;
 const EXTRA_FILE: u8 = 3;
 /// The store cannot be read for the new revision.
 const UNREADABLE: u8 = 4;
+/// The new revision is not there to read, as after a purge.
+const NEW_REVISION_MISSING: u8 = 5;
+/// The revision before the new one is not there to read.
+const PREVIOUS_MISSING: u8 = 6;
+/// The revision before the new one cannot be read.
+const PREVIOUS_UNREADABLE: u8 = 7;
+/// A file of the new revision cannot be read.
+const FILE_UNREADABLE: u8 = 8;
+/// A file the new revision lists is not there to read.
+const FILE_MISSING: u8 = 9;
 
 /// A real store that lies about the revisions it reads back.
 struct Misreporting {
@@ -112,8 +122,13 @@ impl ArtifactStore for Misreporting {
         id: &ArtifactId,
         revision: SourceRevision,
     ) -> Result<Option<RevisionRecord>, StoreError> {
-        if self.mode.load(Ordering::SeqCst) == UNREADABLE && revision.0 >= 3 {
-            return Err(StoreError::Unavailable("injected read failure".into()));
+        let mode = self.mode.load(Ordering::SeqCst);
+        match (mode, revision.0) {
+            (UNREADABLE, 3..) | (PREVIOUS_UNREADABLE, 2) => {
+                return Err(StoreError::Unavailable("injected read failure".into()));
+            }
+            (NEW_REVISION_MISSING, 3..) | (PREVIOUS_MISSING, 2) => return Ok(None),
+            _ => {}
         }
         let mut record = self.inner.revision(id, revision)?;
         // Only the revision the edit created is misreported: the earlier one
@@ -144,6 +159,13 @@ impl ArtifactStore for Misreporting {
         revision: SourceRevision,
         path: &PackagePath,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        match self.mode.load(Ordering::SeqCst) {
+            FILE_UNREADABLE => {
+                return Err(StoreError::Unavailable("injected read failure".into()));
+            }
+            FILE_MISSING => return Ok(None),
+            _ => {}
+        }
         let mut bytes = self.inner.revision_file(id, revision, path)?;
         if self.mode.load(Ordering::SeqCst) == OTHER_BYTES
             && let Some(bytes) = bytes.as_mut()
@@ -441,44 +463,58 @@ fn a_retry_is_the_same_request_in_any_order_but_not_under_other_conditions() -> 
 
 #[test]
 fn an_edit_whose_commit_cannot_be_checked_is_an_error_that_says_a_revision_exists() -> TestResult {
-    let fixture = fixture("edit-unverified")?;
-    let notes = digest_of(&fixture, 1, "notes.txt")?;
-    fixture.mode.store(UNREADABLE, Ordering::SeqCst);
-    let edits = [put_notes(FileExpectation::Sha256(notes))];
+    for (what, mode) in [
+        ("the new revision cannot be read", UNREADABLE),
+        ("the new revision is gone", NEW_REVISION_MISSING),
+        ("the previous revision is gone", PREVIOUS_MISSING),
+        ("the previous revision cannot be read", PREVIOUS_UNREADABLE),
+        ("a put file cannot be read", FILE_UNREADABLE),
+        ("a put file is gone", FILE_MISSING),
+    ] {
+        let fixture = fixture(&format!("edit-unverified-{mode}"))?;
+        let notes = digest_of(&fixture, 1, "notes.txt")?;
+        fixture.mode.store(mode, Ordering::SeqCst);
+        let edits = [put_notes(FileExpectation::Sha256(notes))];
 
-    let result = fixture.service.edit_files(
-        &fixture.owner,
-        &parsed("edit-key-1"),
-        &fixture.id,
-        SourceRevision(2),
-        &edits,
-    );
+        let result = fixture.service.edit_files(
+            &fixture.owner,
+            &parsed("edit-key-1"),
+            &fixture.id,
+            SourceRevision(2),
+            &edits,
+        );
 
-    let Err(error) = result else {
-        return Err("an unchecked edit must not be reported as verified".into());
-    };
-    assert_eq!(error, ArtifactError::EditUnverified);
-    assert!(error.committed_a_revision());
-    assert_eq!(
-        fixture
-            .service
-            .artifact(&fixture.owner, &fixture.id)?
-            .current_revision,
-        SourceRevision(3),
-        "the revision was committed"
-    );
-    // The retry returns the receipt of that revision.
-    fixture.mode.store(HONEST, Ordering::SeqCst);
-    let again = fixture.service.edit_files(
-        &fixture.owner,
-        &parsed("edit-key-1"),
-        &fixture.id,
-        SourceRevision(2),
-        &edits,
-    )?;
-    assert_eq!(
-        (again.delivery, again.revision.revision),
-        (Delivery::Replayed, SourceRevision(3))
-    );
+        let Err(error) = result else {
+            return Err(format!("{what}: an unchecked edit was reported as verified").into());
+        };
+        assert_eq!(error, ArtifactError::EditUnverified, "{what}");
+        assert!(error.committed_a_revision(), "{what}");
+        assert!(
+            error.to_string().contains("committed"),
+            "{what}: the message says the edit was committed: {error}"
+        );
+        assert_eq!(
+            fixture
+                .service
+                .artifact(&fixture.owner, &fixture.id)?
+                .current_revision,
+            SourceRevision(3),
+            "{what}: the revision was committed"
+        );
+        // The retry returns the receipt of that revision.
+        fixture.mode.store(HONEST, Ordering::SeqCst);
+        let again = fixture.service.edit_files(
+            &fixture.owner,
+            &parsed("edit-key-1"),
+            &fixture.id,
+            SourceRevision(2),
+            &edits,
+        )?;
+        assert_eq!(
+            (again.delivery, again.revision.revision),
+            (Delivery::Replayed, SourceRevision(3)),
+            "{what}"
+        );
+    }
     Ok(())
 }

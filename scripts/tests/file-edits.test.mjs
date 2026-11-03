@@ -708,3 +708,22 @@ test('The conditions of an edit are refused as usage when they are not well form
     await server.stop();
   }
 });
+
+test('A path named twice in one edit is refused as usage before any server is asked', () => {
+  // Nothing listens here: a command that tried to read first would fail
+  // with a network error (status 1), not a usage error (status 2).
+  const nowhere = { api_url: 'http://127.0.0.1:9', token: 'unused' };
+  const id = `art_${'0'.repeat(32)}`;
+  const base = ['edit', id, '--base', '1'];
+  const cases = [
+    ['a put twice', ['--put', 'a.txt=/x', '--put', 'a.txt=/y']],
+    ['a put and a delete', ['--put', 'a.txt=/x', '--delete', 'a.txt']],
+    ['a delete twice', ['--delete', 'a.txt', '--delete', 'a.txt']],
+  ];
+  for (const [what, extra] of cases) {
+    const result = cli(nowhere, [...base, ...extra]);
+    assert.equal(result.status, 2, `${what}: ${result.stderr}`);
+    assert.match(result.stderr, /a\.txt is named twice/, what);
+    assert.equal(result.stdout, '', what);
+  }
+});
