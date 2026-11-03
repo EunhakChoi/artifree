@@ -24,7 +24,7 @@ apps/
 packages/
   contracts/           generated TypeScript wire types and build inventory
   client/              HTTP API v1 client with runtime response checks
-  runtime-sdk/         bound metadata read; other capability types proposed
+  runtime-sdk/         bound metadata, source list/read and download request; other capabilities proposed
 crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
   artifree-core/       artifact service, owner policy, job and worker logic; documents planned
@@ -94,7 +94,16 @@ short-lived view binds the actor, artifact, source revision, view generation,
 and initialization; the server checks access and the current source on each
 read ([0019](decisions/0019-runtime-metadata-bridge.md)). A process-local
 connection grant requires explicit consent for `metadata.read` and is checked
-again on every call; other capabilities remain proposed
+again on every call. R11a adds read-only `source.read` and
+`source.download`, each declared, consented, and granted on its own: the server
+checks the binding, the connection's grant of that one capability, the live
+artifact, and the artifact's current head on every call and again before it
+returns bytes, answers `404` for a binding that does not match, `403` for a
+missing grant, and `409` for a head that moved, and limits frame traffic apart
+from the owner's. The workspace asks the server for an offer before it shows the
+user a prompt, and a download only starts after the user confirms
+([0032](decisions/0032-runtime-source-read-and-download.md)). Writing source
+from a frame (R11b) and the other capabilities remain proposed
 ([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
@@ -127,6 +136,10 @@ in the Rust core.
 | `POST /v1/artifacts/{id}/revisions/{n}/previews`                                   | Short-lived preview URL on the content origin     |
 | `POST /v1/artifacts/{id}/revisions/{n}/runtime-views`                              | Issue a bound, short-lived runtime view           |
 | `POST /v1/artifacts/{id}/revisions/{n}/runtime-views/{view}/{generation}/metadata` | Read the view's current metadata                  |
+| `POST .../runtime-views/{view}/{generation}/source/list`                           | List the pinned revision's files (`source.read`)  |
+| `POST .../runtime-views/{view}/{generation}/source/read`                           | Read one part of a file (`source.read`)           |
+| `POST .../runtime-views/{view}/{generation}/source/offer`                          | Ask what a download would be (`source.download`)  |
+| `POST .../runtime-views/{view}/{generation}/source/download`                       | The bytes of a confirmed download                 |
 | `DELETE /v1/runtime-views/{view}/{generation}`                                     | Close one runtime view generation                 |
 | `POST /v1/runtime-sessions`                                                        | Open an ephemeral runtime connection              |
 | `DELETE /v1/runtime-sessions/{session}`                                            | Close the connection and revoke its grants        |
@@ -148,7 +161,7 @@ in the Rust core.
 | `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)     |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"? } }` with
-`invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `not_found` (404),
+`invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `forbidden` (403, a runtime frame call whose capability is not granted), `not_found` (404),
 `revision_conflict`, `metadata_conflict`, `data_conflict`, `data_path_conflict`, `job_ended`, and `too_many_jobs` (409), `request_key_reused` and `data_too_large` (422), `payload_too_large`
 (413), `range_not_satisfiable` (416 with `Content-Range: bytes */{size}`), `rate_limited` (429 with
 `Retry-After`; this attempt was not processed),
@@ -288,7 +301,8 @@ change silently (`NaN`, holes, getters, a `Date`, a `toJSON` function) and sends
 checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
-bridge grants only `metadata.read`**. Subscriptions and queries (R07) and
+bridge has no data capability** (it grants `metadata.read`, `source.read`, and
+`source.download`). Subscriptions and queries (R07) and
 assets (R09) are not implemented.
 
 The roadmap separately covers artifact management, local/server deployment,

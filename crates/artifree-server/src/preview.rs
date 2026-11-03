@@ -32,7 +32,8 @@ use serde::Serialize;
 
 use crate::auth::hex;
 use crate::http::AppState;
-use crate::runtime_sessions::{GrantScope, RuntimeSession};
+use crate::runtime_policy::Capability;
+use crate::runtime_sessions::{GrantDenied, GrantScope, RuntimeSession};
 
 /// Upper bound on live tickets, which limits memory held by unused links.
 pub const MAX_LIVE_TICKETS: usize = 4096;
@@ -92,6 +93,26 @@ pub(crate) struct RuntimeAuthority {
     pub(crate) session: Arc<RuntimeSession>,
     pub(crate) scope: GrantScope,
     pub(crate) version: u64,
+}
+
+/// What a frame presents to prove it is the view the server issued.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViewKey<'a> {
+    pub(crate) actor: &'a ActorId,
+    pub(crate) artifact: &'a ArtifactId,
+    pub(crate) revision: SourceRevision,
+    pub(crate) view_id: &'a str,
+    pub(crate) generation: u64,
+    pub(crate) initialization: &'a str,
+}
+
+/// Why a runtime call is refused before any data is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeDenied {
+    /// No live view matches, or its connection is closed or expired.
+    Binding,
+    /// The view matches, but its connection has not granted the capability.
+    Capability,
 }
 
 /// A runtime ticket could not be issued.
@@ -406,30 +427,36 @@ impl PreviewTickets {
         })
     }
 
-    /// Checks a live binding and the connection's current grant. The registry
-    /// lock is released before taking the session lock.
+    /// Checks a live binding and the connection's current grant of
+    /// `capability`. The registry lock is released before taking the session
+    /// lock. A binding that does not match, or whose connection is gone, is
+    /// [`RuntimeDenied::Binding`]; a matching binding without the capability
+    /// is [`RuntimeDenied::Capability`]. Only a caller that holds the view's
+    /// initialization secret can tell the two apart.
     pub(crate) fn runtime_access(
         &self,
-        actor: &ActorId,
-        artifact: &ArtifactId,
-        revision: SourceRevision,
-        view_id: &str,
-        generation: u64,
-        initialization: &str,
-    ) -> Option<SourceRevision> {
-        let (head, authority) = self.runtime_binding(
-            actor,
-            artifact,
-            revision,
-            view_id,
-            generation,
-            initialization,
-        )?;
-        let authority = authority?;
-        authority
+        key: &ViewKey<'_>,
+        capability: Capability,
+    ) -> Result<SourceRevision, RuntimeDenied> {
+        let (head, authority) = self
+            .runtime_binding(
+                key.actor,
+                key.artifact,
+                key.revision,
+                key.view_id,
+                key.generation,
+                key.initialization,
+            )
+            .ok_or(RuntimeDenied::Binding)?;
+        let authority = authority.ok_or(RuntimeDenied::Binding)?;
+        match authority
             .session
-            .permits(&authority.scope, authority.version)
-            .then_some(head)
+            .permits(&authority.scope, authority.version, capability)
+        {
+            Ok(()) => Ok(head),
+            Err(GrantDenied::Closed) => Err(RuntimeDenied::Binding),
+            Err(GrantDenied::NotGranted) => Err(RuntimeDenied::Capability),
+        }
     }
 
     #[cfg(test)]

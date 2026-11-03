@@ -101,12 +101,36 @@ test('Requests are classified by what they change', () => {
     requestKind('POST', '/v1/artifacts/a/revisions/2/runtime-views'),
     'read',
   );
+  // What a runtime frame causes is its own kind (decision 0032).
+  for (const tail of [
+    'metadata',
+    'source/list',
+    'source/read',
+    'source/offer',
+    'source/download',
+  ])
+    assert.equal(
+      requestKind(
+        'POST',
+        `/v1/artifacts/a/revisions/2/runtime-views/view/3/${tail}`,
+      ),
+      'frame',
+      tail,
+    );
+  // Only those exact routes, and only as POST.
+  assert.equal(
+    requestKind(
+      'GET',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/list',
+    ),
+    'read',
+  );
   assert.equal(
     requestKind(
       'POST',
-      '/v1/artifacts/a/revisions/2/runtime-views/view/3/metadata',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write',
     ),
-    'read',
+    'write',
   );
   assert.equal(requestKind('DELETE', '/v1/runtime-views/view/3'), 'write');
   assert.equal(requestKind('POST', '/v1/other/runtime-views'), 'write');
@@ -136,6 +160,35 @@ test('Reads are sent one at a time, in order; writes are not held', async () => 
   assert.deepEqual(api.paths().at(-1), 'GET /v1/artifacts/a');
   api.answer(2);
   assert.equal((await second).status, 200);
+});
+
+test('A frame call is sent at once, and a refusal of it holds no owner read', async () => {
+  const { api, gate } = setup();
+  const frame = '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/read';
+  const owner = gate.fetch('/v1/artifacts');
+  gate.fetch(frame, { method: 'POST' });
+  gate.fetch(frame, { method: 'POST' });
+  await settle();
+  // Both frame calls went out beside the owner's read.
+  assert.deepEqual(api.paths().sort(), [
+    'GET /v1/artifacts',
+    `POST ${frame}`,
+    `POST ${frame}`,
+  ]);
+  const at = (path) => api.paths().indexOf(path);
+  // The server limits frames apart from the owner: a 429 for a frame call
+  // must not start the pause that holds every owner read.
+  api.answer(at(`POST ${frame}`), limited(30));
+  await settle();
+  api.answer(at('GET /v1/artifacts'), Response.json({ artifacts: [] }));
+  const answered = await owner;
+  assert.equal(answered.status, 200);
+  await answered.json();
+  const next = gate.fetch('/v1/artifacts/b');
+  await settle();
+  assert.equal(api.paths().at(-1), 'GET /v1/artifacts/b');
+  api.answer(api.sent.length - 1);
+  assert.equal((await next).status, 200);
 });
 
 test('A withdrawn read is never sent', async () => {

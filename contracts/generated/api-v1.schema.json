@@ -1685,6 +1685,94 @@
       ],
       "type": "object"
     },
+    "RuntimeDownloadKind": {
+      "description": "What a runtime download offers the user.",
+      "oneOf": [
+        {
+          "const": "file",
+          "description": "One stored file of the pinned revision, byte for byte.",
+          "type": "string"
+        },
+        {
+          "const": "archive",
+          "description": "The source export of the pinned revision (decision 0015).",
+          "type": "string"
+        }
+      ]
+    },
+    "RuntimeDownloadOffer": {
+      "additionalProperties": false,
+      "description": "What the server would hand over, without any of it. The workspace shows\nit to the user before they confirm.",
+      "properties": {
+        "file_name": {
+          "description": "The name to save under: at most 100 characters of\n`A-Z a-z 0-9 . _ -`, not starting with a dot.",
+          "maxLength": 100,
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RuntimeDownloadKind",
+          "description": "What is offered."
+        },
+        "path": {
+          "description": "Package path of the file for `file`; null for `archive`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "description": "The file's SHA-256 digest for `file`; null for `archive`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "The file's size in bytes for `file`; null for `archive`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path",
+        "file_name",
+        "size",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "RuntimeDownloadRequest": {
+      "additionalProperties": false,
+      "description": "Asks whether, or asks for, a download of the pinned revision. The same\nbody is used to check that an offer is allowed and, after the user\nconfirmed, to fetch the bytes; the server decides afresh each time.",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RuntimeDownloadKind",
+          "description": "What to download."
+        },
+        "path": {
+          "default": null,
+          "description": "Package path of the file for `file`; null for `archive`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "initialization",
+        "kind"
+      ],
+      "type": "object"
+    },
     "RuntimeGrant": {
       "additionalProperties": false,
       "description": "The new version of a connection-scoped grant.",
@@ -1745,6 +1833,133 @@
       },
       "required": [
         "initialization"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceList": {
+      "additionalProperties": false,
+      "description": "The files of the revision a runtime view is pinned to. The listing is\nthat of the pinned revision, never of a newer one.",
+      "properties": {
+        "files": {
+          "description": "Its files in path order, each path once.",
+          "items": {
+            "$ref": "#/$defs/RevisionFile"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "The pinned revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "files"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceListRequest": {
+      "additionalProperties": false,
+      "description": "Proves that the parent is listing the source of its initialized view.",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourcePart": {
+      "additionalProperties": false,
+      "description": "Exactly the bytes of one part of a file, with what identifies the whole\nfile. The bytes number `next_offset - offset`, or `size - offset` for the\nfinal part. A client checks that before it relies on the other numbers.",
+      "properties": {
+        "content": {
+          "description": "The bytes of the part, as base64.",
+          "type": "string"
+        },
+        "next_offset": {
+          "description": "Where the next part starts: greater than `offset` and less than\n`size`. Null once `content` reaches the end of the file.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Where `content` starts in the file, as requested.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Package path of the file, as requested.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The pinned revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "description": "The whole file's SHA-256 digest, as 64 lowercase hex digits.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The whole file's size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "revision",
+        "offset",
+        "next_offset",
+        "size",
+        "sha256",
+        "content"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceReadRequest": {
+      "additionalProperties": false,
+      "description": "Reads one part of one file of a runtime view's pinned revision.",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "length": {
+          "description": "How many bytes at most, from 1 to 1,048,576. A part may be shorter at\nthe end of the file. Parts are cut at bytes, not characters.",
+          "format": "uint64",
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "The first byte to read, counted from 0. An offset past the end of\nthe file is refused; an offset at the end reads an empty final part.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Package path of the file.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "path",
+        "offset",
+        "length"
       ],
       "type": "object"
     },
@@ -2334,6 +2549,24 @@
     },
     {
       "$ref": "#/$defs/RuntimeMetadata"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceListRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceList"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceReadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourcePart"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDownloadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDownloadOffer"
     },
     {
       "$ref": "#/$defs/ErrorResponse"

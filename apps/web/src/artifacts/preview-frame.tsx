@@ -6,6 +6,28 @@ import { Button } from '@/components/ui/button';
 import { RuntimeFrame } from './runtime-frame';
 import { describeFailure, useRequest } from './use-request';
 
+/**
+ * The capabilities a preview can be granted, each with its own control: a
+ * grant of one never implies another (decisions 0020 and 0032).
+ */
+const CAPABILITY_CONTROLS = [
+  {
+    name: 'metadata.read',
+    allow: 'Allow metadata access',
+    revoke: 'Revoke metadata access',
+  },
+  {
+    name: 'source.read',
+    allow: 'Allow source reading',
+    revoke: 'Revoke source reading',
+  },
+  {
+    name: 'source.download',
+    allow: 'Allow download requests',
+    revoke: 'Revoke download requests',
+  },
+] as const;
+
 interface PreviewFrameProps {
   client: ArtifreeClient;
   artifactId: string;
@@ -107,10 +129,10 @@ export function PreviewFrame({
     );
   const view = preview.value.view;
   const grantStatus = client.runtimeGrantStatus(view);
-  async function changeGrant(allowed: boolean): Promise<void> {
+  async function changeGrant(capabilities: string[]): Promise<void> {
     setGrantError(undefined);
     try {
-      await client.setRuntimeGrant(view, allowed ? ['metadata.read'] : []);
+      await client.setRuntimeGrant(view, capabilities);
     } catch (error: unknown) {
       setGrantError(
         `Permission change was not confirmed: ${describeFailure(error)}`,
@@ -147,25 +169,34 @@ export function PreviewFrame({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => void changeGrant(false)}
+              onClick={() => void changeGrant([])}
             >
               Resolve by revoking access
             </Button>
-          ) : grantStatus === 'settled' &&
-            view.supported.includes('metadata.read') &&
-            view.declared.includes('metadata.read') ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                void changeGrant(!view.granted.includes('metadata.read'))
-              }
-            >
-              {view.granted.includes('metadata.read')
-                ? 'Revoke metadata access'
-                : 'Allow metadata access'}
-            </Button>
+          ) : grantStatus === 'settled' ? (
+            CAPABILITY_CONTROLS.filter(
+              ({ name }) =>
+                view.supported.includes(name) && view.declared.includes(name),
+            ).map(({ name, allow, revoke }) => {
+              const granted = view.granted.includes(name);
+              return (
+                <Button
+                  key={name}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    void changeGrant(
+                      granted
+                        ? view.granted.filter((item) => item !== name)
+                        : [...view.granted, name],
+                    )
+                  }
+                >
+                  {granted ? revoke : allow}
+                </Button>
+              );
+            })
           ) : null}
         </section>
       )}

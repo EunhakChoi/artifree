@@ -28,8 +28,10 @@ import type {
   RestoreRevisionRequest,
   Revision,
   RotateTokenResponse,
+  RuntimeDownloadOffer,
   RuntimeMetadata,
   RuntimeGrant,
+  RuntimeSourceList,
   RuntimeView,
   SaveRevisionRequest,
   SetDataRequest,
@@ -70,9 +72,15 @@ import {
   parseRevisionList,
   parseRotateToken,
   parseRuntimeConnection,
+  parseRuntimeDownloadOffer,
   parseRuntimeMetadata,
   parseRuntimeGrant,
+  parseRuntimeSourceList,
+  parseRuntimeSourcePart,
   parseRuntimeView,
+  type RuntimeDownloadTarget,
+  type RuntimeSourcePartBytes,
+  type RuntimeSourceRequest,
   parseTokenList,
   parseUnreferencedContent,
   parseUpdate,
@@ -1563,6 +1571,127 @@ export class ArtifreeClient {
         },
       );
     return metadata;
+  }
+
+  /**
+   * The route of one of a runtime view's calls. They are the calls a frame
+   * causes, sent here on its behalf: the frame holds no account token.
+   */
+  private frameRoute(view: RuntimeView, tail: string): string {
+    return `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/${tail}`;
+  }
+
+  private async frameJson<T>(
+    view: RuntimeView,
+    tail: string,
+    body: Record<string, unknown>,
+    parse: (value: unknown) => T | undefined,
+    options: ReadOptions,
+  ): Promise<T> {
+    this.requireViewSession(view);
+    const result = await this.json('POST', this.frameRoute(view, tail), parse, {
+      body: { initialization: view.initialization, ...body },
+      signal: options.signal,
+    });
+    this.requireViewSession(view);
+    return result;
+  }
+
+  /**
+   * The files of the revision a view is pinned to (decision 0032). The
+   * server checks the view, the `source.read` grant and the artifact's head
+   * again; `403` is a missing grant, `409` a view the head has outgrown.
+   */
+  async runtimeSourceList(
+    view: RuntimeView,
+    options: ReadOptions = {},
+  ): Promise<RuntimeSourceList> {
+    return this.frameJson(
+      view,
+      'source/list',
+      {},
+      (value) => parseRuntimeSourceList(value, view.revision),
+      options,
+    );
+  }
+
+  /**
+   * One part of a file of a view's pinned revision. It resolves only with a
+   * part that echoes `request`, whose bytes number what its offsets say.
+   */
+  async runtimeSourceRead(
+    view: RuntimeView,
+    request: RuntimeSourceRequest,
+    options: ReadOptions = {},
+  ): Promise<RuntimeSourcePartBytes> {
+    return this.frameJson(
+      view,
+      'source/read',
+      { path: request.path, offset: request.offset, length: request.length },
+      (value) => parseRuntimeSourcePart(value, view.revision, request),
+      options,
+    );
+  }
+
+  /**
+   * Asks the server whether a download may be offered to the user and what
+   * it would be, before any prompt is shown. Nothing is handed over.
+   */
+  async runtimeSourceOffer(
+    view: RuntimeView,
+    target: RuntimeDownloadTarget,
+    options: ReadOptions = {},
+  ): Promise<RuntimeDownloadOffer> {
+    return this.frameJson(
+      view,
+      'source/offer',
+      { kind: target.kind, path: target.kind === 'file' ? target.path : null },
+      (value) => parseRuntimeDownloadOffer(value, target),
+      options,
+    );
+  }
+
+  /**
+   * The bytes of a download the user confirmed. Resolves only when the
+   * response is the attachment `offer` named, with the closed content type
+   * of its kind.
+   */
+  async runtimeSourceDownload(
+    view: RuntimeView,
+    offer: RuntimeDownloadOffer,
+    options: ReadOptions = {},
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    this.requireViewSession(view);
+    const path = this.frameRoute(view, 'source/download');
+    const response = await this.send('POST', path, {
+      body: {
+        initialization: view.initialization,
+        kind: offer.kind,
+        path: offer.path,
+      },
+      signal: options.signal,
+    });
+    const type = response.headers.get('content-type')?.trim().toLowerCase();
+    const disposition = response.headers.get('content-disposition');
+    const refuse = async (): Promise<never> => {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ArtifreeApiError(
+        `POST ${path} did not return the attachment that was offered.`,
+        { status: response.status, code: 'invalid_response' },
+      );
+    };
+    if (
+      type !==
+        (offer.kind === 'file'
+          ? 'application/octet-stream'
+          : 'application/zip') ||
+      disposition !== `attachment; filename="${offer.file_name}"`
+    )
+      return refuse();
+    const bytes = await this.bytes(response, offer.file_name);
+    this.requireViewSession(view);
+    if (offer.size !== null && bytes.length !== offer.size) return refuse();
+    return bytes;
   }
 
   /** Closes one view generation; an older close cannot revoke its replacement. */

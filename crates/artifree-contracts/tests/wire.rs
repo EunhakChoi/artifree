@@ -2,10 +2,12 @@
 use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
-    DuplicateArtifactResponse, ErrorResponse, FeedPosition, Preview, PurgeArtifactResponse,
-    RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeConnection, RuntimeGrant,
-    RuntimeView, SaveRevisionRequest, SourceExportManifest, UnreferencedContent,
-    UpdateArtifactResponse,
+    DuplicateArtifactResponse, ErrorResponse, FeedPosition, MAX_DOWNLOAD_NAME,
+    MAX_RUNTIME_SOURCE_PART_BYTES, Preview, PurgeArtifactResponse,
+    RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeConnection,
+    RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
+    RuntimeSourceReadRequest, RuntimeView, SaveRevisionRequest, SourceExportManifest,
+    UnreferencedContent, UpdateArtifactResponse,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -188,6 +190,18 @@ fn response_schemas_describe_what_the_server_writes() {
         ),
         ("RuntimeGrant", published_unlike_written::<RuntimeGrant>()),
         ("RuntimeView", published_unlike_written::<RuntimeView>()),
+        (
+            "RuntimeSourceList",
+            published_unlike_written::<RuntimeSourceList>(),
+        ),
+        (
+            "RuntimeSourcePart",
+            published_unlike_written::<RuntimeSourcePart>(),
+        ),
+        (
+            "RuntimeDownloadOffer",
+            published_unlike_written::<RuntimeDownloadOffer>(),
+        ),
         ("ErrorResponse", published_unlike_written::<ErrorResponse>()),
         (
             "ArtifactChange",
@@ -231,4 +245,34 @@ fn app_data_tells_a_stored_null_from_no_value() {
         text(&stored_null)
     );
     assert!(!text(&absent).contains("value"), "{}", text(&absent));
+}
+
+/// The bounds a frame's parsers apply are the ones the schema publishes
+/// (decision 0032): a part is at most `MAX_RUNTIME_SOURCE_PART_BYTES`, a
+/// download name at most `MAX_DOWNLOAD_NAME` characters.
+#[test]
+fn runtime_source_bounds_are_the_published_ones() {
+    let schema = |settings: SchemaSettings| {
+        let generator = settings.into_generator();
+        (
+            serde_json::to_value(
+                generator
+                    .clone()
+                    .into_root_schema_for::<RuntimeSourceReadRequest>(),
+            ),
+            serde_json::to_value(generator.into_root_schema_for::<RuntimeDownloadOffer>()),
+        )
+    };
+    let (read, offer) = schema(SchemaSettings::draft2020_12());
+    let read = read.unwrap_or_else(|error| panic!("read schema: {error}"));
+    let offer = offer.unwrap_or_else(|error| panic!("offer schema: {error}"));
+    assert_eq!(
+        read["properties"]["length"]["maximum"],
+        MAX_RUNTIME_SOURCE_PART_BYTES
+    );
+    assert_eq!(read["properties"]["length"]["minimum"], 1);
+    assert_eq!(
+        offer["properties"]["file_name"]["maxLength"],
+        MAX_DOWNLOAD_NAME
+    );
 }

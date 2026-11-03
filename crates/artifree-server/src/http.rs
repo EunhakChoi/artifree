@@ -23,9 +23,11 @@ use artifree_contracts::api::{
     Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
     PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
-    RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, SaveRevisionRequest,
-    SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest, UnreferencedContent,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
+    RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
+    RuntimeSourceReadRequest, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
+    StageHandoffRequest, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::jobs::{Clock, SystemClock};
@@ -55,6 +57,7 @@ use crate::origin::normalize_origin;
 use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::runtime_sessions::RuntimeSessions;
+use crate::runtime_source::{self, FrameCall};
 use crate::tokens;
 use crate::web::WebAssets;
 
@@ -81,6 +84,9 @@ pub struct Settings {
     pub frame_ancestors: String,
     /// Per-actor request budget shared by HTTP and MCP.
     pub limits: RequestLimits,
+    /// Per-actor budget for the requests a runtime frame causes (decision
+    /// 0032). It is counted apart from [`Settings::limits`].
+    pub frame_limits: RequestLimits,
     /// Change streams one actor may keep open, at least 1.
     pub change_streams: u32,
     /// Optional public API and web origin, such as `https://artifree.example.com`.
@@ -104,6 +110,7 @@ impl Default for Settings {
             preview_ttl: Duration::from_secs(15 * 60),
             frame_ancestors: "http://127.0.0.1:* http://localhost:* http://[::1]:*".into(),
             limits: RequestLimits::default(),
+            frame_limits: RequestLimits::FRAME,
             change_streams: crate::changes::DEFAULT_STREAMS_PER_ACTOR,
             api_origin: None,
             trusted_proxies: Vec::new(),
@@ -132,6 +139,7 @@ struct Shared {
     runtime_sessions: RuntimeSessions,
     handoffs: Handoffs,
     limiter: Limiter,
+    frame_limiter: Limiter,
     feed: Feed,
     draining: AtomicUsize,
     settings: Settings,
@@ -199,6 +207,7 @@ impl AppState {
                 runtime_sessions: RuntimeSessions::new(Duration::from_secs(24 * 60 * 60)),
                 handoffs: Handoffs::new(Duration::from_secs(60 * 60)),
                 limiter: Limiter::new(settings.limits.validate()?),
+                frame_limiter: Limiter::new(settings.frame_limits.validate()?),
                 feed: Feed::new(settings.change_streams),
                 draining: AtomicUsize::new(0),
                 settings,
@@ -381,10 +390,6 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
             axum::routing::post(create_runtime_view),
         )
         .route(
-            "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}/metadata",
-            axum::routing::post(runtime_metadata),
-        )
-        .route(
             "/v1/runtime-views/{view}/{generation}",
             axum::routing::delete(close_runtime_view),
         )
@@ -413,6 +418,43 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::map_response(no_store))
         .layer(middleware::from_fn_with_state(state.clone(), admit))
+        .merge(frame_routes(state))
+}
+
+/// Largest body of a frame call: the secret, a package path and two numbers.
+const MAX_FRAME_BODY_BYTES: usize = 16 * 1024;
+
+/// What a runtime frame can ask the workspace to ask the server (decisions
+/// 0019 and 0032). The workspace page sends these with the account token on
+/// the frame's behalf; the frame itself holds none. They are admitted under
+/// the frame budget, not the owner's.
+fn frame_routes(state: &AppState) -> Router<AppState> {
+    const VIEW: &str = "/v1/artifacts/{id}/revisions/{revision}/runtime-views/{view}/{generation}";
+    Router::new()
+        .route(
+            &format!("{VIEW}/metadata"),
+            axum::routing::post(runtime_metadata),
+        )
+        .route(
+            &format!("{VIEW}/source/list"),
+            axum::routing::post(runtime_source_list),
+        )
+        .route(
+            &format!("{VIEW}/source/read"),
+            axum::routing::post(runtime_source_read),
+        )
+        .route(
+            &format!("{VIEW}/source/offer"),
+            axum::routing::post(runtime_source_offer),
+        )
+        .route(
+            &format!("{VIEW}/source/download"),
+            axum::routing::post(runtime_source_download),
+        )
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_FRAME_BODY_BYTES))
+        .layer(middleware::map_response(no_store))
+        .layer(middleware::from_fn_with_state(state.clone(), admit_frame))
 }
 
 /// Routes of HTTP API v1, the MCP endpoint, and optional production web assets.
@@ -480,12 +522,27 @@ async fn healthz_head() -> impl IntoResponse {
 /// Authenticates the request, then admits it under the actor's limits. A
 /// refused request never reaches the application, so this attempt commits
 /// nothing; its idempotency key is free unless an earlier attempt used it.
-async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+async fn admit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    admit_under(&state.shared.limiter, state.clone(), request, next).await
+}
+
+/// As [`admit`] for the requests a runtime frame causes, under the frame
+/// budget: whatever a frame floods, the owner's budget is untouched.
+async fn admit_frame(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    admit_under(&state.shared.frame_limiter, state.clone(), request, next).await
+}
+
+async fn admit_under(
+    limiter: &Limiter,
+    state: AppState,
+    mut request: Request,
+    next: Next,
+) -> Response {
     let auth = match state.authenticate(request.headers()).await {
         Ok(auth) => auth,
         Err(error) => return error.into_response(),
     };
-    let permit = match state.shared.limiter.admit(&auth.actor) {
+    let permit = match limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
             discard(&state, request.into_body()).await;
@@ -1353,7 +1410,7 @@ async fn runtime_metadata(
     body: Result<Json<RuntimeMetadataRequest>, JsonRejection>,
 ) -> Result<Json<RuntimeMetadata>, ApiError> {
     let Path((id, revision, view, generation)) = path?;
-    let Json(request) = body?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
     operations::runtime_metadata(
         &state,
         actor,
@@ -1365,6 +1422,134 @@ async fn runtime_metadata(
     )
     .await
     .map(Json)
+}
+
+type FramePath = Result<Path<(String, u64, String, u64)>, PathRejection>;
+
+/// A frame call's body is built by the workspace page from what a frame
+/// sent, so a parse failure says only that, with no serde text that could
+/// quote the frame's input.
+fn frame_body_error(rejection: &JsonRejection) -> ApiError {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::PayloadTooLarge,
+            "the frame call is too large",
+        );
+    }
+    ApiError::invalid("the frame call is not a valid request")
+}
+
+async fn runtime_source_list(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeSourceListRequest>, JsonRejection>,
+) -> Result<Json<RuntimeSourceList>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_source::list(&state, &call).await.map(Json)
+}
+
+async fn runtime_source_read(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeSourceReadRequest>, JsonRejection>,
+) -> Result<Json<RuntimeSourcePart>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_source::read(&state, &call, &request)
+        .await
+        .map(Json)
+}
+
+async fn runtime_source_offer(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeDownloadRequest>, JsonRejection>,
+) -> Result<Json<RuntimeDownloadOffer>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_source::offer(&state, &call, &request)
+        .await
+        .map(Json)
+}
+
+/// The bytes of a download the user confirmed, as an attachment that no
+/// browser renders: a closed content type, `nosniff`, and a sandbox policy
+/// that also holds if the response is ever opened as a document. It is a
+/// `POST` so that no link or navigation can reach it.
+async fn runtime_source_download(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeDownloadRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    let download = runtime_source::download(&state, &call, &request).await?;
+    let disposition =
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", download.file_name))
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::Internal,
+                    "the download name is not a header value",
+                )
+            })?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(download.content_type),
+            ),
+            (header::CONTENT_DISPOSITION, disposition),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("sandbox; default-src 'none'"),
+            ),
+        ],
+        download.bytes,
+    )
+        .into_response())
 }
 
 async fn close_runtime_view(

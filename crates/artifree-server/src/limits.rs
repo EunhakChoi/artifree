@@ -40,6 +40,16 @@ impl Default for RequestLimits {
 }
 
 impl RequestLimits {
+    /// The budget for requests a runtime frame causes (decision 0032), kept
+    /// apart from the owner's so that a frame that floods the workspace
+    /// cannot use up the budget the owner's own requests, including revoking
+    /// the frame's grant, need: 60 at once, then 1200 per minute, 16 at a time.
+    pub const FRAME: Self = Self {
+        burst: 60,
+        per_minute: 1200,
+        concurrent: 16,
+    };
+
     /// Checks that every limit admits at least one request.
     ///
     /// # Errors

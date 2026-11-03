@@ -11,12 +11,14 @@ export interface Visibility {
 export const STALL_MS = 10_000;
 
 /** How the gate treats a request. */
-export type RequestKind = 'read' | 'stream' | 'write';
+export type RequestKind = 'read' | 'stream' | 'write' | 'frame';
 
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a
- * preview or runtime view, and reading runtime metadata. The feed is one
- * long request. Everything else, including closing a runtime view, writes.
+ * preview or runtime view. The feed is one long request. A runtime frame's
+ * calls (metadata, source, download), which the workspace sends on its
+ * behalf, are `frame` requests. Everything else, including closing a runtime
+ * view, writes.
  */
 export function requestKind(method: string, url: string): RequestKind {
   const { pathname } = new URL(url, 'http://gate.invalid');
@@ -26,11 +28,16 @@ export function requestKind(method: string, url: string): RequestKind {
   if (verb === 'POST' && pathname.endsWith('/previews')) return 'read';
   if (
     verb === 'POST' &&
-    /^\/v1\/artifacts\/[^/]+\/revisions\/\d+\/runtime-views(?:\/[^/]+\/\d+\/metadata)?$/.test(
+    /^\/v1\/artifacts\/[^/]+\/revisions\/\d+\/runtime-views$/.test(pathname)
+  )
+    return 'read';
+  if (
+    verb === 'POST' &&
+    /^\/v1\/artifacts\/[^/]+\/revisions\/\d+\/runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download))$/.test(
       pathname,
     )
   )
-    return 'read';
+    return 'frame';
   return 'write';
 }
 
@@ -50,6 +57,12 @@ interface Waiter {
  * - The stream is sent once no delay is pending; the caller decides when
  *   to open it.
  * - Writes are sent at once: the user started each one and sees its result.
+ * - A frame's calls are sent at once too, outside the one-read lane, and a
+ *   `429` that one earns holds back nobody else's reads: the server counts
+ *   them in a budget of their own (decision 0032), so a frame that floods
+ *   cannot slow the owner's requests, and the owner's requests cannot be held
+ *   by the frame's refusals. The workspace's own budget for them limits what
+ *   reaches the gate.
  *
  * Any `429` answer, whatever its body and whichever kind of request it
  * answered, delays every read for its `Retry-After`, at least one second,
@@ -82,6 +95,7 @@ export class RequestGate {
     const request = describe(input, init);
     const kind = requestKind(request.method, request.url);
     if (kind === 'write') return this.#observe(await this.#send(input, init));
+    if (kind === 'frame') return this.#send(input, init);
     if (kind === 'stream') {
       await this.#afterDelay(request.signal);
       return this.#observe(await this.#send(input, init));

@@ -1,7 +1,16 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
+import { DownloadPrompt } from './download-prompt';
+import { TokenBucket } from './frame-budget';
+import { FrameRpc } from './frame-rpc';
+import { OfferDesk } from './offer-desk';
+import { pageSaver } from './save-blob';
 
+// `allow-downloads` is the browser's own flag for a page that starts a
+// download itself. It is unrelated to the `source.download` capability, which
+// asks the workspace to offer a stored file and needs the user's confirmation
+// each time (decision 0032).
 const PREVIEW_SANDBOX =
   'allow-scripts allow-forms allow-modals allow-downloads';
 
@@ -19,7 +28,11 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Owns a single frame's initialization, message port and pending reads. */
+/**
+ * Owns a single frame's initialization, message port and pending calls. What
+ * the frame may ask is decided by `FrameRpc`, its budget and the offer desk
+ * (decision 0032); this component only wires them to the port.
+ */
 export function RuntimeFrame({
   client,
   view,
@@ -32,6 +45,7 @@ export function RuntimeFrame({
   const loads = useRef(0);
   const close = useRef<() => void>(() => undefined);
   const revokeTimer = useRef<number | undefined>(undefined);
+  const [desk] = useState(() => new OfferDesk());
 
   useLayoutEffect(() => {
     // React StrictMode replays setup/cleanup synchronously. Only a cleanup
@@ -39,59 +53,16 @@ export function RuntimeFrame({
     window.clearTimeout(revokeTimer.current);
     let active = true;
     let port: MessagePort | undefined;
-    const pending = new Set<AbortController>();
+    let rpc: FrameRpc | undefined;
     const stop = (): void => {
       if (!active) return;
       active = false;
       port?.close();
-      for (const controller of pending) controller.abort();
-      pending.clear();
+      rpc?.close();
+      desk.withdraw();
     };
     close.current = stop;
 
-    const respond = (channel: MessagePort, message: unknown): void => {
-      if (!active || performance.now() >= deadline || !record(message)) return;
-      const { id, type } = message;
-      if (
-        type !== 'metadata' ||
-        typeof id !== 'number' ||
-        !Number.isSafeInteger(id) ||
-        id < 1
-      )
-        return;
-      if (pending.size >= 64) {
-        channel.postMessage({ id, ok: false });
-        return;
-      }
-      const controller = new AbortController();
-      pending.add(controller);
-      void client
-        .runtimeMetadata(view, { signal: controller.signal })
-        .then(
-          (result) => {
-            if (!active || performance.now() >= deadline) return;
-            channel.postMessage({
-              id,
-              ok: true,
-              metadata: {
-                artifactId: result.artifact_id,
-                title: result.title,
-                currentRevision: result.current_revision,
-                metadataRevision: result.metadata_revision,
-              },
-            });
-          },
-          () => {
-            if (active && performance.now() < deadline)
-              channel.postMessage({ id, ok: false });
-          },
-        )
-        .finally(() => pending.delete(controller))
-        .catch((error: unknown) => {
-          console.error('The runtime message could not be delivered.', error);
-          stop();
-        });
-    };
     const connect = (event: MessageEvent<unknown>): void => {
       if (!record(event.data) || event.data.type !== 'artifree-runtime-connect')
         return;
@@ -114,8 +85,25 @@ export function RuntimeFrame({
         return;
       }
       port = candidate;
-      port.onmessage = (message: MessageEvent<unknown>) =>
-        respond(candidate, message.data);
+      const bucket = new TokenBucket(() => performance.now());
+      const served = new FrameRpc({
+        client,
+        view,
+        ask: (offer, signal) => desk.ask(offer, signal),
+        save: (bytes, fileName, type) => {
+          pageSaver.save(bytes, fileName, type);
+        },
+        take: () => bucket.take(),
+        now: () => performance.now(),
+        deadline,
+        send: (reply, transfer) => {
+          if (active) candidate.postMessage(reply, transfer);
+        },
+      });
+      rpc = served;
+      candidate.onmessage = (message: MessageEvent<unknown>) => {
+        if (active) served.handle(message.data);
+      };
     };
     window.addEventListener('message', connect);
     const expiry = window.setTimeout(
@@ -128,23 +116,26 @@ export function RuntimeFrame({
       stop();
       revokeTimer.current = window.setTimeout(onClose, 0);
     };
-  }, [client, view, deadline, onClose]);
+  }, [client, view, deadline, onClose, desk]);
 
   return (
-    <iframe
-      ref={frame}
-      title={title}
-      src={view.url}
-      sandbox={PREVIEW_SANDBOX}
-      referrerPolicy="no-referrer"
-      className={className}
-      onLoad={() => {
-        loads.current += 1;
-        if (view.enabled && loads.current > 1) {
-          close.current();
-          onClose();
-        }
-      }}
-    />
+    <>
+      <iframe
+        ref={frame}
+        title={title}
+        src={view.url}
+        sandbox={PREVIEW_SANDBOX}
+        referrerPolicy="no-referrer"
+        className={className}
+        onLoad={() => {
+          loads.current += 1;
+          if (view.enabled && loads.current > 1) {
+            close.current();
+            onClose();
+          }
+        }}
+      />
+      <DownloadPrompt desk={desk} />
+    </>
   );
 }

@@ -218,6 +218,7 @@ fn build_settings(
         preview_ttl: options.preview_ttl,
         frame_ancestors: options.frame_ancestors.clone(),
         limits: options.limits,
+        frame_limits: RequestLimits::FRAME,
         change_streams: options.change_streams,
         api_origin: options.api_origin.clone(),
         trusted_proxies: options.trusted_proxies.clone(),
