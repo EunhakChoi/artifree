@@ -316,7 +316,17 @@ checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge has no data capability** (it grants `metadata.read`, `source.read`, and
-`source.download`). Subscriptions and queries (R07) and
+`source.download`). R07 adds a member listing and a server-sent event stream
+over one path of that data ([0038](decisions/0038-data-query-and-subscriptions.md)):
+pages ordered by name bytes with an explicit `next_after`, a `snapshot` then
+`change` events that state the value after each write, and a retained window of
+the last 64 writes (256 KiB) per actor and artifact in process memory, so a
+resumed cursor replays without a gap or duplicate and anything older, or from
+before a restart, gets a `reset`. A write and the recording of its event share
+one lock per space; streams register where the change streams do and close when
+the user is disabled or the token revoked. Data versions and source revisions
+never share a name or a cursor form. The surface is HTTP and the TypeScript
+client; no frame, MCP tool, CLI command, or web screen uses it, and uploaded
 assets (R09) are not implemented.
 
 The roadmap separately covers artifact management, local/server deployment,

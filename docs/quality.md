@@ -340,6 +340,31 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the client and the CLI against a stand-in server. Each guard was checked by
   breaking it and watching a named test fail. These tests do not show roles,
   sharing, OAuth, or a web screen for users, because none exist.
+- Data queries and subscriptions (decision 0038): domain tests for the query
+  rules (every parameter's bounds, ordering by UTF-8 bytes including characters
+  outside the basic plane, paging, prefix and cursor, the 512 KiB value bound with
+  the first member always included, a path that is not an object), for the
+  data cursor (a change feed cursor and every non-canonical form are refused)
+  and for the projection of a write onto a watched path; unit tests of the
+  retained window (contiguity, trimming by count and bytes, an oversize write,
+  anchoring, eviction that spares a window with an open stream); and through the
+  real router: pages while writers run, snapshot then replay with no gap or
+  duplicate across a reconnect, a reset for a cursor past the window, ahead of
+  the data, from another database, or lost to a restart, a subscriber converging
+  on the state under concurrent writers, writes over MCP reaching a stream, the
+  same `404` for another user's artifact, the trash and a missing one, a
+  disabled user's or revoked token's streams ending without touching anyone
+  else's, the eight-stream limit and a closed stream freeing its place, and the
+  route-inventory test of decision 0036 extended to both routes. Node tests run
+  the client against a scripted network (a page that breaks any promise of the
+  contract, events checked field by field, reconnection from the last cursor,
+  abort, the reducer, and a member named `__proto__`) and against the real binary
+  with every page and event validated against the published schema, including a
+  crash and restart. Guards were checked by breaking them and watching a named
+  test fail (the pull request lists them). These tests do not show that a frame
+  can subscribe, delivery across a restart, several server processes, or any
+  load beyond the stated limits; no browser smoke covers them because no web
+  code uses them.
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,

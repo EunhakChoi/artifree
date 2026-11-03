@@ -141,7 +141,8 @@ restoring a revision does not change the data, and `artifact duplicate
 there is no history, so an overwrite cannot be undone, and a purge erases it.
 **A page running in a preview cannot read or write this data** (the runtime
 bridge has no data capability), it is not in a revision or an export, and the web
-workspace has no data view or subscriptions; poll `data get`.
+workspace has no data view. A client can page through a collection and follow
+its changes over HTTP (below); a page cannot.
 
 For development with live reloading, Vite is still available:
 
@@ -335,7 +336,7 @@ workspace, and the frame each check against the bytes they sent. A save moves
 the head, so the workspace shows the next revision in a new view that holds no
 grant: the user consents again for each save. Only the owner exists as a
 principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** data access from a
-preview, subscriptions, uploaded assets, replacing a view in place, deleting or
+preview (including a data subscription for a frame), uploaded assets, replacing a view in place, deleting or
 renaming files, several files in one save, a prompt for each save, roles (a
 viewer is not refused because none exists), and any claim that a preview cannot
 use the network. No MCP tool was added or changed.
@@ -354,7 +355,8 @@ late joiner never receives older events. Rooms are memory of one server process:
 a restart empties them, nothing is stored, and events have no delivery
 guarantee. **Not implemented:** roles and sharing (S02), a room
 capability for a sandboxed frame, a web or CLI surface, a push stream,
-subscriptions (R07), an outbox (R08), and any MCP tool.
+a data subscription for a frame (R07 serves HTTP only), an outbox (R08), and
+any MCP tool.
 
 ### Users (decision 0036)
 
@@ -372,6 +374,38 @@ already running finishes). **Not implemented:** roles, sharing and per-object
 grants (S02), OAuth or any external identity, passwords or login sessions, a
 web screen for users, user deletion, per-user storage quotas, and cleanup of
 content as a user (cleanup is administrator-only).
+
+### Data queries and subscriptions (decision 0038)
+
+`GET /v1/artifacts/{id}/data/members` lists the members of the object at a
+`path` in your own data: ordered by the UTF-8 bytes of the names, at most
+`limit` (1 to 100, 50 by default) per page, optionally only names with a
+`prefix`, as `names` or with their `values` (at most 512 KiB a page). A page
+repeats the query as parsed, reports its `data_version`, and gives `next_after`
+when more follow; pass it back as `after`. Pages are not pinned to one version
+(the space keeps no history): a member that exists throughout appears once, in
+order, and one added or removed meanwhile may not. `GET
+/v1/artifacts/{id}/data/events?path=` is a server-sent event stream: a
+`snapshot` of the value at the path, then a `change` after each write that
+touches it (the value afterwards, even for a merge patch, or `exists: false`), a
+`position` that keeps the cursor current across writes elsewhere in the space,
+and a `reset` when the server cannot continue a cursor. The event `id` is a data
+cursor (`d.<feed>.<version>`; the change feed's cursor is refused), and
+`Last-Event-ID` resumes with no gap or duplicate while the server still holds the
+writes after it: the last 64 writes or 256 KiB per actor and artifact, kept in
+process memory. A restart empties them, so a cursor from before a restart is
+reset unless nothing was written since. Everything sent is committed state;
+the server holds no pending write, and a client that queues writes (R08) keeps
+them apart from it. A caller may hold 8 open streams (`429` after that). A
+stream closes when its user is disabled or its token revoked; another user's
+artifact, one in the trash, or a purged one is the same `404` as a missing one.
+The TypeScript client has `listDataMembers`, `openData`, `followData` (it
+reconnects from the last cursor), and `applyDataEvent` (a reducer that rebuilds
+the value). **Not implemented:** a frame or runtime capability, a web screen,
+any MCP tool or CLI command, an outbox or pending writes (R08), a persisted
+window or replay across a restart, fan-out between server processes, value
+filters, sorting other than by name, aggregates, pinned pages, and an event
+rate limit of its own.
 
 ## Verification
 

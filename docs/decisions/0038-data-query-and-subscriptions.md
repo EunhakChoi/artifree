@@ -29,7 +29,7 @@ workspace does not use them.
 ### Query
 
 1. **One query form: list the members of an object.** `GET
-   /v1/artifacts/{id}/data/members` lists the members of the object at a path
+/v1/artifacts/{id}/data/members` lists the members of the object at a path
    (a collection) in the caller's own space. `get` of one path is the existing
    `GET data`. Parameters (all optional; an unknown or repeated parameter is
    `400`, a value that breaks a rule is `422 invalid_request`):
@@ -38,8 +38,9 @@ workspace does not use them.
      `[A-Za-z0-9_-]`.
    - `select`: `names` (the default) or `values`.
    - `limit`: 1 to 100 members, 50 by default.
-   - `after`: a member name, 1 to 256 bytes without control characters;
-     members strictly after it are listed.
+   - `after`: a member name, 1 to 256 bytes; members strictly after it are
+     listed. It is not limited to the path grammar: member names of a value are
+     any strings, and a name the grammar refuses can still be a cursor.
 2. **Order and cursor.** Members are ordered by the UTF-8 bytes of their
    names, ascending, and always so. The cursor is the last name of the
    previous page (`next_after`), not an opaque token and not a position in a
@@ -72,7 +73,7 @@ workspace does not use them.
 ### Source revisions and data versions
 
 6. **They are never mixed.** A data version is `data_version` and a position
-   in a data stream is a *data cursor*. Neither is named `revision`, and a data
+   in a data stream is a _data cursor_. Neither is named `revision`, and a data
    cursor has a different text form from a change feed cursor (`d.<feed>.<n>`
    against `<feed>.<n>`), so passing one where the other is wanted is a `400`,
    not a silent mismatch. No source revision appears in a data response, no
@@ -83,7 +84,7 @@ workspace does not use them.
 ### Subscription
 
 7. **Mechanism: server-sent events, as the change feed.** `GET
-   /v1/artifacts/{id}/data/events?path=` (only `path`; strict) streams the
+/v1/artifacts/{id}/data/events?path=` (only `path`; strict) streams the
    value at a path and every committed change to it. SSE is chosen for the
    reasons of 0006: delivery is one-directional, the bearer header is read with
    `fetch`, and `Last-Event-ID` resumes. Long polling was rejected: it needs a
@@ -92,7 +93,7 @@ workspace does not use them.
 8. **Events.** Each event's `id` is its data cursor, repeated as `cursor` in
    the data. All values are committed (decision 5).
    - `snapshot` opens a stream that has no `Last-Event-ID`: `{cursor,
-     data_version, path, exists, value?}`, the value at the path as of that
+data_version, path, exists, value?}`, the value at the path as of that
      version.
    - `change`: after the write at `data_version`, the value at `path` is
      `value`, or is gone (`exists: false`). Writes that do not touch the
@@ -106,10 +107,10 @@ workspace does not use them.
    - `reset`: the same data as `snapshot`. The cursor cannot be continued
      (decision 10). The client discards what it holds for the path and takes
      this value; later events follow it.
-   A `change` carries the state after a write, not the write: for a merge
-   patch it is the merged value at the patch's path, so a client needs no
-   merge algorithm. Applying `snapshot` or `reset`, then each `change` in
-   order, gives the value that `GET data` reports at the same `data_version`.
+     A `change` carries the state after a write, not the write: for a merge
+     patch it is the merged value at the patch's path, so a client needs no
+     merge algorithm. Applying `snapshot` or `reset`, then each `change` in
+     order, gives the value that `GET data` reports at the same `data_version`.
 9. **Snapshot, then replay.** A stream with no `Last-Event-ID` sends `snapshot`
    then follows. A stream with a data cursor continues after its version:
    it replays the `change` events of the writes after it, in version order,

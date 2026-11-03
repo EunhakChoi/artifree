@@ -203,7 +203,9 @@ WITHOUT ROWID`. Fixtures of versions 1 to 8 upgrade, a failed step rolls
     new.
 14. **Not in the change feed.** A data change adds no change kind to
     `/v1/changes`, and the web reducer is unchanged. A client polls `GET data`
-    and compares `data_version`. Subscriptions belong to R07. Data is not in a
+    and compares `data_version`. Subscriptions belong to R07 (added by
+    [0038](0038-data-query-and-subscriptions.md), which keeps data out of the
+    change feed). Data is not in a
     revision, an export (A07), the `package`, or the content-cleanup
     references (0029): it holds no content digest.
 15. **Surface.** Contract version 0.9.0: `AppData`, `JsonValue`, `ReadDataQuery`,
@@ -236,7 +238,8 @@ WITHOUT ROWID`. Fixtures of versions 1 to 8 upgrade, a failed step rolls
 
 - **Frames and previews cannot read or write data.** There is no runtime
   bridge, no capability, and no data panel in the web workspace.
-- No subscription or change notification (R07), no query (R07), no uploaded
+- No subscription or change notification, no query (R07; added to HTTP and
+  the client by [0038](0038-data-query-and-subscriptions.md)), no uploaded
   assets (R09), no sharing between actors, and no per-collection or array
   operations. A path never enters an array, so an app that needs to change one
   element sets the array whole or keeps its items as members.
