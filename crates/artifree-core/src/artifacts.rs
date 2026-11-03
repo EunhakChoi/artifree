@@ -12,6 +12,7 @@
 //! policy. A duplicate copies files, and the data space only when asked;
 //! artifacts have no uploaded assets yet. Publishing is not implemented.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use artifree_domain::AppDataVersion;
@@ -23,9 +24,10 @@ use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePat
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
-    CommitReceipt, ContentSetDigest, CopySource, MetadataReceipt, MetadataUpdate, NewArtifact,
-    PurgeReceipt, PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit,
-    RevisionRecord, StoreError, UnreferencedContent,
+    CommitReceipt, ConditionalCommit, ContentSetDigest, CopySource, Delivery, FileEdit, FileEntry,
+    FileExpectation, FileMismatch, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
+    PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
+    UnreferencedContent,
 };
 use sha2::{Digest, Sha256};
 
@@ -71,6 +73,20 @@ pub enum ArtifactError {
         /// The current revision.
         current: SourceRevision,
     },
+    /// An edited file is not in the state its edit expects; nothing was
+    /// written (decision 0035). The strict [`Self::RevisionConflict`] is a
+    /// different answer to a different command.
+    FilesChanged {
+        /// The current revision.
+        current: SourceRevision,
+        /// The first mismatches in path order, a bounded number of them.
+        files: Vec<FileMismatch>,
+        /// How many edits mismatch, listed or not.
+        total: usize,
+    },
+    /// The edit committed but the stored revision is not what was asked for.
+    /// The revision exists; the history shows it (decision 0035).
+    EditNotAsRequested,
     /// The metadata change was prepared against an older metadata revision;
     /// nothing was written.
     MetadataConflict {
@@ -123,6 +139,14 @@ impl fmt::Display for ArtifactError {
                 "artifact changed; current revision is {}",
                 current.0
             ),
+            Self::FilesChanged { current, total, .. } => write!(
+                formatter,
+                "{total} edited files are not as expected; current revision is {}",
+                current.0
+            ),
+            Self::EditNotAsRequested => formatter.write_str(
+                "the edit was saved but the stored revision is not what was asked for; check the history",
+            ),
             Self::MetadataConflict { current } => write!(
                 formatter,
                 "artifact metadata changed; current metadata revision is {}",
@@ -161,6 +185,16 @@ impl From<StoreError> for ArtifactError {
         match error {
             StoreError::NotFound => Self::NotFound(Missing::Artifact),
             StoreError::RevisionConflict { current } => Self::RevisionConflict { current },
+            StoreError::FilesChanged {
+                current,
+                mismatches,
+                total,
+            } => Self::FilesChanged {
+                current,
+                files: mismatches,
+                total,
+            },
+            StoreError::Package(error) => Self::InvalidPackage(error),
             StoreError::MetadataConflict { current } => Self::MetadataConflict { current },
             StoreError::NotInTrash => Self::NotInTrash,
             StoreError::ContentChanged => Self::ContentChanged,
@@ -338,6 +372,98 @@ impl<S: ArtifactStore> ArtifactService<S> {
             package: &package,
         })?;
         Ok(receipt)
+    }
+
+    /// Commits `edits` as the next revision, each applied to the file of the
+    /// **current** revision that its expectation describes, and nothing
+    /// otherwise (decision 0035). The strict commands, [`Self::save`] and
+    /// [`Self::restore`], are not changed by this one.
+    ///
+    /// `base` is the revision the caller read the files from. It is not a
+    /// condition: a head that moved since is no conflict by itself, and the
+    /// files that no edit names are carried over from the current revision
+    /// even if they changed meanwhile. It must be a revision the artifact has,
+    /// and it is part of the request's identity. An edit applies only if its
+    /// own file is as expected, and one that is not rejects all of them.
+    ///
+    /// Retrying with the same key and content returns the original receipt
+    /// even after later revisions were committed. A rejected request does not
+    /// use its key. After a new commit, the stored revision is read back and
+    /// compared with the edits.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or a
+    /// `base` it has no revision for, [`ArtifactError::InvalidPackage`] for no
+    /// edit, a path edited twice, a result that is no valid package, or one
+    /// that equals the current revision, [`ArtifactError::FilesChanged`],
+    /// [`ArtifactError::RequestKeyReused`],
+    /// [`ArtifactError::EditNotAsRequested`], or
+    /// [`ArtifactError::Unavailable`].
+    pub fn edit_files(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        base: SourceRevision,
+        edits: &[FileEdit],
+    ) -> Result<CommitReceipt, ArtifactError> {
+        let record = self.owned(actor, id)?;
+        let mut hasher = Fingerprint::new("edit_files");
+        hasher.field(id.as_str().as_bytes());
+        hasher.field(&base.0.to_be_bytes());
+        // Paths are distinct, so path order is total: a retry that lists the
+        // same edits in another order is the same request.
+        let mut ordered: Vec<&FileEdit> = edits.iter().collect();
+        ordered.sort_by(|left, right| left.change.path().cmp(right.change.path()));
+        for edit in ordered {
+            hasher.edit(edit);
+        }
+        let fingerprint = hasher.finish();
+        checked(&record, edits_are_possible(&record, base, edits))?;
+        let receipt = self.store.commit_edits(ConditionalCommit {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint,
+            },
+            artifact: id,
+            edits,
+        })?;
+        if receipt.delivery == Delivery::Committed {
+            self.read_back(id, &receipt.revision, edits)?;
+        }
+        Ok(receipt)
+    }
+
+    /// Reads the revision `committed` created and compares it with `edits`:
+    /// the previous revision's files, changed only as the edits say, and the
+    /// bytes of every file put.
+    fn read_back(
+        &self,
+        id: &ArtifactId,
+        committed: &RevisionRecord,
+        edits: &[FileEdit],
+    ) -> Result<(), ArtifactError> {
+        let missing = || ArtifactError::NotFound(Missing::Artifact);
+        let previous = SourceRevision(committed.revision.0.saturating_sub(1));
+        let after = self
+            .store
+            .revision(id, committed.revision)?
+            .ok_or_else(missing)?;
+        let before = self.store.revision(id, previous)?.ok_or_else(missing)?;
+        if !listing_is_as_edited(&before.files, &after.files, edits) {
+            return Err(ArtifactError::EditNotAsRequested);
+        }
+        for edit in edits {
+            if let FileChange::Put { path, content } = &edit.change {
+                let stored = self.store.revision_file(id, committed.revision, path)?;
+                if stored.as_deref() != Some(content.as_slice()) {
+                    return Err(ArtifactError::EditNotAsRequested);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Creates an artifact owned by `actor` whose revision 1 has the files
@@ -836,6 +962,56 @@ impl<S: ArtifactStore> ArtifactService<S> {
     }
 }
 
+/// The checks of an edit request that the store cannot make cheaper or more
+/// precisely: it names an edit, no path twice, and a revision the artifact
+/// has. Whether the files are as expected is the store's, with the commit.
+fn edits_are_possible(
+    record: &ArtifactRecord,
+    base: SourceRevision,
+    edits: &[FileEdit],
+) -> Result<(), ArtifactError> {
+    if edits.is_empty() {
+        return Err(ArtifactError::InvalidPackage(PackageError::EmptyChange));
+    }
+    let mut seen = BTreeSet::new();
+    for edit in edits {
+        if !seen.insert(edit.change.path()) {
+            return Err(ArtifactError::InvalidPackage(PackageError::DuplicatePath(
+                edit.change.path().clone(),
+            )));
+        }
+    }
+    if base.0 == 0 || base > record.current_revision {
+        return Err(ArtifactError::NotFound(Missing::Revision));
+    }
+    Ok(())
+}
+
+/// Whether `after` lists exactly the files of `before` with `edits` applied:
+/// the same paths, and for each its size and digest.
+fn listing_is_as_edited(before: &[FileEntry], after: &[FileEntry], edits: &[FileEdit]) -> bool {
+    let mut expected: BTreeMap<&PackagePath, (u64, [u8; 32])> = before
+        .iter()
+        .map(|entry| (&entry.path, (entry.size, entry.sha256)))
+        .collect();
+    for edit in edits {
+        match &edit.change {
+            FileChange::Put { path, content } => {
+                let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
+                expected.insert(path, (size, Sha256::digest(content).into()));
+            }
+            FileChange::Delete { path } => {
+                expected.remove(path);
+            }
+        }
+    }
+    let listed: BTreeMap<&PackagePath, (u64, [u8; 32])> = after
+        .iter()
+        .map(|entry| (&entry.path, (entry.size, entry.sha256)))
+        .collect();
+    listed == expected && after.len() == listed.len()
+}
+
 /// Refuses a base that cannot be current: revision 0 never exists, and a
 /// future one is not current either. Whether a past one still is, the store
 /// decides with the commit.
@@ -881,6 +1057,23 @@ impl Fingerprint {
         self.0.update(bytes);
     }
 
+    fn edit(&mut self, edit: &FileEdit) {
+        match &edit.change {
+            FileChange::Put { path, content } => self.put(path, content),
+            FileChange::Delete { path } => {
+                self.field(b"delete");
+                self.field(path.as_str().as_bytes());
+            }
+        }
+        match edit.expect {
+            FileExpectation::Absent => self.field(b"absent"),
+            FileExpectation::Sha256(digest) => {
+                self.field(b"sha256");
+                self.field(&digest);
+            }
+        }
+    }
+
     fn put(&mut self, path: &PackagePath, content: &[u8]) {
         self.field(b"put");
         self.field(path.as_str().as_bytes());
@@ -916,6 +1109,9 @@ mod tests {
             Err(StoreError::Unavailable("unused".into()))
         }
         fn commit_revision(&self, _: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn commit_edits(&self, _: ConditionalCommit<'_>) -> Result<CommitReceipt, StoreError> {
             Err(StoreError::Unavailable("unused".into()))
         }
         fn update_metadata(&self, _: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
@@ -1017,6 +1213,172 @@ mod tests {
             Some(ArtifactError::NotFound(Missing::Artifact))
         );
         Ok(())
+    }
+
+    fn path(name: &str) -> PackagePath {
+        let Ok(path) = name.parse() else {
+            panic!("{name} is not a package path");
+        };
+        path
+    }
+
+    fn listed(name: &str, content: &[u8]) -> FileEntry {
+        FileEntry {
+            path: path(name),
+            size: content.len() as u64,
+            sha256: Sha256::digest(content).into(),
+        }
+    }
+
+    fn put_edit(name: &str, content: &[u8], expect: FileExpectation) -> FileEdit {
+        FileEdit {
+            change: FileChange::Put {
+                path: path(name),
+                content: content.to_vec(),
+            },
+            expect,
+        }
+    }
+
+    #[test]
+    fn the_listing_read_back_is_the_previous_one_with_only_the_edits_applied() {
+        let before = [listed("a.txt", b"a"), listed("b.txt", b"b")];
+        let edits = [
+            put_edit("a.txt", b"new", FileExpectation::Sha256([0; 32])),
+            put_edit("c.txt", b"c", FileExpectation::Absent),
+            FileEdit {
+                change: FileChange::Delete {
+                    path: path("b.txt"),
+                },
+                expect: FileExpectation::Sha256([0; 32]),
+            },
+        ];
+        let right = [listed("a.txt", b"new"), listed("c.txt", b"c")];
+        assert!(listing_is_as_edited(&before, &right, &edits));
+
+        let wrong: [(&str, [FileEntry; 2]); 4] = [
+            (
+                "a stale digest",
+                [listed("a.txt", b"a"), listed("c.txt", b"c")],
+            ),
+            (
+                "a size off by one",
+                [
+                    FileEntry {
+                        size: 4,
+                        ..listed("a.txt", b"new")
+                    },
+                    listed("c.txt", b"c"),
+                ],
+            ),
+            (
+                "the deleted file kept",
+                [listed("a.txt", b"new"), listed("b.txt", b"b")],
+            ),
+            (
+                "another file's digest",
+                [listed("a.txt", b"new"), listed("c.txt", b"x")],
+            ),
+        ];
+        for (what, after) in wrong {
+            assert!(!listing_is_as_edited(&before, &after, &edits), "{what}");
+        }
+        let extra = [
+            listed("a.txt", b"new"),
+            listed("c.txt", b"c"),
+            listed("z.txt", b"z"),
+        ];
+        assert!(
+            !listing_is_as_edited(&before, &extra, &edits),
+            "a file nobody asked for"
+        );
+        let doubled = [
+            listed("a.txt", b"new"),
+            listed("c.txt", b"c"),
+            listed("c.txt", b"c"),
+        ];
+        assert!(
+            !listing_is_as_edited(&before, &doubled, &edits),
+            "a path listed twice"
+        );
+    }
+
+    #[test]
+    fn an_edit_request_names_an_edit_no_path_twice_and_a_revision_the_artifact_has()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let record = ArtifactRecord {
+            id: "art_0123456789abcdef0123456789abcdef".parse()?,
+            owner: "owner".parse()?,
+            kind: ArtifactKind::App,
+            title: "Demo".parse()?,
+            pinned: false,
+            current_revision: SourceRevision(3),
+            metadata_revision: MetadataRevision(1),
+            deleted_at: None,
+            created_at: artifree_domain::identity::UnixMillis(1),
+            updated_at: artifree_domain::identity::UnixMillis(1),
+        };
+        let one = put_edit("a.txt", b"x", FileExpectation::Absent);
+        let other = put_edit("b.txt", b"x", FileExpectation::Absent);
+        let check =
+            |base, edits: &[FileEdit]| edits_are_possible(&record, SourceRevision(base), edits);
+
+        assert_eq!(check(1, &[one.clone(), other.clone()]), Ok(()));
+        assert_eq!(
+            check(3, std::slice::from_ref(&one)),
+            Ok(()),
+            "the current revision"
+        );
+        assert_eq!(
+            check(1, &[]),
+            Err(ArtifactError::InvalidPackage(PackageError::EmptyChange))
+        );
+        assert_eq!(
+            check(1, &[one.clone(), other, one.clone()]),
+            Err(ArtifactError::InvalidPackage(PackageError::DuplicatePath(
+                "a.txt".parse()?
+            )))
+        );
+        for base in [0, 4] {
+            assert_eq!(
+                check(base, std::slice::from_ref(&one)),
+                Err(ArtifactError::NotFound(Missing::Revision)),
+                "base {base}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_fingerprint_of_an_edit_covers_its_change_and_its_condition() {
+        let fingerprint = |edits: &[FileEdit]| {
+            let mut hasher = Fingerprint::new("edit_files");
+            for edit in edits {
+                hasher.edit(edit);
+            }
+            hasher.finish()
+        };
+        let absent = put_edit("a.txt", b"x", FileExpectation::Absent);
+        let expects = put_edit("a.txt", b"x", FileExpectation::Sha256([1; 32]));
+        let other_digest = put_edit("a.txt", b"x", FileExpectation::Sha256([2; 32]));
+        let other_bytes = put_edit("a.txt", b"y", FileExpectation::Absent);
+        let delete = FileEdit {
+            change: FileChange::Delete {
+                path: path("a.txt"),
+            },
+            expect: FileExpectation::Sha256([1; 32]),
+        };
+        let all = [absent, expects, other_digest, other_bytes, delete];
+        for (left, first) in all.iter().enumerate() {
+            for (right, second) in all.iter().enumerate() {
+                assert_eq!(
+                    fingerprint(std::slice::from_ref(first))
+                        == fingerprint(std::slice::from_ref(second)),
+                    left == right,
+                    "edits {left} and {right}"
+                );
+            }
+        }
     }
 
     #[test]

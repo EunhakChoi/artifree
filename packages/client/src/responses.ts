@@ -82,6 +82,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   not_found: true,
   runtime_session_expired: true,
   revision_conflict: true,
+  file_conflict: true,
   metadata_conflict: true,
   not_in_trash: true,
   job_ended: true,

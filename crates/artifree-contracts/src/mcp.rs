@@ -19,8 +19,8 @@ use serde_json::Value;
 use crate::api::{
     AppData, Artifact, ArtifactList, CancelJobResponse, CommitResponse, ContentEncoding,
     DataWriteResponse, DuplicateArtifactResponse, EnqueueJobResponse, ErrorResponse, FileChange,
-    FileUpload, Handoff, HandoffState, Job, JobKind, JobList, ListArtifactsQuery, Preview,
-    Revision, RevisionList, UpdateArtifactResponse,
+    FileEdit, FileUpload, Handoff, HandoffState, Job, JobKind, JobList, ListArtifactsQuery,
+    Preview, Revision, RevisionList, UpdateArtifactResponse,
 };
 
 /// Names one artifact.
@@ -86,6 +86,25 @@ pub struct SaveRevisionArguments {
     /// Changes applied to the base revision; unchanged files carry over. At
     /// most 512 changes, each to a different path.
     pub changes: Vec<FileChange>,
+    /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
+    /// new value for each intended change and resend it unchanged to retry.
+    pub idempotency_key: String,
+}
+
+/// Arguments of `edit_files`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditFilesArguments {
+    /// Artifact identifier.
+    pub artifact_id: String,
+    /// The revision the expected digests were read from. It is not a
+    /// condition: files that no edit names may have changed since. It must
+    /// be a revision the artifact has.
+    pub base_revision: u64,
+    /// At least one edit and at most 512, each to a different path. Every edit
+    /// carries the condition on its own file in the current revision.
+    #[schemars(length(max = 512))]
+    pub edits: Vec<FileEdit>,
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
@@ -498,7 +517,9 @@ create or save carries an idempotency_key. If a call times out or its result \
 is lost, resend the identical call with the same key: it returns the original \
 result with replayed true instead of committing twice. Use a new key for a \
 different change. restore_revision commits an earlier revision's files as the \
-next revision under the same base_revision and key rules. duplicate_artifact \
+next revision under the same base_revision and key rules. edit_files changes some files even if \
+the artifact moved on, when each edited file still has the sha256 you read (file_conflict otherwise, \
+nothing written); it never merges. duplicate_artifact \
 creates a new artifact from one revision's files, with its own history; it \
 needs no base_revision but carries a key like a create. update_artifact renames, pins, deletes, \
 or recovers an artifact without a new revision; it names base_metadata_revision and fails with \
@@ -744,7 +765,7 @@ fn data_tools() -> [ToolDefinition; 4] {
 }
 
 /// The tools that commit, after the two that read artifacts.
-fn commit_tools() -> [ToolDefinition; 5] {
+fn commit_tools() -> [ToolDefinition; 6] {
     [
         tool::<CreateArtifactArguments, CommitResponse>(
             "create_artifact",
@@ -767,6 +788,24 @@ fn commit_tools() -> [ToolDefinition; 5] {
                  revisions are kept. The save is all or nothing and succeeds only if \
                  base_revision is still current; otherwise it fails with revision_conflict and \
                  the current revision. {SIZE_RULE} {KEY_RULE}"
+            ),
+            ToolEffect::Commit,
+        ),
+        tool::<EditFilesArguments, CommitResponse>(
+            "edit_files",
+            "Edit files",
+            format!(
+                "Commit changes to some files as the next revision, even if the artifact moved \
+                 on since base_revision. Each edit puts a file's complete content or deletes a \
+                 file, and carries expect: the SHA-256 (lowercase hex, from get_revision or \
+                 list_revisions) the file has now, or absent for a file that must not exist yet \
+                 (put only). Files no edit names carry over as they are now. The edit is all or \
+                 nothing: if any expect does not hold in the current revision it fails with \
+                 file_conflict, the current revision, and the files that differ with their \
+                 current sha256 (null when missing), and nothing is written. It is not a \
+                 merge: a file is replaced whole, never combined. save_revision keeps its \
+                 stricter rule. Editing a file to the bytes it has fails with invalid_request. \
+                 {SIZE_RULE} {KEY_RULE}"
             ),
             ToolEffect::Commit,
         ),

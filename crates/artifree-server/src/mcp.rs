@@ -15,18 +15,18 @@ use std::sync::Arc;
 use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
     CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest, DeleteDataRequest,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, EnqueueJobRequest, EnqueueJobResponse,
-    ErrorResponse, JsonValue, ListArtifactsQuery, ListJobsQuery, RestoreRevisionRequest,
-    SaveRevisionRequest, SetDataRequest, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorResponse, JsonValue, ListArtifactsQuery, ListJobsQuery,
+    RestoreRevisionRequest, SaveRevisionRequest, SetDataRequest, UpdateArtifactRequest,
+    UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, CancelJobArguments,
-    CreateArtifactArguments, DeleteDataArguments, DuplicateArtifactArguments, EnqueueJobArguments,
-    FileArguments, FileContent, GetDataArguments, JobArguments, ListJobsArguments,
-    PollHandoffArguments, RegisterHandoffSessionArguments, RestoreRevisionArguments,
-    RevisionArguments, SaveRevisionArguments, SetDataArguments, ToolDefinition,
-    UpdateArtifactArguments, UpdateDataArguments,
+    CreateArtifactArguments, DeleteDataArguments, DuplicateArtifactArguments, EditFilesArguments,
+    EnqueueJobArguments, FileArguments, FileContent, GetDataArguments, JobArguments,
+    ListJobsArguments, PollHandoffArguments, RegisterHandoffSessionArguments,
+    RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments, SetDataArguments,
+    ToolDefinition, UpdateArtifactArguments, UpdateDataArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
@@ -216,6 +216,7 @@ async fn dispatch(
         }
         "create_artifact" => json(create_artifact(state, actor, arguments)).await,
         "save_revision" => json(save_revision(state, actor, arguments)).await,
+        "edit_files" => json(edit_files(state, actor, arguments)).await,
         "restore_revision" => json(restore_revision(state, actor, arguments)).await,
         "duplicate_artifact" => json(duplicate_artifact(state, actor, arguments)).await,
         "update_artifact" => json(update_artifact(state, actor, arguments)).await,
@@ -469,6 +470,25 @@ async fn save_revision(
     operations::save(state, actor, key, &artifact_id, request).await
 }
 
+async fn edit_files(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<CommitResponse, ApiError> {
+    let EditFilesArguments {
+        artifact_id,
+        base_revision,
+        edits,
+        idempotency_key,
+    } = parse(arguments)?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = EditFilesRequest {
+        base_revision,
+        edits,
+    };
+    operations::edit_files(state, actor, key, &artifact_id, request).await
+}
+
 async fn enqueue_job(
     state: &AppState,
     actor: ActorId,
@@ -609,7 +629,7 @@ async fn read_file(
 /// The error tool result: the HTTP error body with `isError: true`.
 fn failure(error: &ApiError) -> CallToolResult {
     let body = ErrorResponse {
-        error: error.body.clone(),
+        error: (*error.body).clone(),
     };
     match serde_json::to_value(body) {
         Ok(value) => CallToolResult::structured_error(value),

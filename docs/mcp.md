@@ -85,6 +85,7 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 | `get_artifact`             | `artifact_id`                                                                                           | artifact with `current_revision`           |
 | `create_artifact`          | `title`, `files`, `idempotency_key`                                                                     | `{ artifact, revision, replayed }`         |
 | `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                            | `{ artifact, revision, replayed }`         |
+| `edit_files`               | `artifact_id`, `base_revision`, `edits` (each with `expect`), `idempotency_key`                         | `{ artifact, revision, replayed }`         |
 | `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                           | `{ artifact, revision, replayed }`         |
 | `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, `idempotency_key`                    | `{ artifact, revision, copied, replayed }` |
 | `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
@@ -133,6 +134,22 @@ owner's access token may purge or clean up (decision [0029](decisions/0029-reten
 and `content_conflict` error codes of the shared error schema are therefore
 never returned over MCP, and
 a purged artifact answers every MCP call as an unknown one (`not_found`).
+`edit_files` changes some files even if the artifact moved on since
+`base_revision`, the revision you read (decision
+[0035](decisions/0035-per-file-conditional-edit.md)). An edit is a change
+(`put` with its content, or `delete`) plus `expect`: the lowercase SHA-256 the
+file has now, as `get_revision` lists it, or `absent` for a put of a file that
+must not exist (a delete takes a digest only). Each `expect` is judged against
+the file in the **current** revision, not in `base_revision`; files no edit
+names carry over as they are now. If any one does not hold, nothing is written
+and the call fails with `file_conflict`, `current_revision`, and
+`conflicting_files` (at most 32, in path order, each with its `path` and
+`current_sha256`, which is `null` when the file is gone) with
+`conflicting_files_total`; read those files again and edit again. It never
+merges: a file is replaced whole. `save_revision` is unchanged and still fails
+with `revision_conflict` whenever the head moved. The same key and edits
+replay the first result, also after the head moved; a rejected call does not
+use its key. Editing a file to the bytes it has fails with `invalid_request`.
 `restore_revision` commits an earlier revision's files, byte for byte, as the
 next revision under the same `base_revision` and key rules as a save; it
 changes no title or pin. Each file in a manifest carries `sha256`, so two

@@ -3,12 +3,14 @@ import { parseArgs } from 'node:util';
 import {
   ArtifreeApiError,
   ArtifreeClient,
+  editFiles,
   encodeFile,
   newIdempotencyKey,
 } from '@artifree/client';
 import type {
   Artifact,
   FileChange,
+  FileEdit,
   ListArtifactsQuery,
   UpdateArtifactRequest,
 } from '@artifree/contracts';
@@ -31,6 +33,8 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact create --title <title> (--dir <dir> | --file <path>...)
   artifree artifact save <id> --base <revision>
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
+  artifree artifact edit <id> --base <revision>
+      ([--put <package-path>=<local-path>]... [--delete <package-path>]...)
   artifree artifact restore <id> <revision> --base <revision>
   artifree artifact duplicate <id> <revision> [--title <title>] [--copy-data]
   artifree artifact rename <id> <title> --base-metadata <n>
@@ -65,6 +69,14 @@ was recovered and deleted again since. It needs the owner's access token: an
 issued agent token is refused with 403 forbidden. A retry with the same
 --idempotency-key returns the original result; every other request that named
 the artifact is then not_found. Copies made from it are not affected.
+edit changes some files even if the artifact moved on since --base, which is
+the revision you read, not a condition: each --put or --delete applies only if
+that file in the current revision is exactly as it was in --base (a --put of
+a path --base lacks needs the path to be absent now). If any file is not, the
+whole edit is refused with error[file_conflict], the current revision, and one
+conflict line per file (path and its current SHA-256, or absent) on stderr;
+nothing is written. Files you name nothing for carry over as they are now. It
+never merges: a file is replaced whole. save keeps its stricter rule.
 restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
@@ -81,7 +93,7 @@ bytes from --offset (default 0), or to the end of the file without --length.
 A range that starts at or past the end of the file is refused. history lists
 each file's size and SHA-256.
 
-create, save, restore, duplicate, rename, pin, unpin, delete, recover, and
+create, save, edit, restore, duplicate, rename, pin, unpin, delete, recover, and
 purge accept --idempotency-key <key>. Without it a new key is
 generated and reported on stderr if the outcome is unknown; retry with that key
 to get the original result instead of a duplicate. save --dir replaces the
@@ -159,6 +171,8 @@ export async function runArtifact(args: string[]): Promise<void> {
       return create(rest);
     case 'save':
       return save(rest);
+    case 'edit':
+      return edit(rest);
     case 'restore':
       return restore(rest);
     case 'duplicate':
@@ -481,6 +495,65 @@ async function save(args: string[]): Promise<void> {
         { base_revision: base, changes },
         { idempotencyKey },
       ),
+  );
+  print(result);
+}
+
+async function edit(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      ...connectionOptions,
+      base: { type: 'string' },
+      put: { type: 'string', multiple: true },
+      delete: { type: 'string', multiple: true },
+      'idempotency-key': { type: 'string' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = ''] = single(positionals, ['id']);
+  if (values.base === undefined)
+    throw new UsageError(
+      'edit requires --base <revision>, the revision you read the files from.',
+    );
+  const base = positiveNumber(values.base, '--base');
+  if (values.put === undefined && values.delete === undefined)
+    throw new UsageError('edit requires at least one --put or --delete.');
+  const client = await connect(values);
+  const baseRevision = (await client.listRevisions(id)).find(
+    (item) => item.revision === base,
+  );
+  if (baseRevision === undefined)
+    throw new ArtifreeApiError(`Revision ${base} does not exist.`, {
+      status: 0,
+      code: 'not_found',
+    });
+  // Each file must be as it was in the revision the caller read.
+  const digests = new Map(
+    baseRevision.files.map((file) => [file.path, file.sha256]),
+  );
+  const edits: FileEdit[] = [];
+  for (const value of values.put ?? []) {
+    const [path, location] = splitPut(value);
+    edits.push({
+      op: 'put',
+      ...encodeFile(path, await readRegularFile(location)),
+      expect: digests.get(path) ?? 'absent',
+    });
+  }
+  for (const path of values.delete ?? []) {
+    const expect = digests.get(path);
+    if (expect === undefined)
+      throw new UsageError(
+        `--delete ${path}: revision ${base} has no such file.`,
+      );
+    edits.push({ op: 'delete', path, expect });
+  }
+  const result = await mutate(
+    values['idempotency-key'] ?? newIdempotencyKey(),
+    (idempotencyKey) =>
+      editFiles(client, id, { base_revision: base, edits }, { idempotencyKey }),
   );
   print(result);
 }

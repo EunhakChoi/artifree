@@ -165,6 +165,21 @@ fn put_index(base: u64, html: &str) -> Value {
     })
 }
 
+fn edits_of(id: &str) -> String {
+    format!("/v1/artifacts/{id}/edits")
+}
+
+/// An edit that puts `content` at `path`, expecting `expect` there.
+fn put_edit(path: &str, content: &str, expect: &str) -> Value {
+    json!({
+        "op": "put", "path": path, "encoding": "utf8", "content": content, "expect": expect
+    })
+}
+
+fn edit_body(base: u64, edits: &[Value]) -> Value {
+    json!({ "base_revision": base, "edits": edits })
+}
+
 fn error_code(reply: &Reply) -> String {
     reply
         .json()
@@ -427,6 +442,430 @@ async fn stale_base_revision_conflicts_with_current_revision() -> TestResult {
         .await?
         .json()?;
     assert_eq!(artifact["current_revision"], 2);
+    Ok(())
+}
+
+/// The digest the manifest of `revision` states for `path`.
+async fn digest_in(
+    harness: &Harness,
+    id: &str,
+    revision: u64,
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let manifest = harness
+        .send(get(&format!("/v1/artifacts/{id}/revisions/{revision}"))?)
+        .await?
+        .json()?;
+    manifest["files"]
+        .as_array()
+        .and_then(|files| files.iter().find(|file| file["path"] == path))
+        .and_then(|file| file["sha256"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("no {path} in revision {revision}").into())
+}
+
+async fn file_text(
+    harness: &Harness,
+    id: &str,
+    revision: u64,
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let reply = harness
+        .send(get(&format!(
+            "/v1/artifacts/{id}/revisions/{revision}/files/{path}"
+        ))?)
+        .await?;
+    assert_eq!(reply.status, StatusCode::OK, "{path}@{revision}");
+    Ok(String::from_utf8(reply.body)?)
+}
+
+async fn revision_total(harness: &Harness, id: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let history = harness
+        .send(get(&format!("/v1/artifacts/{id}/revisions"))?)
+        .await?
+        .json()?;
+    Ok(history["revisions"].as_array().ok_or("revisions")?.len())
+}
+
+#[tokio::test]
+async fn an_edit_applies_where_the_strict_save_of_a_stale_base_conflicts() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let saved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    // A caller that read revision 1 changes a file revision 2 did not touch.
+    let logo = digest_in(&harness, &id, 1, "assets/logo.png").await?;
+    let change =
+        json!({ "op": "put", "path": "assets/logo.png", "encoding": "utf8", "content": "new" });
+
+    let strict = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-2"),
+            &json!({ "base_revision": 1, "changes": [change] }),
+        )?)
+        .await?;
+    assert_eq!(strict.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&strict), "revision_conflict");
+    assert_eq!(strict.json()?["error"]["current_revision"], 2);
+
+    let edited = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &edit_body(1, &[put_edit("assets/logo.png", "new", &logo)]),
+        )?)
+        .await?;
+    assert_eq!(
+        edited.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&edited)
+    );
+    assert_eq!(
+        edited.header(header::LOCATION),
+        format!("/v1/artifacts/{id}/revisions/3")
+    );
+    let body = edited.json()?;
+    assert_eq!(
+        (&body["revision"]["revision"], &body["replayed"]),
+        (&json!(3), &json!(false))
+    );
+    assert_eq!(
+        file_text(&harness, &id, 3, "index.html").await?,
+        "<h1>v2</h1>"
+    );
+    assert_eq!(file_text(&harness, &id, 3, "assets/logo.png").await?, "new");
+    assert_eq!(
+        digest_in(&harness, &id, 3, "index.html").await?,
+        digest_in(&harness, &id, 2, "index.html").await?,
+        "the file the edit did not name is revision 2's, not revision 1's"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_conflicting_edit_names_every_failed_file_and_writes_nothing() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let index = digest_in(&harness, &id, 1, "index.html").await?;
+    let logo = digest_in(&harness, &id, 1, "assets/logo.png").await?;
+    let saved = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &put_index(1, "<h1>v2</h1>"),
+        )?)
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", error_code(&saved));
+    let current_index = digest_in(&harness, &id, 2, "index.html").await?;
+
+    let rejected = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &edit_body(
+                1,
+                &[
+                    // Holds: the logo is as it was read.
+                    put_edit("assets/logo.png", "new", &logo),
+                    // Fails: index.html changed in revision 2.
+                    put_edit("index.html", "mine", &index),
+                    // Fails: there is no such file to delete.
+                    json!({ "op": "delete", "path": "gone.js", "expect": index }),
+                ],
+            ),
+        )?)
+        .await?;
+
+    assert_eq!(rejected.status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&rejected), "file_conflict");
+    let error = &rejected.json()?["error"];
+    assert_eq!(error["current_revision"], 2);
+    assert_eq!(error["conflicting_files_total"], 2);
+    assert_eq!(
+        error["conflicting_files"],
+        json!([
+            { "path": "gone.js", "current_sha256": null },
+            { "path": "index.html", "current_sha256": current_index },
+        ])
+    );
+    assert_eq!(revision_total(&harness, &id).await?, 2, "no revision");
+    assert_eq!(
+        digest_in(&harness, &id, 2, "assets/logo.png").await?,
+        logo,
+        "the edit whose condition held was not applied"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retried_edit_replays_after_the_head_moved_and_another_request_is_refused() -> TestResult
+{
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let logo = digest_in(&harness, &id, 1, "assets/logo.png").await?;
+    let index = digest_in(&harness, &id, 1, "index.html").await?;
+    let first = edit_body(
+        1,
+        &[
+            put_edit("assets/logo.png", "new", &logo),
+            put_edit("notes.txt", "n", "absent"),
+        ],
+    );
+    let edited = harness
+        .send(post(&edits_of(&id), Some("edit-key-1"), &first)?)
+        .await?;
+    assert_eq!(
+        edited.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&edited)
+    );
+    // Another writer changes the edited file, so the first request's own
+    // condition would fail now.
+    let later = harness
+        .send(post(
+            &format!("/v1/artifacts/{id}/revisions"),
+            Some("save-key-1"),
+            &json!({ "base_revision": 2, "changes": [
+                { "op": "put", "path": "assets/logo.png", "encoding": "utf8", "content": "later" }
+            ] }),
+        )?)
+        .await?;
+    assert_eq!(later.status, StatusCode::CREATED, "{}", error_code(&later));
+
+    // The same edits in another order are the same request.
+    let reordered = edit_body(
+        1,
+        &[
+            put_edit("notes.txt", "n", "absent"),
+            put_edit("assets/logo.png", "new", &logo),
+        ],
+    );
+    let again = harness
+        .send(post(&edits_of(&id), Some("edit-key-1"), &reordered)?)
+        .await?;
+    assert_eq!(again.status, StatusCode::CREATED, "{}", error_code(&again));
+    let replay = again.json()?;
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["revision"], edited.json()?["revision"]);
+    assert_eq!(
+        revision_total(&harness, &id).await?,
+        3,
+        "a replay writes nothing"
+    );
+
+    let other = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &edit_body(1, &[put_edit("index.html", "x", &index)]),
+        )?)
+        .await?;
+    assert_eq!(other.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_code(&other), "request_key_reused");
+    // The base is part of the request: the same edits against another base
+    // are another request.
+    let rebased = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &edit_body(
+                2,
+                &[
+                    put_edit("assets/logo.png", "new", &logo),
+                    put_edit("notes.txt", "n", "absent"),
+                ],
+            ),
+        )?)
+        .await?;
+    assert_eq!(error_code(&rebased), "request_key_reused");
+    Ok(())
+}
+
+/// A refused edit: what is wrong with it, the status and code that answer
+/// it, and the request body.
+type RefusedEdit = (&'static str, StatusCode, &'static str, Value);
+
+/// Edits refused for their shape or size, with `index` the digest of the
+/// first revision's `index.html`.
+fn refused_edit_shapes(index: &str) -> Vec<RefusedEdit> {
+    let many: Vec<Value> = (0..513)
+        .map(|number| put_edit(&format!("f{number}.txt"), "x", "absent"))
+        .collect();
+    vec![
+        (
+            "nothing to edit",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(1, &[]),
+        ),
+        (
+            "a path twice",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(
+                1,
+                &[
+                    put_edit("a.txt", "1", "absent"),
+                    put_edit("a.txt", "2", "absent"),
+                ],
+            ),
+        ),
+        (
+            "more edits than a change set may hold",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(1, &many),
+        ),
+        (
+            "bytes the file already has",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(1, &[put_edit("index.html", "<h1>v1</h1>", index)]),
+        ),
+        (
+            "no entry document left",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(
+                1,
+                &[json!({ "op": "delete", "path": "index.html", "expect": index })],
+            ),
+        ),
+    ]
+}
+
+/// Edits refused for their conditions or the revision they name.
+fn refused_edit_conditions(index: &str) -> Vec<RefusedEdit> {
+    vec![
+        (
+            "an upper-case digest",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(1, &[put_edit("index.html", "x", &index.to_uppercase())]),
+        ),
+        (
+            "a short digest",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(1, &[put_edit("index.html", "x", &index[..63])]),
+        ),
+        (
+            "a delete that expects the file to be absent",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(
+                1,
+                &[json!({ "op": "delete", "path": "index.html", "expect": "absent" })],
+            ),
+        ),
+        (
+            "an unsafe path",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            edit_body(1, &[put_edit("../a.txt", "x", "absent")]),
+        ),
+        (
+            "base 0",
+            StatusCode::NOT_FOUND,
+            "not_found",
+            edit_body(0, &[put_edit("a.txt", "x", "absent")]),
+        ),
+        (
+            "a base the artifact has not reached",
+            StatusCode::NOT_FOUND,
+            "not_found",
+            edit_body(2, &[put_edit("a.txt", "x", "absent")]),
+        ),
+        (
+            "a field the contract does not know",
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            json!({ "base_revision": 1, "edits": [], "force": true }),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn refused_edits_write_nothing_and_do_not_use_their_key() -> TestResult {
+    let harness = Harness::new();
+    let id = created_id(&harness).await?;
+    let index = digest_in(&harness, &id, 1, "index.html").await?;
+    let cases = [refused_edit_shapes(&index), refused_edit_conditions(&index)].concat();
+    for (what, status, code, body) in cases {
+        let reply = harness
+            .send(post(&edits_of(&id), Some("edit-key-1"), &body)?)
+            .await?;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (status, code),
+            "{what}"
+        );
+        assert_eq!(revision_total(&harness, &id).await?, 1, "{what} wrote");
+    }
+    // The count is judged before any edit is read: the first edit here is
+    // invalid in itself, and the answer is still about the count.
+    let mut too_many: Vec<Value> = (0..513)
+        .map(|number| put_edit(&format!("f{number}.txt"), "x", "absent"))
+        .collect();
+    too_many[0] = put_edit("../a.txt", "x", "absent");
+    let counted = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &edit_body(1, &too_many),
+        )?)
+        .await?;
+    assert_eq!(counted.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        counted.json()?["error"]["message"],
+        "at most 512 edits are allowed"
+    );
+    let missing_condition = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &json!({ "base_revision": 1, "edits": [
+                { "op": "put", "path": "a.txt", "encoding": "utf8", "content": "x" }
+            ] }),
+        )?)
+        .await?;
+    assert!(
+        missing_condition.status.is_client_error(),
+        "an edit has no default condition"
+    );
+    assert_eq!(revision_total(&harness, &id).await?, 1);
+    let no_key = harness
+        .send(post(
+            &edits_of(&id),
+            None,
+            &edit_body(1, &[put_edit("a.txt", "x", "absent")]),
+        )?)
+        .await?;
+    assert_eq!(no_key.status, StatusCode::BAD_REQUEST);
+
+    // None of them reserved the key.
+    let accepted = harness
+        .send(post(
+            &edits_of(&id),
+            Some("edit-key-1"),
+            &edit_body(1, &[put_edit("a.txt", "x", "absent")]),
+        )?)
+        .await?;
+    assert_eq!(
+        accepted.status,
+        StatusCode::CREATED,
+        "{}",
+        error_code(&accepted)
+    );
     Ok(())
 }
 
@@ -1688,9 +2127,62 @@ fn reads_and_saves(id: &str) -> Result<Requests, axum::http::Error> {
 }
 
 /// The other writes that name the artifact `id`, as for [`reads_and_saves`].
+/// The edit requests that every state of an artifact must answer alike.
+fn edit_writes(id: &str) -> Result<Requests, axum::http::Error> {
+    let edit = |key: Option<&str>, body: &Value| post(&edits_of(id), key, body);
+    let stale = "a".repeat(64);
+    Ok(vec![
+        (
+            "edit",
+            edit(
+                Some("edit-key-1"),
+                &edit_body(2, &[put_edit("index.html", "x", &stale)]),
+            )?,
+        ),
+        (
+            "edit onto a future base",
+            edit(
+                Some("edit-key-2"),
+                &edit_body(9, &[put_edit("index.html", "x", &stale)]),
+            )?,
+        ),
+        // Whether the artifact is there is judged before what is asked.
+        (
+            "edit that names nothing",
+            edit(Some("edit-key-3"), &edit_body(2, &[]))?,
+        ),
+        (
+            "edit with a reused key",
+            edit(
+                Some("save-key-1"),
+                &edit_body(2, &[put_edit("index.html", "y", &stale)]),
+            )?,
+        ),
+        (
+            "edit of an unsafe path",
+            edit(
+                Some("edit-key-4"),
+                &edit_body(2, &[put_edit("../x", "x", &stale)]),
+            )?,
+        ),
+        (
+            "edit with an invalid condition",
+            edit(
+                Some("edit-key-5"),
+                &edit_body(2, &[put_edit("index.html", "x", "STALE")]),
+            )?,
+        ),
+        (
+            "edit without a key",
+            edit(None, &edit_body(2, &[put_edit("index.html", "x", &stale)]))?,
+        ),
+    ])
+}
+
 fn other_writes(id: &str) -> Result<Requests, axum::http::Error> {
     let metadata = |key, body: Value| patch(&format!("/v1/artifacts/{id}"), Some(key), &body);
-    Ok(vec![
+    let mut writes = edit_writes(id)?;
+    writes.extend(vec![
         ("restore", restore(id, 1, Some("restore-key-1"), 2)?),
         (
             "restore a future revision",
@@ -1746,7 +2238,8 @@ fn other_writes(id: &str) -> Result<Requests, axum::http::Error> {
             "update without a change",
             metadata("rename-key-3", json!({ "base_metadata_revision": 2 }))?,
         ),
-    ])
+    ]);
+    Ok(writes)
 }
 
 #[tokio::test]
@@ -1775,7 +2268,7 @@ async fn an_artifact_in_the_trash_answers_as_an_unknown_one() -> TestResult {
             missing += 1;
         }
     }
-    assert_eq!(missing, 24, "every request valid in itself is not found");
+    assert_eq!(missing, 28, "every request valid in itself is not found");
     assert_eq!(
         harness.content(&link).await?.status,
         StatusCode::NOT_FOUND,
@@ -2380,7 +2873,7 @@ async fn a_purged_artifact_answers_as_an_unknown_one_and_its_keys_stay_reserved(
             missing += 1;
         }
     }
-    assert_eq!(missing, 24, "every request valid in itself is not found");
+    assert_eq!(missing, 28, "every request valid in itself is not found");
     assert_eq!(harness.content(&link).await?.status, StatusCode::NOT_FOUND);
     // A recovery, and the retries of the requests that made the artifact.
     for (what, request) in [

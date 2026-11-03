@@ -143,6 +143,7 @@ in the Rust core.
 | `PATCH /v1/artifacts/{id}`                                                         | Conditional rename or pin (`Idempotency-Key`)     |
 | `GET /v1/artifacts/{id}/revisions`                                                 | History, newest first                             |
 | `POST /v1/artifacts/{id}/revisions`                                                | Conditional commit (`Idempotency-Key`)            |
+| `POST /v1/artifacts/{id}/edits`                                                    | Per-file conditional commit (`Idempotency-Key`)   |
 | `GET /v1/artifacts/{id}/revisions/{n}`                                             | One revision manifest                             |
 | `GET /v1/artifacts/{id}/revisions/{n}/files/{path}`                                | Raw bytes of a pinned file, or one `Range`        |
 | `POST /v1/artifacts/{id}/revisions/{n}/previews`                                   | Short-lived preview URL on the content origin     |
@@ -200,9 +201,9 @@ failures.
 `POST /mcp` serves MCP Streamable HTTP through the official Rust SDK, `rmcp`,
 statelessly and with JSON responses, for protocol versions up to 2026-07-28.
 It requires the same bearer token, accepts only loopback `Host` names, and
-refuses requests carrying an `Origin`. Twenty-two tools are served. Eleven
+refuses requests carrying an `Origin`. Twenty-three tools are served. Twelve
 mirror the artifact HTTP routes: `list_artifacts`, `get_artifact`,
-`create_artifact`, `save_revision`, `restore_revision`, `duplicate_artifact`,
+`create_artifact`, `save_revision`, `edit_files`, `restore_revision`, `duplicate_artifact`,
 `update_artifact`, `list_revisions`, `get_revision`, `read_file`, and
 `create_preview`. Four mirror the job routes: `enqueue_job`, `get_job`,
 `list_jobs`, and `cancel_job` ([0030](decisions/0030-persistent-jobs-and-worker.md)).

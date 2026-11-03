@@ -6,18 +6,19 @@
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
-    CommitResponse, ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse,
-    EnqueueJobRequest, EnqueueJobResponse, ErrorBody, ErrorCode, ExportRuntime,
-    FileChange as WireChange, FileUpload, Handoff, HandoffState, Job as WireJob,
-    JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult,
-    JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
-    Preview, PurgeArtifactRequest, PurgeArtifactResponse, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
-    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
-    SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
+    CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
+    ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
+    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
+    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
+    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
+    PurgeArtifactResponse, RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse,
+    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
+    RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
+    SourceExportFormat, SourceExportManifest, StageHandoffRequest,
+    UnreferencedContent as WireContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
@@ -36,8 +37,8 @@ use artifree_domain::package::{
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, ListOrder, RevisionRecord,
-    UnreferencedContent,
+    ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
+    ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
 use artifree_ports::job_store::JobRecord;
 use artifree_providers::archive::{self, ArchiveEntry};
@@ -57,7 +58,8 @@ use crate::runtime_sessions::{GrantScope, SessionError};
 #[derive(Debug)]
 pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
-    pub(crate) body: ErrorBody,
+    /// Boxed so that a `Result` carrying an error stays small.
+    pub(crate) body: Box<ErrorBody>,
     /// For `range_not_satisfiable`, the file's size, which HTTP states in
     /// `Content-Range`.
     pub(crate) range_size: Option<u64>,
@@ -67,13 +69,15 @@ impl ApiError {
     pub(crate) fn new(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             status,
-            body: ErrorBody {
+            body: Box::new(ErrorBody {
                 code,
                 message: message.into(),
                 current_revision: None,
                 current_metadata_revision: None,
                 current_data_version: None,
-            },
+                conflicting_files: None,
+                conflicting_files_total: None,
+            }),
             range_size: None,
         }
     }
@@ -141,6 +145,26 @@ impl From<ArtifactError> for ApiError {
                 let mut conflict =
                     Self::new(StatusCode::CONFLICT, ErrorCode::RevisionConflict, message);
                 conflict.body.current_revision = Some(current.0);
+                conflict
+            }
+            ArtifactError::FilesChanged {
+                current,
+                files,
+                total,
+            } => {
+                let mut conflict =
+                    Self::new(StatusCode::CONFLICT, ErrorCode::FileConflict, message);
+                conflict.body.current_revision = Some(current.0);
+                conflict.body.conflicting_files = Some(
+                    files
+                        .into_iter()
+                        .map(|file| ConflictingFile {
+                            path: file.path.to_string(),
+                            current_sha256: file.current.map(|digest| hex(&digest)),
+                        })
+                        .collect(),
+                );
+                conflict.body.conflicting_files_total = Some(total as u64);
                 conflict
             }
             ArtifactError::MetadataConflict { current } => {
@@ -331,6 +355,62 @@ pub(crate) async fn save(
         .run(move |artifacts| artifacts.save(&actor, &key, &id, base, changes))
         .await?;
     Ok(announce(state, receipt))
+}
+
+pub(crate) async fn edit_files(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: EditFilesRequest,
+) -> Result<CommitResponse, ApiError> {
+    let id = artifact_id(id)?;
+    let base = SourceRevision(request.base_revision);
+    too_many("edits", request.edits.len(), MAX_CHANGES)?;
+    let mut edits = Vec::with_capacity(request.edits.len());
+    for (index, edit) in request.edits.into_iter().enumerate() {
+        let field = format!("edits[{index}]");
+        edits.push(match edit {
+            WireEdit::Put {
+                path,
+                encoding,
+                content,
+                expect,
+            } => FileEdit {
+                expect: expectation(&format!("{field}.expect"), &expect, true)?,
+                change: FileChange::Put {
+                    path: package_path(&format!("{field}.path"), &path)?,
+                    content: decode(&format!("{field}.content"), encoding, content)?,
+                },
+            },
+            WireEdit::Delete { path, expect } => FileEdit {
+                expect: expectation(&format!("{field}.expect"), &expect, false)?,
+                change: FileChange::Delete {
+                    path: package_path(&format!("{field}.path"), &path)?,
+                },
+            },
+        });
+    }
+    let receipt = state
+        .run(move |artifacts| artifacts.edit_files(&actor, &key, &id, base, &edits))
+        .await?;
+    Ok(announce(state, receipt))
+}
+
+/// The condition an edit states: `absent` where `may_be_absent`, otherwise
+/// a digest.
+fn expectation(field: &str, value: &str, may_be_absent: bool) -> Result<FileExpectation, ApiError> {
+    if may_be_absent && value == "absent" {
+        return Ok(FileExpectation::Absent);
+    }
+    parse_sha256(value)
+        .map(FileExpectation::Sha256)
+        .ok_or_else(|| {
+            ApiError::unprocessable(format!(
+                "{field}: must be {}64 lowercase hexadecimal digits",
+                if may_be_absent { "\"absent\" or " } else { "" }
+            ))
+        })
 }
 
 pub(crate) async fn restore(

@@ -74,6 +74,65 @@ pub struct SaveRevisionRequest {
     pub changes: Vec<FileChange>,
 }
 
+/// One edit of an edit request: a change to one file and the condition on
+/// that file alone (decision 0035).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FileEdit {
+    /// Create or replace a file.
+    Put {
+        /// Portable relative path.
+        path: String,
+        /// How `content` encodes the bytes.
+        encoding: ContentEncoding,
+        /// Complete new content.
+        content: String,
+        /// What the file must be in the current revision: `absent` when the
+        /// path must not be a file (a create), or the lowercase hexadecimal
+        /// SHA-256 digest of the bytes the file must have (a replace).
+        #[schemars(regex(pattern = r"^(absent|[0-9a-f]{64})$"))]
+        expect: String,
+    },
+    /// Remove an existing file.
+    Delete {
+        /// Portable relative path.
+        path: String,
+        /// The lowercase hexadecimal SHA-256 digest of the bytes the file
+        /// must have in the current revision. `absent` is refused: deleting
+        /// what is not there is no edit.
+        #[schemars(regex(pattern = r"^[0-9a-f]{64}$"))]
+        expect: String,
+    },
+}
+
+/// Body of `POST /v1/artifacts/{id}/edits`: commits changes to some files as
+/// the next revision, each applied only if its own file is as expected in the
+/// **current** revision. One file that is not rejects all of them with
+/// `file_conflict`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditFilesRequest {
+    /// The revision the caller read the expected digests from. It is not a
+    /// condition: files that no edit names may have changed since. It must be
+    /// a revision the artifact has.
+    pub base_revision: u64,
+    /// At least one edit and at most 512, each to a different path.
+    #[schemars(length(max = 512))]
+    pub edits: Vec<FileEdit>,
+}
+
+/// A file named by an edit that is not as expected, with what it is now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConflictingFile {
+    /// The edited path.
+    pub path: String,
+    /// Lowercase hexadecimal SHA-256 digest of the file in the current
+    /// revision, or null when the path is not a file of it. Always present.
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub current_sha256: Option<String>,
+}
+
 /// Body of `POST /v1/artifacts/{id}/revisions/{revision}/restore`: commits
 /// the files of that earlier revision as the next revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1477,6 +1536,12 @@ pub enum ErrorCode {
     RuntimeSessionExpired,
     /// The base revision is not current; reload and reapply the change.
     RevisionConflict,
+    /// A file named by an edit is not as the edit expects it in the current
+    /// revision (`POST /v1/artifacts/{id}/edits` only). Nothing was written,
+    /// not even the other edits. The error lists the files and the current
+    /// revision; read them again and edit again. The strict commands never
+    /// answer this: for them a head that moved is `revision_conflict`.
+    FileConflict,
     /// The base metadata revision is not current; reload and reapply the
     /// change.
     MetadataConflict,
@@ -1540,6 +1605,15 @@ pub struct ErrorBody {
     /// The current data version, present for `data_conflict`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_data_version: Option<u64>,
+    /// The first files, in path order, whose edits did not hold; present for
+    /// `file_conflict`, together with `current_revision`. At most 32.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32))]
+    pub conflicting_files: Option<Vec<ConflictingFile>>,
+    /// How many edits did not hold, at least the length of `conflicting_files`;
+    /// present for `file_conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_files_total: Option<u64>,
 }
 
 /// Body of every non-2xx JSON response.
