@@ -20,11 +20,11 @@ use artifree_ports::artifact_store::{
     ArtifactStore, CleanupRequest, CommitReceipt, Delivery, NewArtifact, PurgeRequest,
     RequestFingerprint, RequestIdentity, StoreError,
 };
-use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_ports::job_store::{
     Checkpoint, Claim, ClaimedJob, JobCancel, JobClaim, JobListing, JobPosition, JobReceipt,
     JobRecord, JobStore, JobStoreError, NewJob, Retry,
 };
+use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 use common::{
@@ -1322,9 +1322,7 @@ fn a_job_running_when_its_user_is_disabled_finishes_normally() -> TestResult {
     let held = fixture.claimed("a", 2_000)?;
     fixture.disable(&alice)?;
 
-    let checkpoint = fixture
-        .store
-        .heartbeat_job(&held.lease, at(2_500), LEASE)?;
+    let checkpoint = fixture.store.heartbeat_job(&held.lease, at(2_500), LEASE)?;
     assert_eq!(checkpoint, Checkpoint::Continue);
     let ended = fixture
         .store
@@ -1342,7 +1340,11 @@ fn a_running_job_whose_lease_expired_is_not_taken_over_while_its_user_is_disable
     let first = fixture.claimed("a", 0)?;
     fixture.disable(&alice)?;
 
-    assert!(claim_with(&fixture.store, "b", LEASE_MS + 1)?.claimed.is_none());
+    assert!(
+        claim_with(&fixture.store, "b", LEASE_MS + 1)?
+            .claimed
+            .is_none()
+    );
     let waiting = fixture.job(&job.id)?;
     assert_eq!((waiting.state, waiting.attempts), (JobState::Running, 1));
 
