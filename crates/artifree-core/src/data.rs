@@ -10,6 +10,7 @@
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
+use artifree_domain::data_members::{MemberPage, MemberQuery};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
 use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWrite};
@@ -23,6 +24,16 @@ pub struct DataRead {
     pub version: AppDataVersion,
     /// The value at the path, or `None` where nothing is.
     pub value: Option<DataValue>,
+}
+
+/// A page of the members of an object, and the version it was read at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataMembersRead {
+    /// The version of the space when it was read: the page and the version
+    /// come from one snapshot.
+    pub version: AppDataVersion,
+    /// The page.
+    pub page: MemberPage,
 }
 
 /// The result of a write, in terms the adapters report.
@@ -57,6 +68,38 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         Ok(DataRead {
             version: snapshot.version,
             value: snapshot.space.get(path).cloned(),
+        })
+    }
+
+    /// One page of the members of the object at the query's path in the
+    /// actor's data space of an artifact (decision 0040). A path with nothing
+    /// at it, or a value that is not an object, is a page that is not a
+    /// collection and has no members.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] as for [`Self::data`], or
+    /// [`ArtifactError::Unavailable`], also when the stored space cannot be
+    /// read back.
+    pub fn data_members(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        query: &MemberQuery,
+    ) -> Result<DataMembersRead, ArtifactError> {
+        self.authorized(actor, id)?;
+        let snapshot = self.store.read_data(id, actor).map_err(data_error)?;
+        let page = match snapshot.space.get(query.path()) {
+            Some(value) => value.members(query),
+            None => MemberPage {
+                collection: false,
+                members: Vec::new(),
+                next_after: None,
+            },
+        };
+        Ok(DataMembersRead {
+            version: snapshot.version,
+            page,
         })
     }
 

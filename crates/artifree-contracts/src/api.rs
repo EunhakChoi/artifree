@@ -797,6 +797,123 @@ fn present<'de, D: serde::Deserializer<'de>>(
     JsonValue::deserialize(deserializer).map(Some)
 }
 
+/// What a members listing carries for each member (decision 0040).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DataSelect {
+    /// Names only; no member has `value` or `too_large`.
+    #[default]
+    Names,
+    /// Names and values; each member has exactly one of `value` and
+    /// `too_large`.
+    Values,
+}
+
+/// Query of `GET /v1/artifacts/{id}/data/members`. Every parameter is
+/// optional; an unknown, repeated, or mistyped one is `400`, and a value that
+/// breaks a rule is `422 invalid_request`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListDataMembersQuery {
+    /// The object whose members are listed, as for `ReadDataQuery`. Absent or
+    /// empty is the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Only members whose name starts with this are listed (at most 256
+    /// bytes). Absent or empty lists all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// What each member carries; default `names`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<DataSelect>,
+    /// Most members in the page, 1 to 100; default 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// A member name (1 to 256 bytes): only members that sort after it by
+    /// their UTF-8 bytes are listed. Pass the previous page's `next_after`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// The query of a members listing after validation and defaults. Passing
+/// these values back gives the same page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMembersQuery {
+    /// The path, as parsed.
+    pub path: String,
+    /// The prefix; empty when none was given.
+    pub prefix: String,
+    /// What each member carries.
+    pub select: DataSelect,
+    /// Most members in a page.
+    pub limit: u64,
+    /// The cursor, when one was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// One member of a members listing. Under `select=names` it has only a
+/// `name`. Under `select=values` it has exactly one of `value` (its canonical
+/// JSON, which can be `null`) and `too_large: true` (the value is over
+/// 131,072 bytes and is not carried; read it with `GET data` at its path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMember {
+    /// The member name.
+    pub name: String,
+    /// The value, canonical, when it is carried. `null` is a stored `null`.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value: Option<JsonValue>,
+    /// True when the value is too large to carry; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub too_large: Option<bool>,
+}
+
+/// Response of `GET /v1/artifacts/{id}/data/members`: one page of the members
+/// of the object at a path of the caller's data space, ordered by the UTF-8
+/// bytes of their names, read from one snapshot. `data_version` is the
+/// version of the data space the page was read at; it is not a source
+/// revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMembers {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The query as validated, with its defaults.
+    pub query: DataMembersQuery,
+    /// The version of the data space this page was read at.
+    pub data_version: u64,
+    /// Whether an object is at the path. When false, `members` is empty.
+    pub collection: bool,
+    /// The members.
+    pub members: Vec<DataMember>,
+    /// Present exactly when more members match: pass it as `after` (with the
+    /// other parameters unchanged) to read the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
+
+/// Data of the `too_large` event of `GET /v1/artifacts/{id}/data/events`
+/// (decision 0040): the value at the watched path, at `data_version`, is over
+/// `max_bytes` and is not sent. The stream ends after this event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataEventTooLarge {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The watched path.
+    pub path: String,
+    /// The version of the data space the value was read at.
+    pub data_version: u64,
+    /// The largest canonical value an event carries, in bytes.
+    pub max_bytes: u64,
+}
+
 /// Body of `PUT /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:
 /// replaces the value at a path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

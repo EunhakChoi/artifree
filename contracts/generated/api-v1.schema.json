@@ -482,6 +482,170 @@
       ],
       "type": "object"
     },
+    "DataEventTooLarge": {
+      "additionalProperties": false,
+      "description": "Data of the `too_large` event of `GET /v1/artifacts/{id}/data/events`\n(decision 0040): the value at the watched path, at `data_version`, is over\n`max_bytes` and is not sent. The stream ends after this event.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space the value was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_bytes": {
+          "description": "The largest canonical value an event carries, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The watched path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "data_version",
+        "max_bytes"
+      ],
+      "type": "object"
+    },
+    "DataMember": {
+      "additionalProperties": false,
+      "description": "One member of a members listing. Under `select=names` it has only a\n`name`. Under `select=values` it has exactly one of `value` (its canonical\nJSON, which can be `null`) and `too_large: true` (the value is over\n131,072 bytes and is not carried; read it with `GET data` at its path).",
+      "properties": {
+        "name": {
+          "description": "The member name.",
+          "type": "string"
+        },
+        "too_large": {
+          "description": "True when the value is too large to carry; absent otherwise.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value, canonical, when it is carried. `null` is a stored `null`."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "DataMembers": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/data/members`: one page of the members\nof the object at a path of the caller's data space, ordered by the UTF-8\nbytes of their names, read from one snapshot. `data_version` is the\nversion of the data space the page was read at; it is not a source\nrevision.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "collection": {
+          "description": "Whether an object is at the path. When false, `members` is empty.",
+          "type": "boolean"
+        },
+        "data_version": {
+          "description": "The version of the data space this page was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "members": {
+          "description": "The members.",
+          "items": {
+            "$ref": "#/$defs/DataMember"
+          },
+          "type": "array"
+        },
+        "next_after": {
+          "description": "Present exactly when more members match: pass it as `after` (with the\nother parameters unchanged) to read the next page.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "$ref": "#/$defs/DataMembersQuery",
+          "description": "The query as validated, with its defaults."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "query",
+        "data_version",
+        "collection",
+        "members"
+      ],
+      "type": "object"
+    },
+    "DataMembersQuery": {
+      "additionalProperties": false,
+      "description": "The query of a members listing after validation and defaults. Passing\nthese values back gives the same page.",
+      "properties": {
+        "after": {
+          "description": "The cursor, when one was given.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Most members in a page.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The path, as parsed.",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "The prefix; empty when none was given.",
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/DataSelect",
+          "description": "What each member carries."
+        }
+      },
+      "required": [
+        "path",
+        "prefix",
+        "select",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "DataSelect": {
+      "description": "What a members listing carries for each member (decision 0040).",
+      "oneOf": [
+        {
+          "const": "names",
+          "description": "Names only; no member has `value` or `too_large`.",
+          "type": "string"
+        },
+        {
+          "const": "values",
+          "description": "Names and values; each member has exactly one of `value` and\n`too_large`.",
+          "type": "string"
+        }
+      ]
+    },
     "DataWriteResponse": {
       "additionalProperties": false,
       "description": "Response of the three writes of application data.",
@@ -1538,6 +1702,54 @@
             }
           ],
           "description": "The order."
+        }
+      },
+      "type": "object"
+    },
+    "ListDataMembersQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/members`. Every parameter is\noptional; an unknown, repeated, or mistyped one is `400`, and a value that\nbreaks a rule is `422 invalid_request`.",
+      "properties": {
+        "after": {
+          "description": "A member name (1 to 256 bytes): only members that sort after it by\ntheir UTF-8 bytes are listed. Pass the previous page's `next_after`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Most members in the page, 1 to 100; default 25.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The object whose members are listed, as for `ReadDataQuery`. Absent or\nempty is the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prefix": {
+          "description": "Only members whose name starts with this are listed (at most 256\nbytes). Absent or empty lists all.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "select": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSelect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What each member carries; default `names`."
         }
       },
       "type": "object"
@@ -3185,6 +3397,12 @@
     },
     {
       "$ref": "#/$defs/DataWriteResponse"
+    },
+    {
+      "$ref": "#/$defs/DataMembers"
+    },
+    {
+      "$ref": "#/$defs/DataEventTooLarge"
     }
   ],
   "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",

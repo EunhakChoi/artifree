@@ -92,6 +92,8 @@ pub enum DataError {
     /// The root of a space is an object: a change cannot make it anything
     /// else.
     RootNotObject,
+    /// A query for the members of an object breaks a rule (decision 0040).
+    InvalidQuery(&'static str),
 }
 
 impl fmt::Display for DataError {
@@ -106,6 +108,7 @@ impl fmt::Display for DataError {
                 "the path crosses a value that is not an object, which a write cannot make room in",
             ),
             Self::RootNotObject => formatter.write_str("the root of a data space is an object"),
+            Self::InvalidQuery(rule) => write!(formatter, "invalid members query: {rule}"),
         }
     }
 }
