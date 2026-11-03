@@ -26,6 +26,8 @@ pub mod web;
 pub mod worker;
 
 #[cfg(test)]
+mod data_tests;
+#[cfg(test)]
 mod runtime_tests;
 
 use std::collections::BTreeMap;

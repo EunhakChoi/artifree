@@ -31,7 +31,7 @@ use crate::changes::{
     Events, HEARTBEAT, Stopped, TokenStreamRegistration, event, too_many_streams,
     wait_for_revocation,
 };
-use crate::data_hub::{Replay, Space};
+use crate::data_hub::{Replay, Space, SpaceError};
 use crate::http::AppState;
 use crate::limits::{Refusal, Slot};
 use crate::operations::{self, ApiError};
@@ -107,6 +107,12 @@ pub(crate) async fn stream(
     let Query(ReadDataEventsQuery { path }) = query?;
     let watched = operations::data_path("path", path.as_deref().unwrap_or_default())?;
     let resume = last_event_id(&headers)?;
+    // Access first: a stream for an artifact that is missing or not this
+    // actor's takes no place and makes no window (decision 0038).
+    let (reader, id) = (auth.actor.clone(), artifact.clone());
+    state
+        .run(move |artifacts| artifacts.check_data_access(&reader, &id))
+        .await?;
     let slot = match state.data_streams().take(&auth.actor) {
         Ok(slot) => slot,
         Err(Refusal::Unavailable) => {
@@ -118,10 +124,17 @@ pub(crate) async fn stream(
             ));
         }
     };
-    let space = state
-        .data_hub()
-        .space(&auth.actor, &artifact)
-        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let space = match state.data_hub().space(&auth.actor, &artifact) {
+        Ok(space) => space,
+        Err(SpaceError::Full) => {
+            return Ok(too_many_streams(
+                "too many data subscriptions are open on this server; retry after the given delay",
+            ));
+        }
+        Err(error @ SpaceError::Poisoned) => {
+            return Err(ApiError::unavailable(error.to_string()));
+        }
+    };
     // Subscribe before the first read, so a write after it wakes the stream.
     let writes = space.watch();
     let commits = state.feed().commits();

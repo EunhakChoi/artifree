@@ -1585,6 +1585,7 @@ pub(crate) async fn data_members(
                     value: member
                         .value
                         .and_then(|value| JsonValue::from_text(value.to_canonical())),
+                    too_large: member.too_large.then_some(true),
                 })
                 .collect(),
             next_after: read.members.next_after,
@@ -1669,21 +1670,45 @@ async fn write_data(
         | DataChange::Merge { path, .. }
         | DataChange::Remove { path } => path.to_string(),
     };
-    let space = state
-        .data_hub()
-        .space(&actor, &id)
-        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    // A window is made only for an artifact this actor may use, so a request
+    // for any other name makes none and evicts none.
+    let (checked, id_for_check) = (actor.clone(), id.clone());
+    state
+        .run(move |artifacts| artifacts.check_data_access(&checked, &id_for_check))
+        .await?;
+    // When the hub is full the write goes ahead without a window: nothing
+    // streams this space (an open stream would hold its window), and the
+    // first stream to open anchors a new one from storage.
+    let space = state.data_hub().space(&actor, &id).ok();
+    // The gate is awaited here, not inside the blocking task: a reader holds
+    // it while it waits for a blocking thread, so a thread parked on the gate
+    // could starve the holder.
+    let gate = match &space {
+        Some(space) => Some(space.gate_owned().await),
+        None => None,
+    };
+    let hub = state.clone();
     let outcome = state
         .run(move |artifacts| {
             // The gate orders this write and the recording of its event
             // against every other write and every reader of the space
             // (decision 0038); a write committed here is in the window before
             // the next one can start.
-            let _gate = space.gate().blocking_lock();
+            let _gate = gate;
             let outcome =
                 artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)?;
-            if outcome.delivery == Delivery::Committed && outcome.changed {
-                data_hub::record_write(&space, artifacts, &actor, &id, &change, outcome.version)?;
+            if let Some(space) = &space
+                && outcome.delivery == Delivery::Committed
+                && outcome.changed
+            {
+                data_hub::record_after_commit(
+                    hub.data_hub(),
+                    space,
+                    artifacts,
+                    (&actor, &id),
+                    &change,
+                    outcome.version,
+                );
             }
             Ok(outcome)
         })

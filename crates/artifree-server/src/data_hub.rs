@@ -53,6 +53,26 @@ impl From<Poisoned> for ArtifactError {
     }
 }
 
+/// Why [`DataHub::space`] gave no window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpaceError {
+    /// The registry is unusable; see [`Poisoned`].
+    Poisoned,
+    /// Every window that could make room is held by an open stream or a
+    /// write in flight, so a new one would exceed the bounds. Nothing was
+    /// inserted.
+    Full,
+}
+
+impl fmt::Display for SpaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Poisoned => "the data subscription state is unavailable",
+            Self::Full => "too many data subscriptions are open on this server",
+        })
+    }
+}
+
 /// What a window can say about the writes after a position.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Replay {
@@ -74,8 +94,15 @@ pub(crate) struct Window {
     known: bool,
     floor: u64,
     head: u64,
-    edits: VecDeque<Arc<DataEdit>>,
+    edits: VecDeque<Kept>,
     bytes: usize,
+}
+
+/// A retained write and what it weighs, computed once.
+#[derive(Debug)]
+struct Kept {
+    edit: Arc<DataEdit>,
+    weight: usize,
 }
 
 impl Window {
@@ -90,13 +117,17 @@ impl Window {
             self.floor = version.saturating_sub(1);
         }
         self.head = version;
-        self.bytes += edit.weight();
-        self.edits.push_back(Arc::new(edit));
+        let weight = edit.weight();
+        self.bytes += weight;
+        self.edits.push_back(Kept {
+            edit: Arc::new(edit),
+            weight,
+        });
         while (self.edits.len() > RETAIN_WRITES || self.bytes > RETAIN_BYTES)
             && let Some(dropped) = self.edits.pop_front()
         {
-            self.bytes = self.bytes.saturating_sub(dropped.weight());
-            self.floor = dropped.version.0;
+            self.bytes = self.bytes.saturating_sub(dropped.weight);
+            self.floor = dropped.edit.version.0;
         }
     }
 
@@ -131,8 +162,8 @@ impl Window {
             edits: self
                 .edits
                 .iter()
-                .filter(|edit| edit.version > position)
-                .cloned()
+                .filter(|kept| kept.edit.version > position)
+                .map(|kept| Arc::clone(&kept.edit))
                 .collect(),
             head: AppDataVersion(self.head),
         }
@@ -153,7 +184,7 @@ pub(crate) struct Space {
     /// Held by a writer from before the storage write until its event is
     /// recorded, and by a reader while it reads storage and anchors the
     /// window, so the two agree on the version.
-    gate: tokio::sync::Mutex<()>,
+    gate: Arc<tokio::sync::Mutex<()>>,
     window: Mutex<Window>,
     wake: watch::Sender<()>,
 }
@@ -161,7 +192,7 @@ pub(crate) struct Space {
 impl Space {
     fn new() -> Self {
         Self {
-            gate: tokio::sync::Mutex::new(()),
+            gate: Arc::new(tokio::sync::Mutex::new(())),
             window: Mutex::new(Window::default()),
             wake: watch::Sender::new(()),
         }
@@ -170,6 +201,14 @@ impl Space {
     /// The gate; see the type.
     pub(crate) fn gate(&self) -> &tokio::sync::Mutex<()> {
         &self.gate
+    }
+
+    /// Waits for the gate without holding a thread, and returns a guard that
+    /// can move into a blocking task. A writer takes the gate here, before it
+    /// asks for a blocking thread: a reader holds the gate while it waits for
+    /// one, so a writer parked on a blocking thread could starve it.
+    pub(crate) async fn gate_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.gate).lock_owned().await
     }
 
     /// Runs `use_window` on the window.
@@ -229,13 +268,18 @@ pub(crate) struct DataHub {
 impl DataHub {
     /// The space of `actor` for `artifact`, made when it is missing. Making
     /// one over the bounds drops the least recently used windows that no
-    /// stream holds, first the actor's own.
+    /// stream or write holds, first the actor's own; when none can be
+    /// dropped, nothing is inserted and the answer is [`SpaceError::Full`], so
+    /// the registry never exceeds its bounds.
+    ///
+    /// Callers ask for a space only for an artifact the actor may use: a
+    /// request that ends in `not found` must not make or evict a window.
     pub(crate) fn space(
         &self,
         actor: &ActorId,
         artifact: &ArtifactId,
-    ) -> Result<Arc<Space>, Poisoned> {
-        let mut registry = self.registry.lock().map_err(|_| Poisoned)?;
+    ) -> Result<Arc<Space>, SpaceError> {
+        let mut registry = self.registry.lock().map_err(|_| SpaceError::Poisoned)?;
         registry.clock += 1;
         let touched = registry.clock;
         let key = (actor.clone(), artifact.clone());
@@ -243,16 +287,24 @@ impl DataHub {
             entry.touched = touched;
             return Ok(Arc::clone(&entry.space));
         }
-        let own = registry
-            .spaces
-            .keys()
-            .filter(|(owner, _)| owner == actor)
-            .count();
-        if own >= MAX_WINDOWS_PER_ACTOR {
+        let own = |registry: &Registry| {
+            registry
+                .spaces
+                .keys()
+                .filter(|(owner, _)| owner == actor)
+                .count()
+        };
+        if own(&registry) >= MAX_WINDOWS_PER_ACTOR {
             registry.evict(|owner| owner == actor);
+            if own(&registry) >= MAX_WINDOWS_PER_ACTOR {
+                return Err(SpaceError::Full);
+            }
         }
         if registry.spaces.len() >= MAX_WINDOWS {
             registry.evict(|_| true);
+            if registry.spaces.len() >= MAX_WINDOWS {
+                return Err(SpaceError::Full);
+            }
         }
         let space = Arc::new(Space::new());
         registry.spaces.insert(
@@ -265,12 +317,31 @@ impl DataHub {
         Ok(space)
     }
 
+    /// Drops one window from the registry (for example, one whose lock was
+    /// poisoned), so that the next stream starts a new one. Streams that hold
+    /// the old one end at their next look at it.
+    pub(crate) fn discard(&self, actor: &ActorId, artifact: &ArtifactId) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.spaces.remove(&(actor.clone(), artifact.clone()));
+        }
+    }
+
     /// Drops the windows of a purged artifact, so that its values do not
     /// stay in memory. A stream that still holds one ends at its next check.
     pub(crate) fn forget(&self, artifact: &ArtifactId) {
         if let Ok(mut registry) = self.registry.lock() {
             registry.spaces.retain(|(_, id), _| id != artifact);
         }
+    }
+
+    /// Whether a window is kept for the pair.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, actor: &ActorId, artifact: &ArtifactId) -> bool {
+        self.registry.lock().is_ok_and(|registry| {
+            registry
+                .spaces
+                .contains_key(&(actor.clone(), artifact.clone()))
+        })
     }
 
     /// How many windows are kept.
@@ -285,10 +356,28 @@ impl DataHub {
 /// Records the write that just committed and left the space at `version`, and
 /// wakes the readers. Called under [`Space::gate`], right after the write.
 ///
-/// # Errors
-///
-/// When a merge's result cannot be read back or the window is unusable.
-pub(crate) fn record_write(
+/// The write is durable by now, so nothing here may fail the request. When the
+/// event cannot be recorded (the merged value could not be read back, or the
+/// window's lock was poisoned) the window is forgotten, so every stream
+/// behind it is reset rather than left believing it saw everything; a window
+/// that cannot even be forgotten is dropped from the hub and its streams end.
+pub(crate) fn record_after_commit(
+    hub: &DataHub,
+    space: &Space,
+    artifacts: &ArtifactService<SqliteStore>,
+    (actor, artifact): (&ActorId, &ArtifactId),
+    change: &DataChange,
+    version: AppDataVersion,
+) {
+    if try_record(space, artifacts, actor, artifact, change, version).is_err()
+        && space.with_window(Window::invalidate).is_err()
+    {
+        hub.discard(actor, artifact);
+    }
+    space.wake();
+}
+
+fn try_record(
     space: &Space,
     artifacts: &ArtifactService<SqliteStore>,
     actor: &ActorId,
@@ -323,7 +412,6 @@ pub(crate) fn record_write(
         }),
         None => window.invalidate(),
     })?;
-    space.wake();
     Ok(())
 }
 
@@ -352,6 +440,10 @@ mod tests {
         format!("u-{number:032x}")
             .parse()
             .unwrap_or_else(|error| panic!("fixture actor: {error}"))
+    }
+
+    fn small(count: usize) -> u8 {
+        u8::try_from(count).unwrap_or_else(|_| panic!("{count} does not fit a fixture number"))
     }
 
     fn artifact(number: u8) -> ArtifactId {
@@ -465,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_are_bounded_per_actor_and_in_all_and_spare_those_in_use() -> Result<(), Poisoned> {
+    fn windows_are_bounded_per_actor_and_in_all_and_spare_those_in_use() -> Result<(), SpaceError> {
         let hub = DataHub::default();
         let alice = actor(1);
         let bob = actor(2);
@@ -502,7 +594,68 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_an_artifact_drops_its_windows_for_every_actor() -> Result<(), Poisoned> {
+    fn a_registry_full_of_held_windows_refuses_instead_of_growing() {
+        let hub = DataHub::default();
+        let mut held = Vec::new();
+        // Windows that streams hold fill the process, spread over actors.
+        for who in 0..small(MAX_WINDOWS / MAX_WINDOWS_PER_ACTOR) {
+            for number in 0..small(MAX_WINDOWS_PER_ACTOR) {
+                held.push(
+                    hub.space(&actor(who), &artifact(number))
+                        .map(|space| (who, space)),
+                );
+            }
+        }
+        assert!(
+            held.iter().all(Result::is_ok),
+            "the bounds themselves were refused"
+        );
+        assert_eq!(hub.len(), MAX_WINDOWS);
+        let newcomer = actor(200);
+        for number in 0..20 {
+            assert_eq!(
+                hub.space(&newcomer, &artifact(number)).err(),
+                Some(SpaceError::Full)
+            );
+            assert_eq!(hub.len(), MAX_WINDOWS, "the registry grew past its bound");
+        }
+        // A window that is already kept is still found, and one that is
+        // released makes room.
+        assert!(hub.space(&actor(0), &artifact(0)).is_ok());
+        drop(held.pop());
+        assert!(hub.space(&newcomer, &artifact(1)).is_ok());
+        assert_eq!(hub.len(), MAX_WINDOWS);
+    }
+
+    #[test]
+    fn one_actor_cannot_hold_more_windows_than_its_bound() {
+        let hub = DataHub::default();
+        let held: Vec<_> = (0..small(MAX_WINDOWS_PER_ACTOR))
+            .map(|number| hub.space(&actor(1), &artifact(number)))
+            .collect();
+        assert!(held.iter().all(Result::is_ok));
+        assert_eq!(
+            hub.space(&actor(1), &artifact(100)).err(),
+            Some(SpaceError::Full)
+        );
+        assert_eq!(hub.len(), MAX_WINDOWS_PER_ACTOR);
+        // Another actor is unaffected.
+        assert!(hub.space(&actor(2), &artifact(100)).is_ok());
+    }
+
+    #[test]
+    fn a_discarded_window_leaves_the_registry() -> Result<(), SpaceError> {
+        let hub = DataHub::default();
+        let first = hub.space(&actor(1), &artifact(1))?;
+        hub.discard(&actor(1), &artifact(1));
+        assert!(!hub.contains(&actor(1), &artifact(1)));
+        let second = hub.space(&actor(1), &artifact(1))?;
+        assert!(!Arc::ptr_eq(&first, &second), "the old window came back");
+        Ok(())
+    }
+
+    #[test]
+    fn forgetting_an_artifact_drops_its_windows_for_every_actor() -> Result<(), SpaceError> {
         let hub = DataHub::default();
         let shared = artifact(1);
         hub.space(&actor(1), &shared)?;

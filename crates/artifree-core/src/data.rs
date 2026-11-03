@@ -70,6 +70,19 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         })
     }
 
+    /// Whether the actor may use the data space of an artifact: the same
+    /// access as [`Self::data`], without reading the space. A caller that
+    /// keeps per-space state asks first, so that a request for an artifact
+    /// that is missing or not the actor's makes none.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for an artifact that is missing, in the
+    /// trash, purged, or another actor's, or [`ArtifactError::Unavailable`].
+    pub fn check_data_access(&self, actor: &ActorId, id: &ArtifactId) -> Result<(), ArtifactError> {
+        self.authorized(actor, id).map(|_| ())
+    }
+
     /// A page of the members of the object at the query's path in the actor's
     /// data space (decision 0038), and the space's version, read in one
     /// snapshot. Access follows [`Self::data`].
