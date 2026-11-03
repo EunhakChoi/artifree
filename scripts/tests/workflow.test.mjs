@@ -68,3 +68,8 @@ test('Browser jobs test the server binary built for them', () => {
     'Browser tests must download the binary instead of skipping the server.',
   );
 });
+test('A CI job cannot hold a write token', () => {
+  const invalid = structuredClone(workflow);
+  invalid.jobs.checks.permissions = { contents: 'write' };
+  assert.throws(() => checkWorkflow(invalid), /must not hold a write token/);
+});

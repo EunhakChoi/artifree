@@ -4,6 +4,10 @@ import { mkdtemp, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  LICENSE_INDEX_PATH,
+  verifyLicenseBundle,
+} from './lib/license-bundle.mjs';
 import { TARGET_LAYOUT, entrypoints, sha256 } from './lib/release-layout.mjs';
 import { startServer } from './lib/server-process.mjs';
 import {
@@ -78,8 +82,9 @@ async function walk(dir, prefix = '', found = { files: [], dirs: [] }) {
  * Checks the unpacked tree against its MANIFEST.json: the entrypoints are
  * exactly those of the manifest's target and are listed files; the tree has
  * only regular files and directories; every listed file has the recorded size
- * and SHA-256; and nothing else is present, not even an empty directory.
- * Returns the manifest.
+ * and SHA-256; nothing else is present, not even an empty directory; and the
+ * license bundle is complete and consistent (decision 0037). Returns the
+ * manifest.
  */
 export async function verifyManifest(packageDir) {
   const manifest = JSON.parse(
@@ -107,6 +112,8 @@ export async function verifyManifest(packageDir) {
     expected.server,
     expected.cli,
     `${expected.web}/index.html`,
+    LICENSE_INDEX_PATH,
+    'THIRD_PARTY_NOTICES.md',
   ]) {
     assert.ok(listed.has(required), `The manifest does not list ${required}.`);
   }
@@ -138,6 +145,7 @@ export async function verifyManifest(packageDir) {
     assert.equal(bytes.length, file.size, `Size mismatch: ${file.path}`);
     assert.equal(sha256(bytes), file.sha256, `SHA-256 mismatch: ${file.path}`);
   }
+  await verifyLicenseBundle(packageDir);
   return manifest;
 }
 

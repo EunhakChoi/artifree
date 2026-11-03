@@ -1,17 +1,25 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, lstat, readdir, readFile, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { tarGz, zip } from './lib/archive.mjs';
 import {
+  assertCollectedInputs,
+  bundleLicenses,
+  npmClosure,
+  npmComponents,
+} from './lib/license-bundle.mjs';
+import {
   CLI_PATH,
   TARGET_LAYOUT,
   entrypoints,
+  GLIBC_FLOOR,
   sha256,
 } from './lib/release-layout.mjs';
+import { assertGlibcFloor } from './lib/elf-glibc.mjs';
 import { buildServer } from './lib/server-process.mjs';
 
 /**
@@ -98,7 +106,10 @@ async function webFiles(webDir) {
   return found;
 }
 
-async function cliBundle(root) {
+/** npm workspaces whose dependencies may be bundled into the package. */
+const BUNDLED_WORKSPACES = ['apps/web', 'apps/cli'];
+
+async function cliBundle(root, allowedPackages) {
   const entry = join(root, 'apps/cli/dist/main.js');
   await lstat(entry).catch(() => {
     assert.fail(
@@ -115,14 +126,17 @@ async function cliBundle(root) {
     write: false,
     legalComments: 'none',
     logLevel: 'silent',
+    metafile: true,
   });
   assert.equal(result.outputFiles.length, 1);
+  assertCollectedInputs(Object.keys(result.metafile.inputs), allowedPackages);
   return Buffer.from(result.outputFiles[0].contents);
 }
 
 /**
  * The third-party Rust crates linked into the server for `triple`: name,
- * version, and declared license expression (not the license texts).
+ * version, declared license expression, and the crate's source directory and
+ * declared license file (for the license texts).
  * Only registry/git crates reachable through normal dependencies count:
  * workspace crates (`source === null`) are Artifree's own code under the
  * repository LICENSE, and build-only or dev-only crates are not linked into
@@ -162,6 +176,8 @@ function rustDependencies(root, triple) {
       name: pkg.name,
       version: pkg.version,
       license: pkg.license ?? null,
+      dir: dirname(pkg.manifest_path),
+      licenseFile: pkg.license_file ?? undefined,
     }))
     .sort(
       (a, b) =>
@@ -192,6 +208,7 @@ export async function buildReleasePackage({
   ).version;
   const binaryBytes = await readFile(binary);
   assertBinaryFormat(target, binaryBytes);
+  if (target === 'linux-x64') assertGlibcFloor(binaryBytes, GLIBC_FLOOR);
   // The binary can only be run to read its version on its own platform; a
   // different target is checked for format only.
   if (hostTarget() === target) {
@@ -206,6 +223,18 @@ export async function buildReleasePackage({
   const name = `artifree-${version}-${target}`;
   const paths = entrypoints(target);
   const text = async (path) => readFile(join(root, path));
+  const rust = rustDependencies(root, spec.triple);
+  const lock = JSON.parse(await text('package-lock.json'));
+  const npmKeys = [
+    ...new Set(BUNDLED_WORKSPACES.flatMap((key) => npmClosure(lock, key))),
+  ].sort();
+  const licenses = await bundleLicenses(
+    [
+      ...rust.map((crate) => ({ ecosystem: 'cargo', ...crate })),
+      ...(await npmComponents(root, lock, npmKeys)),
+    ],
+    JSON.parse(await text('scripts/license-exceptions.json')).exceptions,
+  );
   const files = [
     { path: 'LICENSE', data: await text('LICENSE') },
     {
@@ -215,7 +244,15 @@ export async function buildReleasePackage({
     {
       path: 'RUST_DEPENDENCIES.json',
       data: Buffer.from(
-        `${JSON.stringify(rustDependencies(root, spec.triple), null, 2)}\n`,
+        `${JSON.stringify(
+          rust.map(({ name, version, license }) => ({
+            name,
+            version,
+            license,
+          })),
+          null,
+          2,
+        )}\n`,
       ),
     },
     {
@@ -227,7 +264,12 @@ export async function buildReleasePackage({
       data: await text('docs/backup-restore.md'),
     },
     { path: paths.server, data: binaryBytes, executable: true },
-    { path: CLI_PATH, data: await cliBundle(root), executable: true },
+    {
+      path: CLI_PATH,
+      data: await cliBundle(root, new Set(npmKeys)),
+      executable: true,
+    },
+    ...licenses,
     ...(await webFiles(webDir)),
   ].sort((a, b) => (a.path < b.path ? -1 : 1));
 

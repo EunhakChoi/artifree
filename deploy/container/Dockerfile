@@ -8,8 +8,9 @@
 #
 # Base: Debian 12 slim, pinned by the multi-arch index digest (resolved from
 # the registry on 2026-11-01). glibc 2.36 is newer than the 2.34 the packaged
-# binary needs. Refresh the digest deliberately; Dependabot is not configured
-# for this file.
+# binary needs. Refresh the digest deliberately with
+# scripts/refresh-base-digests.mjs (procedure: docs/release-packages.md);
+# Dependabot is not configured for this file (decision 0037).
 FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 LABEL org.opencontainers.image.title="Artifree server" \

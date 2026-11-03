@@ -41,7 +41,7 @@ and "it installs" must be shown from the unpacked files, not from the checkout.
    in-repository deterministic tar/gzip and ZIP writer (fixed timestamps and
    owners, sorted paths), so the same inputs give the same bytes on the same
    Node/zlib build; this is tested for the host only.
-5. **Dependency inventory, not license texts.** `RUST_DEPENDENCIES.json` lists
+5. **Dependency inventory, not license texts** (_amended by [0037](0037-release-publishing-and-supply-chain.md): the archives now include the license texts_). `RUST_DEPENDENCIES.json` lists
    the crates linked into the server for the target (from `cargo metadata
 --locked`) with their declared license expressions. Full license texts of
    Rust crates and the npm packages in the web and CLI bundles are not

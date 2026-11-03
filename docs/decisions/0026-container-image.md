@@ -88,7 +88,9 @@ moves to O03c. The web-workspace gaps found while writing the guides are O03d.
 - No Rust, web, or contract change; no new dependency, lint exception, or
   boundary change. The only workflow change is the `container` job.
 - No image is published, signed, or scanned. Bundled license texts, release
-  publishing, signing/provenance, and the glibc floor policy are O03c.
+  publishing, signing/provenance, and the glibc floor policy are O03c. _Amended
+  by [0037](0037-release-publishing-and-supply-chain.md): implemented as a
+  workflow and checks; the first publication has not happened._
 - The static web workspace has no build-time default server, and
   `--frame-ancestors`/`--content-origin` have no environment variables, which
   makes container and static-UI setups argument-only. Tracked as O03d; _done in

@@ -36,3 +36,17 @@ export function entrypoints(target) {
 export function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
+
+/**
+ * The oldest glibc the Linux package supports (decision 0037): the highest
+ * `GLIBC_*` symbol version its server binary may require. It was measured as
+ * 2.34 with objdump; packaging refuses a binary that needs more.
+ */
+export const GLIBC_FLOOR = '2.34';
+
+/**
+ * The glibc of the Debian 12 environments in which CI runs the package and the
+ * container. It is the newest version at which the floor is exercised; versions
+ * between the floor and this one are not run.
+ */
+export const GLIBC_VERIFIED_RUNTIME = '2.36';
