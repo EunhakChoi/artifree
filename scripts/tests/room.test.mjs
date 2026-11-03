@@ -56,10 +56,10 @@ after(async () => {
 });
 
 /** One browser tab: a client with its own runtime connection. */
-async function tab() {
+async function tab(running = server) {
   const client = new ArtifreeClient({
-    baseUrl: server.api_url,
-    accessToken: server.token,
+    baseUrl: running.api_url,
+    accessToken: running.token,
     fetch: async (url, init) => {
       const response = await fetch(url, init);
       if (new URL(url).pathname.includes('/room/') && response.ok) {
@@ -75,10 +75,10 @@ async function tab() {
 }
 
 let counter = 0;
-async function artifact() {
+async function artifact(running = server) {
   const client = new ArtifreeClient({
-    baseUrl: server.api_url,
-    accessToken: server.token,
+    baseUrl: running.api_url,
+    accessToken: running.token,
   });
   const { artifact: created } = await client.createArtifact(
     {
@@ -152,6 +152,22 @@ test('A reconnect keeps its participant, refuses the old connection and never du
   );
 });
 
+test('A resumed join hands over what came while its participant was away', async () => {
+  const id = await artifact();
+  const [one, two] = [await tab(), await tab()];
+  const sender = await joinRoom(one, id, { slot: 'page' });
+  const reader = await joinRoom(two, id, { slot: 'page' });
+  await pollRoom(two, identityOf(id, reader), { after: 0 });
+  await sendRoomEvent(one, identityOf(id, sender), { kind: 'k', data: 'away' });
+  const back = await joinRoom(two, id, { slot: 'page' });
+  assert.equal(back.participant, reader.participant);
+  assert.deepEqual(
+    back.events.map((e) => [e.seq, e.data, e.is_me, e.same_tab]),
+    [[1, 'away', false, false]],
+  );
+  assert.deepEqual([back.head, back.missed], [1, false]);
+});
+
 test('An event reaches those present with the flags of their view, and nobody who joins later', async () => {
   const id = await artifact();
   const [one, two, three] = [await tab(), await tab(), await tab()];
@@ -208,63 +224,71 @@ test('Closing a tab removes its participants, and a tab cannot act for another',
 });
 
 test('A follower keeps a tab present, hears the others, and rejoins when its participant is gone', async () => {
-  const id = await artifact();
-  const [followed, other] = [await tab(), await tab()];
+  // Its own server: a follower polls steadily, and the rooms budget of an
+  // actor is shared by every test that uses the same server.
+  const own = await startServer(binary, join(scratch, 'follower-data'));
   const stops = new AbortController();
-  /** Resolves when `onSnapshot` has seen a snapshot satisfying a predicate. */
-  const waiting = [];
-  const snapshots = [];
-  const seen = (predicate) =>
-    new Promise((resolve) => {
-      const hit = snapshots.find(predicate);
-      if (hit !== undefined) resolve(hit);
-      else waiting.push({ predicate, resolve });
+  try {
+    const id = await artifact(own);
+    const [followed, other] = [await tab(own), await tab(own)];
+    /** Resolves when `onSnapshot` has seen a snapshot satisfying a predicate. */
+    const waiting = [];
+    const snapshots = [];
+    const seen = (predicate) =>
+      new Promise((resolve) => {
+        const hit = snapshots.find(predicate);
+        if (hit !== undefined) resolve(hit);
+        else waiting.push({ predicate, resolve });
+      });
+    const following = followRoom(followed, {
+      artifactId: id,
+      slot: 'page',
+      state: () => 'following',
+      signal: stops.signal,
+      // Slower than the actor's room budget (15 requests a second) so that the
+      // follower does not use up what this test's own calls need.
+      intervalMs: 150,
+      onSnapshot: (item) => {
+        snapshots.push(item);
+        for (const wait of waiting.splice(0))
+          if (wait.predicate(item)) wait.resolve(item);
+          else waiting.push(wait);
+      },
     });
-  const following = followRoom(followed, {
-    artifactId: id,
-    slot: 'page',
-    state: () => 'following',
-    signal: stops.signal,
-    // Slower than the actor's room budget (15 requests a second) so that the
-    // follower does not use up what this test's own calls need.
-    intervalMs: 150,
-    onSnapshot: (item) => {
-      snapshots.push(item);
-      for (const wait of waiting.splice(0))
-        if (wait.predicate(item)) wait.resolve(item);
-        else waiting.push(wait);
-    },
-  });
-  const first = await seen(() => true);
-  assert.equal(first.joined, true);
-  const mine = first.snapshot.participant;
+    const first = await seen(() => true);
+    assert.equal(first.joined, true);
+    const mine = first.snapshot.participant;
 
-  // Another tab joins, speaks, and is heard by the follower.
-  const peer = await joinRoom(other, id, { slot: 'page' });
-  const heard = seen((item) => item.snapshot.members.length === 2);
-  await sendRoomEvent(other, identityOf(id, peer), {
-    kind: 'cursor',
-    data: 'hi',
-  });
-  const withEvent = await seen((item) => item.snapshot.events.length > 0);
-  assert.deepEqual(
-    withEvent.snapshot.events.map((e) => [e.data, e.is_me, e.same_tab]),
-    [['hi', false, false]],
-  );
-  assert.equal((await heard).snapshot.participant, mine);
+    // Another tab joins, speaks, and is heard by the follower.
+    const peer = await joinRoom(other, id, { slot: 'page' });
+    const heard = seen((item) => item.snapshot.members.length === 2);
+    await sendRoomEvent(other, identityOf(id, peer), {
+      kind: 'cursor',
+      data: 'hi',
+    });
+    const withEvent = await seen((item) => item.snapshot.events.length > 0);
+    assert.deepEqual(
+      withEvent.snapshot.events.map((e) => [e.data, e.is_me, e.same_tab]),
+      [['hi', false, false]],
+    );
+    assert.equal((await heard).snapshot.participant, mine);
 
-  // The follower's participant is removed by another connection of the same
-  // tab: it is gone for the follower, which joins again as a new one.
-  await leaveRoom(followed, identityOf(id, withEvent.snapshot));
-  const rejoined = await seen((item) => item.joined && item !== first);
-  assert.notEqual(rejoined.snapshot.participant, mine);
-  assert.equal(rejoined.snapshot.members.length, 2);
+    // The follower's participant is removed by another connection of the same
+    // tab: it is gone for the follower, which joins again as a new one.
+    await leaveRoom(followed, identityOf(id, withEvent.snapshot));
+    const rejoined = await seen((item) => item.joined && item !== first);
+    assert.notEqual(rejoined.snapshot.participant, mine);
+    assert.equal(rejoined.snapshot.members.length, 2);
 
-  stops.abort();
-  await following;
-  // It left on abort: the peer sees only itself.
-  const left = await pollRoom(other, identityOf(id, peer), { after: 0 });
-  assert.deepEqual(flags(left), [[peer.participant, true, true]]);
+    stops.abort();
+    await following;
+    // It left on abort: the peer sees only itself.
+    const left = await pollRoom(other, identityOf(id, peer), { after: 0 });
+    assert.deepEqual(flags(left), [[peer.participant, true, true]]);
+  } finally {
+    stops.abort(); // a failed assertion must not leave the follower polling
+    await own.stop();
+  }
 });
 
 test('Every room response the real server sent obeys the published schema', () => {

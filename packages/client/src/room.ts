@@ -100,8 +100,6 @@ export interface RoomExpectation {
   readonly epoch?: number;
   /** The position the call said it had read; 0 for a join. */
   readonly after: number;
-  /** Whether the call was a join, which returns no events. */
-  readonly join: boolean;
 }
 
 /**
@@ -134,8 +132,7 @@ export function parseRoomSnapshot(
   if (
     (expect.participant !== undefined && participant !== expect.participant) ||
     (expect.epoch !== undefined && epoch !== expect.epoch) ||
-    head < expect.after ||
-    (expect.join && (value.events.length > 0 || missed))
+    head < expect.after
   )
     return undefined;
   const members: RoomMember[] = [];
@@ -219,8 +216,12 @@ export interface RoomCallOptions {
  * Joins the room of `artifactId` as the participant this tab keeps in
  * `slot`, or resumes it: the same slot returns the same participant with a
  * newer epoch, and the connection that held the older epoch can no longer
- * act. After its lease ran out the same call makes a new participant. A
- * join returns no events; read from the returned `head`.
+ * act. After its lease ran out the same call makes a new participant. A new
+ * participant's snapshot has no events. A resumed one's holds the events
+ * after the newest position that participant reported, and `missed` says the
+ * room dropped some; they may repeat what an earlier connection of the
+ * participant handled, so tell them apart by `seq`. Read on from the
+ * returned `head`.
  */
 export async function joinRoom(
   client: ArtifreeClient,
@@ -237,7 +238,7 @@ export async function joinRoom(
         slot: options.slot,
         ...(options.state === undefined ? {} : { state: options.state }),
       },
-      (value) => parseRoomSnapshot(value, { after: 0, join: true }),
+      (value) => parseRoomSnapshot(value, { after: 0 }),
       options.signal,
     ),
   );
@@ -270,7 +271,6 @@ export async function pollRoom(
           participant: who.participant,
           epoch: who.epoch,
           after: options.after,
-          join: false,
         }),
       options.signal,
     ),
@@ -346,7 +346,10 @@ export interface FollowRoomOptions {
   readonly signal: AbortSignal;
   /** Receives every snapshot in order, across rejoins. */
   readonly onSnapshot: (followed: FollowedRoom) => void;
-  /** Called when a call failed and following continues. */
+  /**
+   * Called when a call failed and following continues, and when the
+   * participant was lost again and again (see {@link followRoom}).
+   */
   readonly onDisconnect?: (error: ArtifreeApiError, retryInMs: number) => void;
   /** Delay between heartbeats; default a fifth of the lease. */
   readonly intervalMs?: number;
@@ -354,7 +357,22 @@ export interface FollowRoomOptions {
   readonly retryDelayMs?: { readonly min: number; readonly max: number };
   /** Waits; tests replace it. Must resolve early when `signal` aborts. */
   readonly sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  /**
+   * Bounds what follows an abort ({@link ROOM_CLEANUP_MS}); tests replace it.
+   * Must resolve early when `signal` aborts.
+   */
+  readonly cleanupTimer?: (
+    milliseconds: number,
+    signal: AbortSignal,
+  ) => Promise<void>;
 }
+
+/**
+ * How long, after an abort, {@link followRoom} waits for a join that was
+ * already in flight and for the leave that follows it. Past it the lease
+ * (15 s on the server) ends the participant.
+ */
+const ROOM_CLEANUP_MS = 3_000;
 
 function retryable(error: ArtifreeApiError): boolean {
   return (
@@ -380,18 +398,49 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+type Timer = NonNullable<FollowRoomOptions['cleanupTimer']>;
+
+/**
+ * Leaves the room, giving up after {@link ROOM_CLEANUP_MS} however the
+ * network behaves. Never rejects: the lease ends the participant anyway.
+ */
+async function leaveWithin(
+  client: ArtifreeClient,
+  who: RoomIdentity,
+  timer: Timer,
+): Promise<void> {
+  const cancel = new AbortController();
+  const expired = timer(ROOM_CLEANUP_MS, cancel.signal);
+  const left = leaveRoom(client, who, { signal: cancel.signal }).catch(
+    () => undefined, // a failed or cancelled leave is ended by the lease
+  );
+  try {
+    await Promise.race([left, expired]);
+  } finally {
+    cancel.abort();
+  }
+}
+
 /**
  * Keeps this tab present in a room until `signal` aborts. It joins, then
  * renews the lease every interval and hands over each snapshot. After a
  * failed call it waits and tries the heartbeat again, so a short outage
  * costs nothing: the lease is still alive and the same participant goes on.
  * When the server says the participant is gone (`not_found`, after a longer
- * outage), it joins again with the same slot and says so with `joined`; a
- * join whose answer was lost resumes the same participant instead of adding
- * a second. It rejects on a failure retrying cannot fix, such as a closed
- * runtime connection, a rejected token, or a response that breaks the
- * contract, and on what `onSnapshot` throws. On abort it leaves the room
- * once, ignoring a failure: the lease ends it anyway.
+ * outage), it joins again at once with the same slot and says so with
+ * `joined`; a join whose answer was lost resumes the same participant
+ * instead of adding a second. A participant lost again before any heartbeat
+ * succeeded (two followers of one slot in a tab replace each other) is
+ * joined again only after the retry delay, which doubles from the minimum to
+ * the maximum, and each such wait is reported to `onDisconnect`. It rejects
+ * on a failure retrying cannot fix, such as a closed runtime connection, a
+ * rejected token, or a response that breaks the contract, and on what
+ * `onSnapshot` throws.
+ *
+ * After an abort it resolves within about {@link ROOM_CLEANUP_MS} (if the
+ * transport honors the abort and the cleanup timer): it leaves the room once,
+ * also when the abort came while the first join was in flight and that join
+ * still produced a participant, ignoring a failure; the lease ends it anyway.
  */
 export async function followRoom(
   client: ArtifreeClient,
@@ -399,24 +448,36 @@ export async function followRoom(
 ): Promise<void> {
   const { artifactId, slot, signal, onSnapshot } = options;
   const sleep = options.sleep ?? wait;
+  const timer = options.cleanupTimer ?? wait;
   const { min, max } = options.retryDelayMs ?? { min: 500, max: 15_000 };
   let current: RoomSnapshot | undefined;
   let attempt = 0;
+  let losses = 0;
   while (!signal.aborted) {
     let followed: FollowedRoom | undefined;
     let delay = 0;
     try {
       const state = options.state?.();
       const stateOption = state === undefined ? {} : { state };
-      const snapshot =
-        current === undefined
-          ? await joinRoom(client, artifactId, { slot, signal, ...stateOption })
-          : await pollRoom(client, identityOf(artifactId, current), {
-              after: current.head,
-              signal,
-              ...stateOption,
-            });
-      followed = { snapshot, joined: current === undefined };
+      const joined = current === undefined;
+      let snapshot: RoomSnapshot;
+      if (current === undefined) {
+        snapshot = await joinUnlessAbandoned(client, options, timer, {
+          slot,
+          ...stateOption,
+        });
+        // Whatever was joined is left below, also after an abort.
+        current = snapshot;
+        if (signal.aborted) break;
+      } else {
+        snapshot = await pollRoom(client, identityOf(artifactId, current), {
+          after: current.head,
+          signal,
+          ...stateOption,
+        });
+        losses = 0;
+      }
+      followed = { snapshot, joined };
       current = snapshot;
       attempt = 0;
       delay = options.intervalMs ?? Math.max(250, snapshot.lease_ms / 5);
@@ -424,26 +485,57 @@ export async function followRoom(
       if (signal.aborted) break;
       if (!(error instanceof ArtifreeApiError)) throw error;
       if (current !== undefined && error.code === 'not_found') {
-        // The participant is gone. Join again at once: the next heartbeat
-        // is an interval away, so this cannot spin.
+        // The participant is gone. Join again at once; the next heartbeat is
+        // an interval away, so a single loss cannot spin. Losing it again
+        // before a heartbeat succeeded means something else replaces it each
+        // time: wait, and say so.
         current = undefined;
-        continue;
+        losses += 1;
+        if (losses < 2) continue;
+        delay = Math.min(max, min * 2 ** (losses - 2));
+        options.onDisconnect?.(error, delay);
+      } else {
+        if (!retryable(error)) throw error;
+        delay =
+          error.retryAfterSeconds === undefined
+            ? Math.min(max, min * 2 ** attempt)
+            : error.retryAfterSeconds * 1_000;
+        attempt += 1;
+        options.onDisconnect?.(error, delay);
       }
-      if (!retryable(error)) throw error;
-      delay =
-        error.retryAfterSeconds === undefined
-          ? Math.min(max, min * 2 ** attempt)
-          : error.retryAfterSeconds * 1_000;
-      attempt += 1;
-      options.onDisconnect?.(error, delay);
     }
     // Outside the try: what the handler throws is never retried.
     if (followed !== undefined) onSnapshot(followed);
     await sleep(delay, signal);
   }
   if (current !== undefined) {
-    await leaveRoom(client, identityOf(artifactId, current)).catch(
-      () => undefined,
-    );
+    await leaveWithin(client, identityOf(artifactId, current), timer);
+  }
+}
+
+/**
+ * A join that an abort does not cancel at once: the server may already have
+ * made the participant, and a cancelled request would leave its identity
+ * unknown. After an abort it is given {@link ROOM_CLEANUP_MS} more.
+ */
+async function joinUnlessAbandoned(
+  client: ArtifreeClient,
+  options: FollowRoomOptions,
+  timer: Timer,
+  join: { slot: string; state?: string },
+): Promise<RoomSnapshot> {
+  const grace = new AbortController();
+  const arm = (): void => {
+    void timer(ROOM_CLEANUP_MS, grace.signal).then(() => grace.abort());
+  };
+  options.signal.addEventListener('abort', arm, { once: true });
+  try {
+    return await joinRoom(client, options.artifactId, {
+      ...join,
+      signal: grace.signal,
+    });
+  } finally {
+    options.signal.removeEventListener('abort', arm);
+    grace.abort(); // ends a timer that is still waiting
   }
 }

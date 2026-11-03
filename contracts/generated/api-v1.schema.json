@@ -1845,7 +1845,7 @@
           "type": "integer"
         },
         "events": {
-          "description": "Events after the requested position, oldest first. A join returns\nnone.",
+          "description": "Events after the requested position, oldest first. A join that makes\na new participant returns none. A join that resumes a participant\nreturns the events after the newest position that participant\nreported in a heartbeat (its join position if it reported none); they\nmay repeat events an earlier connection of the participant handled, so\ntell them apart by `seq`.",
           "items": {
             "$ref": "#/$defs/RoomEvent"
           },
@@ -1871,7 +1871,7 @@
           "type": "array"
         },
         "missed": {
-          "description": "Whether the room dropped events the caller had not read. Ephemeral\nevents can be lost; this says when it happened to this caller.",
+          "description": "Whether the room dropped events the caller had not read, including, in\na resuming join, events that came while the participant was away.\nEphemeral events can be lost; this says when it happened to this\ncaller.",
           "type": "boolean"
         },
         "participant": {

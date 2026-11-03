@@ -253,9 +253,10 @@ pub(crate) async fn join(
     actor: &ActorId,
     session_id: &str,
     artifact: &str,
-    request: RoomJoinRequest,
+    body: Result<RoomJoinRequest, ApiError>,
 ) -> Result<RoomSnapshot, ApiError> {
     let located = locate(state, actor, session_id, artifact, true).await?;
+    let request = body?;
     let slot: Slot = text("slot", &request.slot)?;
     let presence = state_of(request.state.as_deref())?;
     located
@@ -270,10 +271,11 @@ pub(crate) async fn heartbeat(
     state: &AppState,
     actor: &ActorId,
     names: RoomNames<'_>,
-    request: RoomHeartbeatRequest,
+    body: Result<RoomHeartbeatRequest, ApiError>,
 ) -> Result<RoomSnapshot, ApiError> {
     let (participant, epoch) = names.numbers()?;
     let located = locate(state, actor, names.session, names.artifact, true).await?;
+    let request = body?;
     let presence = state_of(request.state.as_deref())?;
     located
         .act(state, actor, |rooms, now, caller| {
@@ -294,10 +296,11 @@ pub(crate) async fn send(
     state: &AppState,
     actor: &ActorId,
     names: RoomNames<'_>,
-    request: RoomEventRequest,
+    body: Result<RoomEventRequest, ApiError>,
 ) -> Result<RoomEventReceipt, ApiError> {
     let (participant, epoch) = names.numbers()?;
     let located = locate(state, actor, names.session, names.artifact, true).await?;
+    let request = body?;
     let kind: EventKind = text("kind", &request.kind)?;
     let data: EventData = text("data", &request.data)?;
     located

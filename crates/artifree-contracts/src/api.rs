@@ -1320,14 +1320,20 @@ pub struct RoomSnapshot {
     pub lease_ms: u64,
     /// Everyone present, the viewer included, by participant.
     pub members: Vec<RoomMember>,
-    /// Events after the requested position, oldest first. A join returns
-    /// none.
+    /// Events after the requested position, oldest first. A join that makes
+    /// a new participant returns none. A join that resumes a participant
+    /// returns the events after the newest position that participant
+    /// reported in a heartbeat (its join position if it reported none); they
+    /// may repeat events an earlier connection of the participant handled, so
+    /// tell them apart by `seq`.
     pub events: Vec<RoomEvent>,
     /// The newest event's position, 0 if the room never had one. Send it as
     /// `after` once its events were read.
     pub head: u64,
-    /// Whether the room dropped events the caller had not read. Ephemeral
-    /// events can be lost; this says when it happened to this caller.
+    /// Whether the room dropped events the caller had not read, including, in
+    /// a resuming join, events that came while the participant was away.
+    /// Ephemeral events can be lost; this says when it happened to this
+    /// caller.
     pub missed: bool,
 }
 

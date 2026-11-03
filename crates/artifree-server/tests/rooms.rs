@@ -529,6 +529,68 @@ async fn an_event_reaches_those_present_and_is_never_replayed_to_a_late_joiner()
 }
 
 #[tokio::test]
+async fn a_resumed_join_delivers_what_came_while_its_participant_was_away_or_says_it_missed()
+-> TestResult {
+    let harness = Harness::new();
+    let artifact = harness.artifact().await?;
+    let (sending, reading) = (harness.tab().await?, harness.tab().await?);
+    let sender = harness.enter(&sending, &artifact, "page").await?;
+    let reader = harness.enter(&reading, &artifact, "page").await?;
+    harness.emit(&sending, &artifact, &sender, "read").await?;
+    let seen = harness
+        .beat(&reading, &artifact, &reader, 0)
+        .await?
+        .snapshot()?;
+    assert_eq!(seen.events.len(), 1);
+    // The reader says it read event 1, goes away, and two events arrive.
+    harness
+        .beat(&reading, &artifact, &reader, 1)
+        .await?
+        .snapshot()?;
+    harness.clock.advance(1_000);
+    harness.emit(&sending, &artifact, &sender, "away-1").await?;
+    harness.emit(&sending, &artifact, &sender, "away-2").await?;
+    harness.clock.advance(1_000);
+    let resumed = harness.enter(&reading, &artifact, "page").await?;
+    assert_eq!(resumed.participant, reader.participant);
+    let data: Vec<_> = resumed.events.iter().map(|e| e.data.as_str()).collect();
+    assert_eq!(data, ["away-1", "away-2"]);
+    assert_eq!((resumed.head, resumed.missed), (3, false));
+
+    // While another participant is away more than the room keeps, the
+    // resuming join says so instead of passing silently.
+    let away = harness.tab().await?;
+    let gone = harness.enter(&away, &artifact, "page").await?;
+    let senders = [
+        harness.tab().await?,
+        harness.tab().await?,
+        harness.tab().await?,
+    ];
+    let mut talking = Vec::new();
+    for tab in &senders {
+        for slot in ["a", "b", "c", "d"] {
+            talking.push((tab, harness.enter(tab, &artifact, slot).await?));
+        }
+    }
+    // Twelve senders, a burst of eight each, twice: 192 events, 128 kept.
+    for _ in 0..2 {
+        for (tab, who) in &talking {
+            for _ in 0..8 {
+                let sent = harness.emit(tab, &artifact, who, "e").await?;
+                assert_eq!(sent.status, StatusCode::OK, "{}", sent.code());
+            }
+        }
+        harness.clock.advance(5_000);
+    }
+    let back = harness.enter(&away, &artifact, "page").await?;
+    assert_eq!(back.participant, gone.participant);
+    assert_eq!(back.events.len(), 128);
+    assert_eq!(back.events[0].seq, 3 + 192 - 127);
+    assert!(back.missed, "the oldest events were dropped before it read");
+    Ok(())
+}
+
+#[tokio::test]
 async fn events_are_not_stored_and_a_restart_empties_every_room() -> TestResult {
     let harness = Harness::new();
     let artifact = harness.artifact().await?;
@@ -746,6 +808,86 @@ async fn a_caller_without_a_live_connection_learns_nothing_from_how_its_body_is_
         (dead.status, dead.code().as_str()),
         (StatusCode::NOT_FOUND, "runtime_session_expired")
     );
+    Ok(())
+}
+
+/// The path of a room call from a tab, an artifact and the caller's participant.
+type RoutePath = fn(&str, &str, &RoomSnapshot) -> String;
+
+fn raw(path: &str, body: String) -> Result<Request<Body>, axum::http::Error> {
+    authorized(Request::post(path))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+}
+
+#[tokio::test]
+async fn a_body_is_judged_after_the_connection_on_every_route_that_has_one() -> TestResult {
+    let harness = Harness::new();
+    let artifact = harness.artifact().await?;
+    let tab = harness.tab().await?;
+    let me = harness.enter(&tab, &artifact, "page").await?;
+    let unknown = "0".repeat(32);
+    // Each route with a body, as `(name, path for a connection, a valid body)`.
+    let routes: [(&str, RoutePath, &str); 3] = [
+        (
+            "join",
+            |tab, artifact, _| room(tab, artifact),
+            r#"{"slot":"page"}"#,
+        ),
+        (
+            "heartbeat",
+            |tab, artifact, me| {
+                format!(
+                    "{}/heartbeat",
+                    member(tab, artifact, me.participant, me.epoch)
+                )
+            },
+            r#"{"after":0}"#,
+        ),
+        (
+            "events",
+            |tab, artifact, me| {
+                format!("{}/events", member(tab, artifact, me.participant, me.epoch))
+            },
+            r#"{"kind":"k","data":"d"}"#,
+        ),
+    ];
+    let oversized = format!(r#"{{"data":"{}"}}"#, "d".repeat(20_000));
+    for (name, path, valid) in routes {
+        // A connection the server never issued answers the same whatever the
+        // body is: a valid one, malformed JSON, an unknown field, or one far
+        // over the room's limit.
+        let dead_path = path(&unknown, &artifact, &me);
+        let reference = harness.send(raw(&dead_path, valid.to_owned())?).await?;
+        assert_eq!(
+            (reference.status, reference.code().as_str()),
+            (StatusCode::NOT_FOUND, "runtime_session_expired"),
+            "{name}"
+        );
+        let live_path = path(&tab, &artifact, &me);
+        for (what, body, expected) in [
+            ("malformed JSON", "{".to_owned(), StatusCode::BAD_REQUEST),
+            (
+                "an unknown field",
+                r#"{"slot":"a","kind":"k","data":"","after":0,"zzz":1}"#.to_owned(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "an oversized body",
+                oversized.clone(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+        ] {
+            let dead = harness.send(raw(&dead_path, body.clone())?).await?;
+            assert_eq!(
+                (dead.status, dead.code()),
+                (reference.status, reference.code()),
+                "{name}, {what}: a dead connection must not learn how the body was judged"
+            );
+            let live = harness.send(raw(&live_path, body)?).await?;
+            assert_eq!(live.status, expected, "{name}, {what}: {}", live.message());
+        }
+    }
     Ok(())
 }
 

@@ -95,8 +95,16 @@ head, missed}`. A **lease** is 15 s from the last join or heartbeat on a
    head at its join, and reads from `max(after, floor)`. So:
    - an event sent before a participant joined is **never** delivered to it,
      whatever `after` it asks for, including 0;
-   - a resumed participant keeps its floor, so it still reads what came while
-     it was away, up to the 128 kept;
+   - the room also remembers the newest `after` each participant reported in
+     a heartbeat (its **read position**, never below its floor). A join that
+     **resumes** a participant returns the events after that position, up to
+     the 128 kept, and sets `missed` when the room already dropped some of
+     them, so what came while the participant was away is delivered or
+     reported, never skipped silently. The position is the participant's own
+     claim and only affects what it reads. Events handled by an earlier
+     connection of the participant after its last heartbeat can come again;
+     readers tell them apart by `seq`. A join that makes a **new**
+     participant returns no events;
    - `missed` is true when the room dropped events the caller had not read.
      Nothing replaces them.
 
@@ -133,8 +141,13 @@ head, missed}`. A **lease** is 15 s from the last join or heartbeat on a
 
 7. **Order of judgement.** Route shape (`400`), then the tab (`404
 runtime_session_expired`), then the live artifact (`404`; a trashed artifact
-   is as absent as for every other call), then the body. A caller without a
-   live tab learns nothing from how its body was judged. `leave` needs the tab
+   is as absent as for every other call), then the body. The body is read by
+   the router but judged only after the tab: malformed JSON, an unknown field
+   or a body over 8 KiB answer exactly as a valid body does when the
+   connection is unknown, expired, closed or another actor's, so a caller
+   without a live tab learns nothing from how its body was judged (a test sends
+   each of the three to a dead connection and to a live one on every route with
+   a body). `leave` needs the tab
    but not a live artifact, so a tab can leave the room of an artifact that was
    trashed. Route numbers are plain: ASCII digits, no sign, no leading zero,
    `1` to `2^53-1`; anything else is `400`.
@@ -166,14 +179,22 @@ runtime_session_expired`), then the live artifact (`404`; a trashed artifact
     cross-checks everything a server sends (counters, flags, a member list that
     holds the viewer exactly once, a viewer that is `is_me` and `same_tab`,
     `same_tab` equal to equality of tab labels, event numbers that increase, come
-    after the position asked and do not pass `head`, and a join that returns no
-    events) and rejects an
+    after the position asked and do not pass `head`) and rejects an
     inconsistent response as a contract violation. Methods return rejected
     promises; none throws synchronously. `followRoom` joins, heartbeats at
     `lease / 5` from the head it last read, backs off from 0.5 s to 15 s on a
     transient failure (honoring `Retry-After`), joins again at once on
     `not_found`, never retries a failure that is the caller's fault or a handler
-    that throws, and leaves once on abort.
+    that throws, and leaves once on abort. A participant lost again before any
+    heartbeat succeeded (two followers of one slot in one tab replace each
+    other's epoch) is joined again only after a wait that doubles from 0.5 s to
+    15 s, reported to `onDisconnect`; the first loss still rejoins at once.
+    After an abort `followRoom` settles within about 3 s whatever the network
+    does: a first join that was already in flight is given 3 s and, if it
+    still made a participant, that participant is left; the leave itself is
+    given 3 s; past that the lease (15 s) ends the participant. This relies on
+    the transport honoring an `AbortSignal` for the join; the leave is also
+    raced against its timer.
 
 ## Not implemented
 

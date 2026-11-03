@@ -234,6 +234,11 @@ struct Member {
     /// or before it are never delivered to it, whatever position it asks
     /// for.
     floor: EventSeq,
+    /// The newest position the participant has said it read (the `after` of
+    /// its heartbeats), at least its floor. A resumed join returns the
+    /// events after it, so none that arrived while the participant was away
+    /// is skipped without a word.
+    read: EventSeq,
     pacer: Pacer,
 }
 
@@ -395,9 +400,13 @@ impl Rooms {
     /// same call then makes a new one. The state is replaced by `state`, or
     /// emptied if there is none.
     ///
-    /// The snapshot has no events: an event sent before the join is not
-    /// delivered to the new participant, and a resumed one reads from where
-    /// it stopped by [`Rooms::heartbeat`].
+    /// A new participant's snapshot has no events: an event sent before the
+    /// join is never delivered to it. A resumed participant's snapshot holds
+    /// the events after the newest position it reported by
+    /// [`Rooms::heartbeat`] (its join floor if it reported none), and
+    /// `missed` is set when the room already dropped some of them. That can
+    /// repeat events an earlier connection of the participant handled;
+    /// readers tell them apart by `seq`.
     ///
     /// # Errors
     ///
@@ -425,8 +434,8 @@ impl Rooms {
             member.epoch = epoch;
             member.state = state;
             member.lease_until = lease_until;
-            let head = room.head;
-            return Ok(room.snapshot(index, caller.actor, head, &self.limits));
+            let read = member.read.0;
+            return Ok(room.snapshot(index, caller.actor, read, &self.limits));
         }
         if let Some(room) = self.table.get(&key) {
             if room.members.len() >= self.limits.max_participants {
@@ -468,6 +477,7 @@ impl Rooms {
             state,
             lease_until,
             floor: EventSeq(room.head),
+            read: EventSeq(room.head),
             pacer: Pacer {
                 next: Duration::ZERO,
             },
@@ -509,6 +519,7 @@ impl Rooms {
         }
         let member = &mut room.members[index];
         member.lease_until = now.saturating_add(self.limits.lease);
+        member.read = EventSeq(member.read.0.max(after.0));
         if let Some(state) = state {
             member.state = state;
         }
@@ -1167,6 +1178,134 @@ mod tests {
             .map(|event| event.data.as_str())
             .collect();
         assert_eq!(texts, ["gap"]);
+    }
+
+    fn send_text(rooms: &mut Rooms, now: u64, tab: &Tab, from: &Snapshot, text: &str) {
+        rooms
+            .send(
+                at(now),
+                &tab.caller(),
+                from.participant,
+                from.epoch,
+                kind(),
+                data(text),
+            )
+            .ready();
+    }
+
+    fn texts(view: &Snapshot) -> Vec<&str> {
+        view.events
+            .iter()
+            .map(|event| event.data.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_resumed_join_delivers_what_came_after_the_position_its_participant_reported() {
+        let mut rooms = rooms();
+        let (one, two) = (Tab::new("tab-one"), Tab::new("tab-two"));
+        let sender = join(&mut rooms, 0, &one, "page");
+        let reader = join(&mut rooms, 0, &two, "page");
+        send_text(&mut rooms, 1, &one, &sender, "read");
+        let seen = rooms
+            .heartbeat(
+                at(2),
+                &two.caller(),
+                reader.participant,
+                reader.epoch,
+                EventSeq(0),
+                None,
+            )
+            .ready();
+        assert_eq!(texts(&seen), ["read"]);
+        // The reader reports having read event 1, then goes away; two more
+        // events arrive.
+        rooms
+            .heartbeat(
+                at(3),
+                &two.caller(),
+                reader.participant,
+                reader.epoch,
+                EventSeq(1),
+                None,
+            )
+            .ready();
+        send_text(&mut rooms, 4, &one, &sender, "away-1");
+        send_text(&mut rooms, 1_000, &one, &sender, "away-2");
+        let resumed = join(&mut rooms, 2_000, &two, "page");
+        assert_eq!(resumed.participant, reader.participant);
+        assert_eq!(texts(&resumed), ["away-1", "away-2"]);
+        assert_eq!(resumed.head, EventSeq(3));
+        assert!(!resumed.missed, "nothing was dropped");
+    }
+
+    #[test]
+    fn a_position_reported_once_never_goes_back() {
+        let mut rooms = rooms();
+        let (one, two) = (Tab::new("tab-one"), Tab::new("tab-two"));
+        let sender = join(&mut rooms, 0, &one, "page");
+        let reader = join(&mut rooms, 0, &two, "page");
+        send_text(&mut rooms, 1, &one, &sender, "a");
+        send_text(&mut rooms, 1_000, &one, &sender, "b");
+        for after in [2, 1] {
+            rooms
+                .heartbeat(
+                    at(2_000),
+                    &two.caller(),
+                    reader.participant,
+                    reader.epoch,
+                    EventSeq(after),
+                    None,
+                )
+                .ready();
+        }
+        send_text(&mut rooms, 3_000, &one, &sender, "c");
+        let resumed = join(&mut rooms, 4_000, &two, "page");
+        assert_eq!(texts(&resumed), ["c"], "from the newest reported position");
+    }
+
+    #[test]
+    fn a_resumed_join_says_when_the_room_dropped_what_its_participant_had_not_read() {
+        let limits = Limits {
+            kept_events: 3,
+            event_burst: 100,
+            ..Limits::STANDARD
+        };
+        let mut rooms = Rooms::new(limits);
+        let (one, two) = (Tab::new("tab-one"), Tab::new("tab-two"));
+        let sender = join(&mut rooms, 0, &one, "page");
+        let reader = join(&mut rooms, 0, &two, "page");
+        for round in 0..5 {
+            send_text(&mut rooms, round, &one, &sender, "e");
+        }
+        let resumed = join(&mut rooms, 1_000, &two, "page");
+        let seqs: Vec<_> = resumed.events.iter().map(|event| event.seq.0).collect();
+        assert_eq!(seqs, [3, 4, 5], "the room kept the newest three");
+        assert!(resumed.missed, "events 1 and 2 were dropped unread");
+        assert_eq!(resumed.participant, reader.participant);
+    }
+
+    #[test]
+    fn a_new_participant_after_its_lease_ran_out_gets_no_old_events_in_its_join() {
+        let mut rooms = rooms();
+        let (one, two) = (Tab::new("tab-one"), Tab::new("tab-two"));
+        let sender = join(&mut rooms, 0, &one, "page");
+        join(&mut rooms, 0, &two, "page");
+        send_text(&mut rooms, 1, &one, &sender, "old");
+        // The sender keeps its lease alive; the reader's ran out.
+        rooms
+            .heartbeat(
+                at(14_000),
+                &one.caller(),
+                sender.participant,
+                sender.epoch,
+                EventSeq(1),
+                None,
+            )
+            .ready();
+        let fresh = join(&mut rooms, 15_000, &two, "page");
+        assert!(fresh.events.is_empty() && !fresh.missed);
+        assert_eq!(fresh.head, EventSeq(1));
     }
 
     #[test]

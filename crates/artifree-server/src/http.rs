@@ -1694,10 +1694,17 @@ async fn join_room(
     body: Result<Json<RoomJoinRequest>, JsonRejection>,
 ) -> Result<Json<RoomSnapshot>, ApiError> {
     let Path((session, id)) = path?;
-    let Json(request) = body?;
-    rooms::join(&state, &actor, &session, &id, request)
-        .await
-        .map(Json)
+    // The body is judged by `rooms` after the connection, so what it says
+    // about a malformed body does not tell a live connection from a dead one.
+    rooms::join(
+        &state,
+        &actor,
+        &session,
+        &id,
+        body.map(|Json(request)| request).map_err(ApiError::from),
+    )
+    .await
+    .map(Json)
 }
 
 async fn room_heartbeat(
@@ -1707,16 +1714,20 @@ async fn room_heartbeat(
     body: Result<Json<RoomHeartbeatRequest>, JsonRejection>,
 ) -> Result<Json<RoomSnapshot>, ApiError> {
     let Path((session, id, participant, epoch)) = path?;
-    let Json(request) = body?;
     let names = RoomNames {
         session: &session,
         artifact: &id,
         participant: &participant,
         epoch: &epoch,
     };
-    rooms::heartbeat(&state, &actor, names, request)
-        .await
-        .map(Json)
+    rooms::heartbeat(
+        &state,
+        &actor,
+        names,
+        body.map(|Json(request)| request).map_err(ApiError::from),
+    )
+    .await
+    .map(Json)
 }
 
 async fn send_room_event(
@@ -1726,14 +1737,20 @@ async fn send_room_event(
     body: Result<Json<RoomEventRequest>, JsonRejection>,
 ) -> Result<Json<RoomEventReceipt>, ApiError> {
     let Path((session, id, participant, epoch)) = path?;
-    let Json(request) = body?;
     let names = RoomNames {
         session: &session,
         artifact: &id,
         participant: &participant,
         epoch: &epoch,
     };
-    rooms::send(&state, &actor, names, request).await.map(Json)
+    rooms::send(
+        &state,
+        &actor,
+        names,
+        body.map(|Json(request)| request).map_err(ApiError::from),
+    )
+    .await
+    .map(Json)
 }
 
 async fn leave_room(

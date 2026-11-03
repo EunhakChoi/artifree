@@ -312,9 +312,12 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   another participant's events and the owner's saves unaffected; bounded memory;
   another actor and a wrong tab getting `404`; a join racing a close; closing a
   connection; a trashed artifact; strict route numbers; and no row in the
-  database after a restart. Node tests give the client parser about thirty
+  database after a restart; a resumed join that delivers, or reports as missed,
+  what came while its participant was away; and a malformed, unknown-field or
+  oversized body that answers a dead or another actor's connection exactly as a
+  valid body does. Node tests give the client parser about thirty
   inconsistent responses, check local validation without a request and the
-  follower's backoff, rejoin and abort, and run the real binary with every room
+  follower's backoff, rejoin, repeated-loss wait and abort (a leave or a first join that never answers cannot keep it from settling), and run the real binary with every room
   response validated against the published schema. Each guard was checked by
   breaking it and watching a named test fail. These tests do not show multiple
   users, that a frame can use a room, or anything about MCP; no browser smoke

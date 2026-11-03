@@ -25,6 +25,7 @@ use tower::ServiceExt;
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
+use crate::operations::ApiError;
 use crate::rooms::{self, RoomNames};
 use crate::runtime_source::{self, FrameCall};
 use crate::{changes, operations, preview};
@@ -1744,6 +1745,10 @@ fn close_while_creation_waits_for_storage_rejects_the_late_view() -> Result<(), 
     Ok(())
 }
 
+fn bad<T>() -> Result<T, ApiError> {
+    Err(ApiError::invalid("body is malformed"))
+}
+
 fn join_request(slot: &str) -> RoomJoinRequest {
     RoomJoinRequest {
         slot: slot.into(),
@@ -1768,12 +1773,13 @@ fn another_actor_has_no_access_to_the_owners_room_or_participants() -> Result<()
         let theirs = operations::open_runtime_session(&state, &other, None)
             .map_err(|error| error.body.message)?
             .session_id;
-        let mine = rooms::join(&state, &owner, &tab, &artifact, join_request("page"))
+        let mine = rooms::join(&state, &owner, &tab, &artifact, Ok(join_request("page")))
             .await
             .map_err(|error| error.body.message)?;
 
         // The other actor's own connection cannot reach the owner's artifact.
-        let joined = rooms::join(&state, &other, &theirs, &artifact, join_request("page")).await;
+        let joined =
+            rooms::join(&state, &other, &theirs, &artifact, Ok(join_request("page"))).await;
         assert!(matches!(&joined, Err(error) if error.status == StatusCode::NOT_FOUND));
         // Nor can it use the owner's connection or participant.
         let (participant, epoch) = (mine.participant.to_string(), mine.epoch.to_string());
@@ -1788,10 +1794,10 @@ fn another_actor_has_no_access_to_the_owners_room_or_participants() -> Result<()
                 &state,
                 &other,
                 names,
-                RoomHeartbeatRequest {
+                Ok(RoomHeartbeatRequest {
                     after: 0,
                     state: None,
-                },
+                }),
             )
             .await;
             assert!(
@@ -1800,6 +1806,38 @@ fn another_actor_has_no_access_to_the_owners_room_or_participants() -> Result<()
                 beat.map(|view| view.participant)
             );
         }
+        // The other actor's judgement of a bad body is the judgement of a good
+        // one on the owner's live connection: a connection that is not its
+        // own tells it nothing about how a body was read.
+        let same = |reference: &ApiError, other: &ApiError| {
+            (reference.status, reference.body.code) == (other.status, other.body.code)
+        };
+        let reference = rooms::join(&state, &other, &tab, &artifact, Ok(join_request("page")))
+            .await
+            .err()
+            .ok_or("the owner's connection must refuse another actor")?;
+        assert_eq!(reference.status, StatusCode::NOT_FOUND);
+        let refused = rooms::join(&state, &other, &tab, &artifact, bad())
+            .await
+            .err()
+            .ok_or("must be refused")?;
+        assert!(same(&reference, &refused), "join: {refused:?}");
+        let names = RoomNames {
+            session: &tab,
+            artifact: &artifact,
+            participant: &participant,
+            epoch: &epoch,
+        };
+        let refused = rooms::heartbeat(&state, &other, names, bad())
+            .await
+            .err()
+            .ok_or("must be refused")?;
+        assert!(same(&reference, &refused), "heartbeat: {refused:?}");
+        let refused = rooms::send(&state, &other, names, bad())
+            .await
+            .err()
+            .ok_or("must be refused")?;
+        assert!(same(&reference, &refused), "send: {refused:?}");
         // The owner's participant is untouched.
         let names = RoomNames {
             session: &tab,
@@ -1811,10 +1849,10 @@ fn another_actor_has_no_access_to_the_owners_room_or_participants() -> Result<()
             &state,
             &owner,
             names,
-            RoomHeartbeatRequest {
+            Ok(RoomHeartbeatRequest {
                 after: 0,
                 state: None,
-            },
+            }),
         )
         .await
         .map_err(|error| error.body.message)?;
@@ -1847,7 +1885,7 @@ fn a_join_whose_connection_closes_during_the_artifact_lookup_leaves_no_participa
             &actor,
             &closing,
             &artifact,
-            join_request("page"),
+            Ok(join_request("page")),
         ));
         let pending = poll_fn(|context| match join.as_mut().poll(context) {
             Poll::Pending => Poll::Ready(true),
@@ -1866,9 +1904,15 @@ fn a_join_whose_connection_closes_during_the_artifact_lookup_leaves_no_participa
         );
         blocker.await?;
         // The room holds nobody from the closed connection.
-        let view = rooms::join(&state, &actor, &staying, &artifact, join_request("page"))
-            .await
-            .map_err(|error| error.body.message)?;
+        let view = rooms::join(
+            &state,
+            &actor,
+            &staying,
+            &artifact,
+            Ok(join_request("page")),
+        )
+        .await
+        .map_err(|error| error.body.message)?;
         assert_eq!(view.members.len(), 1);
         Ok::<(), Box<dyn Error>>(())
     })
@@ -1889,7 +1933,7 @@ fn revoking_the_token_of_a_connection_ends_what_its_participants_can_do()
         let tab = operations::open_runtime_session(&state, &actor, Some(token.clone()))
             .map_err(|error| error.body.message)?
             .session_id;
-        let mine = rooms::join(&state, &actor, &tab, &artifact, join_request("page"))
+        let mine = rooms::join(&state, &actor, &tab, &artifact, Ok(join_request("page")))
             .await
             .map_err(|error| error.body.message)?;
         state.runtime_sessions().revoke_token(&token);
@@ -1904,10 +1948,10 @@ fn revoking_the_token_of_a_connection_ends_what_its_participants_can_do()
             &state,
             &actor,
             names,
-            RoomHeartbeatRequest {
+            Ok(RoomHeartbeatRequest {
                 after: 0,
                 state: None,
-            },
+            }),
         )
         .await;
         assert!(
@@ -1916,7 +1960,7 @@ fn revoking_the_token_of_a_connection_ends_what_its_participants_can_do()
             "{:?}",
             beat.map(|view| view.participant)
         );
-        let joined = rooms::join(&state, &actor, &tab, &artifact, join_request("page")).await;
+        let joined = rooms::join(&state, &actor, &tab, &artifact, Ok(join_request("page"))).await;
         assert!(matches!(&joined, Err(error) if error.status == StatusCode::NOT_FOUND));
         Ok::<(), Box<dyn Error>>(())
     })

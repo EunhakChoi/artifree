@@ -59,8 +59,8 @@ function event(seq, participant, tab, self = { participant: 4, tab: 2 }) {
   };
 }
 
-const heartbeat = { participant: 4, epoch: 7, after: 8, join: false };
-const join = { after: 0, join: true };
+const heartbeat = { participant: 4, epoch: 7, after: 8 };
+const join = { after: 0 };
 
 test('A consistent snapshot is accepted, with its flags as the server computed them', () => {
   const view = parseRoomSnapshot(
@@ -83,6 +83,19 @@ test('A consistent snapshot is accepted, with its flags as the server computed t
       [10, false, true],
     ],
   );
+});
+
+test('A resuming join may carry the events its participant missed, and say that some were dropped', () => {
+  const view = parseRoomSnapshot(
+    snapshot({ events: [event(9, 3, 1), event(10, 5, 2)], missed: true }),
+    join,
+  );
+  assert.ok(view);
+  assert.deepEqual(
+    view.events.map((e) => e.seq),
+    [9, 10],
+  );
+  assert.equal(view.missed, true);
 });
 
 const refused = [
@@ -255,8 +268,8 @@ const refused = [
     },
     heartbeat,
   ],
-  ['events in a join', { events: [event(9, 3, 1)] }, join],
-  ['missed in a join', { missed: true }, join],
+  ['events in a join not newer than 0', { events: [event(0, 3, 1)] }, join],
+  ['events in a join beyond the head', { events: [event(11, 3, 1)] }, join],
   ['a zero lease', { lease_ms: 0 }, heartbeat],
   ['a lease over an hour', { lease_ms: 3_600_001 }, heartbeat],
   ['a fractional participant', { participant: 4.5 }, join],
@@ -299,6 +312,7 @@ async function clientWith(respond) {
         method: init?.method,
         body: init?.body === undefined ? undefined : JSON.parse(init.body),
         authorization: init?.headers?.authorization,
+        signal: init?.signal,
       };
       requests.push(request);
       return respond(request);
@@ -636,14 +650,14 @@ test('A failure retrying cannot fix ends following with that failure', async () 
 test('A body that breaks the contract ends following', async () => {
   const stops = new AbortController();
   const { client } = await clientWith(() =>
-    Response.json(snapshot({ events: [event(9, 3, 1)] })),
+    Response.json(snapshot({ lease_ms: 0 })),
   );
   await assert.rejects(
     followRoom(client, {
       artifactId: ARTIFACT,
       slot: 'page',
       signal: stops.signal,
-      onSnapshot: () => assert.fail('a join with events is not a snapshot'),
+      onSnapshot: () => assert.fail('a zero lease is not a snapshot'),
       sleep: async () => assert.fail('no retry'),
     }),
     (error) => error.code === 'invalid_response',
@@ -735,4 +749,165 @@ test('An abort during the first join leaves nothing to leave and resolves', asyn
     sleep: async () => assert.fail('no wait'),
   });
   assert.equal(requests.length, 1);
+});
+
+/** A cleanup timer that never expires by itself, only when cancelled. */
+const patientTimer = (_milliseconds, signal) =>
+  new Promise((resolve) => signal.addEventListener('abort', () => resolve()));
+
+test(
+  'A leave that never answers cannot keep the follower from settling after an abort',
+  { timeout: 5_000 },
+  async () => {
+    const stops = new AbortController();
+    const timers = [];
+    let asked = () => {};
+    const leaveAsked = new Promise((resolve) => {
+      asked = resolve;
+    });
+    const { client, requests } = await clientWith((request) => {
+      if (!request.path.endsWith('/leave')) return Response.json(snapshot());
+      asked();
+      return new Promise(() => {});
+    });
+    await followRoom(client, {
+      artifactId: ARTIFACT,
+      slot: 'page',
+      signal: stops.signal,
+      onSnapshot: () => {},
+      sleep: async () => stops.abort(),
+      // The bound is reached once the leave was sent and not answered.
+      cleanupTimer: async (milliseconds) => {
+        timers.push(milliseconds);
+        await leaveAsked;
+      },
+    });
+    assert.deepEqual(timers, [3_000], 'the leave is bounded by three seconds');
+    assert.deepEqual(
+      requests.map((r) => r.path.replace(ROOM, '')),
+      ['', '/4/7/leave'],
+    );
+  },
+);
+
+test(
+  'An abort while the first join is in flight still leaves the participant that join made',
+  { timeout: 5_000 },
+  async () => {
+    const stops = new AbortController();
+    let answer = () => assert.fail('no join was sent');
+    let started = () => {};
+    const inFlight = new Promise((resolve) => {
+      started = resolve;
+    });
+    const { client, requests } = await clientWith((request) => {
+      if (request.path.endsWith('/leave'))
+        return new Response(null, { status: 204 });
+      return new Promise((resolve, reject) => {
+        answer = () => resolve(Response.json(snapshot()));
+        // A transport that honors the signal the follower passed on.
+        request.signal.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        );
+        started();
+      });
+    });
+    const following = followRoom(client, {
+      artifactId: ARTIFACT,
+      slot: 'page',
+      signal: stops.signal,
+      onSnapshot: () => assert.fail('nothing is handed over after an abort'),
+      sleep: async () => assert.fail('no wait'),
+      cleanupTimer: patientTimer,
+    });
+    await inFlight;
+    stops.abort();
+    answer();
+    await following;
+    assert.deepEqual(
+      requests.map((r) => r.path.replace(ROOM, '')),
+      ['', '/4/7/leave'],
+      'the participant the join made is left',
+    );
+  },
+);
+
+test(
+  'A first join that does not answer within the bound after an abort is given up',
+  { timeout: 5_000 },
+  async () => {
+    const stops = new AbortController();
+    let started = () => {};
+    const inFlight = new Promise((resolve) => {
+      started = resolve;
+    });
+    const { client, requests } = await clientWith(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.signal.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+          started();
+        }),
+    );
+    const following = followRoom(client, {
+      artifactId: ARTIFACT,
+      slot: 'page',
+      signal: stops.signal,
+      onSnapshot: () => assert.fail('no snapshot'),
+      sleep: async () => assert.fail('no wait'),
+      cleanupTimer: async () => {},
+    });
+    await inFlight;
+    stops.abort();
+    await following;
+    assert.equal(requests.length, 1, 'no leave: the participant is unknown');
+  },
+);
+
+const heartbeatGone = (request) =>
+  request.path.endsWith('/heartbeat') ? gone() : snapshot();
+
+test('A participant lost again and again is joined again only after a growing wait, reported each time', async () => {
+  const { waits, failures, received } = await follow(heartbeatGone, {
+    sleeps: 5,
+  });
+  // join, wait; lost: join at once, wait; lost again: 500 ms, join, wait;
+  // lost again: 1 s.
+  assert.deepEqual(waits, [3_000, 3_000, 500, 3_000, 1_000]);
+  assert.deepEqual(failures, [
+    ['not_found', 500],
+    ['not_found', 1_000],
+  ]);
+  assert.deepEqual(
+    received.map((r) => r.joined),
+    [true, true, true],
+  );
+});
+
+test('The wait after a participant is lost again and again stops growing at the maximum', async () => {
+  const { waits, failures } = await follow(heartbeatGone, {
+    sleeps: 7,
+    options: { retryDelayMs: { min: 500, max: 1_000 } },
+  });
+  assert.deepEqual(waits, [3_000, 3_000, 500, 3_000, 1_000, 3_000, 1_000]);
+  assert.deepEqual(failures, [
+    ['not_found', 500],
+    ['not_found', 1_000],
+    ['not_found', 1_000],
+  ]);
+});
+
+test('A loss after a heartbeat that worked is joined again at once, whenever it happens', async () => {
+  let heartbeats = 0;
+  const { waits, failures } = await follow(
+    (request) => {
+      if (!request.path.endsWith('/heartbeat')) return snapshot();
+      heartbeats += 1;
+      return heartbeats % 2 === 1 ? snapshot() : gone();
+    },
+    { sleeps: 7 },
+  );
+  assert.deepEqual(waits, [3_000, 3_000, 3_000, 3_000, 3_000, 3_000, 3_000]);
+  assert.deepEqual(failures, []);
 });
