@@ -25,7 +25,7 @@ export function cursorOf(event: ChangeFeedEvent): string {
 }
 
 /** One dispatched server-sent event: its type and data. */
-interface ServerSentEvent {
+export interface ServerSentEvent {
   readonly type: string;
   readonly data: string;
 }
@@ -40,7 +40,7 @@ interface ServerSentEvent {
  * ignored: feed data carries its cursor, and reconnection follows
  * {@link follow}'s own delays.
  */
-async function* serverSentEvents(
+export async function* serverSentEvents(
   chunks: AsyncIterable<string>,
 ): AsyncGenerator<ServerSentEvent> {
   let pending = '';
@@ -153,7 +153,7 @@ export type OpenStream = (
  * failure needs a change on the client's side, including a successful
  * response that is not this feed.
  */
-function retryable(error: ArtifreeApiError): boolean {
+export function retryable(error: ArtifreeApiError): boolean {
   return (
     error.code === 'network_error' ||
     error.status === 429 ||
@@ -211,7 +211,10 @@ export async function follow(
 }
 
 /** Waits `milliseconds`, or less when `signal` aborts or has aborted. */
-function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+export function sleep(
+  milliseconds: number,
+  signal: AbortSignal,
+): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) {
       resolve();

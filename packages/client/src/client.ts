@@ -585,7 +585,11 @@ export class ArtifreeClient {
   readonly subscribeRuntimeGrants = this.runtimeGrants.subscribe;
   readonly runtimeGrantSnapshot = this.runtimeGrants.snapshot;
   private readonly baseUrl: string;
-  private readonly address: Address;
+  /**
+   * How errors may name the server. Public only so that a streaming call in a
+   * module of its own (`openData`) applies the same rule as {@link send}.
+   */
+  readonly address: Address;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
 
@@ -1718,7 +1722,12 @@ export class ArtifreeClient {
     return parsed;
   }
 
-  private async send(
+  /**
+   * Sends one authorized request and returns the successful response, failing
+   * with the client's errors. Public for the same reason as {@link json}: a
+   * streaming call in a module of its own (`openData`) needs the raw answer.
+   */
+  async send(
     method: string,
     path: string,
     {
@@ -1794,7 +1803,7 @@ export class ArtifreeClient {
  * cancels the body, which closes its connection, also with a `fetch` that
  * ignores the signal once the response has arrived.
  */
-async function* decodeText(
+export async function* decodeText(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
   keepCause: boolean,

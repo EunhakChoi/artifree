@@ -122,7 +122,7 @@ function isCopiedPart(value: unknown): value is CopiedPart {
  * An opaque feed cursor. It is sent back in `Last-Event-ID`, so it must be
  * a visible ASCII header value.
  */
-function isCursor(value: unknown): value is string {
+export function isCursor(value: unknown): value is string {
   return typeof value === 'string' && /^[\x21-\x7e]{1,256}$/.test(value);
 }
 
@@ -272,7 +272,7 @@ export function parseDuplicate(
   return { ...commit, copied };
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
+export function isJsonValue(value: unknown): value is JsonValue {
   return (
     value === null ||
     typeof value === 'string' ||
