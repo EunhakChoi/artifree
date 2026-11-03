@@ -6,19 +6,20 @@
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
-    CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
-    CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
+    CanonicalMembers, CommitResponse, ConflictingFile, ContentEncoding, CopiedPart,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMember, DataMemberSelect, DataMembers,
+    DataMembersQuery, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
     DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
     ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
     HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
     JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
-    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
-    PurgeArtifactResponse, RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse,
-    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
-    RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
-    SourceExportFormat, SourceExportManifest, StageHandoffRequest,
-    UnreferencedContent as WireContent, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest,
+    ListArtifactsQuery, ListDataMembersQuery, ListJobsQuery, ListSort, Preview,
+    PurgeArtifactRequest, PurgeArtifactResponse, RemoveUnreferencedContentRequest,
+    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
+    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
+    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
@@ -30,6 +31,7 @@ use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
+use artifree_domain::data_query::{MemberSelect, MembersQuery};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
@@ -48,6 +50,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::auth::hex;
 use crate::changes::Feed;
+use crate::data_hub;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
 use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey};
@@ -534,10 +537,13 @@ pub(crate) async fn purge(
 ) -> Result<PurgeArtifactResponse, ApiError> {
     let id = artifact_id(id)?;
     let base = MetadataRevision(request.base_metadata_revision);
+    let purged = id.clone();
     let receipt = state
         .run(move |artifacts| artifacts.purge(&actor, &key, &id, base))
         .await?;
     if receipt.delivery == Delivery::Committed {
+        // The values of a purged artifact do not stay in memory (decision 0038).
+        state.data_hub().forget(&purged);
         state.feed().committed();
     }
     Ok(PurgeArtifactResponse {
@@ -1526,6 +1532,66 @@ pub(crate) async fn read_data(
     })
 }
 
+/// A page of the members of an object in the actor's data space of an
+/// artifact (decision 0038).
+pub(crate) async fn data_members(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    query: ListDataMembersQuery,
+) -> Result<DataMembers, ApiError> {
+    let id = artifact_id(id)?;
+    let path = data_path("path", query.path.as_deref().unwrap_or_default())?;
+    let select = query.select.map(|select| match select {
+        DataMemberSelect::Names => MemberSelect::Names,
+        DataMemberSelect::Values => MemberSelect::Values,
+    });
+    let query = MembersQuery::new(
+        path,
+        query.prefix.as_deref(),
+        select,
+        query.limit,
+        query.after.as_deref(),
+    )
+    .map_err(|error| ApiError::unprocessable(error.to_string()))?;
+    let artifact = id.to_string();
+    let asked = query.clone();
+    let read = state
+        .run(move |artifacts| artifacts.data_members(&actor, &id, &query))
+        .await?;
+    let values = asked.select() == MemberSelect::Values;
+    Ok(DataMembers {
+        artifact_id: artifact,
+        query: DataMembersQuery {
+            path: asked.path().to_string(),
+            prefix: asked.prefix().map(str::to_owned),
+            select: if values {
+                DataMemberSelect::Values
+            } else {
+                DataMemberSelect::Names
+            },
+            limit: u64::try_from(asked.limit()).unwrap_or(u64::MAX),
+            after: asked.after().map(str::to_owned),
+        },
+        canonical: CanonicalMembers {
+            data_version: read.version.0,
+            exists: read.members.exists,
+            members: read
+                .members
+                .entries
+                .into_iter()
+                .map(|member| DataMember {
+                    name: member.name,
+                    value: member
+                        .value
+                        .and_then(|value| JsonValue::from_text(value.to_canonical())),
+                })
+                .collect(),
+            next_after: read.members.next_after,
+        },
+    })
+}
+
 pub(crate) async fn set_data(
     state: &AppState,
     actor: ActorId,
@@ -1603,9 +1669,23 @@ async fn write_data(
         | DataChange::Merge { path, .. }
         | DataChange::Remove { path } => path.to_string(),
     };
+    let space = state
+        .data_hub()
+        .space(&actor, &id)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
     let outcome = state
         .run(move |artifacts| {
-            artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)
+            // The gate orders this write and the recording of its event
+            // against every other write and every reader of the space
+            // (decision 0038); a write committed here is in the window before
+            // the next one can start.
+            let _gate = space.gate().blocking_lock();
+            let outcome =
+                artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)?;
+            if outcome.delivery == Delivery::Committed && outcome.changed {
+                data_hub::record_write(&space, artifacts, &actor, &id, &change, outcome.version)?;
+            }
+            Ok(outcome)
         })
         .await?;
     Ok(DataWriteResponse {

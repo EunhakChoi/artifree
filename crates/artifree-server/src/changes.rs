@@ -46,8 +46,9 @@ struct StreamRegistrations {
     streams: Vec<(u64, ActorId, TokenId, watch::Sender<bool>)>,
 }
 
+/// A stream registered to end when its token or user is revoked.
 #[derive(Debug)]
-struct TokenStreamRegistration {
+pub(crate) struct TokenStreamRegistration {
     id: u64,
     registrations: Arc<Mutex<StreamRegistrations>>,
 }
@@ -122,7 +123,20 @@ impl Feed {
         }
     }
 
-    fn register_token_stream(
+    /// A receiver that sees the commits of this process from now on.
+    pub(crate) fn commits(&self) -> watch::Receiver<()> {
+        self.commits.subscribe()
+    }
+
+    /// A receiver that sees when the server starts shutting down.
+    pub(crate) fn closing(&self) -> watch::Receiver<bool> {
+        self.closing.subscribe()
+    }
+
+    /// Registers a stream of `actor` opened with `token_id`, so that a
+    /// revocation of either sets `sender`. `None` when the registry is
+    /// unusable; a caller that could not then be ended must refuse the stream.
+    pub(crate) fn register_token_stream(
         &self,
         actor: &ActorId,
         token_id: &TokenId,
@@ -185,7 +199,9 @@ pub(crate) async fn stream(
     let resume = last_event_id(&headers)?;
     let feed = state.feed();
     let Some(slot) = feed.open(&auth.actor) else {
-        return Ok(too_many_streams());
+        return Ok(too_many_streams(
+            "too many change streams are open; close one or retry after the given delay",
+        ));
     };
     // Subscribe before the first read, so a commit after it wakes the stream.
     let commits = feed.commits.subscribe();
@@ -244,11 +260,12 @@ fn last_event_id(headers: &HeaderMap) -> Result<Option<ChangeCursor>, ApiError> 
         .ok_or_else(|| ApiError::invalid("Last-Event-ID must be a cursor received from this feed"))
 }
 
-fn too_many_streams() -> Response {
+/// The refusal of a stream beyond an actor's bound.
+pub(crate) fn too_many_streams(message: &'static str) -> Response {
     let mut response = ApiError::new(
         StatusCode::TOO_MANY_REQUESTS,
         ErrorCode::RateLimited,
-        "too many change streams are open; close one or retry after the given delay",
+        message,
     )
     .into_response();
     response
@@ -260,7 +277,7 @@ fn too_many_streams() -> Response {
 /// Why a producer stops: the reader left, the server is shutting down, or
 /// storage failed. The reader reconnects in the last case.
 #[derive(Debug)]
-struct Stopped;
+pub(crate) struct Stopped;
 
 /// Reads one actor's changes and sends them to one stream.
 struct Producer {
@@ -376,7 +393,9 @@ impl Producer {
     }
 }
 
-async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
+/// Resolves when the stream's token or user is revoked; never, without a
+/// registration.
+pub(crate) async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
     if let Some(rx) = receiver {
         let _ = rx.wait_for(|revoked| *revoked).await;
     } else {
@@ -385,7 +404,11 @@ async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
 }
 
 /// An event whose `id` is `cursor` and whose data is `data` as JSON.
-fn event(name: &str, cursor: &str, data: &impl serde::Serialize) -> Result<Event, Stopped> {
+pub(crate) fn event(
+    name: &str,
+    cursor: &str,
+    data: &impl serde::Serialize,
+) -> Result<Event, Stopped> {
     Event::default()
         .event(name)
         .id(cursor)
@@ -394,7 +417,13 @@ fn event(name: &str, cursor: &str, data: &impl serde::Serialize) -> Result<Event
 }
 
 /// The events a producer sends, as the response body's stream.
-struct Events(mpsc::Receiver<Result<Event, Infallible>>);
+pub(crate) struct Events(mpsc::Receiver<Result<Event, Infallible>>);
+
+impl Events {
+    pub(crate) fn new(receiver: mpsc::Receiver<Result<Event, Infallible>>) -> Self {
+        Self(receiver)
+    }
+}
 
 impl Stream for Events {
     type Item = Result<Event, Infallible>;

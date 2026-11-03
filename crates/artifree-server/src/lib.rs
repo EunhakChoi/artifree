@@ -3,6 +3,8 @@
 
 pub mod auth;
 pub mod changes;
+mod data_events;
+mod data_hub;
 mod handoffs;
 pub mod http;
 mod inventory;
