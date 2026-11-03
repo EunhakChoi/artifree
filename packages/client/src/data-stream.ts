@@ -247,9 +247,13 @@ async function* dataEvents(
     }
     if (type === 'too_large') {
       const large = parseTooLarge(value);
-      if (large === undefined)
+      if (
+        large === undefined ||
+        large.artifact_id !== watched.artifactId ||
+        large.path !== watched.path
+      )
         throw invalidResponse(
-          'The data stream sent a malformed too_large event.',
+          'The data stream sent a too_large event that does not match the contract or the watched path.',
         );
       throw new ArtifreeApiError(
         `The value at "${watched.path}" is over ${large.max_bytes} bytes and is not streamed; watch a smaller path.`,

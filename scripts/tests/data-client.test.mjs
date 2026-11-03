@@ -541,6 +541,26 @@ test('A value too large to stream rejects with data_too_large and is not retried
   assert.equal(malformed.outcome.error.code, 'invalid_response');
 });
 
+test('A too_large event for another artifact or path is invalid_response, not data_too_large', async () => {
+  const elsewhere = {
+    'another artifact': { artifact_id: 'art_' + '1'.repeat(32), path: 'n' },
+    'another path': { artifact_id: ART, path: 'other' },
+  };
+  for (const [label, target] of Object.entries(elsewhere)) {
+    const { outcome, calls } = await run([
+      eventStream([
+        frame('too_large', { ...target, data_version: 1, max_bytes: 131072 }),
+      ]),
+    ]);
+    assert.ok(
+      outcome.error instanceof ArtifreeApiError &&
+        outcome.error.code === 'invalid_response',
+      `${label}: ${String(outcome.error)}`,
+    );
+    assert.equal(calls.length, 1, label);
+  }
+});
+
 test('Event types this client does not know are skipped', async () => {
   const { events, outcome } = await run([
     eventStream([
