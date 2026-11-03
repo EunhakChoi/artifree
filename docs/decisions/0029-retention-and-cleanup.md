@@ -46,7 +46,10 @@ not_in_trash` (new error code); a stale base is `409 metadata_conflict`; a
    credential** (0023: the bootstrap owner token, `RequireAdmin`): an issued
    agent token authenticates as the same owner, so the owner check alone would
    not stop an agent. An agent token gets `403 forbidden`, before the key, the
-   body, or the artifact is looked at.
+   body, or the artifact is looked at. **Amended by
+   [0036](0036-multi-user-identity.md) (item 13):** a token issued to a user
+   other than the owner profile may also purge, for that user's own
+   artifacts only; a token issued to the owner profile is still refused.
 2. **A purge leaves a tombstone.** In one write transaction it deletes the
    artifact's `revision_files` rows (the listing of every revision's files),
    the blobs that no other revision file refers to afterwards, and the title

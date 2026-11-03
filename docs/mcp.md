@@ -133,8 +133,11 @@ artifacts, jobs, data and changes, another user's artifact or job answers
 `not_found`, and there is no MCP tool to create users or tokens.
 There is no MCP tool to purge an artifact for good or to clean up unreferenced
 content: a purge cannot be undone, so only the HTTP API and the CLI offer it,
-and over HTTP an issued agent token is refused with `403 forbidden`; only the
-owner's access token may purge or clean up (decision [0029](decisions/0029-retention-and-cleanup.md)). The `not_in_trash`
+and over HTTP a token issued to the owner profile is refused with `403 forbidden`;
+only the owner's access token may clean up, and purge is open to it and to a
+token issued to another user, for that user's own trashed artifacts (decisions
+[0029](decisions/0029-retention-and-cleanup.md) and
+[0036](decisions/0036-multi-user-identity.md)). The `not_in_trash`
 and `content_conflict` error codes of the shared error schema are therefore
 never returned over MCP, and
 a purged artifact answers every MCP call as an unknown one (`not_found`).

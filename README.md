@@ -97,9 +97,13 @@ reviews that set, then deletes exactly it under a request key; a retry with the
 same `--idempotency-key` and `--base-digest` prints the first run's report
 again, and a set that changed since the review is refused with
 `content_conflict` ([decision 0029](docs/decisions/0029-retention-and-cleanup.md)). A
-purge cannot be undone, is refused to issued agent tokens (they get `403`; only
-the owner's access token may purge or clean up), is not offered to MCP agents,
-and does not reach earlier backups. Request keys, those of a cleanup too, are
+purge cannot be undone, is refused to tokens issued to the owner profile (they
+get `403`), is not offered to MCP agents, and does not reach earlier backups.
+Purge is allowed to the owner's access token and to a token issued to another
+user, who purges only their own trashed artifacts (another user's answers `404`,
+as a missing one does); content cleanup needs the owner's access token, and the
+bytes of purged artifacts of any user are reclaimed only by that cleanup
+([decision 0036](docs/decisions/0036-multi-user-identity.md)). Request keys, those of a cleanup too, are
 never expired.
 
 Jobs are the first background work ([decision 0030](docs/decisions/0030-persistent-jobs-and-worker.md)).
@@ -362,11 +366,12 @@ trash, jobs, application data, change feed, previews, runtime connections and
 rooms: another user's name answers the `404` an unknown name does. Only the
 bootstrap token manages users and tokens; no MCP tool does. Disabling a user
 makes its tokens `401` and closes its open streams, links, connections and
-rooms; enabling lets tokens that were not revoked in again. **Not
-implemented:** roles, sharing and per-object grants (S02), OAuth or any
-external identity, passwords or login sessions, a web screen for users, user
-deletion, per-user storage quotas, and purging as a user (purge and cleanup are
-administrator-only).
+rooms; enabling lets tokens that were not revoked in again. A disabled
+user's queued jobs wait unclaimed and run once the user is enabled again (a job
+already running finishes). **Not implemented:** roles, sharing and per-object
+grants (S02), OAuth or any external identity, passwords or login sessions, a
+web screen for users, user deletion, per-user storage quotas, and cleanup of
+content as a user (cleanup is administrator-only).
 
 ## Verification
 
