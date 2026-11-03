@@ -37,6 +37,34 @@ The server prints one JSON readiness line with the API and web URL (default
 token file. On Unix the server creates the data directory readable only by
 you and refuses an existing one that other users can access.
 
+The line also names `mode` (`persistent`) and `data_dir`.
+
+### One-shot session (decision 0039)
+
+```sh
+artifree-server serve --one-shot-ttl-seconds 3600 --web-dir apps/web/dist
+```
+
+runs the same server on a new private temporary data directory (mode 0700 on
+Unix) under `--session-root` (default: the system temporary directory) and
+deletes it when the process ends: after 1 to 604800 seconds in total (the time
+spent starting counts; there is no default), on SIGINT or SIGTERM, on a
+start-up failure, or when a panic unwinds. Open connections get 5 seconds after
+the stop, then are dropped. It cannot be combined with `--data-dir`. A session
+always starts empty with a new owner token: an old token answers `401`, an old
+job or preview address `404`. The readiness line has `"mode":"one_shot"`,
+`data_dir`, `session_ttl_seconds`, and `sweep`; stderr says that nothing is kept.
+
+Implemented: the above, and a sweep of directories that killed sessions left
+behind, done by the next one-shot start under the same root, only on Linux, and
+only for a directory whose name, type, owner, marker file, and dead owner
+process are all proven. **Not implemented / known limits:** a tunnel or proxy
+lifetime (a separate concept, unrelated to the data TTL); a sweep on macOS or
+Windows or at any time other than the next one-shot start; sessions that share
+a session root but not a PID namespace; secure erase; a size quota; resuming or
+extending a session; a directory left by a crash between creating it and
+writing its marker is never swept.
+
 Open `http://127.0.0.1:7410` in a browser and paste the token from
 `.artifree/data/access-token` to use the workspace directly without Vite.
 
@@ -234,8 +262,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0033](docs/decisions/0033-runtime-source-write.md),
 [0034](docs/decisions/0034-room-and-presence.md),
 [0035](docs/decisions/0035-per-file-conditional-edit.md),
-[0036](docs/decisions/0036-multi-user-identity.md), and
-[0037](docs/decisions/0037-release-publishing-and-supply-chain.md)).
+[0036](docs/decisions/0036-multi-user-identity.md),
+[0037](docs/decisions/0037-release-publishing-and-supply-chain.md), and
+[0039](docs/decisions/0039-one-shot-session.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
