@@ -345,6 +345,7 @@ CREATE TABLE users (
     label TEXT NOT NULL UNIQUE CHECK (length(label) BETWEEN 1 AND 64),
     created_at TEXT NOT NULL,
     disabled_at TEXT,
+    state_generation INTEGER NOT NULL DEFAULT 1 CHECK (state_generation >= 1),
     CHECK (id <> 'local' OR disabled_at IS NULL)
 ) STRICT, WITHOUT ROWID;
 INSERT INTO users (id, label, created_at)

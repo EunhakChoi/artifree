@@ -11,6 +11,7 @@ use artifree_ports::token_store::{NewTokenRecord, TokenRecord, TokenStore, Token
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior};
 
 use crate::schema::SCHEMA_VERSION;
+use crate::users::stored_generation;
 use sha2::{Digest, Sha256};
 
 const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -82,8 +83,9 @@ impl SqliteTokenStore {
 /// The columns of a [`TokenRecord`], joined with the user the token belongs
 /// to. The join is inner on purpose: a token whose user is missing from the
 /// registry is not listed and does not authenticate.
-const TOKEN_COLUMNS: &str = "SELECT t.id, t.actor, u.disabled_at IS NOT NULL, t.name, \
-     t.secret_hash, t.prefix, t.created_at, t.last_used_at, t.revoked_at \
+const TOKEN_COLUMNS: &str = "SELECT t.id, t.actor, u.disabled_at IS NOT NULL, \
+     u.state_generation, t.name, t.secret_hash, t.prefix, t.created_at, \
+     t.last_used_at, t.revoked_at \
      FROM tokens t JOIN users u ON u.id = t.actor";
 
 /// The values of one row of [`TOKEN_COLUMNS`], before they are parsed.
@@ -91,6 +93,7 @@ type TokenRow = (
     String,
     String,
     bool,
+    i64,
     String,
     String,
     String,
@@ -110,6 +113,7 @@ fn token_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TokenRow> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
     ))
 }
 
@@ -118,6 +122,7 @@ fn token_record(row: TokenRow) -> Result<TokenRecord, TokenStoreError> {
         id,
         actor,
         actor_disabled,
+        actor_generation,
         name,
         secret_hash,
         prefix,
@@ -133,6 +138,8 @@ fn token_record(row: TokenRow) -> Result<TokenRecord, TokenStoreError> {
             TokenStoreError::Unavailable(format!("stored token user is invalid: {error}"))
         })?,
         actor_disabled,
+        actor_generation: stored_generation(actor_generation)
+            .map_err(TokenStoreError::Unavailable)?,
         name,
         secret_hash,
         prefix,
@@ -205,16 +212,9 @@ impl TokenStore for SqliteTokenStore {
                     Some(_) => TokenStoreError::Conflict("the user is disabled".into()),
                 })
             }
-            Ok(_) => Ok(TokenRecord {
-                id: token.id.clone(),
-                actor: token.actor.clone(),
-                actor_disabled: false,
-                name: token.name.clone(),
-                secret_hash: token.secret_hash.clone(),
-                prefix: token.prefix.clone(),
-                created_at: token.created_at.clone(),
-                last_used_at: None,
-                revoked_at: None,
+            // Read back with its user, so the record carries the generation.
+            Ok(_) => token_by_id(&connection, &token.id)?.ok_or_else(|| {
+                TokenStoreError::Unavailable("the token just created cannot be read".into())
             }),
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == ErrorCode::ConstraintViolation =>

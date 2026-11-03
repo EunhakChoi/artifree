@@ -223,6 +223,39 @@ impl fmt::Display for ActorId {
     }
 }
 
+/// The state generation of a user (decision 0036): a number the registry
+/// raises every time the user is disabled or enabled, and never lowers. A
+/// request records the generation its token authenticated under, and what it
+/// registers afterwards is kept only while the user still has that
+/// generation, so a disable followed by an enable (the user is enabled both
+/// times) still counts as a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StateGeneration(u64);
+
+impl StateGeneration {
+    /// The generation of a user at registration, and the owner's for ever:
+    /// the owner is never disabled, so it never changes.
+    pub const FIRST: Self = Self(1);
+
+    /// A generation read from storage; `None` for zero, which no user has.
+    #[must_use]
+    pub fn new(value: u64) -> Option<Self> {
+        (value >= Self::FIRST.0).then_some(Self(value))
+    }
+
+    /// The number, for storage and display.
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for StateGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
 /// Maximum length of a user's label in Unicode scalar values.
 pub const MAX_USER_LABEL_CHARS: usize = 64;
 
@@ -472,6 +505,14 @@ mod tests {
         ] {
             assert!(value.parse::<ArtifactId>().is_err(), "accepted {value:?}");
         }
+    }
+
+    #[test]
+    fn a_state_generation_is_never_zero() {
+        assert_eq!(StateGeneration::new(0), None);
+        assert_eq!(StateGeneration::new(1), Some(StateGeneration::FIRST));
+        assert_eq!(StateGeneration::new(7).map(StateGeneration::get), Some(7));
+        assert!(StateGeneration::new(2) > Some(StateGeneration::FIRST));
     }
 
     #[test]

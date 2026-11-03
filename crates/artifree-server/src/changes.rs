@@ -200,7 +200,7 @@ pub(crate) async fn stream(
     // The registration above is what a disable ends; confirming the user
     // after it closes the window in which a request that authenticated
     // earlier opens a stream the disable has already passed.
-    state.ensure_enabled(&auth.actor).await?;
+    state.ensure_current(&auth.actor, auth.generation).await?;
     let reader = auth.actor.clone();
     let start = state
         .run(move |artifacts| artifacts.changes(&reader, ChangeSequence(0), 0))

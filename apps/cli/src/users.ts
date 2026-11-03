@@ -61,9 +61,9 @@ export async function runUser(args: string[]): Promise<void> {
       }
       for (const user of result.users) {
         const state =
-          user.disabled_at === undefined || user.disabled_at === null
-            ? ''
-            : ` (disabled ${user.disabled_at})`;
+          typeof user.disabled_at === 'string'
+            ? ` (disabled ${user.disabled_at})`
+            : '';
         const owner = user.is_owner ? ' [owner]' : '';
         console.log(`${user.id.padEnd(36)} ${user.label}${owner}${state}`);
       }

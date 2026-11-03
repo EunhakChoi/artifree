@@ -4,7 +4,7 @@
 mod common;
 
 use artifree_domain::change::ChangeSequence;
-use artifree_domain::identity::{ActorId, TokenId, UserLabel};
+use artifree_domain::identity::{ActorId, StateGeneration, TokenId, UserLabel};
 use artifree_ports::artifact_store::{
     ArtifactStore, CommitReceipt, Delivery, RequestFingerprint, RequestIdentity, RevisionCommit,
     StoreError,
@@ -169,6 +169,73 @@ fn disabling_keeps_the_first_time_and_enabling_clears_it() -> TestResult {
             .err(),
         Some(UserStoreError::NotFound(ActorId::user([9; 16]).to_string()))
     );
+    Ok(())
+}
+
+#[test]
+fn the_state_generation_rises_with_each_change_of_state_and_never_falls() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.register("Alice", 1)?;
+    let token = fixture.token(&alice, 1)?;
+    let generation = |fixture: &Fixture| -> Result<u64, Box<dyn std::error::Error>> {
+        Ok(fixture
+            .identity
+            .user(&alice)?
+            .ok_or("alice is registered")?
+            .state_generation
+            .get())
+    };
+    let mut seen = vec![generation(&fixture)?];
+
+    // Every change of state is one step up; repeating the state is none.
+    fixture
+        .identity
+        .set_disabled(&alice, Some("2026-11-03T01:00:00Z"))?;
+    seen.push(generation(&fixture)?);
+    fixture
+        .identity
+        .set_disabled(&alice, Some("2026-11-03T02:00:00Z"))?;
+    seen.push(generation(&fixture)?);
+    let enabled = fixture.identity.set_disabled(&alice, None)?;
+    seen.push(enabled.state_generation.get());
+    fixture.identity.set_disabled(&alice, None)?;
+    seen.push(generation(&fixture)?);
+    fixture
+        .identity
+        .set_disabled(&alice, Some("2026-11-03T03:00:00Z"))?;
+    seen.push(generation(&fixture)?);
+    assert_eq!(seen, [1, 2, 2, 3, 3, 4]);
+
+    // The token is read with the generation its user has, in the same row.
+    let record = |fixture: &Fixture| {
+        fixture
+            .identity
+            .find_by_hash(&hash_token_secret("secret 1"))
+    };
+    assert_eq!(
+        record(&fixture)?.map(|t| (t.id, t.actor_generation.get())),
+        Some((token, 4))
+    );
+
+    // It survives the process: a store opened again reads the same number,
+    // and the owner, who is never disabled, still has the first.
+    let reopened = SqliteTokenStore::open(&fixture.path)?;
+    assert_eq!(
+        reopened.user(&alice)?.map(|u| u.state_generation.get()),
+        Some(4)
+    );
+    assert_eq!(
+        reopened
+            .user(&ActorId::owner())?
+            .map(|u| u.state_generation),
+        Some(StateGeneration::FIRST)
+    );
+    // A statement that bypasses the store cannot set a number no user has.
+    let direct = Connection::open(&fixture.path)?.execute(
+        "UPDATE users SET state_generation = 0 WHERE id = ?1",
+        [alice.as_str()],
+    );
+    assert!(direct.is_err(), "the schema accepted generation zero");
     Ok(())
 }
 

@@ -32,7 +32,7 @@ S02 (roles, sharing, per-object grants) and implements none of it.
 
 1. **A persistent registry.** A `users` table (schema 10) holds `id`, a unique
    `label` (1-64 characters, no control characters, no surrounding space),
-   `created_at` and `disabled_at`. The owner is user number 1 with the id it
+   `created_at`, `disabled_at` and `state_generation` (item 11). The owner is user number 1 with the id it
    always had, `local`, label `Local owner`; the migration inserts it, so an
    older database opens with the owner already registered. Every other user's id
    is `u-` followed by 32 random hexadecimal digits. Both spellings are valid
@@ -79,9 +79,10 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
    that authenticated before a disable can register something that outlives it
    after the disable's cleanup ran. Every registration of long-lived per-user
    state in memory was inventoried, and each is one of two kinds:
-   - **Confirmed after registering** (`ensure_enabled`: it reads the user and,
-     if it is disabled or gone, runs the cleanup again and answers `401`, so
-     either the request sees the disabled user and removes its own registration,
+   - **Confirmed after registering** (`ensure_current`, item 11: it reads the
+     user and, if it is disabled, gone, or no longer in the state generation the
+     request authenticated under, runs the cleanup again and answers `401`, so
+     either the request sees the changed user and removes its own registration,
      or the disable's cleanup comes later and removes it): change streams,
      preview links, runtime views, runtime connections
      (`POST /v1/runtime-sessions`), and agent inboxes (MCP
@@ -140,9 +141,64 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
     spelling), `tokens` rebuilt with `actor`, `actor_feeds`, `changes` rebuilt
     with `actor`/`actor_seq`. The feed head is carried over. The structural check
     that compares a database with a fresh one, and the restore path of decision
-    0027, include the new tables. `TokenInfo.user_id`,
+    0027, include the new tables and the `users.state_generation` column. `TokenInfo.user_id`,
     `CreateTokenRequest.user_id`, `UserInfo`, `CreateUserRequest`, `UserList`
     are new in the generated contract.
+11. **A disable that was undone is still a change: the state generation.** The
+    confirmation of item 5 alone sees "enabled now". A request that authenticated
+    while a user was enabled, was delayed, and registers something after the
+    administrator disabled the user (the cleanup ran) and enabled it again would
+    keep a registration the disable was meant to close. So `users.state_generation`
+    (`INTEGER NOT NULL DEFAULT 1 CHECK (>= 1)`, one for every user at registration
+    and for the owner for ever) is raised by one **in the same statement** that
+    changes `disabled_at`, on a disable and on an enable that change the state; a
+    repeated disable or enable changes nothing and does not raise it. It is stored
+    in the database, so it survives a restart, and the only statement that writes
+    it adds one (a file edited outside Artifree is outside the guarantee); it is read
+    in the same row as the token (the token query joins `users`), so a token
+    authenticates together with the generation its user has at that instant, never
+    from two reads. The generation travels in the request's `AuthContext` to
+    every handler that registers state, and `AppState::ensure_current` compares
+    the user's _current_ generation with it, together with "registered and
+    enabled", after the registration. A mismatch is the same `401` as a disabled or
+    unknown token (indistinguishable), and runs the cleanup again.
+    - **Why both transitions.** A disable alone would separate the two epochs for
+      this race, since nothing authenticates while a user is disabled. Raising it
+      on both makes the number change on every change of state, so one equality
+      says "same enabled period, nothing in between" and any rule written later
+      against the number cannot rely on the half that was left out. It costs one
+      integer.
+    - **Where it is checked.** Streams (`GET /v1/changes`), preview links,
+      runtime views, runtime connections and agent inboxes, over HTTP and MCP,
+      all through `ensure_current`; a source test counts the confirmations and
+      fails if a handler registers without one or uses a check that only reads
+      "enabled". Room participants, staged deliveries and grants have no
+      generation of their own: they change state only through the runtime
+      connection they hold, the disable closes and removes the connection, and a
+      removed connection is never active again, so a delayed call that holds one
+      is refused whatever the user's state is by then (tested with a disable
+      followed by an enable).
+    - **A refusal closes more than the late request's own registration.**
+      Registrations carry no owner of their own, so the cleanup that follows a
+      refusal removes everything the user holds, including what it opened under
+      the newer generation in the meantime. Those clients see a closed stream or
+      connection and open it again. This is an availability cost of a rare race,
+      accepted over tagging every registry entry with a generation.
+    - **Pending view creations and fences.** `revoke_actor` drops the fences of an
+      actor's views even while a create for one is pending. The create from the
+      old epoch is refused anyway (its connection is closed, and the generation
+      check is the second line), and removes whatever it registered, so keeping
+      the fence would only keep an entry for a request that cannot succeed. A test
+      holds a create pending across a disable and an enable and shows it refused,
+      with nothing left and the same view issuable afterwards.
+    - **Not covered.** The generation guards in-memory registrations that outlive
+      a request. It does not guard stored data: an artifact, revision, data
+      document or job written by a request that authenticated before the
+      disable is the user's data (item 5). A job queued before the disable still
+      runs (see Not implemented). A token an administrator issues is created
+      only for a user that is enabled in the same statement, so a racing disable
+      cannot leave an active token. The owner has no generation to compare
+      because it is never disabled.
 
 ## Threat notes
 
@@ -195,6 +251,10 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
 - Cancelling a disabled user's jobs: disabling stops requests and what the
   server holds in memory, not the separate worker, so a job already queued or
   running for the user is carried out, and its result is the user's stored data.
+  A job that a delayed request enqueues after a disable and an enable is the
+  same: stored data of the user, not state the generation closes.
+- Per-registration ownership: a refused late request closes everything the user
+  holds, not only its own registration (item 11).
 
 ## Limits (not changed in this record)
 
@@ -210,7 +270,10 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
 the route inventory check, user management and its administrator boundary,
 token ownership, disabling and enabling, per-user budgets, the owner profile),
 `crates/artifree-providers/tests/users.rs` and `schema_upgrade.rs` (the registry,
-its constraints, the per-actor feed, upgrades from every earlier schema
+its constraints, the state generation (raised by each change, never lowered, kept
+across reopen), the per-actor feed, upgrades from every earlier schema
 version, and an upgrade that keeps every change row, a purged artifact's and an
 orphan's included, by value and by cursor), unit tests of each per-user bound and cascade in the server and core
-crates, `scripts/tests/user-management.test.mjs` (client and CLI).
+crates, the races in `runtime_tests.rs` (a request that authenticated before a
+disable, and before a disable and an enable, registers nothing: stream, link,
+view, connection, inbox, join, tool call), `scripts/tests/user-management.test.mjs` (client and CLI).

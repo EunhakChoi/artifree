@@ -2437,6 +2437,44 @@ async fn a_user_at_the_stream_bound_can_open_one_again_after_a_disable_and_enabl
     Ok(())
 }
 
+#[tokio::test]
+async fn a_user_disabled_and_enabled_again_registers_through_every_route_with_its_new_generation()
+-> TestResult {
+    // The token authenticates under a generation that is not the first. A
+    // handler that confirmed with a generation of its own making (or the
+    // first) would refuse the user for good.
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let ids = fixture(&harness, &alice, "alice").await?;
+    set_disabled(&harness, &alice.id, true).await?;
+    set_disabled(&harness, &alice.id, false).await?;
+
+    live_preview(&harness, &alice, &ids).await?;
+    // A connection, its grant, a runtime view and a room participant.
+    connected_things(&harness, &alice.secret, &ids.artifact).await?;
+    let _stream = harness.open_stream(&alice.secret).await?;
+    let agent = harness
+        .tool(
+            &alice.secret,
+            "register_handoff_session",
+            json!({ "name": "again" }),
+        )
+        .await?;
+    assert!(
+        agent["structuredContent"]["session_id"].is_string(),
+        "{agent}"
+    );
+    let preview = harness
+        .tool(
+            &alice.secret,
+            "create_preview",
+            json!({ "artifact_id": ids.artifact, "revision": 2 }),
+        )
+        .await?;
+    assert!(preview["structuredContent"]["url"].is_string(), "{preview}");
+    Ok(())
+}
+
 #[test]
 fn request_handlers_open_connections_and_inboxes_only_through_the_confirmed_functions() {
     // A connection and an inbox outlive the request that opens them, so a
@@ -2460,6 +2498,28 @@ fn request_handlers_open_connections_and_inboxes_only_through_the_confirmed_func
     assert!(
         include_str!("../src/mcp.rs").contains("operations::register_confirmed_handoff_session(")
     );
+}
+
+#[test]
+fn every_registration_that_outlives_a_request_is_confirmed_against_the_generation() {
+    // The registrations that outlive their request: a stream, a preview link,
+    // a runtime view, a connection, an inbox. Each confirms the generation
+    // its request authenticated under. A new registration must do the same,
+    // and this count is where it is noticed.
+    let confirmations = |source: &str| source.matches(".ensure_current(").count();
+    assert_eq!(confirmations(include_str!("../src/operations.rs")), 4);
+    assert_eq!(confirmations(include_str!("../src/changes.rs")), 1);
+    for (file, source) in [
+        ("http.rs", include_str!("../src/http.rs")),
+        ("mcp.rs", include_str!("../src/mcp.rs")),
+        ("operations.rs", include_str!("../src/operations.rs")),
+        ("changes.rs", include_str!("../src/changes.rs")),
+    ] {
+        assert!(
+            !source.contains("ensure_enabled("),
+            "{file} confirms that the user is enabled now, which a disable and an enable undoes"
+        );
+    }
 }
 
 #[tokio::test]

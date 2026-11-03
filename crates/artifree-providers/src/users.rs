@@ -3,21 +3,30 @@
 //! It shares the database file, and the opener, of the token store: a token
 //! and the user it belongs to are read and written together.
 
-use artifree_domain::identity::ActorId;
+use artifree_domain::identity::{ActorId, StateGeneration};
 use artifree_ports::token_store::TokenStoreError;
 use artifree_ports::user_store::{MAX_USERS, NewUser, UserRecord, UserStore, UserStoreError};
 use rusqlite::{ErrorCode, OptionalExtension, Row, TransactionBehavior};
 
 use crate::tokens::SqliteTokenStore;
 
-const USER_COLUMNS: &str = "SELECT id, label, created_at, disabled_at FROM users";
+const USER_COLUMNS: &str = "SELECT id, label, created_at, disabled_at, state_generation FROM users";
 
-fn user_row(row: &Row<'_>) -> rusqlite::Result<(String, String, String, Option<String>)> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+/// The values of one row of [`USER_COLUMNS`], before they are parsed.
+type UserRow = (String, String, String, Option<String>, i64);
+
+fn user_row(row: &Row<'_>) -> rusqlite::Result<UserRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn user_record(
-    (id, label, created_at, disabled_at): (String, String, String, Option<String>),
+    (id, label, created_at, disabled_at, generation): UserRow,
 ) -> Result<UserRecord, UserStoreError> {
     Ok(UserRecord {
         id: id.parse().map_err(|error| {
@@ -26,7 +35,16 @@ fn user_record(
         label,
         created_at,
         disabled_at,
+        state_generation: stored_generation(generation).map_err(UserStoreError::Unavailable)?,
     })
+}
+
+/// The generation in a stored `INTEGER`; zero and negative values are not one.
+pub(crate) fn stored_generation(value: i64) -> Result<StateGeneration, String> {
+    u64::try_from(value)
+        .ok()
+        .and_then(StateGeneration::new)
+        .ok_or_else(|| format!("stored state generation {value} is invalid"))
 }
 
 impl UserStore for SqliteTokenStore {
@@ -99,6 +117,7 @@ impl UserStore for SqliteTokenStore {
             label: user.label.as_str().to_owned(),
             created_at: user.created_at.clone(),
             disabled_at: None,
+            state_generation: StateGeneration::FIRST,
         })
     }
 
@@ -112,28 +131,31 @@ impl UserStore for SqliteTokenStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
-        // Disabling keeps the first timestamp; enabling clears it.
-        let changed = match at {
+        // Disabling keeps the first timestamp; enabling clears it. A change
+        // of state raises the generation in the same statement; repeating the
+        // state the user is in changes neither.
+        let update = match at {
             Some(at) => transaction.execute(
-                "UPDATE users SET disabled_at = coalesce(disabled_at, ?1) WHERE id = ?2",
+                "UPDATE users SET disabled_at = ?1, state_generation = state_generation + 1 \
+                 WHERE id = ?2 AND disabled_at IS NULL",
                 (at, id.as_str()),
             ),
             None => transaction.execute(
-                "UPDATE users SET disabled_at = NULL WHERE id = ?1",
+                "UPDATE users SET disabled_at = NULL, state_generation = state_generation + 1 \
+                 WHERE id = ?1 AND disabled_at IS NOT NULL",
                 [id.as_str()],
             ),
-        }
-        .map_err(unavailable)?;
-        if changed == 0 {
-            return Err(UserStoreError::NotFound(id.to_string()));
-        }
+        };
+        update.map_err(unavailable)?;
         let record = transaction
             .query_row(
                 &format!("{USER_COLUMNS} WHERE id = ?1"),
                 [id.as_str()],
                 user_row,
             )
-            .map_err(unavailable)?;
+            .optional()
+            .map_err(unavailable)?
+            .ok_or_else(|| UserStoreError::NotFound(id.to_string()))?;
         transaction.commit().map_err(unavailable)?;
         user_record(record)
     }

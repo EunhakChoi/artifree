@@ -111,7 +111,7 @@ async fn disable_user(
         .await?
         .map_err(store_error)?;
     // After the registry changed: a request that authenticated before it
-    // confirms the user again when it registers something (`ensure_enabled`).
+    // confirms the user again when it registers something (`ensure_current`).
     state.revoke_actor(&id);
     Ok(Json(info(record)).into_response())
 }

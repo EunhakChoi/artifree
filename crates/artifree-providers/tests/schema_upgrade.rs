@@ -135,6 +135,7 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
         let users = SqliteTokenStore::open(&path)?.users()?;
         assert_eq!(users.len(), 1, "version {version}");
         assert!(users[0].id.is_owner() && users[0].is_enabled());
+        assert_eq!(users[0].state_generation.get(), 1, "version {version}");
     }
     Ok(())
 }

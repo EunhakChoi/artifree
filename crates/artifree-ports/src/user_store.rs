@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use artifree_domain::identity::{ActorId, UserLabel};
+use artifree_domain::identity::{ActorId, StateGeneration, UserLabel};
 
 /// The most users the registry holds, the owner and disabled users included.
 /// Users are never deleted, and per-user in-memory limits (decision 0036,
@@ -25,6 +25,9 @@ pub struct UserRecord {
     pub created_at: String,
     /// ISO 8601 timestamp of the disabling, while the user is disabled.
     pub disabled_at: Option<String>,
+    /// Raised by one every time the user is disabled or enabled, never
+    /// lowered, and kept across restarts. See [`StateGeneration`].
+    pub state_generation: StateGeneration,
 }
 
 impl UserRecord {
@@ -99,9 +102,10 @@ pub trait UserStore: Send + Sync {
     /// registered already; [`UserStoreError::LimitReached`]; [`UserStoreError::Unavailable`].
     fn register(&self, user: &NewUser) -> Result<UserRecord, UserStoreError>;
 
-    /// Disables the user at `at`, or enables it with `None`. Disabling a
-    /// disabled user keeps its first timestamp, and enabling an enabled user
-    /// changes nothing.
+    /// Disables the user at `at`, or enables it with `None`. Each change
+    /// raises the user's [`StateGeneration`] by one in the same write.
+    /// Disabling a disabled user keeps its first timestamp, and enabling an
+    /// enabled user changes nothing: neither raises the generation.
     ///
     /// # Errors
     ///

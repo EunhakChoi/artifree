@@ -62,6 +62,16 @@ test('the client sends user management calls and checks their answers', async ()
   assert.deepEqual(JSON.parse(calls[1][2]), { label: 'Alice' });
 });
 
+test('a null disabled_at reads as an enabled user, with no disabled_at at all', async () => {
+  const client = clientFor(async (url, init) =>
+    init.method === 'GET'
+      ? Response.json({ users: [{ ...alice, disabled_at: null }] })
+      : Response.json({ ...alice, disabled_at: null }),
+  );
+  assert.deepEqual((await listUsers(client)).users, [alice]);
+  assert.deepEqual(await setUserDisabled(client, alice.id, false), alice);
+});
+
 test('the client refuses an answer that is not a user', async () => {
   const incomplete = {
     id: alice.id,

@@ -29,7 +29,9 @@ export function parseUserInfo(value: unknown): UserInfo | undefined {
   )
     return undefined;
   const user: UserInfo = { id, label, created_at, is_owner };
-  if (disabled_at !== undefined) user.disabled_at = disabled_at;
+  // The server omits `disabled_at` for an enabled user; a null is read the
+  // same way: the parsed value is a string or absent, never null.
+  if (typeof disabled_at === 'string') user.disabled_at = disabled_at;
   return user;
 }
 

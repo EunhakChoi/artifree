@@ -33,7 +33,7 @@ use artifree_contracts::api::{
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
-use artifree_domain::identity::{ActorId, RequestKey};
+use artifree_domain::identity::{ActorId, RequestKey, StateGeneration};
 use artifree_ports::token_store::TokenStore;
 use artifree_ports::user_store::UserStore;
 use artifree_providers::storage::SqliteStore;
@@ -307,6 +307,7 @@ impl AppState {
             return Ok(AuthContext {
                 actor: ActorId::owner(),
                 token_id: None,
+                generation: StateGeneration::FIRST,
                 is_admin: true,
             });
         }
@@ -328,6 +329,7 @@ impl AppState {
                 Ok(AuthContext {
                     actor: record.actor,
                     token_id: Some(record.id),
+                    generation: record.actor_generation,
                     is_admin: false,
                 })
             }
@@ -339,7 +341,7 @@ impl AppState {
     /// streams, preview links and view fences, runtime connections and the
     /// grants on them, room participants, and registered handoff inboxes.
     /// Disabling a user runs it after the registry is changed, and anything
-    /// that registers afterwards confirms the user with [`Self::ensure_enabled`].
+    /// that registers afterwards confirms the user with [`Self::ensure_current`].
     /// Connections close before rooms are emptied, so that a call in flight
     /// cannot join again.
     pub(crate) fn revoke_actor(&self, actor: &ActorId) {
@@ -350,13 +352,26 @@ impl AppState {
         self.shared.handoffs.revoke_actor(actor);
     }
 
-    /// Confirms that `actor` is enabled in the registry now. A request that
-    /// authenticated before a user was disabled, and registers something that
-    /// outlives the request after the disable already ran its cleanup
-    /// ([`Self::revoke_actor`]), calls this **after** registering: either it
-    /// sees the disabled user and removes its own registration, or the
-    /// cleanup comes later and removes it. The owner is always enabled.
-    pub(crate) async fn ensure_enabled(&self, actor: &ActorId) -> Result<(), ApiError> {
+    /// Confirms that `actor` is still in the state generation the request
+    /// authenticated under: registered, enabled, and not disabled and enabled
+    /// again since. A request that authenticated before a user was disabled,
+    /// and registers something that outlives the request after the disable
+    /// already ran its cleanup ([`Self::revoke_actor`]), calls this **after**
+    /// registering: either it sees the changed generation and removes its own
+    /// registration, or the cleanup comes later and removes it. The
+    /// generation is what makes a disable that was undone in the meantime
+    /// count: the user is enabled when this looks, and the generation is not
+    /// the one the request has. The owner is never disabled and passes.
+    ///
+    /// Every refusal is the same `401` as a token nobody issued. It removes
+    /// everything the user holds, because registrations carry no owner of
+    /// their own: what the user opened under the newer generation is closed
+    /// too, and its clients open it again.
+    pub(crate) async fn ensure_current(
+        &self,
+        actor: &ActorId,
+        generation: StateGeneration,
+    ) -> Result<(), ApiError> {
         if actor.is_owner() {
             return Ok(());
         }
@@ -365,7 +380,7 @@ impl AppState {
             .identity(move |store| store.user(&id))
             .await?
             .map_err(|err| ApiError::unavailable(err.to_string()))?;
-        if user.is_some_and(|user| user.is_enabled()) {
+        if user.is_some_and(|user| user.is_enabled() && user.state_generation == generation) {
             return Ok(());
         }
         self.revoke_actor(actor);
@@ -1526,7 +1541,15 @@ async fn create_preview(
     path: Result<Path<(String, u64)>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision)) = path?;
-    let preview = operations::preview(&state, auth.actor, auth.token_id, &id, revision).await?;
+    let preview = operations::preview(
+        &state,
+        auth.actor,
+        auth.token_id,
+        auth.generation,
+        &id,
+        revision,
+    )
+    .await?;
     let url = preview.url.clone();
     Ok(created(&url, Json(preview)))
 }
@@ -1539,9 +1562,16 @@ async fn create_runtime_view(
 ) -> Result<Response, ApiError> {
     let Path((id, revision)) = path?;
     let Json(request) = body?;
-    let view =
-        operations::create_runtime_view(&state, auth.actor, auth.token_id, &id, revision, request)
-            .await?;
+    let view = operations::create_runtime_view(
+        &state,
+        auth.actor,
+        auth.token_id,
+        auth.generation,
+        &id,
+        revision,
+        request,
+    )
+    .await?;
     let url = view.url.clone();
     Ok(created(&url, Json(view)))
 }
@@ -1731,7 +1761,7 @@ async fn open_runtime_session(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<RuntimeConnection>, ApiError> {
-    operations::open_confirmed_runtime_session(&state, &auth.actor, auth.token_id)
+    operations::open_confirmed_runtime_session(&state, &auth.actor, auth.token_id, auth.generation)
         .await
         .map(Json)
 }

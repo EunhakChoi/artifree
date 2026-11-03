@@ -8,7 +8,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
-use artifree_domain::identity::{ActorId, TokenId};
+use artifree_domain::identity::{ActorId, StateGeneration, TokenId};
 
 const TOKEN_BYTES: usize = 32;
 const AGENT_PREFIX: &str = "art_";
@@ -22,6 +22,10 @@ pub(crate) struct AuthContext {
     pub(crate) actor: ActorId,
     /// The token ID if an issued token was used, or None for the bootstrap owner token.
     pub(crate) token_id: Option<TokenId>,
+    /// The state generation the actor had when the token authenticated (the
+    /// owner's never changes). Whatever the request registers and leaves
+    /// behind is confirmed against it (`AppState::ensure_current`).
+    pub(crate) generation: StateGeneration,
     /// Whether the caller has administrative privileges: only the bootstrap
     /// token has them, never a token issued to any user.
     pub(crate) is_admin: bool,

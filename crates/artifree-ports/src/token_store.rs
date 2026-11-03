@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use artifree_domain::identity::{ActorId, TokenId};
+use artifree_domain::identity::{ActorId, StateGeneration, TokenId};
 
 /// A stored token record. Secret plaintext is never stored or returned here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,10 @@ pub struct TokenRecord {
     /// one statement, so that the answer to "may this token authenticate" is
     /// never made of two reads.
     pub actor_disabled: bool,
+    /// The user's state generation in the same read. A request that
+    /// authenticates with this token carries it, and confirms it again after
+    /// it registers something that outlives the request.
+    pub actor_generation: StateGeneration,
     /// Human-readable label for this token.
     pub name: String,
     /// Hex-encoded SHA-256 hash of the secret bearer token.
