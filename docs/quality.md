@@ -361,8 +361,10 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   `tests/multi_user.rs` (both routes classified, and the confirmation count), and
   `scripts/tests/data-queries.test.mjs` (the event parser measured in bytes, with
   200,000 two-byte characters, one-byte chunks in linear time, CR/LF split across
-  chunks; every event type against every fault; the order rules; the retry
-  classification and its waits with injected timers and clock; abort before the
+  chunks, a byte order mark split across chunks and not counted toward a limit; every event type against every fault; the order rules; the retry
+  classification and its waits with injected timers and clock (a slow or refused
+  open never restarts the backoff; a stable accepted connection does, however it
+  ends; a silent one does not; the doubling stops at the maximum); abort before the
   request, during a wait and a read, and from a chunk of several events; local
   validation of the path grammar; the client's constants against the Rust source
   and the generated schema; member pages against every echo and order fault; and

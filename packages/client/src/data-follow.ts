@@ -55,9 +55,11 @@ export interface FollowDataOptions {
    */
   readonly retryDelayMs?: { readonly min: number; readonly max: number };
   /**
-   * How long a connection must have lasted before the next wait starts again
-   * at `min`; default 10,000 ms. A server that accepts a stream and closes it
-   * at once is thereby asked less and less often.
+   * How long an accepted connection that delivered an event must have lasted,
+   * counted from the moment the server accepted it, before the next wait
+   * starts again at `min`; default 10,000 ms. A server that accepts a stream
+   * and closes it at once, and a proxy that is slow to refuse one, are
+   * thereby asked less and less often.
    */
   readonly stableMs?: number;
   /** Waits; tests replace it. Must resolve early when `signal` aborts. */
@@ -268,14 +270,20 @@ export async function followData(
   const sleep = options.sleep ?? wait;
   const now = options.now ?? ((): number => performance.now());
   let floor: number | undefined;
-  let attempt = 0;
+  // The wait after the next failure; doubles up to `max`, so it is bounded by
+  // construction, and starts again at `min` only after a healthy connection.
+  let backoff = min;
   while (!signal.aborted) {
-    const started = now();
+    // Set once the server has accepted a stream. Opening a stream, however
+    // long it took and however it failed, is not a connection that lasted.
+    let acceptedAt: number | undefined;
+    let events = 0;
     let failure: ArtifreeApiError | undefined;
     // What onEvent threw: it ends following and is never retried.
     let rejected: { readonly error: unknown } | undefined;
     try {
       const body = await openStream(client, artifactId, path, signal);
+      acceptedAt = now();
       options.onConnect?.();
       const session: Session = {
         artifactId,
@@ -283,11 +291,11 @@ export async function followData(
         floor,
         last: undefined,
       };
-      const events = serverSentEvents(bodyChunks(body, signal), {
+      const stream = serverSentEvents(bodyChunks(body, signal), {
         maxLineBytes: MAX_EVENT_BYTES,
         maxEventBytes: MAX_EVENT_BYTES,
       });
-      for await (const { type, data } of events) {
+      for await (const { type, data } of stream) {
         // One chunk can hold several events; none follows an abort.
         if (signal.aborted) break;
         const checked = checkEvent(session, type, data);
@@ -298,6 +306,7 @@ export async function followData(
           );
         session.last = checked.event.dataVersion;
         floor = Math.max(floor ?? 0, checked.event.dataVersion);
+        events += 1;
         try {
           onEvent(checked.event);
         } catch (error: unknown) {
@@ -313,15 +322,21 @@ export async function followData(
     }
     if (rejected !== undefined) throw rejected.error;
     if (signal.aborted) return;
-    // Only a connection that stayed up starts the waits over.
-    if (now() - started >= stableMs) attempt = 0;
-    const backoff = Math.min(max, min * 2 ** attempt);
-    attempt += 1;
+    // Only an accepted connection that delivered an event and then stayed up
+    // starts the waits over, however it ended. A stream that was slow to
+    // open, was refused, or said nothing does not.
+    if (
+      acceptedAt !== undefined &&
+      events > 0 &&
+      now() - acceptedAt >= stableMs
+    )
+      backoff = min;
     const asked =
       failure?.retryAfterSeconds === undefined
         ? 0
         : failure.retryAfterSeconds * 1000;
     const retryInMs = Math.min(MAX_RETRY_MS, Math.max(min, backoff, asked));
+    backoff = Math.min(max, backoff * 2);
     options.onDisconnect?.(failure, retryInMs);
     await sleep(retryInMs, signal);
   }

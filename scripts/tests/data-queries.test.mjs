@@ -159,6 +159,67 @@ test('an event limit counts the bytes of all its data lines', async () => {
   );
 });
 
+// A byte order mark is dropped before anything is measured, so a limit counts
+// the stream without it and the indexes into a line are indexes into its bytes.
+const BOM_BYTES = Uint8Array.of(0xef, 0xbb, 0xbf);
+const withBom = (text) => Uint8Array.of(...BOM_BYTES, ...bytes(text));
+
+test('a byte order mark does not count toward a limit: an event exactly at both limits is accepted', async () => {
+  const line = `data: ${'x'.repeat(50)}\n\n`; // a 56-byte line, 51 bytes of data
+  const fits = { maxLineBytes: 56, maxEventBytes: 51 };
+  assert.deepEqual(await drain(chunksOf(withBom(line)), fits), [
+    { type: 'message', data: 'x'.repeat(50) },
+  ]);
+  assert.deepEqual(await drain(chunksOf(line), fits), [
+    { type: 'message', data: 'x'.repeat(50) },
+  ]);
+  await assert.rejects(
+    drain(chunksOf(withBom(line)), { ...fits, maxLineBytes: 55 }),
+    (error) => error.code === 'invalid_response' && /line/.test(error.message),
+  );
+  await assert.rejects(
+    drain(chunksOf(withBom(line)), { ...fits, maxEventBytes: 50 }),
+    (error) => error.code === 'invalid_response' && /event/.test(error.message),
+  );
+});
+
+test('a byte order mark split over chunks, down to single bytes, is dropped', async () => {
+  const all = withBom('event: snapshot\ndata: ok\n\n');
+  const expected = [{ type: 'snapshot', data: 'ok' }];
+  assert.deepEqual(
+    await drain(
+      chunksOf(all.subarray(0, 1), all.subarray(1, 2), all.subarray(2)),
+    ),
+    expected,
+  );
+  assert.deepEqual(
+    await drain(chunksOf(...[...all].map((b) => Uint8Array.of(b)))),
+    expected,
+  );
+  assert.deepEqual(
+    await drain(
+      chunksOf(new Uint8Array(0), all.subarray(0, 3), all.subarray(3)),
+    ),
+    expected,
+  );
+});
+
+test('only a mark at the very start is dropped; a prefix of it is ordinary data', async () => {
+  // A second mark belongs to the field name, which is then unknown.
+  assert.deepEqual(await drain(chunksOf(withBom('\ufeffdata: x\n\n'))), []);
+  // Inside a value it is kept.
+  assert.deepEqual(await drain(chunksOf('data: a\ufeffb\n\n')), [
+    { type: 'message', data: 'a\ufeffb' },
+  ]);
+  // Two bytes of the mark followed by something else are not UTF-8.
+  await assert.rejects(
+    drain(chunksOf(Uint8Array.of(0xef, 0xbb), bytes('data: x\n\n'))),
+    (error) => error.code === 'invalid_response',
+  );
+  // A stream that ends inside the mark has no event and does not fail.
+  assert.deepEqual(await drain(chunksOf(Uint8Array.of(0xef, 0xbb))), []);
+});
+
 test('an unfinished line is bounded in bytes however small the chunks are', async () => {
   const tiny = [...bytes('é'.repeat(5_000))].map((b) => Uint8Array.of(b));
   await assert.rejects(
@@ -302,21 +363,25 @@ function sse(...events) {
     .join('');
 }
 
-function streamResponse(text, { hold = false, onCancel } = {}) {
+function streamResponse(text, { hold = false, onCancel, onPull } = {}) {
   let sent = false;
-  const body = new ReadableStream({
-    pull(controller) {
-      if (!sent) {
-        sent = true;
-        controller.enqueue(typeof text === 'string' ? bytes(text) : text);
-        if (!hold) controller.close();
-      }
-      return hold ? new Promise(() => {}) : undefined;
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        onPull?.();
+        if (!sent) {
+          sent = true;
+          controller.enqueue(typeof text === 'string' ? bytes(text) : text);
+          if (!hold) controller.close();
+        }
+        return hold ? new Promise(() => {}) : undefined;
+      },
+      cancel() {
+        onCancel?.();
+      },
     },
-    cancel() {
-      onCancel?.();
-    },
-  });
+    onPull === undefined ? undefined : { highWaterMark: 0 },
+  ); // pull only when read
   return new Response(body, {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
@@ -771,22 +836,165 @@ test('a stream that ends without an error waits and reconnects, and the waits do
   );
 });
 
-test('a connection that stayed up starts the waits over, one that did not does not', async () => {
-  let clock = 0;
-  const responses = [
-    // Short-lived: a snapshot, then the clock moves 1 s and it ends.
-    () => ((clock += 1_000), streamResponse(sse(snap(1)))),
-    () => ((clock += 1_000), streamResponse(sse(snap(2)))),
-    // Long-lived: 20 s.
-    () => ((clock += 20_000), streamResponse(sse(snap(3)))),
-    () => ((clock += 1_000), streamResponse(sse(snap(4)))),
-  ];
-  const run = await follow(responses, {
-    retryDelayMs: { min: 100, max: 10_000 },
-    stableMs: 10_000,
-    now: () => clock,
+// The waits between attempts, with a clock the script moves. A response that
+// takes time to open moves it before it returns; a stream that stays up moves
+// it from inside the read, after the server accepted the connection.
+const BACKOFF = { min: 100, max: 10_000 };
+const STABLE = 10_000;
+const LONG = 20_000;
+
+function timeline() {
+  const clock = { t: 0 };
+  const slow = (make) => () => ((clock.t += LONG), make());
+  const refused =
+    (status = 503, headers = {}) =>
+    () =>
+      errorResponse(
+        status,
+        headers,
+        status === 429 ? 'rate_limited' : 'unavailable',
+      );
+  // Accepted at once; the read moves the clock `ms` before its first event.
+  const stream = (ms, ...events) =>
+    streamResponse(sse(...events), { onPull: () => (clock.t += ms) });
+  const lostAfter = (ms) => () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes(sse(snap(1))));
+        },
+        pull() {
+          clock.t += ms;
+          throw new Error('reset');
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  return { clock, slow, refused, stream, lostAfter };
+}
+
+const WAIT_CASES = [
+  [
+    'a refusal that took longer than stableMs to arrive never resets the backoff',
+    ({ slow, refused }) => Array(4).fill(slow(refused())),
+    [100, 200, 400, 800],
+  ],
+  [
+    'a 429 that was slow to arrive keeps doubling and honors its Retry-After',
+    ({ slow, refused }) => [
+      slow(refused(429, { 'retry-after': '3' })),
+      slow(refused(429)),
+      slow(refused(429)),
+    ],
+    [3_000, 200, 400],
+  ],
+  [
+    'a stream that was slow to open and then stayed short does not reset',
+    ({ slow }) => [
+      slow(() => streamResponse(sse(snap(1)))),
+      slow(() => streamResponse(sse(snap(2)))),
+      () => streamResponse(sse(snap(3))),
+    ],
+    [100, 200, 400],
+  ],
+  [
+    'an accepted connection that stayed up resets, however it ends: cleanly',
+    ({ slow, refused, stream }) => [
+      slow(refused()),
+      slow(refused()),
+      () => stream(LONG, snap(1)),
+      slow(refused()),
+    ],
+    [100, 200, 100, 200],
+  ],
+  [
+    'an accepted connection that stayed up resets, however it ends: lost',
+    ({ slow, refused, lostAfter }) => [
+      slow(refused()),
+      slow(refused()),
+      lostAfter(LONG),
+      slow(refused()),
+    ],
+    [100, 200, 100, 200],
+  ],
+  [
+    'short connections with events keep doubling',
+    ({ stream }) => [
+      () => stream(1_000, snap(1)),
+      () => stream(1_000, snap(2)),
+      () => stream(1_000, snap(3)),
+    ],
+    [100, 200, 400],
+  ],
+  [
+    'a connection that stays open for long and says nothing does not reset',
+    ({ stream }) => [
+      () => stream(LONG),
+      () => stream(LONG),
+      () => stream(LONG),
+    ],
+    [100, 200, 400],
+  ],
+  [
+    'a connection exactly stableMs old resets, one a millisecond younger does not',
+    ({ stream, slow, refused }) => [
+      slow(refused()),
+      () => stream(STABLE - 1, snap(1)),
+      () => stream(STABLE, snap(2)),
+    ],
+    [100, 200, 100],
+  ],
+];
+
+for (const [name, script, waits] of WAIT_CASES) {
+  test(`waits: ${name}`, async () => {
+    const time = timeline();
+    const responses = script(time);
+    // The slow responses and streams have a snapshot, but the root of this
+    // case is the clock, so nothing else is asserted about events.
+    const run = await follow(responses, {
+      retryDelayMs: BACKOFF,
+      stableMs: STABLE,
+      now: () => time.clock.t,
+    });
+    assert.deepEqual(run.outcome, { resolved: true });
+    assert.deepEqual(run.waits, waits);
   });
-  assert.deepEqual(run.waits, [100, 200, 100, 200]);
+}
+
+test('waits: the doubling stops at max however many failures there are', async () => {
+  const run = await follow(
+    Array(2_000).fill(() => errorResponse(503, {}, 'unavailable')),
+    { retryDelayMs: { min: 100, max: 5_000 }, now: () => 0 },
+  );
+  assert.equal(run.waits.length, 2_000);
+  assert.deepEqual(
+    run.waits.slice(0, 7),
+    [100, 200, 400, 800, 1_600, 3_200, 5_000],
+  );
+  assert.ok(
+    run.waits.slice(6).every((ms) => ms === 5_000),
+    'a wait passed max',
+  );
+});
+
+test('waits: an abort during a wait after a stable connection ends following', async () => {
+  const time = timeline();
+  const controller = new AbortController();
+  const { client, calls } = scripted(() => time.stream(LONG, snap(1)));
+  await followData(client, ARTIFACT, {
+    path: 'todos',
+    signal: controller.signal,
+    onEvent: () => {},
+    retryDelayMs: BACKOFF,
+    stableMs: STABLE,
+    now: () => time.clock.t,
+    sleep: async (ms) => {
+      assert.equal(ms, 100, 'the wait after a stable connection starts over');
+      controller.abort();
+    },
+  });
+  assert.equal(calls.length, 1);
 });
 
 test('Retry-After is honored, with a floor and an hour as the ceiling', async () => {

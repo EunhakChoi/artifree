@@ -118,7 +118,9 @@ path, data_version, exists, value?}`.
    storage reads; (3) the first read, which is the access check, so a missing
    or foreign artifact is the usual `404` and **holds no place and registers
    nothing**; (4) take the place, re-checking both counts under the lock
-   (a request that lost a race is refused here after one read); (5) register
+   (a request that lost a race is refused here after one read; the number of
+   such requests at once is bounded by the admission limits of 0005, not by
+   this table); (5) register
    for revocation and `ensure_current`. Opening a stream is also a request
    under the limits of 0005, as the change feed is. No lock is held across an
    await or across a storage call.
@@ -141,7 +143,8 @@ path, data_version, exists, value?}`.
     - `followData` parses the event stream as bytes, not strings: the
       limits on a line, on the data of an event, and on the unfinished
       line are in **UTF-8 bytes of the stream**, newlines are searched only
-      in each new chunk, and invalid UTF-8 is `invalid_response`. Every event
+      in each new chunk, a leading byte order mark is dropped before any
+      byte is counted, and invalid UTF-8 is `invalid_response`. Every event
       is validated: its name (anything but the three is `invalid_response`),
       exactly its documented fields, `artifact_id` and `path` equal to what
       was requested, `exists` and `value` consistent, a `data_version` that
@@ -156,7 +159,9 @@ path, data_version, exists, value?}`.
       cleanly are retried; every other failure, `invalid_response`,
       `data_too_large`, and an error thrown by the handler, rejects.
       The wait is the backoff (from `min` doubling to `max`, restarted only
-      after a connection that lasted `stableMs`), or `Retry-After` when
+      after a connection the server **accepted**, that delivered an event,
+      and that lasted `stableMs` from its acceptance; a stream that was slow
+      to open or to refuse, or that said nothing, never restarts it), or `Retry-After` when
       larger, never below `min` and never above one hour. A clean close waits
       too, so a server that closes at once is not hit in a loop. An aborted
       signal resolves before any request, during a wait, and during a read,

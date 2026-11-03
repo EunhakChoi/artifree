@@ -17,6 +17,48 @@ export interface SseLimits {
 
 const LF = 0x0a;
 const CR = 0x0d;
+/** The UTF-8 byte order mark. */
+const BOM = [0xef, 0xbb, 0xbf] as const;
+
+/**
+ * `chunks` without a byte order mark at the very start of the stream, however
+ * the chunks split it. The mark is dropped before anything is measured, so no
+ * limit counts it and every index into a line is an index into its bytes.
+ */
+async function* withoutBom(
+  chunks: AsyncIterable<Uint8Array>,
+): AsyncGenerator<Uint8Array> {
+  // The leading bytes that so far match the mark.
+  const held: number[] = [];
+  let deciding = true;
+  for await (const chunk of chunks) {
+    if (!deciding) {
+      yield chunk;
+      continue;
+    }
+    let index = 0;
+    while (
+      index < chunk.length &&
+      held.length < BOM.length &&
+      chunk[index] === BOM[held.length]
+    ) {
+      held.push(BOM[held.length] ?? 0);
+      index += 1;
+    }
+    if (held.length === BOM.length) {
+      deciding = false;
+      held.length = 0;
+      if (index < chunk.length) yield chunk.subarray(index);
+    } else if (index < chunk.length) {
+      // Not the mark: what matched so far is ordinary data.
+      deciding = false;
+      if (held.length > 0) yield Uint8Array.from(held);
+      held.length = 0;
+      yield chunk.subarray(index);
+    }
+  }
+  if (held.length > 0) yield Uint8Array.from(held);
+}
 
 /** The bytes of `parts` as one array. */
 function join(parts: Uint8Array[], total: number): Uint8Array {
@@ -33,7 +75,8 @@ function join(parts: Uint8Array[], total: number): Uint8Array {
 /**
  * The events of a `text/event-stream` body, read from its bytes as the WHATWG
  * HTML standard specifies: lines end with CRLF, LF, or CR (also when the pair
- * is split across chunks); a byte order mark at the start is dropped; comment
+ * is split across chunks); a byte order mark at the start is dropped before
+ * any byte is counted; comment
  * lines, `id`, `retry`, and unknown fields are ignored; one space after the
  * colon is removed; `data` lines are joined with LF; an event is dispatched at
  * a blank line only when it has data; an event the body ends before is
@@ -52,7 +95,6 @@ export async function* serverSentEvents(
   let parts: Uint8Array[] = [];
   let lineBytes = 0;
   let skipLf = false;
-  let atStart = true;
   let type = '';
   let data: string[] = [];
   let dataBytes = 0;
@@ -64,10 +106,6 @@ export async function* serverSentEvents(
       text = decoder.decode(bytes);
     } catch {
       throw breach('The event stream is not valid UTF-8.');
-    }
-    if (atStart) {
-      atStart = false;
-      if (text.startsWith('﻿')) text = text.slice(1);
     }
     if (text === '') {
       const event =
@@ -101,7 +139,7 @@ export async function* serverSentEvents(
     return undefined;
   };
 
-  for await (const chunk of chunks) {
+  for await (const chunk of withoutBom(chunks)) {
     let start = 0;
     // An empty chunk says nothing about the LF a CR may be followed by.
     if (skipLf && chunk.length > 0) {
