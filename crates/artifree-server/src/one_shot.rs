@@ -21,7 +21,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
 use crate::auth::AccessToken;
-use crate::http::{self, AppState};
+use crate::http::{self, AppState, DatabaseUsers};
 use crate::preview;
 use crate::serve::{self, Ready, ServeOptions};
 use crate::session_sweep::{self, MARKER_FILE, SweepReport};
@@ -33,6 +33,10 @@ pub const SESSION_PREFIX: &str = "artifree-session-";
 pub const MAX_TTL_SECONDS: u64 = 604_800;
 /// How long open connections get to finish after a stop request.
 pub const DRAIN: Duration = Duration::from_secs(5);
+/// How long the directory waits, after the runtime is stopped, for blocking
+/// database tasks that are still running. A task ends at the latest when
+/// `SQLite`'s busy timeout (10 s for the artifact store) does.
+pub const BLOCKING_WAIT: Duration = Duration::from_secs(20);
 
 /// The signals that end a session, as shown to a person.
 #[cfg(unix)]
@@ -282,6 +286,7 @@ pub(crate) fn hold_for_test(_point: &str, _stop: &StopLatch) {}
 #[derive(Debug, Default)]
 struct DirGuard {
     path: Option<PathBuf>,
+    users: Option<DatabaseUsers>,
 }
 
 impl DirGuard {
@@ -289,19 +294,82 @@ impl DirGuard {
         self.path = Some(path);
     }
 
-    /// Removes the directory now and reports a failure.
+    /// Records who can still use the database, so that removal waits for them.
+    fn watch(&mut self, users: DatabaseUsers) {
+        self.users = Some(users);
+    }
+
+    /// Removes the directory now, after the database is no longer in use.
     fn remove(&mut self) -> Result<(), String> {
+        self.remove_within(BLOCKING_WAIT, || {})
+    }
+
+    /// Waits at most `wait` until no blocking database task can still be
+    /// running, then removes the directory. A task still running at the bound
+    /// is an error, whether or not the removal then succeeds. A failed removal
+    /// keeps the path, so that the guard's drop tries once more.
+    ///
+    /// `while_waiting` runs on every poll while a holder remains (only a test
+    /// passes anything).
+    fn remove_within(&mut self, wait: Duration, while_waiting: impl FnMut()) -> Result<(), String> {
         let Some(path) = self.path.take() else {
             return Ok(());
         };
-        match fs::remove_dir_all(&path) {
+        let still_running = self
+            .users
+            .take()
+            .map_or(0, |users| wait_until_idle(&users, wait, while_waiting));
+        let removal = match fs::remove_dir_all(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "could not remove the session directory {}: {error}",
-                path.display()
+            Err(error) => {
+                let message = format!(
+                    "could not remove the session directory {}: {error}",
+                    path.display()
+                );
+                self.path = Some(path);
+                Err(message)
+            }
+        };
+        match (still_running, removal) {
+            (0, removal) => removal,
+            (running, Ok(())) => Err(format!(
+                "{running} database holder(s) were still running after {} seconds; the session directory was removed anyway",
+                wait.as_secs()
+            )),
+            (running, Err(message)) => Err(format!(
+                "{running} database holder(s) were still running after {} seconds; {message}",
+                wait.as_secs()
             )),
         }
+    }
+}
+
+/// Polls until `users` has no holder or `wait` is over; returns how many
+/// holders remain. Says so on stderr when it has to wait.
+fn wait_until_idle(
+    users: &DatabaseUsers,
+    wait: Duration,
+    mut while_waiting: impl FnMut(),
+) -> usize {
+    let give_up = Instant::now() + wait;
+    let mut announced = false;
+    loop {
+        let remaining = users.count();
+        if remaining == 0 || Instant::now() >= give_up {
+            return remaining;
+        }
+        if !announced {
+            announced = true;
+            writeln!(
+                io::stderr(),
+                "A database task of the session is still running; the data directory is removed when it ends, or after {} seconds.",
+                wait.as_secs()
+            )
+            .ok();
+        }
+        while_waiting();
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -485,7 +553,9 @@ where
         let store = earlier(&mut self.store, "the database")?;
         let token_store = earlier(&mut self.token_store, "the token store")?;
         let token = earlier(&mut self.token, "the token")?;
-        self.state = Some(AppState::new(store, token_store, token, settings)?);
+        let state = AppState::new(store, token_store, token, settings)?;
+        self.guard.watch(state.database_users());
+        self.state = Some(state);
         self.web_assets = self
             .options
             .web_dir
@@ -685,7 +755,9 @@ where
     let stop = StopLatch::new();
     install_stop_sources(&runtime, &stop, started + options.ttl)?;
     let served = serve_session(&runtime, &stop, &mut guard, options, on_ready);
-    runtime.shutdown_timeout(DRAIN);
+    // Tasks are dropped here; blocking database tasks are waited for by the
+    // guard, which knows exactly which ones matter.
+    runtime.shutdown_timeout(Duration::from_millis(250));
     let removed = guard.remove();
     match (served, removed) {
         (Ok(()), removed) => removed,
@@ -825,6 +897,78 @@ mod tests {
         assert!(outcome.is_err());
         assert!(!path.exists(), "the guard must remove {}", path.display());
         Ok(())
+    }
+
+    /// A session directory with a database and a holder of its identity store.
+    fn directory_with_holder() -> Result<(PathBuf, Arc<SqliteTokenStore>), String> {
+        let path = create_session_dir(&std::env::temp_dir()).map_err(|e| e.to_string())?;
+        let database = path.join(DATABASE_FILE);
+        SqliteStore::open(&database).map_err(|e| e.to_string())?;
+        let holder = SqliteTokenStore::open(&database).map_err(|e| e.to_string())?;
+        Ok((path, Arc::new(holder)))
+    }
+
+    #[test]
+    fn removal_waits_for_a_database_holder_to_finish() -> Result<(), String> {
+        let (path, holder) = directory_with_holder()?;
+        let mut guard = DirGuard::default();
+        guard.adopt(path.clone());
+        guard.watch(DatabaseUsers::of(&holder));
+        // The "blocking task" is seen by the third poll, then finishes.
+        let mut holder = Some(holder);
+        let mut polls = 0_u32;
+        let mut existed_while_held = false;
+        let result = guard.remove_within(Duration::from_secs(30), || {
+            polls += 1;
+            if polls == 3 {
+                existed_while_held = path.exists();
+                holder = None;
+            }
+        });
+        assert_eq!(result, Ok(()));
+        assert!(
+            polls >= 3,
+            "removal did not wait for the holder: {polls} polls"
+        );
+        assert!(
+            existed_while_held,
+            "the directory must still exist while a holder is running"
+        );
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_holder_still_running_at_the_bound_is_an_explicit_error() -> Result<(), String> {
+        let (path, holder) = directory_with_holder()?;
+        let mut guard = DirGuard::default();
+        guard.adopt(path.clone());
+        guard.watch(DatabaseUsers::of(&holder));
+        let error = guard
+            .remove_within(Duration::from_millis(100), || {})
+            .err()
+            .ok_or("a holder that never finishes must not read as success")?;
+        assert!(error.contains("still running"), "{error}");
+        drop(holder);
+        // The directory was still removed (or the error says it was not).
+        assert!(
+            !path.exists() || error.contains("could not remove"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_removal_keeps_the_path_for_a_second_try() -> Result<(), io::Error> {
+        let path = std::env::temp_dir().join("artifree-guard-retry-test-file");
+        fs::write(&path, b"a file, not a directory")?;
+        let mut guard = DirGuard::default();
+        guard.adopt(path.clone());
+        assert!(guard.remove().is_err(), "remove_dir_all of a file fails");
+        assert_eq!(guard.path.as_deref(), Some(path.as_path()));
+        guard.path = None;
+        fs::remove_file(&path)
     }
 
     #[cfg(unix)]

@@ -66,9 +66,17 @@ session ends, and its directory is removed, on:
 
 A normal end (TTL or signal, before or after readiness) exits 0. A failure
 exits 1 after cleanup. After a stop request the servers drain for at most 5
-seconds (a stalled client does not keep the data alive); then the runtime and
-every database handle are dropped **before** the directory is removed, so
-removal also works where open files block it (Windows).
+seconds (a stalled client does not keep the data alive); then the runtime is
+stopped and its tasks dropped, and the directory is removed only **after no
+database holder is left**: the state's identity store is held by the state and
+by every blocking task a request started (each clones it or the shared state),
+so its strong count reaching zero means that no blocking SQLite task of the
+session can still be running. The wait for that is bounded by 20 seconds
+(SQLite's busy timeout is 10 s for the artifact store, 5 s for the identity
+store), says so on stderr when it has to wait, and a holder still running at
+the bound is an explicit error (exit 1) whether or not the removal then
+succeeds. A failed removal keeps the path so that the guard's drop tries once
+more. Removal therefore also works where open files block it (Windows).
 
 `SIGKILL`, power loss, and an uncatchable termination leave the directory; that
 is what the sweep (decision 4) is for. This is **not secure erase**: removal
@@ -148,6 +156,11 @@ only the lifetime of the data and the process. The two must not be conflated
 when a tunnel is added.
 
 ## Not implemented
+
+- A second Ctrl+C (or SIGINT) during shutdown does not force the process to
+  quit: the handler is registered for the process and swallows it. SIGTERM
+  and SIGKILL still do; SIGKILL leaves the directory for a later sweep.
+- The sweep assumes a shared pid namespace with the dead session (decision 4).
 
 - Secure erase, a size quota, removing a session on SIGKILL or power loss other
   than by a later sweep, a sweep on macOS or Windows, a sweep across pid

@@ -12,8 +12,10 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
+use artifree_providers::storage::DATABASE_FILE;
 use artifree_server::session_sweep::{MARKER_FILE, marker_text};
 use serde_json::{Value, json};
 
@@ -207,6 +209,80 @@ fn a_stalled_client_does_not_keep_the_data_alive() -> TestResult {
     );
     assert!(!data_dir.exists(), "the stalled client kept the data");
     drop(stalled);
+    Ok(())
+}
+
+#[test]
+fn the_directory_stays_until_a_blocked_database_task_has_finished() -> TestResult {
+    let root = Root::new()?;
+    // One request at a time per actor: a second request is refused exactly
+    // while the first is in flight, which shows that it has started.
+    let mut server = Server::start(
+        &one_shot_args(&root, "120", &["--concurrent-requests", "1"]),
+        &[],
+    )?;
+    let ready = server.ready()?;
+    let data_dir = data_dir_of(&ready)?;
+    let api = text(&ready, "api_url")?.to_owned();
+    let token = token_of(&ready)?;
+
+    // Another connection holds the write lock, so the request's blocking task
+    // waits in SQLite's busy handler.
+    let lock = rusqlite::Connection::open(data_dir.join(DATABASE_FILE))?;
+    lock.execute_batch("BEGIN IMMEDIATE")?;
+    let spawn_writer = || {
+        let (writer_api, writer_token) = (api.clone(), token.clone());
+        thread::spawn(move || {
+            http(
+                &writer_api,
+                "POST",
+                "/v1/artifacts",
+                Some(&writer_token),
+                Some("blocked-key-1"),
+                Some(&json!({"title": "blocked", "files": [
+                    {"path": "index.html", "encoding": "utf8", "content": "<h1>x</h1>"}]})),
+            )
+            .map(|reply| reply.status)
+            .map_err(|error| error.to_string())
+        })
+    };
+    // The writer is in flight when two probes in a row are refused while it
+    // has not returned. A writer that lost the race to a probe is refused and
+    // returns at once; then it is started again.
+    let mut writer = spawn_writer();
+    let mut refused_in_a_row = 0;
+    let deadline = Instant::now() + PATIENCE;
+    while refused_in_a_row < 2 {
+        assert!(Instant::now() < deadline, "the write never started");
+        let probe = http(&api, "GET", "/v1/artifacts", Some(&token), None, None)?;
+        if writer.is_finished() {
+            writer = spawn_writer();
+            refused_in_a_row = 0;
+        } else if probe.status == 429 {
+            refused_in_a_row += 1;
+        } else {
+            refused_in_a_row = 0;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    send(&server, "TERM")?;
+    server.wait_stderr_contains("A database task of the session is still running")?;
+    assert!(data_dir.is_dir(), "removed under a running database task");
+    assert!(
+        server.child.try_wait()?.is_none(),
+        "exited under a running task"
+    );
+
+    lock.execute_batch("ROLLBACK")?;
+    let status = server.wait_exit()?;
+    assert_eq!(status.code(), Some(0), "{}", server.stderr());
+    assert!(
+        !data_dir.exists(),
+        "the directory goes once the task is done"
+    );
+    // The request got an answer or a closed connection; it must not hang.
+    writer.join().map_err(|_| "writer panicked")?.ok();
     Ok(())
 }
 
