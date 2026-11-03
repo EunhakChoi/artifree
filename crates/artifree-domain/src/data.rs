@@ -77,6 +77,8 @@ impl fmt::Display for DataLimit {
 pub enum DataError {
     /// The path breaks the grammar.
     InvalidPath(&'static str),
+    /// A parameter of a member query is out of range (decision 0040).
+    InvalidQuery(&'static str),
     /// The text is not an acceptable JSON value.
     InvalidJson {
         /// The byte offset of the first problem.
@@ -98,6 +100,7 @@ impl fmt::Display for DataError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPath(rule) => write!(formatter, "invalid data path: {rule}"),
+            Self::InvalidQuery(rule) => write!(formatter, "invalid data query: {rule}"),
             Self::InvalidJson { offset, rule } => {
                 write!(formatter, "invalid JSON value at byte {offset}: {rule}")
             }

@@ -129,6 +129,17 @@ impl Harness {
         };
         let response = self.api.clone().oneshot(request).await?;
         let status = response.status();
+        // An event stream does not end by itself: its status is the answer.
+        let streams = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"));
+        if streams {
+            return Ok(Reply {
+                status,
+                text: String::new(),
+            });
+        }
         let bytes = to_bytes(response.into_body(), usize::MAX).await?;
         Ok(Reply {
             status,
@@ -833,6 +844,20 @@ fn http_cases() -> Vec<Case> {
             "data",
             "GET",
             "/v1/artifacts/{artifact}/data",
+            None,
+            Succeeds,
+        ),
+        case(
+            "data members",
+            "GET",
+            "/v1/artifacts/{artifact}/data/members?select=values",
+            None,
+            Succeeds,
+        ),
+        case(
+            "data events",
+            "GET",
+            "/v1/artifacts/{artifact}/data/events?path=notes",
             None,
             Succeeds,
         ),
@@ -2757,11 +2782,13 @@ fn every_registration_that_outlives_a_request_is_confirmed_against_the_generatio
     let confirmations = |source: &str| source.matches(".ensure_current(").count();
     assert_eq!(confirmations(include_str!("../src/operations.rs")), 4);
     assert_eq!(confirmations(include_str!("../src/changes.rs")), 1);
+    assert_eq!(confirmations(include_str!("../src/data_events.rs")), 1);
     for (file, source) in [
         ("http.rs", include_str!("../src/http.rs")),
         ("mcp.rs", include_str!("../src/mcp.rs")),
         ("operations.rs", include_str!("../src/operations.rs")),
         ("changes.rs", include_str!("../src/changes.rs")),
+        ("data_events.rs", include_str!("../src/data_events.rs")),
     ] {
         assert!(
             !source.contains("ensure_enabled("),

@@ -844,6 +844,116 @@ pub struct DeleteDataRequest {
     pub base_data_version: u64,
 }
 
+/// What `GET /v1/artifacts/{id}/data/members` says about each member
+/// (decision 0040).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DataSelect {
+    /// Names only. This is the default.
+    Names,
+    /// Names and values: each member has exactly one of `value` and
+    /// `too_large`.
+    Values,
+}
+
+/// Query of `GET /v1/artifacts/{id}/data/members`: one page of the members of
+/// the object at a path, in the byte order of their UTF-8 names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListDataMembersQuery {
+    /// The collection: the path grammar of `ReadDataQuery.path`. Absent or
+    /// empty is the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Names only (the default) or names and values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<DataSelect>,
+    /// Most members in the page, 1 to 100; 50 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<u32>,
+    /// The cursor: members strictly after this name, 1 to 256 bytes. Pass the
+    /// previous page's `next_after`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// One member of a page. Under `select=names` only `name`; under
+/// `select=values` exactly one of `value` and `too_large`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMember {
+    /// The member's name.
+    pub name: String,
+    /// The value, which can be `null`. Absent when the member is `too_large`
+    /// and under `select=names`.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value: Option<JsonValue>,
+    /// Always `true` when present: the canonical value is larger than 32 KiB,
+    /// so it is not carried. Read it with `GET data?path=`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub too_large: Option<bool>,
+}
+
+/// Response of `GET /v1/artifacts/{id}/data/members`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMembers {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The path that was listed, as parsed.
+    pub path: String,
+    /// The `select` that applied.
+    pub select: DataSelect,
+    /// The limit that applied.
+    pub limit: u32,
+    /// The cursor that applied, absent when the query had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// The version of the data space this page was read at. A later page may
+    /// be read at a later version.
+    pub data_version: u64,
+    /// Whether an object is at the path. When false there are no members.
+    pub is_collection: bool,
+    /// The members in the byte order of their names, at most `limit`, with at
+    /// most 256 KiB of value text in all.
+    pub members: Vec<DataMember>,
+    /// The name of the last member, present exactly when more members follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
+
+/// Query of `GET /v1/artifacts/{id}/data/events`, a server-sent event stream
+/// of `snapshot` and `change` events (both `AppData`) and a final `too_large`
+/// event (`DataTooLarge`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WatchDataQuery {
+    /// The path to follow, as for `ReadDataQuery.path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Data of the `too_large` event: the canonical value at the path is larger
+/// than `max_bytes`, so it is not sent and the stream ends. Following it again
+/// would meet the same event; follow a smaller path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataTooLarge {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The path that was followed.
+    pub path: String,
+    /// The version of the data space at which the value was too large.
+    pub data_version: u64,
+    /// The most bytes of canonical value text an event carries.
+    pub max_bytes: u64,
+}
+
 /// Response of the three writes of application data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

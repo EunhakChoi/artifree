@@ -47,7 +47,7 @@ struct StreamRegistrations {
 }
 
 #[derive(Debug)]
-struct TokenStreamRegistration {
+pub(crate) struct TokenStreamRegistration {
     id: u64,
     registrations: Arc<Mutex<StreamRegistrations>>,
 }
@@ -99,6 +99,17 @@ impl Feed {
         self.closing.send_replace(true);
     }
 
+    /// How many streams are registered for revocation, for tests.
+    #[cfg(test)]
+    pub(crate) fn registered(&self) -> usize {
+        self.registrations.lock().map_or(usize::MAX, |reg| reg.streams.len())
+    }
+
+    /// A receiver that turns true when the server starts shutting down.
+    pub(crate) fn closing(&self) -> watch::Receiver<bool> {
+        self.closing.subscribe()
+    }
+
     /// Ends every open stream associated with `token_id`.
     pub(crate) fn revoke_token(&self, token_id: &TokenId) {
         if let Ok(reg) = self.registrations.lock() {
@@ -122,7 +133,7 @@ impl Feed {
         }
     }
 
-    fn register_token_stream(
+    pub(crate) fn register_token_stream(
         &self,
         actor: &ActorId,
         token_id: &TokenId,
@@ -376,7 +387,7 @@ impl Producer {
     }
 }
 
-async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
+pub(crate) async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
     if let Some(rx) = receiver {
         let _ = rx.wait_for(|revoked| *revoked).await;
     } else {
@@ -394,7 +405,7 @@ fn event(name: &str, cursor: &str, data: &impl serde::Serialize) -> Result<Event
 }
 
 /// The events a producer sends, as the response body's stream.
-struct Events(mpsc::Receiver<Result<Event, Infallible>>);
+pub(crate) struct Events(pub(crate) mpsc::Receiver<Result<Event, Infallible>>);
 
 impl Stream for Events {
     type Item = Result<Event, Infallible>;

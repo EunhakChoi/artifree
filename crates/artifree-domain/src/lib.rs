@@ -8,6 +8,7 @@ pub mod change;
 pub mod data;
 pub mod identity;
 pub mod job;
+pub mod members;
 pub mod package;
 pub mod room;
 
