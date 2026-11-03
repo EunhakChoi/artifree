@@ -263,3 +263,25 @@ CREATE TABLE job_findings (
     PRIMARY KEY (job_id, ordinal)
 ) STRICT, WITHOUT ROWID;
 ";
+
+/// Added in schema version 9 (decision 0031): application data and the keys
+/// of data writes.
+pub const STEP_9: &str = "
+CREATE TABLE app_data (
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    actor TEXT NOT NULL,
+    data_version INTEGER NOT NULL CHECK (data_version >= 1),
+    document TEXT NOT NULL CHECK (json_valid(document) AND json_type(document) = 'object'),
+    PRIMARY KEY (artifact_id, actor)
+) STRICT;
+CREATE TABLE data_requests (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    data_version INTEGER NOT NULL CHECK (data_version >= 0),
+    changed INTEGER NOT NULL CHECK (changed IN (0, 1)),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+";

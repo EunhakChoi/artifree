@@ -225,8 +225,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0031](docs/decisions/0031-app-data.md), and
 [0032](docs/decisions/0032-runtime-source-read-and-download.md),
 [0033](docs/decisions/0033-runtime-source-write.md),
-[0034](docs/decisions/0034-room-and-presence.md), and
-[0035](docs/decisions/0035-per-file-conditional-edit.md)).
+[0034](docs/decisions/0034-room-and-presence.md),
+[0035](docs/decisions/0035-per-file-conditional-edit.md), and
+[0036](docs/decisions/0036-multi-user-identity.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -325,7 +326,7 @@ back, and returns the path, revision, size, and SHA-256, which the client, the
 workspace, and the frame each check against the bytes they sent. A save moves
 the head, so the workspace shows the next revision in a new view that holds no
 grant: the user consents again for each save. Only the owner exists as a
-principal; there are no viewer roles. **Not implemented:** data access from a
+principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** data access from a
 preview, subscriptions, uploaded assets, replacing a view in place, deleting or
 renaming files, several files in one save, a prompt for each save, roles (a
 viewer is not refused because none exists), and any claim that a preview cannot
@@ -343,9 +344,25 @@ tab, 4 events per second per participant (burst 8), 128 kept events, 512-byte
 events, 256-byte states, and a room request budget apart from the owner's. A
 late joiner never receives older events. Rooms are memory of one server process:
 a restart empties them, nothing is stored, and events have no delivery
-guarantee. **Not implemented:** several users or roles (S01, S02), a room
+guarantee. **Not implemented:** roles and sharing (S02), a room
 capability for a sandboxed frame, a web or CLI surface, a push stream,
 subscriptions (R07), an outbox (R08), and any MCP tool.
+
+### Users (decision 0036)
+
+The owner is user one (`local`) and can register more users
+(`artifree user create <label>`, `GET/POST /v1/users`) and issue a token to one
+of them (`artifree token create <name> --user <id>`). A token belongs to one
+user for its whole life, and a user reaches only their own artifacts, revisions,
+trash, jobs, application data, change feed, previews, runtime connections and
+rooms: another user's name answers the `404` an unknown name does. Only the
+bootstrap token manages users and tokens; no MCP tool does. Disabling a user
+makes its tokens `401` and closes its open streams, links, connections and
+rooms; enabling lets tokens that were not revoked in again. **Not
+implemented:** roles, sharing and per-object grants (S02), OAuth or any
+external identity, passwords or login sessions, a web screen for users, user
+deletion, per-user storage quotas, and purging as a user (purge and cleanup are
+administrator-only).
 
 ## Verification
 

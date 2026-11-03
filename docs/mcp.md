@@ -127,6 +127,10 @@ lists the trash, and `update_artifact` with `deleted: false` recovers an
 artifact from it, under the same base and key rules. Nothing is removed;
 each artifact carries `deleted_at_ms`, `null` outside the trash (decision
 [0013](decisions/0013-deleting-artifacts-and-the-trash.md)).
+An MCP token acts as the one user it was issued to (decision
+[0036](decisions/0036-multi-user-identity.md)): it sees only that user's
+artifacts, jobs, data and changes, another user's artifact or job answers
+`not_found`, and there is no MCP tool to create users or tokens.
 There is no MCP tool to purge an artifact for good or to clean up unreferenced
 content: a purge cannot be undone, so only the HTTP API and the CLI offer it,
 and over HTTP an issued agent token is refused with `403 forbidden`; only the

@@ -74,7 +74,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/policy.rs",
         ComponentStatus::Implemented,
-        "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks runtime capability grants.",
+        "Per-user artifact access checked on every read; sharing remains planned. The server separately checks runtime capability grants.",
     ),
     (
         "documents",

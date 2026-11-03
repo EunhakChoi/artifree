@@ -538,27 +538,30 @@ fn owners_read_only_their_changes_and_a_short_page_reaches_the_head() -> TestRes
     create(&store, &bob, &key("b"), 2)?;
     commit(&store, &first, &key("c"), 1, "<h1>v2</h1>")?;
 
+    // Every owner numbers its own changes from 1 and its head counts only
+    // those (decision 0036): Bob's commit between Alice's two does not leave
+    // a gap in her feed, and neither feed tells how many the other holds.
     assert_eq!(
         feed(&store, &alice, 0, 100)?,
         (
-            vec![(1, ChangeKind::Created, 1), (3, ChangeKind::Revised, 2)],
-            3
+            vec![(1, ChangeKind::Created, 1), (2, ChangeKind::Revised, 2)],
+            2
         )
     );
     assert_eq!(
         feed(&store, &bob, 0, 100)?,
-        (vec![(2, ChangeKind::Created, 1)], 3)
+        (vec![(1, ChangeKind::Created, 1)], 1)
     );
     // A full page may be followed by more; a short one ends at the head.
     assert_eq!(
         feed(&store, &alice, 0, 1)?,
-        (vec![(1, ChangeKind::Created, 1)], 3)
+        (vec![(1, ChangeKind::Created, 1)], 2)
     );
     assert_eq!(
         feed(&store, &alice, 1, 1)?,
-        (vec![(3, ChangeKind::Revised, 2)], 3)
+        (vec![(2, ChangeKind::Revised, 2)], 2)
     );
-    assert_eq!(feed(&store, &alice, 3, 100)?, (vec![], 3));
+    assert_eq!(feed(&store, &alice, 2, 100)?, (vec![], 2));
     Ok(())
 }
 

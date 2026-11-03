@@ -86,6 +86,21 @@ impl RoomHub {
         action(&mut rooms, now).map_err(room_error)
     }
 
+    /// Removes every participant of `actor`, as when the user is disabled
+    /// (decision 0036). Its connections are closed first, so no later call
+    /// joins again.
+    pub(crate) fn leave_actor(&self, actor: &ActorId) {
+        if let Ok(mut rooms) = self.rooms.lock() {
+            rooms.leave_actor(actor);
+        }
+    }
+
+    /// The rooms and participants that exist, for tests.
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> Option<artifree_core::room::Counts> {
+        self.rooms.lock().ok().map(|rooms| rooms.counts())
+    }
+
     /// Removes the tab's participants after its connection was closed.
     pub(crate) fn leave_tab(&self, actor: &ActorId, tab: &TabKey) {
         // A poisoned lock fails every later call closed; there is nothing

@@ -30,7 +30,7 @@ use artifree_contracts::mcp::{
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
-use artifree_domain::identity::ActorId;
+use artifree_domain::identity::{ActorId, StateGeneration};
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -191,8 +191,8 @@ impl ServerHandler for ArtifactTools {
     }
 }
 
-/// Runs the named tool, or returns `None` for an unknown name.
-async fn dispatch(
+/// Runs the named tool, or `None` for an unknown name; crate-visible for the race tests.
+pub(crate) async fn dispatch(
     state: &AppState,
     auth: AuthContext,
     name: &str,
@@ -244,11 +244,19 @@ async fn dispatch(
                     artifact_id,
                     revision,
                 } = parse(arguments)?;
-                operations::preview(state, actor, auth.token_id, &artifact_id, revision).await
+                operations::preview(
+                    state,
+                    actor,
+                    auth.token_id,
+                    auth.generation,
+                    &artifact_id,
+                    revision,
+                )
+                .await
             })
             .await
         }
-        _ => return dispatch_jobs(state, actor, name, arguments).await,
+        _ => return dispatch_jobs(state, actor, auth.generation, name, arguments).await,
     };
     Some(outcome)
 }
@@ -258,6 +266,7 @@ async fn dispatch(
 async fn dispatch_data(
     state: &AppState,
     actor: ActorId,
+    generation: StateGeneration,
     name: &str,
     arguments: Value,
 ) -> Option<Result<Value, ApiError>> {
@@ -326,7 +335,7 @@ async fn dispatch_data(
             })
             .await
         }
-        _ => return dispatch_handoffs(state, actor, name, arguments).await,
+        _ => return dispatch_handoffs(state, actor, generation, name, arguments).await,
     };
     Some(outcome)
 }
@@ -345,6 +354,7 @@ fn json_text(field: &str, text: String) -> Result<JsonValue, ApiError> {
 async fn dispatch_jobs(
     state: &AppState,
     actor: ActorId,
+    generation: StateGeneration,
     name: &str,
     arguments: Value,
 ) -> Option<Result<Value, ApiError>> {
@@ -370,7 +380,7 @@ async fn dispatch_jobs(
             .await
         }
         "cancel_job" => json(cancel_job(state, actor, arguments)).await,
-        _ => return dispatch_data(state, actor, name, arguments).await,
+        _ => return dispatch_data(state, actor, generation, name, arguments).await,
     };
     Some(outcome)
 }
@@ -379,6 +389,7 @@ async fn dispatch_jobs(
 async fn dispatch_handoffs(
     state: &AppState,
     actor: ActorId,
+    generation: StateGeneration,
     name: &str,
     arguments: Value,
 ) -> Option<Result<Value, ApiError>> {
@@ -386,7 +397,8 @@ async fn dispatch_handoffs(
         "register_handoff_session" => {
             json(async {
                 let RegisterHandoffSessionArguments { name } = parse(arguments)?;
-                operations::register_handoff_session(state, &actor, &name)
+                operations::register_confirmed_handoff_session(state, &actor, generation, &name)
+                    .await
             })
             .await
         }

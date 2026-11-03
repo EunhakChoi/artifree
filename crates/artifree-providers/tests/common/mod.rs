@@ -218,7 +218,7 @@ pub fn old_artifact() -> ArtifactId {
     parsed(OLD_ID)
 }
 
-/// A database as the build of schema `version` (1 to 8) left it, holding real
+/// A database as the build of schema `version` (1 to 9) left it, holding real
 /// data, built only from the frozen schema texts in [`history`]:
 ///
 /// - the artifact "Old" at revision 2 with the body [`OLD_BODY`], created by
@@ -227,7 +227,8 @@ pub fn old_artifact() -> ArtifactId {
 /// - from version 3, "Old" renamed to "Renamed" and pinned (metadata revision 2);
 /// - from version 5, an artifact "Trashed" in the trash and one access token;
 /// - from version 7, a cleanup run under the key "test-key-swept";
-/// - from version 8, a queued job of revision 1 under the key "test-key-legacy-job".
+/// - from version 8, a queued job of revision 1 under the key "test-key-legacy-job";
+/// - from version 9, the (empty) tables of application data.
 pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Error> {
     let connection = Connection::open(path)?;
     connection.execute_batch(history::STEP_1)?;
@@ -306,6 +307,9 @@ pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Er
             job = "0".repeat(32),
             fingerprint = "0a".repeat(32)
         ))?;
+    }
+    if version >= 9 {
+        connection.execute_batch(history::STEP_9)?;
     }
     connection.pragma_update(None, "user_version", version)
 }

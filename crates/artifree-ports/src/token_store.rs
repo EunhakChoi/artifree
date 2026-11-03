@@ -5,13 +5,25 @@
 
 use std::fmt;
 
-use artifree_domain::identity::TokenId;
+use artifree_domain::identity::{ActorId, StateGeneration, TokenId};
 
 /// A stored token record. Secret plaintext is never stored or returned here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenRecord {
     /// Opaque token identifier.
     pub id: TokenId,
+    /// The one user this token authenticates as, for the token's whole life
+    /// (decision 0036). A rotation keeps it; nothing moves a token to
+    /// another user.
+    pub actor: ActorId,
+    /// Whether that user is disabled now. Read together with the token, in
+    /// one statement, so that the answer to "may this token authenticate" is
+    /// never made of two reads.
+    pub actor_disabled: bool,
+    /// The user's state generation in the same read. A request that
+    /// authenticates with this token carries it, and confirms it again after
+    /// it registers something that outlives the request.
+    pub actor_generation: StateGeneration,
     /// Human-readable label for this token.
     pub name: String,
     /// Hex-encoded SHA-256 hash of the secret bearer token.
@@ -27,10 +39,11 @@ pub struct TokenRecord {
 }
 
 impl TokenRecord {
-    /// Whether this token is active (not revoked).
+    /// Whether this token may authenticate a request: it is not revoked and
+    /// its user is not disabled.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.revoked_at.is_none()
+        self.revoked_at.is_none() && !self.actor_disabled
     }
 }
 
@@ -39,6 +52,8 @@ impl TokenRecord {
 pub struct NewTokenRecord {
     /// Unique identifier for the token.
     pub id: TokenId,
+    /// The registered, enabled user the token authenticates as.
+    pub actor: ActorId,
     /// Human-readable label for this token.
     pub name: String,
     /// Hex-encoded SHA-256 hash of the secret bearer token.
@@ -52,9 +67,11 @@ pub struct NewTokenRecord {
 /// Errors from token storage operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenStoreError {
-    /// The requested token does not exist.
+    /// The requested token does not exist, or the user a new token names is
+    /// not registered.
     NotFound(String),
-    /// A conflict occurred (e.g. secret hash already exists).
+    /// A conflict occurred (e.g. secret hash already exists, or the user a
+    /// new token names is disabled).
     Conflict(String),
     /// Storage is unavailable or returned an internal error.
     Unavailable(String),
@@ -85,7 +102,9 @@ pub trait TokenStore: Send + Sync {
     ///
     /// # Errors
     ///
-    /// When a token with the same ID or secret hash already exists, or storage fails.
+    /// When a token with the same ID or secret hash already exists, the user
+    /// is not registered ([`TokenStoreError::NotFound`]) or disabled
+    /// ([`TokenStoreError::Conflict`]), or storage fails.
     fn create(&self, token: &NewTokenRecord) -> Result<TokenRecord, TokenStoreError>;
 
     /// Finds a token by its secret hash.

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataValue};
-use artifree_domain::identity::{TokenId, UnixMillis};
+use artifree_domain::identity::{ActorId, TokenId, UnixMillis};
 use artifree_domain::job::{Finding, JobKind, JobState, Problem, VerifyReport, WorkerId};
 use artifree_domain::{AppDataVersion, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
@@ -64,6 +64,7 @@ impl Layout {
 fn token(index: u8) -> NewTokenRecord {
     NewTokenRecord {
         id: parsed::<TokenId>(&format!("tok_{index:032x}")),
+        actor: ActorId::owner(),
         name: format!("token {index}"),
         secret_hash: hash_token_secret(&format!("secret {index}")),
         prefix: format!("art_{index:02}"),

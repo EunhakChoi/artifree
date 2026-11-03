@@ -36,6 +36,7 @@ test('CLI token --help outputs usage text', () => {
 test('ArtifreeClient token methods handle responses and validation correctly', async () => {
   const mockToken = {
     id: 'tok_0123456789abcdef0123456789abcdef',
+    user_id: 'local',
     name: 'Test Agent',
     prefix: 'art_01234567...',
     created_at: '2026-11-01T00:00:00Z',

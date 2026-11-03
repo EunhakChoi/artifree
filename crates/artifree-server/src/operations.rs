@@ -30,7 +30,7 @@ use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
-use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, TokenId};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
     ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
@@ -725,6 +725,7 @@ pub(crate) async fn preview(
     state: &AppState,
     actor: ActorId,
     token_id: Option<TokenId>,
+    generation: StateGeneration,
     id: &str,
     revision: u64,
 ) -> Result<Preview, ApiError> {
@@ -738,6 +739,7 @@ pub(crate) async fn preview(
     if revision > record.current_revision {
         return Err(ArtifactError::NotFound(Missing::Revision).into());
     }
+    let owner = actor.clone();
     let ticket = state
         .previews()
         .issue(actor, token_id, id, revision)
@@ -748,6 +750,10 @@ pub(crate) async fn preview(
                 "too many live previews; retry shortly",
             )
         })?;
+    // The link is a bearer capability that outlives the request: if the user
+    // was disabled, or disabled and enabled again, while this request ran, it
+    // is removed again.
+    state.ensure_current(&owner, generation).await?;
     Ok(Preview {
         url: format!("{}/p/{}/", state.settings().content_origin, ticket.secret),
         revision: revision.0,
@@ -817,6 +823,9 @@ fn handoff_error(error: HandoffError) -> ApiError {
     }
 }
 
+/// Registers an agent inbox. It only registers: a request that serves a
+/// caller uses [`register_confirmed_handoff_session`], which also confirms
+/// that the user is still enabled.
 pub(crate) fn register_handoff_session(
     state: &AppState,
     actor: &ActorId,
@@ -826,6 +835,21 @@ pub(crate) fn register_handoff_session(
         .handoffs()
         .register(actor, name)
         .map_err(handoff_error)
+}
+
+/// Registers an agent inbox for a request that authenticated earlier. The
+/// inbox outlives the request, so the user is confirmed **after** it is
+/// registered: a disable that came in between (and an enable after it) has
+/// already run its cleanup, and this removes the inbox again (decision 0036).
+pub(crate) async fn register_confirmed_handoff_session(
+    state: &AppState,
+    actor: &ActorId,
+    generation: StateGeneration,
+    name: &str,
+) -> Result<RegisteredHandoffSession, ApiError> {
+    let registered = register_handoff_session(state, actor, name)?;
+    state.ensure_current(actor, generation).await?;
+    Ok(registered)
 }
 
 pub(crate) fn agent_sessions(
@@ -1036,6 +1060,9 @@ pub(crate) fn acknowledge_handoff(
         .map_err(handoff_error)
 }
 
+/// Opens a connection. It only registers: a request that serves a caller
+/// uses [`open_confirmed_runtime_session`], which also confirms that the user
+/// is still enabled.
 pub(crate) fn open_runtime_session(
     state: &AppState,
     actor: &ActorId,
@@ -1046,6 +1073,22 @@ pub(crate) fn open_runtime_session(
         .create(actor, token_id)
         .map_err(session_error)?;
     Ok(RuntimeConnection { session_id })
+}
+
+/// Opens a connection for a request that authenticated earlier. The
+/// connection outlives the request, so the user is confirmed **after** it is
+/// registered: a disable that came in between (and an enable after it) has
+/// already run its cleanup, and this closes and forgets the connection again
+/// (decision 0036).
+pub(crate) async fn open_confirmed_runtime_session(
+    state: &AppState,
+    actor: &ActorId,
+    token_id: Option<TokenId>,
+    generation: StateGeneration,
+) -> Result<RuntimeConnection, ApiError> {
+    let opened = open_runtime_session(state, actor, token_id)?;
+    state.ensure_current(actor, generation).await?;
+    Ok(opened)
 }
 
 pub(crate) fn close_runtime_session(
@@ -1139,6 +1182,7 @@ pub(crate) async fn create_runtime_view(
     state: &AppState,
     actor: ActorId,
     token_id: Option<TokenId>,
+    generation: StateGeneration,
     id: &str,
     revision: u64,
     request: CreateRuntimeViewRequest,
@@ -1163,6 +1207,7 @@ pub(crate) async fn create_runtime_view(
         })?;
     let (record, enabled, policy) = runtime_source(state, &actor, &id, revision).await?;
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
+    let owner = actor.clone();
     let (ticket, grant_version, granted) = session
         .with_grant(&scope, |version, granted| {
             let ticket = state.previews().issue_runtime(RuntimeTicketRequest {
@@ -1200,6 +1245,8 @@ pub(crate) async fn create_runtime_view(
                 "runtime views are temporarily unavailable",
             ),
         })?;
+    // As for a preview link: confirmed after the registration (see `preview`).
+    state.ensure_current(&owner, generation).await?;
     Ok(RuntimeView {
         url: format!(
             "{}/{}/{}/",

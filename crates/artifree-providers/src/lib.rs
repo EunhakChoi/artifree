@@ -12,3 +12,4 @@ mod schema;
 pub mod storage;
 pub mod tokens;
 pub mod tools;
+pub mod users;

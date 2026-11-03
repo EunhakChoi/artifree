@@ -43,7 +43,7 @@ const STREAM_RETRY_SECONDS: u32 = 5;
 #[derive(Debug, Default)]
 struct StreamRegistrations {
     next_id: u64,
-    streams: Vec<(u64, TokenId, watch::Sender<bool>)>,
+    streams: Vec<(u64, ActorId, TokenId, watch::Sender<bool>)>,
 }
 
 #[derive(Debug)]
@@ -55,7 +55,8 @@ struct TokenStreamRegistration {
 impl Drop for TokenStreamRegistration {
     fn drop(&mut self) {
         if let Ok(mut reg) = self.registrations.lock() {
-            reg.streams.retain(|(entry_id, _, _)| *entry_id != self.id);
+            reg.streams
+                .retain(|(entry_id, _, _, _)| *entry_id != self.id);
         }
     }
 }
@@ -101,8 +102,20 @@ impl Feed {
     /// Ends every open stream associated with `token_id`.
     pub(crate) fn revoke_token(&self, token_id: &TokenId) {
         if let Ok(reg) = self.registrations.lock() {
-            for (_, tok, sender) in &reg.streams {
+            for (_, _, tok, sender) in &reg.streams {
                 if tok == token_id {
+                    sender.send_replace(true);
+                }
+            }
+        }
+    }
+
+    /// Ends every open stream of `actor`, as when the user is disabled
+    /// (decision 0036).
+    pub(crate) fn revoke_actor(&self, actor: &ActorId) {
+        if let Ok(reg) = self.registrations.lock() {
+            for (_, owner, _, sender) in &reg.streams {
+                if owner == actor {
                     sender.send_replace(true);
                 }
             }
@@ -111,13 +124,15 @@ impl Feed {
 
     fn register_token_stream(
         &self,
+        actor: &ActorId,
         token_id: &TokenId,
         sender: watch::Sender<bool>,
     ) -> Option<TokenStreamRegistration> {
         let mut reg = self.registrations.lock().ok()?;
         let id = reg.next_id;
         reg.next_id = reg.next_id.wrapping_add(1);
-        reg.streams.push((id, token_id.clone(), sender));
+        reg.streams
+            .push((id, actor.clone(), token_id.clone(), sender));
         Some(TokenStreamRegistration {
             id,
             registrations: Arc::clone(&self.registrations),
@@ -177,11 +192,15 @@ pub(crate) async fn stream(
     let closing = feed.closing.subscribe();
     let (revoked, registration) = if let Some(token_id) = &auth.token_id {
         let (tx, rx) = watch::channel(false);
-        let reg = feed.register_token_stream(token_id, tx);
+        let reg = feed.register_token_stream(&auth.actor, token_id, tx);
         (Some(rx), reg)
     } else {
         (None, None)
     };
+    // The registration above is what a disable ends; confirming the user
+    // after it closes the window in which a request that authenticated
+    // earlier opens a stream the disable has already passed.
+    state.ensure_current(&auth.actor, auth.generation).await?;
     let reader = auth.actor.clone();
     let start = state
         .run(move |artifacts| artifacts.changes(&reader, ChangeSequence(0), 0))
@@ -382,5 +401,37 @@ impl Stream for Events {
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.0.poll_recv(context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use artifree_domain::identity::{ActorId, TokenId};
+    use tokio::sync::watch;
+
+    use super::Feed;
+
+    #[test]
+    fn revoking_an_actor_ends_its_streams_and_no_one_elses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let alice: ActorId = "u-00000000000000000000000000000001".parse()?;
+        let bob: ActorId = "u-00000000000000000000000000000002".parse()?;
+        let first: TokenId = "tok_0123456789abcdef0123456789abcdef".parse()?;
+        let second: TokenId = "tok_fedcba9876543210fedcba9876543210".parse()?;
+        let feed = Feed::new(4);
+        let (alice_tx, alice_rx) = watch::channel(false);
+        let (bob_tx, bob_rx) = watch::channel(false);
+        let _alices = feed
+            .register_token_stream(&alice, &first, alice_tx)
+            .ok_or("registration")?;
+        let _bobs = feed
+            .register_token_stream(&bob, &second, bob_tx)
+            .ok_or("registration")?;
+
+        feed.revoke_actor(&alice);
+
+        assert!(*alice_rx.borrow(), "the user's stream was not ended");
+        assert!(!*bob_rx.borrow(), "another user's stream was ended");
+        Ok(())
     }
 }

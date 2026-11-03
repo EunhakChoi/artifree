@@ -32,7 +32,9 @@ const MAX_COUNTER: u64 = 9_007_199_254_740_991;
 /// none is a hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Rooms with at least one participant, over all actors.
+    /// Rooms with at least one participant that one actor may have
+    /// (decision 0036): the cap is per actor, so that one user's rooms
+    /// cannot keep another from opening a first.
     pub max_rooms: usize,
     /// Participants in one room.
     pub max_participants: usize,
@@ -347,9 +349,28 @@ pub struct Counts {
 pub struct Rooms {
     limits: Limits,
     table: HashMap<RoomKey, Room>,
-    next_participant: u64,
-    next_tab: u64,
-    next_epoch: u64,
+    /// The numbers handed out, kept per actor (decision 0036): a number is
+    /// only compared inside a room, which belongs to one actor, and a counter
+    /// shared by all actors would tell one user how many joins the others made.
+    counters: HashMap<ActorId, Counters>,
+}
+
+/// The next number of each kind an actor's rooms hand out.
+#[derive(Debug)]
+struct Counters {
+    participant: u64,
+    tab: u64,
+    epoch: u64,
+}
+
+impl Default for Counters {
+    fn default() -> Self {
+        Self {
+            participant: 1,
+            tab: 1,
+            epoch: 1,
+        }
+    }
 }
 
 fn take(counter: &mut u64) -> Result<u64, RoomError> {
@@ -368,9 +389,7 @@ impl Rooms {
         Self {
             limits,
             table: HashMap::new(),
-            next_participant: 1,
-            next_tab: 1,
-            next_epoch: 1,
+            counters: HashMap::new(),
         }
     }
 
@@ -429,7 +448,8 @@ impl Rooms {
                 .iter()
                 .position(|member| member.tab == *caller.tab && member.slot == slot)
         {
-            let epoch = Epoch(take(&mut self.next_epoch)?);
+            let counters = self.counters.entry(caller.actor.clone()).or_default();
+            let epoch = Epoch(take(&mut counters.epoch)?);
             let member = &mut room.members[index];
             member.epoch = epoch;
             member.state = state;
@@ -449,11 +469,18 @@ impl Rooms {
             if own >= self.limits.max_per_tab {
                 return Err(RoomError::TabFull);
             }
-        } else if self.table.len() >= self.limits.max_rooms {
+        } else if self
+            .table
+            .keys()
+            .filter(|room| room.actor == *caller.actor)
+            .count()
+            >= self.limits.max_rooms
+        {
             return Err(RoomError::TooManyRooms);
         }
-        let id = ParticipantId(take(&mut self.next_participant)?);
-        let epoch = Epoch(take(&mut self.next_epoch)?);
+        let counters = self.counters.entry(caller.actor.clone()).or_default();
+        let id = ParticipantId(take(&mut counters.participant)?);
+        let epoch = Epoch(take(&mut counters.epoch)?);
         let known = self.table.get(&key).and_then(|room| {
             room.tabs
                 .iter()
@@ -462,7 +489,7 @@ impl Rooms {
         });
         let label = match known {
             Some(label) => label,
-            None => TabLabel(take(&mut self.next_tab)?),
+            None => TabLabel(take(&mut counters.tab)?),
         };
         let room = self.table.entry(key).or_default();
         if known.is_none() {
@@ -601,6 +628,12 @@ impl Rooms {
             self.table.remove(&key);
         }
         Ok(())
+    }
+
+    /// Removes every participant in every room of `actor`, as when the user
+    /// is disabled (decision 0036).
+    pub fn leave_actor(&mut self, actor: &ActorId) {
+        self.table.retain(|key, _| key.actor != *actor);
     }
 
     /// Removes every participant of a tab in every room of `actor`, as when
@@ -1578,6 +1611,130 @@ mod tests {
         );
     }
 
+    fn other_actor() -> ActorId {
+        "u-0123456789abcdef0123456789abcdef".parse().ready()
+    }
+
+    /// A tab of another actor, in the artifact `digit`.
+    fn tab_of(actor: ActorId, connection: &str, digit: char) -> Tab {
+        Tab {
+            actor,
+            ..Tab::new(connection).in_artifact(digit)
+        }
+    }
+
+    #[test]
+    fn the_room_cap_is_per_actor_and_one_actors_rooms_cannot_fill_anothers() {
+        let limits = Limits {
+            max_rooms: 1,
+            ..Limits::STANDARD
+        };
+        let mut rooms = Rooms::new(limits);
+        let mine = tab_of(actor(), "mine", 'a');
+        let theirs = tab_of(other_actor(), "theirs", 'b');
+        join(&mut rooms, 0, &mine, "page");
+        // Another room of the same actor is refused, and another actor's
+        // first room is not.
+        let second = tab_of(actor(), "mine", 'c');
+        assert_eq!(
+            rooms
+                .join(at(0), &second.caller(), slot("page"), None)
+                .err(),
+            Some(RoomError::TooManyRooms)
+        );
+        assert!(
+            rooms
+                .join(at(0), &theirs.caller(), slot("page"), None)
+                .is_ok()
+        );
+        assert_eq!(rooms.counts().rooms, 2);
+    }
+
+    #[test]
+    fn an_actor_at_the_room_cap_can_join_again_after_its_rooms_are_removed() {
+        let limits = Limits {
+            max_rooms: 1,
+            ..Limits::STANDARD
+        };
+        let mut rooms = Rooms::new(limits);
+        let mine = tab_of(actor(), "mine", 'a');
+        join(&mut rooms, 0, &mine, "page");
+        let second = tab_of(actor(), "mine", 'c');
+        assert_eq!(
+            rooms
+                .join(at(0), &second.caller(), slot("page"), None)
+                .err(),
+            Some(RoomError::TooManyRooms)
+        );
+
+        rooms.leave_actor(&actor());
+
+        assert!(
+            rooms
+                .join(at(0), &second.caller(), slot("page"), None)
+                .is_ok(),
+            "a user enabled again must find its places free"
+        );
+    }
+
+    #[test]
+    fn each_actor_counts_its_own_participants_and_epochs() {
+        let mut rooms = rooms();
+        let (mine, theirs) = (
+            tab_of(actor(), "mine", 'a'),
+            tab_of(other_actor(), "theirs", 'b'),
+        );
+        for _ in 0..3 {
+            join(&mut rooms, 0, &mine, "page");
+        }
+        let first = join(&mut rooms, 0, &theirs, "page");
+        // Joining again resumes and takes a new epoch for the same actor
+        // only: the other actor's numbers started at 1 and stay its own.
+        assert_eq!(
+            (first.participant, first.epoch, first.tab),
+            (ParticipantId(1), Epoch(1), TabLabel(1))
+        );
+        let again = join(&mut rooms, 0, &mine, "page");
+        assert!(again.epoch > Epoch(1));
+        let still = join(&mut rooms, 0, &theirs, "page");
+        assert_eq!(
+            still.epoch,
+            Epoch(2),
+            "another actor's joins moved this actor's epoch"
+        );
+    }
+
+    #[test]
+    fn leaving_an_actor_removes_its_rooms_and_no_one_elses() {
+        let mut rooms = rooms();
+        let (mine, theirs) = (
+            tab_of(actor(), "mine", 'a'),
+            tab_of(other_actor(), "theirs", 'a'),
+        );
+        join(&mut rooms, 0, &mine, "page");
+        join(&mut rooms, 0, &theirs, "page");
+        assert_eq!(rooms.counts().rooms, 2);
+        rooms.leave_actor(&actor());
+        assert_eq!(
+            rooms.counts(),
+            Counts {
+                rooms: 1,
+                participants: 1
+            }
+        );
+        let view = rooms
+            .heartbeat(
+                at(1),
+                &theirs.caller(),
+                ParticipantId(1),
+                Epoch(1),
+                EventSeq(0),
+                None,
+            )
+            .ready();
+        assert_eq!(view.members.len(), 1);
+    }
+
     #[test]
     fn memory_is_bounded_by_the_limits_whatever_the_traffic() {
         let limits = Limits {
@@ -1741,7 +1898,7 @@ mod tests {
     #[test]
     fn counters_stop_at_the_largest_safe_number() {
         let mut rooms = rooms();
-        rooms.next_participant = MAX_COUNTER;
+        rooms.counters.entry(actor()).or_default().participant = MAX_COUNTER;
         let (one, two) = (Tab::new("tab-one"), Tab::new("tab-two"));
         let last = join(&mut rooms, 0, &one, "page");
         assert_eq!(last.participant, ParticipantId(MAX_COUNTER));

@@ -699,8 +699,9 @@ impl<S: ArtifactStore> ArtifactService<S> {
 
     /// What content no revision file refers to: the dry run of
     /// [`Self::remove_unreferenced_content`]. Content is shared by all
-    /// owners' revisions and is not owned by anyone; with one owner nothing is
-    /// revealed that the owner could not see.
+    /// owners' revisions and is not owned by anyone, so this reports on the
+    /// whole store and the server offers it to the administrator only
+    /// (decision 0036).
     ///
     /// # Errors
     ///
@@ -798,7 +799,9 @@ impl<S: ArtifactStore> ArtifactService<S> {
 
     /// Up to `limit` committed changes to the actor's artifacts after
     /// `after`, with the feed's identity and head. Only an artifact's owner
-    /// learns of its changes; the head counts every actor's commits.
+    /// learns of its changes. Each actor has a feed of its own (decision
+    /// 0036): positions count that actor's commits only, and the head is that
+    /// actor's newest position, so no number reveals another actor's activity.
     ///
     /// # Errors
     ///

@@ -1,8 +1,10 @@
 //! Authorization decisions. The server's authentication boundary establishes
 //! the actor; an iframe-supplied actor or workspace identifier cannot.
 //!
-//! Only owner artifact access exists today. Sharing and roles are planned
-//! and must extend this decision. The server separately checks the current
+//! Only the artifact's own user has access, whether the owner profile or a
+//! registered user (decision 0036); every other actor is refused as if the
+//! artifact did not exist. Sharing and roles are planned (S02) and must extend
+//! this decision. The server separately checks the current
 //! connection grant for each runtime capability a frame uses. The change feed applies
 //! the owner rule in its storage query (`ArtifactService::changes`), so
 //! sharing must extend that query too.

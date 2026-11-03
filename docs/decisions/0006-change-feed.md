@@ -4,6 +4,10 @@ Date: 2026-10-28. Status: accepted. Builds on
 [0003](0003-local-html-artifact-slice.md) and
 [0005](0005-request-limits.md); corrects the CLI message of 0005.
 
+> Amended by [0036](0036-multi-user-identity.md): the feed is per actor. The
+> `sequence` below stays the global write order in the database, and the
+> position a cursor carries and the head are the actor's own (`actor_seq`).
+
 ## Context
 
 An agent can save an artifact while the web workspace shows it, but nothing
@@ -26,7 +30,7 @@ the same labels: **observed**, **source-only**, **inference**, and
 | C2  | Only a commit that wrote something is announced, once.                                                                  | Observed: stale or conflicting publications created no version. Decision: the change is recorded in the commit's transaction; replays, conflicts, and failed commits record nothing.                                                                                                                                 |
 | C3  | Live delivery has keepalives and reconnects; the credential is not part of the URL.                                     | Observed: ping/pong on the live connection. Source-only: the client reconnects with doubling delays, honors a server-given delay, stops when access is denied, and passes its token outside the URL. Decision: server-sent events over `fetch` with the bearer header, comment keepalives, and the retry rule below. |
 | C4  | A client that was away catches up from a position, or learns that it must reload.                                       | Source-only: a catch-up read by sequence position returns rows, the head, and whether more follow. Decision: a durable cursor that names its database, resumption with `Last-Event-ID`, and a `reset` event when the cursor cannot be continued.                                                                     |
-| C5  | The feed position is not a source revision.                                                                             | Observed: the state carried a sequence number separate from the version. Decision: `ChangeSequence` is its own type, global to the database.                                                                                                                                                                         |
+| C5  | The feed position is not a source revision.                                                                             | Observed: the state carried a sequence number separate from the version. Decision: `ChangeSequence` is its own type, global to the database (per actor since 0036).                                                                                                                                                  |
 
 The analysis did not establish the original server's queue, retention, or
 delivery guarantees; everything below about them is an Artifree decision.

@@ -7,6 +7,7 @@ import { runContent } from './content.js';
 import { runData } from './data.js';
 import { runJob } from './jobs.js';
 import { runToken } from './tokens.js';
+import { runUser } from './users.js';
 
 const help = `Artifree — open artifacts, any agent.
 
@@ -16,6 +17,7 @@ Usage:
   artifree data <command>      Read and write the application data of an artifact (get, set, update, delete)
   artifree job <command>       Queue, read, list, and cancel verification jobs (enqueue, show, list, cancel)
   artifree token <command>     Manage agent access tokens (list, create, rotate, revoke)
+  artifree user <command>      Register and manage users (list, create, disable, enable)
   artifree describe [--json]  Inspect the build-time module inventory
   artifree --version         Print the version
   artifree --help            Show this help
@@ -26,6 +28,7 @@ Data commands talk to a running artifree-server; see artifree data --help.
 Job commands talk to a running artifree-server; see artifree job --help. A job runs only while an
 artifree-server worker process runs on the same data directory.
 Token commands talk to a running artifree-server; see artifree token --help.
+User commands talk to a running artifree-server; see artifree user --help.
 describe prints an inventory bundled at build time; it does not probe a server.
 `;
 
@@ -99,6 +102,7 @@ async function main(): Promise<void> {
   else if (args[0] === 'data') await runData(args.slice(1));
   else if (args[0] === 'job') await runJob(args.slice(1));
   else if (args[0] === 'token') await runToken(args.slice(1));
+  else if (args[0] === 'user') await runUser(args.slice(1));
   else describe(args);
 }
 
