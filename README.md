@@ -93,7 +93,7 @@ A one-shot session ([decision 0038](docs/decisions/0038-one-shot-session.md))
 is the other storage mode: `artifree-server serve --one-shot-ttl-seconds 3600`
 (instead of `--data-dir`) runs the same server on a new private temporary data
 directory and stops after that many seconds (1 to 604800), on Ctrl+C, or on
-SIGTERM, and then deletes the directory with the database and token in it. A
+SIGTERM, and then deletes the directory with the database and token in it. The lifetime is counted from the start of `serve`, so startup time is part of it and `session_ttl_seconds` is the total lifetime, not the time after readiness. A
 new session starts empty: it has a new access token, and tokens, preview
 addresses, and jobs of an earlier session do not exist in it and do not
 authenticate. `--session-root <dir>` chooses where session directories are

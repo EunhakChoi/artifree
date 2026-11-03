@@ -46,8 +46,10 @@ after it was killed.
    startup (database, WAL, access token); the existing check that refuses a
    directory open to other users runs on it.
 3. **The session lifetime.** The lifetime is a whole number of seconds from 1 to
-   604800 (seven days), counted from the start of the process, before storage
-   is opened. When it ends the server stops accepting connections, closes its
+   604800 (seven days), counted from the start of `serve` in the process, before
+   storage is opened. Startup (creating the directory, the stale sweep, opening
+   the database, binding the listeners) is therefore part of the lifetime, and
+   `session_ttl_seconds` is the total lifetime, not the time after readiness. When it ends the server stops accepting connections, closes its
    change streams, gives open connections five seconds
    (`SESSION_DRAIN_GRACE`) and then abandons them, and deletes the session
    directory. A client that holds a connection open therefore cannot keep the
@@ -107,7 +109,11 @@ after it was killed.
 8. **Telling the modes apart.** The readiness line has `mode`: `persistent` or
    `one_shot`, and `data_dir` in both. Only a one-shot line has
    `session_ttl_seconds`, `stale_sessions_removed`, and `stale_sessions_failed`.
-   A one-shot server also prints one line on stderr when it is ready, so a
+   A path in the readiness line must be valid UTF-8: otherwise (for example a
+   `TMPDIR` of arbitrary bytes, which is the default session root) the server
+   refuses to serve with an error that names the problem, exits with code 1
+   before accepting a connection, and removes the session directory; this also
+   replaces what was a panic for a non-UTF-8 `--data-dir` in persistent mode. A one-shot server also prints one line on stderr when it is ready, so a
    person at a terminal is told that nothing is kept. `--help` and the README
    describe the two modes separately. **No HTTP response, no MCP tool, and no
    contract changed**: the API cannot tell a client which mode it talks to,

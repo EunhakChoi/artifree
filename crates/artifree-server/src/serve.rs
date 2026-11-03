@@ -145,8 +145,12 @@ struct SessionRun {
 /// When the data directory, database, token, runtime, or a listener cannot be
 /// set up, when the data directory is accessible to other users (Unix), when
 /// a listener fails while serving, or when a one-shot session directory cannot
-/// be removed.
-pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
+/// be removed, or when `on_ready` refuses to report (the server then does not
+/// start serving, and a one-shot session directory is removed).
+pub fn run(
+    options: ServeOptions,
+    on_ready: impl FnOnce(&Ready) -> Result<(), String>,
+) -> Result<(), String> {
     match options.storage.clone() {
         Storage::Persistent { data_dir } => serve_data_dir(options, &data_dir, None, on_ready),
         Storage::OneShot(one_shot) => run_one_shot(options, &one_shot, on_ready),
@@ -158,7 +162,7 @@ pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), S
 fn run_one_shot(
     options: ServeOptions,
     one_shot: &OneShot,
-    on_ready: impl FnOnce(&Ready),
+    on_ready: impl FnOnce(&Ready) -> Result<(), String>,
 ) -> Result<(), String> {
     let started = Instant::now();
     let root = one_shot.root.clone().unwrap_or_else(std::env::temp_dir);
@@ -191,7 +195,7 @@ fn serve_data_dir(
     options: ServeOptions,
     data_dir: &Path,
     session: Option<SessionRun>,
-    on_ready: impl FnOnce(&Ready),
+    on_ready: impl FnOnce(&Ready) -> Result<(), String>,
 ) -> Result<(), String> {
     data_dir::prepare_data_dir(data_dir)?;
     let db_path = data_dir.join(DATABASE_FILE);
@@ -228,7 +232,7 @@ async fn serve_listeners(
     token: AccessToken,
     data_dir: PathBuf,
     session: Option<SessionRun>,
-    on_ready: impl FnOnce(&Ready),
+    on_ready: impl FnOnce(&Ready) -> Result<(), String>,
 ) -> Result<(), String> {
     let stop = StopSignal::install(session.map(|run| run.deadline));
     let api = bind(options.api_address).await?;
@@ -267,7 +271,7 @@ async fn serve_listeners(
         token_file: data_dir.join(TOKEN_FILE),
         data_dir,
         one_shot: session.map(|run| run.ready),
-    });
+    })?;
     let streams = state.clone();
     let api_stop = stop.clone();
     let api_server = axum::serve(

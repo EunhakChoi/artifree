@@ -279,16 +279,26 @@ fn http(
     Ok((status, serde_json::from_str(body).unwrap_or(Value::Null)))
 }
 
-/// Runs the server with `args` and returns its exit status and stdout. A server
-/// that starts instead of exiting is killed after a short wait and reported.
+/// What a server that exited by itself printed.
+struct Exited {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+/// Runs the server with `args` and the extra environment `env`, and returns how
+/// it ended. A server that starts instead of exiting is killed after a short
+/// wait and reported.
 fn run_to_exit(
     args: &[&std::ffi::OsStr],
-) -> Result<(ExitStatus, Vec<u8>), Box<dyn std::error::Error>> {
+    env: &[(&str, &std::ffi::OsStr)],
+) -> Result<Exited, Box<dyn std::error::Error>> {
     let mut child = Command::new(BIN)
         .args(args)
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -297,7 +307,15 @@ fn run_to_exit(
             if let Some(mut pipe) = child.stdout.take() {
                 pipe.read_to_end(&mut stdout)?;
             }
-            return Ok((status, stdout));
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_string(&mut stderr)?;
+            }
+            return Ok(Exited {
+                status,
+                stdout,
+                stderr,
+            });
         }
         if Instant::now() >= deadline {
             child.kill()?;
@@ -630,9 +648,9 @@ fn contradictory_storage_options_are_refused_before_anything_is_created() -> Tes
         ),
     ];
     for (name, args) in cases {
-        let (status, stdout) = run_to_exit(&args).map_err(|error| format!("{name}: {error}"))?;
-        assert!(!status.success(), "{name} must be refused");
-        assert!(stdout.is_empty(), "{name}: no readiness line");
+        let exited = run_to_exit(&args, &[]).map_err(|error| format!("{name}: {error}"))?;
+        assert!(!exited.status.success(), "{name} must be refused");
+        assert!(exited.stdout.is_empty(), "{name}: no readiness line");
     }
     assert!(!kept.exists(), "a refused start creates no data directory");
     assert_eq!(workspace.leftovers()?, Vec::<String>::new());
@@ -657,5 +675,48 @@ fn a_client_that_never_finishes_a_request_cannot_keep_the_data_alive() -> TestRe
     assert!(exit.success(), "{exit}: {}", session.diagnostics());
     assert!(!dir.exists(), "{} was left behind", dir.display());
     drop(stalled);
+    Ok(())
+}
+
+#[test]
+fn a_temporary_directory_that_is_not_utf8_is_refused_before_serving_and_leaves_nothing()
+-> TestResult {
+    use std::os::unix::ffi::OsStrExt;
+    let workspace = Workspace::new()?;
+    // The default session root is the system temporary directory, which the
+    // environment can set to bytes that are not text.
+    let tmp = workspace
+        .dir
+        .join(std::ffi::OsStr::from_bytes(b"tmp-\xff\xfe"));
+    std::fs::create_dir(&tmp)?;
+    let args: [&std::ffi::OsStr; 7] = [
+        "serve".as_ref(),
+        "--api-listen".as_ref(),
+        "127.0.0.1:0".as_ref(),
+        "--content-listen".as_ref(),
+        "127.0.0.1:0".as_ref(),
+        "--one-shot-ttl-seconds".as_ref(),
+        LONG.as_ref(),
+    ];
+
+    let exited = run_to_exit(&args, &[("TMPDIR", tmp.as_os_str())])?;
+
+    assert_eq!(
+        exited.status.code(),
+        Some(1),
+        "a refusal exits 1; a panic would be 101: {}",
+        exited.stderr
+    );
+    assert!(exited.stdout.is_empty(), "no readiness line was printed");
+    assert!(
+        exited.stderr.contains("not valid UTF-8") && !exited.stderr.contains("panicked"),
+        "a clear error and no panic: {}",
+        exited.stderr
+    );
+    let left: Vec<_> = std::fs::read_dir(&tmp)?.collect::<Result<_, _>>()?;
+    assert!(
+        left.is_empty(),
+        "the session directory must be removed: {left:?}"
+    );
     Ok(())
 }

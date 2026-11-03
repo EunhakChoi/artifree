@@ -85,20 +85,8 @@ fn run() -> Result<(), String> {
         [command, options @ ..] if command == "serve" => {
             let options = parse_serve(options, &ServeEnv::from_process())?;
             serve::run(options, |ready| {
-                let mut line = serde_json::json!({
-                    "event": "ready",
-                    "mode": if ready.one_shot.is_some() { "one_shot" } else { "persistent" },
-                    "api_url": ready.api_url,
-                    "content_origin": ready.content_origin,
-                    "token_file": ready.token_file,
-                    "data_dir": ready.data_dir,
-                });
+                let line = readiness_line(ready)?;
                 if let Some(session) = ready.one_shot {
-                    line["session_ttl_seconds"] = serde_json::json!(session.ttl.as_secs());
-                    line["stale_sessions_removed"] =
-                        serde_json::json!(session.stale_sessions_removed);
-                    line["stale_sessions_failed"] =
-                        serde_json::json!(session.stale_sessions_failed);
                     // The readiness line is for a supervisor; a person needs
                     // to be told on the terminal that nothing is kept.
                     eprintln!(
@@ -106,21 +94,51 @@ fn run() -> Result<(), String> {
                         session.ttl.as_secs()
                     );
                 }
-                if let Some(ref web_url) = ready.web_url {
-                    line["web_url"] = serde_json::json!(web_url);
-                }
-                if let Some(ref loopback_url) = ready.loopback_api_url {
-                    line["loopback_api_url"] = serde_json::json!(loopback_url);
-                }
                 println!("{line}");
                 // A supervisor waits for this line; a failed flush only delays it.
                 if std::io::stdout().flush().is_err() {
                     eprintln!("Could not flush the readiness line.");
                 }
+                Ok(())
             })
         }
         _ => Err("Unknown arguments. Use --help.".into()),
     }
+}
+
+/// The JSON readiness line. It fails, before anything is served, when a path
+/// in it is not valid UTF-8 (for example a `TMPDIR` of arbitrary bytes), because
+/// a JSON string cannot hold such a path and a lossy copy would name a
+/// directory that does not exist.
+fn readiness_line(ready: &serve::Ready) -> Result<serde_json::Value, String> {
+    let utf8 = |path: &std::path::Path, what: &str| {
+        path.to_str().map(str::to_owned).ok_or_else(|| {
+            format!(
+                "The {what} {} is not valid UTF-8, so it cannot be reported to a supervisor; use a path made of UTF-8 text (for a one-shot session, a TMPDIR or --session-root that is).",
+                path.display()
+            )
+        })
+    };
+    let mut line = serde_json::json!({
+        "event": "ready",
+        "mode": if ready.one_shot.is_some() { "one_shot" } else { "persistent" },
+        "api_url": ready.api_url,
+        "content_origin": ready.content_origin,
+        "token_file": utf8(&ready.token_file, "access token file")?,
+        "data_dir": utf8(&ready.data_dir, "data directory")?,
+    });
+    if let Some(session) = ready.one_shot {
+        line["session_ttl_seconds"] = serde_json::json!(session.ttl.as_secs());
+        line["stale_sessions_removed"] = serde_json::json!(session.stale_sessions_removed);
+        line["stale_sessions_failed"] = serde_json::json!(session.stale_sessions_failed);
+    }
+    if let Some(ref web_url) = ready.web_url {
+        line["web_url"] = serde_json::json!(web_url);
+    }
+    if let Some(ref loopback_url) = ready.loopback_api_url {
+        line["loopback_api_url"] = serde_json::json!(loopback_url);
+    }
+    Ok(line)
 }
 
 struct CliServeFlags {
