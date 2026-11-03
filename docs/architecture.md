@@ -334,7 +334,8 @@ resume cursor (`Last-Event-ID` is `400`); a new connection starts with a new
 snapshot and a client replaces its state with each event. The only shared state
 is a wake signal and per-user (8) and per-process (128) stream counts, which
 refuse instead of growing. Another user's artifact is the same `404` as a
-missing one, and the limits are checked before any storage is read; a trash or
+missing one, and the limits are looked at (recording nothing) before any storage is
+read and checked again when the place is taken after the access check; a trash or
 purge ends the stream at the next heartbeat read (15 s; only a data write in
 this process wakes a stream), a disabled user or revoked token closes it as for change streams.
 Source revisions and data versions stay separate numbers. There is no CLI, MCP,

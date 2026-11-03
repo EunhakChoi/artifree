@@ -116,12 +116,17 @@ collection, members, next_after?}`. `query` echoes the normalized request
    rules of 0031 decision 8 and 0036: the artifact must exist, be outside the
    trash and not purged, and belong to the caller; any other case, another
    user's artifact included, is the same `404 not_found` as a missing one.
-   A request is checked against the limits of item 12 first, before any
-   storage is read, so a refused request costs no storage work; a request for
-   an artifact the caller cannot see then holds its place only while its own
-   check runs, registers nothing, and creates nothing. (At the actor's limit
-   the answer is the limit's, `429`, whatever the artifact; it depends only on
-   the caller's own streams, so it tells nothing about any artifact.)
+   The order of a stream request is: look at the limits of item 12 without
+   recording anything (at a limit the answer is `429` or `503` at once, with no
+   storage read, whatever the artifact; it depends only on streams already
+   open, so it tells nothing about any artifact), then read the data space,
+   which is the access check, and only then take the place, checking the
+   limits again in the same step. A request for an artifact the caller cannot
+   see therefore never holds a place, registers nothing, and creates nothing;
+   requests that were admitted together can still not exceed a limit, and each
+   one that loses the race has cost one read. A place is never taken before
+   access is known, so requests for artifacts that are not there cannot use up
+   the places of the process, and they answer `404` below the limit as before.
    Issued agent tokens may use both routes, as they may read data.
 9. **A stream ends when access ends.** The stream reads storage at every wake
    and every heartbeat, so a trashed or purged artifact ends it at the next
@@ -148,9 +153,9 @@ unavailable`, and a stream ends without sending the unreadable state; it
     - 8 open data streams per user. One more is `429 rate_limited` with
       `Retry-After: 5`.
     - 128 open data streams in the process. One more is `503 unavailable`
-      with `Retry-After: 10`. Both limits are checked first, before any
-      storage is read or the stream is registered, and a refusal inserts
-      nothing. Slots are released when the
+      with `Retry-After: 10`. Both limits are looked at first, before any
+      storage is read, and checked again when the place is taken (item 8); a
+      refusal inserts nothing. Slots are released when the
       stream's task ends, whatever ends it.
     - Opening a stream is an ordinary request under the request limits
       (0005); an open stream holds no request slot.
@@ -160,7 +165,8 @@ unavailable`, and a stream ends without sending the unreadable state; it
     - 10 minutes of lifetime per stream, 15 seconds between heartbeats. The
       end of the lifetime is checked ahead of every wake-up and bounds the wait
       for the read interval, so writes that never pause cannot extend a stream
-      past it.
+      past it. At the end of the lifetime a pending change is not flushed; the
+      snapshot of the reconnect carries it.
 13. **Client (`@artifree/client`).** Two functions in modules of their own,
     not methods of the client class (that class is in the web workspace's main
     bundle, which has no room):
@@ -219,13 +225,15 @@ writes that never pause), `crates/artifree-server/tests/data_queries.rs` (paging
 under concurrent writes, every refusal, the response bounds, snapshot then
 changes in order, coalescing, the least time between reads, a data write waking a stream without
 the heartbeat and a commit of anyone else not waking it, a refused request costing no
-storage read, a fresh snapshot after reconnect, two users, a
+storage read, a request that cannot see the artifact holding no place while it is
+checked, requests admitted together not exceeding a limit, a fresh snapshot after reconnect, two users, a
 trashed and a purged artifact, a disabled user and a revoked token, the stream
 and process limits, a missing artifact taking nothing, `too_large`, a corrupt
 space, a slow reader that does not keep a purged artifact's stream, the
 lifetime, `Last-Event-ID`), the extended route table of
 `crates/artifree-server/tests/multi_user.rs`, `scripts/tests/data-client.test.mjs`
-(parsers, a `too_large` event for another target, reconnection with injected timers, abort, idle, line limits), and
+(parsers, every event type held to the watched artifact, path and order, paths the
+server would not accept, reconnection with injected timers, abort, idle, line limits), and
 `scripts/tests/data-stream.test.mjs` (the real binary, end to end).
 
 ## Alternatives
