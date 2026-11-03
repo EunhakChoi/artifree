@@ -214,16 +214,18 @@ unavailable`, and a stream ends without sending the unreadable state; it
 `crates/artifree-domain/src/data_members.rs` (query rules, order, prefix and cursor
 bounds, the byte bound, the `too_large` member, bytes versus characters in
 the order), `crates/artifree-server/src/data_events.rs` (slot accounting,
-version decisions, keeping the newest state of a stream that is behind), `crates/artifree-server/tests/data_queries.rs` (paging
+version decisions, keeping the newest state of a stream that is behind, the lifetime winning over
+writes that never pause), `crates/artifree-server/tests/data_queries.rs` (paging
 under concurrent writes, every refusal, the response bounds, snapshot then
-changes in order, coalescing, the least time between reads, a commit waking a stream without
-the heartbeat, a fresh snapshot after reconnect, two users, a
+changes in order, coalescing, the least time between reads, a data write waking a stream without
+the heartbeat and a commit of anyone else not waking it, a refused request costing no
+storage read, a fresh snapshot after reconnect, two users, a
 trashed and a purged artifact, a disabled user and a revoked token, the stream
 and process limits, a missing artifact taking nothing, `too_large`, a corrupt
 space, a slow reader that does not keep a purged artifact's stream, the
 lifetime, `Last-Event-ID`), the extended route table of
 `crates/artifree-server/tests/multi_user.rs`, `scripts/tests/data-client.test.mjs`
-(parsers, reconnection with injected timers, abort, idle, line limits), and
+(parsers, a `too_large` event for another target, reconnection with injected timers, abort, idle, line limits), and
 `scripts/tests/data-stream.test.mjs` (the real binary, end to end).
 
 ## Alternatives
