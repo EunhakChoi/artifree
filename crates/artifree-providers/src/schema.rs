@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 const SCHEMA: &str = "
 CREATE TABLE artifacts (
@@ -314,6 +314,91 @@ CREATE TABLE data_requests (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// Added in schema version 10 (decision 0036): the registry of users and the
+/// owner of each token and change.
+///
+/// `users` holds the local owner profile (`local`, which every earlier
+/// database already used as the actor of every artifact and token) and the
+/// users it registers. The check on `id` is the one place that fixes the
+/// spelling of an actor id the registry can hold, as `ActorId::is_registrable`
+/// does in code, and the owner can never be disabled. No other table refers to
+/// `users`, except `tokens`: artifacts, keys, jobs, and data keep naming an
+/// actor as text, so a database or a test that names an actor the registry
+/// never saw still works, and nothing about them is rebuilt.
+///
+/// `tokens` is rebuilt with the user it authenticates as, `local` for every
+/// token that exists. `changes` is rebuilt with the actor and a sequence of
+/// the actor's own: the global `sequence` keeps its role as the primary key
+/// and the order of writes, but the cursor a client sees is `actor_seq`,
+/// so that the head of one user's feed counts only that user's changes.
+/// Existing rows keep their sequence number as `actor_seq` (so every
+/// cursor handed out before stays valid), and `actor_feeds` starts each actor
+/// that has changes at the old global head, so a head never moves back.
+const USER_SCHEMA: &str = "
+CREATE TABLE users (
+    id TEXT PRIMARY KEY CHECK (id = 'local' OR (length(id) = 34 AND substr(id, 1, 2) = 'u-'
+        AND NOT substr(id, 3) GLOB '*[^0-9a-f]*')),
+    label TEXT NOT NULL UNIQUE CHECK (length(label) BETWEEN 1 AND 64),
+    created_at TEXT NOT NULL,
+    disabled_at TEXT,
+    CHECK (id <> 'local' OR disabled_at IS NULL)
+) STRICT, WITHOUT ROWID;
+INSERT INTO users (id, label, created_at)
+    VALUES ('local', 'Local owner', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+CREATE TABLE tokens_v10 (
+    id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL REFERENCES users (id),
+    name TEXT NOT NULL,
+    secret_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at TEXT
+) STRICT;
+INSERT INTO tokens_v10 (id, actor, name, secret_hash, prefix, created_at, last_used_at, revoked_at)
+    SELECT id, 'local', name, secret_hash, prefix, created_at, last_used_at, revoked_at FROM tokens;
+DROP TABLE tokens;
+ALTER TABLE tokens_v10 RENAME TO tokens;
+CREATE INDEX idx_tokens_secret_hash ON tokens (secret_hash);
+CREATE INDEX tokens_by_actor ON tokens (actor);
+CREATE TABLE actor_feeds (
+    actor TEXT PRIMARY KEY,
+    head INTEGER NOT NULL CHECK (head >= 0)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE changes_v10 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision)
+) STRICT;
+INSERT INTO changes_v10 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, committed_at)
+    SELECT c.sequence, a.owner, c.sequence, c.artifact_id, c.kind, c.revision,
+        c.metadata_revision, c.committed_at
+    FROM changes c JOIN artifacts a ON a.id = c.artifact_id;
+DROP TABLE changes;
+ALTER TABLE changes_v10 RENAME TO changes;
+";
+
+/// The head every actor that has changes starts at when the feed gets a
+/// sequence per actor: the global head, which is at least every sequence the
+/// actor was ever given. Run after [`USER_SCHEMA`] and after the global head
+/// was restored.
+const ACTOR_FEED_HEADS: &str = "
+INSERT INTO actor_feeds (actor, head)
+    SELECT DISTINCT c.actor, coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'changes'), 0)
+    FROM changes c;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -386,9 +471,17 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
             .execute_batch(DATA_SCHEMA)
             .map_err(unavailable)?;
     }
+    // The version 6 table, which version 10 rebuilds: it is made before
+    // that step, and in a database that has it already this changes nothing.
     transaction
         .execute_batch(TOKEN_SCHEMA)
         .map_err(unavailable)?;
+    if version < 10 {
+        keeping_feed_head(&transaction, USER_SCHEMA)?;
+        transaction
+            .execute_batch(ACTOR_FEED_HEADS)
+            .map_err(unavailable)?;
+    }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(unavailable)?;
@@ -667,6 +760,14 @@ pub(crate) fn check_current(connection: &Connection) -> Result<(), String> {
     }
     if let Some(extra) = actual.keys().find(|object| !expected.contains_key(*object)) {
         return Err(format!("unexpected {extra}"));
+    }
+    let owners: i64 = connection
+        .query_row("SELECT count(*) FROM users WHERE id = 'local'", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if owners != 1 {
+        return Err("the users table does not hold the local owner".to_owned());
     }
     let feeds: i64 = connection
         .query_row("SELECT count(*) FROM feed", [], |row| row.get(0))

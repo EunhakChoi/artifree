@@ -29,8 +29,10 @@ read their current documentation first. What was actually run is in
    the local proxy or tunnel: it gets 403 there. It connects directly to the
    loopback listener (`http://127.0.0.1:7410/mcp`). Do not set `--allow-remote-mcp` just to make a tunnel
    work; if an agent must connect remotely, issue it a dedicated token and
-   revoke it when done. Today a remote agent token is a full-owner token:
-   there are no scopes.
+   revoke it when done. Today a remote agent token has everything the user it is issued to has:
+   the owner profile's token reaches all of the owner's artifacts, and a token
+   issued to another user (decision 0036) reaches only that user's. There are
+   no scopes and no roles.
 4. **Trusted proxy is the proxy's address as the server sees it.** Never trust a
    range that internet clients can send from. A request with forwarded headers
    from any other peer is refused with 403.

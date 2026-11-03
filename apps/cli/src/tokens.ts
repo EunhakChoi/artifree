@@ -5,7 +5,7 @@ import { resolveConnection } from './profiles.js';
 
 export const TOKEN_HELP = `Usage:
   artifree token list [--json]
-  artifree token create <name> [--json]
+  artifree token create <name> [--user <id>] [--json]
   artifree token rotate <id> [--json]
   artifree token revoke <id>
 
@@ -17,15 +17,17 @@ Connection:
   --profile-file <path>  Path to profile configuration file [env ARTIFREE_PROFILES_FILE]
 
 Subcommands:
-  list    List all access tokens (bootstrap owner and agents).
-  create  Create a new agent token with the given name.
+  list    List all access tokens (bootstrap owner and agents) with their users.
+  create  Create a new agent token with the given name, for the owner profile or,
+          with --user, for a registered user (see artifree user --help).
+          A token belongs to one user for its whole life.
           Prints the full secret token once; it is never shown again.
   rotate  Rotate an existing agent token by ID.
           Prints the new secret token once; it is never shown again.
   revoke  Revoke an agent token by ID.
 `;
 
-const connectionOptions = {
+export const connectionOptions = {
   server: { type: 'string' },
   token: { type: 'string' },
   'token-file': { type: 'string' },
@@ -33,7 +35,7 @@ const connectionOptions = {
   'profile-file': { type: 'string' },
 } as const;
 
-async function connect(values: {
+export async function connect(values: {
   server?: string | undefined;
   token?: string | undefined;
   'token-file'?: string | undefined;
@@ -81,7 +83,7 @@ export async function runToken(args: string[]): Promise<void> {
         const adminTag = t.is_admin ? ' [admin]' : '';
         const status = t.revoked_at ? ` (revoked ${t.revoked_at})` : '';
         console.log(
-          `${t.id.padEnd(20)} ${t.name.padEnd(24)} ${t.prefix.padEnd(16)}${adminTag}${status}`,
+          `${t.id.padEnd(20)} ${t.user_id.padEnd(36)} ${t.name.padEnd(24)} ${t.prefix.padEnd(16)}${adminTag}${status}`,
         );
       }
       return;
@@ -91,6 +93,7 @@ export async function runToken(args: string[]): Promise<void> {
         args: rest,
         options: {
           ...connectionOptions,
+          user: { type: 'string' },
           json: { type: 'boolean', default: false },
         },
         allowPositionals: true,
@@ -101,12 +104,16 @@ export async function runToken(args: string[]): Promise<void> {
         throw new UsageError('artifree token create requires a token name.');
       }
       const client = await connect(values);
-      const result = await client.createToken({ name });
+      const result = await client.createToken(
+        values.user === undefined ? { name } : { name, user_id: values.user },
+      );
       if (values.json) {
         console.log(JSON.stringify(result, null, 2));
         return;
       }
-      console.log(`Created token ${result.token.id} (${result.token.name})`);
+      console.log(
+        `Created token ${result.token.id} (${result.token.name}) for ${result.token.user_id}`,
+      );
       console.log(`Secret: ${result.secret}`);
       console.log('Store this token safely; it will not be displayed again.');
       return;

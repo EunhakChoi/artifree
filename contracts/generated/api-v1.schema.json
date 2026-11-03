@@ -435,6 +435,13 @@
         "name": {
           "description": "Human-readable name or label (1-64 characters).",
           "type": "string"
+        },
+        "user_id": {
+          "description": "The user the token authenticates as. Omitted: the owner profile, as\nbefore users existed. A user that is not registered is `not_found`\nand a disabled one is a conflict.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -458,6 +465,20 @@
       "required": [
         "token",
         "secret"
+      ],
+      "type": "object"
+    },
+    "CreateUserRequest": {
+      "additionalProperties": false,
+      "description": "Request to register a user.",
+      "properties": {
+        "label": {
+          "description": "Display label (1-64 characters, no control characters, no surrounding\nwhitespace) that is not another user's.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label"
       ],
       "type": "object"
     },
@@ -2773,10 +2794,15 @@
             "string",
             "null"
           ]
+        },
+        "user_id": {
+          "description": "The user this token authenticates as, for its whole life: `local` for\nthe owner profile (the bootstrap token and every token issued before\nusers existed), otherwise a `u-` identifier from `POST /v1/users`.",
+          "type": "string"
         }
       },
       "required": [
         "id",
+        "user_id",
         "name",
         "prefix",
         "created_at",
@@ -2908,6 +2934,59 @@
         "path",
         "base_data_version",
         "patch"
+      ],
+      "type": "object"
+    },
+    "UserInfo": {
+      "additionalProperties": false,
+      "description": "A registered user (decision 0036). It names an actor that owns artifacts;\nit carries no credential and no role.",
+      "properties": {
+        "created_at": {
+          "description": "ISO 8601 creation timestamp.",
+          "type": "string"
+        },
+        "disabled_at": {
+          "description": "ISO 8601 timestamp of the disabling, present while the user is\ndisabled: its tokens are refused and its open streams, connections,\nlinks, and rooms are closed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The user's identifier, which is its actor: `local` for the owner\nprofile, otherwise `u-` and 32 lowercase hexadecimal digits.",
+          "type": "string"
+        },
+        "is_owner": {
+          "description": "Whether this is the local owner profile, which cannot be disabled and\nholds the only administrative credential.",
+          "type": "boolean"
+        },
+        "label": {
+          "description": "The label the owner gave (1-64 characters).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "created_at",
+        "is_owner"
+      ],
+      "type": "object"
+    },
+    "UserList": {
+      "additionalProperties": false,
+      "description": "The registered users, the owner first.",
+      "properties": {
+        "users": {
+          "description": "The users.",
+          "items": {
+            "$ref": "#/$defs/UserInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "users"
       ],
       "type": "object"
     }
@@ -3067,6 +3146,15 @@
     },
     {
       "$ref": "#/$defs/TokenInfo"
+    },
+    {
+      "$ref": "#/$defs/CreateUserRequest"
+    },
+    {
+      "$ref": "#/$defs/UserInfo"
+    },
+    {
+      "$ref": "#/$defs/UserList"
     },
     {
       "$ref": "#/$defs/EnqueueJobRequest"

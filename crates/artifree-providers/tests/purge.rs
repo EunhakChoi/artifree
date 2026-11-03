@@ -511,12 +511,14 @@ fn the_feed_keeps_its_sequences_and_announces_the_purge() -> TestResult {
         .changes(&fixture.owner, ChangeSequence(3), 100)?;
     assert_eq!(behind.changes.len(), 1);
     assert_eq!(behind.changes[0].kind, ChangeKind::Purged);
-    // Another owner learns nothing of it.
+    // Another owner learns nothing of it, not even how many changes the
+    // owner holds: its own feed is empty and its head is 0 (decision 0036;
+    // the head used to count every owner's commits).
     let stranger = fixture
         .store
         .changes(&actor("someone-else"), ChangeSequence(0), 100)?;
     assert!(stranger.changes.is_empty());
-    assert_eq!(stranger.head, ChangeSequence(4));
+    assert_eq!(stranger.head, ChangeSequence(0));
     // A replay appends nothing; the next commit continues the sequence.
     fixture.purge(id, &key("purge"), 2)?;
     let next = create_demo(

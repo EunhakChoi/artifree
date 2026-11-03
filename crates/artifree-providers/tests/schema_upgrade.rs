@@ -9,12 +9,13 @@ use artifree_domain::identity::UnixMillis;
 use artifree_domain::job::JobKind;
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactListing, ArtifactStore, Delivery, ListOrder, NewArtifact, PurgeRequest,
-    RequestFingerprint, RequestIdentity, StoreError,
+    ArtifactListing, ArtifactStore, ChangeKind, Delivery, ListOrder, NewArtifact, PurgeRequest,
+    RequestFingerprint, RequestIdentity, RevisionCommit, StoreError,
 };
 use artifree_ports::data_store::{DataStore, DataStoreError, DataWrite};
 use artifree_ports::job_store::{JobStore, JobStoreError, NewJob};
 use artifree_ports::token_store::TokenStore;
+use artifree_ports::user_store::UserStore;
 use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
 use common::{
@@ -31,7 +32,7 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
     let fresh = TempDir::new();
     current_database(&database_in(fresh.path()))?;
     let fresh_schema = schema_of(&database_in(fresh.path()))?;
-    for version in 1..=8 {
+    for version in 1..=9 {
         let dir = TempDir::new();
         let path = database_in(dir.path());
         historical_database(&path, version)?;
@@ -115,13 +116,109 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
             purge_the_trashed_artifact(&store, version)?;
         }
         if version >= 5 {
-            let tokens = SqliteTokenStore::open(&path)?.list()?;
+            let identity = SqliteTokenStore::open(&path)?;
+            let tokens = identity.list()?;
             assert_eq!(tokens.len(), 1, "the token of the version 5 file is kept");
             assert_eq!(tokens[0].name, "laptop");
+            // The token keeps authenticating, as the owner profile
+            // (decision 0036): its user is the one every earlier file used.
+            assert!(tokens[0].actor.is_owner(), "version {version}");
+            assert!(tokens[0].is_active(), "version {version}");
+            let found = identity.find_by_hash("hash-1")?.ok_or("token found")?;
+            assert!(found.actor.is_owner() && found.is_active());
         } else {
             assert!(SqliteTokenStore::open(&path)?.list()?.is_empty());
         }
+        // The registry of every upgraded file holds the owner profile alone,
+        // enabled, and no other user (the artifacts of the fixtures name an
+        // actor, "owner", that was never registered, and still work).
+        let users = SqliteTokenStore::open(&path)?.users()?;
+        assert_eq!(users.len(), 1, "version {version}");
+        assert!(users[0].id.is_owner() && users[0].is_enabled());
     }
+    Ok(())
+}
+
+/// A database of any released version gets a feed of the owner's own: every
+/// cursor handed out before stays valid, the head does not move back, and the
+/// next commit continues after it. Another actor starts at nothing.
+#[test]
+fn an_upgraded_feed_keeps_its_cursors_and_continues_after_its_head() -> TestResult {
+    for version in 2..=9 {
+        let dir = TempDir::new();
+        let path = database_in(dir.path());
+        historical_database(&path, version)?;
+        let store = SqliteStore::open(&path)?;
+        let owner = actor("owner");
+
+        let behind = store.changes(&owner, ChangeSequence(1), 100)?;
+        let seen: Vec<_> = behind
+            .changes
+            .iter()
+            .map(|change| (change.sequence, change.kind))
+            .collect();
+        assert_eq!(
+            seen,
+            [(ChangeSequence(2), ChangeKind::Revised)],
+            "version {version}"
+        );
+        assert_eq!(behind.head, ChangeSequence(5), "version {version}");
+
+        let saved = store.commit_revision(RevisionCommit {
+            request: RequestIdentity {
+                actor: &owner,
+                key: &key("after-upgrade"),
+                fingerprint: RequestFingerprint([5; 32]),
+            },
+            artifact: &old_artifact(),
+            base: SourceRevision(2),
+            package: &common::package(&[("index.html", "<h1>new</h1>")]),
+        })?;
+        assert_eq!(saved.delivery, Delivery::Committed, "version {version}");
+        let next = store.changes(&owner, ChangeSequence(5), 100)?;
+        let numbers: Vec<_> = next.changes.iter().map(|c| c.sequence).collect();
+        assert_eq!(numbers, [ChangeSequence(6)], "version {version}");
+        assert_eq!(next.head, ChangeSequence(6), "version {version}");
+
+        let stranger = store.changes(&actor("other"), ChangeSequence(0), 100)?;
+        assert!(stranger.changes.is_empty(), "version {version}");
+        assert_eq!(stranger.head, ChangeSequence(0), "version {version}");
+    }
+    Ok(())
+}
+
+/// A file that already holds changes of two actors (no build wrote one, but
+/// the schema allows it): each actor keeps the numbers its changes had and
+/// starts at the old global head.
+#[test]
+fn an_upgrade_gives_every_actor_with_changes_the_old_head() -> TestResult {
+    let dir = TempDir::new();
+    let path = database_in(dir.path());
+    historical_database(&path, 9)?;
+    let other_id = "art_11111111111111111111111111111111";
+    Connection::open(&path)?.execute_batch(&format!(
+        "INSERT INTO artifacts (id, owner, kind, title, current_revision, created_at, updated_at,
+             pinned, metadata_revision)
+             VALUES ('{other_id}', 'other', 'app', 'Theirs', 1, 700, 700, 0, 1);
+         INSERT INTO revisions VALUES ('{other_id}', 1, 'other', 700);
+         INSERT INTO revision_files VALUES ('{other_id}', 1, 'index.html', 12, zeroblob(32));
+         INSERT INTO metadata_revisions
+             (artifact_id, metadata_revision, title, pinned, created_by, created_at)
+             VALUES ('{other_id}', 1, 'Theirs', 0, 'other', 700);
+         INSERT INTO changes (sequence, artifact_id, kind, revision, metadata_revision, committed_at)
+             VALUES (6, '{other_id}', 'created', 1, 1, 700);
+         UPDATE sqlite_sequence SET seq = 6 WHERE name = 'changes';"
+    ))?;
+    let store = SqliteStore::open(&path)?;
+
+    let theirs = store.changes(&actor("other"), ChangeSequence(0), 100)?;
+    let numbers: Vec<_> = theirs.changes.iter().map(|c| c.sequence).collect();
+    assert_eq!(numbers, [ChangeSequence(6)]);
+    assert_eq!(theirs.head, ChangeSequence(6));
+    let ours = store.changes(&actor("owner"), ChangeSequence(0), 100)?;
+    let numbers: Vec<_> = ours.changes.iter().map(|c| c.sequence).collect();
+    assert_eq!(numbers, [ChangeSequence(1), ChangeSequence(2)]);
+    assert_eq!(ours.head, ChangeSequence(6), "no actor's head moves back");
     Ok(())
 }
 
@@ -372,6 +469,26 @@ fn a_failed_migration_step_is_rolled_back_without_touching_the_file() -> TestRes
             connection.pragma_update(None, "user_version", 8)
         },
         "table data_requests already exists",
+    )?;
+    // The users step (version 9 to 10) fails after it made the registry and
+    // rebuilt the tokens: a table already uses a later name. All of it is
+    // undone.
+    assert_refused_untouched(
+        |connection| {
+            connection.execute_batch(history::STEP_1)?;
+            connection.execute_batch(history::STEP_2)?;
+            connection.execute_batch("INSERT INTO feed VALUES (1, zeroblob(16));")?;
+            connection.execute_batch(history::STEP_3)?;
+            connection.execute_batch(history::STEP_4)?;
+            connection.execute_batch(history::STEP_5)?;
+            connection.execute_batch(history::OLD_TOKENS)?;
+            connection.execute_batch(history::STEP_7)?;
+            connection.execute_batch(history::STEP_8)?;
+            connection.execute_batch(history::STEP_9)?;
+            connection.execute_batch("CREATE TABLE actor_feeds (x TEXT);")?;
+            connection.pragma_update(None, "user_version", 9)
+        },
+        "table actor_feeds already exists",
     )?;
     Ok(())
 }

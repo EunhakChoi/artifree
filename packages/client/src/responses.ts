@@ -808,10 +808,19 @@ export function parseError(value: unknown): ErrorBody | undefined {
 /** Parses a TokenInfo object. */
 export function parseTokenInfo(value: unknown): TokenInfo | undefined {
   if (!isRecord(value)) return undefined;
-  const { id, name, prefix, created_at, is_admin, last_used_at, revoked_at } =
-    value;
+  const {
+    id,
+    user_id,
+    name,
+    prefix,
+    created_at,
+    is_admin,
+    last_used_at,
+    revoked_at,
+  } = value;
   if (
     typeof id !== 'string' ||
+    typeof user_id !== 'string' ||
     typeof name !== 'string' ||
     typeof prefix !== 'string' ||
     typeof created_at !== 'string' ||
@@ -835,6 +844,7 @@ export function parseTokenInfo(value: unknown): TokenInfo | undefined {
   }
   const token: TokenInfo = {
     id,
+    user_id,
     name,
     prefix,
     created_at,

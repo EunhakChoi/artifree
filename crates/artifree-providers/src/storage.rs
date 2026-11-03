@@ -706,22 +706,23 @@ impl ArtifactStore for SqliteStore {
             .query_row("SELECT id FROM feed", [], |row| row.get(0))
             .map_err(unavailable)?;
         let feed = FeedId::from_random(feed.try_into().map_err(|_| corrupt("feed id length"))?);
+        // The head of this actor's own feed, not of the table: a user must not
+        // learn how many changes the other users made (decision 0036).
         let head: Option<i64> = snapshot
             .query_row(
-                "SELECT seq FROM sqlite_sequence WHERE name = 'changes'",
-                [],
+                "SELECT head FROM actor_feeds WHERE actor = ?1",
+                [owner.as_str()],
                 |row| row.get(0),
             )
             .optional()
             .map_err(unavailable)?;
         let mut statement = snapshot
             .prepare(
-                "SELECT c.sequence, c.artifact_id, c.kind, c.revision, c.metadata_revision,
+                "SELECT c.actor_seq, c.artifact_id, c.kind, c.revision, c.metadata_revision,
                      c.committed_at
                  FROM changes c
-                 JOIN artifacts a ON a.id = c.artifact_id
-                 WHERE c.sequence > ?1 AND a.owner = ?2
-                 ORDER BY c.sequence LIMIT ?3",
+                 WHERE c.actor = ?2 AND c.actor_seq > ?1
+                 ORDER BY c.actor_seq LIMIT ?3",
             )
             .map_err(unavailable)?;
         let rows = statement
@@ -1162,11 +1163,34 @@ fn record_change(
             ));
         }
     };
+    // The change belongs to the artifact's owner, and takes the next number of
+    // that owner's own feed (decision 0036): a user's cursors and head count
+    // only that user's changes. The upsert and the insert are in the commit's
+    // write transaction, so two commits never take the same number.
+    let actor: String = transaction
+        .query_row(
+            "SELECT owner FROM artifacts WHERE id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    let sequence: i64 = transaction
+        .query_row(
+            "INSERT INTO actor_feeds (actor, head) VALUES (?1, 1)
+             ON CONFLICT (actor) DO UPDATE SET head = head + 1
+             RETURNING head",
+            [actor.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
     transaction
         .execute(
-            "INSERT INTO changes (artifact_id, kind, revision, metadata_revision, committed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO changes
+                 (actor, actor_seq, artifact_id, kind, revision, metadata_revision, committed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
+                actor,
+                sequence,
                 id.as_str(),
                 kind,
                 sql_revision(revision)?,

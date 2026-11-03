@@ -9,6 +9,8 @@ use crate::runtime_policy::{Capability, CapabilitySet};
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
+/// Open connections one actor may hold (decision 0036): the bound is per
+/// actor so that one user's connections cannot use up the others' places.
 const MAX_SESSIONS: usize = 4096;
 const MAX_GRANTS: usize = 256;
 
@@ -206,7 +208,8 @@ impl RuntimeSessions {
             .lock()
             .map_err(|_| SessionError::Unavailable)?;
         Self::prune(&mut sessions, now);
-        if sessions.len() >= MAX_SESSIONS {
+        let held = sessions.keys().filter(|(owner, _)| owner == actor).count();
+        if held >= MAX_SESSIONS {
             return Err(SessionError::Unavailable);
         }
         let mut random = [0_u8; 16];
@@ -235,6 +238,21 @@ impl RuntimeSessions {
             for session in sessions.values() {
                 if let Ok(mut state) = session.state.lock() {
                     state.closed = state.closed || state.token_id.as_ref() == Some(token_id);
+                }
+            }
+        }
+    }
+
+    /// Closes every runtime session of `actor`, as when the user is
+    /// disabled (decision 0036). Its grants go with them.
+    pub(crate) fn revoke_actor(&self, actor: &ActorId) {
+        if let Ok(sessions) = self.sessions.lock() {
+            for ((owner, _), session) in sessions.iter() {
+                if owner == actor
+                    && let Ok(mut state) = session.state.lock()
+                {
+                    state.closed = true;
+                    state.grants.clear();
                 }
             }
         }
@@ -561,6 +579,43 @@ mod tests {
         assert!(sessions.get(&actor, &s2).is_ok());
         assert!(sessions.get(&actor, &s_bootstrap).is_ok());
 
+        Ok(())
+    }
+
+    #[test]
+    fn the_bound_is_per_actor_and_closing_one_actor_leaves_the_others()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let alice: ActorId = "u-00000000000000000000000000000001".parse()?;
+        let bob: ActorId = "u-00000000000000000000000000000002".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+        let first = sessions
+            .create(&alice, None)
+            .map_err(|error| format!("{error:?}"))?;
+        for _ in 1..super::MAX_SESSIONS {
+            sessions
+                .create(&alice, None)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        assert!(matches!(
+            sessions.create(&alice, None),
+            Err(SessionError::Unavailable)
+        ));
+        let bobs = sessions
+            .create(&bob, None)
+            .map_err(|error| format!("{error:?}"))?;
+
+        sessions.revoke_actor(&alice);
+
+        assert!(matches!(
+            sessions.get(&alice, &first),
+            Err(SessionError::Closed)
+        ));
+        assert!(sessions.get(&bob, &bobs).is_ok());
+        // A connection id is only valid for the actor that holds it.
+        assert!(matches!(
+            sessions.get(&bob, &first),
+            Err(SessionError::Missing)
+        ));
         Ok(())
     }
 }

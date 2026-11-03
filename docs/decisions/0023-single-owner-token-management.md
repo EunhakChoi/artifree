@@ -1,5 +1,9 @@
 # 0023: Single-owner token management
 
+> Amended by [0036](0036-multi-user-identity.md): a token now belongs to one
+> registered user (the owner profile is user one), and the "single owner"
+> below is that owner profile. The administrator rule is unchanged.
+
 Date: 2026-11-01. Status: accepted. Builds on
 [0001](0001-foundation.md),
 [0003](0003-local-html-artifact-slice.md),

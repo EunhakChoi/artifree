@@ -1,5 +1,7 @@
-//! Local access token. One token maps to the single local owner actor; this
-//! is not multi-user authentication.
+//! Access tokens. The bootstrap token is the local owner profile and the only
+//! administrative credential; an issued token belongs to exactly one user
+//! (decision 0036). Tokens are the only credential: there is no password,
+//! OAuth, or external identity.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -15,11 +17,13 @@ const AGENT_PREFIX: &str = "art_";
 /// Context for an authenticated caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthContext {
-    /// The actor identity for this request (the single owner).
+    /// The actor identity for this request: the user the token belongs to,
+    /// or the local owner for the bootstrap token.
     pub(crate) actor: ActorId,
-    /// The token ID if an agent token was used, or None for the bootstrap owner token.
+    /// The token ID if an issued token was used, or None for the bootstrap owner token.
     pub(crate) token_id: Option<TokenId>,
-    /// Whether the caller has administrative privileges.
+    /// Whether the caller has administrative privileges: only the bootstrap
+    /// token has them, never a token issued to any user.
     pub(crate) is_admin: bool,
 }
 

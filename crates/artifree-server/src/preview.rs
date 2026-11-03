@@ -35,7 +35,9 @@ use crate::http::AppState;
 use crate::runtime_policy::Capability;
 use crate::runtime_sessions::{GrantDenied, GrantScope, RuntimeSession};
 
-/// Upper bound on live tickets, which limits memory held by unused links.
+/// Upper bound on live tickets, view generations, and pending creations of
+/// **one actor** (decision 0036), which limits memory held by unused links
+/// without letting one user fill the registry for the others.
 pub const MAX_LIVE_TICKETS: usize = 4096;
 
 /// Sandbox flags for previewed content. `allow-same-origin` is absent so
@@ -159,6 +161,30 @@ impl TicketRegistry {
         self.generations
             .retain(|key, generation| generation.expires > now || self.pending.contains_key(key));
     }
+
+    /// Live tickets of `actor`: the bound that holds per actor.
+    fn live_of(&self, actor: &ActorId) -> usize {
+        self.live
+            .values()
+            .filter(|ticket| &ticket.actor == actor)
+            .count()
+    }
+
+    /// View generations of `actor` that are fenced.
+    fn generations_of(&self, actor: &ActorId) -> usize {
+        self.generations
+            .keys()
+            .filter(|(owner, _)| owner == actor)
+            .count()
+    }
+
+    /// Creations of `actor` that have not finished.
+    fn pending_of(&self, actor: &ActorId) -> usize {
+        self.pending
+            .keys()
+            .filter(|(owner, _)| owner == actor)
+            .count()
+    }
 }
 
 /// Keeps a generation fence until its outstanding create has finished.
@@ -219,7 +245,7 @@ impl PreviewTickets {
             .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
         let mut registry = self.registry.lock().ok()?;
         registry.prune(now);
-        if registry.live.len() >= MAX_LIVE_TICKETS {
+        if registry.live_of(&actor) >= MAX_LIVE_TICKETS {
             return None;
         }
         registry.live.insert(
@@ -248,6 +274,23 @@ impl PreviewTickets {
         }
     }
 
+    /// How many live tickets `actor` holds, for tests.
+    #[cfg(test)]
+    pub(crate) fn live_tickets(&self, actor: &ActorId) -> usize {
+        self.registry
+            .lock()
+            .map_or(usize::MAX, |registry| registry.live_of(actor))
+    }
+
+    /// Invalidates every live ticket of `actor` and the fences of its views,
+    /// as when the user is disabled (decision 0036).
+    pub(crate) fn revoke_actor(&self, actor: &ActorId) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.live.retain(|_, ticket| &ticket.actor != actor);
+            registry.generations.retain(|(owner, _), _| owner != actor);
+        }
+    }
+
     /// Starts a create before its asynchronous artifact lookup.
     pub(crate) fn begin_runtime(
         &self,
@@ -257,7 +300,7 @@ impl PreviewTickets {
         let mut registry = self.registry.lock().ok()?;
         registry.prune(Instant::now());
         let key = (actor.clone(), view_id.to_owned());
-        if registry.pending.len() >= MAX_LIVE_TICKETS && !registry.pending.contains_key(&key) {
+        if registry.pending_of(actor) >= MAX_LIVE_TICKETS && !registry.pending.contains_key(&key) {
             return None;
         }
         let count = registry.pending.entry(key.clone()).or_default();
@@ -295,7 +338,7 @@ impl PreviewTickets {
         {
             return Err(RuntimeIssueError::Stale);
         }
-        if registry.generations.len() >= MAX_LIVE_TICKETS
+        if registry.generations_of(&actor) >= MAX_LIVE_TICKETS
             && !registry.generations.contains_key(&key)
         {
             return Err(RuntimeIssueError::Unavailable);
@@ -322,7 +365,7 @@ impl PreviewTickets {
         }) {
             return Err(RuntimeIssueError::Stale);
         }
-        if registry.live.len() >= MAX_LIVE_TICKETS && !registry.live.values().any(same_view) {
+        if registry.live_of(&actor) >= MAX_LIVE_TICKETS && !registry.live.values().any(same_view) {
             return Err(RuntimeIssueError::Unavailable);
         }
         registry.live.retain(|_, ticket| !same_view(ticket));
@@ -492,7 +535,7 @@ impl PreviewTickets {
         let mut registry = self.registry.lock().ok()?;
         registry.prune(now);
         let key = (actor.clone(), view_id.to_owned());
-        if registry.generations.len() >= MAX_LIVE_TICKETS
+        if registry.generations_of(actor) >= MAX_LIVE_TICKETS
             && !registry.generations.contains_key(&key)
         {
             return None;
@@ -1334,6 +1377,54 @@ mod tests {
             ),
             Err(RuntimeIssueError::Unavailable)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn tickets_are_bounded_per_actor_and_revoked_per_actor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let alice: ActorId = "u-00000000000000000000000000000001".parse()?;
+        let bob: ActorId = "u-00000000000000000000000000000002".parse()?;
+        let artifact = ArtifactId::from_random([1; 16]);
+        let tickets = PreviewTickets::new(Duration::from_secs(60));
+        let issue = |actor: &ActorId| {
+            tickets.issue(actor.clone(), None, artifact.clone(), SourceRevision(1))
+        };
+        for _ in 0..super::MAX_LIVE_TICKETS {
+            assert!(issue(&alice).is_some());
+        }
+        assert!(issue(&alice).is_none(), "one actor's tickets are bounded");
+        assert!(issue(&bob).is_some(), "another actor's are not used up");
+
+        tickets.revoke_actor(&alice);
+
+        assert_eq!(
+            (tickets.live_tickets(&alice), tickets.live_tickets(&bob)),
+            (0, 1)
+        );
+        assert!(issue(&alice).is_some(), "revoking frees the places");
+        Ok(())
+    }
+
+    #[test]
+    fn view_fences_are_bounded_per_actor_and_revoked_per_actor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let alice: ActorId = "u-00000000000000000000000000000001".parse()?;
+        let bob: ActorId = "u-00000000000000000000000000000002".parse()?;
+        let tickets = PreviewTickets::new(Duration::from_secs(60));
+        for number in 0..super::MAX_LIVE_TICKETS {
+            assert_eq!(
+                tickets.close_runtime(&alice, &format!("{number:032x}"), 1),
+                Some(false)
+            );
+        }
+        let view = "ffffffffffffffffffffffffffffffff";
+        assert_eq!(tickets.close_runtime(&alice, view, 1), None);
+        assert_eq!(tickets.close_runtime(&bob, view, 1), Some(false));
+
+        tickets.revoke_actor(&alice);
+
+        assert_eq!(tickets.close_runtime(&alice, view, 1), Some(false));
         Ok(())
     }
 }

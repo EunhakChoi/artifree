@@ -147,7 +147,7 @@ artifree-server serve --data-dir /path/to/new-data ...
 ## Upgrade between versions
 
 1. Back up the running server with the **new** build's `backup` command. It
-   reads schema versions 1 to 9, so it works on a directory written by a
+   reads schema versions 1 to 10, so it works on a directory written by a
    release that has no `backup` command. If you cannot run the new binary
    against the old directory, stop the old server and copy its whole data
    directory instead.
@@ -218,6 +218,6 @@ Notes:
 - That a backup and a running server never delay each other. Under WAL SQLite
   readers do not block the writer; commit latency during a backup was not measured.
 - Restoring a backup made by a different build than this one, other than the
-  schema versions 1 to 8 fixtures in the tests.
+  schema versions 1 to 9 fixtures in the tests.
 - A worker process taking over a restored `running` job on another operating
   system or file system; the restore test exercises the lease expiry only.

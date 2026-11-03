@@ -140,11 +140,61 @@ impl fmt::Display for ArtifactId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ActorId(String);
 
+/// The built-in actor of the local owner profile. Decision 0003 introduced it
+/// and every database written before decision 0036 holds it; it is user number
+/// one of the registry and can neither be created again nor disabled.
+pub const OWNER_ACTOR: &str = "local";
+
+const USER_ACTOR_PREFIX: &str = "u-";
+const USER_ACTOR_HEX_LEN: usize = 32;
+
 impl ActorId {
     /// The canonical string form.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The local owner profile's actor ([`OWNER_ACTOR`]).
+    #[must_use]
+    pub fn owner() -> Self {
+        Self(OWNER_ACTOR.to_owned())
+    }
+
+    /// The actor of a user registered after the owner (decision 0036): `u-`
+    /// and 32 lowercase hexadecimal digits made from `bytes`. The registry
+    /// only ever holds the owner and actors built here, and a caller never
+    /// chooses the spelling, so a label or any text a client sends cannot
+    /// become the owner's actor or another user's.
+    #[must_use]
+    pub fn user(bytes: [u8; 16]) -> Self {
+        let mut value = String::with_capacity(USER_ACTOR_PREFIX.len() + USER_ACTOR_HEX_LEN);
+        value.push_str(USER_ACTOR_PREFIX);
+        for byte in bytes {
+            value.push(hex_digit(byte >> 4));
+            value.push(hex_digit(byte & 0x0f));
+        }
+        Self(value)
+    }
+
+    /// Whether this is the local owner profile's actor.
+    #[must_use]
+    pub fn is_owner(&self) -> bool {
+        self.0 == OWNER_ACTOR
+    }
+
+    /// Whether the spelling is one the registry can hold: the owner's actor or
+    /// one [`ActorId::user`] builds. [`FromStr`] accepts more, because
+    /// databases and tests name other actors; the registry does not.
+    #[must_use]
+    pub fn is_registrable(&self) -> bool {
+        self.is_owner()
+            || self.0.strip_prefix(USER_ACTOR_PREFIX).is_some_and(|hex| {
+                hex.len() == USER_ACTOR_HEX_LEN
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
     }
 }
 
@@ -168,6 +218,47 @@ impl FromStr for ActorId {
 }
 
 impl fmt::Display for ActorId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Maximum length of a user's label in Unicode scalar values.
+pub const MAX_USER_LABEL_CHARS: usize = 64;
+
+/// A registered user's display label: 1 to 64 characters without control
+/// characters or surrounding whitespace. It names a user for the owner who
+/// manages the registry; it is not an identity and not unique.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserLabel(String);
+
+impl UserLabel {
+    /// The stored label.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for UserLabel {
+    type Err = InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let length = value.chars().count();
+        if value.trim() != value
+            || !(1..=MAX_USER_LABEL_CHARS).contains(&length)
+            || value.chars().any(char::is_control)
+        {
+            return Err(InvalidValue {
+                what: "user label",
+                rule: "expected 1-64 characters without control characters or surrounding whitespace",
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl fmt::Display for UserLabel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
@@ -380,6 +471,44 @@ mod tests {
             &format!("art_{}/", "a".repeat(31)),
         ] {
             assert!(value.parse::<ArtifactId>().is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_owner_and_generated_users_can_be_registered() {
+        assert!(ActorId::owner().is_owner());
+        assert!(ActorId::owner().is_registrable());
+        let user = ActorId::user([0xab; 16]);
+        assert_eq!(user.as_str(), format!("u-{}", "ab".repeat(16)));
+        assert!(!user.is_owner());
+        assert!(user.is_registrable());
+        // The spelling parses back to the same actor.
+        assert_eq!(user.as_str().parse::<ActorId>(), Ok(user));
+        // `FromStr` accepts the names databases and tests use, which the
+        // registry refuses, so a client-chosen text never names a user.
+        for value in [
+            "owner",
+            "other",
+            "local-2",
+            "u-",
+            "u-abc",
+            &format!("u-{}", "a".repeat(33)),
+            &format!("u-{}-", "a".repeat(31)),
+            &format!("u-{}g", "a".repeat(31)),
+            &format!("x-{}", "a".repeat(32)),
+        ] {
+            let actor: ActorId = value.parse().unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert!(!actor.is_registrable(), "registrable {value:?}");
+            assert!(!actor.is_owner());
+        }
+    }
+
+    #[test]
+    fn user_label_rejects_padding_controls_and_length() {
+        assert!("Alice".parse::<UserLabel>().is_ok());
+        assert!("가".repeat(64).parse::<UserLabel>().is_ok());
+        for value in ["", " padded", "line\nbreak", "bell\u{7}", &"x".repeat(65)] {
+            assert!(value.parse::<UserLabel>().is_err(), "accepted {value:?}");
         }
     }
 

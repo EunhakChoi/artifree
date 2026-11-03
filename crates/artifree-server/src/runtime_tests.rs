@@ -16,6 +16,7 @@ use artifree_contracts::api::{
 use artifree_contracts::mcp::RegisteredHandoffSession;
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
+use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 use axum::body::Body;
@@ -1962,6 +1963,218 @@ fn revoking_the_token_of_a_connection_ends_what_its_participants_can_do()
         );
         let joined = rooms::join(&state, &actor, &tab, &artifact, Ok(join_request("page"))).await;
         assert!(matches!(&joined, Err(error) if error.status == StatusCode::NOT_FOUND));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+fn registered_user(state: &AppState, seed: u8) -> Result<ActorId, Box<dyn Error>> {
+    let id = ActorId::user([seed; 16]);
+    state
+        .token_store()
+        .register(&NewUser {
+            id: id.clone(),
+            label: format!("user {seed}").parse()?,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(id)
+}
+
+/// A connection, a room, a preview ticket and an inbox of `actor`.
+async fn hold_things(state: &AppState, actor: &ActorId) -> Result<String, Box<dyn Error>> {
+    let artifact = create_runtime_artifact(state, actor).await?;
+    let session = operations::open_runtime_session(state, actor, None)
+        .map_err(|error| error.body.message)?
+        .session_id;
+    rooms::join(state, actor, &session, &artifact, Ok(join_request("page")))
+        .await
+        .map_err(|error| error.body.message)?;
+    operations::preview(state, actor.clone(), None, &artifact, 1)
+        .await
+        .map_err(|error| error.body.message)?;
+    operations::register_handoff_session(state, actor, "Editor")
+        .map_err(|error| error.body.message)?;
+    Ok(session)
+}
+
+#[test]
+fn disabling_a_user_closes_what_it_holds_and_nothing_of_anothers() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (alice, bob) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+        let alices = hold_things(&state, &alice).await?;
+        let bobs = hold_things(&state, &bob).await?;
+        assert_eq!(state.previews().live_tickets(&alice), 1);
+        assert_eq!(state.rooms().counts().map(|counts| counts.rooms), Some(2));
+
+        state.revoke_actor(&alice);
+
+        assert!(matches!(
+            state.runtime_sessions().get(&alice, &alices),
+            Err(crate::runtime_sessions::SessionError::Closed)
+        ));
+        assert!(state.runtime_sessions().get(&bob, &bobs).is_ok());
+        assert_eq!(state.previews().live_tickets(&alice), 0);
+        assert_eq!(state.previews().live_tickets(&bob), 1);
+        assert_eq!(state.rooms().counts().map(|counts| counts.rooms), Some(1));
+        let inbox = |actor: &ActorId| state.handoffs().list(actor).map(|agents| agents.len());
+        assert_eq!(inbox(&alice).map_err(|error| format!("{error:?}"))?, 0);
+        assert_eq!(inbox(&bob).map_err(|error| format!("{error:?}"))?, 1);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_request_that_authenticated_before_a_disable_leaves_nothing_registered()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let alice = registered_user(&state, 1)?;
+        let artifact = create_runtime_artifact(&state, &alice).await?;
+        let session = operations::open_runtime_session(&state, &alice, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        operations::set_runtime_grant(
+            &state,
+            alice.clone(),
+            &session,
+            &artifact,
+            1,
+            SetRuntimeGrantRequest {
+                head_revision: 1,
+                expected_version: 0,
+                capabilities: vec!["metadata.read".into()],
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        // The registry changes between the moment the requests below
+        // authenticated and the moment they register: the disabling's own
+        // cleanup (`revoke_actor`) has not run.
+        state
+            .token_store()
+            .set_disabled(&alice, Some("2026-01-02T00:00:00Z"))
+            .map_err(|error| error.to_string())?;
+
+        let view = operations::create_runtime_view(
+            &state,
+            alice.clone(),
+            None,
+            &artifact,
+            1,
+            CreateRuntimeViewRequest {
+                session_id: session.clone(),
+                view_id: "a".repeat(32),
+                generation: 1,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&view, Err(error) if error.status == StatusCode::UNAUTHORIZED),
+            "{:?}",
+            view.map(|view| view.url)
+        );
+        assert_eq!(state.previews().live_tickets(&alice), 0, "a view was kept");
+        let preview = operations::preview(&state, alice.clone(), None, &artifact, 1).await;
+        assert!(
+            matches!(&preview, Err(error) if error.status == StatusCode::UNAUTHORIZED),
+            "{:?}",
+            preview.map(|ticket| ticket.url)
+        );
+        assert_eq!(
+            state.previews().live_tickets(&alice),
+            0,
+            "a ticket was kept"
+        );
+        assert!(
+            matches!(
+                state.runtime_sessions().get(&alice, &session),
+                Err(crate::runtime_sessions::SessionError::Closed)
+            ),
+            "the late request did not close the connection"
+        );
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn only_a_registered_enabled_user_or_the_owner_passes_the_confirmation()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let alice = registered_user(&state, 1)?;
+        assert!(state.ensure_enabled(&ActorId::owner()).await.is_ok());
+        assert!(state.ensure_enabled(&alice).await.is_ok());
+        let stranger = ActorId::user([9; 16]);
+        assert!(matches!(
+            state.ensure_enabled(&stranger).await,
+            Err(error) if error.status == StatusCode::UNAUTHORIZED
+        ));
+        state
+            .token_store()
+            .set_disabled(&alice, Some("2026-01-02T00:00:00Z"))
+            .map_err(|error| error.to_string())?;
+        assert!(matches!(
+            state.ensure_enabled(&alice).await,
+            Err(error) if error.status == StatusCode::UNAUTHORIZED
+        ));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_stream_for_a_user_disabled_meanwhile_is_refused_and_one_for_an_enabled_user_opens()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let alice = registered_user(&state, 1)?;
+        let caller = || crate::auth::AuthContext {
+            actor: alice.clone(),
+            token_id: "tok_0123456789abcdef0123456789abcdef".parse().ok(),
+            is_admin: false,
+        };
+        let open = changes::stream(
+            axum::extract::State(state.clone()),
+            caller(),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!(open.status(), StatusCode::OK);
+        drop(open);
+
+        // Disabled in the registry after this request authenticated.
+        state
+            .token_store()
+            .set_disabled(&alice, Some("2026-01-02T00:00:00Z"))
+            .map_err(|error| error.to_string())?;
+        let refused = changes::stream(
+            axum::extract::State(state.clone()),
+            caller(),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert!(
+            matches!(&refused, Err(error) if error.status == StatusCode::UNAUTHORIZED),
+            "{:?}",
+            refused.map(|response| response.status())
+        );
         Ok::<(), Box<dyn Error>>(())
     })
 }

@@ -55,6 +55,9 @@ export type ApiBody =
   | RotateTokenResponse
   | TokenList
   | TokenInfo
+  | CreateUserRequest
+  | UserInfo
+  | UserList
   | EnqueueJobRequest
   | EnqueueJobResponse
   | CancelJobResponse
@@ -1355,6 +1358,12 @@ export interface CreateTokenRequest {
    * Human-readable name or label (1-64 characters).
    */
   name: string;
+  /**
+   * The user the token authenticates as. Omitted: the owner profile, as
+   * before users existed. A user that is not registered is `not_found`
+   * and a disabled one is a conflict.
+   */
+  user_id?: string | null;
 }
 /**
  * Response returned when a new token is created.
@@ -1400,6 +1409,12 @@ export interface TokenInfo {
    * ISO 8601 revocation timestamp, if revoked.
    */
   revoked_at?: string | null;
+  /**
+   * The user this token authenticates as, for its whole life: `local` for
+   * the owner profile (the bootstrap token and every token issued before
+   * users existed), otherwise a `u-` identifier from `POST /v1/users`.
+   */
+  user_id: string;
 }
 /**
  * Response returned when a token is rotated.
@@ -1420,6 +1435,55 @@ export interface TokenList {
    * The tokens.
    */
   tokens: TokenInfo[];
+}
+/**
+ * Request to register a user.
+ */
+export interface CreateUserRequest {
+  /**
+   * Display label (1-64 characters, no control characters, no surrounding
+   * whitespace) that is not another user's.
+   */
+  label: string;
+}
+/**
+ * A registered user (decision 0036). It names an actor that owns artifacts;
+ * it carries no credential and no role.
+ */
+export interface UserInfo {
+  /**
+   * ISO 8601 creation timestamp.
+   */
+  created_at: string;
+  /**
+   * ISO 8601 timestamp of the disabling, present while the user is
+   * disabled: its tokens are refused and its open streams, connections,
+   * links, and rooms are closed.
+   */
+  disabled_at?: string | null;
+  /**
+   * The user's identifier, which is its actor: `local` for the owner
+   * profile, otherwise `u-` and 32 lowercase hexadecimal digits.
+   */
+  id: string;
+  /**
+   * Whether this is the local owner profile, which cannot be disabled and
+   * holds the only administrative credential.
+   */
+  is_owner: boolean;
+  /**
+   * The label the owner gave (1-64 characters).
+   */
+  label: string;
+}
+/**
+ * The registered users, the owner first.
+ */
+export interface UserList {
+  /**
+   * The users.
+   */
+  users: UserInfo[];
 }
 /**
  * Body of `POST /v1/artifacts/{id}/jobs`, with an `Idempotency-Key` header:

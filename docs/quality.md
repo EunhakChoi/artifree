@@ -320,8 +320,26 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   follower's backoff (a Retry-After kept between the minimum and the maximum), rejoin, repeated-loss wait and abort (a first join or a leave that never answers, or a signal aborted by `state()` before the join, cannot keep it from settling; the join and the leave share one bound), a join whose answer was lost and resumed without skipping what came meanwhile, and run the real binary with every room
   response validated against the published schema, including that lost first join. The follower does not rejoin after a restart; it rejects with `runtime_session_expired`. Each guard was checked by
   breaking it and watching a named test fail. These tests do not show multiple
-  users, that a frame can use a room, or anything about MCP; no browser smoke
-  covers rooms because no web code uses them.
+  users (those are in the next item), that a frame can use a room, or anything
+  about MCP; no browser smoke covers rooms because no web code uses them.
+- Multi-user identity (decision 0036), in process with the owner and two
+  registered users: a table that sends every artifact-scoped HTTP route and
+  MCP tool the other users' real names and names nobody holds and requires the
+  same status and body (and the holder's own call not to be `404`), a test that
+  reads the server's route declarations and fails on a route that is in no
+  table, listings/trash/jobs/feeds that hold only the caller's own with
+  per-user numbering, the same request key from two users, the administrator
+  boundary (`403` for user and owner-agent tokens, `401` first, decided before
+  the body), token ownership and rotation, the owner profile unchanged,
+  no MCP tool for users or tokens, disabling (every token `401` on HTTP and
+  MCP, streams, previews, connections and rooms closed, another user
+  untouched, enabling restores tokens only), a request that authenticated
+  before a disable leaving nothing registered, and each per-user bound with one
+  user at the limit and another unaffected. Provider tests upgrade a database
+  from every earlier schema version and keep a feed's cursors. Node tests check
+  the client and the CLI against a stand-in server. Each guard was checked by
+  breaking it and watching a named test fail. These tests do not show roles,
+  sharing, OAuth, or a web screen for users, because none exist.
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,
@@ -559,7 +577,7 @@ requirement. Npm/Cargo advisory scans detect known reports, not all vulnerabilit
 Not yet covered, because the behavior does not exist: multi-user roles and
 revocation (a viewer's refused save included), broader runtime capabilities, publishing, and resource limits for artifact
 scripts. Agent runs with Codex and Pi are manual checks, not CI: they need an
-agent account and model calls. The single-owner token is not a multi-user authentication test. The
+agent account and model calls. Multi-user isolation is tested with the owner and two registered users in process (decision 0036); OAuth, roles, sharing, and an identity provider are not tested because they do not exist. The
 crash test kills the process after a commit; it does not simulate power loss
 or a storage device that ignores flushes.
 

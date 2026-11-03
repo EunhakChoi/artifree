@@ -64,7 +64,7 @@ impl SqliteTokenStore {
         Ok(store)
     }
 
-    fn connect(&self) -> Result<Connection, TokenStoreError> {
+    pub(crate) fn connect(&self) -> Result<Connection, TokenStoreError> {
         // Never creates the file: the artifact store owns it.
         let connection = Connection::open_with_flags(
             &self.path,
@@ -79,63 +79,94 @@ impl SqliteTokenStore {
     }
 }
 
+/// The columns of a [`TokenRecord`], joined with the user the token belongs
+/// to. The join is inner on purpose: a token whose user is missing from the
+/// registry is not listed and does not authenticate.
+const TOKEN_COLUMNS: &str = "SELECT t.id, t.actor, u.disabled_at IS NOT NULL, t.name, \
+     t.secret_hash, t.prefix, t.created_at, t.last_used_at, t.revoked_at \
+     FROM tokens t JOIN users u ON u.id = t.actor";
+
+/// The values of one row of [`TOKEN_COLUMNS`], before they are parsed.
+type TokenRow = (
+    String,
+    String,
+    bool,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+fn token_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TokenRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+    ))
+}
+
+fn token_record(row: TokenRow) -> Result<TokenRecord, TokenStoreError> {
+    let (
+        id,
+        actor,
+        actor_disabled,
+        name,
+        secret_hash,
+        prefix,
+        created_at,
+        last_used_at,
+        revoked_at,
+    ) = row;
+    Ok(TokenRecord {
+        id: id.parse().map_err(|error| {
+            TokenStoreError::Unavailable(format!("stored token id is invalid: {error}"))
+        })?,
+        actor: actor.parse().map_err(|error| {
+            TokenStoreError::Unavailable(format!("stored token user is invalid: {error}"))
+        })?,
+        actor_disabled,
+        name,
+        secret_hash,
+        prefix,
+        created_at,
+        last_used_at,
+        revoked_at,
+    })
+}
+
 impl TokenStore for SqliteTokenStore {
     fn list(&self) -> Result<Vec<TokenRecord>, TokenStoreError> {
         let connection = self.connect()?;
         let mut statement = connection
-            .prepare(
-                "SELECT id, name, secret_hash, prefix, created_at, last_used_at, revoked_at \
-                 FROM tokens ORDER BY created_at ASC",
-            )
+            .prepare(&format!("{TOKEN_COLUMNS} ORDER BY t.created_at ASC"))
             .map_err(unavailable)?;
-        let rows = statement
-            .query_map([], |row| {
-                let id_raw: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let secret_hash: String = row.get(2)?;
-                let prefix: String = row.get(3)?;
-                let created_at: String = row.get(4)?;
-                let last_used_at: Option<String> = row.get(5)?;
-                let revoked_at: Option<String> = row.get(6)?;
-                Ok((
-                    id_raw,
-                    name,
-                    secret_hash,
-                    prefix,
-                    created_at,
-                    last_used_at,
-                    revoked_at,
-                ))
-            })
-            .map_err(unavailable)?;
-
+        let rows = statement.query_map([], token_row).map_err(unavailable)?;
         let mut records = Vec::new();
         for row in rows {
-            let (id_raw, name, secret_hash, prefix, created_at, last_used_at, revoked_at) =
-                row.map_err(unavailable)?;
-            let id = id_raw.parse().map_err(|error| {
-                TokenStoreError::Unavailable(format!("stored token id is invalid: {error}"))
-            })?;
-            records.push(TokenRecord {
-                id,
-                name,
-                secret_hash,
-                prefix,
-                created_at,
-                last_used_at,
-                revoked_at,
-            });
+            records.push(token_record(row.map_err(unavailable)?)?);
         }
         Ok(records)
     }
 
     fn create(&self, token: &NewTokenRecord) -> Result<TokenRecord, TokenStoreError> {
         let connection = self.connect()?;
+        // One statement: the token exists only if its user is registered and
+        // enabled at the moment of the insert.
         let result = connection.execute(
-            "INSERT INTO tokens (id, name, secret_hash, prefix, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO tokens (id, actor, name, secret_hash, prefix, created_at) \
+             SELECT ?1, u.id, ?3, ?4, ?5, ?6 FROM users u \
+             WHERE u.id = ?2 AND u.disabled_at IS NULL",
             (
                 token.id.as_str(),
+                token.actor.as_str(),
                 &token.name,
                 &token.secret_hash,
                 &token.prefix,
@@ -143,8 +174,24 @@ impl TokenStore for SqliteTokenStore {
             ),
         );
         match result {
+            Ok(0) => {
+                let disabled: Option<bool> = connection
+                    .query_row(
+                        "SELECT disabled_at IS NOT NULL FROM users WHERE id = ?1",
+                        [token.actor.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(unavailable)?;
+                Err(match disabled {
+                    None => TokenStoreError::NotFound(format!("user {}", token.actor)),
+                    Some(_) => TokenStoreError::Conflict("the user is disabled".into()),
+                })
+            }
             Ok(_) => Ok(TokenRecord {
                 id: token.id.clone(),
+                actor: token.actor.clone(),
+                actor_disabled: false,
                 name: token.name.clone(),
                 secret_hash: token.secret_hash.clone(),
                 prefix: token.prefix.clone(),
@@ -167,46 +214,13 @@ impl TokenStore for SqliteTokenStore {
         let connection = self.connect()?;
         let row = connection
             .query_row(
-                "SELECT id, name, secret_hash, prefix, created_at, last_used_at, revoked_at \
-                 FROM tokens WHERE secret_hash = ?1",
+                &format!("{TOKEN_COLUMNS} WHERE t.secret_hash = ?1"),
                 [secret_hash],
-                |row| {
-                    let id_raw: String = row.get(0)?;
-                    let name: String = row.get(1)?;
-                    let hash: String = row.get(2)?;
-                    let prefix: String = row.get(3)?;
-                    let created_at: String = row.get(4)?;
-                    let last_used_at: Option<String> = row.get(5)?;
-                    let revoked_at: Option<String> = row.get(6)?;
-                    Ok((
-                        id_raw,
-                        name,
-                        hash,
-                        prefix,
-                        created_at,
-                        last_used_at,
-                        revoked_at,
-                    ))
-                },
+                token_row,
             )
             .optional()
             .map_err(unavailable)?;
-
-        let Some((id_raw, name, hash, prefix, created_at, last_used_at, revoked_at)) = row else {
-            return Ok(None);
-        };
-        let id = id_raw.parse().map_err(|error| {
-            TokenStoreError::Unavailable(format!("stored token id is invalid: {error}"))
-        })?;
-        Ok(Some(TokenRecord {
-            id,
-            name,
-            secret_hash: hash,
-            prefix,
-            created_at,
-            last_used_at,
-            revoked_at,
-        }))
+        row.map(token_record).transpose()
     }
 
     fn rotate(
@@ -236,6 +250,8 @@ impl TokenStore for SqliteTokenStore {
         match result {
             Ok(rows) if rows > 0 => Ok(TokenRecord {
                 id: id.clone(),
+                actor: existing.actor,
+                actor_disabled: existing.actor_disabled,
                 name: existing.name,
                 secret_hash: new_secret_hash.to_owned(),
                 prefix: new_prefix.to_owned(),
@@ -302,6 +318,8 @@ fn unavailable(error: rusqlite::Error) -> TokenStoreError {
 
 #[cfg(test)]
 mod tests {
+    use artifree_domain::identity::ActorId;
+
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -326,6 +344,7 @@ mod tests {
         let id1 = TokenId::from_random([1; 16]);
         let token1 = NewTokenRecord {
             id: id1.clone(),
+            actor: ActorId::owner(),
             name: "agent-1".into(),
             secret_hash: hash_token_secret("art_secret_1"),
             prefix: "art_11111111...".into(),

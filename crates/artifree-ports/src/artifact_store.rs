@@ -438,7 +438,7 @@ pub struct ChangeRecord {
     pub committed_at: UnixMillis,
 }
 
-/// Part of an owner's changes and the feed's state, read at one point in
+/// Part of an owner's changes and the owner's feed state, read at one point in
 /// time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangePage {
@@ -446,7 +446,8 @@ pub struct ChangePage {
     pub feed: FeedId,
     /// The owner's changes after the requested position, in feed order.
     pub changes: Vec<ChangeRecord>,
-    /// The newest position in the feed, across all owners.
+    /// The newest position in the owner's feed. Each owner numbers its own
+    /// changes (decision 0036), so the head says nothing about other owners.
     pub head: ChangeSequence,
 }
 
@@ -697,8 +698,8 @@ pub trait ArtifactStore {
 
     /// Up to `limit` changes to artifacts `owner` owns, after `after`.
     ///
-    /// A commit's change becomes visible with the commit, and changes become
-    /// visible in sequence order: once a reader has seen a sequence, no
+    /// Positions are the owner's own (decision 0036). A commit's change becomes
+    /// visible with the commit, and changes become visible in sequence order: once a reader has seen a sequence, no
     /// smaller one appears later. When fewer than `limit` changes are
     /// returned, the owner has none between them and `head`.
     ///

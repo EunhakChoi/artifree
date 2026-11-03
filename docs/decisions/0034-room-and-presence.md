@@ -39,9 +39,9 @@ is not S01 (multi-user identity), R07 (subscriptions), R08 (an outbox) or R10
 2. **Three identities, all known to the server.**
    - _actor_: the authenticated account, from the bearer token. Rooms are keyed
      by actor and artifact, so another actor's room is a different room, not a
-     room it may not read. Only one account kind exists today (the single
-     owner); the field is reserved for S01 and nothing here is a statement
-     about several users.
+     room it may not read. Since decision 0036 the actor can be the owner or a
+     registered user; the room cap and the numbers a room hands out are kept
+     per actor, and a room is never shared between actors.
    - _tab_: the runtime connection named in the route, accepted only if the
      server issued it to this actor and has not closed it.
    - _participant_: a number the room hands out (`1` to `2^53-1`), one per

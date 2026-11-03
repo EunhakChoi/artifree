@@ -35,6 +35,7 @@ use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::identity::{ActorId, RequestKey};
 use artifree_ports::token_store::TokenStore;
+use artifree_ports::user_store::UserStore;
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::{SqliteTokenStore, hash_token_secret};
 use axum::body::{Body, Bytes, HttpBody};
@@ -61,6 +62,7 @@ use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
 use crate::runtime_sessions::RuntimeSessions;
 use crate::runtime_source::{self, FrameCall};
 use crate::tokens;
+use crate::users;
 use crate::web::WebAssets;
 
 /// Largest accepted request body: a maximum package in base64 plus JSON
@@ -143,7 +145,6 @@ struct Shared {
     token_store: Arc<SqliteTokenStore>,
     token: AccessToken,
     started_at: String,
-    owner: ActorId,
     previews: PreviewTickets,
     runtime_sessions: RuntimeSessions,
     handoffs: Handoffs,
@@ -200,9 +201,6 @@ impl AppState {
             }
         }
         settings.allowed_origins = allowed_origins;
-        let owner: ActorId = "local"
-            .parse()
-            .map_err(|error| format!("built-in owner actor: {error}"))?;
         let content_policy =
             preview::content_policy(&settings.content_origin, &settings.frame_ancestors)?;
         if settings.change_streams == 0 {
@@ -215,7 +213,6 @@ impl AppState {
                 token_store: Arc::new(token_store),
                 token,
                 started_at,
-                owner,
                 previews: PreviewTickets::new(settings.preview_ttl),
                 runtime_sessions: RuntimeSessions::new(Duration::from_secs(24 * 60 * 60)),
                 handoffs: Handoffs::new(Duration::from_secs(60 * 60)),
@@ -289,6 +286,12 @@ impl AppState {
     /// Authenticates the bearer token from request headers. Checks the bootstrap
     /// token first, then queries the active token store. Every HTTP route and
     /// the MCP endpoint authenticate through this check.
+    ///
+    /// The bootstrap token is the local owner profile and the only credential
+    /// with administrative authority. An issued token authenticates as the one
+    /// user it belongs to, and only while that user is enabled and the token is
+    /// not revoked; every other case, a disabled user's token included, is the
+    /// same `401` as a token nobody issued (decision 0036).
     pub(crate) async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
         let presented = headers
             .get(header::AUTHORIZATION)
@@ -299,7 +302,7 @@ impl AppState {
         };
         if self.shared.token.matches(token) {
             return Ok(AuthContext {
-                actor: self.shared.owner.clone(),
+                actor: ActorId::owner(),
                 token_id: None,
                 is_admin: true,
             });
@@ -320,13 +323,51 @@ impl AppState {
                     let _ = token_store.touch(&id, &now);
                 });
                 Ok(AuthContext {
-                    actor: self.shared.owner.clone(),
+                    actor: record.actor,
                     token_id: Some(record.id),
                     is_admin: false,
                 })
             }
             _ => Err(ApiError::unauthenticated()),
         }
+    }
+
+    /// Ends everything the server holds in memory for `actor`: change
+    /// streams, preview links and view fences, runtime connections and the
+    /// grants on them, room participants, and registered handoff inboxes.
+    /// Disabling a user runs it after the registry is changed, and anything
+    /// that registers afterwards confirms the user with [`Self::ensure_enabled`].
+    /// Connections close before rooms are emptied, so that a call in flight
+    /// cannot join again.
+    pub(crate) fn revoke_actor(&self, actor: &ActorId) {
+        self.shared.feed.revoke_actor(actor);
+        self.shared.previews.revoke_actor(actor);
+        self.shared.runtime_sessions.revoke_actor(actor);
+        self.shared.rooms.leave_actor(actor);
+        self.shared.handoffs.revoke_actor(actor);
+    }
+
+    /// Confirms that `actor` is enabled in the registry now. A request that
+    /// authenticated before a user was disabled, and registers something that
+    /// outlives the request after the disable already ran its cleanup
+    /// ([`Self::revoke_actor`]), calls this **after** registering: either it
+    /// sees the disabled user and removes its own registration, or the
+    /// cleanup comes later and removes it. The owner is always enabled.
+    pub(crate) async fn ensure_enabled(&self, actor: &ActorId) -> Result<(), ApiError> {
+        if actor.is_owner() {
+            return Ok(());
+        }
+        let users = Arc::clone(&self.shared.token_store);
+        let id = actor.clone();
+        let user = tokio::task::spawn_blocking(move || users.user(&id))
+            .await
+            .map_err(|_| ApiError::unavailable("user lookup failed"))?
+            .map_err(|err| ApiError::unavailable(err.to_string()))?;
+        if user.is_some_and(|user| user.is_enabled()) {
+            return Ok(());
+        }
+        self.revoke_actor(actor);
+        Err(ApiError::unauthenticated())
     }
 
     /// Runs a synchronous application command off the async executor.
@@ -352,6 +393,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .merge(mcp::routes(state.clone()))
         .merge(tokens::routes())
+        .merge(users::routes())
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
         .route(
             "/v1/artifacts/{id}",
@@ -538,23 +580,17 @@ pub fn router_with_web(state: AppState, web_assets: Option<WebAssets>) -> Router
                 return StatusCode::METHOD_NOT_ALLOWED.into_response();
             }
             let is_api = path.starts_with("/v1/") || path == "/v1" || path.starts_with("/mcp");
-            let owner = state.shared.owner.clone();
             if is_api || assets.is_none() {
-                return run_admitted(&state, req, move |req| async move {
-                    let actor = req
-                        .extensions()
-                        .get::<Authenticated>()
-                        .cloned()
-                        .unwrap_or(Authenticated(owner));
-                    no_such_route(&actor).into_response()
-                })
-                .await;
+                // Authenticates first, so callers without a token cannot
+                // probe which routes exist.
+                return run_admitted(&state, req, |_| async { no_such_route().into_response() })
+                    .await;
             }
             let method = req.method().clone();
             if let Some(assets) = assets {
                 assets.handle(&method, &path).await
             } else {
-                no_such_route(&Authenticated(owner)).into_response()
+                no_such_route().into_response()
             }
         }
     };
@@ -718,7 +754,7 @@ fn refused(refusal: Refusal) -> Response {
 
 // Unmatched requests authenticate first, like every route, so that callers
 // without the token cannot probe which routes and methods exist.
-fn no_such_route(_: &Authenticated) -> ApiError {
+fn no_such_route() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "no such route")
 }
 

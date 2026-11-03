@@ -1432,6 +1432,10 @@ pub enum ChangeKind {
 pub struct TokenInfo {
     /// Opaque token identifier.
     pub id: String,
+    /// The user this token authenticates as, for its whole life: `local` for
+    /// the owner profile (the bootstrap token and every token issued before
+    /// users existed), otherwise a `u-` identifier from `POST /v1/users`.
+    pub user_id: String,
     /// Human-readable label for this token.
     pub name: String,
     /// Masked prefix for identification.
@@ -1454,6 +1458,11 @@ pub struct TokenInfo {
 pub struct CreateTokenRequest {
     /// Human-readable name or label (1-64 characters).
     pub name: String,
+    /// The user the token authenticates as. Omitted: the owner profile, as
+    /// before users existed. A user that is not registered is `not_found`
+    /// and a disabled one is a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Response returned when a new token is created.
@@ -1484,6 +1493,45 @@ pub struct RotateTokenResponse {
 pub struct TokenList {
     /// The tokens.
     pub tokens: Vec<TokenInfo>,
+}
+
+/// A registered user (decision 0036). It names an actor that owns artifacts;
+/// it carries no credential and no role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UserInfo {
+    /// The user's identifier, which is its actor: `local` for the owner
+    /// profile, otherwise `u-` and 32 lowercase hexadecimal digits.
+    pub id: String,
+    /// The label the owner gave (1-64 characters).
+    pub label: String,
+    /// ISO 8601 creation timestamp.
+    pub created_at: String,
+    /// ISO 8601 timestamp of the disabling, present while the user is
+    /// disabled: its tokens are refused and its open streams, connections,
+    /// links, and rooms are closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_at: Option<String>,
+    /// Whether this is the local owner profile, which cannot be disabled and
+    /// holds the only administrative credential.
+    pub is_owner: bool,
+}
+
+/// Request to register a user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateUserRequest {
+    /// Display label (1-64 characters, no control characters, no surrounding
+    /// whitespace) that is not another user's.
+    pub label: String,
+}
+
+/// The registered users, the owner first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UserList {
+    /// The users.
+    pub users: Vec<UserInfo>,
 }
 
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a

@@ -19,6 +19,8 @@ use artifree_domain::identity::ActorId;
 use crate::auth::{AccessToken, hex};
 use crate::runtime_sessions::{RuntimeSession, SessionError};
 
+/// Registered inboxes and staged deliveries one actor may hold (decision
+/// 0036): per actor, so one user cannot use up the others' places.
 const MAX_AGENTS: usize = 128;
 const MAX_HANDOFFS: usize = 512;
 const MAX_SELECTION_BYTES: usize = 16 * 1024;
@@ -140,7 +142,12 @@ impl Handoffs {
         let secret = AccessToken::generate().map_err(|_| HandoffError::Unavailable)?;
         let mut registry = self.lock()?;
         registry.prune(now);
-        if registry.agents.len() >= MAX_AGENTS || registry.agents.contains_key(&id) {
+        let held = registry
+            .agents
+            .values()
+            .filter(|agent| agent.owner == *actor)
+            .count();
+        if held >= MAX_AGENTS || registry.agents.contains_key(&id) {
             return Err(HandoffError::Unavailable);
         }
         let result = RegisteredHandoffSession {
@@ -157,6 +164,15 @@ impl Handoffs {
             },
         );
         Ok(result)
+    }
+
+    /// Forgets every inbox and delivery of `actor`, as when the user is
+    /// disabled (decision 0036).
+    pub(crate) fn revoke_actor(&self, actor: &ActorId) {
+        if let Ok(mut registry) = self.state.lock() {
+            registry.agents.retain(|_, agent| agent.owner != *actor);
+            registry.items.retain(|_, item| item.owner != *actor);
+        }
     }
 
     /// Lists registered names, without presenting registration as liveness.
@@ -193,7 +209,12 @@ impl Handoffs {
             .while_active(|| {
                 let mut registry = self.lock()?;
                 registry.prune(now);
-                if registry.items.len() >= MAX_HANDOFFS || registry.items.contains_key(&id) {
+                let held = registry
+                    .items
+                    .values()
+                    .filter(|item| item.owner == *actor)
+                    .count();
+                if held >= MAX_HANDOFFS || registry.items.contains_key(&id) {
                     return Err(HandoffError::Unavailable);
                 }
                 let agent = registry
@@ -1301,6 +1322,86 @@ mod tests {
             assert_eq!(delivered[0].state, HandoffState::Offered);
             assert!(matches!(cancelled, Err(HandoffError::Conflict(_))));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn inboxes_and_items_are_bounded_per_actor_and_forgotten_per_actor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let alice: ActorId = "u-00000000000000000000000000000001".parse()?;
+        let bob: ActorId = "u-00000000000000000000000000000002".parse()?;
+        let connections = RuntimeSessions::new(Duration::from_secs(60));
+        let alice_tab = connections
+            .create(&alice, None)
+            .map_err(|e| format!("{e:?}"))?;
+        let alice_connection = connections
+            .get(&alice, &alice_tab)
+            .map_err(|e| format!("{e:?}"))?;
+        let bob_tab = connections
+            .create(&bob, None)
+            .map_err(|e| format!("{e:?}"))?;
+        let bob_connection = connections
+            .get(&bob, &bob_tab)
+            .map_err(|e| format!("{e:?}"))?;
+        let handoffs = Handoffs::new(Duration::from_secs(60));
+        let agent = handoffs
+            .register(&alice, "Agent")
+            .map_err(|e| format!("{e:?}"))?;
+        for number in 1..super::MAX_AGENTS {
+            handoffs
+                .register(&alice, &format!("Agent {number}"))
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        assert!(matches!(
+            handoffs.register(&alice, "One more"),
+            Err(HandoffError::Unavailable)
+        ));
+        let bobs_agent = handoffs
+            .register(&bob, "Agent")
+            .map_err(|e| format!("{e:?}"))?;
+
+        for _ in 0..super::MAX_HANDOFFS {
+            handoffs
+                .stage(
+                    &alice,
+                    &alice_tab,
+                    &alice_connection,
+                    &agent.session_id,
+                    fixture_selection(),
+                    "Edit".into(),
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        assert!(matches!(
+            handoffs.stage(
+                &alice,
+                &alice_tab,
+                &alice_connection,
+                &agent.session_id,
+                fixture_selection(),
+                "Edit".into(),
+            ),
+            Err(HandoffError::Unavailable)
+        ));
+        let bobs = handoffs
+            .stage(
+                &bob,
+                &bob_tab,
+                &bob_connection,
+                &bobs_agent.session_id,
+                fixture_selection(),
+                "Edit".into(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+
+        handoffs.revoke_actor(&alice);
+
+        assert_eq!(
+            handoffs.list(&alice).map_err(|e| format!("{e:?}"))?.len(),
+            0
+        );
+        assert_eq!(handoffs.list(&bob).map_err(|e| format!("{e:?}"))?.len(), 1);
+        assert!(handoffs.get(&bob, &bob_tab, &bobs.id).is_ok());
         Ok(())
     }
 }

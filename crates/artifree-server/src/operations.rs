@@ -738,6 +738,7 @@ pub(crate) async fn preview(
     if revision > record.current_revision {
         return Err(ArtifactError::NotFound(Missing::Revision).into());
     }
+    let owner = actor.clone();
     let ticket = state
         .previews()
         .issue(actor, token_id, id, revision)
@@ -748,6 +749,9 @@ pub(crate) async fn preview(
                 "too many live previews; retry shortly",
             )
         })?;
+    // The link is a bearer capability that outlives the request: if the user
+    // was disabled while this request ran, it is removed again.
+    state.ensure_enabled(&owner).await?;
     Ok(Preview {
         url: format!("{}/p/{}/", state.settings().content_origin, ticket.secret),
         revision: revision.0,
@@ -1163,6 +1167,7 @@ pub(crate) async fn create_runtime_view(
         })?;
     let (record, enabled, policy) = runtime_source(state, &actor, &id, revision).await?;
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
+    let owner = actor.clone();
     let (ticket, grant_version, granted) = session
         .with_grant(&scope, |version, granted| {
             let ticket = state.previews().issue_runtime(RuntimeTicketRequest {
@@ -1200,6 +1205,8 @@ pub(crate) async fn create_runtime_view(
                 "runtime views are temporarily unavailable",
             ),
         })?;
+    // As for a preview link: confirmed after the registration (see `preview`).
+    state.ensure_enabled(&owner).await?;
     Ok(RuntimeView {
         url: format!(
             "{}/{}/{}/",

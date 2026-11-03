@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.13.0",
+  "contract_version": "0.14.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -72,7 +72,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/policy.rs",
       "status": "implemented",
-      "summary": "Owner-only artifact access checked on every read; sharing remains planned. The server separately checks runtime capability grants."
+      "summary": "Each user reaches only their own artifacts, checked on every read (the owner profile is user one); sharing and roles remain planned. The server separately checks runtime capability grants."
     },
     {
       "id": "documents",

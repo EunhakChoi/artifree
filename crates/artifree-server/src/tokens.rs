@@ -1,14 +1,16 @@
 //! Handlers for token management API v1.
 //!
-//! Only administrators (the owner/bootstrap token) may create, list,
-//! rotate, and revoke access tokens. Agent tokens are rejected with 403 Forbidden.
+//! Only administrators (the bootstrap token of the local owner profile) may
+//! create, list, rotate, and revoke access tokens, for any user. Issued tokens
+//! are rejected with 403 Forbidden, whichever user they belong to. A token
+//! belongs to exactly one user (decision 0036).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
     CreateTokenRequest, CreateTokenResponse, RotateTokenResponse, TokenInfo, TokenList,
 };
-use artifree_domain::identity::TokenId;
+use artifree_domain::identity::{ActorId, TokenId};
 use artifree_ports::token_store::{NewTokenRecord, TokenStore, TokenStoreError};
 use artifree_providers::tokens::hash_token_secret;
 use axum::extract::{Path, State};
@@ -43,6 +45,7 @@ async fn list_tokens(
     // Bootstrap token at the top of the list
     tokens.push(TokenInfo {
         id: "bootstrap".into(),
+        user_id: ActorId::owner().to_string(),
         name: "Bootstrap Owner".into(),
         prefix: state.owner_token().prefix(),
         created_at: state.started_at().to_owned(),
@@ -53,6 +56,7 @@ async fn list_tokens(
     for record in records {
         tokens.push(TokenInfo {
             id: record.id.to_string(),
+            user_id: record.actor.to_string(),
             name: record.name,
             prefix: record.prefix,
             created_at: record.created_at,
@@ -78,6 +82,13 @@ async fn create_token(
         ));
     }
 
+    // Omitted: the owner profile, as before users existed. A spelling that is
+    // no registered user is the same `404` as an unknown one.
+    let actor = match body.user_id.as_deref() {
+        None => ActorId::owner(),
+        Some(text) => text.parse().map_err(|_| ApiError::not_found("user"))?,
+    };
+
     let mut random_id = [0u8; 16];
     getrandom::fill(&mut random_id).map_err(|err| ApiError::unavailable(err.to_string()))?;
     let id = TokenId::from_random(random_id);
@@ -93,6 +104,7 @@ async fn create_token(
         .token_store()
         .create(&NewTokenRecord {
             id: id.clone(),
+            actor,
             name: name.to_owned(),
             secret_hash,
             prefix: prefix.clone(),
@@ -106,6 +118,7 @@ async fn create_token(
 
     let info = TokenInfo {
         id: record.id.to_string(),
+        user_id: record.actor.to_string(),
         name: record.name,
         prefix: record.prefix,
         created_at: record.created_at,
@@ -159,6 +172,7 @@ async fn rotate_token(
 
     let info = TokenInfo {
         id: record.id.to_string(),
+        user_id: record.actor.to_string(),
         name: record.name,
         prefix: record.prefix,
         created_at: record.created_at,
