@@ -106,6 +106,23 @@ bytes of purged artifacts of any user are reclaimed only by that cleanup
 ([decision 0036](docs/decisions/0036-multi-user-identity.md)). Request keys, those of a cleanup too, are
 never expired.
 
+A throwaway session needs no directory of your choosing:
+`artifree-server serve --one-shot-ttl-seconds 3600` runs the same server on a new
+private temporary data directory (mode 700 on Unix, under `--session-root`, which
+defaults to the system temporary directory) with a new owner token
+([decision 0039](docs/decisions/0039-one-shot-session.md)). **Nothing is kept:**
+the directory is deleted when the lifetime (counted from process start) ends, on
+SIGINT, SIGTERM or SIGHUP (Ctrl+C on Windows), on a startup or listener failure,
+and after a panic. A new session starts empty with a new token, so old tokens
+give `401` and old job and preview addresses `404`. The flag excludes
+`--data-dir`, has no default, and accepts 1 to 604800 seconds as plain digits.
+The readiness line reports `mode`, `data_dir`, and `session_ttl_seconds`. A
+killed process (SIGKILL, power loss) leaves its directory; the next one-shot
+start on Linux removes such directories of this user once their owner is proven
+gone, and keeps any it cannot prove. Not implemented: secure erase, a size
+quota, a sweep on macOS or Windows, and a tunnel lifetime, which is a separate
+thing that does not exist yet.
+
 Jobs are the first background work ([decision 0030](docs/decisions/0030-persistent-jobs-and-worker.md)).
 `artifree job enqueue <id> --revision <n> --idempotency-key <key>` queues a
 `verify_revision` job, which recomputes the SHA-256 and size of every file of

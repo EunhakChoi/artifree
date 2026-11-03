@@ -536,6 +536,26 @@ before completing the change. Test assertions must describe observable behavior;
 schema rejection tests do not assume whether an enum is emitted as `enum` or
 `oneOf`/`const`.
 
+- One-shot sessions (decision 0039): unit tests drive the startup runner with
+  a fake stage list (a stop latched during or before each stage means no later
+  stage runs; a failed stage ends the run), parse the lifetime (digits only),
+  check the marker format and the sweep's fail-closed rules with a proc-shaped
+  directory (dead, live, zombie, reused pid, unparsable, a non-directory entry,
+  a mode-000 file that is skipped with a message when the user can read it,
+  a missing or foreign table, look-alikes, a latched stop), and show a panic
+  unwinding removes the directory. Real-process tests (`one_shot_session`) check
+  modes and the marker, each stop signal, a stalled client that cannot keep the
+  data, TTL expiry on every platform, a stop held at every startup stage and at
+  the first sweep entry (debug builds only; skipped with a message otherwise),
+  a live owner kept while a dead one is swept, look-alikes kept, no token,
+  job, preview or artifact carried over, a failed readiness write (an error
+  in one-shot, logged and ignored in persistent mode), a non-UTF-8 temporary
+  directory, and refused flag combinations that create nothing. Guards were
+  checked by breaking them. Not covered: the same-user check of the sweep
+  (no second user in CI), the sweep on macOS and Windows (it removes nothing
+  there), secure erase and quotas (not implemented), and signal handling on
+  Windows beyond the TTL path.
+
 ## CI and local use
 
 `npm run check` performs formatting, code/CSS lint, generated drift, architecture,
