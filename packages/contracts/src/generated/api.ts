@@ -40,6 +40,11 @@ export type ApiBody =
   | RuntimeDownloadOffer
   | RuntimeSourceWriteRequest
   | RuntimeSourceWriteReceipt
+  | RoomJoinRequest
+  | RoomHeartbeatRequest
+  | RoomEventRequest
+  | RoomEventReceipt
+  | RoomSnapshot
   | ErrorResponse
   | ArtifactChange
   | FeedPosition
@@ -963,6 +968,193 @@ export interface RuntimeSourceWriteReceipt {
    * The file's size in bytes: the number of bytes sent.
    */
   size: number;
+}
+/**
+ * Joins the room of an artifact as one participant of the caller's tab, or
+ * resumes the participant that tab already has in `slot` (decision 0034).
+ * The tab is the runtime connection named in the route, never a field.
+ */
+export interface RoomJoinRequest {
+  /**
+   * The tab's own name for this participant, such as `page`: 1 to 32
+   * ASCII letters, digits, `.`, `_` or `-`. Joining again with the same
+   * slot resumes the same participant instead of adding another. A slot
+   * means nothing outside the tab that chose it and other participants
+   * never see it.
+   */
+  slot: string;
+  /**
+   * What the participant tells the others about itself, at most 256 bytes
+   * of UTF-8; the server counts bytes. Omitted means empty.
+   */
+  state?: string | null;
+}
+/**
+ * Renews a participant's lease and reads the room (decision 0034). The
+ * participant and its epoch are in the route.
+ */
+export interface RoomHeartbeatRequest {
+  /**
+   * The newest event position the caller has read, from the `head` of its
+   * last response. Events at or before it are not returned again, and
+   * events from before the participant joined are never returned
+   * whatever this says. A position past the room's newest event is
+   * refused.
+   */
+  after: number;
+  /**
+   * A new state of at most 256 bytes; omitted keeps the current one.
+   */
+  state?: string | null;
+}
+/**
+ * Sends one ephemeral event to the room (decision 0034). It is delivered to
+ * the participants present who poll before the room drops it, and never
+ * kept for anyone else: there is no outbox, no acknowledgement and no
+ * retry that makes it arrive.
+ */
+export interface RoomEventRequest {
+  /**
+   * The event's text, at most 512 bytes of UTF-8; the server counts
+   * bytes. The server does not read it.
+   */
+  data: string;
+  /**
+   * What the event is about: 1 to 32 ASCII letters, digits, `.`, `_` or
+   * `-`.
+   */
+  kind: string;
+}
+/**
+ * What a sent event was given.
+ */
+export interface RoomEventReceipt {
+  /**
+   * The event's position in the room. It says the room accepted the
+   * event, not that anyone read it.
+   */
+  seq: number;
+}
+/**
+ * The viewer's identity in a room, who is present, and the events it has
+ * not read. A join and a heartbeat answer the same way.
+ */
+export interface RoomSnapshot {
+  /**
+   * The viewer's connection generation, to send with every later call. A
+   * join that resumes the participant returns a newer one, and the
+   * connection that held the older one can no longer act.
+   */
+  epoch: number;
+  /**
+   * Events after the requested position, oldest first. A join that makes
+   * a new participant returns none. A join that resumes a participant
+   * returns the events after the newest position that participant
+   * reported in a heartbeat (its join position if it reported none); they
+   * may repeat events an earlier connection of the participant handled, so
+   * tell them apart by `seq`.
+   */
+  events: RoomEvent[];
+  /**
+   * The newest event's position, 0 if the room never had one. Send it as
+   * `after` once its events were read.
+   */
+  head: number;
+  /**
+   * How long the lease lasts from this response, in milliseconds. Renew
+   * well before it ends; the server measures it, not the client.
+   */
+  lease_ms: number;
+  /**
+   * Everyone present, the viewer included, by participant.
+   */
+  members: RoomMember[];
+  /**
+   * Whether the room dropped events the caller had not read, including, in
+   * a resuming join, events that came while the participant was away.
+   * Ephemeral events can be lost; this says when it happened to this
+   * caller.
+   */
+  missed: boolean;
+  /**
+   * The viewer's participant. A join that resumes a participant returns
+   * the same number as before; one after the lease ran out returns a new
+   * one.
+   */
+  participant: number;
+  /**
+   * The viewer's tab as this room labels it.
+   */
+  tab: number;
+}
+/**
+ * One ephemeral event, as the viewer of a [`RoomSnapshot`] sees it.
+ */
+export interface RoomEvent {
+  /**
+   * The sender's text.
+   */
+  data: string;
+  /**
+   * Whether the viewer's own participant sent it.
+   */
+  is_me: boolean;
+  /**
+   * What the sender says the event is about.
+   */
+  kind: string;
+  /**
+   * The sender's participant.
+   */
+  participant: number;
+  /**
+   * Whether it came from the viewer's tab.
+   */
+  same_tab: boolean;
+  /**
+   * The event's position in the room, from 1. It is not a change feed
+   * cursor and not a revision.
+   */
+  seq: number;
+  /**
+   * The sender's tab, labelled as in [`RoomMember::tab`].
+   */
+  tab: number;
+}
+/**
+ * One participant in a room, as the viewer of a [`RoomSnapshot`] sees it.
+ * `is_me` and `same_tab` are computed by the server from the connection
+ * that asked; the participant sends neither.
+ */
+export interface RoomMember {
+  /**
+   * The account the member acts as. Every member of a room acts as the
+   * artifact's owner today.
+   */
+  actor: string;
+  /**
+   * Whether this member is the viewer's own participant.
+   */
+  is_me: boolean;
+  /**
+   * The participant, a number the server assigned. It is a label, not a
+   * credential.
+   */
+  participant: number;
+  /**
+   * Whether this member is in the viewer's tab. The viewer's own
+   * participant is in its own tab.
+   */
+  same_tab: boolean;
+  /**
+   * What the member says about itself.
+   */
+  state: string;
+  /**
+   * The member's tab as this room labels tabs; equal numbers mean the
+   * same tab while the tab has a participant in the room.
+   */
+  tab: number;
 }
 /**
  * Body of every non-2xx JSON response.

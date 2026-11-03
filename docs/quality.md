@@ -302,6 +302,26 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   new revision equal what the frame sent, the refusals make no revision, and the
   next view starts without the grant. These tests do not show roles (there are
   none), that a preview cannot use the network, or anything about MCP.
+- Rooms and presence (decision 0034): Rust tests run the room on an injected
+  clock (no sleeps) and over HTTP with a manual clock: the `isMe`/`sameTab` truth
+  table for a page, its frame and another tab; the exact lease boundary; a
+  reconnect that resumes one participant while the old epoch is refused; no
+  replay of earlier events to a late joiner whatever position it asks for; the
+  caps (64 rooms, 16 per room, 4 per tab, sixteen concurrent joins succeeding
+  and the rest refused); the event pace with `Retry-After`; a flood that leaves
+  another participant's events and the owner's saves unaffected; bounded memory;
+  another actor and a wrong tab getting `404`; a join racing a close; closing a
+  connection; a trashed artifact; strict route numbers; and no row in the
+  database after a restart; a resumed join that delivers, or reports as missed,
+  what came while its participant was away; and a malformed, unknown-field or
+  oversized body that answers a dead or another actor's connection exactly as a
+  valid body does. Node tests give the client parser about thirty
+  inconsistent responses, check local validation without a request and the
+  follower's backoff (a Retry-After kept between the minimum and the maximum), rejoin, repeated-loss wait and abort (a first join or a leave that never answers, or a signal aborted by `state()` before the join, cannot keep it from settling; the join and the leave share one bound), a join whose answer was lost and resumed without skipping what came meanwhile, and run the real binary with every room
+  response validated against the published schema, including that lost first join. The follower does not rejoin after a restart; it rejects with `runtime_session_expired`. Each guard was checked by
+  breaking it and watching a named test fail. These tests do not show multiple
+  users, that a frame can use a room, or anything about MCP; no browser smoke
+  covers rooms because no web code uses them.
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,

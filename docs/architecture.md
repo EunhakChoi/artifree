@@ -108,7 +108,14 @@ artifact service with the view's revision as the base and a key in a namespace
 only a frame can produce, reads the new revision back, and every side compares
 the receipt with the bytes it sent. The save moves the head, so the next view
 needs a new grant
-([0033](decisions/0033-runtime-source-write.md)). The other capabilities
+([0033](decisions/0033-runtime-source-write.md)). R12 adds rooms, which
+are not a capability and not storage: an in-memory, bounded room per actor and
+artifact, where each runtime connection (a tab) joins as named participants
+under a 15 s lease, and the server computes `isMe` and `sameTab` from the
+connection it issued. Events are ephemeral and never replayed to a late joiner;
+a restart empties every room; a frame cannot reach one yet, and there are no
+roles or users
+([0034](decisions/0034-room-and-presence.md)). The other capabilities
 remain proposed ([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 

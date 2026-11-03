@@ -23,6 +23,7 @@ use artifree_contracts::api::{
     Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
     PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
+    RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
     RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
     RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
@@ -56,6 +57,7 @@ use crate::operations::{self, ApiError};
 use crate::origin::normalize_origin;
 use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
+use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
 use crate::runtime_sessions::RuntimeSessions;
 use crate::runtime_source::{self, FrameCall};
 use crate::tokens;
@@ -87,6 +89,11 @@ pub struct Settings {
     /// Per-actor budget for the requests a runtime frame causes (decision
     /// 0032). It is counted apart from [`Settings::limits`].
     pub frame_limits: RequestLimits,
+    /// Per-actor budget for room calls (decision 0034), counted apart from
+    /// [`Settings::limits`] and [`Settings::frame_limits`].
+    pub room_limits: RequestLimits,
+    /// The monotonic clock leases are measured on. Tests replace it.
+    pub room_clock: Arc<dyn RoomClock>,
     /// Change streams one actor may keep open, at least 1.
     pub change_streams: u32,
     /// Optional public API and web origin, such as `https://artifree.example.com`.
@@ -111,6 +118,8 @@ impl Default for Settings {
             frame_ancestors: "http://127.0.0.1:* http://localhost:* http://[::1]:*".into(),
             limits: RequestLimits::default(),
             frame_limits: RequestLimits::FRAME,
+            room_limits: RequestLimits::ROOM,
+            room_clock: Arc::new(ProcessClock::new()),
             change_streams: crate::changes::DEFAULT_STREAMS_PER_ACTOR,
             api_origin: None,
             trusted_proxies: Vec::new(),
@@ -140,6 +149,8 @@ struct Shared {
     handoffs: Handoffs,
     limiter: Limiter,
     frame_limiter: Limiter,
+    room_limiter: Limiter,
+    rooms: RoomHub,
     /// Downloads being built, per actor (decision 0032).
     download_builds: Slots,
     feed: Feed,
@@ -210,6 +221,8 @@ impl AppState {
                 handoffs: Handoffs::new(Duration::from_secs(60 * 60)),
                 limiter: Limiter::new(settings.limits.validate()?),
                 frame_limiter: Limiter::new(settings.frame_limits.validate()?),
+                room_limiter: Limiter::new(settings.room_limits.validate()?),
+                rooms: RoomHub::new(Arc::clone(&settings.room_clock)),
                 download_builds: Slots::new(crate::runtime_source::MAX_DOWNLOAD_BUILDS),
                 feed: Feed::new(settings.change_streams),
                 draining: AtomicUsize::new(0),
@@ -251,6 +264,10 @@ impl AppState {
 
     pub(crate) fn runtime_sessions(&self) -> &RuntimeSessions {
         &self.shared.runtime_sessions
+    }
+
+    pub(crate) fn rooms(&self) -> &RoomHub {
+        &self.shared.rooms
     }
 
     pub(crate) fn handoffs(&self) -> &Handoffs {
@@ -426,6 +443,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .layer(middleware::map_response(no_store))
         .layer(middleware::from_fn_with_state(state.clone(), admit))
         .merge(frame_routes(state))
+        .merge(room_routes(state))
 }
 
 /// Largest body of a frame call: the secret, a package path and two numbers.
@@ -436,6 +454,35 @@ const MAX_FRAME_BODY_BYTES: usize = 16 * 1024;
 /// the small fields around it (decision 0033). Only the write route has this
 /// limit; a test writes a file of the largest size.
 const MAX_FRAME_WRITE_BODY_BYTES: usize = 3 * 512 * 1024;
+
+/// Largest body of a room call: a state or an event's text is at most 512
+/// bytes, which JSON escaping can make six times as long.
+const MAX_ROOM_BODY_BYTES: usize = 8 * 1024;
+
+/// Rooms and presence (decision 0034). A tab reaches its participants
+/// through the runtime connection in the path; the calls are admitted under
+/// the room budget, not the owner's or the frames'.
+fn room_routes(state: &AppState) -> Router<AppState> {
+    const ROOM: &str = "/v1/runtime-sessions/{session}/artifacts/{id}/room/participants";
+    Router::new()
+        .route(ROOM, axum::routing::post(join_room))
+        .route(
+            &format!("{ROOM}/{{participant}}/{{epoch}}/leave"),
+            axum::routing::post(leave_room),
+        )
+        .route(
+            &format!("{ROOM}/{{participant}}/{{epoch}}/heartbeat"),
+            axum::routing::post(room_heartbeat),
+        )
+        .route(
+            &format!("{ROOM}/{{participant}}/{{epoch}}/events"),
+            axum::routing::post(send_room_event),
+        )
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_ROOM_BODY_BYTES))
+        .layer(middleware::map_response(no_store))
+        .layer(middleware::from_fn_with_state(state.clone(), admit_room))
+}
 
 /// What a runtime frame can ask the workspace to ask the server (decisions
 /// 0019 and 0032). The workspace page sends these with the account token on
@@ -548,6 +595,11 @@ async fn admit(State(state): State<AppState>, request: Request, next: Next) -> R
 /// budget: whatever a frame floods, the owner's budget is untouched.
 async fn admit_frame(State(state): State<AppState>, request: Request, next: Next) -> Response {
     admit_under(&state.shared.frame_limiter, state.clone(), request, next).await
+}
+
+/// As [`admit`] for room calls, under the room budget.
+async fn admit_room(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    admit_under(&state.shared.room_limiter, state.clone(), request, next).await
 }
 
 async fn admit_under(
@@ -1633,6 +1685,88 @@ async fn set_runtime_grant(
     operations::set_runtime_grant(&state, actor, &session, &id, revision, request)
         .await
         .map(Json)
+}
+
+async fn join_room(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, String)>, PathRejection>,
+    body: Result<Json<RoomJoinRequest>, JsonRejection>,
+) -> Result<Json<RoomSnapshot>, ApiError> {
+    let Path((session, id)) = path?;
+    // The body is judged by `rooms` after the connection, so what it says
+    // about a malformed body does not tell a live connection from a dead one.
+    rooms::join(
+        &state,
+        &actor,
+        &session,
+        &id,
+        body.map(|Json(request)| request).map_err(ApiError::from),
+    )
+    .await
+    .map(Json)
+}
+
+async fn room_heartbeat(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, String, String, String)>, PathRejection>,
+    body: Result<Json<RoomHeartbeatRequest>, JsonRejection>,
+) -> Result<Json<RoomSnapshot>, ApiError> {
+    let Path((session, id, participant, epoch)) = path?;
+    let names = RoomNames {
+        session: &session,
+        artifact: &id,
+        participant: &participant,
+        epoch: &epoch,
+    };
+    rooms::heartbeat(
+        &state,
+        &actor,
+        names,
+        body.map(|Json(request)| request).map_err(ApiError::from),
+    )
+    .await
+    .map(Json)
+}
+
+async fn send_room_event(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, String, String, String)>, PathRejection>,
+    body: Result<Json<RoomEventRequest>, JsonRejection>,
+) -> Result<Json<RoomEventReceipt>, ApiError> {
+    let Path((session, id, participant, epoch)) = path?;
+    let names = RoomNames {
+        session: &session,
+        artifact: &id,
+        participant: &participant,
+        epoch: &epoch,
+    };
+    rooms::send(
+        &state,
+        &actor,
+        names,
+        body.map(|Json(request)| request).map_err(ApiError::from),
+    )
+    .await
+    .map(Json)
+}
+
+async fn leave_room(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, String, String, String)>, PathRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Path((session, id, participant, epoch)) = path?;
+    let names = RoomNames {
+        session: &session,
+        artifact: &id,
+        participant: &participant,
+        epoch: &epoch,
+    };
+    rooms::leave(&state, &actor, names).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn agent_sessions(

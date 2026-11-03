@@ -50,6 +50,17 @@ impl RequestLimits {
         concurrent: 16,
     };
 
+    /// The budget for room calls (decision 0034), kept apart from the owner's
+    /// and from the frames': a tab that polls its room every few seconds
+    /// uses a small part of it, and a runaway room client cannot use up the
+    /// budget the owner's saves need: 30 at once, then 900 per minute (15 per
+    /// second), 8 at a time.
+    pub const ROOM: Self = Self {
+        burst: 30,
+        per_minute: 900,
+        concurrent: 8,
+    };
+
     /// Checks that every limit admits at least one request.
     ///
     /// # Errors

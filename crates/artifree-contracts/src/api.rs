@@ -1200,6 +1200,152 @@ pub struct RuntimeSourceWriteReceipt {
     pub sha256: String,
 }
 
+/// Joins the room of an artifact as one participant of the caller's tab, or
+/// resumes the participant that tab already has in `slot` (decision 0034).
+/// The tab is the runtime connection named in the route, never a field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomJoinRequest {
+    /// The tab's own name for this participant, such as `page`: 1 to 32
+    /// ASCII letters, digits, `.`, `_` or `-`. Joining again with the same
+    /// slot resumes the same participant instead of adding another. A slot
+    /// means nothing outside the tab that chose it and other participants
+    /// never see it.
+    #[schemars(length(min = 1, max = 32), regex(pattern = r"^[A-Za-z0-9._-]+$"))]
+    pub slot: String,
+    /// What the participant tells the others about itself, at most 256 bytes
+    /// of UTF-8; the server counts bytes. Omitted means empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub state: Option<String>,
+}
+
+/// Renews a participant's lease and reads the room (decision 0034). The
+/// participant and its epoch are in the route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomHeartbeatRequest {
+    /// The newest event position the caller has read, from the `head` of its
+    /// last response. Events at or before it are not returned again, and
+    /// events from before the participant joined are never returned
+    /// whatever this says. A position past the room's newest event is
+    /// refused.
+    #[schemars(range(max = 9_007_199_254_740_991_u64))]
+    pub after: u64,
+    /// A new state of at most 256 bytes; omitted keeps the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub state: Option<String>,
+}
+
+/// Sends one ephemeral event to the room (decision 0034). It is delivered to
+/// the participants present who poll before the room drops it, and never
+/// kept for anyone else: there is no outbox, no acknowledgement and no
+/// retry that makes it arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomEventRequest {
+    /// What the event is about: 1 to 32 ASCII letters, digits, `.`, `_` or
+    /// `-`.
+    #[schemars(length(min = 1, max = 32), regex(pattern = r"^[A-Za-z0-9._-]+$"))]
+    pub kind: String,
+    /// The event's text, at most 512 bytes of UTF-8; the server counts
+    /// bytes. The server does not read it.
+    #[schemars(length(max = 512))]
+    pub data: String,
+}
+
+/// One participant in a room, as the viewer of a [`RoomSnapshot`] sees it.
+/// `is_me` and `same_tab` are computed by the server from the connection
+/// that asked; the participant sends neither.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomMember {
+    /// The participant, a number the server assigned. It is a label, not a
+    /// credential.
+    pub participant: u64,
+    /// The member's tab as this room labels tabs; equal numbers mean the
+    /// same tab while the tab has a participant in the room.
+    pub tab: u64,
+    /// The account the member acts as. Every member of a room acts as the
+    /// artifact's owner today.
+    pub actor: String,
+    /// Whether this member is the viewer's own participant.
+    pub is_me: bool,
+    /// Whether this member is in the viewer's tab. The viewer's own
+    /// participant is in its own tab.
+    pub same_tab: bool,
+    /// What the member says about itself.
+    pub state: String,
+}
+
+/// One ephemeral event, as the viewer of a [`RoomSnapshot`] sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomEvent {
+    /// The event's position in the room, from 1. It is not a change feed
+    /// cursor and not a revision.
+    pub seq: u64,
+    /// The sender's participant.
+    pub participant: u64,
+    /// The sender's tab, labelled as in [`RoomMember::tab`].
+    pub tab: u64,
+    /// Whether the viewer's own participant sent it.
+    pub is_me: bool,
+    /// Whether it came from the viewer's tab.
+    pub same_tab: bool,
+    /// What the sender says the event is about.
+    pub kind: String,
+    /// The sender's text.
+    pub data: String,
+}
+
+/// The viewer's identity in a room, who is present, and the events it has
+/// not read. A join and a heartbeat answer the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomSnapshot {
+    /// The viewer's participant. A join that resumes a participant returns
+    /// the same number as before; one after the lease ran out returns a new
+    /// one.
+    pub participant: u64,
+    /// The viewer's connection generation, to send with every later call. A
+    /// join that resumes the participant returns a newer one, and the
+    /// connection that held the older one can no longer act.
+    pub epoch: u64,
+    /// The viewer's tab as this room labels it.
+    pub tab: u64,
+    /// How long the lease lasts from this response, in milliseconds. Renew
+    /// well before it ends; the server measures it, not the client.
+    pub lease_ms: u64,
+    /// Everyone present, the viewer included, by participant.
+    pub members: Vec<RoomMember>,
+    /// Events after the requested position, oldest first. A join that makes
+    /// a new participant returns none. A join that resumes a participant
+    /// returns the events after the newest position that participant
+    /// reported in a heartbeat (its join position if it reported none); they
+    /// may repeat events an earlier connection of the participant handled, so
+    /// tell them apart by `seq`.
+    pub events: Vec<RoomEvent>,
+    /// The newest event's position, 0 if the room never had one. Send it as
+    /// `after` once its events were read.
+    pub head: u64,
+    /// Whether the room dropped events the caller had not read, including, in
+    /// a resuming join, events that came while the participant was away.
+    /// Ephemeral events can be lost; this says when it happened to this
+    /// caller.
+    pub missed: bool,
+}
+
+/// What a sent event was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomEventReceipt {
+    /// The event's position in the room. It says the room accepted the
+    /// event, not that anyone read it.
+    pub seq: u64,
+}
+
 /// What a commit did to an artifact. A kind that a client does not know
 /// still means the artifact changed: read it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

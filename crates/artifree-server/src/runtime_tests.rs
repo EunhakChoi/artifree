@@ -9,9 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
     ContentEncoding, CreateArtifactRequest, CreateRuntimeViewRequest, FileChange, FileUpload,
-    Handoff, RuntimeDownloadKind, RuntimeDownloadRequest, RuntimeSourceReadRequest,
-    RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
-    StageHandoffRequest, UpdateArtifactRequest,
+    Handoff, RoomHeartbeatRequest, RoomJoinRequest, RuntimeDownloadKind, RuntimeDownloadRequest,
+    RuntimeSourceReadRequest, RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest,
+    SetRuntimeGrantRequest, StageHandoffRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::RegisteredHandoffSession;
 use artifree_domain::SourceRevision;
@@ -25,6 +25,8 @@ use tower::ServiceExt;
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
+use crate::operations::ApiError;
+use crate::rooms::{self, RoomNames};
 use crate::runtime_source::{self, FrameCall};
 use crate::{changes, operations, preview};
 
@@ -1741,4 +1743,225 @@ fn close_while_creation_waits_for_storage_rejects_the_late_view() -> Result<(), 
     drop(runtime);
     drop(state);
     Ok(())
+}
+
+fn bad<T>() -> Result<T, ApiError> {
+    Err(ApiError::invalid("body is malformed"))
+}
+
+fn join_request(slot: &str) -> RoomJoinRequest {
+    RoomJoinRequest {
+        slot: slot.into(),
+        state: None,
+    }
+}
+
+#[test]
+fn another_actor_has_no_access_to_the_owners_room_or_participants() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let owner: ActorId = "local".parse()?;
+        let other: ActorId = "other".parse()?;
+        let artifact = create_runtime_artifact(&state, &owner).await?;
+        let tab = operations::open_runtime_session(&state, &owner, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let theirs = operations::open_runtime_session(&state, &other, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let mine = rooms::join(&state, &owner, &tab, &artifact, Ok(join_request("page")))
+            .await
+            .map_err(|error| error.body.message)?;
+
+        // The other actor's own connection cannot reach the owner's artifact.
+        let joined =
+            rooms::join(&state, &other, &theirs, &artifact, Ok(join_request("page"))).await;
+        assert!(matches!(&joined, Err(error) if error.status == StatusCode::NOT_FOUND));
+        // Nor can it use the owner's connection or participant.
+        let (participant, epoch) = (mine.participant.to_string(), mine.epoch.to_string());
+        for session in [&tab, &theirs] {
+            let names = RoomNames {
+                session,
+                artifact: &artifact,
+                participant: &participant,
+                epoch: &epoch,
+            };
+            let beat = rooms::heartbeat(
+                &state,
+                &other,
+                names,
+                Ok(RoomHeartbeatRequest {
+                    after: 0,
+                    state: None,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(&beat, Err(error) if error.status == StatusCode::NOT_FOUND),
+                "{:?}",
+                beat.map(|view| view.participant)
+            );
+        }
+        // The other actor's judgement of a bad body is the judgement of a good
+        // one on the owner's live connection: a connection that is not its
+        // own tells it nothing about how a body was read.
+        let same = |reference: &ApiError, other: &ApiError| {
+            (reference.status, reference.body.code) == (other.status, other.body.code)
+        };
+        let reference = rooms::join(&state, &other, &tab, &artifact, Ok(join_request("page")))
+            .await
+            .err()
+            .ok_or("the owner's connection must refuse another actor")?;
+        assert_eq!(reference.status, StatusCode::NOT_FOUND);
+        let refused = rooms::join(&state, &other, &tab, &artifact, bad())
+            .await
+            .err()
+            .ok_or("must be refused")?;
+        assert!(same(&reference, &refused), "join: {refused:?}");
+        let names = RoomNames {
+            session: &tab,
+            artifact: &artifact,
+            participant: &participant,
+            epoch: &epoch,
+        };
+        let refused = rooms::heartbeat(&state, &other, names, bad())
+            .await
+            .err()
+            .ok_or("must be refused")?;
+        assert!(same(&reference, &refused), "heartbeat: {refused:?}");
+        let refused = rooms::send(&state, &other, names, bad())
+            .await
+            .err()
+            .ok_or("must be refused")?;
+        assert!(same(&reference, &refused), "send: {refused:?}");
+        // The owner's participant is untouched.
+        let names = RoomNames {
+            session: &tab,
+            artifact: &artifact,
+            participant: &participant,
+            epoch: &epoch,
+        };
+        let beat = rooms::heartbeat(
+            &state,
+            &owner,
+            names,
+            Ok(RoomHeartbeatRequest {
+                after: 0,
+                state: None,
+            }),
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!(beat.members.len(), 1);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_join_whose_connection_closes_during_the_artifact_lookup_leaves_no_participant()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let artifact = create_runtime_artifact(&state, &actor).await?;
+        let closing = operations::open_runtime_session(&state, &actor, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let staying = operations::open_runtime_session(&state, &actor, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let (release, blocker) = hold_blocking_thread().await?;
+        let mut join = Box::pin(rooms::join(
+            &state,
+            &actor,
+            &closing,
+            &artifact,
+            Ok(join_request("page")),
+        ));
+        let pending = poll_fn(|context| match join.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await;
+        assert!(pending, "the artifact lookup must be queued before close");
+        operations::close_runtime_session(&state, &actor, &closing)
+            .map_err(|error| error.body.message)?;
+        release.send(())?;
+        let joined = join.await;
+        assert!(
+            matches!(&joined, Err(error) if error.status == StatusCode::NOT_FOUND),
+            "{:?}",
+            joined.map(|view| view.participant)
+        );
+        blocker.await?;
+        // The room holds nobody from the closed connection.
+        let view = rooms::join(
+            &state,
+            &actor,
+            &staying,
+            &artifact,
+            Ok(join_request("page")),
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!(view.members.len(), 1);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn revoking_the_token_of_a_connection_ends_what_its_participants_can_do()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let token = artifree_domain::identity::TokenId::from_random([9; 16]);
+        let artifact = create_runtime_artifact(&state, &actor).await?;
+        let tab = operations::open_runtime_session(&state, &actor, Some(token.clone()))
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let mine = rooms::join(&state, &actor, &tab, &artifact, Ok(join_request("page")))
+            .await
+            .map_err(|error| error.body.message)?;
+        state.runtime_sessions().revoke_token(&token);
+        let (participant, epoch) = (mine.participant.to_string(), mine.epoch.to_string());
+        let names = RoomNames {
+            session: &tab,
+            artifact: &artifact,
+            participant: &participant,
+            epoch: &epoch,
+        };
+        let beat = rooms::heartbeat(
+            &state,
+            &actor,
+            names,
+            Ok(RoomHeartbeatRequest {
+                after: 0,
+                state: None,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(&beat, Err(error) if error.status == StatusCode::NOT_FOUND
+                && error.body.code == artifree_contracts::api::ErrorCode::RuntimeSessionExpired),
+            "{:?}",
+            beat.map(|view| view.participant)
+        );
+        let joined = rooms::join(&state, &actor, &tab, &artifact, Ok(join_request("page"))).await;
+        assert!(matches!(&joined, Err(error) if error.status == StatusCode::NOT_FOUND));
+        Ok::<(), Box<dyn Error>>(())
+    })
 }

@@ -329,6 +329,9 @@ and, after the user grants each, list and read its own source and ask the
 user to save a file (decision [0032](decisions/0032-runtime-source-read-and-download.md)),
 and, after a separate edit grant, save one file of its own artifact as a new
 revision (decision [0033](decisions/0033-runtime-source-write.md)).
+The room and presence of decision [0034](decisions/0034-room-and-presence.md)
+is HTTP and client only: an agent has no runtime connection (tab), so **no MCP
+tool was added** for it.
 That bridge is a connection grant to the web page. **No MCP tool was added or
 changed for it**, and an agent token gives a preview nothing. An open web
 workspace shows an agent's saves as they are committed (decision

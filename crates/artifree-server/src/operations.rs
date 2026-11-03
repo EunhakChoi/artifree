@@ -26,6 +26,7 @@ use artifree_core::artifacts::{
 use artifree_core::jobs::JobPageSize;
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
+use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, TokenId};
@@ -667,7 +668,7 @@ pub(crate) fn missing_view() -> ApiError {
     )
 }
 
-fn session_error(error: SessionError) -> ApiError {
+pub(crate) fn session_error(error: SessionError) -> ApiError {
     match error {
         SessionError::Missing | SessionError::Closed => ApiError::new(
             StatusCode::NOT_FOUND,
@@ -947,7 +948,11 @@ pub(crate) fn close_runtime_session(
     state
         .runtime_sessions()
         .close(actor, id)
-        .map_err(session_error)
+        .map_err(session_error)?;
+    // The connection is closed first, so no join can pass its check after
+    // this; what it held in a room goes now rather than when its lease ends.
+    state.rooms().leave_tab(actor, &TabKey::new(id));
+    Ok(())
 }
 
 async fn runtime_source(
