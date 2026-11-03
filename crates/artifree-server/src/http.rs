@@ -366,7 +366,10 @@ impl AppState {
     /// Every refusal is the same `401` as a token nobody issued. It removes
     /// everything the user holds, because registrations carry no owner of
     /// their own: what the user opened under the newer generation is closed
-    /// too, and its clients open it again.
+    /// too, and its clients open it again. Removing only the late request's
+    /// registration needs a removal by identity in each of the five registries
+    /// and only the connection registry has one; decision 0036 (item 11)
+    /// records why this was kept.
     pub(crate) async fn ensure_current(
         &self,
         actor: &ActorId,
@@ -1087,6 +1090,36 @@ impl<S: Sync> FromRequestParts<S> for RequireAdmin {
     }
 }
 
+/// An extractor for the purge route (decision 0029, amended in decision
+/// 0036): the administrator, or a token issued to a user
+/// other than the owner profile. Purge acts on the caller's own artifacts only
+/// (the application checks ownership), so a user's token can reach nothing but
+/// that user's trash. A token issued to the **owner profile** stays refused
+/// (`403`): the owner has the bootstrap token, so an issued owner token is the
+/// agent credential of decision 0029. A non-owner user has no other
+/// credential, and the server cannot tell a person's token from an agent's;
+/// that is the cost of letting a user empty their own trash.
+#[derive(Debug, Clone)]
+pub(crate) struct RequirePurge;
+
+impl<S: Sync> FromRequestParts<S> for RequirePurge {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, ApiError> {
+        let auth = parts
+            .extensions
+            .get::<AuthContext>()
+            .ok_or_else(ApiError::unauthenticated)?;
+        if auth.is_admin || !auth.actor.is_owner() {
+            Ok(Self)
+        } else {
+            Err(ApiError::forbidden(
+                "purge needs the administrative credential or a user's own token",
+            ))
+        }
+    }
+}
+
 /// The credentials of a `Bearer` authorization value. The scheme is
 /// case-insensitive and separated from the token by one or more spaces
 /// (RFC 9110 section 11.4).
@@ -1377,13 +1410,15 @@ async fn cancel_job(
     Ok(Json(operations::cancel_job(&state, actor, key, &id).await?))
 }
 
-/// Removes a trashed artifact for good. The administrative credential only
-/// (decision 0029): an agent token authenticates as the owner but must not be
-/// able to do what cannot be undone. The guard comes first, so an agent token
-/// learns nothing about the artifact, the base, or the key.
+/// Removes the caller's own trashed artifact for good: the administrative
+/// credential or a non-owner user's token ([`RequirePurge`]). A token issued to
+/// the owner profile is an agent token and must not be able to do what cannot
+/// be undone (decision 0029). The guard comes first, so such a token learns
+/// nothing about the artifact, the base, or the key; another user's artifact
+/// answers as a missing one.
 async fn purge_artifact(
     State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
+    _: RequirePurge,
     Authenticated(actor): Authenticated,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,

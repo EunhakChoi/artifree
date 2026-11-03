@@ -734,11 +734,26 @@ enum Holder {
     /// Anything but not-found or a server error: an earlier case may have
     /// changed the state the call is conditional on.
     Reaches,
-    /// Administrative credentials only; the holder has none (`403`).
-    Forbidden,
+    /// The caller's own trash (purge): the holder succeeds, a user or the
+    /// administrator who does not hold the name is told it does not exist, and
+    /// a token issued to the owner profile is an agent token and is refused
+    /// (`403`) before the name is read (decisions 0029 and 0036).
+    Purges,
+
     /// Closing is idempotent: the holder gets a success, and anyone else the
     /// same success, which closes nothing of the holder's.
     Closes,
+}
+
+/// What a caller of the isolation table holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Credential {
+    /// The bootstrap token.
+    Administrator,
+    /// A token issued to a user other than the owner profile.
+    User,
+    /// A token issued to the owner profile: an agent token (decision 0029).
+    OwnerAgent,
 }
 
 struct Case {
@@ -775,7 +790,7 @@ const ROOM_ROUTE: &str = "/v1/runtime-sessions/{session}/artifacts/{artifact}/ro
     reason = "A table of every route reads best as one list."
 )]
 fn http_cases() -> Vec<Case> {
-    use Holder::{Closes, Forbidden, Reaches, Succeeds};
+    use Holder::{Closes, Purges, Reaches, Succeeds};
     vec![
         case("show", "GET", "/v1/artifacts/{artifact}", None, Succeeds),
         case(
@@ -1021,7 +1036,7 @@ fn http_cases() -> Vec<Case> {
             "POST",
             "/v1/artifacts/{trashed}/purge",
             Some(r#"{"base_metadata_revision":{trashed_base}}"#),
-            Forbidden,
+            Purges,
         ),
         case(
             "room leave",
@@ -1164,10 +1179,10 @@ fn every_declared_route_is_in_an_isolation_table_or_not_artifact_scoped() {
 async fn others_find_nothing(
     harness: &Harness,
     ids: &Ids,
-    others: &[(&str, &str, bool)],
+    others: &[(&str, &str, Credential)],
 ) -> TestResult {
     let absent = Ids::absent();
-    for (who, token, admin) in others {
+    for (who, token, credential) in others {
         for (number, case) in http_cases().iter().enumerate() {
             let mut answers = Vec::new();
             for names in [ids, &absent] {
@@ -1180,14 +1195,14 @@ async fn others_find_nothing(
                 answers.push((reply.status, names.scrub(&reply.text)));
             }
             let expected = match case.holder {
-                Holder::Forbidden if !admin => StatusCode::FORBIDDEN,
+                Holder::Purges if *credential == Credential::OwnerAgent => StatusCode::FORBIDDEN,
                 Holder::Closes => StatusCode::NO_CONTENT,
                 _ => StatusCode::NOT_FOUND,
             };
             assert_eq!(
                 answers[0].0, expected,
-                "{who}: {} {}: {}",
-                case.method, case.route, answers[0].1
+                "{who}: {} ({} {}): {}",
+                case.name, case.method, case.route, answers[0].1
             );
             assert_eq!(
                 answers[0], answers[1],
@@ -1269,9 +1284,10 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
             )
             .await?;
         match case.holder {
-            Holder::Succeeds | Holder::Closes => assert!(
+            Holder::Succeeds | Holder::Closes | Holder::Purges => assert!(
                 reply.status.is_success(),
-                "alice: {} {}: {} {}",
+                "alice: {} ({} {}): {} {}",
+                case.name,
                 case.method,
                 case.route,
                 reply.status,
@@ -1279,13 +1295,13 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
             ),
             Holder::Reaches => assert!(
                 reply.status != StatusCode::NOT_FOUND && !reply.status.is_server_error(),
-                "alice: {} {}: {} {}",
+                "alice: {} ({} {}): {} {}",
+                case.name,
                 case.method,
                 case.route,
                 reply.status,
                 reply.text
             ),
-            Holder::Forbidden => assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", case.name),
         }
     }
     Ok(())
@@ -1302,14 +1318,246 @@ async fn nobody_else_can_reach_what_a_user_holds_over_http() -> TestResult {
         &harness,
         &ids,
         &[
-            ("bob", bob.secret.as_str(), false),
-            ("owner", OWNER, true),
-            ("owner agent", agent.secret.as_str(), false),
+            ("bob", bob.secret.as_str(), Credential::User),
+            ("owner", OWNER, Credential::Administrator),
+            ("owner agent", agent.secret.as_str(), Credential::OwnerAgent),
         ],
     )
     .await?;
     state_is_untouched(&harness, &alice, &ids).await?;
     the_holder_is_not_refused(&harness, &alice, &ids).await
+}
+
+/// Creates an artifact for `token` and moves it to the trash; returns its id
+/// and the metadata revision the purge must name.
+async fn trashed_artifact(
+    harness: &Harness,
+    token: &str,
+    tag: &str,
+) -> Result<(String, u64), TestError> {
+    let created: Value = harness
+        .expect(
+            201,
+            "POST",
+            "/v1/artifacts",
+            token,
+            Some(format!("{tag}-create").as_str()),
+            Some(json!({ "title": tag, "files": [
+                { "path": "index.html", "encoding": "utf8", "content": ENTRY }
+            ]})),
+        )
+        .await?;
+    let id = created["artifact"]["id"].as_str().ok_or("id")?.to_owned();
+    let binned: Value = harness
+        .expect(
+            200,
+            "PATCH",
+            &format!("/v1/artifacts/{id}"),
+            token,
+            Some(format!("{tag}-trash").as_str()),
+            Some(json!({ "base_metadata_revision": 1, "deleted": true })),
+        )
+        .await?;
+    let base = binned["artifact"]["metadata_revision"]
+        .as_u64()
+        .ok_or("revision")?;
+    Ok((id, base))
+}
+
+#[tokio::test]
+async fn nobody_else_can_purge_what_a_user_trashed() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let bob = harness.person("bob").await?;
+    let (id, base) = trashed_artifact(&harness, &alice.secret, "alice-old").await?;
+    let path = format!("/v1/artifacts/{id}/purge");
+    let body = json!({ "base_metadata_revision": base });
+
+    // Bob cannot purge Alice's trashed artifact, and the answer is the one for
+    // a name nobody holds; nothing of Alice's changed.
+    let foreign = harness
+        .send(
+            "POST",
+            &path,
+            Some(&bob.secret),
+            Some("bob-purge-1"),
+            Some(body.to_string()),
+        )
+        .await?;
+    let nothing = format!("/v1/artifacts/art_{}/purge", "2".repeat(32));
+    let missing = harness
+        .send(
+            "POST",
+            &nothing,
+            Some(&bob.secret),
+            Some("bob-purge-2"),
+            Some(body.to_string()),
+        )
+        .await?;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{}", foreign.text);
+    assert_eq!(
+        foreign.text.replace(&id, "<name>"),
+        missing.text.replace(
+            &nothing["/v1/artifacts/".len()..nothing.len() - "/purge".len()],
+            "<name>"
+        ),
+        "a foreign trashed artifact answers like a missing one"
+    );
+    let trash: Value = harness
+        .expect(
+            200,
+            "GET",
+            "/v1/artifacts?deleted=true",
+            &alice.secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        trash["artifacts"][0]["id"],
+        id.as_str(),
+        "still in the trash"
+    );
+
+    // The owner profile's administrator does not reach a user's artifact.
+    let admin = harness
+        .send(
+            "POST",
+            &path,
+            Some(OWNER),
+            Some("admin-purge-1"),
+            Some(body.to_string()),
+        )
+        .await?;
+    assert_eq!(admin.status, StatusCode::NOT_FOUND, "{}", admin.text);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_user_purges_their_own_trashed_artifact_under_the_usual_rules() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let bob = harness.person("bob").await?;
+    let (id, base) = trashed_artifact(&harness, &alice.secret, "alice-old").await?;
+    let (bobs, bobs_base) = trashed_artifact(&harness, &bob.secret, "bob-old").await?;
+    let path = format!("/v1/artifacts/{id}/purge");
+    let body = json!({ "base_metadata_revision": base });
+
+    // A stale base is a conflict that removes nothing.
+    let stale = harness
+        .send(
+            "POST",
+            &path,
+            Some(&alice.secret),
+            Some("alice-purge-stale"),
+            Some(json!({ "base_metadata_revision": base + 1 }).to_string()),
+        )
+        .await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.text);
+
+    // Alice purges her own, and a retry with the same key replays.
+    let first: Value = harness
+        .expect(
+            200,
+            "POST",
+            &path,
+            &alice.secret,
+            Some("alice-purge-1"),
+            Some(body.clone()),
+        )
+        .await?;
+    assert_eq!(first["replayed"], false);
+    let again: Value = harness
+        .expect(
+            200,
+            "POST",
+            &path,
+            &alice.secret,
+            Some("alice-purge-1"),
+            Some(body),
+        )
+        .await?;
+    assert_eq!(again["replayed"], true);
+    assert_eq!(again["purged_at_ms"], first["purged_at_ms"]);
+    assert_eq!(
+        harness
+            .status("GET", &format!("/v1/artifacts/{id}"), Some(&alice.secret))
+            .await?,
+        404,
+        "a purged artifact is missing"
+    );
+
+    // Bob's trashed artifact was not touched by any of it.
+    let bobs_trash: Value = harness
+        .expect(
+            200,
+            "GET",
+            "/v1/artifacts?deleted=true",
+            &bob.secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(bobs_trash["artifacts"][0]["id"], bobs.as_str());
+    assert_eq!(bobs_trash["artifacts"][0]["metadata_revision"], bobs_base);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_user_cannot_purge_an_artifact_outside_the_trash_and_cannot_clean_up_content()
+-> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let live: Value = harness
+        .expect(
+            201,
+            "POST",
+            "/v1/artifacts",
+            &alice.secret,
+            Some("alice-live"),
+            Some(json!({ "title": "live", "files": [
+                { "path": "index.html", "encoding": "utf8", "content": ENTRY }
+            ]})),
+        )
+        .await?;
+    let id = live["artifact"]["id"].as_str().ok_or("id")?;
+    let refused = harness
+        .send(
+            "POST",
+            &format!("/v1/artifacts/{id}/purge"),
+            Some(&alice.secret),
+            Some("alice-purge-live"),
+            Some(json!({ "base_metadata_revision": 1 }).to_string()),
+        )
+        .await?;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.text);
+    assert!(refused.text.contains("not_in_trash"), "{}", refused.text);
+
+    // Content cleanup is global, so it stays with the administrator.
+    assert_eq!(
+        harness
+            .status("GET", "/v1/content/unreferenced", Some(&alice.secret))
+            .await?,
+        403
+    );
+    let apply = harness
+        .send(
+            "DELETE",
+            "/v1/content/unreferenced",
+            Some(&alice.secret),
+            Some("alice-cleanup"),
+            Some(json!({ "base_digest": "0".repeat(64) }).to_string()),
+        )
+        .await?;
+    assert_eq!(apply.status, StatusCode::FORBIDDEN, "{}", apply.text);
+    assert_eq!(
+        harness
+            .status("GET", "/v1/content/unreferenced", Some(OWNER))
+            .await?,
+        200
+    );
+    Ok(())
 }
 
 /// The tools that name an artifact or a session, with their arguments for the

@@ -10,7 +10,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use artifree_domain::SourceRevision;
-use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
+use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis, UserLabel};
 use artifree_domain::job::{
     Finding, JobFailure, JobId, JobKind, JobState, MAX_ACTIVE_JOBS_PER_ACTOR, MAX_ATTEMPTS,
     Problem, VerifyReport, WorkerId,
@@ -24,7 +24,9 @@ use artifree_ports::job_store::{
     Checkpoint, Claim, ClaimedJob, JobCancel, JobClaim, JobListing, JobPosition, JobReceipt,
     JobRecord, JobStore, JobStoreError, NewJob, Retry,
 };
+use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
+use artifree_providers::tokens::SqliteTokenStore;
 use common::{
     TempDir, TestResult, actor, create_demo, database_in, digest, key, package, parsed, revise,
     update_metadata,
@@ -1194,6 +1196,201 @@ fn a_running_job_of_a_trashed_artifact_is_left_alone_when_its_lease_expires() ->
     assert_eq!(second.job.id, job.id);
     assert_eq!(second.job.attempts, 2);
     assert!(second.lease.fence > first.lease.fence);
+    Ok(())
+}
+
+// --- a disabled user's jobs (decision 0036) ----------------------------------
+
+/// A registered user with an artifact of their own, and the identity store
+/// that disables and enables users in the same database.
+struct Tenant {
+    user: ActorId,
+    artifact: ArtifactId,
+}
+
+impl Fixture {
+    fn identity(&self) -> Result<SqliteTokenStore, Box<dyn std::error::Error>> {
+        Ok(SqliteTokenStore::open(&database_in(self.dir.path()))?)
+    }
+
+    /// Registers user number `seed` and creates an artifact for them.
+    fn tenant(&self, seed: u8) -> Result<Tenant, Box<dyn std::error::Error>> {
+        let user = ActorId::user([seed; 16]);
+        self.identity()?.register(&NewUser {
+            id: user.clone(),
+            label: parsed::<UserLabel>(&format!("User {seed}")),
+            created_at: "2026-11-03T00:00:00Z".to_owned(),
+        })?;
+        let created = create_demo(
+            &self.store,
+            &user,
+            &key(&format!("tenant-{seed}")),
+            "Mine",
+            FIRST,
+        )?;
+        Ok(Tenant {
+            user,
+            artifact: created.artifact.id,
+        })
+    }
+
+    fn enqueue_for(
+        &self,
+        tenant: &Tenant,
+        name: &str,
+        now: i64,
+    ) -> Result<JobRecord, JobStoreError> {
+        let request_key = key(name);
+        Ok(self
+            .store
+            .enqueue_job(NewJob {
+                request: RequestIdentity {
+                    actor: &tenant.user,
+                    key: &request_key,
+                    fingerprint: RequestFingerprint(digest(name)),
+                },
+                artifact: &tenant.artifact,
+                revision: SourceRevision(1),
+                kind: JobKind::VerifyRevision,
+                now: at(now),
+            })?
+            .job)
+    }
+
+    fn disable(&self, tenant: &Tenant) -> Result<(), Box<dyn std::error::Error>> {
+        self.identity()?
+            .set_disabled(&tenant.user, Some("2026-11-04T00:00:00Z"))?;
+        Ok(())
+    }
+
+    fn enable(&self, tenant: &Tenant) -> Result<(), Box<dyn std::error::Error>> {
+        self.identity()?.set_disabled(&tenant.user, None)?;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_queued_job_of_a_disabled_user_waits_and_runs_after_the_user_is_enabled() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.tenant(1)?;
+    let job = fixture.enqueue_for(&alice, "alice-job", 1_000)?;
+    fixture.disable(&alice)?;
+
+    let outcome = claim_with(&fixture.store, "a", 5_000)?;
+    assert!(
+        outcome.claimed.is_none() && outcome.settled.is_empty(),
+        "a disabled user's job is not taken"
+    );
+    let waiting = fixture.job(&job.id)?;
+    assert_eq!(waiting.state, JobState::Queued);
+    assert_eq!(waiting.attempts, 0, "no attempt was used");
+
+    fixture.enable(&alice)?;
+    let taken = fixture.claimed("a", 6_000)?;
+    assert_eq!(taken.job.id, job.id, "the job was not lost");
+    assert_eq!(taken.job.attempts, 1, "the first attempt is the first run");
+    Ok(())
+}
+
+#[test]
+fn disabling_one_user_leaves_the_jobs_of_the_others_claimable_in_order() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.tenant(1)?;
+    let bob = fixture.tenant(2)?;
+    let alices = fixture.enqueue_for(&alice, "alice-job", 1_000)?;
+    let bobs = fixture.enqueue_for(&bob, "bob-job", 2_000)?;
+    let owners = fixture.queued("owner-job", 3_000)?;
+    fixture.disable(&alice)?;
+
+    let first = fixture.claimed("a", 9_000)?;
+    let second = fixture.claimed("a", 9_000)?;
+    assert_eq!(
+        (first.job.id, second.job.id),
+        (bobs.id, owners.id),
+        "the older job of the disabled user is skipped, not blocking"
+    );
+    assert!(fixture.try_claim("a", 9_000)?.is_none());
+    assert_eq!(fixture.state(&alices.id)?, JobState::Queued);
+    Ok(())
+}
+
+#[test]
+fn a_job_running_when_its_user_is_disabled_finishes_normally() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.tenant(1)?;
+    let job = fixture.enqueue_for(&alice, "alice-job", 1_000)?;
+    let held = fixture.claimed("a", 2_000)?;
+    fixture.disable(&alice)?;
+
+    let checkpoint = fixture.store.heartbeat_job(&held.lease, at(2_500), LEASE)?;
+    assert_eq!(checkpoint, Checkpoint::Continue);
+    let ended = fixture
+        .store
+        .complete_job(&held.lease, &report(&[]), at(3_000))?;
+    assert_eq!(ended.state, JobState::Succeeded);
+    assert_eq!(fixture.state(&job.id)?, JobState::Succeeded);
+    Ok(())
+}
+
+#[test]
+fn a_running_job_whose_lease_expired_is_not_taken_over_while_its_user_is_disabled() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.tenant(1)?;
+    let job = fixture.enqueue_for(&alice, "alice-job", 0)?;
+    let first = fixture.claimed("a", 0)?;
+    fixture.disable(&alice)?;
+
+    assert!(
+        claim_with(&fixture.store, "b", LEASE_MS + 1)?
+            .claimed
+            .is_none()
+    );
+    let waiting = fixture.job(&job.id)?;
+    assert_eq!((waiting.state, waiting.attempts), (JobState::Running, 1));
+
+    fixture.enable(&alice)?;
+    let second = fixture.claimed("b", LEASE_MS + 2)?;
+    assert_eq!(second.job.id, job.id);
+    assert_eq!(second.job.attempts, 2);
+    assert!(second.lease.fence > first.lease.fence);
+    Ok(())
+}
+
+/// The claim must decide in its own write transaction. A worker that read
+/// "something is due" before the disable committed, and then waits for the
+/// write lock, must not take the job once the disable has committed.
+#[test]
+fn a_claim_waiting_for_the_write_lock_sees_a_disable_that_commits_first() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.tenant(1)?;
+    let job = fixture.enqueue_for(&alice, "alice-job", 1_000)?;
+
+    // Opening a store takes the write lock for its schema check, so it is
+    // done before the disable holds the lock.
+    let worker_store = fixture.another_store()?;
+    // The disable is written but not yet committed: the worker's idle read
+    // still sees the job as due and then queues for the write lock.
+    let disabler = fixture.sql()?;
+    disabler.execute_batch("BEGIN IMMEDIATE")?;
+    disabler.execute(
+        "UPDATE users SET disabled_at = '2026-11-04T00:00:00Z', \
+         state_generation = state_generation + 1 WHERE id = ?1",
+        [alice.user.as_str()],
+    )?;
+    let waiting = thread::spawn(move || claim_with(&worker_store, "a", 5_000));
+    // Only the direction of this wait matters for what is tested: a worker
+    // that has not reached the lock yet reads the committed disable instead,
+    // which is correct too, so a slow thread weakens the check, never fails it.
+    thread::sleep(std::time::Duration::from_millis(300));
+    disabler.execute_batch("COMMIT")?;
+
+    let outcome = waiting.join().map_err(|_| "the worker thread panicked")??;
+    assert!(
+        outcome.claimed.is_none(),
+        "the job was started by a claim that began before the disable committed"
+    );
+    assert_eq!(fixture.state(&job.id)?, JobState::Queued);
+    assert_eq!(fixture.job(&job.id)?.attempts, 0);
     Ok(())
 }
 

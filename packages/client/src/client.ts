@@ -767,7 +767,9 @@ export class ArtifreeClient {
    * artifact's metadata is no longer at `base_metadata_revision`, and with
    * `not_found` for an artifact that is missing, belongs to someone else, or
    * is already purged. A retry with the same key and request resolves with
-   * `replayed: true`.
+   * `replayed: true`. Needs the owner's access token or a token issued to a
+   * user other than the owner profile (decision 0036); a token issued to the
+   * owner profile rejects with `forbidden`.
    */
   async purgeArtifact(
     id: string,

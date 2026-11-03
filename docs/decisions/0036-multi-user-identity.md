@@ -184,6 +184,14 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
       the newer generation in the meantime. Those clients see a closed stream or
       connection and open it again. This is an availability cost of a rare race,
       accepted over tagging every registry entry with a generation.
+      Narrowing the refusal to the late request's own registration was
+      re-examined after this record (follow-up to S01) and **not changed**: it
+      needs a removal for one registration in each of five registries (change
+      streams, preview tickets, runtime views, runtime connections, handoff
+      inboxes), and only the connection registry has one by id. The cleanup is
+      also the right answer whenever the user is disabled or gone, which is
+      most refusals; only "enabled again under a newer generation" would gain,
+      and that is the rare case already accepted above.
     - **Pending view creations and fences.** `revoke_actor` drops the fences of an
       actor's views even while a create for one is pending. The create from the
       old epoch is refused anyway (its connection is closed, and the generation
@@ -194,17 +202,57 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
     - **Not covered.** The generation guards in-memory registrations that outlive
       a request. It does not guard stored data: an artifact, revision, data
       document or job written by a request that authenticated before the
-      disable is the user's data (item 5). A job queued before the disable still
-      runs (see Not implemented). A token an administrator issues is created
+      disable is the user's data (item 5). A job queued before the disable is
+      not started while the user is disabled (item 12). A token an administrator issues is created
       only for a user that is enabled in the same statement, so a racing disable
       cannot leave an active token. The owner has no generation to compare
       because it is never disabled.
 
+12. **Follow-up: a disabled user's queued jobs are not started.** The set of
+    jobs a worker may take (`DUE` in `storage/jobs.rs`) leaves out a job whose
+    owning user has a `users` row with `disabled_at` set. The user is read in
+    the same statement as the job, inside the claim's write transaction (the
+    idle poll's read uses the same predicate only as a hint, and the claim
+    decides again). So a disable that commits before the claim is seen by it,
+    and one that commits after the claim began to run cannot undo it: there is
+    no read-then-claim window. A skipped job stays `queued` (or
+    `retry_scheduled`) with the attempts it had, is not failed or released, and
+    is due again, oldest first, once the user is enabled; the other users'
+    jobs are claimed meanwhile. An actor with no `users` row is not disabled
+    (store tests use such actors). **A job that is already running when its
+    user is disabled is not stopped**: its worker keeps its lease, heartbeats
+    and writes its result, which is the user's stored data. If that worker
+    dies, the expired lease is not taken over until the user is enabled (the
+    job stays `running`, and listing it shows that). There is no new state, no
+    cancellation, and no schema change.
+13. **Follow-up: a user purges their own trashed artifacts.** `POST
+/v1/artifacts/{id}/purge` (decision 0029) accepts the administrator and a
+    token issued to a **user other than the owner profile**
+    (`RequirePurge`, `403` before the key, the identifier or the body is read,
+    for anyone else). The purge is `ArtifactService::purge` unchanged: the base
+    metadata revision, the request key (per user, item 7), the tombstone and
+    the replay rules are those of 0029, and its owner check is the one of every
+    other mutation, so another user's artifact (and the administrator's
+    attempt on a user's artifact) answers the `404` a missing one does. A
+    token issued to the **owner profile** is still refused: the owner has the
+    bootstrap token, so an issued owner token is the agent credential of
+    decision 0029, and no MCP tool purges. **The cost:** a non-owner user has
+    no other credential, and the server cannot tell a person's token from an
+    agent's, so an agent holding a user's token can purge that user's trashed
+    artifacts, which cannot be undone. Content cleanup (`/v1/content/unreferenced`)
+    stays administrator-only because it is global; a purge deletes the blobs no
+    other revision file refers to in its own transaction (0029), so the cleanup
+    only reclaims what was left by other means, and it is the administrator
+    who runs it for every user's bytes.
+14. **Follow-up: label uniqueness is documented where it is enforced.**
+    `UserLabel` said "not unique"; the registry's `label` column is `UNIQUE`
+    (exact, case-sensitive comparison; item 1 and the registry tests).
+
 ## Threat notes
 
 - **A stolen user token** is that user's access and nothing else: it cannot list
-  users, issue tokens, purge or clean up (administrator only), or read another
-  user's names. Revoke it; disable the user to close its open resources too.
+  users, issue tokens, clean up content (administrator only), purge anything but
+  its own trashed artifacts (item 13), or read another user's names. Revoke it; disable the user to close its open resources too.
 - **Probing for another user's ids.** The answers for a real foreign name and an
   unknown name are byte-identical in the tests, including the order of checks:
   authentication, then administrator, then route names, then the body.
@@ -239,20 +287,23 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
   workspace still signs in with the owner's token. No claim is made about
   identity federation.
 - A web screen for users, and MCP tools for users or tokens (by decision).
-- Purging or cleaning up as a user: both are administrator-only, so a user's
-  trashed artifacts cannot be purged by that user, and the administrator's purge
-  reaches only the owner profile's artifacts.
+- Cleaning up content as a user: content cleanup is global and
+  administrator-only. A user can purge their own trashed artifacts (item 13),
+  but the administrator's purge still reaches only the owner profile's
+  artifacts, and there is no per-user cleanup.
+- Purge through a token issued to the owner profile, and any MCP tool for
+  purge (both stay refused, as in 0029).
 - Deleting or renaming a user, erasing a user's data, transferring a token,
   per-user storage quotas, configurable per-user rate limits, an audit log,
   per-user backups or exports of the whole account.
 - Frame identity (a runtime frame acts for the user whose workspace page asked),
   a multi-process or shared limiter and room store, and any statement about
   network isolation.
-- Cancelling a disabled user's jobs: disabling stops requests and what the
-  server holds in memory, not the separate worker, so a job already queued or
-  running for the user is carried out, and its result is the user's stored data.
-  A job that a delayed request enqueues after a disable and an enable is the
-  same: stored data of the user, not state the generation closes.
+- Cancelling a disabled user's jobs: a job that is **running** when the user is
+  disabled is carried out, and its result is the user's stored data (item 12).
+  Queued jobs are not started while the user is disabled (item 12). A job that a
+  delayed request enqueues after a disable and an enable is stored data of the
+  user, not state the generation closes.
 - Per-registration ownership: a refused late request closes everything the user
   holds, not only its own registration (item 11).
 
@@ -269,6 +320,13 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
 `crates/artifree-server/tests/multi_user.rs` (HTTP and MCP isolation tables,
 the route inventory check, user management and its administrator boundary,
 token ownership, disabling and enabling, per-user budgets, the owner profile),
+item 12 in `crates/artifree-providers/tests/jobs.rs` (a disabled user's job is
+not claimed and uses no attempt, then is claimed after enabling; other users'
+jobs are claimed in order; a running job completes; an expired lease is not
+taken over; a claim waiting for the write lock sees a disable that commits
+first), item 13 in `multi_user.rs` (the route table classifies the purge route
+for the owner, Alice, Bob and an owner-profile agent token; a user's purge
+rules; cleanup stays administrator-only),
 `crates/artifree-providers/tests/users.rs` and `schema_upgrade.rs` (the registry,
 its constraints, the state generation (raised by each change, never lowered, kept
 across reopen), the per-actor feed, upgrades from every earlier schema

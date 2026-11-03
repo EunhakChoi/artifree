@@ -276,7 +276,8 @@ selection and, after user confirmation, delivers it to an explicitly registered
 MCP inbox ([0021](decisions/0021-agent-selection-handoff.md)). Its receipt
 acknowledgement is separate from model work and its state is process-local.
 O05 removes an artifact in the trash for good (`POST
-/v1/artifacts/{id}/purge`, administrative credential only, conditional on its metadata revision and
+/v1/artifacts/{id}/purge`, the administrative credential or a token issued to another user
+for that user's own trash, conditional on its metadata revision and
 retryable by key) and deletes file content no revision file refers to
 (`GET` for the dry run and its set digest, `DELETE` conditional on that digest
 and retryable by key, `/v1/content/unreferenced`). A purge keeps a tombstone so that

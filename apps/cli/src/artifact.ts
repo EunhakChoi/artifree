@@ -67,8 +67,10 @@ trash, where nothing can read or change it until recover takes it out.
 purge removes an artifact that is in the trash for good: its files and titles
 are deleted and it can never be recovered. It needs --yes, and
 --base-metadata from list --deleted, which makes it refuse an artifact that
-was recovered and deleted again since. It needs the owner's access token: an
-issued agent token is refused with 403 forbidden. A retry with the same
+was recovered and deleted again since. It needs the owner's access token or a
+token issued to a user other than the owner profile, and removes only that
+user's own artifacts; a token issued to the owner profile is refused with 403
+forbidden. A retry with the same
 --idempotency-key returns the original result; every other request that named
 the artifact is then not_found. Copies made from it are not affected.
 edit changes some files even if the artifact moved on since --base, which is
