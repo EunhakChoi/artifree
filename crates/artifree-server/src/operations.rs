@@ -31,7 +31,7 @@ use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
-use artifree_domain::data_query::{MemberSelect, MembersQuery};
+use artifree_domain::data_query::{Member, MemberSelect, MembersQuery};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
@@ -1528,7 +1528,8 @@ pub(crate) async fn read_data(
         exists: read.value.is_some(),
         value: read
             .value
-            .and_then(|value| JsonValue::from_text(value.to_canonical())),
+            .map(|value| wire_value(value.to_canonical()))
+            .transpose()?,
     })
 }
 
@@ -1580,17 +1581,44 @@ pub(crate) async fn data_members(
                 .members
                 .entries
                 .into_iter()
-                .map(|member| DataMember {
-                    name: member.name,
-                    value: member
-                        .value
-                        .and_then(|value| JsonValue::from_text(value.to_canonical())),
-                    too_large: member.too_large.then_some(true),
-                })
-                .collect(),
+                .map(|member| member_dto(member, values))
+                .collect::<Result<Vec<_>, _>>()?,
             next_after: read.members.next_after,
         },
     })
+}
+
+/// A member as the wire states it. Under `select=values` a member has exactly
+/// one of `value` and `too_large`, and under `names` neither; a member that
+/// breaks that, or a stored value whose canonical text is not JSON (neither
+/// can happen: the domain builds members and writes canonical text), is a
+/// server error, never a member that says nothing about its value.
+fn member_dto(member: Member, values: bool) -> Result<DataMember, ApiError> {
+    let value = member
+        .value
+        .map(|value| wire_value(value.to_canonical()))
+        .transpose()?;
+    let consistent = if values {
+        value.is_some() != member.too_large
+    } else {
+        value.is_none() && !member.too_large
+    };
+    if !consistent {
+        return Err(ApiError::unavailable(
+            "a data member does not match the query that listed it",
+        ));
+    }
+    Ok(DataMember {
+        name: member.name,
+        value,
+        too_large: member.too_large.then_some(true),
+    })
+}
+
+/// The wire form of a stored value's canonical text.
+fn wire_value(text: String) -> Result<JsonValue, ApiError> {
+    JsonValue::from_text(text)
+        .ok_or_else(|| ApiError::unavailable("a stored data value is not valid JSON"))
 }
 
 pub(crate) async fn set_data(
@@ -1676,9 +1704,11 @@ async fn write_data(
     state
         .run(move |artifacts| artifacts.check_data_access(&checked, &id_for_check))
         .await?;
-    // When the hub is full the write goes ahead without a window: nothing
-    // streams this space (an open stream would hold its window), and the
-    // first stream to open anchors a new one from storage.
+    // When the hub is full (or unusable) the write goes ahead without a
+    // window. After it commits, any window that exists for the pair is
+    // forgotten and woken, so its streams reset at once, and a registry that
+    // cannot be searched wakes every data stream to compare itself with
+    // storage. A stream that opens later anchors from storage.
     let space = state.data_hub().space(&actor, &id).ok();
     // The gate is awaited here, not inside the blocking task: a reader holds
     // it while it waits for a blocking thread, so a thread parked on the gate
@@ -1697,18 +1727,19 @@ async fn write_data(
             let _gate = gate;
             let outcome =
                 artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)?;
-            if let Some(space) = &space
-                && outcome.delivery == Delivery::Committed
-                && outcome.changed
-            {
-                data_hub::record_after_commit(
-                    hub.data_hub(),
-                    space,
-                    artifacts,
-                    (&actor, &id),
-                    &change,
-                    outcome.version,
-                );
+            if outcome.delivery == Delivery::Committed && outcome.changed {
+                if let Some(space) = &space {
+                    data_hub::record_after_commit(
+                        hub.data_hub(),
+                        space,
+                        artifacts,
+                        (&actor, &id),
+                        &change,
+                        outcome.version,
+                    );
+                } else if data_hub::forget_unrecorded(hub.data_hub(), &actor, &id) {
+                    hub.feed().committed();
+                }
             }
             Ok(outcome)
         })
@@ -1866,6 +1897,41 @@ mod tests {
             revision,
             delivery,
         })
+    }
+
+    #[test]
+    fn a_member_states_its_value_or_that_it_is_too_large_and_never_neither() {
+        let member = |value: Option<DataValue>, too_large| Member {
+            name: "m".into(),
+            value,
+            too_large,
+        };
+        let one = || Some(DataValue::Null);
+        // (value, too_large, values selected, accepted)
+        let cases = [
+            (one(), false, true, true),
+            (None, true, true, true),
+            (None, false, false, true),
+            (None, false, true, false),
+            (one(), true, true, false),
+            (one(), false, false, false),
+            (None, true, false, false),
+        ];
+        for (value, too_large, values, accepted) in cases {
+            let described = format!("value {value:?}, too_large {too_large}, values {values}");
+            let dto = member_dto(member(value, too_large), values);
+            assert_eq!(dto.is_ok(), accepted, "{described}");
+        }
+        // A stored null is a value, present as null.
+        let stored_null =
+            member_dto(member(one(), false), true).map(|dto| dto.value.map(|v| v.get().to_owned()));
+        assert_eq!(stored_null.ok().flatten().as_deref(), Some("null"));
+        // Canonical text that is not JSON is a server error, not a gap.
+        let refused = wire_value("{".into());
+        assert_eq!(
+            refused.err().map(|error| error.status),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
     }
 
     #[test]

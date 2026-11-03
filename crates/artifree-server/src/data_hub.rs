@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
@@ -187,6 +188,9 @@ pub(crate) struct Space {
     gate: Arc<tokio::sync::Mutex<()>>,
     window: Mutex<Window>,
     wake: watch::Sender<()>,
+    /// Set when the artifact is purged: the window holds nothing and any use
+    /// of it fails, so a stream that still holds the space ends.
+    ended: AtomicBool,
 }
 
 impl Space {
@@ -195,6 +199,7 @@ impl Space {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             window: Mutex::new(Window::default()),
             wake: watch::Sender::new(()),
+            ended: AtomicBool::new(false),
         }
     }
 
@@ -211,13 +216,35 @@ impl Space {
         Arc::clone(&self.gate).lock_owned().await
     }
 
-    /// Runs `use_window` on the window.
+    /// Runs `use_window` on the window. Fails once the space has ended.
     pub(crate) fn with_window<T>(
         &self,
         use_window: impl FnOnce(&mut Window) -> T,
     ) -> Result<T, Poisoned> {
+        if self.ended.load(Ordering::Acquire) {
+            return Err(Poisoned);
+        }
         let mut window = self.window.lock().map_err(|_| Poisoned)?;
         Ok(use_window(&mut window))
+    }
+
+    /// Ends the space: drops every value its window retains, makes any later
+    /// use of the window fail, and wakes its streams so that they end. A
+    /// stream blocked on a slow reader still holds the space, but nothing in
+    /// it. A window whose lock was poisoned is left alone: it is unusable
+    /// already.
+    fn end(&self) {
+        self.ended.store(true, Ordering::Release);
+        if let Ok(mut window) = self.window.lock() {
+            window.invalidate();
+        }
+        self.wake();
+    }
+
+    /// The bytes of values the window retains, whatever its state.
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.window.lock().map_or(0, |window| window.bytes)
     }
 
     /// A receiver that sees every wake-up from now on.
@@ -321,17 +348,62 @@ impl DataHub {
     /// poisoned), so that the next stream starts a new one. Streams that hold
     /// the old one end at their next look at it.
     pub(crate) fn discard(&self, actor: &ActorId, artifact: &ArtifactId) {
-        if let Ok(mut registry) = self.registry.lock() {
-            registry.spaces.remove(&(actor.clone(), artifact.clone()));
-        }
+        self.unpoisoned()
+            .spaces
+            .remove(&(actor.clone(), artifact.clone()));
     }
 
-    /// Drops the windows of a purged artifact, so that its values do not
-    /// stay in memory. A stream that still holds one ends at its next check.
+    /// The registry for removing windows only. Removal is safe on a registry
+    /// whose lock a panic poisoned (a map entry is whole or absent), and it
+    /// must still work there: a purge cannot leave values in memory because
+    /// the registry is unusable for everything else.
+    fn unpoisoned(&self) -> std::sync::MutexGuard<'_, Registry> {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Ends and drops the windows of a purged artifact, so that its values do
+    /// not stay in memory, not even in a window that a stream still holds:
+    /// each is emptied and marked ended before it is unlinked, and its
+    /// streams are woken to end.
     pub(crate) fn forget(&self, artifact: &ArtifactId) {
-        if let Ok(mut registry) = self.registry.lock() {
-            registry.spaces.retain(|(_, id), _| id != artifact);
-        }
+        self.unpoisoned().spaces.retain(|(_, id), entry| {
+            let keep = id != artifact;
+            if !keep {
+                entry.space.end();
+            }
+            keep
+        });
+    }
+
+    /// The window kept for the pair, if there is one; none is made.
+    ///
+    /// # Errors
+    ///
+    /// When the registry is unusable.
+    pub(crate) fn existing(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+    ) -> Result<Option<Arc<Space>>, Poisoned> {
+        let registry = self.registry.lock().map_err(|_| Poisoned)?;
+        Ok(registry
+            .spaces
+            .get(&(actor.clone(), artifact.clone()))
+            .map(|entry| Arc::clone(&entry.space)))
+    }
+
+    /// Poisons the registry's lock, as a panic in a holder would.
+    #[cfg(test)]
+    pub(crate) fn poison_registry(&self) {
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let _guard = self.registry.lock();
+                panic!("poisons the registry on purpose");
+            });
+            assert!(holder.join().is_err(), "the fixture did not poison");
+        });
     }
 
     /// Whether a window is kept for the pair.
@@ -375,6 +447,26 @@ pub(crate) fn record_after_commit(
         hub.discard(actor, artifact);
     }
     space.wake();
+}
+
+/// What a committed write does when it had no window to record in (the hub was
+/// full): any window that exists for the pair at this moment is forgotten and
+/// woken, so its streams reset at once instead of waiting for the next check.
+/// A stream that opens later anchors from storage and sees the write. Returns
+/// whether the registry could not be searched (it is poisoned), in which case
+/// the caller wakes every data stream to compare itself with storage.
+pub(crate) fn forget_unrecorded(hub: &DataHub, actor: &ActorId, artifact: &ArtifactId) -> bool {
+    match hub.existing(actor, artifact) {
+        Ok(Some(space)) => {
+            if space.with_window(Window::invalidate).is_err() {
+                hub.discard(actor, artifact);
+            }
+            space.wake();
+            false
+        }
+        Ok(None) => false,
+        Err(Poisoned) => true,
+    }
 }
 
 fn try_record(

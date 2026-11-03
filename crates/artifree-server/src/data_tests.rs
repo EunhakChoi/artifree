@@ -4,12 +4,14 @@
 //! blocking thread on a gate that a reader holds.
 
 use std::error::Error;
+use std::future::poll_fn;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
-    ContentEncoding, CreateArtifactRequest, FileUpload, JsonValue, SetDataRequest,
-    UpdateArtifactRequest,
+    ContentEncoding, CreateArtifactRequest, FileUpload, JsonValue, PurgeArtifactRequest,
+    SetDataRequest, UpdateArtifactRequest,
 };
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
@@ -18,10 +20,11 @@ use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use http_body::Body as _;
 use tower::ServiceExt;
 
 use crate::auth::AccessToken;
-use crate::data_hub::{self, MAX_WINDOWS, Replay};
+use crate::data_hub::{self, MAX_WINDOWS, MAX_WINDOWS_PER_ACTOR, Replay};
 use crate::http::{self, AppState, Settings};
 use crate::operations;
 
@@ -384,6 +387,256 @@ fn a_failed_read_back_forgets_the_window_and_wakes_its_streams() -> TestResult {
             "the window kept a stale history"
         );
         assert!(woken.has_changed()?, "streams were not woken to notice");
+        Ok(())
+    })
+}
+
+/// Opens a data stream of the owner and returns its body.
+async fn open_stream(state: &AppState, id: &ArtifactId) -> Result<Body, Box<dyn Error>> {
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/artifacts/{id}/data/events"))
+        .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
+        .body(Body::empty())?;
+    let response = http::router(state.clone()).oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(response.into_body())
+}
+
+/// Reads the stream until `needle` has arrived, or fails after `within`.
+async fn read_until(
+    body: &mut Body,
+    needle: &str,
+    within: Duration,
+) -> Result<String, Box<dyn Error>> {
+    let mut seen = String::new();
+    let outcome = tokio::time::timeout(within, async {
+        while !seen.contains(needle) {
+            match poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)).await {
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        seen.push_str(&String::from_utf8_lossy(&data));
+                    }
+                }
+                Some(Err(error)) => return Err(error.to_string()),
+                None => return Err("the stream ended".to_owned()),
+            }
+        }
+        Ok(())
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => Ok(seen),
+        Ok(Err(reason)) => Err(format!("{reason} before {needle}: {seen}").into()),
+        Err(_) => Err(format!("no {needle} within {within:?}: {seen}").into()),
+    }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, Box<dyn Error>> {
+    Ok(tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()?)
+}
+
+/// A purge empties the windows that streams still hold, so their values do
+/// not stay in memory outside the registry's bounds, and wakes those streams
+/// so that they end.
+#[test]
+fn a_purge_empties_the_windows_that_streams_still_hold() -> TestResult {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    runtime()?.block_on(async {
+        let actor = ActorId::owner();
+        let id = create_artifact(&state, &actor).await?;
+        let held = state
+            .data_hub()
+            .space(&actor, &id)
+            .map_err(|error| error.to_string())?;
+        let woken = held.watch();
+        let mut body = open_stream(&state, &id).await?;
+        read_until(&mut body, "event: snapshot", Duration::from_secs(5)).await?;
+        let blob = format!("\"{}\"", "x".repeat(100 * 1024));
+        operations::set_data(
+            &state,
+            actor.clone(),
+            "purge-held-write".parse()?,
+            &id.to_string(),
+            set_request("blob", 0, &blob)?,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert!(
+            held.retained_bytes() > 100 * 1024,
+            "the write was not retained"
+        );
+        operations::update(
+            &state,
+            actor.clone(),
+            "purge-held-trash".parse()?,
+            &id.to_string(),
+            UpdateArtifactRequest {
+                base_metadata_revision: 1,
+                title: None,
+                pinned: None,
+                deleted: Some(true),
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        // Only the purge is judged: leave what the trash did out of it.
+        let _ = woken.has_changed();
+        let before = held.retained_bytes();
+        operations::purge(
+            &state,
+            actor.clone(),
+            "purge-held-purge".parse()?,
+            &id.to_string(),
+            PurgeArtifactRequest {
+                base_metadata_revision: 2,
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert!(before > 0);
+        assert_eq!(held.retained_bytes(), 0, "a purged value stayed in memory");
+        assert!(
+            held.with_window(|_| ()).is_err(),
+            "a stream could still use the window of a purged artifact"
+        );
+        assert!(!state.data_hub().contains(&actor, &id));
+        assert!(woken.has_changed()?, "the streams were not woken to end");
+        let ended = read_until(&mut body, "never sent", Duration::from_secs(5)).await;
+        assert!(
+            ended.is_err_and(|error| error.to_string().contains("the stream ended")),
+            "the stream did not end after the purge"
+        );
+        Ok(())
+    })
+}
+
+/// With the hub full the write still succeeds and makes no window.
+#[test]
+fn a_write_with_a_full_hub_commits_and_makes_no_window() -> TestResult {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    runtime()?.block_on(async {
+        let actor = ActorId::owner();
+        let id = create_artifact(&state, &actor).await?;
+        let hub = state.data_hub();
+        let mut held = Vec::new();
+        for who in 1..=u8::try_from(MAX_WINDOWS / MAX_WINDOWS_PER_ACTOR)? {
+            for number in 0..u8::try_from(MAX_WINDOWS_PER_ACTOR)? {
+                held.push(
+                    hub.space(&other_actor(who), &ArtifactId::from_random([number; 16]))
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+        }
+        assert_eq!(hub.len(), MAX_WINDOWS);
+        let reply = operations::set_data(
+            &state,
+            actor.clone(),
+            "full-hub-write".parse()?,
+            &id.to_string(),
+            set_request("a", 0, "1")?,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!((reply.data_version, reply.changed), (1, true));
+        assert_eq!(hub.len(), MAX_WINDOWS);
+        assert!(!hub.contains(&actor, &id));
+        Ok(())
+    })
+}
+
+/// A write that had no window to record in forgets and wakes the window that
+/// exists afterwards, so its streams reset at once.
+#[test]
+fn an_unrecorded_commit_forgets_and_wakes_the_window_that_exists() -> TestResult {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    runtime()?.block_on(async {
+        let actor = ActorId::owner();
+        let id = create_artifact(&state, &actor).await?;
+        let hub = state.data_hub();
+        // No window: nothing is made, and no global wake is needed.
+        assert!(!data_hub::forget_unrecorded(hub, &actor, &id));
+        assert!(!hub.contains(&actor, &id));
+        // A stream's window, anchored at version 3 with history to resume from.
+        let space = hub.space(&actor, &id).map_err(|error| error.to_string())?;
+        space
+            .with_window(|window| window.anchor(AppDataVersion(3)))
+            .map_err(|_| "the window is poisoned")?;
+        let woken = space.watch();
+        assert!(!data_hub::forget_unrecorded(hub, &actor, &id));
+        let complete = space
+            .with_window(|window| matches!(window.after(AppDataVersion(3)), Replay::Edits { .. }))
+            .map_err(|_| "the window is poisoned")?;
+        assert!(!complete, "the window kept believing it was complete");
+        assert!(woken.has_changed()?, "its streams were not woken");
+        // A registry that cannot be searched asks for a wake of every stream.
+        hub.poison_registry();
+        assert!(data_hub::forget_unrecorded(hub, &actor, &id));
+        Ok(())
+    })
+}
+
+/// A write made while the registry is unusable still reaches the streams that
+/// were open before it: they compare themselves with storage at once and
+/// reset, instead of waiting for the next heartbeat.
+#[test]
+fn a_stream_open_before_an_unrecorded_write_resets_promptly() -> TestResult {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    runtime()?.block_on(async {
+        let actor = ActorId::owner();
+        let id = create_artifact(&state, &actor).await?;
+        let mut body = open_stream(&state, &id).await?;
+        read_until(&mut body, "event: snapshot", Duration::from_secs(5)).await?;
+        state.data_hub().poison_registry();
+        let reply = operations::set_data(
+            &state,
+            actor.clone(),
+            "unrecorded-write".parse()?,
+            &id.to_string(),
+            set_request("a", 0, "1")?,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!(reply.data_version, 1);
+        // The heartbeat is fifteen seconds: this is the wake, not the check.
+        let seen = read_until(&mut body, "event: reset", Duration::from_secs(5)).await?;
+        assert!(seen.contains(r#""data_version":1"#), "{seen}");
+        Ok(())
+    })
+}
+
+/// A registry that a panic poisoned still lets a purge empty the windows it
+/// holds: a purged value is not kept because the registry is unusable.
+#[test]
+fn a_purge_empties_windows_even_when_the_registry_is_poisoned() -> TestResult {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    runtime()?.block_on(async {
+        let actor = ActorId::owner();
+        let id = create_artifact(&state, &actor).await?;
+        let hub = state.data_hub();
+        let held = hub.space(&actor, &id).map_err(|error| error.to_string())?;
+        let blob = format!("\"{}\"", "x".repeat(10 * 1024));
+        operations::set_data(
+            &state,
+            actor.clone(),
+            "poisoned-purge-write".parse()?,
+            &id.to_string(),
+            set_request("blob", 0, &blob)?,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert!(held.retained_bytes() > 0, "the write was not retained");
+        hub.poison_registry();
+        hub.forget(&id);
+        assert_eq!(held.retained_bytes(), 0, "a purged value stayed in memory");
+        assert!(held.with_window(|_| ()).is_err());
         Ok(())
     })
 }

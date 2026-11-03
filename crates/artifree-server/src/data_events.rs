@@ -405,7 +405,7 @@ impl Producer {
                     data_version: version.0,
                     path,
                     exists: value.is_some(),
-                    value: json(value.as_ref()),
+                    value: json(value.as_ref())?,
                 },
             ),
             Outgoing::Change { version, seen } => event(
@@ -416,7 +416,7 @@ impl Producer {
                     data_version: version.0,
                     path: seen.path.to_string(),
                     exists: seen.value.is_some(),
-                    value: json(seen.value.as_ref()),
+                    value: json(seen.value.as_ref())?,
                 },
             ),
             Outgoing::Position { version } => event(
@@ -431,9 +431,15 @@ impl Producer {
     }
 }
 
-/// The wire form of a value, in the canonical text the space stores.
-fn json(value: Option<&DataValue>) -> Option<JsonValue> {
-    value.and_then(|value| JsonValue::from_text(value.to_canonical()))
+/// The wire form of a value, in the canonical text the space stores. A value
+/// that cannot be stated stops the stream: an event that says a path exists
+/// and carries no value would be wrong, and the client's reconnect is reset.
+fn json(value: Option<&DataValue>) -> Result<Option<JsonValue>, Stopped> {
+    value.map(|value| wire(value.to_canonical())).transpose()
+}
+
+fn wire(text: String) -> Result<JsonValue, Stopped> {
+    JsonValue::from_text(text).ok_or(Stopped)
 }
 
 #[cfg(test)]
@@ -464,6 +470,13 @@ mod tests {
                 Outgoing::Position { version } => ("position", version.0),
             })
             .collect()
+    }
+
+    #[test]
+    fn a_value_that_is_not_json_stops_the_stream_instead_of_being_left_out() {
+        assert!(matches!(json(Some(&DataValue::Null)), Ok(Some(_))));
+        assert!(matches!(json(None), Ok(None)));
+        assert!(wire("{".into()).is_err());
     }
 
     #[test]
