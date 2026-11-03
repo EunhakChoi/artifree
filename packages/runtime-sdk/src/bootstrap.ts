@@ -7,6 +7,7 @@ import type {
   SourcePart,
   SourceReadRequest,
 } from './index.js';
+import { isPackagePath } from './package-path.js';
 
 /** Server-issued initialization of a single frame and view generation. */
 export interface RuntimeInitialization {
@@ -339,8 +340,7 @@ export function start(config: RuntimeInitialization): void {
       const { path, offset, length } = fields;
       if (
         typeof path !== 'string' ||
-        path.length === 0 ||
-        path.length > MAX_PATH_CHARS ||
+        !isPackagePath(path) ||
         !count(offset) ||
         !count(length) ||
         length < 1 ||
@@ -364,8 +364,7 @@ export function start(config: RuntimeInitialization): void {
         if (
           fields === undefined ||
           typeof named !== 'string' ||
-          named.length === 0 ||
-          named.length > MAX_PATH_CHARS
+          !isPackagePath(named)
         )
           return invalid();
         path = named;

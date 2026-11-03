@@ -262,9 +262,14 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   read releases none of them. Parts are joined by digest (a non-ASCII text cut
   inside a character, a binary file, an empty file), hostile, oversized,
   nested and duplicate-field bodies get fixed messages, a flood of frame calls
-  leaves owner requests and the revoke served, and a restart revokes. Node
+  leaves owner requests and the revoke served, a holder of `source.download`
+  cannot have more than two downloads built at once, every path-taking route
+  judges the shared path fixture, and a restart revokes. Node
   tests run one fixture of accepted and refused parts through the client and the
-  frame script; hit the frame script's public methods with `null`,
+  frame script and the shared path fixture through the frame script and the host; check that a file download is the offered digest
+  (or is refused, also without `crypto.subtle`); classify every request kind
+  under server addresses with and without a path prefix; answer a call the host
+  cannot parse at once; hit the frame script's public methods with `null`,
   arrays, primitives, `Proxy` objects, revoked proxies and throwing getters
   without a leaked pending slot; and drive the host's token bucket, offer gate
   (delay, trust, one at a time, cooldown, every withdrawal leaving no timer or

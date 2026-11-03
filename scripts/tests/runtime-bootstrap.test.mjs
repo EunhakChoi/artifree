@@ -20,6 +20,48 @@ const bundle = await build({
 const { start } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
+// The workspace host's parser, bundled as it ships, to check that whatever the
+// frame sends the host accepts.
+const hostBundle = await build({
+  entryPoints: [
+    fileURLToPath(
+      new URL('../../apps/web/src/artifacts/frame-rpc.ts', import.meta.url),
+    ),
+  ],
+  bundle: true,
+  format: 'esm',
+  platform: 'neutral',
+  write: false,
+});
+const { parseCall } = await import(
+  `data:text/javascript;base64,${Buffer.from(hostBundle.outputFiles[0].text).toString('base64')}`
+);
+// The frame's own copy of the package path rules.
+const rulesBundle = await build({
+  entryPoints: [
+    fileURLToPath(
+      new URL(
+        '../../packages/runtime-sdk/src/package-path.ts',
+        import.meta.url,
+      ),
+    ),
+  ],
+  bundle: true,
+  format: 'esm',
+  platform: 'neutral',
+  write: false,
+});
+const { FRAME_PATH_RULES } = await import(
+  `data:text/javascript;base64,${Buffer.from(rulesBundle.outputFiles[0].text).toString('base64')}`
+);
+const { scaffoldDescription } =
+  await import('../../packages/contracts/dist/index.js');
+const pathCases = JSON.parse(
+  await readFile(
+    new URL('../../contracts/fixtures/package-paths.json', import.meta.url),
+    'utf8',
+  ),
+).cases;
 const vectors = JSON.parse(
   await readFile(
     new URL('./fixtures/source-part-vectors.json', import.meta.url),
@@ -151,7 +193,7 @@ function hostileObjects() {
     length: 1,
   };
   const trapping = new Proxy(
-    { path: 'a', offset: 0, length: 1 },
+    { path: 'a.txt', offset: 0, length: 1 },
     {
       getPrototypeOf() {
         throw new Error('trap ran');
@@ -169,14 +211,14 @@ function hostileObjects() {
   );
   class Shaped {
     constructor() {
-      this.path = 'a';
+      this.path = 'a.txt';
       this.offset = 0;
       this.length = 1;
     }
   }
-  const symbolic = { path: 'a', offset: 0, length: 1, [Symbol('x')]: 1 };
+  const symbolic = { path: 'a.txt', offset: 0, length: 1, [Symbol('x')]: 1 };
   const hidden = { offset: 0, length: 1 };
-  Object.defineProperty(hidden, 'path', { value: 'a', enumerable: false });
+  Object.defineProperty(hidden, 'path', { value: 'a.txt', enumerable: false });
   return [
     null,
     undefined,
@@ -193,20 +235,20 @@ function hostileObjects() {
     new Shaped(),
     symbolic,
     hidden,
-    { path: 'a', offset: 0, length: 1, extra: 1 },
+    { path: 'a.txt', offset: 0, length: 1, extra: 1 },
     { path: 5, offset: 0, length: 1 },
     { path: '', offset: 0, length: 1 },
     { path: 'a'.repeat(1025), offset: 0, length: 1 },
-    { path: 'a', offset: -1, length: 1 },
-    { path: 'a', offset: 1.5, length: 1 },
-    { path: 'a', offset: Number.NaN, length: 1 },
-    { path: 'a', offset: Infinity, length: 1 },
-    { path: 'a', offset: 2 ** 53, length: 1 },
-    { path: 'a', offset: '0', length: 1 },
-    { path: 'a', offset: 0, length: 0 },
-    { path: 'a', offset: 0, length: 1_048_577 },
-    { path: 'a', offset: 0, length: -1 },
-    { path: 'a', length: 1 },
+    { path: 'a.txt', offset: -1, length: 1 },
+    { path: 'a.txt', offset: 1.5, length: 1 },
+    { path: 'a.txt', offset: Number.NaN, length: 1 },
+    { path: 'a.txt', offset: Infinity, length: 1 },
+    { path: 'a.txt', offset: 2 ** 53, length: 1 },
+    { path: 'a.txt', offset: '0', length: 1 },
+    { path: 'a.txt', offset: 0, length: 0 },
+    { path: 'a.txt', offset: 0, length: 1_048_577 },
+    { path: 'a.txt', offset: 0, length: -1 },
+    { path: 'a.txt', length: 1 },
   ];
 }
 
@@ -231,7 +273,7 @@ test('Hostile arguments are refused without throwing, sending or leaking a slot'
   for (const argument of [
     { path: 5 },
     { path: '' },
-    { path: 'a', extra: 1 },
+    { path: 'a.txt', extra: 1 },
     {},
   ]) {
     assert.equal(
@@ -249,13 +291,88 @@ test('Hostile arguments are refused without throwing, sending or leaking a slot'
     await assert.rejects(promise, { code: 'expired' });
 });
 
+test('A path the package rules refuse fails at once, and the host accepts what is sent', async () => {
+  assert.ok(pathCases.length >= 30);
+  for (const { path, error } of pathCases) {
+    const f = frame();
+    const calls = [
+      f.api.source.read({ path, offset: 0, length: 1 }),
+      f.api.source.requestDownload({ path }),
+    ];
+    const outcomes = Promise.allSettled(calls);
+    await settle();
+    if (error === null) {
+      // Sent, and the host's parser reads each message as a call.
+      assert.equal(f.received.length, 2, JSON.stringify(path));
+      for (const message of f.received)
+        assert.notEqual(parseCall(message), undefined, JSON.stringify(path));
+      current.listeners.pagehide();
+      await outcomes;
+    } else {
+      // Refused before sending, so no waiting slot is held until a timeout.
+      assert.deepEqual(f.received, [], JSON.stringify(path));
+      for (const outcome of await outcomes) {
+        assert.equal(outcome.status, 'rejected', path);
+        assert.equal(outcome.reason.code, 'invalid_request', path);
+      }
+    }
+    // Close the port, or the test process never ends.
+    current.listeners.pagehide();
+    delete globalThis.window;
+  }
+});
+
+test("The frame's copy of the path rules is the build's", () => {
+  const rules = scaffoldDescription.package_rules;
+  assert.equal(FRAME_PATH_RULES.maxPathBytes, rules.max_path_bytes);
+  assert.equal(FRAME_PATH_RULES.maxPathSegments, rules.max_path_segments);
+  assert.equal(FRAME_PATH_RULES.maxSegmentBytes, rules.max_segment_bytes);
+  assert.deepEqual(
+    [...FRAME_PATH_RULES.extensions].sort(),
+    Object.keys(rules.media_types).sort(),
+  );
+});
+
+test('Whatever the frame sends, the host reads as a call', async () => {
+  const f = frame();
+  const { list, read, requestDownload } = f.api.source;
+  const calls = [
+    list(),
+    f.api.currentMetadata(),
+    read({ path: 'a/b.txt', offset: 0, length: 1 }),
+    read({ path: 'a/b.txt', offset: 2 ** 53 - 1, length: 1_048_576 }),
+    requestDownload(),
+    requestDownload({ path: 'a/b.txt' }),
+  ];
+  await settle();
+  assert.equal(f.received.length, calls.length);
+  for (const message of f.received)
+    assert.deepEqual(
+      parseCall(message)?.type,
+      message.type,
+      JSON.stringify(message),
+    );
+  f.hangUp();
+  await Promise.allSettled(calls);
+  // Each value the frame refuses is one the host would refuse too.
+  for (const message of [
+    { type: 'source.read', id: 1, path: 'a.txt', offset: 0, length: 0 },
+    { type: 'source.read', id: 1, path: 'a.txt', offset: 0, length: 1_048_577 },
+    { type: 'source.read', id: 1, path: 'a.txt', offset: -1, length: 1 },
+    { type: 'source.read', id: 1, path: 'a.txt', offset: 2 ** 53, length: 1 },
+    { type: 'source.download', id: 1, kind: 'file', path: '../a.txt' },
+    { type: 'source.download', id: 1, kind: 'archive', path: 'a.txt' },
+  ])
+    assert.equal(parseCall(message), undefined, JSON.stringify(message));
+});
+
 test('A call with a strange this or arguments still behaves', async () => {
   const f = frame();
   const { list, read } = f.api.source;
   const calls = [
     list.call(null),
     list.call(undefined, 1, 2, 3),
-    read.call({ path: 'x' }, { path: 'a', offset: 0, length: 1 }),
+    read.call({ path: 'x' }, { path: 'a.txt', offset: 0, length: 1 }),
   ];
   await settle();
   assert.equal(f.received.length, 3);
@@ -486,9 +603,12 @@ test('A view that ended or whose lease ran out refuses every call', async () => 
   await assert.rejects(waiting, { code: 'expired' });
   await assert.rejects(f.api.source.list(), { code: 'expired' });
   await assert.rejects(f.api.currentMetadata(), { code: 'expired' });
-  await assert.rejects(f.api.source.read({ path: 'a', offset: 0, length: 1 }), {
-    code: 'expired',
-  });
+  await assert.rejects(
+    f.api.source.read({ path: 'a.txt', offset: 0, length: 1 }),
+    {
+      code: 'expired',
+    },
+  );
   delete globalThis.window;
   const short = frame({ ...CONFIG, lease_ms: 0 });
   await assert.rejects(short.api.source.list(), { code: 'expired' });

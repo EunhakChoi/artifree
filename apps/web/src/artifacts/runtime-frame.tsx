@@ -1,11 +1,9 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
-import { DownloadPrompt } from './download-prompt';
-import { TokenBucket } from './frame-budget';
-import { FrameRpc } from './frame-rpc';
-import { OfferDesk } from './offer-desk';
-import { pageSaver } from './save-blob';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import type { FrameRpc } from './frame-rpc';
+import type * as RuntimeHost from './runtime-host';
 
 // `allow-downloads` is the browser's own flag for a page that starts a
 // download itself. It is unrelated to the `source.download` capability, which
@@ -31,7 +29,10 @@ function record(value: unknown): value is Record<string, unknown> {
 /**
  * Owns a single frame's initialization, message port and pending calls. What
  * the frame may ask is decided by `FrameRpc`, its budget and the offer desk
- * (decision 0032); this component only wires them to the port.
+ * (decision 0032); this component only wires them to the port. Those parts
+ * load on demand, and only for a view that is enabled: a plain preview never
+ * fetches them, and an enabled frame is not shown until they are here, so
+ * the connection its script announces on load is never missed.
  */
 export function RuntimeFrame({
   client,
@@ -45,7 +46,25 @@ export function RuntimeFrame({
   const loads = useRef(0);
   const close = useRef<() => void>(() => undefined);
   const revokeTimer = useRef<number | undefined>(undefined);
-  const [desk] = useState(() => new OfferDesk());
+  const [host, setHost] = useState<typeof RuntimeHost>();
+  const [hostFailed, setHostFailed] = useState(false);
+  const desk = useMemo(() => host?.createDesk(), [host]);
+
+  useEffect(() => {
+    if (!view.enabled) return undefined;
+    let live = true;
+    void import('./runtime-host').then(
+      (loaded) => {
+        if (live) setHost(loaded);
+      },
+      () => {
+        if (live) setHostFailed(true);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [view.enabled]);
 
   useLayoutEffect(() => {
     // React StrictMode replays setup/cleanup synchronously. Only a cleanup
@@ -59,7 +78,7 @@ export function RuntimeFrame({
       active = false;
       port?.close();
       rpc?.close();
-      desk.withdraw();
+      desk?.withdraw();
     };
     close.current = stop;
 
@@ -68,6 +87,8 @@ export function RuntimeFrame({
         return;
       const candidate = event.ports[0];
       if (
+        host === undefined ||
+        desk === undefined ||
         !view.enabled ||
         !active ||
         loads.current > 1 ||
@@ -85,16 +106,10 @@ export function RuntimeFrame({
         return;
       }
       port = candidate;
-      const bucket = new TokenBucket(() => performance.now());
-      const served = new FrameRpc({
+      const served = host.createRpc({
         client,
         view,
-        ask: (offer, signal) => desk.ask(offer, signal),
-        save: (bytes, fileName, type) => {
-          pageSaver.save(bytes, fileName, type);
-        },
-        take: () => bucket.take(),
-        now: () => performance.now(),
+        desk,
         deadline,
         send: (reply, transfer) => {
           if (active) candidate.postMessage(reply, transfer);
@@ -116,8 +131,23 @@ export function RuntimeFrame({
       stop();
       revokeTimer.current = window.setTimeout(onClose, 0);
     };
-  }, [client, view, deadline, onClose, desk]);
+  }, [client, view, deadline, onClose, host, desk]);
 
+  if (view.enabled && hostFailed)
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Preview unavailable</AlertTitle>
+        <AlertDescription>
+          The preview could not be prepared. Refresh the preview to try again.
+        </AlertDescription>
+      </Alert>
+    );
+  if (view.enabled && host === undefined)
+    return (
+      <output className="text-sm text-muted-foreground">
+        Preparing preview…
+      </output>
+    );
   return (
     <>
       <iframe
@@ -135,7 +165,9 @@ export function RuntimeFrame({
           }
         }}
       />
-      <DownloadPrompt desk={desk} />
+      {host === undefined || desk === undefined ? null : (
+        <host.DownloadPrompt desk={desk} />
+      )}
     </>
   );
 }

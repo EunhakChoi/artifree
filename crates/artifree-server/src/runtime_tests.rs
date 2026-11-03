@@ -687,6 +687,105 @@ fn a_revocation_after_the_bytes_were_read_still_releases_none_of_them() -> Resul
 }
 
 #[test]
+fn only_a_few_downloads_per_actor_are_built_at_once_and_each_frees_its_slot()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, _session) = source_view(&state, &actor).await?;
+        let call = FrameCall {
+            actor: &actor,
+            artifact: &view.artifact_id,
+            revision: view.revision,
+            view: &view.view_id,
+            generation: view.generation,
+            initialization: &view.initialization,
+        };
+        let archive = RuntimeDownloadRequest {
+            initialization: view.initialization.clone(),
+            kind: RuntimeDownloadKind::Archive,
+            path: None,
+        };
+        let file = RuntimeDownloadRequest {
+            initialization: view.initialization.clone(),
+            kind: RuntimeDownloadKind::File,
+            path: Some("note.txt".into()),
+        };
+        // Hold every slot the actor may use, as builds in progress would.
+        let mut held: Vec<_> = (0..runtime_source::MAX_DOWNLOAD_BUILDS)
+            .map(|_| state.download_builds().take(&actor))
+            .collect::<Result<_, _>>()
+            .map_err(|refusal| refusal.to_string())?;
+        for request in [&archive, &file] {
+            let refused = runtime_source::download(&state, &call, request).await;
+            assert!(
+                matches!(&refused, Err(error)
+                    if error.status == StatusCode::TOO_MANY_REQUESTS
+                        && error.body.code == artifree_contracts::api::ErrorCode::RateLimited),
+                "{:?}",
+                refused.map(|_| ())
+            );
+        }
+        // The refusal says when to retry, as every rate limit does.
+        let refusal = runtime_source::download(&state, &call, &archive)
+            .await
+            .err()
+            .ok_or("a download over the cap must be refused")?;
+        let response = axum::response::IntoResponse::into_response(refusal);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .map(axum::http::HeaderValue::as_bytes),
+            Some(b"1".as_slice())
+        );
+        // Only downloads are held back, and only for this actor.
+        let listed = runtime_source::list(&state, &call).await;
+        assert_eq!(listed.map(|list| list.revision).ok(), Some(view.revision));
+        let offered = runtime_source::offer(&state, &call, &file).await;
+        assert_eq!(
+            offered.map(|offer| offer.file_name).ok().as_deref(),
+            Some("note.txt")
+        );
+        let other: ActorId = "other".parse()?;
+        assert!(state.download_builds().take(&other).is_ok());
+        // One slot freed: a download is built, and its slot is freed when it
+        // returns, so the next one is built too.
+        held.pop();
+        let zipped = runtime_source::download(&state, &call, &archive).await;
+        assert_eq!(
+            zipped.map(|built| built.bytes.starts_with(b"PK")).ok(),
+            Some(true),
+            "an archive is a zip"
+        );
+        let stored = runtime_source::download(&state, &call, &file).await;
+        assert_eq!(
+            stored.map(|built| built.bytes).ok().as_deref(),
+            Some(b"stored bytes".as_slice())
+        );
+        // A download that fails also frees its slot.
+        let missing = RuntimeDownloadRequest {
+            path: Some("absent.txt".into()),
+            ..file.clone()
+        };
+        for _ in 0..4 {
+            let failed = runtime_source::download(&state, &call, &missing).await;
+            assert!(
+                matches!(&failed, Err(error) if error.status == StatusCode::NOT_FOUND),
+                "{:?}",
+                failed.map(|_| ())
+            );
+        }
+        drop(held);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
 fn logout_while_handoff_source_waits_rejects_its_late_delivery() -> Result<(), Box<dyn Error>> {
     handoff_source_recheck(true)
 }

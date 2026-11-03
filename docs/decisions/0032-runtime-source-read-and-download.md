@@ -102,7 +102,21 @@ change a revision.
      `size - offset`. A part that makes no progress is refused, so a read loop
      always ends;
    - `sha256` is 64 lowercase hex digits; a listing names each path once; a
-     download receipt's size is the number of bytes actually received.
+     download receipt's size is the number of bytes actually received;
+   - a path the frame supplies obeys the package path rules (decision 0017)
+     before anything is sent: the frame script, the host's `parseCall` and the
+     server judge `contracts/fixtures/package-paths.json` alike, each in its
+     own test. The frame script holds its own copy of the rules (it is a
+     self-contained bundle, so the generated inventory is not imported), and a
+     test compares that copy with the build inventory.
+   - a **file download** is the offered digest: the client hashes the bytes it
+     received with `crypto.subtle` and refuses a mismatch, also when the length
+     is right. A platform that cannot compute the digest (no `crypto.subtle`,
+     as on a page that is not a secure context) refuses the download; it never
+     passes it unchecked. An **archive** is built on demand and has no digest;
+     it is checked for nothing but its closed content type and attachment name,
+     and the receipt reports the bytes received. That is a stated limit, not a
+     check.
 
    Base64 is read only in its canonical form (no whitespace, correct padding,
    zero padding bits). Fixture `scripts/tests/fixtures/source-part-vectors.json`
@@ -123,6 +137,12 @@ change a revision.
       `source/download`, which checks again and returns the bytes.
    3. The workspace hands the bytes to the browser (decision 8) and tells the
       frame `{ started: true, kind, bytes }`.
+
+   The offer and the download are two calls. Between the user's accept and the
+   download the grant can be revoked or the head can move, so an accepted
+   prompt can end with nothing saved: the server is right to refuse, and the
+   frame is told `denied` or `stale_view`. The user is never told that a
+   file was saved when it was not.
 
    **`started` means "handed to the browser".** The browser or the user can
    still cancel the save, and the workspace cannot tell. `bytes` is the number
@@ -191,7 +211,24 @@ default-src 'none'`, and `Cache-Control: no-store`.
      that frame's grant wait. The web request gate classes frame calls as their
      own kind: a `429` for a frame holds no owner reads. A test floods the
      frame budget and then makes an owner request and revokes the grant.
+   - **Downloads under construction:** a file is read, and an archive is built,
+     whole in memory (up to the package limit). A hostile frame that holds
+     `source.download` could otherwise start up to 16 builds at once, so each
+     actor may have at most 2 downloads being built (`MAX_DOWNLOAD_BUILDS`).
+     A build takes a slot after authorization and holds it until the bytes
+     are returned or the work fails; dropping it frees it on every exit, and
+     a further request is answered `429 rate_limited` with `Retry-After`. A
+     test holds every slot, sees the next download refused while a list and an
+     offer still work, and sees a freed slot and a failed build reuse.
    - `rate_limited` is in the frame's closed set of failures.
+   - **The host answers every call it can.** A message with a known `type` and
+     a positive integer `id` that does not parse (an unaccepted path, a bad
+     length, an extra key) is answered `invalid_request` at once, costs a
+     token, and holds no waiting slot, so a frame never waits for the timeout
+     of a call that was never going to be served. A message without a usable
+     id cannot be answered and is dropped. Two deliberate silences remain: a
+     `cancel` that parses gets no reply, and a call whose `id` is already
+     waiting is dropped, since that id will be answered once.
 10. **The frame sees a closed vocabulary.** A failed call rejects with
     `RuntimeRequestFailure` whose `code` is one of `invalid_request`, `denied`,
     `stale_view`, `not_found`, `rate_limited`, `declined`, `unavailable`,
@@ -199,7 +236,9 @@ default-src 'none'`, and `Cache-Control: no-store`.
     text, status, path, or value is forwarded, and no value the frame sent is
     echoed in an error. The workspace maps `404` to `not_found`, `403` to
     `denied`, `409 revision_conflict` to `stale_view`, `429` to `rate_limited`,
-    `400/413/416/422` to `invalid_request`, a replaced connection to `expired`,
+    `400/413/416/422` to `invalid_request`, a call the client refused because
+    its runtime connection ended (marked by `RuntimeConnectionReplacedError`,
+    not by its status and code) to `expired`,
     and everything else to `unavailable`. The server's frame routes answer
     malformed, duplicate-field, over-deep, wrongly typed, and oversized bodies
     with fixed messages and never panic. The SDK's public methods never throw
@@ -241,7 +280,14 @@ default-src 'none'`, and `Cache-Control: no-store`.
 ## Limits and what is not implemented
 
 - **Implemented:** reading and downloading as above, in the web workspace
-  with a bound frame.
+  with a bound frame. Code that only a page showing a runtime preview
+  needs is not in the main bundle, which stays under Vite's 500 kB warning
+  (499.99 kB with this change, 499.55 kB before it: the margin is thin, and
+  the limit was not raised). Four chunks load on demand: the frame component
+  and the permission controls (when a preview is shown), the workspace's side
+  of the bridge (rpc, budget, prompt, saver; only for an enabled view, and the
+  frame is not shown until it is loaded, so its connection is never missed),
+  and the client's source checks (on the first source call).
 - **Not implemented:** writing source from a frame, editing permission, viewer
   roles (R11b); data access from frames (the bridge still has no data
   capability, R06 stays server-side); subscriptions and queries (R07);
@@ -275,7 +321,7 @@ an undeclared capability; a moved head with `current_revision`; a trashed
 artifact; download headers, the archive equal to `GET export`, and download
 needing its own consent; hostile bodies; a flood of frame calls with owner
 requests and the revoke still served, and an owner flood that leaves the frame
-budget alone; a restart that revokes), `runtime_tests.rs` (a revoke after the bytes were read releases none of them, for a list, a read, an offer and a download),
+budget alone; a restart that revokes), `runtime_tests.rs` (a revoke after the bytes were read releases none of them, for a list, a read, an offer and a download; the download slots), the shared path fixture judged by every path-taking route,
 `runtime_policy.rs`, `runtime_sessions.rs`, the unit tests of the name rule (hostile strings reduced, the bound equal to the longest package segment), and `crates/artifree-contracts/tests/wire.rs` (the schema bounds equal the constants).
 
 TypeScript (`npm run test:tooling`): `runtime-source-client.test.mjs`
@@ -286,8 +332,13 @@ pending slot, every vector, a closed failure set, timeouts and cancel, expiry),
 `runtime-host.test.mjs` (the token bucket, the desk's delay, trust, re-entrancy,
 cooldown, one at a time and every withdrawal with no timer or listener left,
 the call parser, the pending cap, a flood, the offer before the prompt, cancel,
-close, the object-URL lifetime), and `request-gate.test.mjs` (frame calls are
-their own kind).
+close, the object-URL lifetime, a call that does not parse answered at once,
+the shared path fixture, the failure mapping), and `request-gate.test.mjs` (every
+route family, frame calls included, under four server address shapes with and
+without a path prefix, and a frame `429` that holds no owner read). The frame
+script test and the host test also run the shared path fixture, and the client
+tests cover the digest of a file download, a platform without `crypto.subtle`,
+and the marker of a replaced connection.
 
 Browser: `scripts/smoke-source.mjs` in Chromium and Firefox: a frame lists
 and reads parts and its bytes are compared by digest with the stored ones

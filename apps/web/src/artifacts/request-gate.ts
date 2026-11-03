@@ -14,31 +14,33 @@ export const STALL_MS = 10_000;
 export type RequestKind = 'read' | 'stream' | 'write' | 'frame';
 
 /**
+ * The routes the gate tells apart. The configured server address may carry a
+ * path prefix (`https://api.example/prefix`), so a route is recognized by
+ * its own tail, from a `/v1/` boundary to the end of the path, never by a
+ * path that starts at the root. The tails are specific enough that a prefix
+ * cannot make one request look like another.
+ */
+const CHANGE_FEED = /\/v1\/changes$/;
+// Group 1 is set for `previews` and a bare `runtime-views`, which issue a
+// preview or a view; a longer tail below `runtime-views` is a frame call.
+const REVISION_ROUTE =
+  /\/v1\/artifacts\/[^/]+\/revisions\/\d+\/(?:(previews|runtime-views)|runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download)))$/;
+
+/**
  * Reads change nothing: every `GET` except the change feed, and issuing a
  * preview or runtime view. The feed is one long request. A runtime frame's
  * calls (metadata, source, download), which the workspace sends on its
  * behalf, are `frame` requests. Everything else, including closing a runtime
- * view, writes.
+ * view, writes. `url` may carry the server's path prefix.
  */
 export function requestKind(method: string, url: string): RequestKind {
   const { pathname } = new URL(url, 'http://gate.invalid');
   const verb = method.toUpperCase();
-  if (verb === 'GET')
-    return pathname.endsWith('/v1/changes') ? 'stream' : 'read';
-  if (verb === 'POST' && pathname.endsWith('/previews')) return 'read';
-  if (
-    verb === 'POST' &&
-    /^\/v1\/artifacts\/[^/]+\/revisions\/\d+\/runtime-views$/.test(pathname)
-  )
-    return 'read';
-  if (
-    verb === 'POST' &&
-    /^\/v1\/artifacts\/[^/]+\/revisions\/\d+\/runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download))$/.test(
-      pathname,
-    )
-  )
-    return 'frame';
-  return 'write';
+  if (verb === 'GET') return CHANGE_FEED.test(pathname) ? 'stream' : 'read';
+  if (verb !== 'POST') return 'write';
+  const match = REVISION_ROUTE.exec(pathname);
+  if (match === null) return 'write';
+  return match[1] === undefined ? 'frame' : 'read';
 }
 
 interface Waiter {

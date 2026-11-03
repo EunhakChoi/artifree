@@ -32,11 +32,8 @@ import type {
   Revision,
   RevisionFile,
   RuntimeConnection,
-  RuntimeDownloadKind,
-  RuntimeDownloadOffer,
   RuntimeMetadata,
   RuntimeGrant,
-  RuntimeSourceList,
   RuntimeView,
   CreateTokenResponse,
   RotateTokenResponse,
@@ -46,7 +43,6 @@ import type {
   UpdateArtifactResponse,
 } from '@artifree/contracts';
 import type { FeedChange } from './change-feed.js';
-import { decodeBase64, isDownloadName, partNumbersFit } from './source-part.js';
 
 /**
  * Runtime checks for API responses. Generated types describe the contract;
@@ -56,11 +52,11 @@ import { decodeBase64, isDownloadName, partNumbersFit } from './source-part.js';
 
 type Fields = Readonly<Record<string, unknown>>;
 
-function isRecord(value: unknown): value is Fields {
+export function isRecord(value: unknown): value is Fields {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isCount(value: unknown): value is number {
+export function isCount(value: unknown): value is number {
   return Number.isSafeInteger(value) && typeof value === 'number' && value >= 0;
 }
 
@@ -184,7 +180,7 @@ function artifact(value: unknown): Artifact | undefined {
   };
 }
 
-function revisionFile(value: unknown): RevisionFile | undefined {
+export function revisionFile(value: unknown): RevisionFile | undefined {
   if (!isRecord(value)) return undefined;
   const { path, size, sha256, media_type } = value;
   if (
@@ -212,7 +208,7 @@ function revision(value: unknown): Revision | undefined {
   return { revision: number, created_by, created_at_ms, files };
 }
 
-function list<T>(
+export function list<T>(
   values: unknown,
   parse: (value: unknown) => T | undefined,
 ): T[] | undefined {
@@ -578,113 +574,6 @@ export function parseRuntimeMetadata(
   )
     return undefined;
   return { artifact_id, title, current_revision, metadata_revision };
-}
-
-const MAX_LISTED_FILES = 256;
-
-/** Validates the files a runtime view lists: each path once. */
-export function parseRuntimeSourceList(
-  value: unknown,
-  revision: number,
-): RuntimeSourceList | undefined {
-  if (!isRecord(value) || !Array.isArray(value.files)) return undefined;
-  if (value.revision !== revision || value.files.length > MAX_LISTED_FILES)
-    return undefined;
-  const files = list(value.files, revisionFile);
-  if (
-    files === undefined ||
-    new Set(files.map((file) => file.path)).size !== files.length
-  )
-    return undefined;
-  return { revision, files };
-}
-
-/** One part of a file, with its bytes decoded and its numbers verified. */
-export interface RuntimeSourcePartBytes {
-  readonly path: string;
-  readonly offset: number;
-  /** Where the next part starts; null once the bytes reach the end. */
-  readonly nextOffset: number | null;
-  readonly size: number;
-  readonly sha256: string;
-  readonly bytes: Uint8Array<ArrayBuffer>;
-}
-
-/** What a part was asked for; a part must answer exactly that. */
-export interface RuntimeSourceRequest {
-  readonly path: string;
-  readonly offset: number;
-  readonly length: number;
-}
-
-/**
- * Validates a part against the request it answers: it echoes the path and
- * offset, and the bytes received number what its offsets say.
- */
-export function parseRuntimeSourcePart(
-  value: unknown,
-  revision: number,
-  request: RuntimeSourceRequest,
-): RuntimeSourcePartBytes | undefined {
-  if (!isRecord(value)) return undefined;
-  const { path, offset, next_offset, size, sha256, content } = value;
-  if (
-    value.revision !== revision ||
-    path !== request.path ||
-    offset !== request.offset ||
-    !isCount(size) ||
-    typeof sha256 !== 'string' ||
-    !/^[0-9a-f]{64}$/.test(sha256) ||
-    typeof content !== 'string' ||
-    !(next_offset === null || isCount(next_offset))
-  )
-    return undefined;
-  const bytes = decodeBase64(content);
-  if (
-    bytes === undefined ||
-    !partNumbersFit(
-      { offset, nextOffset: next_offset, size, received: bytes.length },
-      request.length,
-    )
-  )
-    return undefined;
-  return { path, offset, nextOffset: next_offset, size, sha256, bytes };
-}
-
-/** What a download was asked for. */
-export type RuntimeDownloadTarget =
-  | { readonly kind: 'file'; readonly path: string }
-  | { readonly kind: 'archive' };
-
-const DOWNLOAD_KINDS: Record<RuntimeDownloadKind, true> = {
-  file: true,
-  archive: true,
-};
-
-/** Validates an offer against the target it answers. */
-export function parseRuntimeDownloadOffer(
-  value: unknown,
-  target: RuntimeDownloadTarget,
-): RuntimeDownloadOffer | undefined {
-  if (!isRecord(value)) return undefined;
-  const { kind, path, file_name, size, sha256 } = value;
-  if (
-    typeof kind !== 'string' ||
-    !Object.hasOwn(DOWNLOAD_KINDS, kind) ||
-    kind !== target.kind ||
-    !isDownloadName(file_name)
-  )
-    return undefined;
-  if (target.kind === 'archive')
-    return path === null && size === null && sha256 === null
-      ? { kind: 'archive', path: null, file_name, size: null, sha256: null }
-      : undefined;
-  return path === target.path &&
-    isCount(size) &&
-    typeof sha256 === 'string' &&
-    /^[0-9a-f]{64}$/.test(sha256)
-    ? { kind: 'file', path, file_name, size, sha256 }
-    : undefined;
 }
 
 /** Parses the data of a `ready` or `reset` feed event. */

@@ -530,6 +530,62 @@ async fn each_capability_and_the_binding_are_checked_on_every_call() -> TestResu
     Ok(())
 }
 
+/// The paths the domain, the workspace and the frame script all judge alike
+/// (decision 0017): every route that takes a path refuses the refused ones
+/// with the same fixed answer and lets the accepted ones through to a lookup.
+#[tokio::test]
+async fn every_route_that_takes_a_path_judges_the_shared_path_fixture() -> TestResult {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../contracts/fixtures/package-paths.json"
+    ))?;
+    let cases = fixture["cases"].as_array().ok_or("no cases")?;
+    assert!(cases.len() >= 30, "the fixture lost its cases");
+    let harness = Harness::new();
+    let frame = frame(
+        &harness,
+        &["source.read", "source.download"],
+        &["source.read", "source.download"],
+    )
+    .await?;
+    for case in cases {
+        let path = case["path"].as_str().ok_or("a case without a path")?;
+        let refused = !case["error"].is_null();
+        let requests = [
+            post(
+                &frame.route("source/read"),
+                &frame.body(json!({"path": path, "offset": 0, "length": 1})),
+            )?,
+            post(
+                &frame.route("source/offer"),
+                &frame.body(json!({"kind": "file", "path": path})),
+            )?,
+            post(
+                &frame.route("source/download"),
+                &frame.body(json!({"kind": "file", "path": path})),
+            )?,
+        ];
+        for request in requests {
+            let route = request.uri().path().to_owned();
+            let reply = harness.send(request).await?;
+            if refused {
+                assert_eq!(
+                    reply.status,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "{route} {path:?}"
+                );
+            } else {
+                assert_ne!(
+                    reply.status,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "{route} {path:?}: {}",
+                    reply.code()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn granted_download_and_metadata(
     harness: &Harness,
 ) -> Result<Frame, Box<dyn std::error::Error>> {

@@ -32,11 +32,11 @@ export type {
   RuntimeDownloadTarget,
   RuntimeSourcePartBytes,
   RuntimeSourceRequest,
-} from './responses.js';
+} from './runtime-source.js';
 export type {
   ChangeFeedEvent,
   FeedChange,
   FollowOptions,
 } from './change-feed.js';
-export { ArtifreeApiError } from './errors.js';
+export { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 export type { FailureCode } from './errors.js';

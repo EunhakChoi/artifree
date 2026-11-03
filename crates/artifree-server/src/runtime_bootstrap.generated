@@ -24,6 +24,59 @@ var __ArtifreeBootstrap = (() => {
   __export(bootstrap_exports, {
     start: () => start
   });
+
+  // packages/runtime-sdk/src/package-path.ts
+  var MAX_PATH_BYTES = 240;
+  var MAX_PATH_SEGMENTS = 8;
+  var MAX_SEGMENT_BYTES = 100;
+  var EXTENSION_LIST = [
+    "avif",
+    "css",
+    "csv",
+    "gif",
+    "htm",
+    "html",
+    "ico",
+    "jpeg",
+    "jpg",
+    "js",
+    "json",
+    "map",
+    "md",
+    "mjs",
+    "otf",
+    "png",
+    "svg",
+    "ttf",
+    "txt",
+    "wasm",
+    "webp",
+    "woff",
+    "woff2",
+    "xml"
+  ];
+  var EXTENSIONS = new Set(EXTENSION_LIST);
+  function isReservedDevice(segment) {
+    const stem = (segment.split(".", 1)[0] ?? "").toLowerCase();
+    return /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/u.test(stem);
+  }
+  function isPackagePath(path) {
+    if (path.length === 0 || path.length > MAX_PATH_BYTES) return false;
+    if (!/^[A-Za-z0-9._/-]+$/u.test(path)) return false;
+    const segments = path.split("/");
+    if (segments.length > MAX_PATH_SEGMENTS) return false;
+    for (const segment of segments) {
+      if (segment.length === 0 || segment.length > MAX_SEGMENT_BYTES)
+        return false;
+      if (segment.startsWith(".") || segment.endsWith(".")) return false;
+      if (isReservedDevice(segment)) return false;
+    }
+    const name = segments.at(-1) ?? "";
+    const dot = name.lastIndexOf(".");
+    return dot >= 0 && EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+  }
+
+  // packages/runtime-sdk/src/bootstrap.ts
   var MAX_PART_BYTES = 1048576;
   var MAX_PATH_CHARS = 1024;
   var MAX_LISTED_FILES = 256;
@@ -235,7 +288,7 @@ var __ArtifreeBootstrap = (() => {
         const fields = argument(request, ["path", "offset", "length"]);
         if (fields === void 0) return invalid();
         const { path, offset, length } = fields;
-        if (typeof path !== "string" || path.length === 0 || path.length > MAX_PATH_CHARS || !count(offset) || !count(length) || length < 1 || length > MAX_PART_BYTES)
+        if (typeof path !== "string" || !isPackagePath(path) || !count(offset) || !count(length) || length < 1 || length > MAX_PART_BYTES)
           return invalid();
         const asked = { path, offset, length };
         return call(
@@ -249,7 +302,7 @@ var __ArtifreeBootstrap = (() => {
         if (request !== void 0) {
           const fields = argument(request, ["path"]);
           const named = fields?.path;
-          if (fields === void 0 || typeof named !== "string" || named.length === 0 || named.length > MAX_PATH_CHARS)
+          if (fields === void 0 || typeof named !== "string" || !isPackagePath(named))
             return invalid();
           path = named;
         }

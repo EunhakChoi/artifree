@@ -34,6 +34,12 @@ use crate::runtime_policy::Capability;
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
+/// Downloads one actor may have under construction at once. A file is read
+/// and an archive is built whole in memory (up to the package limit), so a
+/// frame holding `source.download` must not be able to start many together;
+/// the frame budget bounds how often it asks, this bounds how much it holds.
+pub(crate) const MAX_DOWNLOAD_BUILDS: u32 = 2;
+
 /// One frame call: the route's names and the secret the frame presented.
 pub(crate) struct FrameCall<'a> {
     pub(crate) actor: &'a ActorId,
@@ -79,6 +85,15 @@ fn stale(current: SourceRevision) -> ApiError {
     );
     error.body.current_revision = Some(current.0);
     error
+}
+
+/// Too many of the actor's downloads are being built.
+fn busy() -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        ErrorCode::RateLimited,
+        "too many downloads are being prepared; retry shortly",
+    )
 }
 
 /// The full live check of one call for one capability. Binding failures are
@@ -235,6 +250,13 @@ pub(crate) async fn download(
 ) -> Result<Download, ApiError> {
     let granted = authorize(state, call, Capability::SourceDownload).await?;
     let target = target(request)?;
+    // Held until the bytes are returned or the work fails; dropping the slot
+    // on any exit frees it. Taken after authorization, so a caller without a
+    // grant cannot occupy one, and before any byte is read.
+    let _build = state
+        .download_builds()
+        .take(call.actor)
+        .map_err(|_| busy())?;
     let result = match target {
         Target::Archive => {
             let export =

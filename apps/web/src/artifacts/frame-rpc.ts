@@ -63,6 +63,19 @@ const SHAPES: Record<string, readonly string[]> = {
 };
 
 /**
+ * The id a message asks to be answered under: a positive safe integer on an
+ * object of a known type, whatever else is wrong with it. A message without
+ * one cannot be answered and is dropped.
+ */
+export function callId(message: unknown): number | undefined {
+  if (!isRecord(message)) return undefined;
+  const { type, id } = message;
+  if (typeof type !== 'string' || !Object.hasOwn(SHAPES, type))
+    return undefined;
+  return isCount(id) && id >= 1 ? id : undefined;
+}
+
+/**
  * The call a message is, or undefined. Exactly the keys of its type, a
  * positive safe-integer id, a path the package rules accept, a part length
  * from 1 to 1 MiB. A message that is not an object, has another key, or has
@@ -118,15 +131,19 @@ export function parseCall(message: unknown): FrameCall | undefined {
  */
 export function failureCode(error: unknown): FailureCode {
   if (!isRecord(error) && !(error instanceof Error)) return 'unavailable';
-  const { name, status, code } = error as {
+  const { name, status, code, connectionReplaced } = error as {
     name?: unknown;
     status?: unknown;
     code?: unknown;
+    connectionReplaced?: unknown;
   };
   if (name !== 'ArtifreeApiError' || typeof status !== 'number')
     return 'unavailable';
+  // The client's own marker: the call was never sent because the runtime
+  // connection ended. No other status 0 failure says the view is over.
+  if (connectionReplaced === true) return 'expired';
   if (status === 0)
-    return code === 'invalid_request' ? 'expired' : 'unavailable';
+    return code === 'invalid_request' ? 'invalid_request' : 'unavailable';
   switch (status) {
     case 404:
       return 'not_found';
@@ -228,7 +245,13 @@ export class FrameRpc {
     const call = parseCall(message);
     if (call === undefined) {
       // Not a call. It still costs a token, so a flood of noise is bounded.
-      this.#deps.take();
+      const taken = this.#deps.take();
+      // A message the frame can wait on is answered at once, so a bad one
+      // never holds one of its waiting slots until it times out. After the
+      // lease nothing is sent. A message without a usable id is dropped.
+      const id = callId(message);
+      if (id !== undefined && this.#deps.now() < this.#deps.deadline)
+        this.#fail(id, taken ? 'invalid_request' : 'rate_limited');
       return;
     }
     if (call.type === 'cancel') {

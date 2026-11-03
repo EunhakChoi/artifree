@@ -50,7 +50,7 @@ use axum::{Json, Router};
 use crate::auth::{AccessToken, AuthContext};
 use crate::changes::{self, Feed};
 use crate::handoffs::Handoffs;
-use crate::limits::{Limiter, Refusal, RequestLimits};
+use crate::limits::{Limiter, Refusal, RequestLimits, Slots};
 use crate::mcp;
 use crate::operations::{self, ApiError};
 use crate::origin::normalize_origin;
@@ -140,6 +140,8 @@ struct Shared {
     handoffs: Handoffs,
     limiter: Limiter,
     frame_limiter: Limiter,
+    /// Downloads being built, per actor (decision 0032).
+    download_builds: Slots,
     feed: Feed,
     draining: AtomicUsize,
     settings: Settings,
@@ -208,6 +210,7 @@ impl AppState {
                 handoffs: Handoffs::new(Duration::from_secs(60 * 60)),
                 limiter: Limiter::new(settings.limits.validate()?),
                 frame_limiter: Limiter::new(settings.frame_limits.validate()?),
+                download_builds: Slots::new(crate::runtime_source::MAX_DOWNLOAD_BUILDS),
                 feed: Feed::new(settings.change_streams),
                 draining: AtomicUsize::new(0),
                 settings,
@@ -236,6 +239,10 @@ impl AppState {
 
     pub(crate) fn feed(&self) -> &Feed {
         &self.shared.feed
+    }
+
+    pub(crate) fn download_builds(&self) -> &Slots {
+        &self.shared.download_builds
     }
 
     pub(crate) fn previews(&self) -> &PreviewTickets {
@@ -844,7 +851,10 @@ async fn no_store(mut response: Response) -> Response {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let retry = self.body.code == ErrorCode::Unavailable;
+        let retry = matches!(
+            self.body.code,
+            ErrorCode::Unavailable | ErrorCode::RateLimited
+        );
         let mut response = (self.status, Json(ErrorResponse { error: self.body })).into_response();
         if self.status == StatusCode::UNAUTHORIZED {
             response

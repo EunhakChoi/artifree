@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -400,6 +401,40 @@ test('A message is a call only with exactly its fields and bounded values', () =
   );
 });
 
+test('The host judges the shared path fixture as the domain does', async () => {
+  const { cases } = JSON.parse(
+    await readFile(
+      new URL('../../contracts/fixtures/package-paths.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  assert.ok(cases.length >= 30);
+  for (const { path, error } of cases) {
+    const read = parseCall({
+      type: 'source.read',
+      id: 1,
+      path,
+      offset: 0,
+      length: 1,
+    });
+    const download = parseCall({
+      type: 'source.download',
+      id: 1,
+      kind: 'file',
+      path,
+    });
+    assert.equal(read !== undefined, error === null, JSON.stringify(path));
+    assert.equal(download !== undefined, error === null, JSON.stringify(path));
+  }
+  // The paths a person might actually mistype.
+  for (const path of ['../a.txt', 'a b.txt', 'a//b.txt', 'LICENSE', '/a.txt'])
+    assert.equal(
+      parseCall({ type: 'source.read', id: 1, path, offset: 0, length: 1 }),
+      undefined,
+      path,
+    );
+});
+
 test('The frame is told a closed word for a failure, never the failure', () => {
   const table = [
     [new StatusError(404, 'not_found'), 'not_found'],
@@ -414,7 +449,15 @@ test('The frame is told a closed word for a failure, never the failure', () => {
     [new StatusError(500, 'internal'), 'unavailable'],
     [new StatusError(503, 'unavailable'), 'unavailable'],
     [new StatusError(401, 'unauthenticated'), 'unavailable'],
-    [new StatusError(0, 'invalid_request'), 'expired'],
+    // Only the client's own marker says the connection ended; another status
+    // 0 failure that shares its code is an ordinary bad request.
+    [
+      Object.assign(new StatusError(0, 'invalid_request'), {
+        connectionReplaced: true,
+      }),
+      'expired',
+    ],
+    [new StatusError(0, 'invalid_request'), 'invalid_request'],
     [new StatusError(0, 'network_error'), 'unavailable'],
     [new Error('SECRET'), 'unavailable'],
     [{ status: 404, name: 'ArtifreeApiError' }, 'not_found'],
@@ -480,6 +523,104 @@ test('A flood costs the workspace a token each and the server only the burst', a
     'id',
     'ok',
   ]);
+});
+
+test('A call the host cannot parse is still answered, at once, and holds no slot', async () => {
+  const wrong = [
+    { type: 'source.read', id: 1, path: '../a.txt', offset: 0, length: 1 },
+    { type: 'source.read', id: 2, path: 'a b.txt', offset: 0, length: 1 },
+    { type: 'source.read', id: 3, path: 'a//b.txt', offset: 0, length: 1 },
+    { type: 'source.read', id: 4, path: 'LICENSE', offset: 0, length: 1 },
+    {
+      type: 'source.read',
+      id: 5,
+      path: `${'a'.repeat(241)}.txt`,
+      offset: 0,
+      length: 1,
+    },
+    { type: 'source.read', id: 6, path: 'a.txt', offset: -1, length: 1 },
+    { type: 'source.read', id: 7, path: 'a.txt', offset: 0, length: 0 },
+    { type: 'source.read', id: 8, path: 'a.txt', offset: 0, length: 2 ** 21 },
+    {
+      type: 'source.read',
+      id: 9,
+      path: 'a.txt',
+      offset: 0,
+      length: 1,
+      extra: 1,
+    },
+    { type: 'source.read', id: 10, path: 'a.txt', offset: 0 },
+    { type: 'source.download', id: 11, kind: 'file', path: 'LICENSE' },
+    { type: 'source.download', id: 12, kind: 'file', path: null },
+    { type: 'source.download', id: 13, kind: 'archive', path: 'a.txt' },
+    { type: 'source.download', id: 14, kind: 'both', path: null },
+    { type: 'source.download', id: 15 },
+    { type: 'source.list', id: 16, path: 'a.txt' },
+    { type: 'metadata', id: 17, extra: true },
+    { type: 'cancel', id: 18, extra: true },
+  ];
+  const { rpc, sent, log } = rpcWith();
+  for (const message of wrong) rpc.handle(message);
+  await settle();
+  assert.deepEqual(
+    sent.map(({ message }) => message),
+    wrong.map(({ id }) => ({ id, ok: false, code: 'invalid_request' })),
+  );
+  assert.equal(rpc.pending, 0, 'a refused call holds no slot');
+  assert.deepEqual(log, [], 'nothing reached the server');
+  // A message without a usable id, or of no known type, cannot be answered.
+  sent.length = 0;
+  for (const message of [
+    { type: 'source.list' },
+    { type: 'source.list', id: 0 },
+    { type: 'source.list', id: -1 },
+    { type: 'source.list', id: 1.5 },
+    { type: 'source.list', id: '1' },
+    { type: 'source.list', id: 2 ** 53 },
+    { type: 'nothing', id: 1 },
+    { id: 1 },
+    'text',
+    null,
+    [],
+  ])
+    rpc.handle(message);
+  assert.deepEqual(sent, []);
+});
+
+test('A call the host cannot parse costs a token, and answers only as the budget allows', async () => {
+  let tokens = 2;
+  const { rpc, sent } = rpcWith({ take: () => tokens-- > 0 });
+  const bad = (id) => ({
+    type: 'source.read',
+    id,
+    path: '../x',
+    offset: 0,
+    length: 1,
+  });
+  rpc.handle(bad(1));
+  rpc.handle({ type: 'source.list', id: 2, junk: 1 });
+  rpc.handle(bad(3));
+  assert.deepEqual(
+    sent.map(({ message }) => [message.id, message.code]),
+    [
+      [1, 'invalid_request'],
+      [2, 'invalid_request'],
+      [3, 'rate_limited'],
+    ],
+  );
+});
+
+test('After the lease a call that cannot be parsed is not answered either', () => {
+  const time = clock();
+  const { rpc, sent } = rpcWith({ deadline: time.now() - 1 });
+  rpc.handle({
+    type: 'source.read',
+    id: 1,
+    path: '../x',
+    offset: 0,
+    length: 1,
+  });
+  assert.deepEqual(sent, []);
 });
 
 test('Only a bounded number of calls wait at once, and finishing one frees a slot', async () => {

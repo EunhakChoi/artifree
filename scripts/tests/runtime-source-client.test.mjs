@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import {
   ArtifreeApiError,
   ArtifreeClient,
   MAX_DOWNLOAD_NAME_CHARS,
+  RuntimeConnectionReplacedError,
   decodeBase64,
   isDownloadName,
 } from '../../packages/client/dist/index.js';
@@ -257,13 +259,17 @@ test('Base64 is read only in its canonical form', () => {
     assert.equal(decodeBase64(bad), undefined, JSON.stringify(bad));
 });
 
+const sha256Of = (bytes) =>
+  createHash('sha256').update(Uint8Array.from(bytes)).digest('hex');
+
+/** An offer for the bytes [1, 2, 3], and a response carrying `bytes`. */
 function download(overrides = {}, headers = {}, bytes = [1, 2, 3]) {
   const offer = {
     kind: 'file',
     path: 'a.txt',
     file_name: 'a.txt',
     size: 3,
-    sha256: vectors.digest,
+    sha256: sha256Of([1, 2, 3]),
     ...overrides,
   };
   return {
@@ -326,4 +332,91 @@ test('A download resolves only as the attachment that was offered', async () => 
       (error) => error.code === 'invalid_response',
     );
   }
+});
+
+test('A file download must be the bytes whose digest was offered', async () => {
+  // The same length and a different content is not the offered file.
+  const tampered = download({}, {}, [1, 2, 4]);
+  const { client } = await clientWith(tampered.respond);
+  await assert.rejects(
+    client.runtimeSourceDownload(view, tampered.offer),
+    (error) =>
+      error instanceof ArtifreeApiError &&
+      error.code === 'invalid_response' &&
+      !String(error.message).includes(tampered.offer.sha256),
+  );
+  // An archive is built on demand and has no digest: its size is all there is.
+  const archive = download(
+    { kind: 'archive', path: null, size: null, sha256: null },
+    { 'content-type': 'application/zip' },
+    [7, 7],
+  );
+  const { client: zipped } = await clientWith(archive.respond);
+  assert.equal(
+    (await zipped.runtimeSourceDownload(view, archive.offer)).length,
+    2,
+  );
+});
+
+test('A digest that cannot be computed refuses the download, it does not pass it', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  const { offer, respond } = download();
+  const { client } = await clientWith(respond);
+  try {
+    for (const replacement of [
+      undefined,
+      {},
+      { subtle: {} },
+      {
+        subtle: {
+          digest: async () => {
+            throw new Error('no digest');
+          },
+        },
+      },
+    ]) {
+      Object.defineProperty(globalThis, 'crypto', {
+        value: replacement,
+        configurable: true,
+      });
+      await assert.rejects(
+        client.runtimeSourceDownload(view, offer),
+        (error) =>
+          error instanceof ArtifreeApiError &&
+          error.code === 'invalid_response',
+        JSON.stringify(replacement),
+      );
+    }
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', original);
+  }
+  assert.equal((await client.runtimeSourceDownload(view, offer)).length, 3);
+});
+
+test('A call for a connection that ended carries its own marker', async () => {
+  const { client } = await clientWith(() => Response.json({}));
+  const other = { ...view, session_id: 'f'.repeat(32) };
+  for (const attempt of [
+    () => client.runtimeSourceList(other),
+    () =>
+      client.runtimeSourceRead(other, { path: 'a.txt', offset: 0, length: 1 }),
+    () => client.runtimeSourceOffer(other, { kind: 'archive' }),
+    () => client.runtimeSourceDownload(other, download().offer),
+    () => client.runtimeMetadata(other),
+  ]) {
+    const error = await attempt().then(
+      () => assert.fail('The call must be refused.'),
+      (rejection) => rejection,
+    );
+    assert.ok(error instanceof RuntimeConnectionReplacedError);
+    assert.ok(error instanceof ArtifreeApiError);
+    assert.equal(error.connectionReplaced, true);
+    assert.equal(error.name, 'ArtifreeApiError');
+  }
+  // A bad request of the client's own is not that marker.
+  const plain = new ArtifreeApiError('x', {
+    status: 0,
+    code: 'invalid_request',
+  });
+  assert.equal(plain.connectionReplaced, undefined);
 });

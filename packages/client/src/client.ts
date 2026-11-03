@@ -50,7 +50,13 @@ import {
   changeFeedEvents,
   follow,
 } from './change-feed.js';
-import { ArtifreeApiError } from './errors.js';
+import { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
+import type * as RuntimeSource from './runtime-source.js';
+import type {
+  RuntimeDownloadTarget,
+  RuntimeSourcePartBytes,
+  RuntimeSourceRequest,
+} from './runtime-source.js';
 import {
   parseAgentSessions,
   parseAppData,
@@ -72,15 +78,9 @@ import {
   parseRevisionList,
   parseRotateToken,
   parseRuntimeConnection,
-  parseRuntimeDownloadOffer,
   parseRuntimeMetadata,
   parseRuntimeGrant,
-  parseRuntimeSourceList,
-  parseRuntimeSourcePart,
   parseRuntimeView,
-  type RuntimeDownloadTarget,
-  type RuntimeSourcePartBytes,
-  type RuntimeSourceRequest,
   parseTokenList,
   parseUnreferencedContent,
   parseUpdate,
@@ -516,16 +516,6 @@ function sessionExpired(error: unknown): boolean {
     error instanceof ArtifreeApiError &&
     error.status === 404 &&
     error.code === 'runtime_session_expired'
-  );
-}
-
-function connectionReplaced(): ArtifreeApiError {
-  return new ArtifreeApiError(
-    'The runtime connection was closed or replaced.',
-    {
-      status: 0,
-      code: 'invalid_request',
-    },
   );
 }
 
@@ -1228,7 +1218,7 @@ export class ArtifreeClient {
 
   /** Lists registered agent inboxes for the current workspace connection. */
   async agentSessions(options: ReadOptions = {}): Promise<AgentSession[]> {
-    if (this.runtimeClosing) throw connectionReplaced();
+    if (this.runtimeClosing) throw new RuntimeConnectionReplacedError();
     options.signal?.throwIfAborted();
     const closeAttempt = this.runtimeCloseAttempt;
     const request = (session: string): Promise<AgentSession[]> =>
@@ -1245,13 +1235,13 @@ export class ArtifreeClient {
     } catch (error: unknown) {
       options.signal?.throwIfAborted();
       if (this.runtimeClosing || this.runtimeCloseAttempt !== closeAttempt)
-        throw connectionReplaced();
+        throw new RuntimeConnectionReplacedError();
       if (!sessionExpired(error)) throw error;
       try {
         await this.recoverRuntimeSession(session);
         options.signal?.throwIfAborted();
         if (this.runtimeClosing || this.runtimeCloseAttempt !== closeAttempt)
-          throw connectionReplaced();
+          throw new RuntimeConnectionReplacedError();
         session = this.runtimeSessionId;
         sessions = await request(session);
       } catch (retryError: unknown) {
@@ -1265,7 +1255,7 @@ export class ArtifreeClient {
       this.runtimeCloseAttempt !== closeAttempt ||
       this.runtimeSession !== session
     )
-      throw connectionReplaced();
+      throw new RuntimeConnectionReplacedError();
     return sessions;
   }
 
@@ -1275,7 +1265,7 @@ export class ArtifreeClient {
       this.runtimeClosing ||
       this.runtimeSessionId !== request.workspace_session_id
     )
-      throw connectionReplaced();
+      throw new RuntimeConnectionReplacedError();
     const response = await this.send('POST', '/v1/handoffs', { body: request });
     const handoff = parseHandoff(await readJson(response, this.address.plain));
     const selection = handoff?.selection;
@@ -1320,7 +1310,7 @@ export class ArtifreeClient {
   /** Sends the same staged identity on every retry; consent is not replayed. */
   async sendHandoff(handoff: Handoff, workspace: string): Promise<Handoff> {
     if (this.runtimeClosing || this.runtimeSessionId !== workspace)
-      throw connectionReplaced();
+      throw new RuntimeConnectionReplacedError();
     const result = await this.json(
       'POST',
       `/v1/handoffs/${encodeURIComponent(handoff.id)}/send`,
@@ -1377,7 +1367,7 @@ export class ArtifreeClient {
     generation: number,
     options: RuntimeViewOptions = {},
   ): Promise<RuntimeView> {
-    if (this.runtimeClosing) throw connectionReplaced();
+    if (this.runtimeClosing) throw new RuntimeConnectionReplacedError();
     const request = (session: string): Promise<RuntimeView> =>
       this.json(
         'POST',
@@ -1425,7 +1415,7 @@ export class ArtifreeClient {
 
   /** Opens the runtime connection before requesting previews. */
   async openRuntimeSession(options: ReadOptions = {}): Promise<void> {
-    if (this.runtimeClosing) throw connectionReplaced();
+    if (this.runtimeClosing) throw new RuntimeConnectionReplacedError();
     if (this.runtimeSession !== undefined) return;
     await this.establishRuntimeSession(undefined, options);
   }
@@ -1447,7 +1437,7 @@ export class ArtifreeClient {
       this.runtimeSession !== previous ||
       this.runtimeClosing
     )
-      throw connectionReplaced();
+      throw new RuntimeConnectionReplacedError();
     if (previous !== undefined && connection.session_id === previous)
       throw new ArtifreeApiError(
         'The server returned the expired runtime connection again.',
@@ -1460,9 +1450,10 @@ export class ArtifreeClient {
 
   /** Replaces only a confirmed expired connection, once for all its views. */
   private async recoverRuntimeSession(previous: string): Promise<void> {
-    if (this.runtimeClosing) throw connectionReplaced();
+    if (this.runtimeClosing) throw new RuntimeConnectionReplacedError();
     if (this.runtimeSession !== previous) {
-      if (this.runtimeSession === undefined) throw connectionReplaced();
+      if (this.runtimeSession === undefined)
+        throw new RuntimeConnectionReplacedError();
       return;
     }
     if (this.runtimeRecovery?.session === previous)
@@ -1496,7 +1487,7 @@ export class ArtifreeClient {
   private requireViewSession(view: RuntimeView): string {
     const session = this.runtimeSessionId;
     if (this.runtimeClosing || view.session_id !== session)
-      throw connectionReplaced();
+      throw new RuntimeConnectionReplacedError();
     return session;
   }
 
@@ -1574,27 +1565,44 @@ export class ArtifreeClient {
   }
 
   /**
-   * The route of one of a runtime view's calls. They are the calls a frame
-   * causes, sent here on its behalf: the frame holds no account token.
+   * Runs one source call of a runtime view. The calls and their checks are
+   * loaded on first use, since only a page that shows a runtime view needs
+   * them; a module that cannot be loaded is a failed request, like any other
+   * the client reports. They are the calls a frame causes, sent here on its
+   * behalf: the frame holds no account token.
    */
-  private frameRoute(view: RuntimeView, tail: string): string {
-    return `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/${tail}`;
-  }
-
-  private async frameJson<T>(
+  private async runtimeCall<T>(
     view: RuntimeView,
-    tail: string,
-    body: Record<string, unknown>,
-    parse: (value: unknown) => T | undefined,
-    options: ReadOptions,
+    run: (
+      source: typeof RuntimeSource,
+      frame: RuntimeSource.FrameTransport,
+    ) => Promise<T>,
   ): Promise<T> {
     this.requireViewSession(view);
-    const result = await this.json('POST', this.frameRoute(view, tail), parse, {
-      body: { initialization: view.initialization, ...body },
-      signal: options.signal,
+    let source: typeof RuntimeSource;
+    try {
+      source = await import('./runtime-source.js');
+    } catch (cause: unknown) {
+      throw new ArtifreeApiError('The runtime checks could not be loaded.', {
+        status: 0,
+        code: 'network_error',
+        cause,
+      });
+    }
+    const check = (): void => {
+      this.requireViewSession(view);
+    };
+    return run(source, {
+      check,
+      json: async (path, body, parse, signal) => {
+        check();
+        const result = await this.json('POST', path, parse, { body, signal });
+        check();
+        return result;
+      },
+      post: (path, body, signal) => this.send('POST', path, { body, signal }),
+      bytes: (response, what) => this.bytes(response, what),
     });
-    this.requireViewSession(view);
-    return result;
   }
 
   /**
@@ -1606,12 +1614,8 @@ export class ArtifreeClient {
     view: RuntimeView,
     options: ReadOptions = {},
   ): Promise<RuntimeSourceList> {
-    return this.frameJson(
-      view,
-      'source/list',
-      {},
-      (value) => parseRuntimeSourceList(value, view.revision),
-      options,
+    return this.runtimeCall(view, (source, frame) =>
+      source.listSource(frame, view, options.signal),
     );
   }
 
@@ -1624,12 +1628,8 @@ export class ArtifreeClient {
     request: RuntimeSourceRequest,
     options: ReadOptions = {},
   ): Promise<RuntimeSourcePartBytes> {
-    return this.frameJson(
-      view,
-      'source/read',
-      { path: request.path, offset: request.offset, length: request.length },
-      (value) => parseRuntimeSourcePart(value, view.revision, request),
-      options,
+    return this.runtimeCall(view, (source, frame) =>
+      source.readSource(frame, view, request, options.signal),
     );
   }
 
@@ -1642,56 +1642,24 @@ export class ArtifreeClient {
     target: RuntimeDownloadTarget,
     options: ReadOptions = {},
   ): Promise<RuntimeDownloadOffer> {
-    return this.frameJson(
-      view,
-      'source/offer',
-      { kind: target.kind, path: target.kind === 'file' ? target.path : null },
-      (value) => parseRuntimeDownloadOffer(value, target),
-      options,
+    return this.runtimeCall(view, (source, frame) =>
+      source.offerDownload(frame, view, target, options.signal),
     );
   }
 
   /**
    * The bytes of a download the user confirmed. Resolves only when the
    * response is the attachment `offer` named, with the closed content type
-   * of its kind.
+   * of its kind, and the bytes are what the offer promised.
    */
   async runtimeSourceDownload(
     view: RuntimeView,
     offer: RuntimeDownloadOffer,
     options: ReadOptions = {},
   ): Promise<Uint8Array<ArrayBuffer>> {
-    this.requireViewSession(view);
-    const path = this.frameRoute(view, 'source/download');
-    const response = await this.send('POST', path, {
-      body: {
-        initialization: view.initialization,
-        kind: offer.kind,
-        path: offer.path,
-      },
-      signal: options.signal,
-    });
-    const type = response.headers.get('content-type')?.trim().toLowerCase();
-    const disposition = response.headers.get('content-disposition');
-    const refuse = async (): Promise<never> => {
-      await response.body?.cancel().catch(() => undefined);
-      throw new ArtifreeApiError(
-        `POST ${path} did not return the attachment that was offered.`,
-        { status: response.status, code: 'invalid_response' },
-      );
-    };
-    if (
-      type !==
-        (offer.kind === 'file'
-          ? 'application/octet-stream'
-          : 'application/zip') ||
-      disposition !== `attachment; filename="${offer.file_name}"`
-    )
-      return refuse();
-    const bytes = await this.bytes(response, offer.file_name);
-    this.requireViewSession(view);
-    if (offer.size !== null && bytes.length !== offer.size) return refuse();
-    return bytes;
+    return this.runtimeCall(view, (source, frame) =>
+      source.fetchDownload(frame, view, offer, options.signal),
+    );
   }
 
   /** Closes one view generation; an older close cannot revoke its replacement. */
