@@ -58,14 +58,17 @@ mode they are in.
    signal (item 6). The TTL is a deadline for the process, not a quota on
    requests.
 6. **Cleanup in every exit path.** The directory is removed on TTL expiry,
-   SIGINT, SIGTERM, SIGHUP (the signal of a closed terminal; on Windows only
-   Ctrl+C is handled), a startup failure, a failed readiness
+   SIGINT, SIGTERM, SIGHUP (the signal of a closed terminal), on Unix, or
+   Ctrl+C on Windows, which handles nothing else (the notice and `--help` take
+   the list from one constant, so each platform's text is true), a startup failure, a failed readiness
    callback, a listener failure, and a panic that unwinds. Order matters and is
    fixed: (a) the signal handlers are installed **before** the directory is
    created, by building the runtime first; a signal that arrives later is
-   recorded and acted upon at the next checkpoint between the synchronous
-   start-up steps (directory, sweep, database, token) and again before the
-   readiness line; (b) the listeners stop and open connections get a bounded
+   recorded, and a stop is looked for before every step that creates or changes
+   something: the directory, each entry of the sweep, the database, the token
+   store, the token, each listener, the application state, and the readiness
+   line. A step that has started is finished; none starts after a latched stop,
+   and a stop during start-up never opens or migrates the database after it; (b) the listeners stop and open connections get a bounded
    drain of **5 seconds**; a client that stalls cannot keep the data alive past
    it; (c) the runtime is shut down (with a short bound for blocking work), which
    drops every connection and with it the database handles; (d) only then is the
@@ -126,7 +129,8 @@ mode they are in.
 10. **A debug-build test seam.** To test a signal during startup
     deterministically, a build with `debug_assertions` (so `cargo test`, never a
     release package) reads `ARTIFREE_TEST_HOLD_STARTUP=<stage>=<file>` where
-    `<stage>` is `before-directory`, `after-directory`, or `after-database`:
+    `<stage>` is `before-directory`, `after-directory`, `after-sweep`, or
+    `after-database`:
     on reaching that checkpoint the server creates `<file>` and waits until a
     stop is requested. A release build does not contain the code. It is not in
     `ServeEnv` (0028) because it is not an operator setting. A timing-based test
@@ -135,6 +139,10 @@ mode they are in.
     token tables are inside it and there is no other copy. A client that
     remembers the old token learns nothing: the next session has a different
     token and a different database, and answers the old one with `401`.
+12. **SIGHUP ends a session even under `nohup`.** Registering a handler for
+    SIGHUP replaces an inherited "ignore", so `nohup` does not protect a
+    one-shot session. It is a temporary mode by design; use `--data-dir` for a
+    server that must outlive its terminal.
 
 ## Known limits (stated, not hidden)
 

@@ -142,6 +142,7 @@ impl Signals {
 enum Stage {
     BeforeDirectory,
     AfterDirectory,
+    AfterSweep,
     AfterDatabase,
 }
 
@@ -151,6 +152,7 @@ impl Stage {
         match self {
             Self::BeforeDirectory => "before-directory",
             Self::AfterDirectory => "after-directory",
+            Self::AfterSweep => "after-sweep",
             Self::AfterDatabase => "after-database",
         }
     }
@@ -286,8 +288,10 @@ fn start(
     stopper.checkpoint(Stage::BeforeDirectory)?;
     let dir = session.begin(root, &table)?.to_path_buf();
     stopper.checkpoint(Stage::AfterDirectory)?;
-    let swept = sweep::sweep(root, &dir, &table);
-    let opened = serve::open_data(&dir)?;
+    let stopping = || stopper.watch.requested();
+    let swept = sweep::sweep(root, &dir, &table, &stopping);
+    stopper.checkpoint(Stage::AfterSweep)?;
+    let opened = serve::open_data(&dir, &stopping)?.ok_or(Halt::Stopped)?;
     stopper.checkpoint(Stage::AfterDatabase)?;
     runtime.block_on(serve::serve_listeners(
         options,
@@ -297,4 +301,64 @@ fn start(
         on_ready,
     ))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::changes;
+    use crate::limits::RequestLimits;
+    use std::error::Error;
+    use std::net::TcpListener;
+
+    /// Options for listeners on free loopback ports, except the content
+    /// listener, which is given.
+    fn options(content: std::net::SocketAddr) -> ServeOptions {
+        ServeOptions {
+            data: serve::DataLocation::OneShot(OneShot {
+                ttl: Duration::from_secs(60),
+                session_root: None,
+            }),
+            web_dir: None,
+            api_address: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            loopback_api_address: None,
+            content_address: content,
+            content_origin: None,
+            frame_ancestors: "http://127.0.0.1:*".to_owned(),
+            preview_ttl: Duration::from_secs(60),
+            limits: RequestLimits::default(),
+            change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+            api_origin: None,
+            trusted_proxies: Vec::new(),
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            allow_remote_mcp: false,
+        }
+    }
+
+    /// A stop that is already latched ends start-up after the first listener
+    /// is bound: the second is never bound (its port is taken, so binding it
+    /// would be an error), nothing is built, and readiness is not reported.
+    #[test]
+    fn a_latched_stop_ends_listener_start_up_before_the_next_step() -> Result<(), Box<dyn Error>> {
+        let taken = TcpListener::bind("127.0.0.1:0")?;
+        let dir = std::env::temp_dir().join(format!("artifree-latched-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        artifree_providers::data_dir::create_private_dir(&dir)?;
+        let opened = serve::open_data(&dir, &|| false)?.ok_or("opened")?;
+        let (sender, receiver) = watch::channel(true);
+        let runtime = serve::build_runtime()?;
+        let result = runtime.block_on(serve::serve_listeners(
+            options(taken.local_addr()?),
+            opened,
+            None,
+            serve::Shutdown::Session(StopWatch { receiver }),
+            |_| Err("readiness must not be reported after a latched stop".to_owned()),
+        ));
+        drop(sender);
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Ok(()));
+        Ok(())
+    }
 }

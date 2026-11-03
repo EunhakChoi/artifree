@@ -54,19 +54,34 @@ enum Verdict {
 
 /// Sweeps the session directories in `root`, except `own_dir`, the directory
 /// of the calling session. Its Unix owner is the only owner that may be swept.
+///
+/// `stopping` is asked before each entry is looked at; once it says `true` the
+/// sweep ends. An entry that was started is always finished: it is never left
+/// half-judged or half-removed by a stop.
 #[must_use]
-pub(crate) fn sweep(root: &Path, own_dir: &Path, table: &ProcessTable) -> SweepReport {
+pub(crate) fn sweep(
+    root: &Path,
+    own_dir: &Path,
+    table: &ProcessTable,
+    stopping: &dyn Fn() -> bool,
+) -> SweepReport {
     // Without our own owner there is nothing to compare with: sweep nothing.
     let own_owner = fs::symlink_metadata(own_dir)
         .ok()
         .and_then(|metadata| owner_of(&metadata));
     match own_owner {
-        Some(owner) => sweep_as(root, own_dir, owner, table),
+        Some(owner) => sweep_as(root, own_dir, owner, table, stopping),
         None => SweepReport::default(),
     }
 }
 
-fn sweep_as(root: &Path, own_dir: &Path, own_owner: u32, table: &ProcessTable) -> SweepReport {
+fn sweep_as(
+    root: &Path,
+    own_dir: &Path,
+    own_owner: u32,
+    table: &ProcessTable,
+    stopping: &dyn Fn() -> bool,
+) -> SweepReport {
     if !table.is_readable_here() {
         return SweepReport::default();
     }
@@ -78,6 +93,9 @@ fn sweep_as(root: &Path, own_dir: &Path, own_owner: u32, table: &ProcessTable) -
         ..SweepReport::default()
     };
     for entry in entries {
+        if stopping() {
+            break;
+        }
         let Ok(entry) = entry else {
             report.kept += 1;
             continue;
@@ -280,7 +298,7 @@ mod tests {
         let world = World::new()?;
         let own = world.own()?;
         let dead = world.session('a', &marker(GONE_PID, Some(2000)))?;
-        let report = sweep(&world.root, &own, &world.table());
+        let report = sweep(&world.root, &own, &world.table(), &|| false);
         // `sweep` reads our owner from the directory, as in production.
         assert_eq!(
             report,
@@ -303,7 +321,7 @@ mod tests {
         let live = world.session('1', &marker(LIVE_PID, Some(3000)))?;
         let live_unrecorded = world.session('2', &marker(LIVE_PID, None))?;
         let dead = world.session('3', &marker(GONE_PID, None))?;
-        let report = sweep(&world.root, &own, &world.table());
+        let report = sweep(&world.root, &own, &world.table(), &|| false);
         assert_eq!(
             report,
             SweepReport {
@@ -416,7 +434,7 @@ mod tests {
             .join(format!("{DIR_PREFIX}{}", "b".repeat(SUFFIX_DIGITS)));
         symlink(&target, &link)?;
         assert_eq!(world.verdict(&link)?, Verdict::Keep(Keep::NotDirectory));
-        let report = sweep(&world.root, &own, &world.table());
+        let report = sweep(&world.root, &own, &world.table(), &|| false);
         assert_eq!(report.removed, 0, "{report:?}");
         assert_eq!(report.kept, 1);
         assert!(fs::symlink_metadata(&link)?.file_type().is_symlink());
@@ -459,7 +477,7 @@ mod tests {
         let other = world.root.join(format!("other-session-{digits}"));
         fs::create_dir(&other)?;
         fs::write(other.join(MARKER_FILE), &text)?;
-        let report = sweep(&world.root, &own, &world.table());
+        let report = sweep(&world.root, &own, &world.table(), &|| false);
         assert_eq!(
             report,
             SweepReport {
@@ -492,7 +510,7 @@ mod tests {
         let world = World::new()?;
         let dead = world.session('a', &marker(GONE_PID, None))?;
         let missing_own = world.root.join("not-created");
-        let report = sweep(&world.root, &missing_own, &world.table());
+        let report = sweep(&world.root, &missing_own, &world.table(), &|| false);
         assert_eq!(report, SweepReport::default());
         assert!(dead.exists());
         Ok(())
@@ -505,7 +523,7 @@ mod tests {
         let dead = world.session('a', &marker(GONE_PID, None))?;
         let none = ProcessTable::at(world.base.join("no-proc"), OWN_PID);
         // A root that is not there: the table is "readable" but proves nothing.
-        let report = sweep(&world.root, &own, &none);
+        let report = sweep(&world.root, &own, &none, &|| false);
         assert_eq!((report.removed, report.kept), (0, 1), "{report:?}");
         assert!(dead.exists());
         Ok(())
@@ -515,8 +533,48 @@ mod tests {
     fn a_root_that_cannot_be_listed_sweeps_nothing() -> TestResult {
         let world = World::new()?;
         let own = world.own()?;
-        let report = sweep(&world.base.join("absent"), &own, &world.table());
+        let report = sweep(&world.base.join("absent"), &own, &world.table(), &|| false);
         assert_eq!(report, SweepReport::default());
+        Ok(())
+    }
+
+    #[test]
+    fn a_stop_ends_the_sweep_between_entries_and_never_inside_one() -> TestResult {
+        let world = World::new()?;
+        let own = world.own()?;
+        let dirs = [
+            world.session('1', &marker(GONE_PID, None))?,
+            world.session('2', &marker(GONE_PID, None))?,
+            world.session('3', &marker(GONE_PID, None))?,
+        ];
+        // The stop arrives once the first removal has happened.
+        let stopping = || dirs.iter().any(|dir| !dir.exists());
+        let report = sweep(&world.root, &own, &world.table(), &stopping);
+        assert_eq!(
+            report,
+            SweepReport {
+                performed: true,
+                removed: 1,
+                kept: 0,
+                failed: 0
+            },
+            "exactly the entry in hand was finished"
+        );
+        let left: Vec<&PathBuf> = dirs.iter().filter(|dir| dir.exists()).collect();
+        assert_eq!(left.len(), 2, "the others were not looked at: {left:?}");
+        for dir in left {
+            assert!(
+                dir.join("artifree.sqlite3").exists(),
+                "{} is whole",
+                dir.display()
+            );
+        }
+        let report = sweep(&world.root, &own, &world.table(), &|| true);
+        assert_eq!(
+            report.removed + report.kept + report.failed,
+            0,
+            "{report:?}"
+        );
         Ok(())
     }
 }

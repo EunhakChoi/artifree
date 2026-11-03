@@ -23,6 +23,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use artifree_providers::storage::DATABASE_FILE;
 use serde_json::{Value, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -342,6 +343,7 @@ fn stderr_tells_a_person_that_nothing_is_kept_and_that_a_tunnel_is_separate() ->
         "{stderr}"
     );
     assert!(stderr.contains("600 seconds"), "{stderr}");
+    assert!(stderr.contains("SIGHUP"), "{stderr}");
     assert!(
         stderr.contains("tunnel") && stderr.contains("does not implement"),
         "{stderr}"
@@ -472,6 +474,40 @@ fn a_signal_at_each_start_up_step_still_removes_the_directory() -> TestResult {
             "{stage}: a stopped start-up prints no readiness line"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_stop_latched_during_the_sweep_keeps_the_database_from_being_created() -> TestResult {
+    let scratch = Scratch::new("after-sweep")?;
+    let root = scratch.root()?;
+    let held = scratch.join("held");
+    let spec = OsString::from(format!("after-sweep={}", held.display()));
+    let mut server = Server::start(
+        &[
+            "--one-shot-ttl-seconds",
+            "600",
+            "--session-root",
+            &root.to_string_lossy(),
+        ],
+        &[(HOLD_VARIABLE, spec)],
+    )?;
+    wait_for_file(&held)?;
+    // The start-up is at the end of the sweep. Anything that tried to open
+    // the database now would fail on this directory, and so end with an error
+    // and not with a clean stop.
+    let session = fs::read_dir(&root)?
+        .next()
+        .ok_or("the session directory")??
+        .path();
+    fs::create_dir(session.join(DATABASE_FILE))?;
+    server.signal("TERM")?;
+    let status = server.wait()?;
+    let stderr = server.stderr();
+    assert!(status.success(), "{status:?}: {stderr}");
+    assert!(!stderr.contains("database"), "{stderr}");
+    assert_eq!(names(&root)?, Vec::<String>::new());
+    assert!(server.rest_of_stdout().is_empty());
     Ok(())
 }
 

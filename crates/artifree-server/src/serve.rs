@@ -26,6 +26,13 @@ pub const DEFAULT_CONTENT_ADDRESS: &str = "127.0.0.1:7411";
 pub const DEFAULT_FRAME_ANCESTORS: &str = "http://127.0.0.1:* http://localhost:* http://[::1]:*";
 /// Default preview link lifetime.
 pub const DEFAULT_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
+/// What ends a one-shot session besides its lifetime, as the platform has it:
+/// Windows handles Ctrl+C only. One text for the notice and for `--help`.
+pub const ONE_SHOT_STOP_SIGNALS: &str = if cfg!(unix) {
+    "SIGINT, SIGTERM or SIGHUP"
+} else {
+    "Ctrl+C"
+};
 /// Longest accepted one-shot session lifetime: seven days.
 pub const MAX_ONE_SHOT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Longest accepted preview link lifetime. Links are bearer credentials, and
@@ -131,21 +138,38 @@ pub(crate) struct Opened {
 }
 
 /// Prepares `data_dir` and opens the database and the access token in it.
-pub(crate) fn open_data(data_dir: &Path) -> Result<Opened, String> {
+///
+/// `stopping` is asked before each step that creates or changes a file (the
+/// database, the token store, the token); when it says `true` nothing further
+/// is started and the result is `Ok(None)`. A step that started is finished.
+/// Persistent mode passes `|| false`.
+pub(crate) fn open_data(
+    data_dir: &Path,
+    stopping: &dyn Fn() -> bool,
+) -> Result<Option<Opened>, String> {
     data_dir::prepare_data_dir(data_dir)?;
+    if stopping() {
+        return Ok(None);
+    }
     let db_path = data_dir.join(DATABASE_FILE);
     let store = SqliteStore::open(&db_path).map_err(|error| error.to_string())?;
+    if stopping() {
+        return Ok(None);
+    }
     let token_store = SqliteTokenStore::open(&db_path).map_err(|error| error.to_string())?;
     let token_file = data_dir.join("access-token");
+    if stopping() {
+        return Ok(None);
+    }
     let token = AccessToken::load_or_create(&token_file)
         .map_err(|error| format!("access token {}: {error}", token_file.display()))?;
-    Ok(Opened {
+    Ok(Some(Opened {
         store,
         token_store,
         token,
         data_dir: data_dir.to_path_buf(),
         token_file,
-    })
+    }))
 }
 
 /// A runtime for the listeners.
@@ -204,7 +228,8 @@ pub fn run(
 ) -> Result<(), String> {
     match options.data.clone() {
         DataLocation::Persistent { data_dir } => {
-            let opened = open_data(&data_dir)?;
+            let opened =
+                open_data(&data_dir, &|| false)?.ok_or("the data directory was not opened")?;
             let runtime = build_runtime()?;
             runtime.block_on(serve_listeners(
                 options,
@@ -233,6 +258,9 @@ pub(crate) async fn serve_listeners(
         token_file,
     } = opened;
     let api = bind(options.api_address).await?;
+    if shutdown.is_stopping() {
+        return Ok(());
+    }
     let content = bind(options.content_address).await?;
     let api_url = match options.api_origin.as_deref() {
         Some(origin) => origin.to_owned(),
@@ -243,6 +271,9 @@ pub(crate) async fn serve_listeners(
         Some(addr) => Some(bind(addr).await?),
         None => None,
     };
+    if shutdown.is_stopping() {
+        return Ok(());
+    }
     let loopback_api_url = match loopback {
         Some(ref listener) => Some(format!("http://{}", local_address(listener)?)),
         None => None,
@@ -252,6 +283,10 @@ pub(crate) async fn serve_listeners(
         None => format!("http://{}", local_address(&content)?),
     };
 
+    if shutdown.is_stopping() {
+        // Nothing below is started once a stop is latched.
+        return Ok(());
+    }
     let settings = build_settings(&options, local_address(&api)?, content_origin.clone());
     let state = AppState::new(store, token_store, token, settings)?;
     let web_assets = options.web_dir.as_deref().map(WebAssets::new).transpose()?;
@@ -435,5 +470,60 @@ pub(crate) async fn shutdown_signal() {
     tokio::select! {
         () = interrupt => {}
         () = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::error::Error;
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new(name: &str) -> std::io::Result<Self> {
+            let path =
+                std::env::temp_dir().join(format!("artifree-open-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            data_dir::create_private_dir(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `open_data` with a stop that is latched from the `n`-th question on
+    /// (`n` = 1 is the first question); returns whether it opened, and which
+    /// of the database and the token exist afterwards.
+    fn open_with_stop_at(name: &str, n: u32) -> Result<(bool, bool, bool), Box<dyn Error>> {
+        let dir = Dir::new(name)?;
+        let asked = Cell::new(0);
+        let stopping = || {
+            asked.set(asked.get() + 1);
+            asked.get() >= n
+        };
+        let opened = open_data(&dir.0, &stopping)?.is_some();
+        Ok((
+            opened,
+            dir.0.join(DATABASE_FILE).exists(),
+            dir.0.join("access-token").exists(),
+        ))
+    }
+
+    #[test]
+    fn a_stop_before_a_step_keeps_that_step_and_the_later_ones_from_starting() -> TestResult {
+        // Asked before the database, before the token store, before the token.
+        assert_eq!(open_with_stop_at("first", 1)?, (false, false, false));
+        assert_eq!(open_with_stop_at("second", 2)?, (false, true, false));
+        assert_eq!(open_with_stop_at("third", 3)?, (false, true, false));
+        assert_eq!(open_with_stop_at("never", 4)?, (true, true, true));
+        Ok(())
     }
 }

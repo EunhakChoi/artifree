@@ -48,7 +48,9 @@ artifree-server serve --one-shot-ttl-seconds 3600 --web-dir apps/web/dist
 runs the same server on a new private temporary data directory (mode 0700 on
 Unix) under `--session-root` (default: the system temporary directory) and
 deletes it when the process ends: after 1 to 604800 seconds in total (the time
-spent starting counts; there is no default), on SIGINT, SIGTERM or SIGHUP, on a
+spent starting counts; there is no default), on SIGINT, SIGTERM or SIGHUP (Ctrl+C on Windows, which handles only that; a
+SIGHUP ends a session even under `nohup`, since a one-shot session is temporary
+by design), on a
 start-up failure, or when a panic unwinds. Open connections get 5 seconds after
 the stop, then are dropped. It cannot be combined with `--data-dir`. A session
 always starts empty with a new owner token: an old token answers `401`, an old
