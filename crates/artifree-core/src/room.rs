@@ -1651,6 +1651,33 @@ mod tests {
     }
 
     #[test]
+    fn an_actor_at_the_room_cap_can_join_again_after_its_rooms_are_removed() {
+        let limits = Limits {
+            max_rooms: 1,
+            ..Limits::STANDARD
+        };
+        let mut rooms = Rooms::new(limits);
+        let mine = tab_of(actor(), "mine", 'a');
+        join(&mut rooms, 0, &mine, "page");
+        let second = tab_of(actor(), "mine", 'c');
+        assert_eq!(
+            rooms
+                .join(at(0), &second.caller(), slot("page"), None)
+                .err(),
+            Some(RoomError::TooManyRooms)
+        );
+
+        rooms.leave_actor(&actor());
+
+        assert!(
+            rooms
+                .join(at(0), &second.caller(), slot("page"), None)
+                .is_ok(),
+            "a user enabled again must find its places free"
+        );
+    }
+
+    #[test]
     fn each_actor_counts_its_own_participants_and_epochs() {
         let mut rooms = rooms();
         let (mine, theirs) = (

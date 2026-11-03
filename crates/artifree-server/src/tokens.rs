@@ -22,6 +22,7 @@ use axum::{Json, Router};
 use crate::auth::AccessToken;
 use crate::http::{AppState, RequireAdmin};
 use crate::operations::ApiError;
+use crate::users::user_id;
 
 /// Routes for token management.
 pub(crate) fn routes() -> Router<AppState> {
@@ -37,8 +38,8 @@ async fn list_tokens(
     RequireAdmin(_): RequireAdmin,
 ) -> Result<Response, ApiError> {
     let records = state
-        .token_store()
-        .list()
+        .identity(TokenStore::list)
+        .await?
         .map_err(|err| ApiError::unavailable(err.to_string()))?;
 
     let mut tokens = Vec::with_capacity(records.len() + 1);
@@ -82,11 +83,12 @@ async fn create_token(
         ));
     }
 
-    // Omitted: the owner profile, as before users existed. A spelling that is
-    // no registered user is the same `404` as an unknown one.
+    // Omitted: the owner profile, as before users existed. A spelling that no
+    // user can have is the same `404` as an unknown user (one validation, in
+    // `users::user_id`).
     let actor = match body.user_id.as_deref() {
         None => ActorId::owner(),
-        Some(text) => text.parse().map_err(|_| ApiError::not_found("user"))?,
+        Some(text) => user_id(text)?,
     };
 
     let mut random_id = [0u8; 16];
@@ -100,16 +102,17 @@ async fn create_token(
     let prefix = token.prefix();
     let created_at = iso_now();
 
+    let new = NewTokenRecord {
+        id: id.clone(),
+        actor,
+        name: name.to_owned(),
+        secret_hash,
+        prefix: prefix.clone(),
+        created_at: created_at.clone(),
+    };
     let record = state
-        .token_store()
-        .create(&NewTokenRecord {
-            id: id.clone(),
-            actor,
-            name: name.to_owned(),
-            secret_hash,
-            prefix: prefix.clone(),
-            created_at: created_at.clone(),
-        })
+        .identity(move |store| store.create(&new))
+        .await?
         .map_err(|err| match err {
             TokenStoreError::Conflict(msg) => ApiError::conflict(msg),
             TokenStoreError::NotFound(msg) => ApiError::not_found(msg),
@@ -156,9 +159,10 @@ async fn rotate_token(
     let new_hash = hash_token_secret(&new_secret);
     let new_prefix = new_token.prefix();
 
+    let rotating = id.clone();
     let record = state
-        .token_store()
-        .rotate(&id, &new_hash, &new_prefix)
+        .identity(move |store| store.rotate(&rotating, &new_hash, &new_prefix))
+        .await?
         .map_err(|err| match err {
             TokenStoreError::Conflict(msg) => ApiError::conflict(msg),
             TokenStoreError::NotFound(msg) => ApiError::not_found(msg),
@@ -201,9 +205,11 @@ async fn revoke_token(
     }
     let id: TokenId = id_raw.parse().map_err(|_| ApiError::not_found("token"))?;
 
+    let revoking = id.clone();
+    let at = iso_now();
     state
-        .token_store()
-        .revoke(&id, &iso_now())
+        .identity(move |store| store.revoke(&revoking, &at))
+        .await?
         .map_err(|err| match err {
             TokenStoreError::Conflict(msg) => ApiError::conflict(msg),
             TokenStoreError::NotFound(msg) => ApiError::not_found(msg),

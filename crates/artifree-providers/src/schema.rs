@@ -333,7 +333,11 @@ CREATE TABLE data_requests (
 /// so that the head of one user's feed counts only that user's changes.
 /// Existing rows keep their sequence number as `actor_seq` (so every
 /// cursor handed out before stays valid), and `actor_feeds` starts each actor
-/// that has changes at the old global head, so a head never moves back.
+/// that has changes at the old global head, so a head never moves back. A
+/// change row whose artifact row is missing (Artifree enforces foreign keys and
+/// never deletes an artifact row, so only a file edited elsewhere can hold one)
+/// is kept under the owner profile, and the upgrade fails without changing
+/// anything if the rebuilt feed holds fewer rows than the old one.
 const USER_SCHEMA: &str = "
 CREATE TABLE users (
     id TEXT PRIMARY KEY CHECK (id = 'local' OR (length(id) = 34 AND substr(id, 1, 2) = 'u-'
@@ -382,9 +386,9 @@ CREATE TABLE changes_v10 (
 ) STRICT;
 INSERT INTO changes_v10 (sequence, actor, actor_seq, artifact_id, kind, revision,
         metadata_revision, committed_at)
-    SELECT c.sequence, a.owner, c.sequence, c.artifact_id, c.kind, c.revision,
-        c.metadata_revision, c.committed_at
-    FROM changes c JOIN artifacts a ON a.id = c.artifact_id;
+    SELECT c.sequence, coalesce(a.owner, 'local'), c.sequence, c.artifact_id, c.kind,
+        c.revision, c.metadata_revision, c.committed_at
+    FROM changes c LEFT JOIN artifacts a ON a.id = c.artifact_id;
 DROP TABLE changes;
 ALTER TABLE changes_v10 RENAME TO changes;
 ";
@@ -477,10 +481,20 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
         .execute_batch(TOKEN_SCHEMA)
         .map_err(unavailable)?;
     if version < 10 {
+        let before = change_rows(&transaction)?;
         keeping_feed_head(&transaction, USER_SCHEMA)?;
         transaction
             .execute_batch(ACTOR_FEED_HEADS)
             .map_err(unavailable)?;
+        // The rebuilt feed holds every row the old one did, or the upgrade
+        // fails and nothing is changed: a cursor a client holds must not
+        // point at a position that is gone.
+        let after = change_rows(&transaction)?;
+        if before != after {
+            return Err(StoreError::Unavailable(format!(
+                "the upgrade to schema 10 would lose change rows ({before} before, {after} after)"
+            )));
+        }
     }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -813,6 +827,13 @@ pub(crate) fn expire_job_leases(connection: &Connection) -> Result<usize, StoreE
             "UPDATE jobs SET lease_expires_at = 0 WHERE state = 'running'",
             [],
         )
+        .map_err(unavailable)
+}
+
+/// How many rows the `changes` table holds.
+fn change_rows(transaction: &Transaction<'_>) -> Result<i64, StoreError> {
+    transaction
+        .query_row("SELECT count(*) FROM changes", [], |row| row.get(0))
         .map_err(unavailable)
 }
 

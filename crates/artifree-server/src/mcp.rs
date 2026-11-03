@@ -386,7 +386,7 @@ async fn dispatch_handoffs(
         "register_handoff_session" => {
             json(async {
                 let RegisterHandoffSessionArguments { name } = parse(arguments)?;
-                operations::register_handoff_session(state, &actor, &name)
+                operations::register_confirmed_handoff_session(state, &actor, &name).await
             })
             .await
         }

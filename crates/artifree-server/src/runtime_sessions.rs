@@ -243,19 +243,33 @@ impl RuntimeSessions {
         }
     }
 
-    /// Closes every runtime session of `actor`, as when the user is
-    /// disabled (decision 0036). Its grants go with them.
+    /// Closes every runtime session of `actor` and forgets it, as when the
+    /// user is disabled (decision 0036). Its grants go with them. The entries
+    /// are removed, not just marked closed: a closed entry would keep
+    /// counting against the actor's [`MAX_SESSIONS`] until its lifetime ended,
+    /// and an actor at the bound would find every new connection refused after
+    /// being enabled again. A handle held elsewhere stays closed.
     pub(crate) fn revoke_actor(&self, actor: &ActorId) {
-        if let Ok(sessions) = self.sessions.lock() {
-            for ((owner, _), session) in sessions.iter() {
-                if owner == actor
-                    && let Ok(mut state) = session.state.lock()
-                {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.retain(|(owner, _), session| {
+                if owner != actor {
+                    return true;
+                }
+                if let Ok(mut state) = session.state.lock() {
                     state.closed = true;
                     state.grants.clear();
                 }
-            }
+                false
+            });
         }
+    }
+
+    /// How many connections `actor` holds, for tests.
+    #[cfg(test)]
+    pub(crate) fn held_by(&self, actor: &ActorId) -> usize {
+        self.sessions.lock().map_or(usize::MAX, |sessions| {
+            sessions.keys().filter(|(owner, _)| owner == actor).count()
+        })
     }
 
     pub(crate) fn get(
@@ -604,12 +618,29 @@ mod tests {
             .create(&bob, None)
             .map_err(|error| format!("{error:?}"))?;
 
+        let held = sessions
+            .get(&alice, &first)
+            .map_err(|error| format!("{error:?}"))?;
+
         sessions.revoke_actor(&alice);
 
+        // The handle taken before stays closed; the entries are forgotten, so
+        // an actor that was at the bound can open connections again once
+        // enabled, and only its own entries went.
         assert!(matches!(
-            sessions.get(&alice, &first),
+            held.while_active(|| ()),
             Err(SessionError::Closed)
         ));
+        assert!(matches!(
+            sessions.get(&alice, &first),
+            Err(SessionError::Missing)
+        ));
+        assert_eq!(sessions.held_by(&alice), 0, "closed entries were kept");
+        assert_eq!(sessions.held_by(&bob), 1);
+        assert!(
+            sessions.create(&alice, None).is_ok(),
+            "an actor at the bound cannot connect after a disable and enable"
+        );
         assert!(sessions.get(&bob, &bobs).is_ok());
         // A connection id is only valid for the actor that holds it.
         assert!(matches!(

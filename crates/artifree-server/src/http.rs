@@ -235,6 +235,9 @@ impl AppState {
         self.shared.feed.close();
     }
 
+    /// The identity store, for tests that change the registry directly; the
+    /// server's own code reaches it through [`Self::identity`].
+    #[cfg(test)]
     pub(crate) fn token_store(&self) -> &SqliteTokenStore {
         &self.shared.token_store
     }
@@ -357,17 +360,29 @@ impl AppState {
         if actor.is_owner() {
             return Ok(());
         }
-        let users = Arc::clone(&self.shared.token_store);
         let id = actor.clone();
-        let user = tokio::task::spawn_blocking(move || users.user(&id))
-            .await
-            .map_err(|_| ApiError::unavailable("user lookup failed"))?
+        let user = self
+            .identity(move |store| store.user(&id))
+            .await?
             .map_err(|err| ApiError::unavailable(err.to_string()))?;
         if user.is_some_and(|user| user.is_enabled()) {
             return Ok(());
         }
         self.revoke_actor(actor);
         Err(ApiError::unauthenticated())
+    }
+
+    /// Runs a call on the identity store (users and tokens, blocking `SQLite`)
+    /// off the async executor.
+    pub(crate) async fn identity<T, F>(&self, call: F) -> Result<T, ApiError>
+    where
+        F: FnOnce(&SqliteTokenStore) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let store = Arc::clone(&self.shared.token_store);
+        tokio::task::spawn_blocking(move || call(&store))
+            .await
+            .map_err(|_| ApiError::unavailable("the identity store call failed"))
     }
 
     /// Runs a synchronous application command off the async executor.
@@ -1716,7 +1731,9 @@ async fn open_runtime_session(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<RuntimeConnection>, ApiError> {
-    operations::open_runtime_session(&state, &auth.actor, auth.token_id).map(Json)
+    operations::open_confirmed_runtime_session(&state, &auth.actor, auth.token_id)
+        .await
+        .map(Json)
 }
 
 async fn close_runtime_session(

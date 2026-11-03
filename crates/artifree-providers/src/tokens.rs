@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use artifree_domain::identity::TokenId;
 use artifree_ports::token_store::{NewTokenRecord, TokenRecord, TokenStore, TokenStoreError};
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior};
 
 use crate::schema::SCHEMA_VERSION;
 use sha2::{Digest, Sha256};
@@ -142,6 +142,23 @@ fn token_record(row: TokenRow) -> Result<TokenRecord, TokenStoreError> {
     })
 }
 
+/// The token `id` with its user, read through `connection`.
+fn token_by_id(
+    connection: &Connection,
+    id: &TokenId,
+) -> Result<Option<TokenRecord>, TokenStoreError> {
+    connection
+        .query_row(
+            &format!("{TOKEN_COLUMNS} WHERE t.id = ?1"),
+            [id.as_str()],
+            token_row,
+        )
+        .optional()
+        .map_err(unavailable)?
+        .map(token_record)
+        .transpose()
+}
+
 impl TokenStore for SqliteTokenStore {
     fn list(&self) -> Result<Vec<TokenRecord>, TokenStoreError> {
         let connection = self.connect()?;
@@ -229,36 +246,34 @@ impl TokenStore for SqliteTokenStore {
         new_secret_hash: &str,
         new_prefix: &str,
     ) -> Result<TokenRecord, TokenStoreError> {
-        let connection = self.connect()?;
-        // Check if token exists and is active
-        let existing = self
-            .list()?
-            .into_iter()
-            .find(|record| record.id == *id)
+        let mut connection = self.connect()?;
+        // One write transaction: the token that is checked, changed and
+        // returned is one snapshot, so the answer says whether the user is
+        // disabled now and not when an earlier read happened.
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(unavailable)?;
+        let existing = token_by_id(&transaction, id)?
             .ok_or_else(|| TokenStoreError::NotFound(id.to_string()))?;
         if existing.revoked_at.is_some() {
             return Err(TokenStoreError::Conflict(
                 "cannot rotate a revoked token".into(),
             ));
         }
-
-        let result = connection.execute(
+        // A disabled user's token can be rotated: the old secret stops now,
+        // and the new one authenticates only once the user is enabled.
+        let result = transaction.execute(
             "UPDATE tokens SET secret_hash = ?1, prefix = ?2, last_used_at = NULL \
              WHERE id = ?3 AND revoked_at IS NULL",
             (new_secret_hash, new_prefix, id.as_str()),
         );
         match result {
-            Ok(rows) if rows > 0 => Ok(TokenRecord {
-                id: id.clone(),
-                actor: existing.actor,
-                actor_disabled: existing.actor_disabled,
-                name: existing.name,
-                secret_hash: new_secret_hash.to_owned(),
-                prefix: new_prefix.to_owned(),
-                created_at: existing.created_at,
-                last_used_at: None,
-                revoked_at: None,
-            }),
+            Ok(rows) if rows > 0 => {
+                let record = token_by_id(&transaction, id)?
+                    .ok_or_else(|| TokenStoreError::NotFound(id.to_string()))?;
+                transaction.commit().map_err(unavailable)?;
+                Ok(record)
+            }
             Ok(_) => Err(TokenStoreError::NotFound(id.to_string())),
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == ErrorCode::ConstraintViolation =>

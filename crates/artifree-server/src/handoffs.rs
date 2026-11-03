@@ -1402,6 +1402,21 @@ mod tests {
         );
         assert_eq!(handoffs.list(&bob).map_err(|e| format!("{e:?}"))?.len(), 1);
         assert!(handoffs.get(&bob, &bob_tab, &bobs.id).is_ok());
+        // An actor that was at both bounds has its places back, so a user
+        // enabled again can register an inbox and stage a delivery.
+        let again = handoffs
+            .register(&alice, "Agent again")
+            .map_err(|e| format!("{e:?}"))?;
+        handoffs
+            .stage(
+                &alice,
+                &alice_tab,
+                &alice_connection,
+                &again.session_id,
+                fixture_selection(),
+                "Edit".into(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
         Ok(())
     }
 }

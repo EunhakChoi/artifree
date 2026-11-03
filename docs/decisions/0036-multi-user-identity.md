@@ -60,23 +60,43 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
    owner cannot be disabled, `409`). From then on every token of the user is the
    same `401` as a token nobody issued, on HTTP and MCP. The server also closes
    what it holds open in memory for the user: change streams, preview tickets
-   and runtime view fences, runtime connections (and so their grants and
-   handoff offers), room participants, and registered handoff inboxes. Nothing
-   stored is touched: artifacts, revisions, data, jobs and the user's tokens
-   stay, and the tokens are not revoked. **Enabling lets the tokens that are not
-   revoked authenticate again; what disabling closed stays closed**, so a client
-   opens a new connection, stream or link. Token rotation and per-token
-   revocation work as before, and a revoked token's cascade (streams, tickets,
-   connections) is unchanged.
+   and runtime view fences, runtime connections (closed **and forgotten**, with
+   their grants and handoff offers), room participants, and registered handoff
+   inboxes. A closed connection is removed, not kept marked: a kept entry would
+   count against the user's bound of 4096 until its lifetime ended, and a user
+   at the bound would find every new connection refused after being enabled
+   again. Nothing stored is touched: artifacts, revisions, data, jobs and the
+   user's tokens stay, and the tokens are not revoked. **Enabling lets the
+   tokens that are not revoked authenticate again; what disabling closed stays
+   closed**, so a client opens a new connection, stream or link. The
+   administrator can still list, revoke and rotate the tokens of a disabled
+   user: a revoked token stays revoked when the user is enabled, and a rotated
+   secret authenticates only once the user is enabled (a rotation is one
+   transaction, and its answer states whether the user is disabled at that
+   moment). A revoked token's cascade (streams, tickets, connections) is
+   unchanged.
 5. **Registering after the disable is closed by confirming after.** A request
    that authenticated before a disable can register something that outlives it
-   (a stream, a preview link, a runtime view) after the disable's cleanup ran.
-   Those paths register first and then call `ensure_enabled`, which reads the
-   user and, if it is disabled or gone, runs the cleanup again and answers `401`.
-   Either the request sees the disabled user and removes its own registration, or
-   the disable's cleanup comes later and removes it. Runtime connections close
-   before rooms are emptied, and a room call checks its connection under a lock,
-   so no participant outlives its connection.
+   after the disable's cleanup ran. Every registration of long-lived per-user
+   state in memory was inventoried, and each is one of two kinds:
+   - **Confirmed after registering** (`ensure_enabled`: it reads the user and,
+     if it is disabled or gone, runs the cleanup again and answers `401`, so
+     either the request sees the disabled user and removes its own registration,
+     or the disable's cleanup comes later and removes it): change streams,
+     preview links, runtime views, runtime connections
+     (`POST /v1/runtime-sessions`), and agent inboxes (MCP
+     `register_handoff_session`). The HTTP and MCP handlers call only the
+     `*_confirmed` forms, and a test fails when a handler calls the registering
+     function alone.
+   - **Tied to a runtime connection and checked under its lock**: room
+     participants, staged handoff deliveries, grants. A connection closes before
+     the rooms and deliveries of the user are emptied, and each of these changes
+     its state only while the connection is open (`while_active`), so a call
+     that passed its lookup before the disable is refused afterwards and none
+     outlives its connection.
+     Stored data is not state of this kind: an artifact, revision, data document or
+     job written by a request that authenticated before the disable is the user's
+     data like any other, and is there when the user is enabled again.
 6. **Isolation: another user's name is a name that does not exist.** An artifact,
    revision, file, export, trashed artifact, job, application data, preview,
    runtime view or grant, room, handoff or inbox that belongs to another user
@@ -102,13 +122,19 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
    the old sequence into `actor_seq` and gives each actor that has changes the
    old head, so a single user's cursors stay valid and the next change continues
    after the head. A stream reads only its own actor's rows, so another user's
-   commit is neither delivered nor visible as a gap in numbering.
+   commit is neither delivered nor visible as a gap in numbering. Every row of
+   the old feed is kept: the upgrade fails, changing nothing, if the rebuilt
+   feed would hold fewer rows, and a row whose artifact row is missing (which
+   only a file edited outside Artifree can hold, since foreign keys are enforced
+   and no artifact row is ever deleted; a purged artifact keeps its row) goes to
+   the owner profile.
 9. **Bounds that were global are per user.** Rooms with a participant
    (`max_rooms`), the numbers rooms hand out (participant, tab, epoch), runtime
    connections (4096), preview tickets, view fences and pending creations (4096
    each), handoff inboxes (128) and items (512). The request limiter, the three
    request budgets and the open-stream cap were already keyed by actor; they stay.
-   Each is tested for "one user at the bound, another unaffected".
+   Each is tested for "one user at the bound, another unaffected", and for "a
+   user at the bound has its places back after a disable and an enable".
 10. **Schema 10 and contract 0.14.0.** One transaction: `users` (with the owner
     row, a `CHECK` that the owner is never disabled, and `CHECK`s on the id
     spelling), `tokens` rebuilt with `actor`, `actor_feeds`, `changes` rebuilt
@@ -166,6 +192,17 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
 - Frame identity (a runtime frame acts for the user whose workspace page asked),
   a multi-process or shared limiter and room store, and any statement about
   network isolation.
+- Cancelling a disabled user's jobs: disabling stops requests and what the
+  server holds in memory, not the separate worker, so a job already queued or
+  running for the user is carried out, and its result is the user's stored data.
+
+## Limits (not changed in this record)
+
+- The per-user counts of rooms, preview tickets and fences, handoff inboxes and
+  items, and runtime connections scan the whole table under its lock. That is
+  bounded by 32 users times the bounds above, and is kept simple on purpose.
+- The room counters of an actor (participant, tab and epoch numbers) are
+  kept for the process's life and not pruned; there are at most 32 actors.
 
 ## Tests
 
@@ -173,6 +210,7 @@ disable|enable` and `artifree token create <name> --user <id>`. No MCP tool
 the route inventory check, user management and its administrator boundary,
 token ownership, disabling and enabling, per-user budgets, the owner profile),
 `crates/artifree-providers/tests/users.rs` and `schema_upgrade.rs` (the registry,
-its constraints, the per-actor feed, and upgrades from every earlier schema
-version), unit tests of each per-user bound and cascade in the server and core
+its constraints, the per-actor feed, upgrades from every earlier schema
+version, and an upgrade that keeps every change row, a purged artifact's and an
+orphan's included, by value and by cursor), unit tests of each per-user bound and cascade in the server and core
 crates, `scripts/tests/user-management.test.mjs` (client and CLI).

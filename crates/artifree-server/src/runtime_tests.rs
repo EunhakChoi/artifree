@@ -2013,10 +2013,13 @@ fn disabling_a_user_closes_what_it_holds_and_nothing_of_anothers() -> Result<(),
 
         state.revoke_actor(&alice);
 
+        // The connection is forgotten, so it no longer counts against the
+        // user's bound after the user is enabled again.
         assert!(matches!(
             state.runtime_sessions().get(&alice, &alices),
-            Err(crate::runtime_sessions::SessionError::Closed)
+            Err(crate::runtime_sessions::SessionError::Missing)
         ));
+        assert_eq!(state.runtime_sessions().held_by(&alice), 0);
         assert!(state.runtime_sessions().get(&bob, &bobs).is_ok());
         assert_eq!(state.previews().live_tickets(&alice), 0);
         assert_eq!(state.previews().live_tickets(&bob), 1);
@@ -2097,9 +2100,121 @@ fn a_request_that_authenticated_before_a_disable_leaves_nothing_registered()
         assert!(
             matches!(
                 state.runtime_sessions().get(&alice, &session),
-                Err(crate::runtime_sessions::SessionError::Closed)
+                Err(crate::runtime_sessions::SessionError::Missing)
             ),
             "the late request did not close the connection"
+        );
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_connection_or_inbox_registered_after_a_disable_does_not_come_back_with_the_user()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let alice = registered_user(&state, 1)?;
+        // The registry changes after the two requests below authenticated,
+        // and the disabling's own cleanup (`revoke_actor`) ran before they
+        // register: nothing but the confirmation can undo what they leave.
+        state
+            .token_store()
+            .set_disabled(&alice, Some("2026-01-02T00:00:00Z"))
+            .map_err(|error| error.to_string())?;
+
+        let connection = operations::open_confirmed_runtime_session(&state, &alice, None).await;
+        assert!(
+            matches!(&connection, Err(error) if error.status == StatusCode::UNAUTHORIZED),
+            "{:?}",
+            connection.map(|opened| opened.session_id)
+        );
+        let inbox = operations::register_confirmed_handoff_session(&state, &alice, "Editor").await;
+        assert!(
+            matches!(&inbox, Err(error) if error.status == StatusCode::UNAUTHORIZED),
+            "{:?}",
+            inbox.map(|registered| registered.session_id)
+        );
+
+        // Once the user is enabled again nothing of the late requests is there.
+        state
+            .token_store()
+            .set_disabled(&alice, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            state.runtime_sessions().held_by(&alice),
+            0,
+            "a connection outlived the disable"
+        );
+        let inboxes = state
+            .handoffs()
+            .list(&alice)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(inboxes.is_empty(), "an inbox outlived the disable");
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_join_that_passed_its_lookup_before_a_disable_leaves_no_participant()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let alice = registered_user(&state, 1)?;
+        let artifact = create_runtime_artifact(&state, &alice).await?;
+        let session = operations::open_runtime_session(&state, &alice, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let (release, blocker) = hold_blocking_thread().await?;
+        let mut join = Box::pin(rooms::join(
+            &state,
+            &alice,
+            &session,
+            &artifact,
+            Ok(join_request("page")),
+        ));
+        let pending = poll_fn(|context| match join.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await;
+        assert!(
+            pending,
+            "the artifact lookup must be queued before the disable"
+        );
+        // The join has its connection and waits for the artifact; the user is
+        // disabled with everything the server holds for it, rooms included.
+        state
+            .token_store()
+            .set_disabled(&alice, Some("2026-01-02T00:00:00Z"))
+            .map_err(|error| error.to_string())?;
+        state.revoke_actor(&alice);
+        release.send(())?;
+        let joined = join.await;
+        assert!(
+            matches!(&joined, Err(error) if error.status == StatusCode::NOT_FOUND),
+            "{:?}",
+            joined.map(|view| view.participant)
+        );
+        blocker.await?;
+        // Nothing of the user is in a room, now or after it is enabled again.
+        state
+            .token_store()
+            .set_disabled(&alice, None)
+            .map_err(|error| error.to_string())?;
+        let counts = state.rooms().counts();
+        assert_eq!(
+            counts.map(|counts| (counts.rooms, counts.participants)),
+            Some((0, 0)),
+            "a participant outlived the disable"
         );
         Ok::<(), Box<dyn Error>>(())
     })

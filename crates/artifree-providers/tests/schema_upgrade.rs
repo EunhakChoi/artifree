@@ -187,6 +187,113 @@ fn an_upgraded_feed_keeps_its_cursors_and_continues_after_its_head() -> TestResu
     Ok(())
 }
 
+const PURGED_ID: &str = "art_22222222222222222222222222222222";
+const ORPHAN_ID: &str = "art_33333333333333333333333333333333";
+
+/// Every change row as text, in write order, whatever the columns around it.
+fn change_rows(path: &std::path::Path) -> Result<Vec<String>, rusqlite::Error> {
+    let connection = Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT sequence || '|' || artifact_id || '|' || kind || '|' || revision || '|'
+             || metadata_revision || '|' || committed_at FROM changes ORDER BY sequence",
+    )?;
+    statement.query_map([], |row| row.get(0))?.collect()
+}
+
+/// Change rows of an artifact that was purged (its row stays as a tombstone)
+/// and of one whose artifact row is gone (no Artifree build removes one, and
+/// foreign keys forbid it, so only a file edited elsewhere holds such a row):
+/// the upgrade keeps every row and every number, and the second kind goes to
+/// the owner profile.
+#[test]
+fn an_upgrade_keeps_every_change_row_including_a_purged_and_an_orphaned_artifacts() -> TestResult {
+    for version in 7..=9 {
+        let dir = TempDir::new();
+        let path = database_in(dir.path());
+        historical_database(&path, version)?;
+        // Foreign keys are off while the file is edited "elsewhere": the
+        // orphan's revision rows name an artifact that is not there.
+        Connection::open(&path)?.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO artifacts (id, owner, kind, title, current_revision, created_at,
+                 updated_at, pinned, metadata_revision, deleted_at, purged_at)
+                 VALUES ('{PURGED_ID}', 'owner', 'app', 'Gone', 1, 160, 160, 0, 3, 450, 500);
+             INSERT INTO revisions VALUES ('{PURGED_ID}', 1, 'owner', 160);
+             INSERT INTO metadata_revisions
+                 (artifact_id, metadata_revision, title, pinned, created_by, created_at, deleted_at)
+                 VALUES ('{PURGED_ID}', 1, 'Gone', 0, 'owner', 160, NULL),
+                        ('{PURGED_ID}', 2, 'Gone', 0, 'owner', 450, 450),
+                        ('{PURGED_ID}', 3, 'Gone', 0, 'owner', 500, 500);
+             INSERT INTO changes (sequence, artifact_id, kind, revision, metadata_revision, committed_at)
+                 VALUES (6, '{PURGED_ID}', 'created', 1, 1, 160),
+                        (7, '{PURGED_ID}', 'deleted', 1, 2, 450),
+                        (8, '{PURGED_ID}', 'purged', 1, 3, 500);
+             INSERT INTO revisions VALUES ('{ORPHAN_ID}', 1, 'owner', 170);
+             INSERT INTO metadata_revisions
+                 (artifact_id, metadata_revision, title, pinned, created_by, created_at)
+                 VALUES ('{ORPHAN_ID}', 1, 'Lost', 0, 'owner', 170);
+             INSERT INTO changes (sequence, artifact_id, kind, revision, metadata_revision, committed_at)
+                 VALUES (9, '{ORPHAN_ID}', 'created', 1, 1, 170);
+             UPDATE sqlite_sequence SET seq = 9 WHERE name = 'changes';"
+        ))?;
+        let before = change_rows(&path)?;
+        assert_eq!(before.len(), 6, "the fixture of version {version}");
+
+        let store = SqliteStore::open(&path)?;
+
+        assert_eq!(change_rows(&path)?, before, "version {version}");
+        let numbering: Vec<String> = {
+            let connection = Connection::open(&path)?;
+            let mut statement = connection
+                .prepare("SELECT actor || '|' || sequence || '|' || actor_seq FROM changes ORDER BY sequence")?;
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        assert_eq!(
+            numbering,
+            [
+                "owner|1|1",
+                "owner|2|2",
+                "owner|6|6",
+                "owner|7|7",
+                "owner|8|8",
+                "local|9|9"
+            ],
+            "version {version}: the purged artifact's rows stay the owner's, the orphan's go to the owner profile"
+        );
+        // The owner's cursors of before are still valid and see the purge.
+        let owner = actor("owner");
+        let seen: Vec<_> = store
+            .changes(&owner, ChangeSequence(5), 100)?
+            .changes
+            .iter()
+            .map(|change| (change.sequence, change.kind))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (ChangeSequence(6), ChangeKind::Created),
+                (ChangeSequence(7), ChangeKind::Deleted),
+                (ChangeSequence(8), ChangeKind::Purged)
+            ],
+            "version {version}"
+        );
+        let local = store.changes(&actor("local"), ChangeSequence(0), 100)?;
+        assert_eq!(
+            local
+                .changes
+                .iter()
+                .map(|change| change.sequence)
+                .collect::<Vec<_>>(),
+            [ChangeSequence(9)],
+            "version {version}"
+        );
+        assert_eq!(local.head, ChangeSequence(9), "version {version}");
+    }
+    Ok(())
+}
+
 /// A file that already holds changes of two actors (no build wrote one, but
 /// the schema allows it): each actor keeps the numbers its changes had and
 /// starts at the old global head.

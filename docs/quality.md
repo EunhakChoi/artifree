@@ -334,7 +334,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   no MCP tool for users or tokens, disabling (every token `401` on HTTP and
   MCP, streams, previews, connections and rooms closed, another user
   untouched, enabling restores tokens only), a request that authenticated
-  before a disable leaving nothing registered, and each per-user bound with one
+  before a disable leaving nothing registered (stream, link, view, connection, inbox, and a room join already in flight), a user at a bound having its places back after a disable and an enable, a disabled user's token still revocable and staying revoked once enabled, and each per-user bound with one
   user at the limit and another unaffected. Provider tests upgrade a database
   from every earlier schema version and keep a feed's cursors. Node tests check
   the client and the CLI against a stand-in server. Each guard was checked by

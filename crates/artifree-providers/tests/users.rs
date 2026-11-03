@@ -268,6 +268,85 @@ fn a_token_belongs_to_one_user_and_stops_with_it() -> TestResult {
 }
 
 #[test]
+fn a_disabled_users_token_can_still_be_revoked_and_stays_revoked_once_enabled() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.register("Alice", 1)?;
+    let stolen = fixture.token(&alice, 1)?;
+    let kept = fixture.token(&alice, 2)?;
+    fixture
+        .identity
+        .set_disabled(&alice, Some("2026-11-03T01:00:00Z"))?;
+
+    // The administrator can still kill a token of a disabled user, and the
+    // listing still shows it.
+    fixture.identity.revoke(&stolen, "2026-11-03T02:00:00Z")?;
+    let listed = fixture.identity.list()?;
+    let revoked: Vec<_> = listed
+        .iter()
+        .filter(|token| token.revoked_at.is_some())
+        .map(|token| token.id.clone())
+        .collect();
+    assert_eq!(revoked, std::slice::from_ref(&stolen));
+
+    // Enabling the user brings back the token that was not revoked only.
+    fixture.identity.set_disabled(&alice, None)?;
+    let found = |seed: u8| {
+        fixture
+            .identity
+            .find_by_hash(&hash_token_secret(&format!("secret {seed}")))
+    };
+    assert!(found(1)?.is_some_and(|token| !token.is_active()), "revoked");
+    assert!(found(2)?.is_some_and(|token| token.is_active() && token.id == kept));
+    // A revoked token cannot be rotated back to life.
+    assert!(matches!(
+        fixture
+            .identity
+            .rotate(&stolen, &hash_token_secret("revived"), "art_x"),
+        Err(TokenStoreError::Conflict(_))
+    ));
+    assert!(
+        fixture
+            .identity
+            .find_by_hash(&hash_token_secret("revived"))?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn rotating_a_disabled_users_token_answers_with_the_state_it_stored() -> TestResult {
+    let fixture = Fixture::new()?;
+    let alice = fixture.register("Alice", 1)?;
+    let token = fixture.token(&alice, 1)?;
+    fixture
+        .identity
+        .set_disabled(&alice, Some("2026-11-03T01:00:00Z"))?;
+
+    let rotated = fixture
+        .identity
+        .rotate(&token, &hash_token_secret("rotated"), "art_r")?;
+
+    // The old secret is dead at once, and the new one waits for the user.
+    assert!(rotated.actor_disabled, "the answer was stale");
+    assert!(!rotated.is_active());
+    assert_eq!(rotated.prefix, "art_r");
+    assert!(
+        fixture
+            .identity
+            .find_by_hash(&hash_token_secret("secret 1"))?
+            .is_none()
+    );
+    fixture.identity.set_disabled(&alice, None)?;
+    assert!(
+        fixture
+            .identity
+            .find_by_hash(&hash_token_secret("rotated"))?
+            .is_some_and(|found| found.is_active())
+    );
+    Ok(())
+}
+
+#[test]
 fn a_token_is_issued_only_to_a_registered_enabled_user() -> TestResult {
     let fixture = Fixture::new()?;
     let ghost = ActorId::user([7; 16]);

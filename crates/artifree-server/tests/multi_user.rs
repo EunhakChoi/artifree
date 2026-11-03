@@ -2338,6 +2338,131 @@ async fn enabling_restores_only_the_tokens_not_what_was_closed() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_disabled_users_token_can_be_revoked_and_stays_revoked_after_enabling() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let stolen = harness.issue(Some(&alice.id), "stolen").await?;
+    let kept = harness.issue(Some(&alice.id), "kept").await?;
+    set_disabled(&harness, &alice.id, true).await?;
+
+    // The administrator can revoke while the user is disabled, and again.
+    for _ in 0..2 {
+        assert_eq!(
+            harness
+                .status(
+                    "DELETE",
+                    &format!("/v1/tokens/{}", stolen.token.id),
+                    Some(OWNER)
+                )
+                .await?,
+            204
+        );
+    }
+    let listed: TokenList = harness
+        .expect(200, "GET", "/v1/tokens", OWNER, None, None)
+        .await?;
+    assert!(
+        listed
+            .tokens
+            .iter()
+            .any(|token| token.id == stolen.token.id && token.revoked_at.is_some()),
+        "{listed:?}"
+    );
+
+    set_disabled(&harness, &alice.id, false).await?;
+    assert_eq!(
+        harness
+            .status("GET", "/v1/artifacts", Some(&stolen.secret))
+            .await?,
+        401,
+        "a token revoked while its user was disabled works again"
+    );
+    assert_eq!(
+        harness
+            .status("GET", "/v1/artifacts", Some(&kept.secret))
+            .await?,
+        200
+    );
+    // A revoked token cannot be rotated back either.
+    assert_eq!(
+        harness
+            .status(
+                "POST",
+                &format!("/v1/tokens/{}/rotate", stolen.token.id),
+                Some(OWNER)
+            )
+            .await?,
+        409
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_user_at_the_stream_bound_can_open_one_again_after_a_disable_and_enable() -> TestResult {
+    let harness = Harness::with(|settings| settings.change_streams = 1);
+    let alice = harness.person("alice").await?;
+    let mut held = harness.open_stream(&alice.secret).await?;
+    assert_eq!(
+        harness
+            .status("GET", "/v1/changes", Some(&alice.secret))
+            .await?,
+        429
+    );
+
+    set_disabled(&harness, &alice.id, true).await?;
+    assert!(held.ended().await?, "the stream outlived the user");
+    set_disabled(&harness, &alice.id, false).await?;
+
+    // The slot is freed when the stream's task has finished, a moment after
+    // the body ends.
+    let mut opened = false;
+    for _ in 0..500 {
+        // Only the status is read: the body of an open stream never ends.
+        let response = harness
+            .api
+            .clone()
+            .oneshot(
+                Request::get("/v1/changes")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", alice.secret))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        if response.status() == StatusCode::OK {
+            opened = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(opened, "the ended stream still holds the user's place");
+    Ok(())
+}
+
+#[test]
+fn request_handlers_open_connections_and_inboxes_only_through_the_confirmed_functions() {
+    // A connection and an inbox outlive the request that opens them, so a
+    // handler that authenticated before a disable must confirm the user after
+    // registering. The registering functions alone do not.
+    for (file, source) in [
+        ("http.rs", include_str!("../src/http.rs")),
+        ("mcp.rs", include_str!("../src/mcp.rs")),
+    ] {
+        for primitive in [
+            "operations::open_runtime_session(",
+            "operations::register_handoff_session(",
+        ] {
+            assert!(
+                !source.contains(primitive),
+                "{file} registers through {primitive} without confirming the user"
+            );
+        }
+    }
+    assert!(include_str!("../src/http.rs").contains("operations::open_confirmed_runtime_session("));
+    assert!(
+        include_str!("../src/mcp.rs").contains("operations::register_confirmed_handoff_session(")
+    );
+}
+
+#[tokio::test]
 async fn disabling_one_user_leaves_the_others_requests_and_streams_alone() -> TestResult {
     let harness = Harness::new();
     let alice = harness.person("alice").await?;

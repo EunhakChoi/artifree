@@ -821,6 +821,9 @@ fn handoff_error(error: HandoffError) -> ApiError {
     }
 }
 
+/// Registers an agent inbox. It only registers: a request that serves a
+/// caller uses [`register_confirmed_handoff_session`], which also confirms
+/// that the user is still enabled.
 pub(crate) fn register_handoff_session(
     state: &AppState,
     actor: &ActorId,
@@ -830,6 +833,20 @@ pub(crate) fn register_handoff_session(
         .handoffs()
         .register(actor, name)
         .map_err(handoff_error)
+}
+
+/// Registers an agent inbox for a request that authenticated earlier. The
+/// inbox outlives the request, so the user is confirmed **after** it is
+/// registered: a disable that came in between has already run its cleanup,
+/// and this removes the inbox again (decision 0036).
+pub(crate) async fn register_confirmed_handoff_session(
+    state: &AppState,
+    actor: &ActorId,
+    name: &str,
+) -> Result<RegisteredHandoffSession, ApiError> {
+    let registered = register_handoff_session(state, actor, name)?;
+    state.ensure_enabled(actor).await?;
+    Ok(registered)
 }
 
 pub(crate) fn agent_sessions(
@@ -1040,6 +1057,9 @@ pub(crate) fn acknowledge_handoff(
         .map_err(handoff_error)
 }
 
+/// Opens a connection. It only registers: a request that serves a caller
+/// uses [`open_confirmed_runtime_session`], which also confirms that the user
+/// is still enabled.
 pub(crate) fn open_runtime_session(
     state: &AppState,
     actor: &ActorId,
@@ -1050,6 +1070,20 @@ pub(crate) fn open_runtime_session(
         .create(actor, token_id)
         .map_err(session_error)?;
     Ok(RuntimeConnection { session_id })
+}
+
+/// Opens a connection for a request that authenticated earlier. The
+/// connection outlives the request, so the user is confirmed **after** it is
+/// registered: a disable that came in between has already run its cleanup,
+/// and this closes and forgets the connection again (decision 0036).
+pub(crate) async fn open_confirmed_runtime_session(
+    state: &AppState,
+    actor: &ActorId,
+    token_id: Option<TokenId>,
+) -> Result<RuntimeConnection, ApiError> {
+    let opened = open_runtime_session(state, actor, token_id)?;
+    state.ensure_enabled(actor).await?;
+    Ok(opened)
 }
 
 pub(crate) fn close_runtime_session(

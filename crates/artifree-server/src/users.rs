@@ -47,9 +47,9 @@ fn store_error(error: UserStoreError) -> ApiError {
     }
 }
 
-/// A user identifier from a route. A spelling that no user can have is the
-/// same `404` as an unknown user.
-fn user_id(text: &str) -> Result<ActorId, ApiError> {
+/// A user identifier from a route or a body. A spelling that no user can have
+/// is the same `404` as an unknown user.
+pub(crate) fn user_id(text: &str) -> Result<ActorId, ApiError> {
     text.parse::<ActorId>()
         .ok()
         .filter(ActorId::is_registrable)
@@ -61,7 +61,10 @@ async fn list_users(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
 ) -> Result<Response, ApiError> {
-    let users = state.token_store().users().map_err(store_error)?;
+    let users = state
+        .identity(UserStore::users)
+        .await?
+        .map_err(store_error)?;
     Ok(Json(UserList {
         users: users.into_iter().map(info).collect(),
     })
@@ -81,13 +84,14 @@ async fn create_user(
         .map_err(|error| ApiError::invalid(format!("label: {error}")))?;
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|err| ApiError::unavailable(err.to_string()))?;
+    let user = NewUser {
+        id: ActorId::user(random),
+        label,
+        created_at: iso_now(),
+    };
     let record = state
-        .token_store()
-        .register(&NewUser {
-            id: ActorId::user(random),
-            label,
-            created_at: iso_now(),
-        })
+        .identity(move |store| store.register(&user))
+        .await?
         .map_err(store_error)?;
     Ok((StatusCode::CREATED, Json(info(record))).into_response())
 }
@@ -100,9 +104,11 @@ async fn disable_user(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let id = user_id(&id)?;
+    let at = iso_now();
+    let disabled = id.clone();
     let record = state
-        .token_store()
-        .set_disabled(&id, Some(&iso_now()))
+        .identity(move |store| store.set_disabled(&disabled, Some(&at)))
+        .await?
         .map_err(store_error)?;
     // After the registry changed: a request that authenticated before it
     // confirms the user again when it registers something (`ensure_enabled`).
@@ -119,8 +125,8 @@ async fn enable_user(
 ) -> Result<Response, ApiError> {
     let id = user_id(&id)?;
     let record = state
-        .token_store()
-        .set_disabled(&id, None)
+        .identity(move |store| store.set_disabled(&id, None))
+        .await?
         .map_err(store_error)?;
     Ok(Json(info(record)).into_response())
 }

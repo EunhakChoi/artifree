@@ -72,7 +72,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/policy.rs",
       "status": "implemented",
-      "summary": "Each user reaches only their own artifacts, checked on every read (the owner profile is user one); sharing and roles remain planned. The server separately checks runtime capability grants."
+      "summary": "Per-user artifact access checked on every read; sharing remains planned. The server separately checks runtime capability grants."
     },
     {
       "id": "documents",
