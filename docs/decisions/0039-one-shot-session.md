@@ -179,7 +179,7 @@ mode they are in.
 
 ## Verification
 
-`crates/artifree-server/tests/one_shot_session.rs` (real child processes: modes,
+`crates/artifree-server/tests/one_shot_session/unix.rs` (real child processes: modes,
 SIGTERM and SIGINT cleanup, TTL expiry, a stalled client, signals at each start
 stage and right after the readiness line, no carry-over of tokens, jobs, and
 previews, a live owner that is not swept while a dead one is, look-alike
