@@ -407,7 +407,8 @@ function dataBodyText(
   return `{"base_data_version":${JSON.stringify(request.base_data_version)},"path":${JSON.stringify(request.path)},"${field}":${text}}`;
 }
 
-interface SendOptions {
+/** What {@link ArtifreeClient.send} takes besides the method and path. */
+export interface SendOptions {
   readonly mutation?:
     { body: unknown; idempotencyKey: string; text?: string } | undefined;
   readonly body?: unknown;
@@ -1718,7 +1719,13 @@ export class ArtifreeClient {
     return parsed;
   }
 
-  private async send(
+  /**
+   * Sends one request and returns the successful response unread; any other
+   * answer is the client's error. Public for the same reason as
+   * {@link ArtifreeClient.json}: a stream or a bounded read lives in a module
+   * of its own (`listDataMembers`, `followData`), outside the main bundle.
+   */
+  async send(
     method: string,
     path: string,
     {

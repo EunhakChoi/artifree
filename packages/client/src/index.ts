@@ -20,6 +20,20 @@ export type {
   RuntimeViewOptions,
 } from './client.js';
 export { cursorOf } from './change-feed.js';
+export { listDataMembers } from './data-members.js';
+export type { ListDataMembersQuery } from './data-members.js';
+export { MAX_RETRY_MS, followData } from './data-follow.js';
+export type { DataFollowEvent, FollowDataOptions } from './data-follow.js';
+export {
+  MAX_EVENT_VALUE_BYTES,
+  MAX_MEMBER_NAME_BYTES,
+  MAX_PATH_SEGMENTS,
+  MAX_SEGMENT_BYTES,
+  MEMBERS_DEFAULT_LIMIT,
+  MEMBERS_MAX_LIMIT,
+  compareUtf8,
+  dataPathProblem,
+} from './data-grammar.js';
 export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
 export {
