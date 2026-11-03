@@ -2,13 +2,15 @@
 //! preview content listener.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use artifree_providers::data_dir;
+use artifree_providers::session_dir::SessionDir;
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
@@ -28,11 +30,43 @@ pub const DEFAULT_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
 /// the bound keeps expiry arithmetic far from overflow.
 pub const MAX_PREVIEW_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Name of the access token file inside the data directory.
+const TOKEN_FILE: &str = "access-token";
+/// Longest accepted one-shot session lifetime (decision 0038).
+pub const MAX_SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How long a stopping one-shot session waits for open connections before it
+/// gives up on them, so that its data is removed even if a client never leaves.
+pub const SESSION_DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// Where the server keeps its data.
+#[derive(Debug, Clone)]
+pub enum Storage {
+    /// A directory the operator chose. It is kept when the server stops.
+    Persistent {
+        /// Directory holding the database and access token.
+        data_dir: PathBuf,
+    },
+    /// A temporary directory for one session that is deleted when the server
+    /// stops (decision 0038).
+    OneShot(OneShot),
+}
+
+/// Settings of a one-shot session.
+#[derive(Debug, Clone)]
+pub struct OneShot {
+    /// How long the session runs before the server stops and its data is
+    /// removed. This is a data lifetime, not a tunnel or link lifetime.
+    pub ttl: Duration,
+    /// Directory that holds session directories; the system temporary
+    /// directory when absent.
+    pub root: Option<PathBuf>,
+}
+
 /// Options of `artifree-server serve`.
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
-    /// Directory holding the database and access token.
-    pub data_dir: PathBuf,
+    /// Where the database and access token live.
+    pub storage: Storage,
     /// Directory holding production web assets to serve alongside the API.
     pub web_dir: Option<PathBuf>,
     /// API listen address. Port 0 picks a free port.
@@ -77,36 +111,114 @@ pub struct Ready {
     pub content_origin: String,
     /// File holding the access token.
     pub token_file: PathBuf,
+    /// Directory holding the database and access token.
+    pub data_dir: PathBuf,
+    /// Present only in a one-shot session; its data is deleted at the end.
+    pub one_shot: Option<OneShotReady>,
+}
+
+/// What a one-shot session reports once it is ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OneShotReady {
+    /// The session lifetime; the server stops and deletes its data after it.
+    pub ttl: Duration,
+    /// Directories of earlier sessions that ended without cleaning up and
+    /// were removed at start.
+    pub stale_sessions_removed: usize,
+    /// Such directories that could not be removed.
+    pub stale_sessions_failed: usize,
+}
+
+/// The parts of a one-shot session the serving code needs.
+#[derive(Debug, Clone, Copy)]
+struct SessionRun {
+    deadline: Instant,
+    ready: OneShotReady,
 }
 
 /// Opens storage, binds both listeners, reports readiness, and serves until
-/// interrupted (Ctrl+C, or SIGTERM on Unix).
+/// interrupted (Ctrl+C, or SIGTERM on Unix). A one-shot session also stops
+/// when its lifetime ends, and then deletes its data directory.
 ///
 /// # Errors
 ///
 /// When the data directory, database, token, runtime, or a listener cannot be
-/// set up, when the data directory is accessible to other users (Unix), or
-/// when a listener fails while serving.
+/// set up, when the data directory is accessible to other users (Unix), when
+/// a listener fails while serving, or when a one-shot session directory cannot
+/// be removed.
 pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
-    data_dir::prepare_data_dir(&options.data_dir)?;
-    let db_path = options.data_dir.join(DATABASE_FILE);
+    match options.storage.clone() {
+        Storage::Persistent { data_dir } => serve_data_dir(options, &data_dir, None, on_ready),
+        Storage::OneShot(one_shot) => run_one_shot(options, &one_shot, on_ready),
+    }
+}
+
+/// Runs one session in a new temporary directory and removes the directory
+/// again, whether the session ends by its lifetime, a signal, or an error.
+fn run_one_shot(
+    options: ServeOptions,
+    one_shot: &OneShot,
+    on_ready: impl FnOnce(&Ready),
+) -> Result<(), String> {
+    let started = Instant::now();
+    let root = one_shot.root.clone().unwrap_or_else(std::env::temp_dir);
+    let session = SessionDir::create(&root).map_err(|error| error.to_string())?;
+    let swept = session.sweep_stale();
+    let run = SessionRun {
+        deadline: started + one_shot.ttl,
+        ready: OneShotReady {
+            ttl: one_shot.ttl,
+            stale_sessions_removed: swept.removed,
+            stale_sessions_failed: swept.failed,
+        },
+    };
+    // The serving code owns the database and the runtime and has dropped both
+    // by the time it returns, so the directory is removed after they are closed.
+    let served = serve_data_dir(options, &session.data_dir(), Some(run), on_ready);
+    let removed = session.close().map_err(|error| {
+        format!(
+            "cannot remove the one-shot session directory: {error}; the next session removes it"
+        )
+    });
+    match (served, removed) {
+        (Err(served), Err(removed)) => Err(format!("{served}; {removed}")),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn serve_data_dir(
+    options: ServeOptions,
+    data_dir: &Path,
+    session: Option<SessionRun>,
+    on_ready: impl FnOnce(&Ready),
+) -> Result<(), String> {
+    data_dir::prepare_data_dir(data_dir)?;
+    let db_path = data_dir.join(DATABASE_FILE);
     let store = SqliteStore::open(&db_path).map_err(|error| error.to_string())?;
     let token_store = SqliteTokenStore::open(&db_path).map_err(|error| error.to_string())?;
-    let token_file = options.data_dir.join("access-token");
+    let token_file = data_dir.join(TOKEN_FILE);
     let token = AccessToken::load_or_create(&token_file)
         .map_err(|error| format!("access token {}: {error}", token_file.display()))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("cannot start the async runtime: {error}"))?;
-    runtime.block_on(serve_listeners(
+    let served = runtime.block_on(serve_listeners(
         options,
         store,
         token_store,
         token,
-        token_file,
+        data_dir.to_path_buf(),
+        session,
         on_ready,
-    ))
+    ));
+    if session.is_some() {
+        // A task that outlives the grace period is abandoned so that the
+        // session's data can be removed.
+        runtime.shutdown_timeout(SESSION_DRAIN_GRACE);
+    }
+    served
 }
 
 async fn serve_listeners(
@@ -114,9 +226,11 @@ async fn serve_listeners(
     store: SqliteStore,
     token_store: SqliteTokenStore,
     token: AccessToken,
-    token_file: PathBuf,
+    data_dir: PathBuf,
+    session: Option<SessionRun>,
     on_ready: impl FnOnce(&Ready),
 ) -> Result<(), String> {
+    let stop = StopSignal::install(session.map(|run| run.deadline));
     let api = bind(options.api_address).await?;
     let content = bind(options.content_address).await?;
     let api_url = match options.api_origin.as_deref() {
@@ -150,54 +264,72 @@ async fn serve_listeners(
         web_url,
         loopback_api_url,
         content_origin,
-        token_file,
+        token_file: data_dir.join(TOKEN_FILE),
+        data_dir,
+        one_shot: session.map(|run| run.ready),
     });
     let streams = state.clone();
+    let api_stop = stop.clone();
     let api_server = axum::serve(
         api,
         http::router_with_web(state.clone(), web_assets.clone())
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        api_stop.wait().await;
         // Open change streams would otherwise keep the server running.
         streams.close_streams();
     });
+    let loopback_stop = stop.clone();
     let loopback_server = loopback.map(|loopback_listener| {
         axum::serve(
             loopback_listener,
             http::router_with_web(state.clone(), web_assets)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(loopback_stop.wait())
     });
     let content_server = axum::serve(
         content,
         preview::router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal());
-    tokio::try_join!(
-        async {
-            api_server
-                .await
-                .map_err(|error| format!("API listener failed: {error}"))
-        },
-        async {
-            content_server
-                .await
-                .map_err(|error| format!("content listener failed: {error}"))
-        },
-        async {
-            if let Some(server) = loopback_server {
-                server
+    .with_graceful_shutdown(stop.clone().wait());
+    let serving = async {
+        tokio::try_join!(
+            async {
+                api_server
                     .await
-                    .map_err(|error| format!("loopback API listener failed: {error}"))
-            } else {
-                Ok(())
-            }
-        },
-    )?;
-    Ok(())
+                    .map_err(|error| format!("API listener failed: {error}"))
+            },
+            async {
+                content_server
+                    .await
+                    .map_err(|error| format!("content listener failed: {error}"))
+            },
+            async {
+                if let Some(server) = loopback_server {
+                    server
+                        .await
+                        .map_err(|error| format!("loopback API listener failed: {error}"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .map(|_| ())
+    };
+    if session.is_none() {
+        return serving.await;
+    }
+    // A one-shot session waits a bounded time for open connections once it
+    // has been told to stop, so that its data is always removed.
+    tokio::select! {
+        served = serving => served,
+        () = async {
+            stop.wait().await;
+            tokio::time::sleep(SESSION_DRAIN_GRACE).await;
+        } => Ok(()),
+    }
 }
 
 fn build_settings(
@@ -261,28 +393,93 @@ fn local_address(listener: &TcpListener) -> Result<SocketAddr, String> {
         .map_err(|error| format!("cannot read the bound address: {error}"))
 }
 
-/// Completes when the process receives Ctrl-C (SIGINT) or, on Unix, SIGTERM.
-/// If a handler cannot be installed, that signal is never delivered here.
-pub(crate) async fn shutdown_signal() {
-    let interrupt = async {
-        // If the handler cannot be installed, keep serving rather than exit.
+/// When the server must stop: on Ctrl-C (SIGINT) or, on Unix, SIGTERM, and in a
+/// one-shot session also when its lifetime ends.
+#[derive(Debug, Clone)]
+struct StopSignal {
+    stopped: watch::Receiver<bool>,
+}
+
+impl StopSignal {
+    /// Installs the signal handlers now and starts watching for a stop. This
+    /// runs before the readiness line is printed, so a supervisor that signals
+    /// the server as soon as it sees that line is not killed by the default
+    /// action, which would skip the removal of a one-shot session's data.
+    fn install(deadline: Option<Instant>) -> Self {
+        let (sender, stopped) = watch::channel(false);
+        let signals = Signals::install();
+        tokio::spawn(async move {
+            let expiry = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                () = signals.received() => {}
+                () = expiry => {}
+            }
+            // Nobody left to tell means the servers have already ended.
+            sender.send_replace(true);
+        });
+        Self { stopped }
+    }
+
+    /// Completes once the server must stop.
+    async fn wait(mut self) {
+        // The sender is dropped only when the runtime ends, which also stops
+        // the servers; either outcome means stop.
+        let _ = self.stopped.wait_for(|stopped| *stopped).await;
+    }
+}
+
+/// The handlers for Ctrl-C (SIGINT) and, on Unix, SIGTERM. A handler that
+/// cannot be installed leaves that signal with no effect here.
+struct Signals {
+    #[cfg(unix)]
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+}
+
+impl Signals {
+    #[cfg(unix)]
+    fn install() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        Self {
+            interrupt: signal(SignalKind::interrupt()).ok(),
+            terminate: signal(SignalKind::terminate()).ok(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn install() -> Self {
+        Self {}
+    }
+
+    /// Completes when one of the signals is received.
+    #[cfg(unix)]
+    async fn received(mut self) {
+        async fn first(signal: &mut Option<tokio::signal::unix::Signal>) {
+            match signal {
+                Some(signal) => {
+                    signal.recv().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        }
+        tokio::select! {
+            () = first(&mut self.interrupt) => {}
+            () = first(&mut self.terminate) => {}
+        }
+    }
+
+    /// Completes when Ctrl-C is received. If the handler cannot be installed,
+    /// keeps serving rather than exiting.
+    #[cfg(not(unix))]
+    async fn received(self) {
         if tokio::signal::ctrl_c().await.is_err() {
             std::future::pending::<()>().await;
         }
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = interrupt => {}
-        () = terminate => {}
     }
 }

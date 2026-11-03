@@ -11,7 +11,7 @@ use artifree_server::auth::AccessToken;
 use artifree_server::changes;
 use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
-use artifree_server::serve::{ServeOptions, derive_loopback_address};
+use artifree_server::serve::{ServeOptions, Storage, derive_loopback_address};
 use artifree_server::web::WebAssets;
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -422,7 +422,9 @@ fn dummy_options(
     loopback: Option<SocketAddr>,
 ) -> Result<ServeOptions, Box<dyn std::error::Error>> {
     Ok(ServeOptions {
-        data_dir: PathBuf::from("/tmp"),
+        storage: Storage::Persistent {
+            data_dir: PathBuf::from("/tmp"),
+        },
         web_dir: None,
         api_address: api,
         loopback_api_address: loopback,
