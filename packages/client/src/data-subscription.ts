@@ -25,6 +25,12 @@ import { isCount, isCursor, isJsonValue, isRecord } from './responses.js';
 const DATA_PATH = /^([A-Za-z0-9_-]{1,64}(\/[A-Za-z0-9_-]{1,64}){0,15})?$/;
 /** The most members a page may hold (`limit` of the contract). */
 const MAX_MEMBERS_LIMIT = 100;
+/**
+ * The longest wait a server's `Retry-After` is honored for, in milliseconds. A
+ * larger value is a server or proxy mistake, or a lockout the application
+ * should hear about through `onDisconnect`, not an hour of silence times two.
+ */
+const MAX_RETRY_AFTER_MS = 3_600_000;
 /** A data cursor: `d.`, a feed identity, and a canonical data version. */
 const DATA_CURSOR = /^d\.[0-9a-f]{32}\.(0|[1-9][0-9]{0,19})$/;
 
@@ -379,7 +385,8 @@ export interface FollowDataOptions {
   /**
    * Reconnection delays: from `min`, doubling after each attempt that
    * delivered nothing, up to `max`, in milliseconds. A `Retry-After` from the
-   * server is used instead when given, kept between `min` and `max`.
+   * server is honored instead when given: never below `min`, and not above one
+   * hour, so it may exceed `max` (the server knows how long it needs).
    */
   readonly retryDelayMs?: { readonly min: number; readonly max: number };
 }
@@ -438,7 +445,10 @@ export async function followData(
     const retryInMs =
       failure?.retryAfterSeconds === undefined
         ? Math.min(max, min * 2 ** attempt)
-        : Math.min(max, Math.max(min, failure.retryAfterSeconds * 1000));
+        : Math.min(
+            MAX_RETRY_AFTER_MS,
+            Math.max(min, failure.retryAfterSeconds * 1000),
+          );
     attempt += 1;
     onDisconnect?.(failure, retryInMs);
     await sleep(retryInMs, signal);

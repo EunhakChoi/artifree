@@ -481,32 +481,36 @@ test('Following stops on a failure a retry cannot fix', async () => {
   }
 });
 
-test('A Retry-After is kept between the configured delays, never a hot loop', async () => {
-  const limited = (seconds) =>
-    Response.json(
-      { error: { code: 'rate_limited', message: 'too many streams' } },
-      { status: 429, headers: { 'retry-after': String(seconds) } },
+test('A Retry-After is honored above the backoff cap, but never below the floor or past an hour', async () => {
+  // The wait before the first retry, for a server that says to wait `seconds`.
+  // The run is aborted as that wait is announced, so no test sleeps for it.
+  const firstWait = async (seconds) => {
+    const { client } = scripted(() =>
+      Response.json(
+        { error: { code: 'rate_limited', message: 'too many streams' } },
+        { status: 429, headers: { 'retry-after': String(seconds) } },
+      ),
     );
-  const seconds = [0, 1, 3600];
-  const { client } = scripted((url, init, count) =>
-    limited(seconds[count - 1]),
-  );
-  const controller = new AbortController();
-  const delays = [];
-  // Aborting at the third wait ends the test even when a delay was not capped.
-  await followData(client, ARTIFACT, {
-    signal: controller.signal,
-    retryDelayMs: { min: 20, max: 60 },
-    onEvent() {},
-    onDisconnect(error, retryInMs) {
-      delays.push(retryInMs);
-      if (delays.length === seconds.length) controller.abort();
-    },
-  });
+    const controller = new AbortController();
+    const delays = [];
+    await followData(client, ARTIFACT, {
+      signal: controller.signal,
+      retryDelayMs: { min: 20, max: 60 },
+      onEvent() {},
+      onDisconnect(error, retryInMs) {
+        delays.push(retryInMs);
+        controller.abort();
+      },
+    });
+    return delays;
+  };
+  assert.deepEqual(await firstWait(0), [20], 'zero still waits the floor');
+  assert.deepEqual(await firstWait(1), [1000], 'above the backoff cap');
+  assert.deepEqual(await firstWait(120), [120_000], 'a server knows its need');
   assert.deepEqual(
-    delays,
-    [20, 60, 60],
-    'zero waits the minimum, an hour the maximum',
+    await firstWait(7200),
+    [3_600_000],
+    'an hour is the ceiling',
   );
 });
 
