@@ -262,7 +262,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   bytes, sizes and digests against the stored revision, bounded reads that
   join back to the file, a viewer's refused write, non-ASCII and binary saves,
   replay and key reuse, a frame key that cannot reach an owner key (also one
-  spelled `frame:K`) and no route outside a frame taking a key in the frame
+  spelled `frame:K`), one key on two artifacts of one user being two keys for
+  their frames, and no route outside a frame taking a key in the frame
   namespace, a view whose head moved (reads, downloads and listing refused as
   `stale_view`; a repeated save still replays, a new save still conflicts, a
   new consent works), a save that answers with its own files only, a frame
@@ -270,17 +271,25 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   pinned base, two frames racing for one base (one winner), a replaced
   or closed generation, revoke and regrant, logout and a restart, forged
   bindings, a trashed artifact, size, count and path rules, hostile messages
-  that must not be echoed, the half-size frame budget, and a download whose type, name,
-  headers and archive bytes equal the owner's export of the pinned revision.
+  that must not be echoed, the half-size frame budget, and a download whose type, name
+  (the longest a package path allows), headers and archive bytes equal the
+  owner's export of the pinned revision.
   `scripts/tests/runtime-requests.test.mjs` bundles the workspace's message
   parser (a text that starts with U+FEFF is saved as written; the per-frame
   budget on an injected clock), `scripts/tests/runtime-bootstrap.test.mjs` the
   shipped frame script (every public method with null, arrays, primitives,
   objects with throwing getters and proxies: always a rejected promise, never a
-  synchronous throw) and `scripts/tests/download-offer.test.mjs` the timing of
-  the download question (activation, expiry before the frame's own wait,
-  pause after a decline), and run them against hostile messages and responses. `client.test.mjs`
-  checks the closed download type and name. `scripts/smoke-source.mjs`, in its
+  synchronous throw; parts, receipts and downloads whose numbers disagree with
+  their bytes or with the request) and `scripts/tests/download-offer.test.mjs`
+  the download question on an injected clock (activation, expiry before the
+  frame's own wait, pause after a decline, a button that is enabled exactly
+  when a press counts even if timers run early, one download for a double
+  click, a request that was aborted already, no listener or timer left behind,
+  a saved file's address kept for 60 s), and run them against hostile messages
+  and responses. `client.test.mjs` checks the closed download type and name
+  (up to 128 characters), and that a part of a file, a listing and a save
+  receipt agree with their own numbers and with the request: each rejection,
+  and parts that join into the file, a final part and an empty file. `scripts/smoke-source.mjs`, in its
   own browser context in Chromium and Firefox, uses a real server and
   sandboxed frame: no grant means `not_granted` and nothing is sent; the
   listed digests and read text equal the stored file; a download question

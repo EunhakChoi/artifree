@@ -580,6 +580,10 @@ export function parseRuntimeMetadata(
   return { artifact_id, title, current_revision, metadata_revision };
 }
 
+function hasRepeatedPath(files: readonly RevisionFile[]): boolean {
+  return new Set(files.map((file) => file.path)).size !== files.length;
+}
+
 /** Validates a frame's source listing. */
 export function parseRuntimeSourceManifest(
   value: unknown,
@@ -587,7 +591,12 @@ export function parseRuntimeSourceManifest(
   if (!isRecord(value) || typeof value.artifact_id !== 'string')
     return undefined;
   const files = list(value.files, revisionFile);
-  if (!isCount(value.revision) || value.revision === 0 || files === undefined)
+  if (
+    !isCount(value.revision) ||
+    value.revision === 0 ||
+    files === undefined ||
+    hasRepeatedPath(files)
+  )
     return undefined;
   return {
     artifact_id: value.artifact_id,
@@ -599,7 +608,26 @@ export function parseRuntimeSourceManifest(
 const BASE64_TEXT =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-/** Validates a part of a file a frame read; `content` is padded base64. */
+/** The most bytes one answer of a frame's read carries (decision 0032). */
+export const RUNTIME_READ_MAX_BYTES = 1024 * 1024;
+
+/** How many bytes padded base64 text stands for, or undefined if it is not. */
+export function base64Size(content: string): number | undefined {
+  if (!BASE64_TEXT.test(content)) return undefined;
+  const padding = content.endsWith('==') ? 2 : content.endsWith('=') ? 1 : 0;
+  return (content.length / 4) * 3 - padding;
+}
+
+/**
+ * Validates a part of a file a frame read; `content` is padded base64.
+ *
+ * The numbers must agree with the bytes: a caller that joins parts at
+ * `next_offset` would otherwise skip or repeat bytes, or take a short file
+ * for a whole one. A part holds at most {@link RUNTIME_READ_MAX_BYTES}; it
+ * starts inside the file; when more follows, it ends exactly where
+ * `next_offset` says, which is further on and still inside the file; when
+ * nothing follows, it ends exactly at `size`.
+ */
 export function parseRuntimeSourceFile(
   value: unknown,
 ): RuntimeSourceFile | undefined {
@@ -614,10 +642,19 @@ export function parseRuntimeSourceFile(
     offset > size ||
     typeof sha256 !== 'string' ||
     !/^[0-9a-f]{64}$/.test(sha256) ||
-    !(next_offset === null || (isCount(next_offset) && next_offset > offset)) ||
-    (next_offset !== null && next_offset > size) ||
-    typeof content !== 'string' ||
-    !BASE64_TEXT.test(content)
+    !(next_offset === null || isCount(next_offset)) ||
+    typeof content !== 'string'
+  )
+    return undefined;
+  const length = base64Size(content);
+  if (length === undefined || length > RUNTIME_READ_MAX_BYTES) return undefined;
+  const end = offset + length;
+  if (next_offset === null) {
+    if (end !== size) return undefined;
+  } else if (
+    next_offset <= offset ||
+    next_offset >= size ||
+    end !== next_offset
   )
     return undefined;
   return { path, revision, offset, size, sha256, next_offset, content };
@@ -634,7 +671,8 @@ export function parseRuntimeSourceSaved(
     !isCount(revision) ||
     revision < 2 ||
     !isTime(created_at_ms) ||
-    files === undefined
+    files === undefined ||
+    hasRepeatedPath(files)
   )
     return undefined;
   return { revision, created_at_ms, files, replayed: value.replayed };

@@ -35,6 +35,8 @@ const TIMEOUT_MS: Readonly<Record<RequestKind, number>> = {
   download: 120_000,
 };
 const MAX_PENDING = 64;
+/** The most bytes one answer of a read carries. */
+const MAX_READ_BYTES = 1024 * 1024;
 const MAX_CHANGES = 512;
 const MAX_PATH_BYTES = 240;
 const KEY_PATTERN = /^[A-Za-z0-9._:-]{8,100}$/;
@@ -78,6 +80,8 @@ interface Waiting {
   readonly resolve: (value: never) => void;
   readonly reject: (reason: Error) => void;
   readonly timeout: number;
+  /** Whether the answer fits the request that was sent, or it is refused. */
+  readonly fits: (value: never) => boolean;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -127,6 +131,9 @@ function fileInfos(value: unknown): RuntimeSourceFileInfo[] | undefined {
     if (file === undefined) return undefined;
     files.push(file);
   }
+  // A path is listed once.
+  if (new Set(files.map((file) => file.path)).size !== files.length)
+    return undefined;
   return files;
 }
 
@@ -156,7 +163,18 @@ function part(value: unknown): RuntimeSourcePart | undefined {
     typeof sha256 !== 'string' ||
     !DIGEST_PATTERN.test(sha256) ||
     !(nextOffset === null || count(nextOffset)) ||
-    !(bytes instanceof Uint8Array)
+    !(bytes instanceof Uint8Array) ||
+    offset > size ||
+    bytes.length > MAX_READ_BYTES
+  )
+    return undefined;
+  // The numbers must agree with the bytes, or joining the parts at
+  // `nextOffset` would skip, repeat, or cut short.
+  const end = offset + bytes.length;
+  if (
+    nextOffset === null
+      ? end !== size
+      : nextOffset <= offset || nextOffset >= size || end !== nextOffset
   )
     return undefined;
   return { path, revision, offset, size, sha256, nextOffset, bytes };
@@ -190,6 +208,30 @@ function download(value: unknown): RuntimeDownloadResult | undefined {
   )
     return undefined;
   return { status: 'started', kind, name, size, revision };
+}
+
+/**
+ * Whether a save's receipt describes exactly the files the save wrote: each
+ * `put` once, with the size of the bytes that were sent.
+ */
+function describesWrites(
+  files: readonly RuntimeSourceFileInfo[],
+  sent: readonly RuntimeSourceChange[],
+): boolean {
+  const sizes = new Map<string, number>();
+  for (const change of sent) {
+    if (change.op !== 'put') continue;
+    sizes.set(
+      change.path,
+      typeof change.content === 'string'
+        ? new TextEncoder().encode(change.content).length
+        : change.content.length,
+    );
+  }
+  return (
+    files.length === sizes.size &&
+    files.every((file) => sizes.get(file.path) === file.size)
+  );
 }
 
 function isErrorCode(value: unknown): value is RuntimeErrorCode {
@@ -312,7 +354,8 @@ export function start(config: RuntimeInitialization): void {
             : pending.kind === 'source.write'
               ? saved(event.data.result)
               : download(event.data.result);
-    if (parsed === undefined) pending.reject(failure(pending.kind, {}));
+    if (parsed === undefined || !pending.fits(parsed as never))
+      pending.reject(failure(pending.kind, {}));
     else pending.resolve(parsed as never);
   };
   window.addEventListener(
@@ -347,6 +390,7 @@ export function start(config: RuntimeInitialization): void {
   function call<T>(
     kind: RequestKind,
     fields: Record<string, unknown> = {},
+    fits: (value: T) => boolean = () => true,
   ): Promise<T> {
     if (closed || performance.now() >= deadline)
       return rejected('view_unavailable', 'The runtime view has expired.');
@@ -375,6 +419,7 @@ export function start(config: RuntimeInitialization): void {
         resolve: resolve as (value: never) => void,
         reject,
         timeout,
+        fits: fits as (value: never) => boolean,
       });
       try {
         channel.port1.postMessage({ type: kind, id, ...fields });
@@ -417,11 +462,18 @@ export function start(config: RuntimeInitialization): void {
           (length !== undefined && !(count(length) && length >= 1))
         )
           return undefined;
-        return call('source.read', {
-          path,
-          ...(offset === undefined ? {} : { offset }),
-          ...(length === undefined ? {} : { length }),
-        });
+        return call<RuntimeSourcePart>(
+          'source.read',
+          {
+            path,
+            ...(offset === undefined ? {} : { offset }),
+            ...(length === undefined ? {} : { length }),
+          },
+          (answer) =>
+            answer.path === path &&
+            answer.offset === (offset ?? 0) &&
+            answer.bytes.length <= (length ?? MAX_READ_BYTES),
+        );
       });
     },
     saveSource(request: RuntimeSaveRequest): Promise<RuntimeSaveResult> {
@@ -436,7 +488,11 @@ export function start(config: RuntimeInitialization): void {
           copy === undefined
         )
           return undefined;
-        return call('source.write', { key, changes: copy });
+        return call<RuntimeSaveResult>(
+          'source.write',
+          { key, changes: copy },
+          (answer) => describesWrites(answer.files, copy),
+        );
       });
     },
     requestDownload(
@@ -447,7 +503,11 @@ export function start(config: RuntimeInitialization): void {
         if (!plain(candidate)) return undefined;
         const { path } = candidate;
         if (path !== undefined && !validPath(path)) return undefined;
-        return call('download', path === undefined ? {} : { path });
+        return call<RuntimeDownloadResult>(
+          'download',
+          path === undefined ? {} : { path },
+          (answer) => answer.kind === (path === undefined ? 'archive' : 'file'),
+        );
       });
     },
   });

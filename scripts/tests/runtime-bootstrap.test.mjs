@@ -348,7 +348,7 @@ test('Answers are parsed strictly and matched to their request', async () => {
   const read = view.runtime.readSource('a.txt');
   const write = view.runtime.saveSource({
     key: 'frame-key-0001',
-    changes: [{ op: 'delete', path: 'a.txt' }],
+    changes: [{ op: 'put', path: 'a.txt', content: 'abc' }],
   });
   const download = view.runtime.requestDownload();
   view.reply({
@@ -578,4 +578,188 @@ test('A second runtime in the same window is refused', () => {
     /already installed/,
   );
   view.hide();
+});
+
+const PART = {
+  path: 'a.txt',
+  revision: 2,
+  offset: 0,
+  size: 3,
+  sha256: DIGEST,
+  nextOffset: null,
+  bytes: new Uint8Array([97, 98, 99]),
+};
+
+test('A part whose numbers disagree with its bytes is refused, whole ones are not', async () => {
+  const MIB = 1024 * 1024;
+  const answers = async (request, results) => {
+    const view = boot();
+    const outcomes = results.map((result, index) => {
+      const promise = request(view.runtime, index);
+      return [promise, result];
+    });
+    outcomes.forEach(([, result], index) =>
+      view.reply({ id: index + 1, ok: true, result }),
+    );
+    const settled = await Promise.all(
+      outcomes.map(([promise]) =>
+        promise.then(
+          () => 'accepted',
+          (error) => error.code,
+        ),
+      ),
+    );
+    view.hide();
+    return settled;
+  };
+  const bytes = (length) => new Uint8Array(length);
+  // What a caller who joins parts at nextOffset would be fooled by.
+  assert.deepEqual(
+    await answers(
+      // The last one asks for more than a part may hold, so only the size
+      // of the part itself can refuse it.
+      (runtime, index) =>
+        runtime.readSource('a.txt', index === 7 ? { length: 2 * MIB } : {}),
+      [
+        // Empty content, but the next part is said to start at 1 MiB.
+        { ...PART, size: 2 * MIB, bytes: bytes(0), nextOffset: MIB },
+        // Claims completion before the advertised size.
+        { ...PART, size: 10, nextOffset: null },
+        // Says more follows but ends where the size does.
+        { ...PART, nextOffset: 3 },
+        // The bytes do not reach the next offset.
+        { ...PART, size: 10, nextOffset: 4 },
+        // No progress, past the end, and starting past the end.
+        { ...PART, size: 10, bytes: bytes(0), nextOffset: 0 },
+        { ...PART, size: 3, nextOffset: 5 },
+        { ...PART, offset: 4, size: 3, bytes: bytes(0) },
+        // More bytes than a part may hold.
+        { ...PART, size: MIB + 1, bytes: bytes(MIB + 1), nextOffset: null },
+      ],
+    ),
+    Array(8).fill('refused'),
+  );
+  assert.deepEqual(
+    await answers(
+      // The final part is the one asked for from offset 7.
+      (runtime, index) =>
+        runtime.readSource('a.txt', index === 1 ? { offset: 7 } : {}),
+      [
+        // A middle part, a final part, the whole file, and an empty file.
+        { ...PART, size: 10, nextOffset: 3 },
+        { ...PART, offset: 7, size: 10, nextOffset: null },
+        PART,
+        { ...PART, size: 0, bytes: bytes(0), nextOffset: null },
+        // The largest part there is.
+        { ...PART, size: 2 * MIB, bytes: bytes(MIB), nextOffset: MIB },
+      ],
+    ),
+    Array(5).fill('accepted'),
+  );
+});
+
+test('A read is answered with the file and the bytes that were asked for', async () => {
+  const outcome = async (ask, result) => {
+    const view = boot();
+    const promise = ask(view.runtime);
+    view.reply({ id: 1, ok: true, result });
+    const settled = await promise.then(
+      () => 'accepted',
+      (error) => error.code,
+    );
+    view.hide();
+    return settled;
+  };
+  const asks = (runtime) =>
+    runtime.readSource('a.txt', { offset: 1, length: 2 });
+  const part = { ...PART, offset: 1, size: 3, nextOffset: null };
+  const two = new Uint8Array([98, 99]);
+  assert.equal(await outcome(asks, { ...part, bytes: two }), 'accepted');
+  assert.equal(
+    await outcome(asks, { ...part, path: 'b.txt', bytes: two }),
+    'refused',
+    'another file',
+  );
+  assert.equal(
+    await outcome(asks, { ...part, offset: 0, size: 2, bytes: two }),
+    'refused',
+    'another offset',
+  );
+  assert.equal(
+    await outcome(asks, {
+      ...part,
+      offset: 1,
+      size: 4,
+      bytes: new Uint8Array(3),
+    }),
+    'refused',
+    'more than the length asked for',
+  );
+});
+
+test('A listing names each file once and a save receipt only what the save wrote', async () => {
+  const outcome = async (ask, result) => {
+    const view = boot();
+    const promise = ask(view.runtime);
+    view.reply({ id: 1, ok: true, result });
+    const settled = await promise.then(
+      () => 'accepted',
+      (error) => error.code,
+    );
+    view.hide();
+    return settled;
+  };
+  const list = (runtime) => runtime.listSource();
+  assert.equal(
+    await outcome(list, { artifactId: 'a', revision: 1, files: [FILE, FILE] }),
+    'refused',
+  );
+  const save = (runtime) =>
+    runtime.saveSource({
+      key: 'frame-key-0001',
+      changes: [
+        { op: 'put', path: 'a.txt', content: 'héllo' },
+        { op: 'put', path: 'b.bin', content: new Uint8Array([0, 255]) },
+        { op: 'delete', path: 'c.txt' },
+      ],
+    });
+  const receipt = (files) => ({
+    revision: 3,
+    createdAtMs: 9,
+    replayed: false,
+    files,
+  });
+  const a = { ...FILE, path: 'a.txt', size: 6 };
+  const b = { ...FILE, path: 'b.bin', size: 2 };
+  assert.equal(await outcome(save, receipt([a, b])), 'accepted');
+  for (const [name, files] of [
+    ['a file that was not written', [a, b, { ...FILE, path: 'c.txt' }]],
+    ['a file missing', [a]],
+    ['a size that is not the bytes sent', [{ ...a, size: 5 }, b]],
+    ['a file listed twice', [a, a]],
+    ['nothing', []],
+  ])
+    assert.equal(await outcome(save, receipt(files)), 'refused', name);
+});
+
+test('A download is answered with the kind that was asked for', async () => {
+  const outcome = async (request, kind) => {
+    const view = boot();
+    const promise = view.runtime.requestDownload(request);
+    view.reply({
+      id: 1,
+      ok: true,
+      result: { kind, name: 'x', size: 1, revision: 1 },
+    });
+    const settled = await promise.then(
+      (done) => done.kind,
+      (error) => error.code,
+    );
+    view.hide();
+    return settled;
+  };
+  assert.equal(await outcome({ path: 'a.txt' }, 'file'), 'file');
+  assert.equal(await outcome({}, 'archive'), 'archive');
+  assert.equal(await outcome({ path: 'a.txt' }, 'archive'), 'refused');
+  assert.equal(await outcome({}, 'file'), 'refused');
 });

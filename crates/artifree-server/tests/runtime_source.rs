@@ -214,11 +214,20 @@ async fn artifact(
     harness: &Harness,
     declared: &[&str],
 ) -> Result<String, Box<dyn std::error::Error>> {
+    artifact_with_key(harness, "create-source-fixture", declared).await
+}
+
+/// [`artifact`] under its own creation key, for a second artifact.
+async fn artifact_with_key(
+    harness: &Harness,
+    key: &str,
+    declared: &[&str],
+) -> Result<String, Box<dyn std::error::Error>> {
     let manifest = json!({"sdk": "artifree.app.v1", "capabilities": declared}).to_string();
     let created = harness
         .send(post(
             "/v1/artifacts",
-            Some("create-source-fixture"),
+            Some(key),
             &json!({
                 "title": "Source probe",
                 "files": [
@@ -780,6 +789,45 @@ async fn frame_keys_never_collide_with_the_owners_keys() -> TestResult {
         assert_eq!(repeated.json()?["replayed"], json!(true), "{owner_key}");
         assert_eq!(revisions(&harness, &id).await?, [1, 2, 3]);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_key_on_two_artifacts_is_two_keys_for_their_frames() -> TestResult {
+    let harness = Harness::new()?;
+    let first = artifact(&harness, &["source.write"]).await?;
+    let second = artifact_with_key(&harness, "create-second-fixture", &["source.write"]).await?;
+    assert_ne!(first, second);
+    let one = frame(&harness, &first, 1, &["source.write"]).await?;
+    let two = frame(&harness, &second, 1, &["source.write"]).await?;
+    // A preview that hard-codes a key must not be able to use up, replay, or
+    // probe the key of an app on another artifact of the same user.
+    let key = "shared-key-0001";
+    let changes = json!([put("notes.txt", b"on the first")]);
+    let saved = one.save(&harness, key, &changes).await?;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.code());
+    // The same key with other changes on the other artifact is a new request,
+    // not `request_key_reused`, and does not return the first artifact's
+    // result.
+    let other = json!([put("notes.txt", b"on the second")]);
+    let reply = two.save(&harness, key, &other).await?;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.code());
+    let body = reply.json()?;
+    assert_eq!(body["replayed"], json!(false));
+    assert_eq!(
+        stored(&harness, &second, 2, "notes.txt").await?,
+        b"on the second"
+    );
+    assert_eq!(
+        stored(&harness, &first, 2, "notes.txt").await?,
+        b"on the first"
+    );
+    // Within one artifact the key still replays and still conflicts.
+    let repeated = one.save(&harness, key, &changes).await?;
+    assert_eq!(repeated.status, StatusCode::OK, "{}", repeated.code());
+    assert_eq!(repeated.json()?["replayed"], json!(true));
+    let reused = one.save(&harness, key, &other).await?;
+    assert_eq!(reused.code(), "request_key_reused");
     Ok(())
 }
 
@@ -1553,6 +1601,68 @@ async fn a_download_is_the_stored_bytes_as_an_attachment_of_a_closed_type() -> T
         let reply = head.download(&harness, Some(path)).await?;
         assert_eq!(reply.status, status, "{path}");
         assert!(!String::from_utf8_lossy(&reply.body).contains(path));
+    }
+    Ok(())
+}
+
+/// Every name a download can be saved under, which the client accepts.
+fn is_a_download_name(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+#[tokio::test]
+async fn the_longest_last_segment_is_saved_under_a_name_the_client_accepts() -> TestResult {
+    let harness = Harness::new()?;
+    let id = artifact(&harness, &["source.write", "source.download"]).await?;
+    // A package path allows 240 bytes in all but at most 100 in a segment,
+    // and no segment starts with a dot: the longest name a download can have
+    // is 100, well inside the 128 the client accepts. The deepest path of
+    // 240 bytes has a last segment of 100 as well.
+    let long_segment = format!("{}.txt", "a".repeat(96));
+    let deep = format!("{}/{}/{long_segment}", "d".repeat(99), "e".repeat(30));
+    let cases = [
+        (
+            format!("{}.txt", "b".repeat(95)),
+            format!("{}.txt", "b".repeat(95)),
+        ),
+        (long_segment.clone(), long_segment.clone()),
+        (deep, long_segment),
+    ];
+    let writer = frame(&harness, &id, 1, &["source.write"]).await?;
+    let changes: Vec<Value> = cases
+        .iter()
+        .map(|(path, _)| put(path, path.as_bytes()))
+        .collect();
+    let saved = writer
+        .save(&harness, "long-names-save-1", &json!(changes))
+        .await?;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.code());
+    let downloader = frame(&harness, &id, 2, &["source.download"]).await?;
+    for (path, name) in &cases {
+        let reply = downloader.download(&harness, Some(path)).await?;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.code());
+        assert_eq!(reply.body, path.as_bytes());
+        assert!(is_a_download_name(name), "{name}");
+        assert_eq!(
+            reply.header(header::CONTENT_DISPOSITION),
+            format!("attachment; filename=\"{name}\""),
+            "{path}"
+        );
+    }
+    // One byte more in a segment is not a package path, so no download can
+    // ask for a longer name; nor can a segment start with a dot.
+    let writer = frame(&harness, &id, 2, &["source.write"]).await?;
+    for (key, path) in [
+        ("long-names-save-2", format!("{}.txt", "f".repeat(97))),
+        ("long-names-save-3", format!(".{}.txt", "g".repeat(10))),
+    ] {
+        let refused = writer
+            .save(&harness, key, &json!([put(&path, b"x")]))
+            .await?;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
     }
     Ok(())
 }

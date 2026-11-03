@@ -187,17 +187,19 @@ impl RequestKey {
     }
 
     /// The key under which a runtime frame's request is recorded (decision
-    /// 0032): `frame/` followed by the frame's own key.
+    /// 0032): `frame/`, the artifact's identifier, `/`, and the frame's own
+    /// key.
     ///
     /// `/` is not a character [`FromStr`] accepts, so no key a client, agent,
     /// or CLI can send, on any route, equals a value this returns. A frame's
     /// key therefore can neither replay nor collide with a request made
-    /// outside a frame, whatever the key's text. The value is for the
-    /// store's lookups only; it is not parseable and is never sent back to a
-    /// client.
+    /// outside a frame, whatever the key's text. The artifact is part of it,
+    /// so two frames of one user on different artifacts cannot spend, probe,
+    /// or replay each other's keys. The value is for the store's lookups
+    /// only; it is not parseable and is never sent back to a client.
     #[must_use]
-    pub fn frame_scoped(&self) -> Self {
-        Self(format!("frame/{}", self.0))
+    pub fn frame_scoped(&self, artifact: &ArtifactId) -> Self {
+        Self(format!("frame/{}/{}", artifact.as_str(), self.0))
     }
 }
 
@@ -363,16 +365,27 @@ mod tests {
 
     #[test]
     fn a_frame_scoped_key_is_never_a_key_a_client_can_send() -> Result<(), InvalidValue> {
-        // Including a client key that spells the old textual prefix.
-        for text in ["shared-key-0001", "frame:shared-key-0001", "frame-key-0001"] {
+        let artifact = ArtifactId::from_random([1; 16]);
+        let other = ArtifactId::from_random([2; 16]);
+        // Including a client key that spells the old textual prefix, and the
+        // longest key there is.
+        for text in [
+            "shared-key-0001",
+            "frame:shared-key-0001",
+            "frame-key-0001",
+            &"k".repeat(128),
+        ] {
             let key: RequestKey = text.parse()?;
-            let scoped = key.frame_scoped();
+            let scoped = key.frame_scoped(&artifact);
             assert_ne!(scoped, key);
             assert!(scoped.as_str().parse::<RequestKey>().is_err());
-            for other in ["shared-key-0001", "frame:shared-key-0001"] {
-                assert_ne!(scoped, other.parse::<RequestKey>()?);
+            for client in ["shared-key-0001", "frame:shared-key-0001"] {
+                assert_ne!(scoped, client.parse::<RequestKey>()?);
             }
-            assert_ne!(scoped, key.frame_scoped().frame_scoped());
+            assert_ne!(scoped, key.frame_scoped(&artifact).frame_scoped(&artifact));
+            // One key on two artifacts is two keys.
+            assert_ne!(scoped, key.frame_scoped(&other));
+            assert_eq!(scoped, key.frame_scoped(&artifact));
         }
         Ok(())
     }

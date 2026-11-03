@@ -1737,6 +1737,144 @@ test('Source calls name the view, carry only its initialization, and check the a
   }
 });
 
+const b64 = (length) => Buffer.alloc(length, 97).toString('base64');
+
+test('A source part must agree with its own range and size, or it is refused', async () => {
+  const MIB = 1024 * 1024;
+  const part = {
+    path: 'notes.txt',
+    revision: 3,
+    offset: 0,
+    size: 3,
+    sha256: 'e'.repeat(64),
+    next_offset: null,
+    content: b64(3),
+  };
+  const read = async (body, range = {}) => {
+    const { client } = await recordingClient(() => Response.json(body));
+    return client.runtimeSourceRead(SOURCE_VIEW, 'notes.txt', range).then(
+      (answer) => answer,
+      (error) => error.code,
+    );
+  };
+  // Parts that join into the file, an empty file, and the largest part.
+  const first = { ...part, size: 7, next_offset: 3 };
+  const second = { ...part, offset: 3, size: 7, next_offset: 6 };
+  const last = { ...part, offset: 6, size: 7, content: b64(1) };
+  const joined = [];
+  for (const [body, offset] of [
+    [first, 0],
+    [second, 3],
+    [last, 6],
+  ])
+    joined.push(Buffer.from((await read(body, { offset })).content, 'base64'));
+  assert.equal(Buffer.concat(joined).length, 7);
+  assert.equal(
+    (await read({ ...part, size: 0, content: '' })).content,
+    '',
+    'an empty file: offset 0, size 0, no next part, no bytes',
+  );
+  assert.equal(
+    (
+      await read({
+        ...part,
+        size: 2 * MIB,
+        next_offset: MIB,
+        content: b64(MIB),
+      })
+    ).next_offset,
+    MIB,
+  );
+  for (const [name, body, range] of [
+    [
+      'empty content with a next part at 1 MiB',
+      { ...part, size: 2 * MIB, next_offset: MIB, content: '' },
+    ],
+    ['completion claimed before the size', { ...part, size: 10 }],
+    ['bytes short of the next offset', { ...part, size: 10, next_offset: 4 }],
+    ['bytes beyond the next offset', { ...part, size: 10, next_offset: 2 }],
+    ['a next part at the end of the file', { ...part, next_offset: 3 }],
+    ['no progress', { ...part, size: 10, content: '', next_offset: 0 }],
+    [
+      'an offset past the size',
+      { ...part, offset: 4, content: '' },
+      { offset: 4 },
+    ],
+    ['bytes past the size', { ...part, size: 2 }],
+    [
+      'more than one answer holds',
+      { ...part, size: MIB + 1, content: b64(MIB + 1) },
+    ],
+    ['more than was asked for', part, { length: 2 }],
+    ['a size that is not a safe integer', { ...part, size: 2 ** 53 }],
+    ['a negative offset', { ...part, offset: -1 }],
+    ['a fractional offset', { ...part, offset: 0.5 }],
+    ['a digest in capitals', { ...part, sha256: 'E'.repeat(64) }],
+    ['text that is not padded base64', { ...part, content: 'YWJj\n' }],
+  ])
+    assert.equal(await read(body, range), 'invalid_response', name);
+});
+
+test('A source listing names each file once', async () => {
+  const listing = (files) => ({ artifact_id: artifact.id, revision: 3, files });
+  const list = async (body) => {
+    const { client } = await recordingClient(() => Response.json(body));
+    return client.runtimeSourceList(SOURCE_VIEW).then(
+      () => 'accepted',
+      (error) => error.code,
+    );
+  };
+  const other = { ...SOURCE_FILE, path: 'other.txt' };
+  assert.equal(await list(listing([SOURCE_FILE, other])), 'accepted');
+  assert.equal(await list(listing([])), 'accepted');
+  assert.equal(
+    await list(listing([SOURCE_FILE, { ...other, path: 'notes.txt' }])),
+    'invalid_response',
+  );
+});
+
+test('A save receipt describes exactly the files that were put, with the bytes sent', async () => {
+  const save = async (files, changes) => {
+    const { client } = await recordingClient(() =>
+      Response.json({ revision: 4, created_at_ms: 5, files, replayed: false }),
+    );
+    return client
+      .runtimeSourceSave(SOURCE_VIEW, changes, {
+        idempotencyKey: 'frame-key-0001',
+      })
+      .then(
+        () => 'accepted',
+        (error) => error.code,
+      );
+  };
+  const put = (path, content, encoding = 'utf8') => ({
+    op: 'put',
+    path,
+    encoding,
+    content,
+  });
+  const file = (path, size) => ({ ...SOURCE_FILE, path, size });
+  const changes = [
+    put('a.txt', 'héllo'),
+    put('b.bin', 'AP8=', 'base64'),
+    { op: 'delete', path: 'c.txt' },
+  ];
+  assert.equal(
+    await save([file('a.txt', 6), file('b.bin', 2)], changes),
+    'accepted',
+  );
+  assert.equal(await save([], [{ op: 'delete', path: 'c.txt' }]), 'accepted');
+  for (const [name, files] of [
+    ['a deleted file', [file('a.txt', 6), file('b.bin', 2), file('c.txt', 1)]],
+    ['a file missing', [file('a.txt', 6)]],
+    ['a file nobody wrote', [file('a.txt', 6), file('z.txt', 2)]],
+    ['a text size in characters', [file('a.txt', 5), file('b.bin', 2)]],
+    ['a base64 size in characters', [file('a.txt', 6), file('b.bin', 4)]],
+    ['one file twice', [file('a.txt', 6), file('a.txt', 6)]],
+  ])
+    assert.equal(await save(files, changes), 'invalid_response', name);
+});
+
 test('A refused source save keeps the conflict, the key reuse and the grant refusal apart', async () => {
   const refusal =
     (status, code, extra = {}) =>
@@ -1830,6 +1968,34 @@ test('A runtime download is a closed type, a safe name and the whole body', asyn
     return response;
   };
   assert.equal((await failure(download(cut))).code, 'network_error');
+});
+
+test('A download name is accepted up to 128 characters, and not beyond', async () => {
+  const bytes = new Uint8Array([1]);
+  const download = async (name) =>
+    (
+      await recordingClient(
+        () =>
+          new Response(bytes, {
+            status: 200,
+            headers: {
+              'content-type': 'application/octet-stream',
+              'content-disposition': `attachment; filename="${name}"`,
+            },
+          }),
+      )
+    ).client
+      .runtimeDownload(SOURCE_VIEW, 'notes.txt')
+      .then(
+        (file) => file.fileName.length,
+        (error) => error.code,
+      );
+  // The server never makes one longer than a path segment (100 bytes); the
+  // client's bound is the one both sides state.
+  for (const length of [1, 100, 127, 128])
+    assert.equal(await download('n'.repeat(length)), length);
+  assert.equal(await download('n'.repeat(129)), 'invalid_response');
+  assert.equal(await download('n'.repeat(240)), 'invalid_response');
 });
 
 test('Source calls need the connection that issued the view', async () => {

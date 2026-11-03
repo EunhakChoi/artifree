@@ -117,7 +117,12 @@ export interface RuntimeSourcePart {
   readonly size: number;
   /** SHA-256 of the whole file. */
   readonly sha256: string;
-  /** Where the next part starts, or null when this one reaches the end. */
+  /**
+   * Where the next part starts, or null when this one reaches the end. A part
+   * is only handed to you when `offset` plus the length of `bytes` is
+   * `nextOffset`, or `size` when `nextOffset` is null, so parts joined at
+   * `nextOffset` are the file.
+   */
   readonly nextOffset: number | null;
   readonly bytes: Uint8Array;
 }

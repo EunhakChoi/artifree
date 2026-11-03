@@ -33,7 +33,7 @@ use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
-    ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
+    ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, MAX_SEGMENT_BYTES, PackagePath,
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use std::collections::BTreeSet;
@@ -1361,7 +1361,7 @@ pub(crate) async fn runtime_source_save(
     let committed = save(
         state,
         actor,
-        key.frame_scoped(),
+        key.frame_scoped(&frame.id),
         &frame.id.to_string(),
         SaveRevisionRequest {
             base_revision: frame.revision.0,
@@ -1392,9 +1392,22 @@ pub(crate) struct RuntimeDownload {
     pub(crate) bytes: Vec<u8>,
 }
 
+/// The longest name a download can be saved under. The client accepts exactly
+/// this many characters (`runtimeDownload` in `packages/client`), so both
+/// sides share one bound.
+const MAX_DOWNLOAD_NAME_CHARS: usize = 128;
+
+// A package path segment is at most `MAX_SEGMENT_BYTES` bytes and never
+// starts with a dot, so the name of a download never needs the `download`
+// prefix below and is never longer than a segment. This keeps it that way:
+// raising the segment limit past the client's bound fails the build instead
+// of failing a user's download.
+const _: () = assert!(MAX_SEGMENT_BYTES + "download".len() <= MAX_DOWNLOAD_NAME_CHARS);
+
 /// The name a download is saved under: the last path segment, reduced to
 /// ASCII letters, digits, `.`, `-`, and `_`. Package paths already satisfy
-/// this; the reduction keeps the header safe regardless.
+/// this and a segment is at most [`MAX_SEGMENT_BYTES`] long; the reduction
+/// and the cut at [`MAX_DOWNLOAD_NAME_CHARS`] keep the header safe regardless.
 fn safe_file_name(path: &PackagePath) -> String {
     let name = path.as_str().rsplit('/').next().unwrap_or("download");
     let name: String = name
@@ -1407,11 +1420,15 @@ fn safe_file_name(path: &PackagePath) -> String {
             }
         })
         .collect();
-    if name.is_empty() || name.starts_with('.') {
+    let mut name = if name.is_empty() || name.starts_with('.') {
         format!("download{name}")
     } else {
         name
-    }
+    };
+    // Never reached for a valid package path (see the assertion above); the
+    // name is all ASCII, so cutting at a byte is cutting at a character.
+    name.truncate(MAX_DOWNLOAD_NAME_CHARS);
+    name
 }
 
 /// The bytes of one file of the pinned revision, or its source export

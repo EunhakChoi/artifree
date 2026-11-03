@@ -40,7 +40,10 @@ permissions, and with a viewer's and an old generation's writes refused.
    needs both asks for both. To keep that true, a save answers with the
    revision number, the time, and the size and SHA-256 of **the files that save
    wrote** only, not the other files of the new revision (a deleted file is not
-   listed).
+   listed). There is one exception, and it is deliberate: a save that fails
+   with `revision_conflict` carries the head's revision number
+   (`currentRevision`, decisions 5 and 10), so a write-only frame learns that
+   one number, and nothing else about the source.
 2. **Every call checks the full binding, then the current grant.** A source
    call first matches the view exactly as a metadata read does (actor,
    artifact, revision, view, generation, initialization, an open connection,
@@ -74,7 +77,8 @@ permissions, and with a viewer's and an old generation's writes refused.
 6. **Retries.** The frame supplies a key (8 to 100 characters from
    `A-Za-z0-9._:-`) and the workspace sends it as `Idempotency-Key` (like every
    key, 8 to 128 of those characters). The server records it as
-   `frame/` plus the key (`RequestKey::frame_scoped`). `/` is not a character
+   `frame/`, the artifact's identifier, `/`, and the key
+   (`RequestKey::frame_scoped`). `/` is not a character
    any route accepts in a key, and every route parses keys with the same
    function (HTTP headers, MCP arguments, and the client and CLI that feed
    them), so **no key an owner, an agent, or the CLI can send equals a key a
@@ -83,11 +87,18 @@ permissions, and with a viewer's and an old generation's writes refused.
    collide with a frame's key `K`: the frame could be told the owner's receipt
    or probe for it, so it was replaced. A frame's key can therefore neither
    reuse nor probe an owner's key, and an owner key that starts with `frame:`
-   is an ordinary key. The same key with the same changes returns the first
-   result with `replayed: true`, also after the head moved; the same key with
-   different changes is a 422 `request_key_reused`. The recorded key can be
-   six characters longer than an owner key; it is never parsed back or
-   sent to a client.
+   is an ordinary key. The artifact is part of the recorded key, so two frames
+   of one user on different artifacts that pick the same key (an app that
+   hard-codes it, or a hostile preview) are two keys: neither can use up,
+   probe, or replay the other's. The same key with the same changes on the
+   same artifact returns the first result with `replayed: true`, also after the
+   head moved; the same key with different changes is a 422
+   `request_key_reused`. The recorded key is longer than an owner key (at
+   most 6 + 36 + 1 + 128 characters; the store puts no limit on it); it is
+   never parsed back or sent to a client. A frame that sends a second save
+   while its first is still pending gets `busy` until the first settles; a
+   retry with the same key after that returns the first result once it has
+   committed (decision 7).
 7. **Known window.** The save checks the grant, then commits. A request that
    passed the check can commit once even if the user revokes a moment later
    or the view is replaced. Nothing after that check can stop it, and the
@@ -117,8 +128,18 @@ default-src 'none'`. The client refuses a response whose type or name is
    link only after the user presses Download. The frame gets a receipt
    (`status: "started"`, the kind, name, size, and revision), `declined`, or
    `busy`. One offer is open at a time, and an offer disappears with its frame.
-   A receipt is not proof that the user kept the file. The question is
-   hardened in decision 17.
+   `started` means the workspace handed the file to the browser, nothing more:
+   it is not proof that the user kept the file. The saved file's address
+   (`blob:`) stays valid for 60 s after that, or until the next download
+   replaces it, and is not revoked by the page being rebuilt in between, so a
+   large archive the browser is still reading is not cut. The question is
+   hardened in decision 17. The name is at most 100 characters: a package path
+   segment is at most 100 bytes and never starts with a dot, so the `download`
+   prefix of the fallback is never used for a valid path. The client accepts
+   up to 128, and a build-time assertion in `operations.rs` keeps the
+   server's longest name (the segment limit plus that prefix) inside that
+   bound; tests pin both sides at 100, 127, 128 and 129.
+   What the numbers say must match the bytes (decision 18).
 10. **The frame sees a closed set of error codes.** `invalid_request`,
     `not_granted`, `view_unavailable`, `not_found`, `revision_conflict`
     (with `currentRevision`), `key_reused`, `too_large`, `range`,
@@ -202,7 +223,29 @@ allow-forms allow-modals allow-downloads` (decision 0003). `allow-downloads`
     a decline or withdrawal the next question is refused as `declined` for 3 s,
     so a frame cannot re-ask in a loop; (e) the file name the frame chose is
     shown in a code span, cut at 80 characters, marked as a name the app chose;
-    (f) a frame without `source.download` cannot open a question at all.
+    (f) a frame without `source.download` cannot open a question at all;
+    (g) there is one authority on whether a press counts: the gate. The button
+    is enabled from the gate's answer, and the timers only make the page look
+    again (a timer that fires early is set again for the rest, so the button
+    is never enabled before a press would count); the first press that counts
+    takes the question before anything is awaited, so a double click starts one
+    download; (h) a request whose signal had already aborted opens nothing
+    and does not start the pause, and the listener on a signal is removed
+    when the question ends however it ends.
+18. **Numbers must agree with the bytes.** A part of a file is accepted only if
+    its length is at most 1 MiB, it starts inside the file, and it ends where
+    it says: with a `next_offset`, it ends exactly there, which is further on
+    and still before the end of the file; without one, it ends exactly at the
+    advertised `size`. Otherwise a caller joining parts could skip or repeat
+    bytes or take a short file for a whole one. The client checks this for the
+    workspace, the frame script checks it again for the app, and the frame
+    script also checks that the answer is for the file and offset it asked
+    for and no longer than the `length` it asked for. A listing names a path
+    once. A save's receipt names exactly the files the save put, once each,
+    with the size of the bytes that were sent, and a download's receipt is
+    for the kind asked (a file for a path, an archive without one) with the
+    size of the bytes the workspace actually received. The digests are not
+    recomputed by the client; they are the server's.
 
 ## Limits and what is not implemented
 
@@ -215,6 +258,8 @@ allow-forms allow-modals allow-downloads` (decision 0003). `allow-downloads`
 - The fence is checked when a call starts (decision 14); the workspace's frame
   bucket is not a boundary against a hostile workspace page (decision 15).
 - A save that passed its check can commit once after a revoke (decision 7).
+- The client does not hash what it reads or receives; a file's `sha256` is the
+  server's word, and only sizes and ranges are cross-checked (decision 18).
 - `not_found` is ambiguous on purpose: a missing file, a missing view, or an
   unavailable artifact. A frame cannot tell a trashed artifact from a deleted
   one.

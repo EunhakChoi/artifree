@@ -34,6 +34,7 @@ import type {
   RuntimeSourceManifest,
   RuntimeSourceSaved,
   RuntimeView,
+  RevisionFile,
   SaveRevisionRequest,
   SetDataRequest,
   StageHandoffRequest,
@@ -82,6 +83,7 @@ import {
   parseTokenList,
   parseUnreferencedContent,
   parseUpdate,
+  base64Size,
 } from './responses.js';
 
 /** Connection settings for one Artifree API. */
@@ -153,6 +155,31 @@ export interface RuntimeDownloadBytes {
   readonly mediaType: 'application/octet-stream' | 'application/zip';
   /** Whether it is one file or the whole revision. */
   readonly kind: 'file' | 'archive';
+}
+
+/**
+ * Whether a save's receipt describes exactly the files the request wrote:
+ * each `put` once, with the size of the bytes that were sent. (The digest is
+ * the server's; checking it would need a hash the caller did not ask for.)
+ */
+function describesWrittenFiles(
+  files: readonly RevisionFile[],
+  changes: SaveRevisionRequest['changes'],
+): boolean {
+  const sent = new Map<string, number>();
+  for (const change of changes) {
+    if (change.op !== 'put') continue;
+    const size =
+      change.encoding === 'base64'
+        ? base64Size(change.content)
+        : new TextEncoder().encode(change.content).length;
+    if (size === undefined) return false;
+    sent.set(change.path, size);
+  }
+  return (
+    files.length === sent.size &&
+    files.every((file) => sent.get(file.path) === file.size)
+  );
 }
 
 function invalidResponse(what: string): ArtifreeApiError {
@@ -1658,6 +1685,9 @@ export class ArtifreeClient {
       part.offset !== (range.offset ?? 0)
     )
       throw invalidResponse('another file, revision, or offset');
+    // The parser holds the part to its own numbers; the request adds its own.
+    if ((base64Size(part.content) ?? 0) > (range.length ?? Infinity))
+      throw invalidResponse('more bytes than were asked for');
     return part;
   }
 
@@ -1688,6 +1718,8 @@ export class ArtifreeClient {
     this.requireViewSession(view);
     if (saved.revision <= view.revision)
       throw invalidResponse('a revision that is not newer');
+    if (!describesWrittenFiles(saved.files, changes))
+      throw invalidResponse('files other than the ones this save wrote');
     return saved;
   }
 

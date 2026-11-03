@@ -33,6 +33,7 @@ var __ArtifreeBootstrap = (() => {
     download: 12e4
   };
   var MAX_PENDING = 64;
+  var MAX_READ_BYTES = 1024 * 1024;
   var MAX_CHANGES = 512;
   var MAX_PATH_BYTES = 240;
   var KEY_PATTERN = /^[A-Za-z0-9._:-]{8,100}$/;
@@ -90,6 +91,8 @@ var __ArtifreeBootstrap = (() => {
       if (file === void 0) return void 0;
       files.push(file);
     }
+    if (new Set(files.map((file) => file.path)).size !== files.length)
+      return void 0;
     return files;
   }
   function manifest(value) {
@@ -103,7 +106,10 @@ var __ArtifreeBootstrap = (() => {
   function part(value) {
     if (!record(value)) return void 0;
     const { path, revision, offset, size, sha256, nextOffset, bytes } = value;
-    if (typeof path !== "string" || !count(revision) || revision < 1 || !count(offset) || !count(size) || typeof sha256 !== "string" || !DIGEST_PATTERN.test(sha256) || !(nextOffset === null || count(nextOffset)) || !(bytes instanceof Uint8Array))
+    if (typeof path !== "string" || !count(revision) || revision < 1 || !count(offset) || !count(size) || typeof sha256 !== "string" || !DIGEST_PATTERN.test(sha256) || !(nextOffset === null || count(nextOffset)) || !(bytes instanceof Uint8Array) || offset > size || bytes.length > MAX_READ_BYTES)
+      return void 0;
+    const end = offset + bytes.length;
+    if (nextOffset === null ? end !== size : nextOffset <= offset || nextOffset >= size || end !== nextOffset)
       return void 0;
     return { path, revision, offset, size, sha256, nextOffset, bytes };
   }
@@ -121,6 +127,17 @@ var __ArtifreeBootstrap = (() => {
     if (kind !== "file" && kind !== "archive" || typeof name !== "string" || !count(size) || !count(revision) || revision < 1)
       return void 0;
     return { status: "started", kind, name, size, revision };
+  }
+  function describesWrites(files, sent) {
+    const sizes = /* @__PURE__ */ new Map();
+    for (const change2 of sent) {
+      if (change2.op !== "put") continue;
+      sizes.set(
+        change2.path,
+        typeof change2.content === "string" ? new TextEncoder().encode(change2.content).length : change2.content.length
+      );
+    }
+    return files.length === sizes.size && files.every((file) => sizes.get(file.path) === file.size);
   }
   function isErrorCode(value) {
     return typeof value === "string" && Object.hasOwn(ERROR_CODES, value);
@@ -198,7 +215,8 @@ var __ArtifreeBootstrap = (() => {
         return;
       }
       const parsed = pending.kind === "metadata" ? metadata(event.data.metadata) : pending.kind === "source.list" ? manifest(event.data.result) : pending.kind === "source.read" ? part(event.data.result) : pending.kind === "source.write" ? saved(event.data.result) : download(event.data.result);
-      if (parsed === void 0) pending.reject(failure(pending.kind, {}));
+      if (parsed === void 0 || !pending.fits(parsed))
+        pending.reject(failure(pending.kind, {}));
       else pending.resolve(parsed);
     };
     window.addEventListener(
@@ -229,7 +247,7 @@ var __ArtifreeBootstrap = (() => {
       "*",
       [channel.port2]
     );
-    function call(kind, fields = {}) {
+    function call(kind, fields = {}, fits = () => true) {
       if (closed || performance.now() >= deadline)
         return rejected("view_unavailable", "The runtime view has expired.");
       if (waiting.size >= MAX_PENDING)
@@ -254,7 +272,8 @@ var __ArtifreeBootstrap = (() => {
           kind,
           resolve,
           reject,
-          timeout
+          timeout,
+          fits
         });
         try {
           channel.port1.postMessage({ type: kind, id, ...fields });
@@ -290,11 +309,15 @@ var __ArtifreeBootstrap = (() => {
           const { offset, length } = limits;
           if (offset !== void 0 && !count(offset) || length !== void 0 && !(count(length) && length >= 1))
             return void 0;
-          return call("source.read", {
-            path,
-            ...offset === void 0 ? {} : { offset },
-            ...length === void 0 ? {} : { length }
-          });
+          return call(
+            "source.read",
+            {
+              path,
+              ...offset === void 0 ? {} : { offset },
+              ...length === void 0 ? {} : { length }
+            },
+            (answer) => answer.path === path && answer.offset === (offset ?? 0) && answer.bytes.length <= (length ?? MAX_READ_BYTES)
+          );
         });
       },
       saveSource(request) {
@@ -305,7 +328,11 @@ var __ArtifreeBootstrap = (() => {
           const copy = changes(candidate.changes);
           if (typeof key !== "string" || !KEY_PATTERN.test(key) || copy === void 0)
             return void 0;
-          return call("source.write", { key, changes: copy });
+          return call(
+            "source.write",
+            { key, changes: copy },
+            (answer) => describesWrites(answer.files, copy)
+          );
         });
       },
       requestDownload(request = {}) {
@@ -314,7 +341,11 @@ var __ArtifreeBootstrap = (() => {
           if (!plain(candidate)) return void 0;
           const { path } = candidate;
           if (path !== void 0 && !validPath(path)) return void 0;
-          return call("download", path === void 0 ? {} : { path });
+          return call(
+            "download",
+            path === void 0 ? {} : { path },
+            (answer) => answer.kind === (path === void 0 ? "archive" : "file")
+          );
         });
       }
     });
