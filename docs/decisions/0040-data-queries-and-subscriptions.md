@@ -105,21 +105,27 @@ collection, members, next_after?}`. `query` echoes the normalized request
    sends one signal after its transaction committed (a `watch` channel that
    carries no data; sending cannot fail and its result is not used, so a
    subscription can never fail a write). The commit signal of the change feed
-   (0006) is also awaited, because trashing or purging an artifact does not
-   move its data version. Every 15 seconds a stream reads again regardless,
-   so a commit by another process on the same database arrives within that
-   time. A stream holds no copy of the data between reads except the one state
+   (0006) is **not** awaited: it wakes on a commit by anyone to any artifact,
+   so with many streams open every commit would cost every stream a read of
+   its data space for nothing. Trashing or purging an artifact does not move
+   its data version and so does not wake a stream either. Every 15 seconds a
+   stream reads again regardless, so a trash, a purge, or a commit by another
+   process on the same database reaches it within that time. A stream holds no copy of the data between reads except the one state
    it is about to send.
 8. **Authorization and isolation.** Both routes are artifact-scoped under the
    rules of 0031 decision 8 and 0036: the artifact must exist, be outside the
    trash and not purged, and belong to the caller; any other case, another
    user's artifact included, is the same `404 not_found` as a missing one.
-   The route is checked before anything is allocated: a request for an
-   artifact the caller cannot see takes no stream slot and creates nothing.
+   A request is checked against the limits of item 12 first, before any
+   storage is read, so a refused request costs no storage work; a request for
+   an artifact the caller cannot see then holds its place only while its own
+   check runs, registers nothing, and creates nothing. (At the actor's limit
+   the answer is the limit's, `429`, whatever the artifact; it depends only on
+   the caller's own streams, so it tells nothing about any artifact.)
    Issued agent tokens may use both routes, as they may read data.
 9. **A stream ends when access ends.** The stream reads storage at every wake
    and every heartbeat, so a trashed or purged artifact ends it at the next
-   read: at once for a commit in this process, within 15 seconds otherwise.
+   heartbeat read: within 15 seconds.
    Disabling a user or revoking a token ends the streams of that user or token
    through the same registrations as change streams, and a stream that is
    opened by a request that authenticated before the disable confirms the
@@ -142,15 +148,19 @@ unavailable`, and a stream ends without sending the unreadable state; it
     - 8 open data streams per user. One more is `429 rate_limited` with
       `Retry-After: 5`.
     - 128 open data streams in the process. One more is `503 unavailable`
-      with `Retry-After: 10`. Both limits are checked before the stream is
-      registered, and a refusal inserts nothing. Slots are released when the
+      with `Retry-After: 10`. Both limits are checked first, before any
+      storage is read or the stream is registered, and a refusal inserts
+      nothing. Slots are released when the
       stream's task ends, whatever ends it.
     - Opening a stream is an ordinary request under the request limits
       (0005); an open stream holds no request slot.
     - One read of storage per stream per 250 ms, whatever wakes it.
     - 128 KiB of canonical value per event (decision 5), 128 KiB of values per
       query page (decision 4), 100 members per page.
-    - 10 minutes of lifetime per stream, 15 seconds between heartbeats.
+    - 10 minutes of lifetime per stream, 15 seconds between heartbeats. The
+      end of the lifetime is checked ahead of every wake-up and bounds the wait
+      for the read interval, so writes that never pause cannot extend a stream
+      past it.
 13. **Client (`@artifree/client`).** Two functions in modules of their own,
     not methods of the client class (that class is in the web workspace's main
     bundle, which has no room):
