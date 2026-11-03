@@ -16,6 +16,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkDockerfile } from './lib/dockerfile-policy.mjs';
+import { glibcFromLddOutput } from './lib/elf-glibc.mjs';
+import { GLIBC_VERIFIED_RUNTIME } from './lib/release-layout.mjs';
 import {
   exerciseNewService,
   expectSavedRevision,
@@ -257,6 +259,14 @@ export async function verifyContainer(archive) {
       dockerOk(['image', 'inspect', '--format', '{{json .Config}}', image]),
     );
     checkImageConfig(inspected);
+    // The glibc claim of decision 0037: the image really is the glibc the
+    // policy says it was verified on, and the binary ran there.
+    assert.equal(
+      glibcFromLddOutput(
+        dockerOk(['run', '--rm', '--entrypoint', 'ldd', image, '--version']),
+      ),
+      GLIBC_VERIFIED_RUNTIME,
+    );
 
     dockerOk(['volume', 'create', volume]);
     const apiPort = await freePort();

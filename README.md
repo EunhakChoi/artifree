@@ -72,7 +72,10 @@ should connect directly to the loopback listener, not through a trusted proxy
 Linux x64 and Windows x64 release archives (server, built web workspace, a
 bundled CLI that needs Node.js 22.12 or newer, and a SHA-256 manifest) are built
 by CI and checked by unpacking them into an empty directory, starting, saving,
-previewing, and restarting. They are not published or signed yet. See
+previewing, and restarting, and carry the license texts of the code inside.
+A tag-triggered workflow can publish them with attestations
+([decision 0037](docs/decisions/0037-release-publishing-and-supply-chain.md)),
+but **nothing has been published or signature-checked yet**. See
 [release packages](docs/release-packages.md). A [container image](docs/container.md)
 built from the Linux archive is checked in CI the same way (nothing is
 published), and the [remote access guides](docs/remote-access.md) cover a
@@ -226,8 +229,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0032](docs/decisions/0032-runtime-source-read-and-download.md),
 [0033](docs/decisions/0033-runtime-source-write.md),
 [0034](docs/decisions/0034-room-and-presence.md),
-[0035](docs/decisions/0035-per-file-conditional-edit.md), and
-[0036](docs/decisions/0036-multi-user-identity.md)).
+[0035](docs/decisions/0035-per-file-conditional-edit.md),
+[0036](docs/decisions/0036-multi-user-identity.md), and
+[0037](docs/decisions/0037-release-publishing-and-supply-chain.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

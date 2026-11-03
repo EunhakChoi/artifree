@@ -2,15 +2,18 @@
 
 Status: O03a, implemented ([decision 0025](decisions/0025-release-packages.md)).
 The [container image](container.md) and [remote access guides](remote-access.md)
-are O03b ([decision 0026](decisions/0026-container-image.md)). Archive
-signing, publishing, and license texts (O03c) are not implemented.
+are O03b ([decision 0026](decisions/0026-container-image.md)). Release
+publishing, signing, license texts, and the glibc floor (O03c) are implemented
+as a workflow and checks, **but nothing has been published and no signature has
+been verified** ([decision 0037](decisions/0037-release-publishing-and-supply-chain.md)).
 Backup, restore, and schema upgrade are O04
 ([decision 0027](decisions/0027-backup-restore-and-schema-upgrade.md),
 [guide](backup-restore.md)).
 
-> **Warning.** CI archives are for testing and your own use. Do not
-> redistribute them: the full license texts of the Rust crates and npm
-> packages inside are not bundled yet (O03c).
+> **Warning.** Archives and images that CI builds are for testing and your own
+> use. Do not redistribute them: they are unreviewed, unattested workflow
+> artifacts that expire. Redistribute only assets of a published release
+> (see [Verify a release](#verify-a-release)). No release exists yet.
 
 A release package is one archive per platform that runs without a repository
 checkout, Rust, or `npm install`:
@@ -20,16 +23,24 @@ checkout, Rust, or `npm install`:
 | Linux x64   | `artifree-<version>-linux-x64.tar.gz` | Ubuntu 24.04 (glibc) |
 | Windows x64 | `artifree-<version>-windows-x64.zip`  | Windows Server 2025  |
 
-No other platform (macOS, ARM, musl/Alpine) is packaged. The Linux binary was
-measured, with `objdump`, to need glibc 2.34 or newer; CI does not enforce that
-number. The Windows binary links the C runtime statically.
+No other platform (macOS, ARM, musl/Alpine) is packaged. The Windows binary
+links the C runtime statically.
+
+**Linux glibc floor: 2.34.** The binary needs glibc 2.34 or newer (x86-64).
+Packaging refuses a binary whose `GLIBC_*` symbol versions exceed that, and CI
+repeats the check on the archive. Checked by running the package: Debian 12
+(glibc 2.36, the `Debian 12` and `Container image` jobs) and Ubuntu 24.04
+(2.39, the `Clean install` job). Supported only by the number, never run:
+glibc 2.34 and 2.35 (RHEL, Rocky, and Alma 9; Ubuntu 22.04). Below 2.34 (Debian 11,
+Ubuntu 20.04, RHEL 8) is not supported.
 
 ## Obtain and check
 
 CI uploads each archive and its `.sha256` file as a workflow artifact
-(`release-linux-x64`, `release-windows-x64`) for every change. Publishing to a
-releases page, signing, and notarization do not exist yet, so the checksum shows
-that the file is intact, not who produced it.
+(`release-linux-x64`, `release-windows-x64`) for every change. The
+checksum shows that the file is intact, not who produced it; for that, see
+[Verify a release](#verify-a-release). Windows notarization or Authenticode
+signing does not exist.
 
 ```sh
 sha256sum -c artifree-<version>-linux-x64.tar.gz.sha256
@@ -55,14 +66,20 @@ artifree-<version>-<target>/
   docs/backup-restore.md   backup, restore, and upgrade (O04)
   LICENSE  THIRD_PARTY_NOTICES.md
   RUST_DEPENDENCIES.json   crates linked into the server: name, version, license expression
+  LICENSES/INDEX.json      every third-party component with its license files (hashes)
+  LICENSES/texts/<hash>.txt  the license texts, each stored once
 ```
 
 `RUST_DEPENDENCIES.json` lists registry crates reachable through normal
-dependencies of the server, with declared license expressions only. Artifree's
-own workspace crates (covered by `LICENSE`) and build-only or dev-only crates
-(not linked into the binary) are intentionally left out. It does not
-contain the license texts of those crates or of the npm packages bundled into
-`web/` and `cli/`.
+dependencies of the server, with declared license expressions. Artifree's own
+workspace crates (covered by `LICENSE`) and build-only or dev-only crates (not
+linked into the binary) are intentionally left out. `LICENSES/` holds the
+license, copying, and notice files of those crates and of the npm packages that
+may be bundled into `web/` and `cli/` (the lockfile closure of the two
+workspaces, which can include a package that was tree-shaken away). Packaging
+fails if a component has no text and no exception recorded in
+`scripts/license-exceptions.json` (none today). Not covered: the notices of the
+Rust standard library and the Windows C runtime linked into the binary.
 
 ## Start
 
@@ -136,6 +153,82 @@ A newer schema is refused by an older build, and there is no downgrade: keep
 the previous package and the backup until you are satisfied. Release notes do not exist yet; check the decision records for a
 changed data format.
 
+## Verify a release
+
+> **Status: not exercised.** No release exists. The steps below describe what
+> the release workflow ([decision 0037](decisions/0037-release-publishing-and-supply-chain.md))
+> is built to support. They have not been run against a real release, so treat a
+> first failure as possibly a documentation or workflow defect. The workflow
+> creates a **draft** release; a maintainer reviews and publishes it by hand.
+
+Download the archive, its `.sha256` file, and `SHA256SUMS` from the release.
+You need a GitHub CLI that has the `attestation` command and a login
+(`gh auth login`); the commands read the attestations from the GitHub
+attestations API, to which the release workflow's attestation action always
+uploads them. The flags below were checked against the GitHub CLI source
+(`--repo`, `--signer-workflow`, the `oci://` form); `gh attestation verify`
+itself was not run, because the CLI used while writing this has no
+`attestation` command.
+
+```sh
+sha256sum -c artifree-<version>-linux-x64.tar.gz.sha256   # integrity
+gh attestation verify artifree-<version>-linux-x64.tar.gz --repo EunhakChoi/artifree --signer-workflow EunhakChoi/artifree/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/eunhakchoi/artifree:<version> --repo EunhakChoi/artifree --signer-workflow EunhakChoi/artifree/.github/workflows/release.yml
+docker pull ghcr.io/eunhakchoi/artifree:<version>
+docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/eunhakchoi/artifree:<version>
+```
+
+`--signer-workflow` requires that the attestation was made by `release.yml`
+and not by some other workflow of the repository. The image attestation is also
+stored in the registry next to the image; `gh attestation verify ... --bundle-from-oci`
+would read it from there, and this guide does not rely on that. The last
+command prints the image digest, which must equal the digest that
+`gh attestation verify` reports; run the container by that digest
+(`ghcr.io/eunhakchoi/artifree@sha256:...`), not by the tag. An attestation shows
+the file was built by this repository's release workflow from a version tag; it
+does not show the code is safe, and a Windows `.zip` still has no Authenticode
+signature.
+
+## Publishing and recovery (maintainers)
+
+Pushing a tag `vX.Y.Z` (equal to the version in `package.json` and `Cargo.toml`,
+on a commit of `main` whose CI run succeeded) starts the release workflow. It
+builds and verifies, waits for one approval of the `release` environment, checks
+the tag, main, and CI again, creates a **draft** release with attested archives,
+and only then pushes and attests the image. Publish the draft by hand, and only
+after the `Publish and attest the image` job succeeded.
+
+If a run fails after the first side effect there is no automatic cleanup and
+the workflow refuses to overwrite anything (an existing release for the tag, or
+an existing image tag, stops it). Recover by hand: delete the draft release,
+delete the image version `ghcr.io/eunhakchoi/artifree:<version>` if it was
+pushed (GitHub package settings), delete the tag, fix the cause, and release
+under a new version. The attestations that were created stay in the attestations
+API; they only attest bytes that no longer have a release.
+
+## Base image digests
+
+Three image references are pinned by tag and digest (the Dockerfile base, the
+Playwright image, and the Debian 12 verifier image in `ci.yml`). Dependabot does
+not track them (decision 0037, section 5). `npm run check` verifies the
+format offline. To refresh them, a maintainer does the following before each
+release candidate and after a Debian security release:
+
+1. On a networked machine, not in CI, run `node scripts/refresh-base-digests.mjs`.
+   It lists each pin as `current` or `CHANGED` with the lines to edit and edits
+   nothing.
+2. Edit those lines. Keep the tag. Update the resolution date in the Dockerfile
+   comment. The Playwright tag must keep matching `@playwright/test` in
+   `package.json`.
+3. Read what changed upstream (Debian security notices; the image's release
+   notes) and decide whether the change is wanted.
+4. Run `npm run check`, open a pull request, and wait for all CI jobs: the
+   `Container image` job asserts the base's glibc and runs the package, and the
+   `Debian 12` job runs the verifier on it. If the glibc of the new base differs
+   from `GLIBC_VERIFIED_RUNTIME` (a new Debian major), change that constant and
+   decision 0037 in the same pull request, because the support policy changes.
+5. Merge, then rebuild any pending release.
+
 ## What CI checks
 
 The `Release archive` job builds the archive on each platform, and the `Clean
@@ -149,3 +242,10 @@ with the packaged CLI, fetching its preview, stopping, restarting on the same
 data and finding revision 2, and the two startup refusals above. It ran only on
 those two runner images; it did not run against a real reverse proxy, tunnel, or
 other machine.
+
+Further checks (decision 0037): the `Debian 12` job checks the archive's glibc
+requirement against the floor and runs the same verifier inside Debian 12
+(glibc 2.36) with no network and a read-only root; the license bundle is
+validated as part of the manifest check; `release.yml` is checked for syntax and
+for the publishing rules in `npm run check` and in CI. The release workflow
+itself has never run.

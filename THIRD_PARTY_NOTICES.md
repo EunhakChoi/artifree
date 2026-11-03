@@ -32,4 +32,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 Other npm and Cargo dependencies retain their respective upstream licenses.
-The committed lockfiles identify their versions.
+The committed lockfiles identify their versions. Each release archive carries
+the license, copying, and notice files of the Rust crates linked into the server
+and of the npm packages that may be bundled into the web workspace and the
+command-line client, under `LICENSES/` with an `INDEX.json` that maps every
+component to its texts (decision 0037). The notices of the Rust standard
+library and of the Windows C runtime are not part of that bundle yet.

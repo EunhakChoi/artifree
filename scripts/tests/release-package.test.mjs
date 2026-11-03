@@ -17,6 +17,9 @@ import {
   buildReleasePackage,
   hostTarget,
 } from '../package-release.mjs';
+import { sha256 } from '../lib/release-layout.mjs';
+import { elfWithNeeds } from './fixtures/elf.mjs';
+import { licenseTextPath } from '../lib/license-bundle.mjs';
 import { buildServer } from '../lib/server-process.mjs';
 import {
   extract,
@@ -282,3 +285,133 @@ test('the refusal check fails when the server starts anyway', async () => {
     refuses(Promise.reject(new Error('some other failure')), /must differ/),
   );
 });
+
+test(
+  'the package carries license texts for its Rust crates and npm packages, covered by the manifest',
+  options,
+  async () => {
+    const { dir } = await unpacked('licenses');
+    const index = JSON.parse(
+      await readFile(join(dir, 'LICENSES', 'INDEX.json'), 'utf8'),
+    );
+    const names = new Set(
+      index.components.map((c) => `${c.ecosystem}:${c.name}`),
+    );
+    for (const expected of [
+      'cargo:axum',
+      'cargo:rusqlite',
+      'npm:react',
+      'npm:react-dom',
+    ])
+      assert.ok(names.has(expected), `Missing license entry: ${expected}`);
+    assert.ok(
+      !names.has('cargo:artifree-server') && !names.has('npm:vite'),
+      'Artifree code and build-only tools are not third-party components.',
+    );
+    const crates = JSON.parse(
+      await readFile(join(dir, 'RUST_DEPENDENCIES.json'), 'utf8'),
+    );
+    assert.deepEqual(
+      index.components
+        .filter((c) => c.ecosystem === 'cargo')
+        .map((c) => c.name),
+      crates.map((c) => c.name),
+    );
+  },
+);
+
+test(
+  'the manifest check rejects a changed, missing, or extra license text',
+  options,
+  async () => {
+    const { dir } = await unpacked('license-tamper');
+    const index = JSON.parse(
+      await readFile(join(dir, 'LICENSES', 'INDEX.json'), 'utf8'),
+    );
+    const text = join(dir, ...licenseTextPath(index.texts[0]).split('/'));
+    const original = await readFile(text);
+    await writeFile(text, `${original}changed`);
+    await assert.rejects(verifyManifest(dir), /mismatch: LICENSES\/texts\//);
+    await writeFile(text, original);
+    await verifyManifest(dir);
+
+    await writeFile(join(dir, 'LICENSES', 'texts', 'extra.txt'), 'extra');
+    await assert.rejects(verifyManifest(dir), /Files differ/);
+    await rm(join(dir, 'LICENSES', 'texts', 'extra.txt'));
+
+    await rm(text);
+    await assert.rejects(verifyManifest(dir), /Files differ/);
+    await writeFile(text, original);
+    await rm(join(dir, 'LICENSES', 'INDEX.json'));
+    await assert.rejects(verifyManifest(dir), /Files differ/);
+  },
+);
+
+test('packaging refuses a Linux binary that needs a newer glibc than the floor', async () => {
+  const outDir = join(scratch, 'out-glibc');
+  const bytes = (version) =>
+    elfWithNeeds({ 'libc.so.6': ['GLIBC_2.17', `GLIBC_${version}`] });
+  const fixture = join(scratch, 'fake-server');
+  // The check runs before the binary is executed, so a fixture suffices.
+  await writeFile(fixture, bytes('2.35'));
+  await assert.rejects(
+    buildReleasePackage({
+      root,
+      target: 'linux-x64',
+      binary: fixture,
+      webDir,
+      outDir,
+    }),
+    /requires glibc 2\.35, above the supported floor 2\.34/,
+  );
+});
+
+/** Applies `change` to the manifest of an unpacked package and saves it. */
+async function rewriteManifest(dir, change) {
+  const path = join(dir, 'MANIFEST.json');
+  const manifest = JSON.parse(await readFile(path, 'utf8'));
+  change(manifest);
+  await writeFile(path, JSON.stringify(manifest));
+}
+
+test(
+  'the manifest check rejects a license index that no longer matches its texts, even when the manifest agrees',
+  options,
+  async () => {
+    const { dir } = await unpacked('license-index');
+    const path = join(dir, 'LICENSES', 'INDEX.json');
+    const index = JSON.parse(await readFile(path, 'utf8'));
+    index.components[0].files = [];
+    const bytes = Buffer.from(JSON.stringify(index));
+    await writeFile(path, bytes);
+    await rewriteManifest(dir, (manifest) => {
+      const entry = manifest.files.find(
+        (f) => f.path === 'LICENSES/INDEX.json',
+      );
+      entry.size = bytes.length;
+      entry.sha256 = sha256(bytes);
+    });
+    await assert.rejects(
+      verifyManifest(dir),
+      /No license text and no exception for/,
+    );
+  },
+);
+
+test(
+  'the manifest check requires the license index to be a listed file',
+  options,
+  async () => {
+    const { dir } = await unpacked('license-listed');
+    await rm(join(dir, 'LICENSES', 'INDEX.json'));
+    await rewriteManifest(dir, (manifest) => {
+      manifest.files = manifest.files.filter(
+        (f) => f.path !== 'LICENSES/INDEX.json',
+      );
+    });
+    await assert.rejects(
+      verifyManifest(dir),
+      /does not list LICENSES\/INDEX.json/,
+    );
+  },
+);

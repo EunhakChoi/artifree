@@ -4,14 +4,17 @@ Status: O03b, implemented as a build recipe and a CI check
 ([decision 0026](decisions/0026-container-image.md)); settings can be declared as
 environment variables ([decision 0028](decisions/0028-static-web-defaults.md)).
 **No image is published.**
-There is no registry, tag, or signature; you build the image from a release
+There is no published registry tag or signature yet; you build the image from a release
 archive yourself. The image was built and run only by the `Container image` CI
 job, on GitHub's `ubuntu-24.04` runner. It has not been run on any other host,
 and Docker was not available where the change was written.
 
-> **Warning.** Like the archives it is built from, the image does not contain
-> the full license texts of the Rust crates and npm packages inside it
-> ([release packages](release-packages.md)). Do not redistribute it.
+> **Warning.** An image you build from a CI archive, or one that CI builds, is
+> unreviewed and unattested. Do not redistribute it. The release workflow can
+> push and attest an image ([decision 0037](decisions/0037-release-publishing-and-supply-chain.md)),
+> but it has never run, and the verification steps in
+> [release packages](release-packages.md#verify-a-release) have not been
+> exercised. The archive it is built from now contains the license texts.
 
 ## What the image is
 

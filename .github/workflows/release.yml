@@ -1,0 +1,266 @@
+name: Release
+
+# Decision 0037. This workflow never runs for a pull request. A push of a tag
+# `vX.Y.Z` builds and verifies, waits for ONE human approval (the `approve`
+# job's `release` environment), and only then publishes, in this order: the
+# DRAFT GitHub Release with attested archives (`release`), then the container
+# image pushed to GHCR and attested (`publish-image`, the last irreversible
+# step). A person publishes the draft. `workflow_dispatch` is a dry run: it
+# builds and verifies and has no publishing path.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify-tag:
+    name: Tag, version, and main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.12.0'
+      - name: The tag equals the repository version
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/release-assets.mjs check-tag "$TAG"
+      - name: The commit is on main
+        if: ${{ github.ref_type == 'tag' }}
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: The Quality gate succeeded for the commit
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-assets.mjs check-ci "$GITHUB_SHA"
+
+  build:
+    name: Archive (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: [verify-tag]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            node: '22.12.0'
+            target: linux-x64
+            rustflags: '-D warnings'
+          - os: windows-2025
+            node: '22.22.2'
+            target: windows-x64
+            rustflags: '-D warnings -C target-feature=+crt-static'
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: rustup show active-toolchain
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/package-release.mjs --target ${{ matrix.target }} --out release
+      - run: node scripts/verify-release.mjs release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  image-check:
+    name: Container image check
+    runs-on: ubuntu-24.04
+    needs: [build]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            deploy
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.12.0'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-linux-x64
+          path: release
+      - run: node scripts/verify-container.mjs release
+
+  approve:
+    name: Approve the release
+    runs-on: ubuntu-24.04
+    needs: [verify-tag, build, image-check]
+    # The only approval gate: configure required reviewers on the `release`
+    # environment. Nothing before this job has a side effect outside the run,
+    # and the jobs after it use no environment, so one approval covers all.
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.repository == 'EunhakChoi/artifree' }}
+    environment: release
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - run: echo "Release approved."
+
+  release:
+    name: Draft the GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [build, image-check, approve]
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.repository == 'EunhakChoi/artifree' }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          sparse-checkout: scripts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.12.0'
+      # Approval can come days after verify-tag ran: check again, now, before
+      # the first side effect.
+      - name: Recheck the tag, main, and CI before publishing anything
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release-assets.mjs check-tag "$TAG"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          node scripts/release-assets.mjs check-ci "$GITHUB_SHA"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums, notes, and the exact asset set
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/release-assets.mjs sums dist
+          IMAGE_REF="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/artifree:${TAG#v}" \
+            node scripts/release-assets.mjs notes dist "${TAG#v}"
+          node scripts/release-assets.mjs check-set dist
+      # The attestation is uploaded to the GitHub attestations API, which is
+      # where `gh attestation verify` reads it. `create-storage-record` is
+      # unrelated: it would add a "Linked Artifacts" record for a registry image
+      # and needs an organization-owned repository.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+          create-storage-record: false
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "A release for $TAG already exists. Delete it first (docs/release-packages.md, recovery)." >&2
+            exit 1
+          fi
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" --draft --verify-tag "${prerelease[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Artifree ${TAG#v}" \
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/*.tar.gz dist/*.zip dist/*.sha256 dist/SHA256SUMS
+
+  publish-image:
+    name: Publish and attest the image
+    runs-on: ubuntu-24.04
+    # After the draft release: the push is the last irreversible step.
+    needs: [build, image-check, approve, release]
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.repository == 'EunhakChoi/artifree' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: deploy
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-linux-x64
+          path: release
+      - name: Build the image from the verified archive
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir package
+          tar -xzf release/artifree-*-linux-x64.tar.gz -C package --strip-components=1
+          docker build --platform linux/amd64 \
+            --file deploy/container/Dockerfile \
+            --tag "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/artifree:${TAG#v}" \
+            package
+      - name: Log in and refuse to overwrite an existing tag
+        env:
+          TAG: ${{ github.ref_name }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/artifree:${TAG#v}"
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          if output="$(docker manifest inspect "$image" 2>&1)"; then
+            echo "The image tag $image already exists; it is never overwritten. See the recovery steps in docs/release-packages.md." >&2
+            exit 1
+          fi
+          if ! grep -qiE 'manifest unknown|name unknown|no such manifest|not found' <<< "$output"; then
+            echo "Cannot tell whether $image exists: $output" >&2
+            exit 1
+          fi
+      - name: Push the image and read its digest
+        id: push
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/artifree"
+          docker push "$image:${TAG#v}"
+          reference="$(docker inspect --format '{{index .RepoDigests 0}}' "$image:${TAG#v}")"
+          {
+            echo "digest=${reference#*@}"
+            echo "name=$image"
+          } >> "$GITHUB_OUTPUT"
+      # push-to-registry stores the attestation next to the image as well; the
+      # GitHub attestations API receives it either way, which is what the
+      # documented `gh attestation verify oci://...` reads.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false

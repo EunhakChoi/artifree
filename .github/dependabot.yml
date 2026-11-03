@@ -28,3 +28,7 @@ updates:
     groups:
       actions:
         patterns: ['*']
+# No `docker` ecosystem on purpose: base image digests are refreshed by hand with
+# scripts/refresh-base-digests.mjs (docs/release-packages.md, decision 0037), because a
+# new digest needs the glibc and Debian-version review and the Playwright image must
+# match the @playwright/test version.
