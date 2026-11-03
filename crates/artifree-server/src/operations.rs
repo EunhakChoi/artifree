@@ -1589,7 +1589,7 @@ pub(crate) async fn list_data_members(
             Select::Names => DataSelect::Names,
             Select::Values => DataSelect::Values,
         },
-        limit: u32::try_from(query.limit()).unwrap_or(u32::MAX),
+        limit: u64::try_from(query.limit()).unwrap_or(u64::MAX),
         after: query.after().map(str::to_owned),
         data_version: read.version.0,
         is_collection: read.members.is_collection,

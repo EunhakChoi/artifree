@@ -67,7 +67,9 @@ export type ApiBody =
   | SetDataRequest
   | UpdateDataRequest
   | DeleteDataRequest
-  | DataWriteResponse;
+  | DataWriteResponse
+  | DataMembers
+  | DataTooLarge;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -222,6 +224,11 @@ export type JsonValue =
   | number
   | boolean
   | null;
+/**
+ * What `GET /v1/artifacts/{id}/data/members` says about each member
+ * (decision 0040).
+ */
+export type DataSelect = 'names' | 'values';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -1740,6 +1747,89 @@ export interface DataWriteResponse {
    * True when an earlier request with the same key already did it.
    */
   replayed: boolean;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/data/members`.
+ */
+export interface DataMembers {
+  /**
+   * The cursor that applied, absent when the query had none.
+   */
+  after?: string | null;
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space this page was read at. A later page may
+   * be read at a later version.
+   */
+  data_version: number;
+  /**
+   * Whether an object is at the path. When false there are no members.
+   */
+  is_collection: boolean;
+  /**
+   * The limit that applied.
+   */
+  limit: number;
+  /**
+   * The members in the byte order of their names, at most `limit`, with at
+   * most 256 KiB of value text in all.
+   */
+  members: DataMember[];
+  /**
+   * The name of the last member, present exactly when more members follow.
+   */
+  next_after?: string | null;
+  /**
+   * The path that was listed, as parsed.
+   */
+  path: string;
+  select: DataSelect;
+}
+/**
+ * One member of a page. Under `select=names` only `name`; under
+ * `select=values` exactly one of `value` and `too_large`.
+ */
+export interface DataMember {
+  /**
+   * The member's name.
+   */
+  name: string;
+  /**
+   * Always `true` when present: the canonical value is larger than 32 KiB,
+   * so it is not carried. Read it with `GET data?path=`.
+   */
+  too_large?: boolean | null;
+  /**
+   * The value, which can be `null`. Absent when the member is `too_large`
+   * and under `select=names`.
+   */
+  value?: JsonValue | null;
+}
+/**
+ * Data of the `too_large` event: the canonical value at the path is larger
+ * than `max_bytes`, so it is not sent and the stream ends. Following it again
+ * would meet the same event; follow a smaller path.
+ */
+export interface DataTooLarge {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space at which the value was too large.
+   */
+  data_version: number;
+  /**
+   * The most bytes of canonical value text an event carries.
+   */
+  max_bytes: number;
+  /**
+   * The path that was followed.
+   */
+  path: string;
 }
 
 /**

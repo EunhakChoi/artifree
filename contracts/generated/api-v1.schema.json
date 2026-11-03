@@ -482,6 +482,151 @@
       ],
       "type": "object"
     },
+    "DataMember": {
+      "additionalProperties": false,
+      "description": "One member of a page. Under `select=names` only `name`; under\n`select=values` exactly one of `value` and `too_large`.",
+      "properties": {
+        "name": {
+          "description": "The member's name.",
+          "type": "string"
+        },
+        "too_large": {
+          "description": "Always `true` when present: the canonical value is larger than 32 KiB,\nso it is not carried. Read it with `GET data?path=`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value, which can be `null`. Absent when the member is `too_large`\nand under `select=names`."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "DataMembers": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/data/members`.",
+      "properties": {
+        "after": {
+          "description": "The cursor that applied, absent when the query had none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space this page was read at. A later page may\nbe read at a later version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "is_collection": {
+          "description": "Whether an object is at the path. When false there are no members.",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "The limit that applied.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "members": {
+          "description": "The members in the byte order of their names, at most `limit`, with at\nmost 256 KiB of value text in all.",
+          "items": {
+            "$ref": "#/$defs/DataMember"
+          },
+          "type": "array"
+        },
+        "next_after": {
+          "description": "The name of the last member, present exactly when more members follow.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path that was listed, as parsed.",
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/DataSelect",
+          "description": "The `select` that applied."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "select",
+        "limit",
+        "data_version",
+        "is_collection",
+        "members"
+      ],
+      "type": "object"
+    },
+    "DataSelect": {
+      "description": "What `GET /v1/artifacts/{id}/data/members` says about each member\n(decision 0040).",
+      "oneOf": [
+        {
+          "const": "names",
+          "description": "Names only. This is the default.",
+          "type": "string"
+        },
+        {
+          "const": "values",
+          "description": "Names and values: each member has exactly one of `value` and\n`too_large`.",
+          "type": "string"
+        }
+      ]
+    },
+    "DataTooLarge": {
+      "additionalProperties": false,
+      "description": "Data of the `too_large` event: the canonical value at the path is larger\nthan `max_bytes`, so it is not sent and the stream ends. Following it again\nwould meet the same event; follow a smaller path.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space at which the value was too large.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_bytes": {
+          "description": "The most bytes of canonical value text an event carries.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The path that was followed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "data_version",
+        "max_bytes"
+      ],
+      "type": "object"
+    },
     "DataWriteResponse": {
       "additionalProperties": false,
       "description": "Response of the three writes of application data.",
@@ -1538,6 +1683,48 @@
             }
           ],
           "description": "The order."
+        }
+      },
+      "type": "object"
+    },
+    "ListDataMembersQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/members`: one page of the members of\nthe object at a path, in the byte order of their UTF-8 names.",
+      "properties": {
+        "after": {
+          "description": "The cursor: members strictly after this name, 1 to 256 bytes. Pass the\nprevious page's `next_after`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Most members in the page, 1 to 100; 50 when absent.",
+          "format": "uint64",
+          "maximum": 100,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The collection: the path grammar of `ReadDataQuery.path`. Absent or\nempty is the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "select": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSelect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Names only (the default) or names and values."
         }
       },
       "type": "object"
@@ -2989,6 +3176,20 @@
         "users"
       ],
       "type": "object"
+    },
+    "WatchDataQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/events`, a server-sent event stream\nof `snapshot` and `change` events (both `AppData`) and a final `too_large`\nevent (`DataTooLarge`).",
+      "properties": {
+        "path": {
+          "description": "The path to follow, as for `ReadDataQuery.path`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     }
   },
   "$id": "https://artifree.invalid/schemas/api-v1.json",
@@ -3185,6 +3386,12 @@
     },
     {
       "$ref": "#/$defs/DataWriteResponse"
+    },
+    {
+      "$ref": "#/$defs/DataMembers"
+    },
+    {
+      "$ref": "#/$defs/DataTooLarge"
     }
   ],
   "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",

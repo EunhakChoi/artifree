@@ -871,7 +871,7 @@ pub struct ListDataMembersQuery {
     /// Most members in the page, 1 to 100; 50 when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 100))]
-    pub limit: Option<u32>,
+    pub limit: Option<u64>,
     /// The cursor: members strictly after this name, 1 to 256 bytes. Pass the
     /// previous page's `next_after`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -910,7 +910,7 @@ pub struct DataMembers {
     /// The `select` that applied.
     pub select: DataSelect,
     /// The limit that applied.
-    pub limit: u32,
+    pub limit: u64,
     /// The cursor that applied, absent when the query had none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
