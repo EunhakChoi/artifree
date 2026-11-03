@@ -121,7 +121,9 @@ mod tests {
         assert_eq!(line["event"], "ready");
         assert_eq!(line["mode"], "persistent");
         assert_eq!(line["data_dir"], "/srv/artifree");
-        assert_eq!(line["token_file"], "/srv/artifree/access-token");
+        // Joined by the platform, so the separator is the platform's.
+        let token_file = PathBuf::from("/srv/artifree").join("access-token");
+        assert_eq!(line["token_file"], token_file.to_string_lossy().as_ref());
         assert_eq!(line["api_url"], "http://127.0.0.1:1");
         let object = line.as_object().ok_or("an object")?;
         for absent in [
