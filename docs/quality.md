@@ -180,6 +180,34 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   on the same database arrives within the poll interval; shutdown ends open
   streams (on Unix: Node cannot send a graceful stop signal to a child on
   Windows); and an invalid `--change-streams` stops the server.
+- Data queries and subscriptions (decision 0040):
+  `crates/artifree-domain/src/data_members.rs` (UTF-8 byte order against
+  UTF-16 order, a cursor that survives deletions before it, the prefix and
+  cursor bounds, the value bound of a page and the `too_large` member, one of
+  `value` and `too_large` per member, query rules that do not echo the value),
+  `crates/artifree-server/src/data_events.rs` (the version decision of a stream
+  and the slot counts: a refusal inserts nothing and a closed stream leaves no
+  entry), `crates/artifree-server/tests/data_queries.rs` (through the router:
+  paging while a writer inserts members, every refused query, the page bound, a
+  stored space that cannot be read as `503` and a stream that ends instead of
+  skipping it, a snapshot then each state in order, coalescing of a burst of 30
+  writes, a fresh snapshot after reconnecting, `Last-Event-ID` refused, a
+  value over the event bound ending with `too_large`, the per-user and
+  per-process limits with their `Retry-After`, a missing or foreign artifact
+  taking and evicting nothing, a trash that ends the stream of a reader that
+  never reads, a purge, a disabled user and a revoked token, a write by another
+  process arriving by the heartbeat read, a version that goes back, the
+  lifetime and shutdown), the extended route table of `multi_user.rs` (both
+  routes classified, another user's artifact the same `404` as a missing one),
+  `scripts/tests/data-client.test.mjs` (24 tests with a scripted network and
+  injected timers: response validation against the request, UTF-8 ordering,
+  limits refused without sending, event order and contract checks, the line and
+  event limits, backoff and its reset, `Retry-After` up to an hour with a floor,
+  the idle drop, abort at every point) and `scripts/tests/data-stream.test.mjs`
+  (the real binary: pages validated against the published schema, a follower
+  that gets a new snapshot after a SIGKILL and restart). Replay, a CLI, MCP
+  tools, frame access, a web view, and the client outbox are not implemented
+  and not tested.
 - `scripts/tests/limits.test.mjs`: the server binary with small limits. The
   official MCP client and the CLI share the budget, a refused create commits
   nothing and its key works after the delay, a CLI retry of a committed
@@ -593,7 +621,7 @@ HTTP, CLI, and web share one client contract and one application service.
 
 The remaining diagnostic is that every module hides a design decision: the
 documents, models, tools, build, and export modules are still
-placeholders; jobs and application data have their first behavior (decisions 0030 and 0031). The `ArtifactStore` port also deliberately exposes request
+placeholders; jobs and application data have their first behavior (decisions 0030, 0031, and 0040). The `ArtifactStore` port also deliberately exposes request
 fingerprints, because replay must commit atomically with the revision. Reach
 10/10 by giving each placeholder a narrow behavioral interface only when its
 first behavior is implemented. This score describes design, not production

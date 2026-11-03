@@ -172,6 +172,8 @@ in the Rust core.
 | `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version) |
 | `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)           |
 | `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)     |
+| `GET /v1/artifacts/{id}/data/members`                                              | List an object's members, a page by name cursor   |
+| `GET /v1/artifacts/{id}/data/events`                                               | Snapshot, then the newest value at a path (SSE)   |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"? } }` with
 `invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `forbidden` (403, a runtime frame call whose capability is not granted), `not_found` (404),
@@ -316,8 +318,26 @@ checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge has no data capability** (it grants `metadata.read`, `source.read`, and
-`source.download`). Subscriptions and queries (R07) and
-assets (R09) are not implemented.
+`source.download`). Assets (R09) are not implemented.
+
+R07 adds data queries and subscriptions
+([0040](decisions/0040-data-queries-and-subscriptions.md)) over HTTP and the
+TypeScript client. `data/members` lists an object's members in UTF-8 byte order
+with a member-name cursor and a byte-bounded page; a member whose value alone is
+over the bound is listed as `too_large` with no value. `data/events` is a
+server-sent event stream on one path: a `snapshot` when it opens, then a
+`change` with the new full value whenever the data version moves. The stream
+reads storage after a wake-up and sends the current state when its version is
+newer than the last one it sent, so bursts coalesce and versions strictly
+increase. **Replay is not implemented**: no event log, no retained window, and no
+resume cursor (`Last-Event-ID` is `400`); a new connection starts with a new
+snapshot and a client replaces its state with each event. The only shared state
+is a wake signal and per-user (8) and per-process (128) stream counts, which
+refuse instead of growing. Another user's artifact is the same `404` as a
+missing one, checked before a slot is taken; a trash or purge ends the stream
+at once, a disabled user or revoked token closes it as for change streams.
+Source revisions and data versions stay separate numbers. There is no CLI, MCP,
+frame, or web access, and no client outbox (R08).
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

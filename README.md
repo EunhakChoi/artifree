@@ -119,6 +119,17 @@ not the isolated execution that builds of React sources or model calls will
 need. Cancelling stops work and never rolls anything back. Job changes are
 not in the change feed and the web workspace has no job view; poll `job show`.
 
+Application data can be queried and followed over HTTP and the TypeScript
+client ([decision 0040](docs/decisions/0040-data-queries-and-subscriptions.md)).
+`GET /v1/artifacts/{id}/data/members` lists the members of an object a page at a
+time in UTF-8 byte order with a member-name cursor, and
+`GET /v1/artifacts/{id}/data/events?path=` sends a `snapshot` and then the
+newest value at one path whenever the data version moves. **There is no replay:**
+a reconnect starts with a new snapshot, and a client replaces its state with each
+event. The client has `listDataMembers` and `followData`. Not implemented: CLI
+and MCP queries or subscriptions, access from a page or frame, a web panel, and
+the client outbox (R08).
+
 Each artifact can keep application data: one JSON object per owner, with its own
 `data_version` that is unrelated to the artifact's revisions
 ([decision 0031](docs/decisions/0031-app-data.md)). `artifree data get <id>
@@ -234,8 +245,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0033](docs/decisions/0033-runtime-source-write.md),
 [0034](docs/decisions/0034-room-and-presence.md),
 [0035](docs/decisions/0035-per-file-conditional-edit.md),
-[0036](docs/decisions/0036-multi-user-identity.md), and
-[0037](docs/decisions/0037-release-publishing-and-supply-chain.md)).
+[0036](docs/decisions/0036-multi-user-identity.md),
+[0037](docs/decisions/0037-release-publishing-and-supply-chain.md), and
+[0040](docs/decisions/0040-data-queries-and-subscriptions.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
