@@ -2,7 +2,7 @@
 //! build inventory.
 #![expect(
     clippy::print_stdout,
-    reason = "Help, version, JSON, and the readiness line are the CLI protocol."
+    reason = "Help, version, and the module inventory are the CLI protocol."
 )]
 #![expect(
     clippy::print_stderr,
@@ -10,30 +10,50 @@
 )]
 
 use std::ffi::OsString;
-use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use artifree_server::changes;
 use artifree_server::limits::RequestLimits;
+use artifree_server::one_shot::{self, OneShotOptions};
 use artifree_server::origin::normalize_origin;
 use artifree_server::preview::normalize_frame_ancestors;
 use artifree_server::proxy::IpNetwork;
 use artifree_server::serve::{self, ServeOptions};
 
 mod maintenance;
+mod ready_line;
 mod serve_env;
 mod worker_command;
 
+use ready_line::Mode;
 use serve_env::{Given, ServeEnv};
+
+/// What `serve` was asked to run.
+#[derive(Debug)]
+enum ServeCommand {
+    /// The normal server on the given data directory.
+    Persistent(ServeOptions),
+    /// A temporary session (decision 0039).
+    OneShot(OneShotOptions),
+}
+
+/// One line on stderr. A closed stderr is not a reason to panic or to stop.
+fn note(message: &str) {
+    std::io::Write::write_all(
+        &mut std::io::stderr().lock(),
+        format!("{message}\n").as_bytes(),
+    )
+    .ok();
+}
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
+            note(&error);
             ExitCode::FAILURE
         }
     }
@@ -83,33 +103,44 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         [command, options @ ..] if command == "serve" => {
-            let options = parse_serve(options, &ServeEnv::from_process())?;
-            serve::run(options, |ready| {
-                let mut line = serde_json::json!({
-                    "event": "ready",
-                    "api_url": ready.api_url,
-                    "content_origin": ready.content_origin,
-                    "token_file": ready.token_file,
-                });
-                if let Some(ref web_url) = ready.web_url {
-                    line["web_url"] = serde_json::json!(web_url);
-                }
-                if let Some(ref loopback_url) = ready.loopback_api_url {
-                    line["loopback_api_url"] = serde_json::json!(loopback_url);
-                }
-                println!("{line}");
-                // A supervisor waits for this line; a failed flush only delays it.
-                if std::io::stdout().flush().is_err() {
-                    eprintln!("Could not flush the readiness line.");
-                }
-            })
+            let started = Instant::now();
+            match parse_serve(options, &ServeEnv::from_process())? {
+                ServeCommand::Persistent(options) => serve::run(options, |ready| {
+                    // A supervisor waits for this line; a failure only delays it.
+                    if let Err(error) = ready_line::announce(ready, &Mode::Persistent) {
+                        note(&error);
+                    }
+                }),
+                ServeCommand::OneShot(options) => run_one_shot(started, &options),
+            }
         }
         _ => Err("Unknown arguments. Use --help.".into()),
     }
 }
 
+/// Runs a one-shot session and tells a person what it does and that it ended.
+fn run_one_shot(started: Instant, options: &OneShotOptions) -> Result<(), String> {
+    let ttl_seconds = options.ttl.as_secs();
+    one_shot::run(started, options, |ready, sweep| {
+        ready_line::announce(ready, &Mode::OneShot { ttl_seconds })?;
+        if let Some(summary) = sweep.summary() {
+            note(&summary);
+        }
+        note(&format!(
+            "One-shot session: nothing is kept. The data directory {} and the owner token in it are deleted when the session ends: {ttl_seconds} seconds after the process started, or on {}, or when startup or a listener fails. A killed process can leave its directory until a later one-shot start removes it (Linux only). This lifetime is not a tunnel lifetime; no tunnel is implemented.",
+            ready.data_dir.display(),
+            one_shot::STOP_SIGNALS,
+        ));
+        Ok(())
+    })?;
+    note("The one-shot session ended and its data directory was removed.");
+    Ok(())
+}
+
 struct CliServeFlags {
     data_dir: Option<PathBuf>,
+    session_root: Option<PathBuf>,
+    one_shot_ttl: Option<Duration>,
     cli_web_dir: Option<PathBuf>,
     cli_lan: Option<String>,
     explicit_api_listen: Option<String>,
@@ -130,6 +161,8 @@ struct CliServeFlags {
 fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
     let mut flags = CliServeFlags {
         data_dir: None,
+        session_root: None,
+        one_shot_ttl: None,
         cli_web_dir: None,
         cli_lan: None,
         explicit_api_listen: None,
@@ -156,6 +189,8 @@ fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
         };
         match flag.as_str() {
             "--data-dir" => flags.data_dir = Some(PathBuf::from(value()?)),
+            "--session-root" => flags.session_root = Some(PathBuf::from(value()?)),
+            "--one-shot-ttl-seconds" => flags.one_shot_ttl = Some(one_shot::parse_ttl(&value()?)?),
             "--web-dir" => flags.cli_web_dir = Some(PathBuf::from(value()?)),
             "--lan" => flags.cli_lan = Some(value()?),
             "--api-listen" => flags.explicit_api_listen = Some(value()?),
@@ -201,7 +236,7 @@ fn unrecognized_option(argument: &str) -> String {
 
 /// Reads `serve` options. Errors name the flag or variable in effect and
 /// never repeat an operator-supplied value (decision 0028).
-fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeOptions, String> {
+fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeCommand, String> {
     let flags = parse_serve_flags(arguments)?;
 
     let explicit_web_dir = match flags.cli_web_dir {
@@ -267,10 +302,27 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeOptions, Str
     let loopback_api_address =
         resolve_loopback_listen(env, flags.explicit_loopback_listen.as_deref())?;
 
-    Ok(ServeOptions {
-        data_dir: flags
-            .data_dir
-            .ok_or("serve requires --data-dir <directory>.")?,
+    // Nothing has been created yet, so every refusal here leaves nothing behind.
+    let (data_dir, one_shot) = match (flags.data_dir, flags.one_shot_ttl) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "--data-dir and --one-shot-ttl-seconds cannot be used together: a one-shot session makes its own temporary data directory."
+                    .to_owned(),
+            );
+        }
+        (Some(dir), None) if flags.session_root.is_none() => (dir, None),
+        (None, Some(ttl)) => (PathBuf::new(), Some((ttl, flags.session_root))),
+        (_, None) if flags.session_root.is_some() => {
+            return Err("--session-root needs --one-shot-ttl-seconds.".to_owned());
+        }
+        _ => {
+            return Err(
+                "serve requires --data-dir <directory> or --one-shot-ttl-seconds <n>.".to_owned(),
+            );
+        }
+    };
+    let serve = ServeOptions {
+        data_dir,
         web_dir: explicit_web_dir,
         api_address: address("--api-listen", &api_str)?,
         loopback_api_address,
@@ -285,6 +337,14 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeOptions, Str
         preview_ttl: flags.preview_ttl,
         limits: flags.limits,
         change_streams: flags.change_streams,
+    };
+    Ok(match one_shot {
+        Some((ttl, session_root)) => ServeCommand::OneShot(OneShotOptions {
+            serve,
+            session_root,
+            ttl,
+        }),
+        None => ServeCommand::Persistent(serve),
     })
 }
 
@@ -537,6 +597,7 @@ fn print_help() {
 
 Usage:
   artifree-server serve --data-dir <dir> [options]
+  artifree-server serve --one-shot-ttl-seconds <n> [--session-root <dir>] [options]
   artifree-server backup --data-dir <dir> --output <file>
   artifree-server restore --input <file> --data-dir <dir>
   artifree-server worker run --data-dir <dir> [--once]
@@ -544,13 +605,22 @@ Usage:
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or
 SIGTERM. When both listeners are ready it prints one JSON line on stdout:
-{{\"event\":\"ready\",\"api_url\":...,\"content_origin\":...,\"token_file\":...}}
+{{\"event\":\"ready\",\"api_url\":...,\"content_origin\":...,\"token_file\":...,\"mode\":...,\"data_dir\":...}}
 Clients authenticate with the bearer token stored in token_file.
 
 Options:
   --data-dir <dir>              SQLite database and access token (required).
                                 On Unix it is created with mode 700, and a
                                 directory other users can access is refused.
+  --one-shot-ttl-seconds <n>    Run a one-shot session instead (decision 0039): a new
+                                private temporary data directory and a new owner
+                                token, deleted when the session ends (n seconds
+                                after the process started, {signals}, or a
+                                failure), 1-604800, digits only. Nothing is kept,
+                                there is no default lifetime, and it excludes
+                                --data-dir. It is not a tunnel lifetime.
+  --session-root <dir>          Where the one-shot directory is created [default:
+                                the system temporary directory]; it must exist.
   --web-dir <dir>               Directory holding production web assets (or ARTIFREE_WEB_DIR)
   --lan <ip>                    Bind listeners to explicit LAN IP (or ARTIFREE_LAN)
   --api-listen <addr:port>      API address [default: {api}]
@@ -603,6 +673,7 @@ running server.",
         api = serve::DEFAULT_API_ADDRESS,
         content = serve::DEFAULT_CONTENT_ADDRESS,
         ancestors = serve::DEFAULT_FRAME_ANCESTORS,
+        signals = one_shot::STOP_SIGNALS,
         burst = RequestLimits::default().burst,
         rate = RequestLimits::default().per_minute,
         concurrent = RequestLimits::default().concurrent,
@@ -632,7 +703,10 @@ mod tests {
     fn parse_with(env: &ServeEnv, list: &[&str]) -> Result<ServeOptions, String> {
         let mut all = vec!["--data-dir", "/tmp"];
         all.extend_from_slice(list);
-        parse_serve(&args(&all), env)
+        match parse_serve(&args(&all), env)? {
+            ServeCommand::Persistent(options) => Ok(options),
+            ServeCommand::OneShot(_) => Err("unexpected one-shot".to_owned()),
+        }
     }
 
     fn refusal(env: &ServeEnv, list: &[&str]) -> String {
@@ -1103,6 +1177,83 @@ mod tests {
         // An empty or false-looking value does not enable remote MCP.
         let off = parse_with(&ServeEnv::default().with(ALLOW_REMOTE_MCP, "yes"), &[])?;
         assert!(!off.allow_remote_mcp);
+        Ok(())
+    }
+
+    fn command(list: &[&str]) -> Result<ServeCommand, String> {
+        parse_serve(&args(list), &ServeEnv::default())
+    }
+
+    #[test]
+    fn one_shot_options_are_read() -> Result<(), String> {
+        let ServeCommand::OneShot(options) = command(&[
+            "--one-shot-ttl-seconds",
+            "90",
+            "--session-root",
+            "/somewhere",
+        ])?
+        else {
+            return Err("expected a one-shot command".to_owned());
+        };
+        assert_eq!(options.ttl, Duration::from_secs(90));
+        assert_eq!(options.session_root, Some(PathBuf::from("/somewhere")));
+        let ServeCommand::OneShot(plain) = command(&["--one-shot-ttl-seconds", "1"])? else {
+            return Err("expected a one-shot command".to_owned());
+        };
+        assert_eq!(plain.session_root, None);
+        Ok(())
+    }
+
+    #[test]
+    fn contradictory_or_incomplete_one_shot_flags_are_refused() {
+        for (list, expected) in [
+            (
+                &["--data-dir", "/d", "--one-shot-ttl-seconds", "5"][..],
+                "--data-dir and --one-shot-ttl-seconds cannot be used together",
+            ),
+            (
+                &["--one-shot-ttl-seconds", "5", "--data-dir", "/d"][..],
+                "--data-dir and --one-shot-ttl-seconds cannot be used together",
+            ),
+            (
+                &["--session-root", "/r"][..],
+                "--session-root needs --one-shot-ttl-seconds",
+            ),
+            (
+                &["--data-dir", "/d", "--session-root", "/r"][..],
+                "--session-root needs --one-shot-ttl-seconds",
+            ),
+            (
+                &[][..],
+                "serve requires --data-dir <directory> or --one-shot-ttl-seconds",
+            ),
+            (
+                &["--one-shot-ttl-seconds", "+5"][..],
+                "--one-shot-ttl-seconds must be",
+            ),
+            (
+                &["--one-shot-ttl-seconds", "0"][..],
+                "--one-shot-ttl-seconds must be",
+            ),
+            (
+                &["--one-shot-ttl-seconds", "604801"][..],
+                "--one-shot-ttl-seconds must be",
+            ),
+            (&["--one-shot-ttl-seconds"][..], "requires a value"),
+        ] {
+            match command(list) {
+                Err(message) => assert!(message.contains(expected), "{list:?}: {message}"),
+                Ok(parsed) => panic!("{list:?} must be refused, got {parsed:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_mode_still_needs_no_one_shot_flag() -> Result<(), String> {
+        let ServeCommand::Persistent(options) = command(&["--data-dir", "/d"])? else {
+            return Err("expected a persistent command".to_owned());
+        };
+        assert_eq!(options.data_dir, PathBuf::from("/d"));
         Ok(())
     }
 }

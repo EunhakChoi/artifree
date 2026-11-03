@@ -133,6 +133,26 @@ impl Default for Settings {
     }
 }
 
+/// A weak view of everything that can still use the state's databases: the
+/// state itself (and its clones) and every blocking task a request started.
+/// It does not keep them alive.
+#[derive(Debug, Clone)]
+pub struct DatabaseUsers(std::sync::Weak<SqliteTokenStore>);
+
+impl DatabaseUsers {
+    /// How many holders remain. Zero means that no database handle of the
+    /// state exists and none can be opened again through it.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.0.strong_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn of(store: &Arc<SqliteTokenStore>) -> Self {
+        Self(Arc::downgrade(store))
+    }
+}
+
 /// Shared request state for the API and content routers.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -227,6 +247,18 @@ impl AppState {
                 content_policy,
             }),
         })
+    }
+
+    /// A view of the holders of this state's databases, for a caller that must
+    /// not delete the database files while a blocking task still uses them.
+    ///
+    /// The identity store is held by the state and by every blocking task that
+    /// uses it or the shared state (each `spawn_blocking` closure of this
+    /// module clones one of the two), so its count reaches zero only when no
+    /// such task is left.
+    #[must_use]
+    pub fn database_users(&self) -> DatabaseUsers {
+        DatabaseUsers(Arc::downgrade(&self.shared.token_store))
     }
 
     /// Ends open change streams so that a graceful shutdown need not wait
