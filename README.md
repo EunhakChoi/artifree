@@ -219,7 +219,8 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0029](docs/decisions/0029-retention-and-cleanup.md),
 [0030](docs/decisions/0030-persistent-jobs-and-worker.md),
 [0031](docs/decisions/0031-app-data.md), and
-[0032](docs/decisions/0032-runtime-source-read-and-download.md)).
+[0032](docs/decisions/0032-runtime-source-read-and-download.md), and
+[0033](docs/decisions/0033-runtime-source-write.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -237,8 +238,9 @@ in the web workspace, saved as one revision (A09), with the draft kept in
 the browser and recovered by choice after a reload or a closed tab (A10);
 the browser must provide Web Locks to keep drafts safely. R04 adds the first
 runtime metadata read, R05 adds an explicit connection-scoped metadata grant,
-and R11a adds read-only source listing and reading and user-confirmed download
-requests with their own grants.
+R11a adds read-only source listing and reading and user-confirmed download
+requests with their own grants, and R11b lets a preview save one file under a
+separate edit grant.
 The source editor can stage a saved selection and, after review, send it to a
 registered MCP agent inbox (A08). The agent must poll and acknowledge; receipt
 does not establish that a model completed the requested work.
@@ -282,13 +284,18 @@ file specifies a complete declaration, for example:
 An omitted `capabilities` field or an empty list declares none. The workspace
 shows declared, supported and granted capabilities separately. Grants apply to
 one connection and source binding, can be revoked, and expire or disappear on
-server restart. Two more capabilities are implemented and are read-only
-(decision 0032):
+server restart. Two more capabilities are read-only (decision 0032) and one
+saves (decision 0033):
 
 ```json
 {
   "sdk": "artifree.app.v1",
-  "capabilities": ["metadata.read", "source.read", "source.download"]
+  "capabilities": [
+    "metadata.read",
+    "source.read",
+    "source.download",
+    "source.write"
+  ]
 }
 ```
 
@@ -301,10 +308,21 @@ the user confirms in the workspace, never in the frame, and the receipt
 `started` means only that the bytes were handed to the browser. Each is its own
 declaration, consent, and grant: reading does not allow a download request.
 The server checks the connection's grant and the artifact's current head on
-every call, so a revoked grant or a newer revision is refused. **Not
-implemented:** writing source from a preview (R11b), data access from a preview,
-subscriptions, uploaded assets, replacing a view in place, and any claim that a
-preview cannot use the network. No MCP tool was added or changed.
+every call, so a revoked grant or a newer revision is refused. `source.write` lets it save
+one file of its own artifact (`.write({ path, content, retryId })`, at most 1
+MiB) as the next revision. It needs its own "Allow source editing" consent, which
+the workspace explains beside the control; it is not implied by reading and does
+not imply it. The server saves through the artifact service with the view's
+revision as the base and a key only a frame can produce, reads the new revision
+back, and returns the path, revision, size, and SHA-256, which the client, the
+workspace, and the frame each check against the bytes they sent. A save moves
+the head, so the workspace shows the next revision in a new view that holds no
+grant: the user consents again for each save. Only the owner exists as a
+principal; there are no viewer roles. **Not implemented:** data access from a
+preview, subscriptions, uploaded assets, replacing a view in place, deleting or
+renaming files, several files in one save, a prompt for each save, roles (a
+viewer is not refused because none exists), and any claim that a preview cannot
+use the network. No MCP tool was added or changed.
 
 ## Verification
 

@@ -3,11 +3,11 @@ use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
     DuplicateArtifactResponse, ErrorResponse, FeedPosition, MAX_DOWNLOAD_NAME,
-    MAX_RUNTIME_SOURCE_PART_BYTES, Preview, PurgeArtifactResponse,
-    RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeConnection,
-    RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
-    RuntimeSourceReadRequest, RuntimeView, SaveRevisionRequest, SourceExportManifest,
-    UnreferencedContent, UpdateArtifactResponse,
+    MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64, MAX_RUNTIME_SOURCE_WRITE_BYTES,
+    Preview, PurgeArtifactResponse, RemoveUnreferencedContentResponse, Revision, RevisionList,
+    RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
+    RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView,
+    SaveRevisionRequest, SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -202,6 +202,10 @@ fn response_schemas_describe_what_the_server_writes() {
             "RuntimeDownloadOffer",
             published_unlike_written::<RuntimeDownloadOffer>(),
         ),
+        (
+            "RuntimeSourceWriteReceipt",
+            published_unlike_written::<RuntimeSourceWriteReceipt>(),
+        ),
         ("ErrorResponse", published_unlike_written::<ErrorResponse>()),
         (
             "ArtifactChange",
@@ -275,4 +279,27 @@ fn runtime_source_bounds_are_the_published_ones() {
         offer["properties"]["file_name"]["maxLength"],
         MAX_DOWNLOAD_NAME
     );
+}
+
+/// A frame write is bounded by the schema's text length (decision 0033): the
+/// base64 bound is exactly the encoding of the byte bound.
+#[test]
+fn runtime_source_write_bounds_are_the_published_ones() {
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<RuntimeSourceWriteRequest>(),
+    )
+    .unwrap_or_else(|error| panic!("write schema: {error}"));
+    assert_eq!(
+        schema["properties"]["content"]["maxLength"],
+        MAX_RUNTIME_SOURCE_WRITE_BASE64
+    );
+    // The retry identity is 8 to 36 characters; the server refuses 7 and 37.
+    assert_eq!(schema["properties"]["retry_id"]["minLength"], 8);
+    assert_eq!(schema["properties"]["retry_id"]["maxLength"], 36);
+    // 1 MiB is 349,525 whole groups of three bytes and one byte over, which
+    // base64 writes as 349,526 groups of four characters with padding.
+    assert_eq!(MAX_RUNTIME_SOURCE_WRITE_BYTES, 1_048_576);
+    assert_eq!(MAX_RUNTIME_SOURCE_WRITE_BASE64, 349_526 * 4);
 }

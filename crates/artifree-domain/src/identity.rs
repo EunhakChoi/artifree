@@ -173,17 +173,88 @@ impl fmt::Display for ActorId {
     }
 }
 
-/// A client-chosen key that makes a mutating request safe to retry.
+/// A key that makes a mutating request safe to retry.
 ///
-/// Keys are scoped to the actor that sent them.
+/// Keys are scoped to the actor that sent them. A caller-chosen key (an HTTP
+/// `Idempotency-Key`, an MCP argument) is parsed with [`FromStr`], whose
+/// grammar has not changed: 8 to 128 ASCII letters, digits and `-_.:`. The
+/// key of a runtime frame write is built only by
+/// [`RequestKey::runtime_write`] and starts with [`RUNTIME_WRITE_PREFIX`],
+/// which holds a character outside that grammar. No text can therefore parse
+/// to a frame's key, a frame's retry identity can never equal, or be made
+/// equal by, a key an agent or the owner's own client sends, and no key that
+/// parsed before the namespace existed is refused now.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestKey(String);
+
+/// The start of every key [`RequestKey::runtime_write`] builds. Its `~` is
+/// outside the grammar [`FromStr`] accepts, so no parsed key can contain it.
+/// Do not change it to a character that grammar accepts.
+pub const RUNTIME_WRITE_PREFIX: &str = "rtw~";
+
+/// Longest retry identity a runtime frame supplies, so that the whole key
+/// stays within 128 characters: the prefix, an artifact identifier, a
+/// 32-character view, a generation of at most 16 digits, three separators and
+/// the identity (4 + 36 + 32 + 16 + 3 + 36 = 127).
+pub const MAX_RUNTIME_RETRY_ID: usize = 36;
+
+/// Shortest retry identity a runtime frame supplies.
+pub const MIN_RUNTIME_RETRY_ID: usize = 8;
 
 impl RequestKey {
     /// The canonical string form.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The key of one runtime frame write: scoped to the artifact, the view
+    /// and the view's generation, so two artifacts, two views, or a view and
+    /// its replacement cannot share a key, whatever identity the frame
+    /// picks. The same frame call retried with the same identity is the same
+    /// key; the store then replays the first outcome instead of committing
+    /// again (decision 0033).
+    ///
+    /// # Errors
+    ///
+    /// When `view` is not 1 to 32 ASCII letters and digits, `generation` is
+    /// not a safe integer from 1, or `retry_id` is not 8 to 36 ASCII
+    /// letters, digits, `-` or `_`. None of them may hold a `:`, which
+    /// separates the parts.
+    pub fn runtime_write(
+        artifact: &ArtifactId,
+        view: &str,
+        generation: u64,
+        retry_id: &str,
+    ) -> Result<Self, InvalidValue> {
+        const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+        let word = |value: &str, min: usize, max: usize, extra: &[u8]| {
+            (min..=max).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || extra.contains(&byte))
+        };
+        if !word(view, 1, 32, b"") {
+            return Err(InvalidValue {
+                what: "runtime view",
+                rule: "expected 1-32 ASCII letters or digits",
+            });
+        }
+        if !(1..=MAX_SAFE_INTEGER).contains(&generation) {
+            return Err(InvalidValue {
+                what: "runtime generation",
+                rule: "expected a safe integer from 1",
+            });
+        }
+        if !word(retry_id, MIN_RUNTIME_RETRY_ID, MAX_RUNTIME_RETRY_ID, b"-_") {
+            return Err(InvalidValue {
+                what: "retry id",
+                rule: "expected 8-36 ASCII letters, digits, '-' or '_'",
+            });
+        }
+        Ok(Self(format!(
+            "{RUNTIME_WRITE_PREFIX}{artifact}:{view}:{generation}:{retry_id}"
+        )))
     }
 }
 
@@ -344,6 +415,109 @@ mod tests {
         assert!("cli-1f2e3d4c".parse::<RequestKey>().is_ok());
         for value in ["short", "has space-1234", "slash/123456", &"k".repeat(129)] {
             assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn keys_that_looked_like_the_old_runtime_prefix_still_parse() {
+        // Keys that were valid before the frame-write namespace existed.
+        for value in [
+            "rtw:request-1",
+            "RTW:anything-at-all",
+            "rtw:abcdefgh",
+            "rtw-anything",
+            "xrtw:anything",
+        ] {
+            assert_eq!(
+                value
+                    .parse::<RequestKey>()
+                    .map(|key| key.as_str().to_owned()),
+                Ok(value.to_owned()),
+                "refused {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_text_parses_to_a_runtime_write_key() {
+        let artifact = ArtifactId::from_random([7; 16]);
+        let built = RequestKey::runtime_write(&artifact, "v", 1, "retry-0001")
+            .map(|key| key.as_str().to_owned())
+            .unwrap_or_default();
+        assert!(built.starts_with(RUNTIME_WRITE_PREFIX), "{built:?}");
+        // The key a frame write has is not accepted back as text, in any
+        // letter case, so no caller can replay or forge it by echoing it.
+        for value in [built.clone(), built.to_uppercase(), built.to_lowercase()] {
+            assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
+        // The prefix itself holds a character the grammar refuses, so no
+        // spelling of it can parse.
+        assert!(
+            RUNTIME_WRITE_PREFIX
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))),
+            "{RUNTIME_WRITE_PREFIX:?} is inside the public key grammar"
+        );
+        for value in ["rtw~request-1", "rtw~anything-at-all"] {
+            assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn a_runtime_write_key_is_scoped_to_artifact_view_generation_and_identity() {
+        let one = ArtifactId::from_random([1; 16]);
+        let two = ArtifactId::from_random([2; 16]);
+        let key = |artifact: &ArtifactId, view: &str, generation: u64, retry: &str| {
+            RequestKey::runtime_write(artifact, view, generation, retry)
+                .map(|key| key.as_str().to_owned())
+        };
+        let base = key(&one, "view1", 3, "retry-0001");
+        assert_eq!(base, key(&one, "view1", 3, "retry-0001"), "a retry");
+        for other in [
+            key(&two, "view1", 3, "retry-0001"),
+            key(&one, "view2", 3, "retry-0001"),
+            key(&one, "view1", 4, "retry-0001"),
+            key(&one, "view1", 3, "retry-0002"),
+        ] {
+            assert!(other.is_ok());
+            assert_ne!(base, other);
+        }
+        assert!(
+            base.as_deref()
+                .is_ok_and(|text| text.starts_with(RUNTIME_WRITE_PREFIX))
+        );
+    }
+
+    #[test]
+    fn the_longest_runtime_write_key_is_a_valid_key_length() {
+        let artifact = ArtifactId::from_random([9; 16]);
+        let longest = RequestKey::runtime_write(
+            &artifact,
+            &"f".repeat(32),
+            9_007_199_254_740_991,
+            &"r".repeat(MAX_RUNTIME_RETRY_ID),
+        );
+        assert_eq!(longest.map(|key| key.as_str().len()), Ok(127));
+    }
+
+    #[test]
+    fn a_runtime_write_key_refuses_parts_that_could_blur_its_scope() {
+        let artifact = ArtifactId::from_random([1; 16]);
+        for (view, generation, retry) in [
+            ("", 1, "retry-0001"),
+            ("vi:ew", 1, "retry-0001"),
+            (&"v".repeat(33), 1, "retry-0001"),
+            ("view", 0, "retry-0001"),
+            ("view", 9_007_199_254_740_992, "retry-0001"),
+            ("view", 1, "short"),
+            ("view", 1, "retry:0001"),
+            ("view", 1, "retry 0001"),
+            ("view", 1, &"r".repeat(MAX_RUNTIME_RETRY_ID + 1)),
+        ] {
+            assert!(
+                RequestKey::runtime_write(&artifact, view, generation, retry).is_err(),
+                "accepted {view:?} {generation} {retry:?}"
+            );
         }
     }
 }

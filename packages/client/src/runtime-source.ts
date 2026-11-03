@@ -2,11 +2,19 @@ import type {
   RuntimeDownloadKind,
   RuntimeDownloadOffer,
   RuntimeSourceList,
+  RuntimeSourceWriteReceipt,
   RuntimeView,
 } from '@artifree/contracts';
+import { toBase64 } from './base64.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord, list, revisionFile } from './responses.js';
-import { decodeBase64, isDownloadName, partNumbersFit } from './source-part.js';
+import {
+  MAX_SOURCE_WRITE_BYTES,
+  decodeBase64,
+  isDownloadName,
+  isRetryId,
+  partNumbersFit,
+} from './source-part.js';
 
 /**
  * Checks of what a runtime view's source calls return (decision 0032). They
@@ -283,4 +291,77 @@ export async function fetchDownload(
   frame.check();
   if (!matches) return refuse();
   return bytes;
+}
+
+/** What a frame asked to save: one file, under the frame's retry identity. */
+export interface SourceWriteInput {
+  readonly path: string;
+  /** 8 to 36 ASCII letters, digits, `-` or `_`; the server scopes it. */
+  readonly retryId: string;
+  readonly bytes: Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * Validates a save receipt against what was sent and the view it was sent
+ * from. The server states the path, the revision, the size and the digest;
+ * none is believed: the path is the one asked for, the revision is the one
+ * after the view's, the size is the number of bytes sent, and the digest is
+ * the SHA-256 of the bytes sent, which the caller computed itself.
+ */
+export function parseRuntimeSourceWriteReceipt(
+  value: unknown,
+  revision: number,
+  input: SourceWriteInput,
+  sha256: string,
+): RuntimeSourceWriteReceipt | undefined {
+  if (!isRecord(value)) return undefined;
+  const { path, revision: made, size, sha256: digest } = value;
+  return path === input.path &&
+    made === revision + 1 &&
+    size === input.bytes.length &&
+    digest === sha256
+    ? { path, revision: made, size, sha256: digest }
+    : undefined;
+}
+
+/**
+ * Saves one file for the frame and resolves only with a receipt that matches
+ * the bytes sent. The arguments are judged here as well as by the server, and
+ * the digest of the bytes is computed before anything is sent: a platform
+ * that cannot compute one refuses the write, because it could not tell
+ * whether the revision holds what the frame wrote (decision 0033).
+ */
+export async function writeSource(
+  frame: FrameTransport,
+  view: RuntimeView,
+  input: SourceWriteInput,
+  signal: AbortSignal | undefined,
+): Promise<RuntimeSourceWriteReceipt> {
+  if (
+    typeof input.path !== 'string' ||
+    !isRetryId(input.retryId) ||
+    !(input.bytes instanceof Uint8Array) ||
+    input.bytes.length > MAX_SOURCE_WRITE_BYTES
+  )
+    throw new ArtifreeApiError('The save was not valid.', {
+      status: 0,
+      code: 'invalid_request',
+    });
+  const digest = await sha256Hex(input.bytes);
+  if (digest === undefined)
+    throw new ArtifreeApiError(
+      'This page cannot compute the digest that checks a save.',
+      { status: 0, code: 'unavailable' },
+    );
+  return frame.json(
+    frameRoute(view, 'source/write'),
+    frameBody(view, {
+      retry_id: input.retryId,
+      path: input.path,
+      content: toBase64(input.bytes),
+    }),
+    (value) =>
+      parseRuntimeSourceWriteReceipt(value, view.revision, input, digest),
+    signal,
+  );
 }

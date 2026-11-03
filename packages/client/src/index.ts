@@ -23,8 +23,10 @@ export { cursorOf } from './change-feed.js';
 export {
   MAX_DOWNLOAD_NAME_CHARS,
   MAX_SOURCE_PART_BYTES,
+  MAX_SOURCE_WRITE_BYTES,
   decodeBase64,
   isDownloadName,
+  isRetryId,
   partNumbersFit,
 } from './source-part.js';
 export type { PartNumbers } from './source-part.js';
@@ -32,6 +34,7 @@ export type {
   RuntimeDownloadTarget,
   RuntimeSourcePartBytes,
   RuntimeSourceRequest,
+  SourceWriteInput,
 } from './runtime-source.js';
 export type {
   ChangeFeedEvent,

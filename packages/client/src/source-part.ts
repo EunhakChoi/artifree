@@ -8,6 +8,14 @@
 /** Most bytes in one part of a file, as the server's contract states. */
 export const MAX_SOURCE_PART_BYTES = 1_048_576;
 
+/** Most bytes in one file a frame saves, as the server's contract states. */
+export const MAX_SOURCE_WRITE_BYTES = 1_048_576;
+
+/** Whether `value` can be a frame's retry identity: 8 to 36 of `A-Za-z0-9_-`. */
+export function isRetryId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{8,36}$/.test(value);
+}
+
 /**
  * Longest name a download may be offered under. The server offers at most
  * 100 characters, the longest package path segment; this bound is looser

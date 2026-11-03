@@ -1963,6 +1963,71 @@
       ],
       "type": "object"
     },
+    "RuntimeSourceWriteReceipt": {
+      "additionalProperties": false,
+      "description": "What a save made, which the client checks against the bytes it sent. The\nserver read the new revision back before it answered: the file holds\nexactly the bytes sent and every other file is as it was.",
+      "properties": {
+        "path": {
+          "description": "Package path of the file, as requested.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "The revision the save made: the view's revision plus one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "description": "The file's SHA-256 digest, as 64 lowercase hex digits.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The file's size in bytes: the number of bytes sent.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "revision",
+        "size",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "RuntimeSourceWriteRequest": {
+      "additionalProperties": false,
+      "description": "Saves one file as the next revision of the artifact a runtime view is\npinned to, on behalf of the frame (needs the `source.write` grant). The\nbase is the view's own revision: a view that is not the artifact's\ncurrent revision is refused with the current one.",
+      "properties": {
+        "content": {
+          "description": "The file's bytes as base64, at most 1,048,576 bytes.",
+          "maxLength": 1398104,
+          "type": "string"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Package path of the file; a new path adds a file.",
+          "type": "string"
+        },
+        "retry_id": {
+          "description": "The frame's retry identity for this save: 8 to 36 ASCII letters,\ndigits, `-` or `_`. The server derives the idempotency key from it,\nthe artifact, the view and its generation, so a retry with the same\nidentity and file is answered with the first outcome, and the same\nidentity with another file is refused.",
+          "maxLength": 36,
+          "minLength": 8,
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "retry_id",
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
     "RuntimeView": {
       "additionalProperties": false,
       "description": "A short-lived runtime view bound to one actor, artifact, and revision.",
@@ -2567,6 +2632,12 @@
     },
     {
       "$ref": "#/$defs/RuntimeDownloadOffer"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceWriteRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeSourceWriteReceipt"
     },
     {
       "$ref": "#/$defs/ErrorResponse"

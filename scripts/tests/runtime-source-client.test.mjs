@@ -6,9 +6,11 @@ import {
   ArtifreeApiError,
   ArtifreeClient,
   MAX_DOWNLOAD_NAME_CHARS,
+  MAX_SOURCE_WRITE_BYTES,
   RuntimeConnectionReplacedError,
   decodeBase64,
   isDownloadName,
+  isRetryId,
 } from '../../packages/client/dist/index.js';
 import { scaffoldDescription } from '../../packages/contracts/dist/index.js';
 
@@ -419,4 +421,191 @@ test('A call for a connection that ended carries its own marker', async () => {
     code: 'invalid_request',
   });
   assert.equal(plain.connectionReplaced, undefined);
+});
+
+// ---- saving a file (decision 0033) ----
+
+const hello = new TextEncoder().encode('hello');
+const HELLO_SHA256 = createHash('sha256').update(hello).digest('hex');
+const saveInput = (overrides = {}) => ({
+  path: 'a.txt',
+  retryId: 'retry-0001',
+  bytes: hello,
+  ...overrides,
+});
+const receiptBody = (overrides = {}) => ({
+  path: 'a.txt',
+  revision: view.revision + 1,
+  size: hello.length,
+  sha256: HELLO_SHA256,
+  ...overrides,
+});
+const saved = (client, input = saveInput()) =>
+  client.runtimeCall(view, (source, frame) =>
+    source.writeSource(frame, view, input, undefined),
+  );
+const refusedWith = async (attempt, code) => {
+  const error = await attempt.then(
+    () => assert.fail('The save must be refused.'),
+    (rejection) => rejection,
+  );
+  assert.ok(error instanceof ArtifreeApiError);
+  assert.equal(error.code, code);
+  return error;
+};
+
+test('A save posts the retry identity, the path and the bytes to the view route', async () => {
+  const { client, requests } = await clientWith(() =>
+    Response.json(receiptBody()),
+  );
+  assert.deepEqual(await saved(client), receiptBody());
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, 'POST');
+  assert.ok(
+    requests[0].url.endsWith(
+      `/revisions/3/runtime-views/${view.view_id}/1/source/write`,
+    ),
+  );
+  assert.deepEqual(requests[0].body, {
+    initialization: view.initialization,
+    retry_id: 'retry-0001',
+    path: 'a.txt',
+    content: 'aGVsbG8=',
+  });
+});
+
+test('A receipt is believed only if it describes the bytes sent', async () => {
+  const wrong = [
+    receiptBody({ path: 'b.txt' }),
+    // The view is revision 3: its save is revision 4, not the head's number.
+    receiptBody({ revision: 3 }),
+    receiptBody({ revision: 5 }),
+    receiptBody({ revision: '4' }),
+    receiptBody({ size: 4 }),
+    receiptBody({ size: '5' }),
+    receiptBody({ sha256: 'f'.repeat(64) }),
+    receiptBody({ sha256: HELLO_SHA256.toUpperCase() }),
+    receiptBody({ sha256: undefined }),
+    [],
+    null,
+    'saved',
+  ];
+  for (const body of wrong) {
+    const { client } = await clientWith(() => Response.json(body));
+    const error = await refusedWith(saved(client), 'invalid_response');
+    assert.ok(!String(error.message).includes('f'.repeat(64)));
+  }
+});
+
+test('A save that is not valid is refused before anything is sent', async () => {
+  const { client, requests } = await clientWith(() =>
+    Response.json(receiptBody()),
+  );
+  const invalid = [
+    saveInput({ retryId: '1234567' }),
+    saveInput({ retryId: 'r'.repeat(37) }),
+    saveInput({ retryId: 'retry:0001' }),
+    saveInput({ retryId: undefined }),
+    saveInput({ path: 7 }),
+    saveInput({ bytes: 'hello' }),
+    saveInput({ bytes: [104, 101] }),
+    saveInput({ bytes: new Uint8Array(1_048_577) }),
+  ];
+  for (const input of invalid)
+    await refusedWith(saved(client, input), 'invalid_request');
+  assert.equal(requests.length, 0);
+  // The largest save is not refused here.
+  const largest = new Uint8Array(1_048_576);
+  const { client: other, requests: sent } = await clientWith(() =>
+    Response.json(
+      receiptBody({
+        size: largest.length,
+        sha256: createHash('sha256').update(largest).digest('hex'),
+      }),
+    ),
+  );
+  assert.equal(
+    (await saved(other, saveInput({ bytes: largest }))).size,
+    largest.length,
+  );
+  assert.equal(sent.length, 1);
+});
+
+test('A save is never sent when its digest cannot be computed', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  const { client, requests } = await clientWith(() =>
+    Response.json(receiptBody()),
+  );
+  try {
+    for (const replacement of [
+      undefined,
+      {},
+      { subtle: {} },
+      {
+        subtle: {
+          digest: async () => {
+            throw new Error('no digest');
+          },
+        },
+      },
+    ]) {
+      Object.defineProperty(globalThis, 'crypto', {
+        value: replacement,
+        configurable: true,
+      });
+      await refusedWith(saved(client), 'unavailable');
+    }
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', original);
+  }
+  assert.equal(requests.length, 0);
+  assert.equal((await saved(client)).revision, 4);
+});
+
+test('A save that lost to a newer revision says so, with the current number', async () => {
+  const { client } = await clientWith(() =>
+    Response.json(
+      {
+        error: {
+          code: 'revision_conflict',
+          message: 'The artifact changed.',
+          current_revision: 9,
+        },
+      },
+      { status: 409 },
+    ),
+  );
+  const error = await refusedWith(saved(client), 'revision_conflict');
+  assert.equal(error.status, 409);
+  assert.equal(error.currentRevision, 9);
+});
+
+test('A save for a connection that ended is not sent', async () => {
+  const { client, requests } = await clientWith(() =>
+    Response.json(receiptBody()),
+  );
+  const other = { ...view, session_id: 'f'.repeat(32) };
+  const error = await client
+    .runtimeCall(other, (source, frame) =>
+      source.writeSource(frame, other, saveInput(), undefined),
+    )
+    .then(
+      () => assert.fail('The save must be refused.'),
+      (rejection) => rejection,
+    );
+  assert.ok(error instanceof RuntimeConnectionReplacedError);
+  assert.equal(requests.length, 0);
+});
+
+test('The save bounds in the client are the ones the schema publishes', () => {
+  const request = schema.$defs.RuntimeSourceWriteRequest.properties;
+  assert.equal(request.retry_id.minLength, 8);
+  assert.equal(request.retry_id.maxLength, 36);
+  assert.equal(
+    request.content.maxLength,
+    Math.ceil(MAX_SOURCE_WRITE_BYTES / 3) * 4,
+  );
+  assert.equal(MAX_SOURCE_WRITE_BYTES, 1_048_576);
+  assert.ok(isRetryId('r'.repeat(8)) && isRetryId('r'.repeat(36)));
+  assert.ok(!isRetryId('r'.repeat(7)) && !isRetryId('r'.repeat(37)));
 });

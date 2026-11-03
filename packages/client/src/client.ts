@@ -50,6 +50,7 @@ import {
   changeFeedEvents,
   follow,
 } from './change-feed.js';
+import { toBase64 } from './base64.js';
 import { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 import type * as RuntimeSource from './runtime-source.js';
 import type {
@@ -198,15 +199,6 @@ export function encodeFile(path: string, bytes: Uint8Array): FileUpload {
   const escaped = new TextEncoder().encode(JSON.stringify(text)).length - 2;
   if (escaped > Math.ceil(bytes.length / 3) * 4) return base64();
   return { path, encoding: 'utf8', content: text };
-}
-
-function toBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunk = 0x8000;
-  for (let start = 0; start < bytes.length; start += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(start, start + chunk));
-  }
-  return btoa(binary);
 }
 
 /**
@@ -1570,8 +1562,12 @@ export class ArtifreeClient {
    * them; a module that cannot be loaded is a failed request, like any other
    * the client reports. They are the calls a frame causes, sent here on its
    * behalf: the frame holds no account token.
+   *
+   * Public so that a call used by one caller only, such as the save of a
+   * runtime host (decision 0033), can live in the on-demand module instead of
+   * adding a method here: this class is in the main bundle, which has no room.
    */
-  private async runtimeCall<T>(
+  async runtimeCall<T>(
     view: RuntimeView,
     run: (
       source: typeof RuntimeSource,

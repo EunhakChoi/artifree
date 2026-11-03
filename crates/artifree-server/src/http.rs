@@ -25,9 +25,9 @@ use artifree_contracts::api::{
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
-    RuntimeSourceReadRequest, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
-    StageHandoffRequest, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest,
+    RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
+    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest,
+    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::jobs::{Clock, SystemClock};
@@ -431,6 +431,12 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
 /// Largest body of a frame call: the secret, a package path and two numbers.
 const MAX_FRAME_BODY_BYTES: usize = 16 * 1024;
 
+/// Largest body of a frame's write: 1.5 MiB, which holds the base64 of the
+/// largest file (1,398,104 characters, `MAX_RUNTIME_SOURCE_WRITE_BASE64`) and
+/// the small fields around it (decision 0033). Only the write route has this
+/// limit; a test writes a file of the largest size.
+const MAX_FRAME_WRITE_BODY_BYTES: usize = 3 * 512 * 1024;
+
 /// What a runtime frame can ask the workspace to ask the server (decisions
 /// 0019 and 0032). The workspace page sends these with the account token on
 /// the frame's behalf; the frame itself holds none. They are admitted under
@@ -457,6 +463,11 @@ fn frame_routes(state: &AppState) -> Router<AppState> {
         .route(
             &format!("{VIEW}/source/download"),
             axum::routing::post(runtime_source_download),
+        )
+        .route(
+            &format!("{VIEW}/source/write"),
+            axum::routing::post(runtime_source_write)
+                .layer(DefaultBodyLimit::max(MAX_FRAME_WRITE_BODY_BYTES)),
         )
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_FRAME_BODY_BYTES))
@@ -1507,6 +1518,28 @@ async fn runtime_source_offer(
         initialization: &request.initialization,
     };
     runtime_source::offer(&state, &call, &request)
+        .await
+        .map(Json)
+}
+
+/// Saves one file for the frame as the next revision (decision 0033).
+async fn runtime_source_write(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeSourceWriteRequest>, JsonRejection>,
+) -> Result<Json<RuntimeSourceWriteReceipt>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_source::write(&state, &call, &request)
         .await
         .map(Json)
 }

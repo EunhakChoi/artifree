@@ -300,7 +300,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -312,7 +312,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -499,6 +499,11 @@ mod tests {
             session.permits(&scope, read, Capability::SourceDownload),
             Err(GrantDenied::NotGranted),
             "reading does not consent to downloading"
+        );
+        assert_eq!(
+            session.permits(&scope, read, Capability::SourceWrite),
+            Err(GrantDenied::NotGranted),
+            "reading does not consent to writing"
         );
         assert_eq!(
             session.permits(&scope, read, Capability::MetadataRead),

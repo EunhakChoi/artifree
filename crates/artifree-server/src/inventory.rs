@@ -38,7 +38,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/runtime-sdk",
         ComponentStatus::Implemented,
-        "An opted-in sandboxed frame reads its own artifact metadata, the files of its pinned revision, and asks for a user-confirmed download of them, each under its own connection-scoped grant; other runtime capabilities, including writing, remain planned.",
+        "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download, and saves one file per view; each needs its own connection-scoped grant, and other capabilities remain planned.",
     ),
     (
         "api",
