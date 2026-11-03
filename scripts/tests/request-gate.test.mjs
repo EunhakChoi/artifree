@@ -108,6 +108,7 @@ test('Requests are classified by what they change', () => {
     'source/read',
     'source/offer',
     'source/download',
+    'source/write',
   ])
     assert.equal(
       requestKind(
@@ -128,10 +129,19 @@ test('Requests are classified by what they change', () => {
   assert.equal(
     requestKind(
       'POST',
-      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/delete',
     ),
     'write',
   );
+  // A save from a frame is a frame call only as a POST of that exact route,
+  // under a revision, not as another verb or a look-alike (decision 0033).
+  for (const [method, path] of [
+    ['GET', '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write'],
+    ['PUT', '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write'],
+    ['POST', '/v1/artifacts/a/runtime-views/view/3/source/write'],
+    ['POST', '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write/x'],
+  ])
+    assert.notEqual(requestKind(method, path), 'frame', `${method} ${path}`);
   assert.equal(requestKind('DELETE', '/v1/runtime-views/view/3'), 'write');
   assert.equal(requestKind('POST', '/v1/other/runtime-views'), 'write');
   assert.equal(requestKind('GET', '/v1/changes'), 'stream');
@@ -154,6 +164,7 @@ const FRAME_TAILS = [
   'source/read',
   'source/offer',
   'source/download',
+  'source/write',
 ];
 
 /** `base` joined with `path` the way the client does. */
@@ -177,7 +188,7 @@ test('Every route family is recognized under any server path prefix', () => {
     ['DELETE', '/v1/runtime-views/view/3', 'write'],
     [
       'POST',
-      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/delete',
       'write',
     ],
     ['POST', '/v1/handoffs', 'write'],

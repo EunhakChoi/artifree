@@ -9,8 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artifree_contracts::api::{
     ContentEncoding, CreateArtifactRequest, CreateRuntimeViewRequest, FileChange, FileUpload,
-    Handoff, RuntimeDownloadKind, RuntimeDownloadRequest, RuntimeSourceReadRequest, RuntimeView,
-    SaveRevisionRequest, SetRuntimeGrantRequest, StageHandoffRequest, UpdateArtifactRequest,
+    Handoff, RuntimeDownloadKind, RuntimeDownloadRequest, RuntimeSourceReadRequest,
+    RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest, SetRuntimeGrantRequest,
+    StageHandoffRequest, UpdateArtifactRequest,
 };
 use artifree_contracts::mcp::RegisteredHandoffSession;
 use artifree_domain::SourceRevision;
@@ -295,7 +296,12 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
     assert_eq!(declared.declared, ["future.write", "metadata.read"]);
     assert_eq!(
         declared.supported,
-        ["metadata.read", "source.download", "source.read"]
+        [
+            "metadata.read",
+            "source.download",
+            "source.read",
+            "source.write"
+        ]
     );
     let request = SetRuntimeGrantRequest {
         head_revision: 2,
@@ -331,7 +337,12 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
     assert!(omitted.declared.is_empty());
     assert_eq!(
         omitted.supported,
-        ["metadata.read", "source.download", "source.read"]
+        [
+            "metadata.read",
+            "source.download",
+            "source.read",
+            "source.write"
+        ]
     );
     assert_eq!(
         change_grant(&state, &actor, &session, &omitted, true).await,
@@ -513,7 +524,7 @@ async fn source_view(
         &artifact,
         1,
         "artifree-runtime.json",
-        r#"{"sdk":"artifree.app.v1","capabilities":["source.read","source.download"]}"#,
+        r#"{"sdk":"artifree.app.v1","capabilities":["source.read","source.download","source.write"]}"#,
     )
     .await?;
     save_fixture_file(state, actor, &artifact, 2, "note.txt", "stored bytes").await?;
@@ -529,7 +540,11 @@ async fn source_view(
         SetRuntimeGrantRequest {
             head_revision: 3,
             expected_version: 0,
-            capabilities: vec!["source.download".into(), "source.read".into()],
+            capabilities: vec![
+                "source.download".into(),
+                "source.read".into(),
+                "source.write".into(),
+            ],
         },
     )
     .await
@@ -548,7 +563,10 @@ async fn source_view(
     )
     .await
     .map_err(|error| error.body.message)?;
-    assert_eq!(view.granted, ["source.download", "source.read"]);
+    assert_eq!(
+        view.granted,
+        ["source.download", "source.read", "source.write"]
+    );
     let path = view
         .url
         .strip_prefix("http://127.0.0.1:7411")
@@ -684,6 +702,100 @@ fn a_revocation_after_the_bytes_were_read_still_releases_none_of_them() -> Resul
         })?;
     }
     Ok(())
+}
+
+/// The write of `note.txt` that the tests below send.
+fn rewrite(view: &RuntimeView) -> RuntimeSourceWriteRequest {
+    RuntimeSourceWriteRequest {
+        initialization: view.initialization.clone(),
+        retry_id: "retry-0001".into(),
+        path: "note.txt".into(),
+        content: "cmV3cml0dGVu".into(),
+    }
+}
+
+#[test]
+fn a_revocation_during_a_write_withholds_the_receipt_not_the_revision() -> Result<(), Box<dyn Error>>
+{
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, session) = source_view(&state, &actor).await?;
+        let call = FrameCall {
+            actor: &actor,
+            artifact: &view.artifact_id,
+            revision: view.revision,
+            view: &view.view_id,
+            generation: view.generation,
+            initialization: &view.initialization,
+        };
+        let request = rewrite(&view);
+        let waiting = Box::pin(runtime_source::write(&state, &call, &request));
+        let outcome =
+            revoke_between_the_read_and_the_reply(&state, &actor, &session, &view, waiting).await?;
+        assert!(
+            matches!(outcome, Err(ref error) if error.status == StatusCode::FORBIDDEN),
+            "the frame is told nothing of an outcome the grant no longer covers: {:?}",
+            outcome.map(|receipt| receipt.revision)
+        );
+        // The commit happened before the revoke was seen, and a revoke does
+        // not undo it: the owner finds the revision in the history.
+        let id: ArtifactId = view.artifact_id.parse()?;
+        let record = state
+            .run({
+                let actor = actor.clone();
+                move |artifacts| artifacts.artifact(&actor, &id)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(record.current_revision, SourceRevision(4));
+        // With the grant gone the replay is refused too.
+        let replay = runtime_source::write(&state, &call, &request).await;
+        assert!(matches!(replay, Err(ref error) if error.status == StatusCode::FORBIDDEN));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn another_actor_cannot_write_through_the_owners_view() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let owner: ActorId = "local".parse()?;
+        let other: ActorId = "other".parse()?;
+        let (view, _session) = source_view(&state, &owner).await?;
+        let call = FrameCall {
+            actor: &other,
+            artifact: &view.artifact_id,
+            revision: view.revision,
+            view: &view.view_id,
+            generation: view.generation,
+            initialization: &view.initialization,
+        };
+        let refused = runtime_source::write(&state, &call, &rewrite(&view)).await;
+        assert!(
+            matches!(refused, Err(ref error) if error.status == StatusCode::NOT_FOUND),
+            "{:?}",
+            refused.map(|receipt| receipt.revision)
+        );
+        // Nothing was saved: the owner's write at the same call succeeds as
+        // the very next revision.
+        let owner_call = FrameCall {
+            actor: &owner,
+            ..call
+        };
+        let saved = runtime_source::write(&state, &owner_call, &rewrite(&view)).await;
+        assert_eq!(saved.map(|receipt| receipt.revision).ok(), Some(4));
+        Ok::<(), Box<dyn Error>>(())
+    })
 }
 
 #[test]

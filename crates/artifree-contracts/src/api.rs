@@ -1152,6 +1152,54 @@ pub struct RuntimeDownloadOffer {
     pub sha256: Option<String>,
 }
 
+/// Most bytes of one file a runtime frame writes in one call (decision
+/// 0033). It is the size of a read part: the file travels as base64 in one
+/// JSON body, and the package rules still apply to the revision it makes.
+pub const MAX_RUNTIME_SOURCE_WRITE_BYTES: u64 = 1_048_576;
+
+/// The characters of the base64 text of [`MAX_RUNTIME_SOURCE_WRITE_BYTES`]
+/// bytes, padding included.
+pub const MAX_RUNTIME_SOURCE_WRITE_BASE64: u64 = MAX_RUNTIME_SOURCE_WRITE_BYTES.div_ceil(3) * 4;
+
+/// Saves one file as the next revision of the artifact a runtime view is
+/// pinned to, on behalf of the frame (needs the `source.write` grant). The
+/// base is the view's own revision: a view that is not the artifact's
+/// current revision is refused with the current one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceWriteRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// The frame's retry identity for this save: 8 to 36 ASCII letters,
+    /// digits, `-` or `_`. The server derives the idempotency key from it,
+    /// the artifact, the view and its generation, so a retry with the same
+    /// identity and file is answered with the first outcome, and the same
+    /// identity with another file is refused.
+    #[schemars(length(min = 8, max = 36))]
+    pub retry_id: String,
+    /// Package path of the file; a new path adds a file.
+    pub path: String,
+    /// The file's bytes as base64, at most 1,048,576 bytes.
+    #[schemars(length(max = 1_398_104))]
+    pub content: String,
+}
+
+/// What a save made, which the client checks against the bytes it sent. The
+/// server read the new revision back before it answered: the file holds
+/// exactly the bytes sent and every other file is as it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceWriteReceipt {
+    /// Package path of the file, as requested.
+    pub path: String,
+    /// The revision the save made: the view's revision plus one.
+    pub revision: u64,
+    /// The file's size in bytes: the number of bytes sent.
+    pub size: u64,
+    /// The file's SHA-256 digest, as 64 lowercase hex digits.
+    pub sha256: String,
+}
+
 /// What a commit did to an artifact. A kind that a client does not know
 /// still means the artifact changed: read it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -1,4 +1,5 @@
-//! Source reads and downloads for runtime frames (decision 0032).
+//! Source reads, downloads and writes for runtime frames (decisions 0032
+//! and 0033).
 //!
 //! Every function here is one frame call proxied by the workspace page: the
 //! frame holds no account token, so the page presents the view's
@@ -12,14 +13,18 @@
 use std::num::NonZeroU64;
 
 use artifree_contracts::api::{
-    ErrorCode, MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES, RuntimeDownloadKind,
-    RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeSourceList, RuntimeSourcePart,
-    RuntimeSourceReadRequest,
+    ErrorCode, MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BYTES,
+    RuntimeDownloadKind, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeSourceList,
+    RuntimeSourcePart, RuntimeSourceReadRequest, RuntimeSourceWriteReceipt,
+    RuntimeSourceWriteRequest,
 };
-use artifree_core::parts::{Boundary, ByteRange};
+use artifree_core::artifacts::{ArtifactError, ArtifactService};
+use artifree_core::parts::{Boundary, ByteRange, FilePart};
 use artifree_domain::SourceRevision;
-use artifree_domain::identity::{ActorId, ArtifactId};
-use artifree_domain::package::PackagePath;
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey};
+use artifree_domain::package::{FileChange, PackageError, PackagePath};
+use artifree_ports::artifact_store::{CommitReceipt, Delivery, RevisionRecord};
+use artifree_providers::storage::SqliteStore;
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -60,6 +65,10 @@ pub(crate) struct Download {
 struct Authorized {
     artifact: ArtifactId,
     revision: SourceRevision,
+    /// The head the view was pinned to when it was issued.
+    pinned: SourceRevision,
+    /// The artifact's head now.
+    current: SourceRevision,
 }
 
 fn denied(reason: RuntimeDenied) -> ApiError {
@@ -96,10 +105,35 @@ fn busy() -> ApiError {
     )
 }
 
-/// The full live check of one call for one capability. Binding failures are
-/// `404`, a missing grant after a matching binding is `403`, a moved head is
-/// `409`, and a trashed or purged artifact is `404`.
-async fn authorize(
+/// The binding and the connection's current grant of `capability`, with the
+/// head the view was pinned to. Binding failures are `404`, a missing grant
+/// after a matching binding is `403`.
+fn permitted(
+    state: &AppState,
+    call: &FrameCall<'_>,
+    artifact: &ArtifactId,
+    revision: SourceRevision,
+    capability: Capability,
+) -> Result<SourceRevision, ApiError> {
+    let key = ViewKey {
+        actor: call.actor,
+        artifact,
+        revision,
+        view_id: call.view,
+        generation: call.generation,
+        initialization: call.initialization,
+    };
+    state
+        .previews()
+        .runtime_access(&key, capability)
+        .map_err(denied)
+}
+
+/// The live check of one call for one capability, without a fence on the
+/// head: the shape of the route names, the binding, the grant and the
+/// artifact outside the trash, with the binding and grant checked again
+/// after the lookup. A write fences on the head with its commit instead.
+async fn live(
     state: &AppState,
     call: &FrameCall<'_>,
     capability: Capability,
@@ -107,33 +141,35 @@ async fn authorize(
     validate_view(call.view, call.generation)?;
     let artifact = artifact_id(call.artifact)?;
     let revision = revision_number(call.revision)?;
-    let key = ViewKey {
-        actor: call.actor,
-        artifact: &artifact,
-        revision,
-        view_id: call.view,
-        generation: call.generation,
-        initialization: call.initialization,
-    };
-    let head = state
-        .previews()
-        .runtime_access(&key, capability)
-        .map_err(denied)?;
+    let pinned = permitted(state, call, &artifact, revision, capability)?;
     let actor = call.actor.clone();
     let lookup = artifact.clone();
     let record = state
         .run(move |artifacts| artifacts.artifact(&actor, &lookup))
         .await?;
-    if record.current_revision != head {
-        return Err(stale(record.current_revision));
-    }
     // The lookup was asynchronous: a revoke, a close or a replacement may
     // have landed meanwhile.
-    state
-        .previews()
-        .runtime_access(&key, capability)
-        .map_err(denied)?;
-    Ok(Authorized { artifact, revision })
+    permitted(state, call, &artifact, revision, capability)?;
+    Ok(Authorized {
+        artifact,
+        revision,
+        pinned,
+        current: record.current_revision,
+    })
+}
+
+/// The full live check of a read: [`live`], and the artifact's head is still
+/// the one the view was pinned to (`409` otherwise).
+async fn authorize(
+    state: &AppState,
+    call: &FrameCall<'_>,
+    capability: Capability,
+) -> Result<Authorized, ApiError> {
+    let granted = live(state, call, capability).await?;
+    if granted.current != granted.pinned {
+        return Err(stale(granted.current));
+    }
+    Ok(granted)
 }
 
 /// The files of the pinned revision.
@@ -295,6 +331,200 @@ pub(crate) async fn download(
     Ok(result)
 }
 
+/// What the commit and its read-back found, from one blocking task.
+struct Saved {
+    receipt: CommitReceipt,
+    /// The receipt for the frame, or why the new revision is not what was
+    /// asked for. The revision exists either way.
+    checked: Result<RuntimeSourceWriteReceipt, Mismatch>,
+}
+
+/// How the committed revision differs from the request. The frame is never
+/// told which: a different file is a server fault, not the frame's to see.
+#[derive(Debug, PartialEq, Eq)]
+enum Mismatch {
+    /// The revision is not the one after the view's.
+    Number,
+    /// The revisions could not be read back.
+    Unreadable,
+    /// A file other than the written one is not as it was.
+    OtherFiles,
+    /// The written file is missing, or its size or digest is not the sent one.
+    Listing,
+    /// The stored bytes are not the bytes sent.
+    Bytes,
+}
+
+/// Saves one file as the next revision of the view's artifact, with the view's
+/// revision as the base, and answers only after reading the new revision back
+/// (decision 0033).
+///
+/// The commit is conditional on the base, so the head is fenced atomically
+/// with the write and not by an earlier check: a view that is not the head
+/// gets `409` with the current revision, and the retry of a save that
+/// committed gets its first outcome back (the store replays it by key) even
+/// though the head moved because of it. The key is derived here, from the
+/// artifact, the view, its generation and the frame's retry identity, in the
+/// namespace no other caller can produce (`RequestKey::runtime_write`).
+pub(crate) async fn write(
+    state: &AppState,
+    call: &FrameCall<'_>,
+    request: &RuntimeSourceWriteRequest,
+) -> Result<RuntimeSourceWriteReceipt, ApiError> {
+    // Authorization first, so a caller without a binding or the edit grant
+    // learns nothing from how its arguments were judged.
+    let granted = live(state, call, Capability::SourceWrite).await?;
+    let path = package_path("path", &request.path)?;
+    let key = RequestKey::runtime_write(
+        &granted.artifact,
+        call.view,
+        call.generation,
+        &request.retry_id,
+    )
+    .map_err(|error| ApiError::invalid(format!("retry_id: {error}")))?;
+    let content = decoded(&request.content)?;
+    let actor = call.actor.clone();
+    let (artifact, base) = (granted.artifact.clone(), granted.revision);
+    let saved = state
+        .run(move |artifacts| {
+            let change = FileChange::Put {
+                path: path.clone(),
+                content: content.clone(),
+            };
+            let receipt = artifacts.save(&actor, &key, &artifact, base, vec![change])?;
+            let checked = read_back(
+                artifacts, &actor, &artifact, base, &receipt, &path, &content,
+            );
+            Ok(Saved { receipt, checked })
+        })
+        .await
+        .map_err(write_error)?;
+    // The commit is durable whatever happens next: tell the change feed.
+    if saved.receipt.delivery == Delivery::Committed {
+        state.feed().committed();
+    }
+    let receipt = saved.checked.map_err(|_mismatch| {
+        // Never reached by a correct store; the revision exists, so say so
+        // plainly instead of reporting a success that was not verified.
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            "the saved revision could not be verified; check the artifact's history",
+        )
+    })?;
+    // A revoke, a close or a replacement that landed during the commit does
+    // not undo it, but the frame is told nothing of the outcome.
+    permitted(
+        state,
+        call,
+        &granted.artifact,
+        granted.revision,
+        Capability::SourceWrite,
+    )?;
+    Ok(receipt)
+}
+
+/// Reads the revision `receipt` made and judges it against the request.
+fn read_back(
+    artifacts: &ArtifactService<SqliteStore>,
+    actor: &ActorId,
+    artifact: &ArtifactId,
+    base: SourceRevision,
+    receipt: &CommitReceipt,
+    path: &PackagePath,
+    content: &[u8],
+) -> Result<RuntimeSourceWriteReceipt, Mismatch> {
+    let made = receipt.revision.revision;
+    let unreadable = |_: ArtifactError| Mismatch::Unreadable;
+    let before = artifacts
+        .revision(actor, artifact, base)
+        .map_err(unreadable)?;
+    let after = artifacts
+        .revision(actor, artifact, made)
+        .map_err(unreadable)?;
+    let stored = artifacts
+        .read_file_part(
+            actor,
+            artifact,
+            made,
+            path,
+            ByteRange::WHOLE,
+            Boundary::Byte,
+        )
+        .map_err(unreadable)?;
+    judge(base, made, path, content, [&before, &after], &stored)
+}
+
+/// Whether the revision `made` is what a save of `content` at `path` on
+/// `base` must produce: the revision after `base`, every other file as it was
+/// in `base`, and the written file holding exactly the bytes sent. The stored
+/// bytes are compared with the sent ones, not only their digests.
+fn judge(
+    base: SourceRevision,
+    made: SourceRevision,
+    path: &PackagePath,
+    content: &[u8],
+    [before, after]: [&RevisionRecord; 2],
+    stored: &FilePart,
+) -> Result<RuntimeSourceWriteReceipt, Mismatch> {
+    if made.0 != base.0.saturating_add(1) || after.revision != made || before.revision != base {
+        return Err(Mismatch::Number);
+    }
+    let others = |record: &RevisionRecord| {
+        record
+            .files
+            .iter()
+            .filter(|file| file.path != *path)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if others(before) != others(after) {
+        return Err(Mismatch::OtherFiles);
+    }
+    let size = content.len() as u64;
+    let entry = after
+        .files
+        .iter()
+        .find(|file| file.path == *path && file.size == size)
+        .ok_or(Mismatch::Listing)?;
+    if stored.content != content || stored.size != size || stored.sha256 != entry.sha256 {
+        return Err(Mismatch::Bytes);
+    }
+    Ok(RuntimeSourceWriteReceipt {
+        path: path.to_string(),
+        revision: made.0,
+        size,
+        sha256: hex(&entry.sha256),
+    })
+}
+
+/// The bytes of a frame's file: standard base64 with padding, of at most
+/// [`MAX_RUNTIME_SOURCE_WRITE_BYTES`] bytes. The request body is already
+/// bounded by the route's own limit, so the text is never longer than that.
+fn decoded(text: &str) -> Result<Vec<u8>, ApiError> {
+    let bytes = BASE64
+        .decode(text)
+        .map_err(|_| ApiError::invalid("content is not valid base64"))?;
+    if bytes.len() as u64 > MAX_RUNTIME_SOURCE_WRITE_BYTES {
+        return Err(ApiError::invalid("content is larger than the write limit"));
+    }
+    Ok(bytes)
+}
+
+/// A commit failure, worded without anything the frame supplied: the path is
+/// not quoted back.
+fn write_error(error: ArtifactError) -> ApiError {
+    match error {
+        ArtifactError::InvalidPackage(PackageError::Unchanged) => {
+            ApiError::unprocessable("the file already holds these bytes; nothing was saved")
+        }
+        ArtifactError::InvalidPackage(_) => {
+            ApiError::unprocessable("the change does not fit the package rules")
+        }
+        other => other.into(),
+    }
+}
+
 enum Target {
     File(PackagePath),
     Archive,
@@ -347,9 +577,163 @@ fn safe_name(segment: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use artifree_core::parts::FilePart;
+    use artifree_domain::SourceRevision;
+    use artifree_domain::identity::{ActorId, UnixMillis};
     use artifree_domain::package::{MAX_SEGMENT_BYTES, PackagePath};
+    use artifree_ports::artifact_store::{FileEntry, RevisionRecord};
 
-    use super::{MAX_DOWNLOAD_NAME, file_name, safe_name};
+    use super::{MAX_DOWNLOAD_NAME, Mismatch, file_name, judge, safe_name};
+
+    fn path(text: &str) -> PackagePath {
+        text.parse()
+            .unwrap_or_else(|error| panic!("fixture path {text}: {error}"))
+    }
+
+    fn entry(name: &str, size: u64, fill: u8) -> FileEntry {
+        FileEntry {
+            path: path(name),
+            size,
+            sha256: [fill; 32],
+        }
+    }
+
+    fn record(revision: u64, files: Vec<FileEntry>) -> RevisionRecord {
+        RevisionRecord {
+            revision: SourceRevision(revision),
+            created_by: "local"
+                .parse::<ActorId>()
+                .unwrap_or_else(|error| panic!("fixture actor: {error}")),
+            created_at: UnixMillis(0),
+            files,
+        }
+    }
+
+    fn stored(content: &[u8], fill: u8) -> FilePart {
+        FilePart {
+            content: content.to_vec(),
+            offset: 0,
+            size: content.len() as u64,
+            sha256: [fill; 32],
+            text: true,
+        }
+    }
+
+    /// Base revision 1 holds `a.txt` and `b.txt`; the save writes `b.txt`.
+    fn base() -> RevisionRecord {
+        record(1, vec![entry("a.txt", 1, 1), entry("b.txt", 2, 2)])
+    }
+
+    fn saved() -> RevisionRecord {
+        record(2, vec![entry("a.txt", 1, 1), entry("b.txt", 3, 9)])
+    }
+
+    fn verdict(
+        made: u64,
+        after: &RevisionRecord,
+        part: &FilePart,
+    ) -> Result<(String, u64, u64, String), Mismatch> {
+        judge(
+            SourceRevision(1),
+            SourceRevision(made),
+            &path("b.txt"),
+            b"new",
+            [&base(), after],
+            part,
+        )
+        .map(|receipt| (receipt.path, receipt.revision, receipt.size, receipt.sha256))
+    }
+
+    #[test]
+    fn a_revision_that_holds_the_bytes_and_leaves_the_rest_is_accepted() {
+        assert_eq!(
+            verdict(2, &saved(), &stored(b"new", 9)),
+            Ok(("b.txt".into(), 2, 3, "09".repeat(32)))
+        );
+    }
+
+    #[test]
+    fn a_revision_that_differs_from_the_request_is_not_accepted() {
+        let moved = |files: Vec<FileEntry>| record(2, files);
+        let cases = [
+            (
+                "a revision that is not the next one",
+                verdict(3, &record(3, saved().files), &stored(b"new", 9)),
+                Mismatch::Number,
+            ),
+            (
+                "a listing of another revision than the one made",
+                verdict(2, &record(5, saved().files), &stored(b"new", 9)),
+                Mismatch::Number,
+            ),
+            (
+                "another file changed",
+                verdict(
+                    2,
+                    &moved(vec![entry("a.txt", 1, 7), entry("b.txt", 3, 9)]),
+                    &stored(b"new", 9),
+                ),
+                Mismatch::OtherFiles,
+            ),
+            (
+                "another file was dropped",
+                verdict(2, &moved(vec![entry("b.txt", 3, 9)]), &stored(b"new", 9)),
+                Mismatch::OtherFiles,
+            ),
+            (
+                "another file was added",
+                verdict(
+                    2,
+                    &moved(vec![
+                        entry("a.txt", 1, 1),
+                        entry("b.txt", 3, 9),
+                        entry("c.txt", 1, 1),
+                    ]),
+                    &stored(b"new", 9),
+                ),
+                Mismatch::OtherFiles,
+            ),
+            (
+                "the written file is not listed",
+                verdict(2, &moved(vec![entry("a.txt", 1, 1)]), &stored(b"new", 9)),
+                Mismatch::Listing,
+            ),
+            (
+                "the written file is listed with another size",
+                verdict(
+                    2,
+                    &moved(vec![entry("a.txt", 1, 1), entry("b.txt", 4, 9)]),
+                    &stored(b"new", 9),
+                ),
+                Mismatch::Listing,
+            ),
+            (
+                "the stored bytes differ from the bytes sent, at the same length",
+                verdict(2, &saved(), &stored(b"old", 9)),
+                Mismatch::Bytes,
+            ),
+            (
+                "the stored file's digest is not the listed one",
+                verdict(2, &saved(), &stored(b"new", 8)),
+                Mismatch::Bytes,
+            ),
+            (
+                "the stored file states another size",
+                verdict(
+                    2,
+                    &saved(),
+                    &FilePart {
+                        size: 4,
+                        ..stored(b"new", 9)
+                    },
+                ),
+                Mismatch::Bytes,
+            ),
+        ];
+        for (name, got, want) in cases {
+            assert_eq!(got, Err(want), "{name}");
+        }
+    }
 
     #[test]
     fn a_download_name_is_the_last_segment_in_safe_ascii() {

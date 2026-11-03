@@ -281,6 +281,27 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   revoked it open no prompt; an old generation and a moved head are refused.
   Each guard was checked by breaking it and watching a test fail. These tests
   do not show that a preview cannot use the network, and no MCP tool is involved.
+- Runtime source writing (decision 0033): Rust tests read the new revision
+  back from the store and compare its bytes with the bytes the frame sent (a
+  non-ASCII text, a new path, the largest binary file), check that the other
+  files and the earlier revision are unchanged, and that no revision exists after
+  a missing binding, a missing edit grant, a bad path (the shared fixture), bad
+  base64, an over-limit file, a view that is not the head (`409` with the
+  current revision), or another actor's token. Authorization is judged before
+  the arguments. A retry of a save returns its first receipt and makes no
+  second revision; the same retry identity in another artifact, view or
+  generation is another request; no key an owner or an agent can send parses into
+  the frame's namespace; a revoke after the write was authorized withholds the
+  receipt and not the revision. The decision-making function that compares the
+  new revision with the request has a case for each way it can differ. Node
+  tests give the client, the frame script and the host a receipt that differs in
+  each field, and one for other bytes with a correct digest of its own; run
+  hostile save arguments, a platform without `crypto.subtle`, the retry rule held
+  to the client's, the schema bounds, and the route's class. `scripts/smoke-source.mjs`
+  saves from a frame in Chromium and Firefox: the stored bytes and digest of the
+  new revision equal what the frame sent, the refusals make no revision, and the
+  next view starts without the grant. These tests do not show roles (there are
+  none), that a preview cannot use the network, or anything about MCP.
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,
@@ -516,7 +537,7 @@ scaffold's automated accessibility checks cannot establish every accessibility
 requirement. Npm/Cargo advisory scans detect known reports, not all vulnerabilities.
 
 Not yet covered, because the behavior does not exist: multi-user roles and
-revocation, broader runtime capabilities, publishing, and resource limits for artifact
+revocation (a viewer's refused save included), broader runtime capabilities, publishing, and resource limits for artifact
 scripts. Agent runs with Codex and Pi are manual checks, not CI: they need an
 agent account and model calls. The single-owner token is not a multi-user authentication test. The
 crash test kills the process after a commit; it does not simulate power loss

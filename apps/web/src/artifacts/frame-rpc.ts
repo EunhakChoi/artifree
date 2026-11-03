@@ -24,8 +24,20 @@ export type FailureCode =
   | 'unavailable'
   | 'expired';
 
+/**
+ * What a retry identity looks like: the client and the server judge the same
+ * rule. It is written out here, not imported, because importing a value from
+ * the client would put a module shared by two on-demand chunks into the
+ * entry bundle's preload list, which has no room (decision 0033). A test
+ * holds this and the client's check to the same answers.
+ */
+const RETRY_ID = /^[A-Za-z0-9_-]{8,36}$/;
+
 /** The most bytes a frame may ask for in one part. */
 const MAX_PART = 1_048_576;
+
+/** The most bytes of one file a frame may save in one call. */
+const MAX_WRITE = 1_048_576;
 
 /** A parsed, bounded call. */
 export type FrameCall =
@@ -43,6 +55,14 @@ export type FrameCall =
       readonly id: number;
       readonly path: string | null;
     }
+  | {
+      readonly type: 'source.write';
+      readonly id: number;
+      readonly retryId: string;
+      readonly path: string;
+      /** The frame's own copy, transferred to the page. */
+      readonly bytes: ArrayBuffer;
+    }
   | { readonly type: 'cancel'; readonly id: number };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -59,6 +79,7 @@ const SHAPES: Record<string, readonly string[]> = {
   'source.list': ['type', 'id'],
   'source.read': ['type', 'id', 'path', 'offset', 'length'],
   'source.download': ['type', 'id', 'kind', 'path'],
+  'source.write': ['type', 'id', 'retryId', 'path', 'bytes'],
   cancel: ['type', 'id'],
 };
 
@@ -120,6 +141,19 @@ export function parseCall(message: unknown): FrameCall | undefined {
         return { type, id, path };
       return undefined;
     }
+    case 'source.write': {
+      const { retryId, path, bytes } = message;
+      if (
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId) ||
+        typeof path !== 'string' ||
+        pathError(path) !== undefined ||
+        !(bytes instanceof ArrayBuffer) ||
+        bytes.byteLength > MAX_WRITE
+      )
+        return undefined;
+      return { type, id, retryId, path, bytes };
+    }
     default:
       return undefined;
   }
@@ -178,6 +212,7 @@ export interface FrameRpcDeps {
     | 'runtimeSourceRead'
     | 'runtimeSourceOffer'
     | 'runtimeSourceDownload'
+    | 'runtimeCall'
   >;
   readonly view: RuntimeView;
   /** Shows a prompt; resolves with the user's answer. */
@@ -363,6 +398,25 @@ export class FrameRpc {
       }
       case 'source.download':
         return this.#download(call.id, call.path, signal);
+      case 'source.write': {
+        // A frame's bytes are copied once, here; the client reads the copy.
+        const input = {
+          path: call.path,
+          retryId: call.retryId,
+          bytes: new Uint8Array(call.bytes.slice(0)),
+        };
+        const receipt = await client.runtimeCall(view, (source, frame) =>
+          source.writeSource(frame, view, input, signal),
+        );
+        return ok(call.id, {
+          written: {
+            path: receipt.path,
+            revision: receipt.revision,
+            size: receipt.size,
+            sha256: receipt.sha256,
+          },
+        });
+      }
     }
   }
 

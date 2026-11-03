@@ -25,9 +25,10 @@ use artifree_contracts::api::{
     Revision, RevisionList, RotateTokenResponse, RuntimeConnection, RuntimeDownloadOffer,
     RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest,
     RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
-    RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest,
-    StageHandoffRequest, TokenInfo, TokenList, UnreferencedContent, UpdateArtifactRequest,
-    UpdateArtifactResponse, UpdateDataRequest,
+    RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest,
+    SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo,
+    TokenList, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -70,6 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<RuntimeSourcePart>(),
         generator.subschema_for::<RuntimeDownloadRequest>(),
         generator.subschema_for::<RuntimeDownloadOffer>(),
+        generator.subschema_for::<RuntimeSourceWriteRequest>(),
+        generator.subschema_for::<RuntimeSourceWriteReceipt>(),
         generator.subschema_for::<ErrorResponse>(),
         generator.subschema_for::<ArtifactChange>(),
         generator.subschema_for::<FeedPosition>(),

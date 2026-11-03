@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, mock, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -53,6 +54,21 @@ const rulesBundle = await build({
 });
 const { FRAME_PATH_RULES } = await import(
   `data:text/javascript;base64,${Buffer.from(rulesBundle.outputFiles[0].text).toString('base64')}`
+);
+// The frame's own SHA-256, with which it checks a save receipt.
+const digestBundle = await build({
+  entryPoints: [
+    fileURLToPath(
+      new URL('../../packages/runtime-sdk/src/sha256.ts', import.meta.url),
+    ),
+  ],
+  bundle: true,
+  format: 'esm',
+  platform: 'neutral',
+  write: false,
+});
+const { sha256Hex } = await import(
+  `data:text/javascript;base64,${Buffer.from(digestBundle.outputFiles[0].text).toString('base64')}`
 );
 const { scaffoldDescription } =
   await import('../../packages/contracts/dist/index.js');
@@ -154,6 +170,7 @@ test('The script announces the view with one port and nothing else', () => {
     'list',
     'read',
     'requestDownload',
+    'write',
   ]);
   assert.throws(() => start(CONFIG), /already installed/);
 });
@@ -616,4 +633,231 @@ test('A view that ended or whose lease ran out refuses every call', async () => 
 
 beforeEach(() => {
   delete globalThis.window;
+});
+
+// ---- saving a file (decision 0033) ----
+
+const HELLO_SHA256 =
+  '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+const SAVE = { path: 'a.txt', content: 'hello', retryId: 'retry-0001' };
+
+test('The frame hashes like the platform, for every length around a block', () => {
+  assert.equal(sha256Hex(new TextEncoder().encode('hello')), HELLO_SHA256);
+  const lengths = [
+    ...Array.from({ length: 200 }, (_, length) => length),
+    1000,
+    65_535,
+    1_048_576,
+  ];
+  for (const length of lengths) {
+    const bytes = Uint8Array.from({ length }, (_, index) => (index * 7) % 256);
+    assert.equal(
+      sha256Hex(bytes),
+      createHash('sha256').update(bytes).digest('hex'),
+      `${length} bytes`,
+    );
+  }
+});
+
+test('A save sends its fields once, with a private copy that it transfers', async () => {
+  const f = frame();
+  const mine = Uint8Array.from([1, 2, 3]);
+  const text = f.api.source.write(SAVE);
+  const bytes = f.api.source.write({
+    path: 'b/c.png',
+    content: mine,
+    retryId: 'retry_0002',
+  });
+  const outcomes = Promise.allSettled([text, bytes]);
+  await settle();
+  assert.equal(f.received.length, 2);
+  const [first, second] = f.received;
+  assert.deepEqual(
+    { ...first, bytes: [...new Uint8Array(first.bytes)] },
+    {
+      type: 'source.write',
+      id: 1,
+      retryId: 'retry-0001',
+      path: 'a.txt',
+      bytes: [...new TextEncoder().encode('hello')],
+    },
+  );
+  assert.deepEqual([...new Uint8Array(second.bytes)], [1, 2, 3]);
+  // The caller's own array is untouched: the transfer took a copy.
+  assert.deepEqual([...mine], [1, 2, 3]);
+  assert.equal(mine.buffer.byteLength, 3);
+  // The host reads both as calls.
+  for (const message of f.received)
+    assert.equal(parseCall(message)?.type, 'source.write');
+  f.hangUp();
+  await outcomes;
+});
+
+function receiptFor(overrides = {}) {
+  return {
+    path: 'a.txt',
+    revision: 2,
+    size: 5,
+    sha256: HELLO_SHA256,
+    ...overrides,
+  };
+}
+
+test('A save receipt is judged by the bytes that were sent', async () => {
+  const answers = [
+    [receiptFor(), true],
+    [receiptFor({ revision: 7 }), true],
+    [receiptFor({ path: 'b.txt' }), false],
+    [receiptFor({ size: 6 }), false],
+    [receiptFor({ size: '5' }), false],
+    [receiptFor({ sha256: 'f'.repeat(64) }), false],
+    [receiptFor({ sha256: HELLO_SHA256.toUpperCase() }), false],
+    [receiptFor({ sha256: HELLO_SHA256.slice(1) }), false],
+    [receiptFor({ revision: 1 }), false],
+    [receiptFor({ revision: 0 }), false],
+    [receiptFor({ revision: 2.5 }), false],
+    [receiptFor({ revision: 2 ** 53 }), false],
+    [{ ...receiptFor(), revision: undefined }, false],
+    [null, false],
+    [[receiptFor()], false],
+    [undefined, false],
+  ];
+  for (const [receipt, valid] of answers) {
+    const f = frame();
+    const result = f.api.source.write(SAVE);
+    const call = await nextCall(f, 0);
+    f.reply({ id: call.id, ok: true, written: receipt });
+    if (valid) assert.deepEqual(await result, receipt);
+    else assert.equal((await code(result)).code, 'unavailable');
+    current.listeners.pagehide();
+    delete globalThis.window;
+  }
+});
+
+test('A save receipt for other bytes is refused, whatever the digest of its own says', async () => {
+  const f = frame();
+  const result = f.api.source.write({ ...SAVE, content: 'goodbye' });
+  const call = await nextCall(f, 0);
+  // Right shape, and the digest and size of "hello", not of "goodbye".
+  f.reply({ id: call.id, ok: true, written: receiptFor() });
+  assert.equal((await code(result)).code, 'unavailable');
+});
+
+test('Hostile save arguments are refused without throwing, sending or leaking a slot', async () => {
+  const f = frame();
+  const { write } = f.api.source;
+  const throwingLength = Uint8Array.from([1]);
+  Object.defineProperty(throwingLength, 'length', {
+    get() {
+      throw new Error('getter ran');
+    },
+  });
+  const bad = [
+    ...hostileObjects(),
+    { ...SAVE, extra: 1 },
+    { path: SAVE.path, content: SAVE.content },
+    { path: SAVE.path, retryId: SAVE.retryId },
+    { content: SAVE.content, retryId: SAVE.retryId },
+    { ...SAVE, path: '../a.txt' },
+    { ...SAVE, path: 5 },
+    { ...SAVE, content: 5 },
+    { ...SAVE, content: null },
+    { ...SAVE, content: ['h'] },
+    { ...SAVE, content: new Uint16Array(2) },
+    { ...SAVE, content: new ArrayBuffer(2) },
+    { ...SAVE, content: throwingLength },
+    { ...SAVE, content: 'a'.repeat(1_048_577) },
+    { ...SAVE, content: new Uint8Array(1_048_577) },
+    { ...SAVE, retryId: '1234567' },
+    { ...SAVE, retryId: 'r'.repeat(37) },
+    { ...SAVE, retryId: 'retry:001' },
+    { ...SAVE, retryId: 'retry 001' },
+    { ...SAVE, retryId: 'retry-001-ü' },
+    { ...SAVE, retryId: 7 },
+    { ...SAVE, retryId: undefined },
+    {
+      get path() {
+        throw new Error('getter ran');
+      },
+      content: 'x',
+      retryId: SAVE.retryId,
+    },
+  ];
+  for (const argument of bad) {
+    let promise;
+    assert.doesNotThrow(() => {
+      promise = write(argument);
+    }, 'write');
+    assert.equal((await code(promise)).code, 'invalid_request');
+  }
+  await settle();
+  assert.deepEqual(f.received, [], 'nothing was sent for a refused save');
+  // Every slot is still free, and the limits themselves are accepted.
+  const edge = [
+    write({
+      ...SAVE,
+      content: new Uint8Array(1_048_576),
+      retryId: 'r'.repeat(36),
+    }),
+    write({ ...SAVE, content: 'a'.repeat(1_048_576), retryId: 'r'.repeat(8) }),
+    write({ ...SAVE, content: '' }),
+  ];
+  await settle();
+  assert.equal(f.received.length, 3);
+  for (const message of f.received)
+    assert.notEqual(parseCall(message), undefined);
+  f.hangUp();
+  for (const promise of edge)
+    await assert.rejects(promise, { code: 'expired' });
+});
+
+test('A save path is judged by the shared fixture, and the host accepts what is sent', async () => {
+  for (const { path, error } of pathCases) {
+    const f = frame();
+    const outcome = f.api.source.write({ ...SAVE, path }).then(
+      () => 'resolved',
+      (rejection) => rejection.code,
+    );
+    await settle();
+    if (error === null) {
+      assert.equal(f.received.length, 1, JSON.stringify(path));
+      assert.notEqual(
+        parseCall(f.received[0]),
+        undefined,
+        JSON.stringify(path),
+      );
+    } else {
+      assert.deepEqual(f.received, [], JSON.stringify(path));
+      assert.equal(await outcome, 'invalid_request', path);
+    }
+    current.listeners.pagehide();
+    delete globalThis.window;
+    await outcome;
+  }
+});
+
+test('A save that is refused or unanswered says so from the closed set, and may be retried', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const f = frame();
+  const refused = f.api.source.write(SAVE);
+  const call = await nextCall(f, 0);
+  f.reply({ id: call.id, ok: false, code: 'stale_view', detail: 'SECRET' });
+  const failure = await code(refused);
+  assert.equal(failure.code, 'stale_view');
+  assert.ok(!failure.message.includes('SECRET'));
+  // An unanswered save gives up after thirty seconds and tells the workspace;
+  // the same retry identity then asks again.
+  const waiting = f.api.source.write(SAVE);
+  await settle();
+  mock.timers.tick(30_000);
+  assert.equal((await code(waiting)).code, 'unavailable');
+  await settle();
+  assert.deepEqual(f.received.at(-1), { type: 'cancel', id: 2 });
+  const again = f.api.source.write(SAVE);
+  await settle();
+  const sent = f.received.at(-1);
+  assert.equal(sent.type, 'source.write');
+  assert.equal(sent.retryId, SAVE.retryId);
+  f.hangUp();
+  await assert.rejects(again, { code: 'expired' });
 });

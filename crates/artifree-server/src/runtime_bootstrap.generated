@@ -76,13 +76,146 @@ var __ArtifreeBootstrap = (() => {
     return dot >= 0 && EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
   }
 
+  // packages/runtime-sdk/src/sha256.ts
+  var K = new Uint32Array([
+    1116352408,
+    1899447441,
+    3049323471,
+    3921009573,
+    961987163,
+    1508970993,
+    2453635748,
+    2870763221,
+    3624381080,
+    310598401,
+    607225278,
+    1426881987,
+    1925078388,
+    2162078206,
+    2614888103,
+    3248222580,
+    3835390401,
+    4022224774,
+    264347078,
+    604807628,
+    770255983,
+    1249150122,
+    1555081692,
+    1996064986,
+    2554220882,
+    2821834349,
+    2952996808,
+    3210313671,
+    3336571891,
+    3584528711,
+    113926993,
+    338241895,
+    666307205,
+    773529912,
+    1294757372,
+    1396182291,
+    1695183700,
+    1986661051,
+    2177026350,
+    2456956037,
+    2730485921,
+    2820302411,
+    3259730800,
+    3345764771,
+    3516065817,
+    3600352804,
+    4094571909,
+    275423344,
+    430227734,
+    506948616,
+    659060556,
+    883997877,
+    958139571,
+    1322822218,
+    1537002063,
+    1747873779,
+    1955562222,
+    2024104815,
+    2227730452,
+    2361852424,
+    2428436474,
+    2756734187,
+    3204031479,
+    3329325298
+  ]);
+  function rotr(value, shift) {
+    return value >>> shift | value << 32 - shift;
+  }
+  function sha256Hex(bytes) {
+    const length = bytes.length;
+    const padded = new Uint8Array(Math.ceil((length + 9) / 64) * 64);
+    padded.set(bytes);
+    padded[length] = 128;
+    const view = new DataView(padded.buffer);
+    view.setUint32(padded.length - 8, Math.floor(length / 536870912), false);
+    view.setUint32(padded.length - 4, length << 3 >>> 0, false);
+    const state = new Uint32Array([
+      1779033703,
+      3144134277,
+      1013904242,
+      2773480762,
+      1359893119,
+      2600822924,
+      528734635,
+      1541459225
+    ]);
+    const words = new Uint32Array(64);
+    for (let block = 0; block < padded.length; block += 64) {
+      for (let index = 0; index < 16; index += 1)
+        words[index] = view.getUint32(block + index * 4, false);
+      for (let index = 16; index < 64; index += 1) {
+        const w15 = words[index - 15] ?? 0;
+        const w2 = words[index - 2] ?? 0;
+        const small0 = rotr(w15, 7) ^ rotr(w15, 18) ^ w15 >>> 3;
+        const small1 = rotr(w2, 17) ^ rotr(w2, 19) ^ w2 >>> 10;
+        words[index] = (words[index - 16] ?? 0) + small0 + (words[index - 7] ?? 0) + small1 | 0;
+      }
+      let [a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0] = state;
+      for (let index = 0; index < 64; index += 1) {
+        const big1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const choice = e & f ^ ~e & g;
+        const first = h + big1 + choice + (K[index] ?? 0) + (words[index] ?? 0) | 0;
+        const big0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const majority = a & b ^ a & c ^ b & c;
+        const second = big0 + majority | 0;
+        h = g;
+        g = f;
+        f = e;
+        e = d + first | 0;
+        d = c;
+        c = b;
+        b = a;
+        a = first + second | 0;
+      }
+      state[0] = (state[0] ?? 0) + a;
+      state[1] = (state[1] ?? 0) + b;
+      state[2] = (state[2] ?? 0) + c;
+      state[3] = (state[3] ?? 0) + d;
+      state[4] = (state[4] ?? 0) + e;
+      state[5] = (state[5] ?? 0) + f;
+      state[6] = (state[6] ?? 0) + g;
+      state[7] = (state[7] ?? 0) + h;
+    }
+    return Array.from(state, (word) => word.toString(16).padStart(8, "0")).join(
+      ""
+    );
+  }
+
   // packages/runtime-sdk/src/bootstrap.ts
   var MAX_PART_BYTES = 1048576;
   var MAX_PATH_CHARS = 1024;
   var MAX_LISTED_FILES = 256;
+  var MAX_WRITE_BYTES = 1048576;
+  var RETRY_ID = /^[A-Za-z0-9_-]{8,36}$/;
   var MAX_PENDING = 64;
   var READ_TIMEOUT_MS = 1e4;
   var DOWNLOAD_TIMEOUT_MS = 12e4;
+  var WRITE_TIMEOUT_MS = 3e4;
   var FAILURE_CODES = {
     invalid_request: "The runtime request was not valid.",
     denied: "The runtime request was not permitted.",
@@ -186,6 +319,33 @@ var __ArtifreeBootstrap = (() => {
       return void 0;
     return { started, kind, bytes };
   }
+  function fileBytes(content) {
+    try {
+      let source;
+      if (typeof content === "string") {
+        if (content.length > MAX_WRITE_BYTES) return void 0;
+        source = new TextEncoder().encode(content);
+      } else if (content instanceof Uint8Array) {
+        source = content;
+      } else {
+        return void 0;
+      }
+      const length = source.length;
+      if (length > MAX_WRITE_BYTES) return void 0;
+      const copy = new Uint8Array(length);
+      copy.set(source);
+      return copy;
+    } catch {
+      return void 0;
+    }
+  }
+  function written(value, sent) {
+    if (!record(value)) return void 0;
+    const { path, revision, size, sha256: digest } = value;
+    if (path !== sent.path || !count(revision) || revision < 2 || size !== sent.size || !sha256(digest) || digest !== sent.sha256)
+      return void 0;
+    return { path, revision, size, sha256: digest };
+  }
   function start(config) {
     if (window.artifree !== void 0)
       throw new Error("The Artifree runtime was already installed.");
@@ -270,7 +430,7 @@ var __ArtifreeBootstrap = (() => {
           refusal: options.refusal
         });
         try {
-          channel.port1.postMessage({ ...message, id });
+          channel.port1.postMessage({ ...message, id }, options.transfer ?? []);
         } catch {
           settle(id);
           reject(new RuntimeRequestFailure("unavailable"));
@@ -295,6 +455,25 @@ var __ArtifreeBootstrap = (() => {
           { type: "source.read", path, offset, length },
           (reply) => part(reply.part, asked),
           { timeout: READ_TIMEOUT_MS }
+        );
+      },
+      write(request) {
+        const fields = argument(request, ["path", "content", "retryId"]);
+        if (fields === void 0) return invalid();
+        const { path, content, retryId } = fields;
+        if (typeof path !== "string" || !isPackagePath(path) || typeof retryId !== "string" || !RETRY_ID.test(retryId))
+          return invalid();
+        const bytes = fileBytes(content);
+        if (bytes === void 0) return invalid();
+        const sent = {
+          path,
+          size: bytes.length,
+          sha256: sha256Hex(bytes)
+        };
+        return call(
+          { type: "source.write", retryId, path, bytes: bytes.buffer },
+          (reply) => written(reply.written, sent),
+          { timeout: WRITE_TIMEOUT_MS, transfer: [bytes.buffer] }
         );
       },
       requestDownload(request) {

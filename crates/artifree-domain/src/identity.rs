@@ -173,11 +173,30 @@ impl fmt::Display for ActorId {
     }
 }
 
-/// A client-chosen key that makes a mutating request safe to retry.
+/// A key that makes a mutating request safe to retry.
 ///
-/// Keys are scoped to the actor that sent them.
+/// Keys are scoped to the actor that sent them. A caller-chosen key (an HTTP
+/// `Idempotency-Key`, an MCP argument) is parsed with [`FromStr`], which
+/// refuses the reserved namespace of runtime frame writes
+/// ([`RUNTIME_WRITE_PREFIX`]); the only way to build a key in that namespace
+/// is [`RequestKey::runtime_write`]. A frame's retry identity can therefore
+/// never equal, and never be made equal by, a key an agent or the owner's
+/// own client sends.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestKey(String);
+
+/// The start of every key [`RequestKey::runtime_write`] builds. No key parsed
+/// from text may start with it, in any letter case.
+pub const RUNTIME_WRITE_PREFIX: &str = "rtw:";
+
+/// Longest retry identity a runtime frame supplies, so that the whole key
+/// stays within 128 characters: the prefix, an artifact identifier, a
+/// 32-character view, a generation of at most 16 digits, three separators and
+/// the identity (4 + 36 + 32 + 16 + 3 + 36 = 127).
+pub const MAX_RUNTIME_RETRY_ID: usize = 36;
+
+/// Shortest retry identity a runtime frame supplies.
+pub const MIN_RUNTIME_RETRY_ID: usize = 8;
 
 impl RequestKey {
     /// The canonical string form.
@@ -185,12 +204,70 @@ impl RequestKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The key of one runtime frame write: scoped to the artifact, the view
+    /// and the view's generation, so two artifacts, two views, or a view and
+    /// its replacement cannot share a key, whatever identity the frame
+    /// picks. The same frame call retried with the same identity is the same
+    /// key; the store then replays the first outcome instead of committing
+    /// again (decision 0033).
+    ///
+    /// # Errors
+    ///
+    /// When `view` is not 1 to 32 ASCII letters and digits, `generation` is
+    /// not a safe integer from 1, or `retry_id` is not 8 to 36 ASCII
+    /// letters, digits, `-` or `_`. None of them may hold a `:`, which
+    /// separates the parts.
+    pub fn runtime_write(
+        artifact: &ArtifactId,
+        view: &str,
+        generation: u64,
+        retry_id: &str,
+    ) -> Result<Self, InvalidValue> {
+        const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+        let word = |value: &str, min: usize, max: usize, extra: &[u8]| {
+            (min..=max).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || extra.contains(&byte))
+        };
+        if !word(view, 1, 32, b"") {
+            return Err(InvalidValue {
+                what: "runtime view",
+                rule: "expected 1-32 ASCII letters or digits",
+            });
+        }
+        if !(1..=MAX_SAFE_INTEGER).contains(&generation) {
+            return Err(InvalidValue {
+                what: "runtime generation",
+                rule: "expected a safe integer from 1",
+            });
+        }
+        if !word(retry_id, MIN_RUNTIME_RETRY_ID, MAX_RUNTIME_RETRY_ID, b"-_") {
+            return Err(InvalidValue {
+                what: "retry id",
+                rule: "expected 8-36 ASCII letters, digits, '-' or '_'",
+            });
+        }
+        Ok(Self(format!(
+            "{RUNTIME_WRITE_PREFIX}{artifact}:{view}:{generation}:{retry_id}"
+        )))
+    }
 }
 
 impl FromStr for RequestKey {
     type Err = InvalidValue;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let reserved = value
+            .get(..RUNTIME_WRITE_PREFIX.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(RUNTIME_WRITE_PREFIX));
+        if reserved {
+            return Err(InvalidValue {
+                what: "request key",
+                rule: "the prefix 'rtw:' is reserved",
+            });
+        }
         if (8..=128).contains(&value.len())
             && value
                 .bytes()
@@ -344,6 +421,90 @@ mod tests {
         assert!("cli-1f2e3d4c".parse::<RequestKey>().is_ok());
         for value in ["short", "has space-1234", "slash/123456", &"k".repeat(129)] {
             assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn the_runtime_write_namespace_cannot_be_parsed_from_text() {
+        for value in [
+            "rtw:anything-at-all",
+            "RTW:anything-at-all",
+            "rTw:anything-at-all",
+            "rtw:",
+        ] {
+            assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
+        // Only the prefix is reserved, not the letters.
+        assert!("rtw-anything".parse::<RequestKey>().is_ok());
+        assert!("xrtw:anything".parse::<RequestKey>().is_ok());
+        // A key built by the constructor is not accepted back as text, so no
+        // caller can replay or forge a frame's key by echoing one.
+        let artifact = ArtifactId::from_random([7; 16]);
+        let built = RequestKey::runtime_write(&artifact, "v", 1, "retry-0001");
+        let built = built.map(|key| key.as_str().to_owned());
+        assert!(
+            built
+                .as_deref()
+                .is_ok_and(|key| key.parse::<RequestKey>().is_err()),
+            "{built:?}"
+        );
+    }
+
+    #[test]
+    fn a_runtime_write_key_is_scoped_to_artifact_view_generation_and_identity() {
+        let one = ArtifactId::from_random([1; 16]);
+        let two = ArtifactId::from_random([2; 16]);
+        let key = |artifact: &ArtifactId, view: &str, generation: u64, retry: &str| {
+            RequestKey::runtime_write(artifact, view, generation, retry)
+                .map(|key| key.as_str().to_owned())
+        };
+        let base = key(&one, "view1", 3, "retry-0001");
+        assert_eq!(base, key(&one, "view1", 3, "retry-0001"), "a retry");
+        for other in [
+            key(&two, "view1", 3, "retry-0001"),
+            key(&one, "view2", 3, "retry-0001"),
+            key(&one, "view1", 4, "retry-0001"),
+            key(&one, "view1", 3, "retry-0002"),
+        ] {
+            assert!(other.is_ok());
+            assert_ne!(base, other);
+        }
+        assert!(
+            base.as_deref()
+                .is_ok_and(|text| text.starts_with(RUNTIME_WRITE_PREFIX))
+        );
+    }
+
+    #[test]
+    fn the_longest_runtime_write_key_is_a_valid_key_length() {
+        let artifact = ArtifactId::from_random([9; 16]);
+        let longest = RequestKey::runtime_write(
+            &artifact,
+            &"f".repeat(32),
+            9_007_199_254_740_991,
+            &"r".repeat(MAX_RUNTIME_RETRY_ID),
+        );
+        assert_eq!(longest.map(|key| key.as_str().len()), Ok(127));
+    }
+
+    #[test]
+    fn a_runtime_write_key_refuses_parts_that_could_blur_its_scope() {
+        let artifact = ArtifactId::from_random([1; 16]);
+        for (view, generation, retry) in [
+            ("", 1, "retry-0001"),
+            ("vi:ew", 1, "retry-0001"),
+            (&"v".repeat(33), 1, "retry-0001"),
+            ("view", 0, "retry-0001"),
+            ("view", 9_007_199_254_740_992, "retry-0001"),
+            ("view", 1, "short"),
+            ("view", 1, "retry:0001"),
+            ("view", 1, "retry 0001"),
+            ("view", 1, &"r".repeat(MAX_RUNTIME_RETRY_ID + 1)),
+        ] {
+            assert!(
+                RequestKey::runtime_write(&artifact, view, generation, retry).is_err(),
+                "accepted {view:?} {generation} {retry:?}"
+            );
         }
     }
 }

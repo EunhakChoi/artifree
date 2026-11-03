@@ -1,12 +1,14 @@
 /**
- * Capability names. `metadata.read`, `source.read` and `source.download` are
- * supported (decisions 0020 and 0032); the others are proposed. A name is not
- * a grant: the user grants each one separately in the workspace.
+ * Capability names. `metadata.read`, `source.read`, `source.download` and
+ * `source.write` are supported (decisions 0020, 0032 and 0033); the others
+ * are proposed. A name is not a grant: the user grants each one separately in
+ * the workspace.
  */
 export type RuntimeCapability =
   | 'metadata.read'
   | 'source.read'
   | 'source.download'
+  | 'source.write'
   | 'model.generate'
   | 'data.read'
   | 'data.write'
@@ -103,6 +105,29 @@ export interface DownloadReceipt {
   readonly bytes: number;
 }
 
+/**
+ * One file to save. `content` is text (saved as UTF-8) or bytes, at most
+ * 1,048,576 bytes. `retryId` is 8 to 36 ASCII letters, digits, `-` or `_`:
+ * choose a new one for each save, and keep it to retry the same save.
+ */
+export interface SourceWriteRequest {
+  readonly path: string;
+  readonly content: string | Uint8Array;
+  readonly retryId: string;
+}
+
+/**
+ * The revision a save made. The frame has checked it against what it sent:
+ * `path` is the one named, `size` the number of bytes sent and `sha256` their
+ * digest. `revision` is the revision after the one this view is pinned to.
+ */
+export interface WriteReceipt {
+  readonly path: string;
+  readonly revision: number;
+  readonly size: number;
+  readonly sha256: string;
+}
+
 /** Operations on the pinned revision's source. */
 export interface SourceRuntime {
   /** Lists the files; needs the `source.read` grant. */
@@ -117,6 +142,16 @@ export interface SourceRuntime {
   requestDownload(request?: {
     readonly path: string;
   }): Promise<DownloadReceipt>;
+  /**
+   * Saves one file as a new revision; needs the `source.write` grant, which
+   * lets the app change this artifact, and asks the user nothing more.
+   * A view saves once: the new revision makes this view stale, so the next
+   * save needs a new view and the user's consent again (`stale_view`).
+   * Retrying with the same `retryId` and bytes after an unanswered attempt
+   * is answered with the first outcome, while this view lives, and never
+   * saves twice.
+   */
+  write(request: SourceWriteRequest): Promise<WriteReceipt>;
 }
 
 /** What an opted-in frame can do, each operation subject to its own grant. */

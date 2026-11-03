@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { ArtifreeClient, isRetryId } from '../../packages/client/dist/index.js';
 
 // The workspace host's rules are web code without DOM or React imports;
 // bundle them as they ship and drive them with an injected clock.
@@ -65,6 +66,15 @@ function clock() {
     },
     live: () => timers.filter((timer) => timer.live).length,
   };
+}
+
+/** Waits, a turn at a time, for a condition made by real asynchronous work. */
+async function until(condition) {
+  for (let turn = 0; turn < 1000; turn += 1) {
+    if (condition()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail('The condition never became true.');
 }
 
 async function settle() {
@@ -305,8 +315,8 @@ function rpcWith(overrides = {}) {
   const saved = [];
   const bucket = new TokenBucket(time.now);
   const rpc = new FrameRpc({
-    client,
-    view,
+    client: overrides.realClient ?? client,
+    view: overrides.view ?? view,
     ask: async (shown, signal) => {
       log.push('ask');
       return (overrides.ask ?? (async () => 'accepted'))(shown, signal);
@@ -423,8 +433,10 @@ test('The host judges the shared path fixture as the domain does', async () => {
       kind: 'file',
       path,
     });
+    const write = parseCall({ ...save, path });
     assert.equal(read !== undefined, error === null, JSON.stringify(path));
     assert.equal(download !== undefined, error === null, JSON.stringify(path));
+    assert.equal(write !== undefined, error === null, JSON.stringify(path));
   }
   // The paths a person might actually mistype.
   for (const path of ['../a.txt', 'a b.txt', 'a//b.txt', 'LICENSE', '/a.txt'])
@@ -446,6 +458,7 @@ test('The frame is told a closed word for a failure, never the failure', () => {
     [new StatusError(413, 'payload_too_large'), 'invalid_request'],
     [new StatusError(416, 'invalid_request'), 'invalid_request'],
     [new StatusError(422, 'invalid_request'), 'invalid_request'],
+    [new StatusError(422, 'request_key_reused'), 'invalid_request'],
     [new StatusError(500, 'internal'), 'unavailable'],
     [new StatusError(503, 'unavailable'), 'unavailable'],
     [new StatusError(401, 'unauthenticated'), 'unavailable'],
@@ -525,6 +538,14 @@ test('A flood costs the workspace a token each and the server only the burst', a
   ]);
 });
 
+const save = {
+  type: 'source.write',
+  id: 1,
+  retryId: 'retry-0001',
+  path: 'a.txt',
+  bytes: new ArrayBuffer(3),
+};
+
 test('A call the host cannot parse is still answered, at once, and holds no slot', async () => {
   const wrong = [
     { type: 'source.read', id: 1, path: '../a.txt', offset: 0, length: 1 },
@@ -558,6 +579,11 @@ test('A call the host cannot parse is still answered, at once, and holds no slot
     { type: 'source.list', id: 16, path: 'a.txt' },
     { type: 'metadata', id: 17, extra: true },
     { type: 'cancel', id: 18, extra: true },
+    { ...save, id: 19, retryId: 'short' },
+    { ...save, id: 20, path: '../a.txt' },
+    { ...save, id: 21, bytes: new ArrayBuffer(1_048_577) },
+    { ...save, id: 22, bytes: new Uint8Array(3) },
+    { ...save, id: 23, extra: 1 },
   ];
   const { rpc, sent, log } = rpcWith();
   for (const message of wrong) rpc.handle(message);
@@ -929,4 +955,229 @@ test('A save the browser could not start releases its URL and says so', () => {
   );
   assert.deepEqual(revoked, ['blob:1']);
   assert.equal(time.live(), 0);
+});
+
+// ---- saving a file (decision 0033) ----
+
+test('A save is a call only with a retry identity, a path and bytes within the bound', () => {
+  for (const bytes of [new ArrayBuffer(0), new ArrayBuffer(1_048_576)]) {
+    for (const retryId of ['12345678', 'r'.repeat(36), 'a-B_9-zZ_0'])
+      assert.equal(
+        parseCall({ ...save, retryId, bytes })?.type,
+        'source.write',
+        `${retryId} ${bytes.byteLength}`,
+      );
+  }
+  const { id: _id, ...withoutId } = save;
+  const bad = [
+    { ...save, retryId: '1234567' },
+    { ...save, retryId: 'r'.repeat(37) },
+    { ...save, retryId: 'retry:001' },
+    { ...save, retryId: 'retry 001' },
+    { ...save, retryId: 7 },
+    { ...save, path: '../a.txt' },
+    { ...save, path: 5 },
+    { ...save, bytes: new ArrayBuffer(1_048_577) },
+    { ...save, bytes: new Uint8Array(3) },
+    { ...save, bytes: new DataView(new ArrayBuffer(3)) },
+    { ...save, bytes: new SharedArrayBuffer(3) },
+    { ...save, bytes: 'abc' },
+    { ...save, bytes: [1, 2, 3] },
+    { ...save, bytes: null },
+    { ...save, extra: 1 },
+    withoutId,
+    { type: 'source.write', id: 1, path: 'a.txt', bytes: new ArrayBuffer(3) },
+  ];
+  for (const message of bad)
+    assert.equal(parseCall(message), undefined, JSON.stringify(message));
+});
+
+test('The host and the client accept the same retry identities', () => {
+  for (const retryId of [
+    '',
+    'a',
+    '1234567',
+    '12345678',
+    'r'.repeat(36),
+    'r'.repeat(37),
+    'a-B_9-zZ_0',
+    'a b c d e f g',
+    'retry:0001',
+    'retry.0001',
+    'retry\n0001',
+    'rétry-0001',
+  ])
+    assert.equal(
+      parseCall({ ...save, retryId }) !== undefined,
+      isRetryId(retryId),
+      JSON.stringify(retryId),
+    );
+});
+
+const SESSION = 'e'.repeat(32);
+const savedView = {
+  url: `http://127.0.0.1:7411/r/${'b'.repeat(64)}/`,
+  enabled: true,
+  session_id: SESSION,
+  artifact_id: `art_${'0'.repeat(32)}`,
+  revision: 3,
+  head_revision: 3,
+  sdk: 'artifree.app.v1',
+  declared: ['source.write'],
+  supported: ['source.write'],
+  granted: ['source.write'],
+  grant_version: 1,
+  view_id: 'd'.repeat(32),
+  generation: 1,
+  initialization: 'c'.repeat(64),
+  expires_at_ms: 1_000_000,
+  lease_ms: 900_000,
+};
+const HELLO_SHA256 =
+  '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+
+/** A rpc over the real client, whose server `respond`s to a save. */
+async function savingRpc(respond, overrides = {}) {
+  const requests = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/runtime-sessions'))
+        return Response.json({ session_id: SESSION });
+      requests.push({ url, init, body: JSON.parse(init.body) });
+      return respond(requests.at(-1));
+    },
+  });
+  await client.openRuntimeSession();
+  return {
+    ...rpcWith({ ...overrides, view: savedView, realClient: client }),
+    requests,
+  };
+}
+
+const hello = () => new TextEncoder().encode('hello').buffer;
+const receipt = (overrides = {}) => ({
+  path: 'a.txt',
+  revision: 4,
+  size: 5,
+  sha256: HELLO_SHA256,
+  ...overrides,
+});
+
+test('A save goes to the server with the bytes the frame sent, and the frame hears the receipt', async () => {
+  const { rpc, sent, requests } = await savingRpc(() =>
+    Response.json(receipt()),
+  );
+  rpc.handle({ ...save, id: 5, bytes: hello() });
+  await until(() => sent.length === 1);
+  assert.equal(requests.length, 1);
+  assert.ok(
+    requests[0].url.endsWith(
+      `/revisions/3/runtime-views/${savedView.view_id}/1/source/write`,
+    ),
+  );
+  assert.deepEqual(requests[0].body, {
+    initialization: savedView.initialization,
+    retry_id: 'retry-0001',
+    path: 'a.txt',
+    content: 'aGVsbG8=',
+  });
+  assert.deepEqual(
+    sent.map(({ message }) => message),
+    [{ id: 5, ok: true, written: receipt() }],
+  );
+  assert.equal(rpc.pending, 0);
+});
+
+test('A receipt for other bytes than the frame sent never reaches the frame as a success', async () => {
+  const wrong = [
+    receipt({ sha256: 'f'.repeat(64) }),
+    receipt({ size: 6 }),
+    receipt({ path: 'b.txt' }),
+    // The view is revision 3, so its save is revision 4 and no other.
+    receipt({ revision: 3 }),
+    receipt({ revision: 5 }),
+    { ...receipt(), extra: undefined, sha256: undefined },
+  ];
+  for (const body of wrong) {
+    const { rpc, sent } = await savingRpc(() => Response.json(body));
+    rpc.handle({ ...save, id: 1, bytes: hello() });
+    await until(() => sent.length === 1);
+    assert.deepEqual(
+      sent.map(({ message }) => message),
+      [{ id: 1, ok: false, code: 'unavailable' }],
+      JSON.stringify(body),
+    );
+  }
+});
+
+test('A refused save is reported as its closed word and nothing the server said', async () => {
+  const refusals = [
+    [409, 'revision_conflict', 'stale_view'],
+    [403, 'forbidden', 'denied'],
+    [404, 'not_found', 'not_found'],
+    [422, 'request_key_reused', 'invalid_request'],
+    [422, 'invalid_request', 'invalid_request'],
+    [429, 'rate_limited', 'rate_limited'],
+    [503, 'unavailable', 'unavailable'],
+  ];
+  for (const [status, code, word] of refusals) {
+    const { rpc, sent } = await savingRpc(() =>
+      Response.json(
+        { error: { code, message: 'SECRET detail', current_revision: 9 } },
+        { status },
+      ),
+    );
+    rpc.handle({ ...save, id: 1, bytes: hello() });
+    await until(() => sent.length === 1);
+    assert.deepEqual(
+      sent.map(({ message }) => message),
+      [{ id: 1, ok: false, code: word }],
+      `${status} ${code}`,
+    );
+  }
+});
+
+test('A save the frame gives up on is aborted and gets no answer', async () => {
+  const gate = deferred();
+  let signal;
+  const { rpc, sent } = await savingRpc(({ init }) => {
+    signal = init.signal;
+    return gate.promise;
+  });
+  rpc.handle({ ...save, id: 1, bytes: hello() });
+  await until(() => signal !== undefined);
+  assert.equal(rpc.pending, 1);
+  assert.equal(signal.aborted, false);
+  rpc.handle({ type: 'cancel', id: 1 });
+  assert.equal(signal.aborted, true);
+  gate.resolve(Response.json(receipt()));
+  await until(() => rpc.pending === 0);
+  assert.deepEqual(sent, []);
+});
+
+test('A save costs a token and holds a waiting slot like any other call', async () => {
+  const gate = deferred();
+  const { rpc, sent } = await savingRpc(() => gate.promise, {
+    take: () => false,
+  });
+  rpc.handle({ ...save, id: 1, bytes: hello() });
+  await settle();
+  assert.deepEqual(
+    sent.map(({ message }) => message),
+    [{ id: 1, ok: false, code: 'rate_limited' }],
+  );
+  assert.equal(rpc.pending, 0);
+  const full = await savingRpc(() => gate.promise);
+  for (let id = 1; id <= FRAME_PENDING_CAP; id += 1)
+    full.rpc.handle({ ...save, id, bytes: hello() });
+  full.rpc.handle({ ...save, id: FRAME_PENDING_CAP + 1, bytes: hello() });
+  await settle();
+  assert.equal(full.rpc.pending, FRAME_PENDING_CAP);
+  assert.deepEqual(
+    full.sent.map(({ message }) => message),
+    [{ id: FRAME_PENDING_CAP + 1, ok: false, code: 'rate_limited' }],
+  );
+  gate.resolve(Response.json(receipt()));
 });

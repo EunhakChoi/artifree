@@ -38,6 +38,8 @@ export type ApiBody =
   | RuntimeSourcePart
   | RuntimeDownloadRequest
   | RuntimeDownloadOffer
+  | RuntimeSourceWriteRequest
+  | RuntimeSourceWriteReceipt
   | ErrorResponse
   | ArtifactChange
   | FeedPosition
@@ -910,6 +912,57 @@ export interface RuntimeDownloadOffer {
    * The file's size in bytes for `file`; null for `archive`.
    */
   size: number | null;
+}
+/**
+ * Saves one file as the next revision of the artifact a runtime view is
+ * pinned to, on behalf of the frame (needs the `source.write` grant). The
+ * base is the view's own revision: a view that is not the artifact's
+ * current revision is refused with the current one.
+ */
+export interface RuntimeSourceWriteRequest {
+  /**
+   * The file's bytes as base64, at most 1,048,576 bytes.
+   */
+  content: string;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * Package path of the file; a new path adds a file.
+   */
+  path: string;
+  /**
+   * The frame's retry identity for this save: 8 to 36 ASCII letters,
+   * digits, `-` or `_`. The server derives the idempotency key from it,
+   * the artifact, the view and its generation, so a retry with the same
+   * identity and file is answered with the first outcome, and the same
+   * identity with another file is refused.
+   */
+  retry_id: string;
+}
+/**
+ * What a save made, which the client checks against the bytes it sent. The
+ * server read the new revision back before it answered: the file holds
+ * exactly the bytes sent and every other file is as it was.
+ */
+export interface RuntimeSourceWriteReceipt {
+  /**
+   * Package path of the file, as requested.
+   */
+  path: string;
+  /**
+   * The revision the save made: the view's revision plus one.
+   */
+  revision: number;
+  /**
+   * The file's SHA-256 digest, as 64 lowercase hex digits.
+   */
+  sha256: string;
+  /**
+   * The file's size in bytes: the number of bytes sent.
+   */
+  size: number;
 }
 /**
  * Body of every non-2xx JSON response.

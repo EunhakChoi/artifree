@@ -21,6 +21,15 @@ const CAPABILITY_CONTROLS = [
     allow: 'Allow download requests',
     revoke: 'Revoke download requests',
   },
+  {
+    name: 'source.write',
+    allow: 'Allow source editing',
+    revoke: 'Revoke source editing',
+    // Shown beside the control, because this grant is the user's only
+    // confirmation of what the app then does by itself (decision 0033).
+    warning:
+      'Allowing this lets the app change files of this artifact. A save creates a new revision without asking you again; earlier revisions stay and can be restored. After a save this preview is out of date, and you must allow editing again for the next one.',
+  },
 ] as const;
 
 interface RuntimePermissionsProps {
@@ -67,24 +76,34 @@ export function RuntimePermissions({
         CAPABILITY_CONTROLS.filter(
           ({ name }) =>
             view.supported.includes(name) && view.declared.includes(name),
-        ).map(({ name, allow, revoke }) => {
+        ).map((control) => {
+          const { name, allow, revoke } = control;
           const granted = view.granted.includes(name);
+          const warning = 'warning' in control ? control.warning : undefined;
+          const noteId = `runtime-${name}-note`;
           return (
-            <Button
-              key={name}
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                onChange(
-                  granted
-                    ? view.granted.filter((item) => item !== name)
-                    : [...view.granted, name],
-                )
-              }
-            >
-              {granted ? revoke : allow}
-            </Button>
+            <div key={name} className="flex flex-col gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-describedby={warning === undefined ? undefined : noteId}
+                onClick={() =>
+                  onChange(
+                    granted
+                      ? view.granted.filter((item) => item !== name)
+                      : [...view.granted, name],
+                  )
+                }
+              >
+                {granted ? revoke : allow}
+              </Button>
+              {warning === undefined ? null : (
+                <p id={noteId} className="text-xs text-muted-foreground">
+                  {warning}
+                </p>
+              )}
+            </div>
           );
         })
       ) : null}

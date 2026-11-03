@@ -3,9 +3,9 @@
 Artifree is in early development: local HTML artifacts work end to end
 (decision 0003), including MCP tools for agents (decision 0004), and an
 opted-in preview can read its own metadata, list and read its own pinned
-source, and ask the user to save a file, each with its own connection grant
-(decisions 0019, 0020 and 0032). Other runtime capabilities, including any
-write from a preview, remain proposed. Keep implemented and proposed behavior
+source, ask the user to save a file, and, under a separate edit grant, save one
+file as a new revision, each with its own connection grant (decisions 0019,
+0020, 0032 and 0033). Other runtime capabilities remain proposed. Keep implemented and proposed behavior
 explicitly separate in code, UI, docs, and completion reports.
 
 Read `docs/roadmap.md` before starting the next feature. It records PR-sized

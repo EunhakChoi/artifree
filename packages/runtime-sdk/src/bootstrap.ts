@@ -6,8 +6,11 @@ import type {
   SourceListing,
   SourcePart,
   SourceReadRequest,
+  SourceWriteRequest,
+  WriteReceipt,
 } from './index.js';
 import { isPackagePath } from './package-path.js';
+import { sha256Hex } from './sha256.js';
 
 /** Server-issued initialization of a single frame and view generation. */
 export interface RuntimeInitialization {
@@ -21,11 +24,17 @@ export interface RuntimeInitialization {
 const MAX_PART_BYTES = 1_048_576;
 const MAX_PATH_CHARS = 1024;
 const MAX_LISTED_FILES = 256;
+/** The most bytes of one file a frame may save, as the server's contract states. */
+const MAX_WRITE_BYTES = 1_048_576;
+/** The retry identity a save carries: the server derives its key from it. */
+const RETRY_ID = /^[A-Za-z0-9_-]{8,36}$/;
 /** Calls waiting for an answer at once. */
 const MAX_PENDING = 64;
 /** A read waits this long; a download waits for a person, so far longer. */
 const READ_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
+/** A save waits for the commit and its read-back. */
+const WRITE_TIMEOUT_MS = 30_000;
 
 const FAILURE_CODES: Record<RuntimeFailureCode, string> = {
   invalid_request: 'The runtime request was not valid.',
@@ -210,6 +219,56 @@ function receipt(value: unknown): DownloadReceipt | undefined {
   return { started, kind, bytes };
 }
 
+/** The bytes of a file as a private copy, or undefined if they are not usable. */
+function fileBytes(content: unknown): Uint8Array<ArrayBuffer> | undefined {
+  try {
+    let source: Uint8Array;
+    if (typeof content === 'string') {
+      // A string of n UTF-16 units encodes to at least n bytes.
+      if (content.length > MAX_WRITE_BYTES) return undefined;
+      source = new TextEncoder().encode(content);
+    } else if (content instanceof Uint8Array) {
+      source = content;
+    } else {
+      return undefined;
+    }
+    const length = source.length;
+    if (length > MAX_WRITE_BYTES) return undefined;
+    const copy = new Uint8Array(length);
+    copy.set(source);
+    return copy;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What a save receipt must say, from the bytes the frame sent. */
+interface Saved {
+  readonly path: string;
+  readonly size: number;
+  readonly sha256: string;
+}
+
+/**
+ * A save receipt, checked against the bytes the frame sent: the path is the
+ * one it named, the size is the number of bytes sent, the digest is the
+ * SHA-256 of those bytes, and the revision is a later one than the first.
+ */
+function written(value: unknown, sent: Saved): WriteReceipt | undefined {
+  if (!record(value)) return undefined;
+  const { path, revision, size, sha256: digest } = value;
+  if (
+    path !== sent.path ||
+    !count(revision) ||
+    revision < 2 ||
+    size !== sent.size ||
+    !sha256(digest) ||
+    digest !== sent.sha256
+  )
+    return undefined;
+  return { path, revision, size, sha256: digest };
+}
+
 interface Waiting {
   readonly parse: (reply: Record<string, unknown>) => unknown;
   readonly resolve: (value: never) => void;
@@ -282,7 +341,11 @@ export function start(config: RuntimeInitialization): void {
   function call<T>(
     message: Record<string, unknown>,
     parse: (reply: Record<string, unknown>) => T | undefined,
-    options: { readonly timeout: number; readonly refusal?: string },
+    options: {
+      readonly timeout: number;
+      readonly refusal?: string;
+      readonly transfer?: Transferable[];
+    },
   ): Promise<T> {
     if (closed || performance.now() >= deadline)
       return Promise.reject(new RuntimeRequestFailure('expired'));
@@ -316,7 +379,7 @@ export function start(config: RuntimeInitialization): void {
         refusal: options.refusal,
       });
       try {
-        channel.port1.postMessage({ ...message, id });
+        channel.port1.postMessage({ ...message, id }, options.transfer ?? []);
       } catch {
         settle(id);
         reject(new RuntimeRequestFailure('unavailable'));
@@ -352,6 +415,30 @@ export function start(config: RuntimeInitialization): void {
         { type: 'source.read', path, offset, length },
         (reply) => part(reply.part, asked),
         { timeout: READ_TIMEOUT_MS },
+      );
+    },
+    write(request: SourceWriteRequest): Promise<WriteReceipt> {
+      const fields = argument(request, ['path', 'content', 'retryId']);
+      if (fields === undefined) return invalid();
+      const { path, content, retryId } = fields;
+      if (
+        typeof path !== 'string' ||
+        !isPackagePath(path) ||
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId)
+      )
+        return invalid();
+      const bytes = fileBytes(content);
+      if (bytes === undefined) return invalid();
+      const sent: Saved = {
+        path,
+        size: bytes.length,
+        sha256: sha256Hex(bytes),
+      };
+      return call(
+        { type: 'source.write', retryId, path, bytes: bytes.buffer },
+        (reply) => written(reply.written, sent),
+        { timeout: WRITE_TIMEOUT_MS, transfer: [bytes.buffer] },
       );
     },
     requestDownload(request?: {

@@ -102,9 +102,14 @@ returns bytes, answers `404` for a binding that does not match, `403` for a
 missing grant, and `409` for a head that moved, and limits frame traffic apart
 from the owner's. The workspace asks the server for an offer before it shows the
 user a prompt, and a download only starts after the user confirms
-([0032](decisions/0032-runtime-source-read-and-download.md)). Writing source
-from a frame (R11b) and the other capabilities remain proposed
-([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
+([0032](decisions/0032-runtime-source-read-and-download.md)). R11b adds
+`source.write` under its own consent: the server saves one file through the
+artifact service with the view's revision as the base and a key in a namespace
+only a frame can produce, reads the new revision back, and every side compares
+the receipt with the bytes it sent. The save moves the head, so the next view
+needs a new grant
+([0033](decisions/0033-runtime-source-write.md)). The other capabilities
+remain proposed ([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
 ## Local and server operation

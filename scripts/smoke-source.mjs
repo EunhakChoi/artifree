@@ -15,6 +15,13 @@ import { api, bytes } from './smoke-workspace.mjs';
  * grant; a page whose own snapshot says "granted" after the grant was
  * revoked) and over the protocol with the real client (an old generation, a
  * head that moved).
+ *
+ * A frame may also save one file under a separate edit grant (decision 0033).
+ * That is checked in the browser: refused without the grant and for arguments
+ * that break the rules, then saved, with the stored bytes of the new revision
+ * compared with the bytes the frame sent, and the next view starting without
+ * the grant. The retry, the moved head and the stale view are checked over
+ * the protocol with the real client.
  */
 
 const text = 'héllo wörld — 日本語 ✓\nsecond line with "quotes" & <tags>\n';
@@ -97,7 +104,13 @@ async function createProbe(server, title) {
 }
 
 /** Opens the artifact's preview in its own browser context. */
-async function open(browser, origin, server, artifact) {
+async function open(
+  browser,
+  origin,
+  server,
+  artifact,
+  declared = 'source.download, source.read',
+) {
   const context = await browser.newContext({ acceptDownloads: true });
   try {
     const page = await context.newPage();
@@ -105,7 +118,14 @@ async function open(browser, origin, server, artifact) {
     const views = [];
     const errors = [];
     const downloads = [];
+    const answers = [];
     page.on('pageerror', (error) => errors.push(error.message));
+    // A frame that is replaced by the next revision cannot be asked what it
+    // answered; the probe page says each answer on the console as well.
+    page.on('console', (message) => {
+      const line = message.text();
+      if (line.startsWith('answer ')) answers.push(line.slice(7));
+    });
     page.on('download', (download) => downloads.push(download));
     page.on('response', (response) => {
       const request = response.request();
@@ -128,9 +148,7 @@ async function open(browser, origin, server, artifact) {
     const permissions = workspace.getByRole('region', {
       name: 'Runtime permissions',
     });
-    await expect(
-      permissions.getByText('Declared: source.download, source.read'),
-    ).toBeVisible();
+    await expect(permissions.getByText(`Declared: ${declared}`)).toBeVisible();
     await expect(permissions.getByText('Granted: none')).toBeVisible();
     return {
       context,
@@ -138,6 +156,7 @@ async function open(browser, origin, server, artifact) {
       workspace,
       permissions,
       errors,
+      answers,
       downloads,
       views: async () => (await Promise.all(views)).filter(Boolean),
       frame: workspace.frameLocator('iframe[title^="Preview of"]'),
@@ -173,6 +192,14 @@ async function act(opened, name) {
     .poll(async () => result.textContent(), { timeout: 20_000 })
     .not.toBe('waiting');
   return JSON.parse(await result.textContent());
+}
+
+/** Presses a button and returns the answer the frame said on the console. */
+async function ask(opened, name) {
+  const seen = opened.answers.length;
+  await opened.frame.getByRole('button', { name }).click();
+  await expect.poll(() => opened.answers.length).toBeGreaterThan(seen);
+  return JSON.parse(opened.answers[seen]);
 }
 
 /** Presses a download button, then answers the workspace's prompt. */
@@ -452,7 +479,232 @@ async function checkOldViews(server, artifact) {
   await client.closeRuntimeSession();
 }
 
-/** The checks of decision 0032 in a real browser. */
+const edited = 'saved by the frame — é 日本\n';
+const added = 'a new file\n';
+const editManifest = JSON.stringify({
+  sdk: 'artifree.app.v1',
+  capabilities: ['source.read', 'source.write'],
+});
+const editEntry = `<!doctype html><html lang="en"><head><!-- artifree-runtime -->
+<meta charset="utf-8"><title>Edit probe</title></head><body>
+<h1>Edit probe</h1><output id="result">waiting</output>
+<div>
+<button id="list">List files</button>
+<button id="save-notes">Save notes</button>
+<button id="save-new">Save new file</button>
+<button id="save-bad-path">Save bad path</button>
+<button id="save-large">Save too large</button>
+</div>
+<script>
+const out = document.querySelector('#result');
+const show = (value) => {
+  const line = JSON.stringify(value);
+  out.textContent = line;
+  console.log('answer ' + line);
+};
+const failure = (error) => show({ error: error && error.code ? error.code : 'unknown' });
+const run = (id, action) => document.querySelector(id).addEventListener('click', () => {
+  action().then(show, failure);
+});
+const save = (path, content, retryId) => window.artifree.source.write({ path, content, retryId });
+run('#list', () => window.artifree.source.list());
+run('#save-notes', () => save('notes.txt', ${JSON.stringify(edited)}, 'smoke-notes-0001'));
+run('#save-new', () => save('added/new.txt', ${JSON.stringify(added)}, 'smoke-added-0001'));
+run('#save-bad-path', () => save('../escape.txt', 'x', 'smoke-escape-0001'));
+run('#save-large', () => save('big.txt', 'a'.repeat(1048577), 'smoke-large-0001'));
+</script></body></html>`;
+
+async function createEditProbe(server, title) {
+  const { artifact } = await api(server, 'POST', '/v1/artifacts', {
+    title,
+    files: [
+      { path: 'index.html', encoding: 'utf8', content: editEntry },
+      {
+        path: 'artifree-runtime.json',
+        encoding: 'utf8',
+        content: editManifest,
+      },
+      { path: 'notes.txt', encoding: 'utf8', content: text },
+    ],
+  });
+  return artifact;
+}
+
+/** Everything the owner's API says about one revision's file. */
+const fileAt = (server, artifact, revision, path) =>
+  bytes(
+    server,
+    `/v1/artifacts/${artifact.id}/revisions/${revision}/files/${path}`,
+  );
+const head = async (server, artifact) =>
+  (await api(server, 'GET', `/v1/artifacts/${artifact.id}`)).current_revision;
+
+/**
+ * A frame saves under its own grant. Each save makes the next revision with
+ * exactly the bytes sent; the workspace then shows that revision in a new
+ * view, which holds no grant until the user allows editing again.
+ */
+async function checkEditing(browser, origin, server, artifact) {
+  const opened = await open(
+    browser,
+    origin,
+    server,
+    artifact,
+    'source.read, source.write',
+  );
+  try {
+    const before = await fileAt(server, artifact, 1, 'notes.txt');
+    assert.deepEqual(before, Buffer.from(text));
+    const index = await fileAt(server, artifact, 1, 'index.html');
+
+    // Nothing is granted: the save is refused and no revision is made.
+    assert.deepEqual(await ask(opened, 'Save notes'), { error: 'denied' });
+    assert.equal(await head(server, artifact), 1);
+
+    // Editing is its own grant, and the screen says what it allows.
+    const control = opened.permissions.getByRole('button', {
+      name: 'Allow source editing',
+    });
+    await expect(control).toHaveAccessibleDescription(
+      /lets the app change files of this artifact.*new revision without asking you again.*allow editing again/s,
+    );
+    await allow(opened, 'Allow source editing', 'source.write');
+    await expect(
+      opened.permissions.getByRole('button', { name: 'Revoke source editing' }),
+    ).toBeVisible();
+
+    // Arguments that break the rules are refused, and nothing is saved.
+    assert.deepEqual(await ask(opened, 'Save bad path'), {
+      error: 'invalid_request',
+    });
+    assert.deepEqual(await ask(opened, 'Save too large'), {
+      error: 'invalid_request',
+    });
+    assert.equal(await head(server, artifact), 1);
+
+    // The save makes revision 2 with the bytes sent, and nothing else changes.
+    const viewBefore = await opened.element.getAttribute('src');
+    const saved = await ask(opened, 'Save notes');
+    const sent = Buffer.from(edited);
+    assert.equal(saved.path, 'notes.txt');
+    assert.equal(saved.revision, 2);
+    assert.equal(saved.size, sent.length);
+    assert.equal(saved.sha256, sha256(sent));
+    assert.equal(await head(server, artifact), 2);
+    assert.deepEqual(await fileAt(server, artifact, 2, 'notes.txt'), sent);
+    assert.deepEqual(await fileAt(server, artifact, 1, 'notes.txt'), before);
+    assert.deepEqual(await fileAt(server, artifact, 2, 'index.html'), index);
+
+    // The workspace follows to revision 2 in a new view with no grant: the
+    // permission did not survive the save.
+    await expect
+      .poll(() => opened.element.getAttribute('src'))
+      .not.toBe(viewBefore);
+    await expect(opened.permissions.getByText('Granted: none')).toBeVisible();
+    await expect(
+      opened.permissions.getByRole('button', { name: 'Allow source editing' }),
+    ).toBeVisible();
+    await expect(
+      opened.frame.getByRole('button', { name: 'Save new file' }),
+    ).toBeVisible();
+    assert.deepEqual(await ask(opened, 'Save new file'), { error: 'denied' });
+    assert.equal(await head(server, artifact), 2);
+
+    // Allowing again lets the next view add a file, as revision 3.
+    await allow(opened, 'Allow source editing', 'source.write');
+    const second = await ask(opened, 'Save new file');
+    assert.equal(second.path, 'added/new.txt');
+    assert.equal(second.revision, 3);
+    assert.equal(second.sha256, sha256(Buffer.from(added)));
+    assert.equal(await head(server, artifact), 3);
+    assert.deepEqual(
+      await fileAt(server, artifact, 3, 'added/new.txt'),
+      Buffer.from(added),
+    );
+    assert.deepEqual(await fileAt(server, artifact, 3, 'notes.txt'), sent);
+    const listed = await api(
+      server,
+      'GET',
+      `/v1/artifacts/${artifact.id}/revisions/2`,
+    );
+    assert.ok(!listed.files.some(({ path }) => path === 'added/new.txt'));
+    assert.deepEqual(opened.errors, []);
+  } finally {
+    await opened.context.close();
+  }
+}
+
+/** Saves over the protocol: a retry, a lost race and a head that moved. */
+async function checkEditingProtocol(server, artifact) {
+  const client = new ArtifreeClient({
+    baseUrl: server.api_url,
+    accessToken: server.token,
+  });
+  await client.openRuntimeSession();
+  const refused = async (promise, status) => {
+    const error = await promise.then(
+      () => assert.fail('The save must be refused.'),
+      (rejection) => rejection,
+    );
+    assert.equal(error.status, status);
+    return error;
+  };
+  const viewId = newRandomId();
+  const created = async (generation) => {
+    const view = await client.createRuntimeView(
+      artifact.id,
+      1,
+      viewId,
+      generation,
+    );
+    const page = await fetch(view.url);
+    assert.equal(page.status, 200);
+    await page.arrayBuffer();
+    return view;
+  };
+  const write = (view, retryId, content) =>
+    client.runtimeCall(view, (source, frame) =>
+      source.writeSource(
+        frame,
+        view,
+        { path: 'notes.txt', retryId, bytes: Buffer.from(content) },
+        undefined,
+      ),
+    );
+
+  const first = await created(1);
+  await client.setRuntimeGrant(first, ['source.write']);
+  // The view was issued before the grant, so it still does not hold it.
+  assert.equal(
+    (await refused(write(first, 'proto-retry-1', 'one'), 403)).code,
+    'forbidden',
+  );
+  const view = await created(2);
+  const receipt = await write(view, 'proto-retry-1', 'one');
+  assert.equal(receipt.revision, 2);
+  assert.equal(receipt.sha256, sha256(Buffer.from('one')));
+  assert.equal(await head(server, artifact), 2);
+
+  // The same retry replays the first outcome and makes no revision.
+  assert.deepEqual(await write(view, 'proto-retry-1', 'one'), receipt);
+  assert.equal(await head(server, artifact), 2);
+  // The same retry for other bytes is a different request under one identity.
+  await refused(write(view, 'proto-retry-1', 'two'), 422);
+  // Another retry loses to the commit that moved the head.
+  const lost = await refused(write(view, 'proto-retry-2', 'two'), 409);
+  assert.equal(lost.code, 'revision_conflict');
+  assert.equal(lost.currentRevision, 2);
+  assert.equal(await head(server, artifact), 2);
+  assert.deepEqual(
+    await fileAt(server, artifact, 2, 'notes.txt'),
+    Buffer.from('one'),
+  );
+  // The old generation of the view is gone.
+  await refused(write(first, 'proto-retry-3', 'three'), 404);
+  await client.closeRuntimeSession();
+}
+
+/** The checks of decisions 0032 and 0033 in a real browser. */
 export async function checkSource({
   browser,
   origin,
@@ -471,10 +723,22 @@ export async function checkSource({
   await checkStaleSnapshot(browser, origin, server, other);
   const old = await createProbe(server, 'Source probe protocol');
   await checkOldViews(server, old);
+  const edit = await createEditProbe(server, 'Source edit probe');
+  await checkEditing(browser, origin, server, edit);
+  const editOld = await createEditProbe(server, 'Source edit protocol');
+  await checkEditingProtocol(server, editOld);
   return {
     read: 'parts joined by digest',
     saved: 'file, binary and archive by digest',
-    refused: ['no grant', 'stale snapshot', 'old generation', 'moved head'],
+    edited: 'two saves by digest, one view each',
+    refused: [
+      'no grant',
+      'stale snapshot',
+      'old generation',
+      'moved head',
+      'edit without its grant',
+      'lost race',
+    ],
     views: frame.views,
   };
 }

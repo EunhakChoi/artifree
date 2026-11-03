@@ -24,7 +24,7 @@ const CHANGE_FEED = /\/v1\/changes$/;
 // Group 1 is set for `previews` and a bare `runtime-views`, which issue a
 // preview or a view; a longer tail below `runtime-views` is a frame call.
 const REVISION_ROUTE =
-  /\/v1\/artifacts\/[^/]+\/revisions\/\d+\/(?:(previews|runtime-views)|runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download)))$/;
+  /\/v1\/artifacts\/[^/]+\/revisions\/\d+\/(?:(previews|runtime-views)|runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download|write)))$/;
 
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a

@@ -326,7 +326,9 @@ bridge or app-data, model, or file capabilities. The URL works for anyone
 who holds it until it expires. A separate, opted-in workspace preview can
 read its own artifact metadata (decision [0019](decisions/0019-runtime-metadata-bridge.md))
 and, after the user grants each, list and read its own source and ask the
-user to save a file (decision [0032](decisions/0032-runtime-source-read-and-download.md)).
+user to save a file (decision [0032](decisions/0032-runtime-source-read-and-download.md)),
+and, after a separate edit grant, save one file of its own artifact as a new
+revision (decision [0033](decisions/0033-runtime-source-write.md)).
 That bridge is a connection grant to the web page. **No MCP tool was added or
 changed for it**, and an agent token gives a preview nothing. An open web
 workspace shows an agent's saves as they are committed (decision

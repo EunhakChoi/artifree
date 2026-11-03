@@ -9,6 +9,7 @@ pub(crate) const SDK_PIN: &str = "artifree.app.v1";
 pub(crate) const METADATA_READ: &str = "metadata.read";
 pub(crate) const SOURCE_READ: &str = "source.read";
 pub(crate) const SOURCE_DOWNLOAD: &str = "source.download";
+pub(crate) const SOURCE_WRITE: &str = "source.write";
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 const MAX_CAPABILITIES: usize = 32;
 const MAX_CAPABILITY_BYTES: usize = 64;
@@ -20,17 +21,26 @@ pub(crate) enum Capability {
     MetadataRead,
     SourceDownload,
     SourceRead,
+    /// Saving a file as a new revision; the only capability that changes the
+    /// artifact (decision 0033).
+    SourceWrite,
 }
 
 impl Capability {
     /// Every supported capability, in name order.
-    pub(crate) const ALL: [Self; 3] = [Self::MetadataRead, Self::SourceDownload, Self::SourceRead];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::MetadataRead,
+        Self::SourceDownload,
+        Self::SourceRead,
+        Self::SourceWrite,
+    ];
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::MetadataRead => METADATA_READ,
             Self::SourceDownload => SOURCE_DOWNLOAD,
             Self::SourceRead => SOURCE_READ,
+            Self::SourceWrite => SOURCE_WRITE,
         }
     }
 
@@ -43,6 +53,7 @@ impl Capability {
             Self::MetadataRead => 1,
             Self::SourceDownload => 2,
             Self::SourceRead => 4,
+            Self::SourceWrite => 8,
         }
     }
 }
@@ -151,6 +162,7 @@ fn valid_capability(name: &str) -> bool {
 mod tests {
     use super::{
         Capability, CapabilitySet, METADATA_READ, RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ,
+        SOURCE_WRITE,
     };
 
     #[test]
@@ -193,7 +205,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             RuntimePolicy::supported(),
-            [METADATA_READ, SOURCE_DOWNLOAD, SOURCE_READ]
+            [METADATA_READ, SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE]
         );
         let read_only = RuntimePolicy::from_source(
             true,
@@ -213,6 +225,49 @@ mod tests {
         assert!(read_only.grant_of(&[METADATA_READ.to_owned()]).is_none());
         let legacy = RuntimePolicy::from_source(true, None)?;
         assert!(legacy.grant_of(&[SOURCE_READ.to_owned()]).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn writing_is_granted_on_its_own_and_never_implied_by_reading()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policy = RuntimePolicy::from_source(
+            true,
+            Some(
+                br#"{"sdk":"artifree.app.v1","capabilities":["source.read","source.download","source.write"]}"#,
+            ),
+        )?;
+        for others in [
+            vec![SOURCE_READ, SOURCE_DOWNLOAD],
+            vec![SOURCE_READ],
+            vec![SOURCE_DOWNLOAD],
+            vec![],
+        ] {
+            let granted = policy
+                .grant_of(
+                    &others
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect::<Vec<_>>(),
+                )
+                .ok_or("a declared capability must be grantable")?;
+            assert!(
+                !granted.contains(Capability::SourceWrite),
+                "{others:?} must not grant writing"
+            );
+        }
+        let write = policy
+            .grant_of(&[SOURCE_WRITE.to_owned()])
+            .ok_or("a declared capability must be grantable")?;
+        assert!(write.contains(Capability::SourceWrite));
+        assert!(!write.contains(Capability::SourceRead));
+        assert!(!write.contains(Capability::SourceDownload));
+        // Declaring reading does not declare writing.
+        let read_only = RuntimePolicy::from_source(
+            true,
+            Some(br#"{"sdk":"artifree.app.v1","capabilities":["source.read"]}"#),
+        )?;
+        assert!(read_only.grant_of(&[SOURCE_WRITE.to_owned()]).is_none());
         Ok(())
     }
 
