@@ -106,22 +106,34 @@ path, data_version, exists, value?}`.
    afterwards), and a value that cannot be written as JSON is the same error:
    it is never dropped or sent as absent. Shutdown (0006 decision 8), a
    revoked token, and a disabled user end the stream through the registrations
-   of 0006/0036: it registers with the change feed's registry **after** it
-   holds a place, and calls `AppState::ensure_current` after registering.
-   Nothing the stream held outlives it (the place, the registration, and the
-   subscription are dropped with the task).
+   of 0006/0036: like the change feed it registers with the change feed's
+   registry **before** its first read, and calls `AppState::ensure_current`
+   after registering. A revocation signals the registrations that exist when
+   it runs, so registering first is what makes it reach a request that
+   authenticated earlier. No new credential check exists to add: the token
+   store can find a token by its secret's hash, not confirm one by id, and
+   this record does not add an authentication path. The guarantee is
+   therefore the change feed's: `register` then `ensure_current` closes the
+   disable race, and the window for a token revoked after authentication and
+   before registration is the same one the feed has. A stream whose
+   revocation is already signalled sends nothing: the producer checks it
+   before every wait and send instead of leaving it to the random choice
+   among ready branches. Nothing the stream held outlives it (the place, the
+   registration, and the subscription are dropped with the task).
 8. **Limits.** Per actor 8 streams (`429 rate_limited`, `Retry-After: 5`) and
    per process 128 (`503 unavailable`, `Retry-After: 5`), both counted in one
    mutex-guarded table with at most 128 entries. The order of an open is
    fixed so storage work stays bounded: (1) validate the request without
    storage; (2) a **non-recording** check of both counts, refusing with zero
-   storage reads; (3) the first read, which is the access check, so a missing
-   or foreign artifact is the usual `404` and **holds no place and registers
-   nothing**; (4) take the place, re-checking both counts under the lock
-   (a request that lost a race is refused here after one read; the number of
+   storage reads; (3) register for revocation and `ensure_current` (the
+   registration is a small entry that lives for the request and is dropped
+   on every way out, a `404` and a refusal included, so the requests in
+   flight under 0005 bound them); (4) the first read, which is the access
+   check, so a missing or foreign artifact is the usual `404` and **holds no
+   place**; (5) take the place, re-checking both counts under the lock (a
+   request that lost a race is refused here after one read; the number of
    such requests at once is bounded by the admission limits of 0005, not by
-   this table); (5) register
-   for revocation and `ensure_current`. Opening a stream is also a request
+   this table). Opening a stream is also a request
    under the limits of 0005, as the change feed is. No lock is held across an
    await or across a storage call.
 9. **Isolation (0036).** Both routes are artifact-scoped: another user's
@@ -181,7 +193,11 @@ path, data_version, exists, value?}`.
   subscriber sees at most the states it read, not every write.
 - No push from other processes: they arrive at the heartbeat (15 s).
 - No outbox or pending/acknowledged distinction (R08).
-- No persistent or cross-process sharing of stream state (X04).
+- No persistent or cross-process sharing of stream state (X04). A token
+  revoked or rotated through another server process is not seen by open data
+  streams until their 10-minute lifetime ends (heartbeat reads check artifact
+  access, not credentials); no existing long-lived stream (change feed,
+  previews, rooms) sees it either.
 - No network isolation claim: the limits bound this server's memory and
   storage reads, not what a client does with its network.
 

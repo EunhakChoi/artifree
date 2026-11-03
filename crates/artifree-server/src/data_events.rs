@@ -147,6 +147,12 @@ pub(crate) struct DataStreams {
     /// Storage reads that streams made, for tests.
     #[cfg(test)]
     reads: AtomicU64,
+    /// Holds opening streams just before their first read, for tests.
+    #[cfg(test)]
+    hold: watch::Sender<bool>,
+    /// Opening streams that are held, for tests.
+    #[cfg(test)]
+    held: AtomicU64,
 }
 
 impl DataStreams {
@@ -157,6 +163,10 @@ impl DataStreams {
             writes: watch::Sender::new(0),
             #[cfg(test)]
             reads: AtomicU64::new(0),
+            #[cfg(test)]
+            hold: watch::Sender::new(false),
+            #[cfg(test)]
+            held: AtomicU64::new(0),
         }
     }
 
@@ -193,6 +203,26 @@ impl DataStreams {
             table: Arc::clone(&self.table),
             actor: actor.clone(),
         })
+    }
+
+    /// Waits while a test holds opening streams.
+    #[cfg(test)]
+    async fn pause_before_first_read(&self) {
+        let mut hold = self.hold.subscribe();
+        if *hold.borrow() {
+            self.held.fetch_add(1, Ordering::Relaxed);
+            let _ = hold.wait_for(|held| !*held).await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_first_reads(&self, hold: bool) {
+        self.hold.send_replace(hold);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> u64 {
+        self.held.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -409,15 +439,15 @@ pub(crate) async fn stream(
     };
     // Subscribe before the first read, so a write after it wakes the stream.
     let writes = streams.writes.subscribe();
-    // The first read is the access check: an artifact that is missing,
-    // trashed, purged, or someone else's holds no place here.
-    let first = target.read(&state).await?;
-    let place = match streams.admit(&auth.actor) {
-        Ok(place) => place,
-        Err(refusal) => return Ok(refusal.into_response()),
-    };
     let feed = state.feed();
     let closing = feed.closing();
+    // Register for revocation before anything slow, as the change feed does:
+    // a revocation signals the registrations that exist when it runs, so a
+    // request that authenticated earlier and registers later would outlive
+    // it. The registration is dropped on every way out below (a refusal, a
+    // `404`, an error). It exists for at most the time of one request, so
+    // the requests in flight (decision 0005) bound them, and a bogus open
+    // still takes no place.
     let (revoked, registration) = if let Some(token_id) = &auth.token_id {
         let (sender, receiver) = watch::channel(false);
         let registration = feed
@@ -430,6 +460,15 @@ pub(crate) async fn stream(
     // After registering, so that a disable that already ran is seen here or
     // runs its cleanup later (decision 0036).
     state.ensure_current(&auth.actor, auth.generation).await?;
+    #[cfg(test)]
+    streams.pause_before_first_read().await;
+    // The first read is the access check: an artifact that is missing,
+    // trashed, purged, or someone else's holds no place here.
+    let first = target.read(&state).await?;
+    let place = match streams.admit(&auth.actor) {
+        Ok(place) => place,
+        Err(refusal) => return Ok(refusal.into_response()),
+    };
     let started = Instant::now();
     let settings = streams.settings;
     let (sender, receiver) = mpsc::channel(1);
@@ -471,6 +510,18 @@ struct Producer {
 }
 
 impl Producer {
+    /// Whether the server is shutting down or the credential was revoked.
+    /// Judged before every wait and send: `select!` picks among ready
+    /// branches at random, so a stream whose revocation is already signalled
+    /// must not be left to chance.
+    fn ended(&self) -> bool {
+        *self.closing.borrow()
+            || self
+                .revoked
+                .as_ref()
+                .is_some_and(|revoked| *revoked.borrow())
+    }
+
     async fn run(mut self, first: Frame) {
         let _stopped: Result<(), Stopped> = self.drive(first).await;
     }
@@ -481,6 +532,9 @@ impl Producer {
         }
         self.pace.read(Instant::now());
         loop {
+            if self.ended() {
+                return Err(Stopped);
+            }
             match self.pace.step(Instant::now()) {
                 Step::End => return Ok(()),
                 Step::Read => {
@@ -534,6 +588,9 @@ impl Producer {
     /// Sends one event, waiting while the reader is behind but not past the
     /// lifetime.
     async fn send(&mut self, event: Event) -> Result<(), Stopped> {
+        if self.ended() {
+            return Err(Stopped);
+        }
         let until = self.pace.lifetime_end;
         tokio::select! {
             _ = self.closing.wait_for(|closing| *closing) => Err(Stopped),

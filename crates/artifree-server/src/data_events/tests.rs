@@ -19,7 +19,7 @@ use crate::auth::AccessToken;
 use crate::http::{self, Settings};
 use artifree_core::artifacts::{ArtifactError, MetadataChange};
 use artifree_domain::data::{DataChange, DataValue};
-use artifree_domain::identity::{RequestKey, UnixMillis};
+use artifree_domain::identity::{RequestKey, TokenId, UnixMillis};
 use artifree_domain::{AppDataVersion, MetadataRevision};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
@@ -974,6 +974,123 @@ async fn disabling_the_user_and_revoking_the_token_end_the_stream() -> TestResul
         )
         .await?;
     disabled.ends().await?;
+    harness.nothing_held().await
+}
+
+/// A revocation that runs while a request is between registering and its
+/// first read must end the stream it then opens, whichever way it reaches the
+/// registration (the token, or the user). The request is held at the point
+/// just before the first read. Repeated, because a stream whose revocation is
+/// already signalled must never be left to `select!`'s random choice.
+#[tokio::test]
+async fn a_revocation_during_the_open_ends_the_stream_without_an_event() -> TestResult {
+    let harness = Harness::new(quick())?;
+    let id = harness.create(OWNER, "create-20").await?;
+    let issued = harness
+        .ok(
+            "POST",
+            "/v1/tokens",
+            OWNER,
+            Some("issue-agent-20"),
+            Some(json!({ "name": "agent" })),
+        )
+        .await?;
+    let secret = issued["secret"].as_str().ok_or("secret")?.to_owned();
+    let token_id: TokenId = issued["token"]["id"].as_str().ok_or("token id")?.parse()?;
+    let streams = harness.state.data_streams();
+    for round in 0..8_u64 {
+        for by_actor in [false, true] {
+            streams.hold_first_reads(true);
+            let held_before = streams.held();
+            let opening = harness.open(&id, "", &secret);
+            let revoke = async {
+                harness
+                    .eventually("the open request reached the hold", |state| {
+                        state.data_streams().held() > held_before
+                    })
+                    .await?;
+                assert_eq!(
+                    harness.state.feed().registered(),
+                    1,
+                    "round {round}: a request held before its first read is not registered for revocation"
+                );
+                if by_actor {
+                    harness.state.revoke_actor(&ActorId::owner());
+                } else {
+                    harness.state.feed().revoke_token(&token_id);
+                }
+                streams.hold_first_reads(false);
+                Ok::<(), Box<dyn Error>>(())
+            };
+            let (response, revoked) = tokio::join!(opening, revoke);
+            revoked?;
+            let response = response?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut events = Events {
+                body: response.into_body(),
+                buffer: String::new(),
+            };
+            events
+                .ends()
+                .await
+                .map_err(|error| format!("round {round}, by_actor {by_actor}: {error}"))?;
+            harness.nothing_held().await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_request_that_fails_or_is_refused_while_registered_leaves_no_registration() -> TestResult
+{
+    let harness = Harness::new(DataStreamSettings {
+        per_actor: 1,
+        ..quick()
+    })?;
+    let id = harness.create(OWNER, "create-21").await?;
+    let issued = harness
+        .ok(
+            "POST",
+            "/v1/tokens",
+            OWNER,
+            Some("issue-agent-21"),
+            Some(json!({ "name": "agent" })),
+        )
+        .await?;
+    let secret = issued["secret"].as_str().ok_or("secret")?.to_owned();
+    // A missing artifact: the registration of the open is dropped with the 404.
+    let missing = "art_00000000000000000000000000000000";
+    let (status, _, _) = harness
+        .send(
+            "GET",
+            &format!("/v1/artifacts/{missing}/data/events"),
+            &secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(harness.state.feed().registered(), 0);
+    assert_eq!(harness.state.data_streams().open_streams(), (0, 0));
+    // A refusal at the per-actor limit: the second open of the same actor.
+    let mut held = harness.follow(&id, "", &secret).await?;
+    held.expect("snapshot").await?;
+    let (status, _, _) = harness
+        .send(
+            "GET",
+            &format!("/v1/artifacts/{id}/data/events"),
+            &secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        harness.state.feed().registered(),
+        1,
+        "only the open stream is registered"
+    );
+    drop(held);
     harness.nothing_held().await
 }
 
