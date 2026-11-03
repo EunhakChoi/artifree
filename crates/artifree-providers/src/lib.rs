@@ -9,6 +9,7 @@ pub mod data_dir;
 pub mod export;
 pub mod models;
 mod schema;
+pub mod session_dir;
 pub mod storage;
 pub mod tokens;
 pub mod tools;
