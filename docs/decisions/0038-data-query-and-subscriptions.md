@@ -148,6 +148,17 @@ rate_limited` and `Retry-After: 5` (the message names the server's
     makes every open data stream read its own space once: reads grow with
     streams times commits, bounded by the stream limits and the request rate),
     and also ends a stream whose artifact went to the trash or was purged.
+    A purge also ends every window of the artifact, for every actor, before
+    it leaves the registry: the window is emptied (its values are released
+    even while a stream or a producer still holds it), marked ended so that
+    nothing can use it again, and its streams are woken so they end. A window
+    held by a stream is therefore never left full outside the registry's
+    bounds. This also holds when a panic poisoned the registry's lock:
+    removal does not need the registry to be otherwise usable. A stored value
+    whose canonical text cannot be stated as JSON (it cannot happen: the space
+    writes canonical text) is never sent as a member, a read, or an event that
+    says nothing about it: a read or page is `503`, and a stream ends so the
+    reconnect is reset.
 11. **Order inside the process.** A write and the recording of its event
     happen under one lock per space (the gate), so the window lists the writes
     in the order they committed. A data write over HTTP and over MCP both pass
@@ -159,6 +170,20 @@ rate_limited` and `Retry-After: 5` (the message names the server's
     lock was poisoned) the window is forgotten and its streams are woken, so
     they reset; a window that cannot be forgotten is dropped from the registry
     and its streams end, and the client's reconnect is reset.
+
+    A commit that finds no window to record in (the registry is full, or its
+    lock was poisoned) cannot leave the streams that were open before it
+    believing nothing happened. After such a commit the write looks up, without
+    making one, any window of the actor and artifact; if there is one it is
+    invalidated and its streams are woken, so they compare themselves with
+    storage at once and reset. If the registry itself is unusable, the write
+    cannot find the window, so it wakes the check of every data stream of this
+    process (the same wake as any commit); each stream then compares its own
+    window with storage and resets. What is guaranteed: a stream that was
+    registered before the commit resets promptly (a read and a wake, not the
+    15 seconds of the heartbeat). A stream whose registration races the commit
+    anchors from storage after it, so it sees the new version. What is not: the
+    wake costs every open data stream one read.
 
 ### Access and limits
 
@@ -201,8 +226,11 @@ rate_limited` and `Retry-After: 5` (the message names the server's
     `DataSnapshotEvent`, `DataChangeEvent`, `DataPosition`, `ReadDataEventsQuery`.
     The TypeScript client: `listDataMembers`, `openData`, `followData` (the
     retry rule of 0006 decision 10, restarting from the last cursor; a
-    `Retry-After` is kept between the minimum and maximum delay, and a stream
-    that delivered nothing before it ended keeps backing off), and
+    `Retry-After` is honored: never below the minimum delay, and up to one hour
+    even when that is more than the maximum backoff, because the server knows
+    how long it needs; a larger value is cut to one hour so a mistaken header
+    cannot silence a client for longer. A stream that delivered nothing before
+    it ended keeps backing off), and
     `applyDataEvent`, a small reducer used by the tests and available to apps.
     Their module is imported only by callers that use it: the web entry does
     not grow.
@@ -232,6 +260,15 @@ rate_limited` and `Retry-After: 5` (the message names the server's
 - **Data versions above 2^53 - 1** are refused by the client as an invalid
   response (a version rises by one per changing write, so it is unreachable in
   practice).
+- **Writers create windows even with no subscribers.** A data write makes a
+  window for its pair when the registry has room, so memory is held (within
+  the bounds of decision 10) for spaces nobody streams until they are evicted.
+- **The page byte bound is on canonical bytes**, not on the escaped HTTP body:
+  a page of values with many characters that JSON escapes can be larger on the
+  wire than the bound of decision 3.
+- **One extra round trip per request.** Opening a stream or writing checks
+  access in its own storage call before the window is looked up (so a
+  refused request makes no window); it is not merged into the read or write.
 - No claim of network isolation or of frame capability enforcement.
 
 ## Tests

@@ -347,7 +347,10 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   data cursor (a change feed cursor and every non-canonical form are refused)
   and for the projection of a write onto a watched path; unit tests of the
   retained window (contiguity, trimming by count and bytes, an oversize write,
-  anchoring, eviction that spares a window with an open stream); and through the
+  anchoring, eviction that spares a window with an open stream, a purge that
+  empties and ends the windows streams still hold, and a commit that found no
+  window waking the streams that were open before it, also with the registry
+  poisoned); and through the
   real router: pages while writers run, snapshot then replay with no gap or
   duplicate across a reconnect, a reset for a cursor past the window, ahead of
   the data, from another database, or lost to a restart, a subscriber converging
@@ -358,7 +361,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   route-inventory test of decision 0036 extended to both routes. Node tests run
   the client against a scripted network (a page that breaks any promise of the
   contract, events checked field by field, reconnection from the last cursor,
-  abort, the reducer, and a member named `__proto__`) and against the real binary
+  abort, a server `Retry-After` honored from the floor up to one hour, the
+  reducer, and a member named `__proto__`) and against the real binary
   with every page and event validated against the published schema, including a
   crash and restart. Guards were checked by breaking them and watching a named
   test fail (the pull request lists them). These tests do not show that a frame
