@@ -261,7 +261,9 @@ pub const MAX_USER_LABEL_CHARS: usize = 64;
 
 /// A registered user's display label: 1 to 64 characters without control
 /// characters or surrounding whitespace. It names a user for the owner who
-/// manages the registry; it is not an identity and not unique.
+/// manages the registry; it is not an identity. The registry keeps labels
+/// unique (the comparison is exact and case sensitive), but this type does not
+/// check that: the store does when a user is registered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserLabel(String);
 

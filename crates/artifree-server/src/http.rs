@@ -366,7 +366,10 @@ impl AppState {
     /// Every refusal is the same `401` as a token nobody issued. It removes
     /// everything the user holds, because registrations carry no owner of
     /// their own: what the user opened under the newer generation is closed
-    /// too, and its clients open it again.
+    /// too, and its clients open it again. Removing only the late request's
+    /// registration needs a removal by identity in each of the five registries
+    /// and only the connection registry has one; decision 0036 (item 11)
+    /// records why this was kept.
     pub(crate) async fn ensure_current(
         &self,
         actor: &ActorId,
