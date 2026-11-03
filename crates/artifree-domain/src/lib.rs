@@ -6,6 +6,8 @@
 
 pub mod change;
 pub mod data;
+pub mod data_feed;
+pub mod data_query;
 pub mod identity;
 pub mod job;
 pub mod package;

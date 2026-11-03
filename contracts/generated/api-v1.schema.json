@@ -269,6 +269,42 @@
       ],
       "type": "object"
     },
+    "CanonicalMembers": {
+      "additionalProperties": false,
+      "description": "The committed state a page reports. Nothing in it is pending: the server\nholds no write that was not committed, and a client that queues writes\nkeeps them beside this object, never inside it (decision 0038).",
+      "properties": {
+        "data_version": {
+          "description": "The version of the data space the page was read at. Pages of one\nlisting are not tied to one version: compare this between pages.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exists": {
+          "description": "Whether an object is at the path. False where nothing is and where the\nvalue is not an object; `members` is then empty.",
+          "type": "boolean"
+        },
+        "members": {
+          "description": "The page, by the UTF-8 bytes of the names.",
+          "items": {
+            "$ref": "#/$defs/DataMember"
+          },
+          "type": "array"
+        },
+        "next_after": {
+          "description": "Pass as `after` for the next page; present exactly when a further\nmatching member exists. A member that existed throughout the reads of a\nlisting appears once; one added or removed meanwhile may not appear.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "data_version",
+        "exists",
+        "members"
+      ],
+      "type": "object"
+    },
     "ChangeKind": {
       "description": "What a commit did to an artifact. A kind that a client does not know\nstill means the artifact changed: read it again.",
       "oneOf": [
@@ -479,6 +515,215 @@
       },
       "required": [
         "label"
+      ],
+      "type": "object"
+    },
+    "DataChangeEvent": {
+      "additionalProperties": false,
+      "description": "Data of a `change` event of `GET /v1/artifacts/{id}/data/events`: after the\nwrite that left the space at `data_version`, the value at `path` is\n`value`, or is gone. `path` is the watched path when the write replaced it\nor something above it, and the written path when the write was below it.\nApplying each event in order to the value of the `snapshot` or `reset` gives\nthe value that a read reports at the same version. Writes that did not touch\nthe watched path are not sent.",
+      "properties": {
+        "cursor": {
+          "description": "Data cursor after this write, also the event's `id`. Opaque.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space the write left.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exists": {
+          "description": "Whether anything is at the path afterwards.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The path the new state is for, within the watched path.",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value at the path afterwards, present when `exists` is true."
+        }
+      },
+      "required": [
+        "cursor",
+        "data_version",
+        "path",
+        "exists"
+      ],
+      "type": "object"
+    },
+    "DataMember": {
+      "additionalProperties": false,
+      "description": "One member of a page.",
+      "properties": {
+        "name": {
+          "description": "The member's name.",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its value, when the query selected `values`. A stored `null` is present\nas `null`."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "DataMemberSelect": {
+      "description": "What a page of `GET /v1/artifacts/{id}/data/members` holds of each member\n(decision 0038).",
+      "oneOf": [
+        {
+          "const": "names",
+          "description": "Only the names. The default.",
+          "type": "string"
+        },
+        {
+          "const": "values",
+          "description": "The names and the values.",
+          "type": "string"
+        }
+      ]
+    },
+    "DataMembers": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/data/members`.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "canonical": {
+          "$ref": "#/$defs/CanonicalMembers",
+          "description": "What the data space held; only committed state."
+        },
+        "query": {
+          "$ref": "#/$defs/DataMembersQuery",
+          "description": "The query as parsed and completed."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "query",
+        "canonical"
+      ],
+      "type": "object"
+    },
+    "DataMembersQuery": {
+      "additionalProperties": false,
+      "description": "The query of a page as the server parsed and completed it: two requests\nthat mean the same thing have the same `DataMembersQuery`.",
+      "properties": {
+        "after": {
+          "description": "The name the page starts after, when the query had one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "The page size that applied.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The collection's path, as parsed.",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "The name prefix, when the query had one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "select": {
+          "$ref": "#/$defs/DataMemberSelect",
+          "description": "What each member lists."
+        }
+      },
+      "required": [
+        "path",
+        "select",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "DataPosition": {
+      "additionalProperties": false,
+      "description": "Data of the `position` event of `GET /v1/artifacts/{id}/data/events`:\nevery write up to `data_version` has been sent or does not touch the\nwatched path. It follows a resumption and any run of writes that no sent\n`change` covers, so the stored cursor keeps up.",
+      "properties": {
+        "cursor": {
+          "description": "Data cursor of this position, also the event's `id`. Opaque.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The data version reached.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cursor",
+        "data_version"
+      ],
+      "type": "object"
+    },
+    "DataSnapshotEvent": {
+      "additionalProperties": false,
+      "description": "Data of the `snapshot` and `reset` events of `GET\n/v1/artifacts/{id}/data/events`. `snapshot` opens a stream that has no\n`Last-Event-ID`. `reset` answers a cursor that cannot be continued: the\nwindow of retained writes no longer holds every write after it, the cursor\nis ahead of the data or from another database, or the window was lost.\nDiscard what is held for the path and take this value; later events follow\nit.",
+      "properties": {
+        "cursor": {
+          "description": "Data cursor of this position, also the event's `id`. Opaque.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space the value was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exists": {
+          "description": "Whether anything is at the path.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The watched path.",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value at the path, present when `exists` is true. A stored `null`\nis present as `null`."
+        }
+      },
+      "required": [
+        "cursor",
+        "data_version",
+        "path",
+        "exists"
       ],
       "type": "object"
     },
@@ -1542,6 +1787,54 @@
       },
       "type": "object"
     },
+    "ListDataMembersQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/members`: the members of the object\nat a path, by the bytes of their names (decision 0038). Every parameter is\noptional; an unknown or repeated one is `400`, and a value that breaks its\nrule is `422 invalid_request`.",
+      "properties": {
+        "after": {
+          "description": "List the members after this name (1-256 bytes): the `next_after` of the\nprevious page, with the same other parameters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Page size, 1-100; 50 when absent.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The collection: the path of the object whose members are listed, by\nthe grammar of `ReadDataQuery`. Absent or empty is the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prefix": {
+          "description": "Only members whose name starts with this: 1-64 ASCII letters, digits,\n`_`, or `-`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "select": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataMemberSelect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to list of each member; `names` when absent."
+        }
+      },
+      "type": "object"
+    },
     "ListJobsQuery": {
       "additionalProperties": false,
       "description": "Query parameters of `GET /v1/jobs` and `GET /v1/artifacts/{id}/jobs`, all\noptional.",
@@ -1653,6 +1946,20 @@
         "purged_at_ms",
         "replayed"
       ],
+      "type": "object"
+    },
+    "ReadDataEventsQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/events`, the server-sent events of\nthe value at a path (decision 0038). The resume position is the\n`Last-Event-ID` header.",
+      "properties": {
+        "path": {
+          "description": "The watched path, by the grammar of `ReadDataQuery`. Absent or empty is\nthe root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "ReadDataQuery": {
@@ -3185,6 +3492,18 @@
     },
     {
       "$ref": "#/$defs/DataWriteResponse"
+    },
+    {
+      "$ref": "#/$defs/DataMembers"
+    },
+    {
+      "$ref": "#/$defs/DataSnapshotEvent"
+    },
+    {
+      "$ref": "#/$defs/DataChangeEvent"
+    },
+    {
+      "$ref": "#/$defs/DataPosition"
     }
   ],
   "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",

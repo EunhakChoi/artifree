@@ -28,6 +28,19 @@ impl FeedId {
         Self(bytes)
     }
 
+    /// Reads an identity from its text form: 32 lowercase hexadecimal digits.
+    #[must_use]
+    pub fn from_hex(text: &str) -> Option<Self> {
+        if text.len() != 2 * FEED_BYTES {
+            return None;
+        }
+        let mut bytes = [0; FEED_BYTES];
+        for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+            *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+        }
+        Some(Self(bytes))
+    }
+
     /// The identity's bytes, as stored.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; FEED_BYTES] {
@@ -75,15 +88,11 @@ impl FromStr for ChangeCursor {
         let canonical_number = !sequence.is_empty()
             && sequence.bytes().all(|byte| byte.is_ascii_digit())
             && (sequence == "0" || !sequence.starts_with('0'));
-        if feed.len() != 2 * FEED_BYTES || !canonical_number {
+        if !canonical_number {
             return Err(invalid);
         }
-        let mut bytes = [0; FEED_BYTES];
-        for (byte, pair) in bytes.iter_mut().zip(feed.as_bytes().chunks_exact(2)) {
-            *byte = (nibble(pair[0]).ok_or(invalid)? << 4) | nibble(pair[1]).ok_or(invalid)?;
-        }
         Ok(Self {
-            feed: FeedId(bytes),
+            feed: FeedId::from_hex(feed).ok_or(invalid)?,
             sequence: ChangeSequence(sequence.parse().map_err(|_| invalid)?),
         })
     }

@@ -10,6 +10,7 @@
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
+use artifree_domain::data_query::{Members, MembersQuery};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
 use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWrite};
@@ -23,6 +24,15 @@ pub struct DataRead {
     pub version: AppDataVersion,
     /// The value at the path, or `None` where nothing is.
     pub value: Option<DataValue>,
+}
+
+/// A page of the members of an object in the actor's data space.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MembersRead {
+    /// The version of the space when the page was read.
+    pub version: AppDataVersion,
+    /// The page.
+    pub members: Members,
 }
 
 /// The result of a write, in terms the adapters report.
@@ -57,6 +67,28 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         Ok(DataRead {
             version: snapshot.version,
             value: snapshot.space.get(path).cloned(),
+        })
+    }
+
+    /// A page of the members of the object at the query's path in the actor's
+    /// data space (decision 0038), and the space's version, read in one
+    /// snapshot. Access follows [`Self::data`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for an artifact that is missing, in the
+    /// trash, purged, or another actor's, or [`ArtifactError::Unavailable`].
+    pub fn data_members(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        query: &MembersQuery,
+    ) -> Result<MembersRead, ArtifactError> {
+        self.authorized(actor, id)?;
+        let snapshot = self.store.read_data(id, actor).map_err(data_error)?;
+        Ok(MembersRead {
+            version: snapshot.version,
+            members: snapshot.space.members(query),
         })
     }
 

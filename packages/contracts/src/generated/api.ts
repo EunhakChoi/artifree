@@ -67,7 +67,11 @@ export type ApiBody =
   | SetDataRequest
   | UpdateDataRequest
   | DeleteDataRequest
-  | DataWriteResponse;
+  | DataWriteResponse
+  | DataMembers
+  | DataSnapshotEvent
+  | DataChangeEvent
+  | DataPosition;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -222,6 +226,11 @@ export type JsonValue =
   | number
   | boolean
   | null;
+/**
+ * What a page of `GET /v1/artifacts/{id}/data/members` holds of each member
+ * (decision 0038).
+ */
+export type DataMemberSelect = 'names' | 'values';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -1740,6 +1749,160 @@ export interface DataWriteResponse {
    * True when an earlier request with the same key already did it.
    */
   replayed: boolean;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/data/members`.
+ */
+export interface DataMembers {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  canonical: CanonicalMembers;
+  query: DataMembersQuery;
+}
+/**
+ * The committed state a page reports. Nothing in it is pending: the server
+ * holds no write that was not committed, and a client that queues writes
+ * keeps them beside this object, never inside it (decision 0038).
+ */
+export interface CanonicalMembers {
+  /**
+   * The version of the data space the page was read at. Pages of one
+   * listing are not tied to one version: compare this between pages.
+   */
+  data_version: number;
+  /**
+   * Whether an object is at the path. False where nothing is and where the
+   * value is not an object; `members` is then empty.
+   */
+  exists: boolean;
+  /**
+   * The page, by the UTF-8 bytes of the names.
+   */
+  members: DataMember[];
+  /**
+   * Pass as `after` for the next page; present exactly when a further
+   * matching member exists. A member that existed throughout the reads of a
+   * listing appears once; one added or removed meanwhile may not appear.
+   */
+  next_after?: string | null;
+}
+/**
+ * One member of a page.
+ */
+export interface DataMember {
+  /**
+   * The member's name.
+   */
+  name: string;
+  /**
+   * Its value, when the query selected `values`. A stored `null` is present
+   * as `null`.
+   */
+  value?: JsonValue | null;
+}
+/**
+ * The query of a page as the server parsed and completed it: two requests
+ * that mean the same thing have the same `DataMembersQuery`.
+ */
+export interface DataMembersQuery {
+  /**
+   * The name the page starts after, when the query had one.
+   */
+  after?: string | null;
+  /**
+   * The page size that applied.
+   */
+  limit: number;
+  /**
+   * The collection's path, as parsed.
+   */
+  path: string;
+  /**
+   * The name prefix, when the query had one.
+   */
+  prefix?: string | null;
+  select: DataMemberSelect;
+}
+/**
+ * Data of the `snapshot` and `reset` events of `GET
+ * /v1/artifacts/{id}/data/events`. `snapshot` opens a stream that has no
+ * `Last-Event-ID`. `reset` answers a cursor that cannot be continued: the
+ * window of retained writes no longer holds every write after it, the cursor
+ * is ahead of the data or from another database, or the window was lost.
+ * Discard what is held for the path and take this value; later events follow
+ * it.
+ */
+export interface DataSnapshotEvent {
+  /**
+   * Data cursor of this position, also the event's `id`. Opaque.
+   */
+  cursor: string;
+  /**
+   * The version of the data space the value was read at.
+   */
+  data_version: number;
+  /**
+   * Whether anything is at the path.
+   */
+  exists: boolean;
+  /**
+   * The watched path.
+   */
+  path: string;
+  /**
+   * The value at the path, present when `exists` is true. A stored `null`
+   * is present as `null`.
+   */
+  value?: JsonValue | null;
+}
+/**
+ * Data of a `change` event of `GET /v1/artifacts/{id}/data/events`: after the
+ * write that left the space at `data_version`, the value at `path` is
+ * `value`, or is gone. `path` is the watched path when the write replaced it
+ * or something above it, and the written path when the write was below it.
+ * Applying each event in order to the value of the `snapshot` or `reset` gives
+ * the value that a read reports at the same version. Writes that did not touch
+ * the watched path are not sent.
+ */
+export interface DataChangeEvent {
+  /**
+   * Data cursor after this write, also the event's `id`. Opaque.
+   */
+  cursor: string;
+  /**
+   * The version of the data space the write left.
+   */
+  data_version: number;
+  /**
+   * Whether anything is at the path afterwards.
+   */
+  exists: boolean;
+  /**
+   * The path the new state is for, within the watched path.
+   */
+  path: string;
+  /**
+   * The value at the path afterwards, present when `exists` is true.
+   */
+  value?: JsonValue | null;
+}
+/**
+ * Data of the `position` event of `GET /v1/artifacts/{id}/data/events`:
+ * every write up to `data_version` has been sent or does not touch the
+ * watched path. It follows a resumption and any run of writes that no sent
+ * `change` covers, so the stored cursor keeps up.
+ */
+export interface DataPosition {
+  /**
+   * Data cursor of this position, also the event's `id`. Opaque.
+   */
+  cursor: string;
+  /**
+   * The data version reached.
+   */
+  data_version: number;
 }
 
 /**

@@ -92,6 +92,9 @@ pub enum DataError {
     /// The root of a space is an object: a change cannot make it anything
     /// else.
     RootNotObject,
+    /// A query breaks a rule of decision 0038. The rule is named, the input is
+    /// not quoted.
+    InvalidQuery(&'static str),
 }
 
 impl fmt::Display for DataError {
@@ -106,6 +109,7 @@ impl fmt::Display for DataError {
                 "the path crosses a value that is not an object, which a write cannot make room in",
             ),
             Self::RootNotObject => formatter.write_str("the root of a data space is an object"),
+            Self::InvalidQuery(rule) => write!(formatter, "invalid data query: {rule}"),
         }
     }
 }
@@ -113,7 +117,7 @@ impl fmt::Display for DataError {
 impl std::error::Error for DataError {}
 
 /// One segment of a [`DataPath`]: 1 to 64 ASCII letters, digits, `_`, or `-`.
-fn valid_segment(segment: &str) -> bool {
+pub(crate) fn valid_segment(segment: &str) -> bool {
     (1..=MAX_SEGMENT_BYTES).contains(&segment.len())
         && segment
             .bytes()
@@ -147,6 +151,13 @@ impl DataPath {
     #[must_use]
     pub fn segments(&self) -> &[String] {
         &self.0
+    }
+
+    /// Whether `ancestor` is this path or a path above it: its segments are
+    /// the first segments of this one. Every path starts with the root.
+    #[must_use]
+    pub fn starts_with(&self, ancestor: &DataPath) -> bool {
+        self.0.starts_with(&ancestor.0)
     }
 
     /// The segments above the last, and the last; `None` for the root.
@@ -321,6 +332,18 @@ impl DataValue {
             return Err(parser.invalid("content after the value"));
         }
         Ok(value)
+    }
+
+    /// The value at `segments` below this one, following object members only;
+    /// `None` where nothing is, also through a value that is not an object.
+    #[must_use]
+    pub fn at(&self, segments: &[String]) -> Option<&DataValue> {
+        segments
+            .iter()
+            .try_fold(self, |value, segment| match value {
+                DataValue::Object(members) => members.get(segment),
+                _ => None,
+            })
     }
 
     /// The canonical JSON text of the value.
@@ -754,12 +777,7 @@ impl DataSpace {
     /// that is not an object has nothing at its end.
     #[must_use]
     pub fn get(&self, path: &DataPath) -> Option<&DataValue> {
-        path.segments()
-            .iter()
-            .try_fold(&self.0, |value, segment| match value {
-                DataValue::Object(members) => members.get(segment),
-                _ => None,
-            })
+        self.0.at(path.segments())
     }
 
     /// The space after `change`, and whether it differs from this one.

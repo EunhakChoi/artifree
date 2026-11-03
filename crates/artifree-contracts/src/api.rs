@@ -862,6 +862,192 @@ pub struct DataWriteResponse {
     pub replayed: bool,
 }
 
+/// What a page of `GET /v1/artifacts/{id}/data/members` holds of each member
+/// (decision 0038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DataMemberSelect {
+    /// Only the names. The default.
+    Names,
+    /// The names and the values.
+    Values,
+}
+
+/// Query of `GET /v1/artifacts/{id}/data/members`: the members of the object
+/// at a path, by the bytes of their names (decision 0038). Every parameter is
+/// optional; an unknown or repeated one is `400`, and a value that breaks its
+/// rule is `422 invalid_request`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListDataMembersQuery {
+    /// The collection: the path of the object whose members are listed, by
+    /// the grammar of `ReadDataQuery`. Absent or empty is the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Only members whose name starts with this: 1-64 ASCII letters, digits,
+    /// `_`, or `-`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// What to list of each member; `names` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<DataMemberSelect>,
+    /// Page size, 1-100; 50 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// List the members after this name (1-256 bytes): the `next_after` of the
+    /// previous page, with the same other parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// The query of a page as the server parsed and completed it: two requests
+/// that mean the same thing have the same `DataMembersQuery`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMembersQuery {
+    /// The collection's path, as parsed.
+    pub path: String,
+    /// The name prefix, when the query had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// What each member lists.
+    pub select: DataMemberSelect,
+    /// The page size that applied.
+    pub limit: u64,
+    /// The name the page starts after, when the query had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// One member of a page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMember {
+    /// The member's name.
+    pub name: String,
+    /// Its value, when the query selected `values`. A stored `null` is present
+    /// as `null`.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value: Option<JsonValue>,
+}
+
+/// The committed state a page reports. Nothing in it is pending: the server
+/// holds no write that was not committed, and a client that queues writes
+/// keeps them beside this object, never inside it (decision 0038).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalMembers {
+    /// The version of the data space the page was read at. Pages of one
+    /// listing are not tied to one version: compare this between pages.
+    pub data_version: u64,
+    /// Whether an object is at the path. False where nothing is and where the
+    /// value is not an object; `members` is then empty.
+    pub exists: bool,
+    /// The page, by the UTF-8 bytes of the names.
+    pub members: Vec<DataMember>,
+    /// Pass as `after` for the next page; present exactly when a further
+    /// matching member exists. A member that existed throughout the reads of a
+    /// listing appears once; one added or removed meanwhile may not appear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
+
+/// Response of `GET /v1/artifacts/{id}/data/members`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMembers {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The query as parsed and completed.
+    pub query: DataMembersQuery,
+    /// What the data space held; only committed state.
+    pub canonical: CanonicalMembers,
+}
+
+/// Query of `GET /v1/artifacts/{id}/data/events`, the server-sent events of
+/// the value at a path (decision 0038). The resume position is the
+/// `Last-Event-ID` header.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadDataEventsQuery {
+    /// The watched path, by the grammar of `ReadDataQuery`. Absent or empty is
+    /// the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Data of the `snapshot` and `reset` events of `GET
+/// /v1/artifacts/{id}/data/events`. `snapshot` opens a stream that has no
+/// `Last-Event-ID`. `reset` answers a cursor that cannot be continued: the
+/// window of retained writes no longer holds every write after it, the cursor
+/// is ahead of the data or from another database, or the window was lost.
+/// Discard what is held for the path and take this value; later events follow
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataSnapshotEvent {
+    /// Data cursor of this position, also the event's `id`. Opaque.
+    pub cursor: String,
+    /// The version of the data space the value was read at.
+    pub data_version: u64,
+    /// The watched path.
+    pub path: String,
+    /// Whether anything is at the path.
+    pub exists: bool,
+    /// The value at the path, present when `exists` is true. A stored `null`
+    /// is present as `null`.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value: Option<JsonValue>,
+}
+
+/// Data of a `change` event of `GET /v1/artifacts/{id}/data/events`: after the
+/// write that left the space at `data_version`, the value at `path` is
+/// `value`, or is gone. `path` is the watched path when the write replaced it
+/// or something above it, and the written path when the write was below it.
+/// Applying each event in order to the value of the `snapshot` or `reset` gives
+/// the value that a read reports at the same version. Writes that did not touch
+/// the watched path are not sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataChangeEvent {
+    /// Data cursor after this write, also the event's `id`. Opaque.
+    pub cursor: String,
+    /// The version of the data space the write left.
+    pub data_version: u64,
+    /// The path the new state is for, within the watched path.
+    pub path: String,
+    /// Whether anything is at the path afterwards.
+    pub exists: bool,
+    /// The value at the path afterwards, present when `exists` is true.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value: Option<JsonValue>,
+}
+
+/// Data of the `position` event of `GET /v1/artifacts/{id}/data/events`:
+/// every write up to `data_version` has been sent or does not touch the
+/// watched path. It follows a resumption and any run of writes that no sent
+/// `change` covers, so the stored cursor keeps up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataPosition {
+    /// Data cursor of this position, also the event's `id`. Opaque.
+    pub cursor: String,
+    /// The data version reached.
+    pub data_version: u64,
+}
+
 /// Response of `GET /v1/artifacts/{id}/revisions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

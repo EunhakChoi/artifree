@@ -17,11 +17,12 @@
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactChange, ArtifactList, CancelJobRequest,
     CancelJobResponse, CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
-    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataWriteResponse,
-    DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
-    EnqueueJobRequest, EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff,
-    HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, Preview,
-    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
+    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataChangeEvent, DataMembers,
+    DataPosition, DataSnapshotEvent, DataWriteResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList,
+    ListArtifactsQuery, ListDataMembersQuery, ListJobsQuery, Preview, PurgeArtifactRequest,
+    PurgeArtifactResponse, ReadDataEventsQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
     RotateTokenResponse, RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest,
@@ -103,6 +104,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<UpdateDataRequest>(),
         generator.subschema_for::<DeleteDataRequest>(),
         generator.subschema_for::<DataWriteResponse>(),
+        generator.subschema_for::<DataMembers>(),
+        generator.subschema_for::<DataSnapshotEvent>(),
+        generator.subschema_for::<DataChangeEvent>(),
+        generator.subschema_for::<DataPosition>(),
     ];
     // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();
@@ -111,6 +116,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The read query has one optional field, so the root would accept any
     // empty object.
     generator.subschema_for::<ReadDataQuery>();
+    // The same holds for the member list and event queries.
+    generator.subschema_for::<ListDataMembersQuery>();
+    generator.subschema_for::<ReadDataEventsQuery>();
     // The cancel body has no fields, so the root would accept any empty object.
     generator.subschema_for::<CancelJobRequest>();
     let api = serde_json::json!({

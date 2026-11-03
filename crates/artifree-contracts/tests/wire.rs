@@ -2,11 +2,11 @@
 use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, ErrorBody, ErrorResponse, FeedPosition,
-    MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64,
-    MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview, PurgeArtifactResponse,
-    RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeConnection,
-    RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
+    DataChangeEvent, DataMembers, DataPosition, DataSnapshotEvent, DuplicateArtifactResponse,
+    EditFilesRequest, ErrorBody, ErrorResponse, FeedPosition, MAX_DOWNLOAD_NAME,
+    MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64, MAX_RUNTIME_SOURCE_WRITE_BYTES,
+    Preview, PurgeArtifactResponse, RemoveUnreferencedContentResponse, Revision, RevisionList,
+    RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
     RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView,
     SaveRevisionRequest, SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
 };
@@ -213,6 +213,16 @@ fn response_schemas_describe_what_the_server_writes() {
             published_unlike_written::<ArtifactChange>(),
         ),
         ("FeedPosition", published_unlike_written::<FeedPosition>()),
+        ("DataMembers", published_unlike_written::<DataMembers>()),
+        (
+            "DataSnapshotEvent",
+            published_unlike_written::<DataSnapshotEvent>(),
+        ),
+        (
+            "DataChangeEvent",
+            published_unlike_written::<DataChangeEvent>(),
+        ),
+        ("DataPosition", published_unlike_written::<DataPosition>()),
         (
             "SourceExportManifest",
             published_unlike_written::<SourceExportManifest>(),
