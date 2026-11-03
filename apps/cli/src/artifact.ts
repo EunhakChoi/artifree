@@ -4,6 +4,7 @@ import {
   ArtifreeApiError,
   ArtifreeClient,
   editFiles,
+  readRevision,
   encodeFile,
   newIdempotencyKey,
 } from '@artifree/client';
@@ -35,6 +36,7 @@ export const ARTIFACT_HELP = `Usage:
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
   artifree artifact edit <id> --base <revision>
       ([--put <package-path>=<local-path>]... [--delete <package-path>]...)
+      [--expect <package-path>=<sha256|absent>]...
   artifree artifact restore <id> <revision> --base <revision>
   artifree artifact duplicate <id> <revision> [--title <title>] [--copy-data]
   artifree artifact rename <id> <title> --base-metadata <n>
@@ -77,6 +79,13 @@ whole edit is refused with error[file_conflict], the current revision, and one
 conflict line per file (path and its current SHA-256, or absent) on stderr;
 nothing is written. Files you name nothing for carry over as they are now. It
 never merges: a file is replaced whole. save keeps its stricter rule.
+edit reads --base from the server to fill in each condition. --expect states
+a condition yourself (the file's SHA-256 in lowercase hex, or absent for a
+--put of a new file); when every --put and --delete path has one, nothing is
+read first and the request is sent as given. To retry an edit whose answer was
+lost after the artifact moved to the trash, repeat the same command with an
+--expect for every path and the same --idempotency-key: the server then
+returns the original result. Without --expect the retry fails with not_found.
 restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
@@ -499,6 +508,34 @@ async function save(args: string[]): Promise<void> {
   print(result);
 }
 
+const DIGEST = /^[0-9a-f]{64}$/;
+
+/**
+ * The conditions of `--expect <package-path>=<sha256|absent>`, by path. A
+ * condition names a path that `--put` or `--delete` edits, and only once.
+ */
+function explicitConditions(
+  values: string[],
+  edited: ReadonlySet<string>,
+): Map<string, string> {
+  const conditions = new Map<string, string>();
+  for (const value of values) {
+    const separator = value.lastIndexOf('=');
+    const path = value.slice(0, Math.max(separator, 0));
+    const condition = value.slice(separator + 1);
+    if (separator <= 0 || (condition !== 'absent' && !DIGEST.test(condition)))
+      throw new UsageError(
+        `--expect expects <package-path>=<64 lowercase hex digits|absent>, got ${value}.`,
+      );
+    if (conditions.has(path))
+      throw new UsageError(`--expect ${path} is given twice.`);
+    if (!edited.has(path))
+      throw new UsageError(`--expect ${path}: no --put or --delete names it.`);
+    conditions.set(path, condition);
+  }
+  return conditions;
+}
+
 async function edit(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -507,6 +544,7 @@ async function edit(args: string[]): Promise<void> {
       base: { type: 'string' },
       put: { type: 'string', multiple: true },
       delete: { type: 'string', multiple: true },
+      expect: { type: 'string', multiple: true },
       'idempotency-key': { type: 'string' },
     },
     allowPositionals: true,
@@ -518,35 +556,40 @@ async function edit(args: string[]): Promise<void> {
       'edit requires --base <revision>, the revision you read the files from.',
     );
   const base = positiveNumber(values.base, '--base');
-  if (values.put === undefined && values.delete === undefined)
+  const puts = (values.put ?? []).map(splitPut);
+  const deletes = values.delete ?? [];
+  if (puts.length === 0 && deletes.length === 0)
     throw new UsageError('edit requires at least one --put or --delete.');
+  const paths = [...puts.map(([path]) => path), ...deletes];
+  const explicit = explicitConditions(values.expect ?? [], new Set(paths));
   const client = await connect(values);
-  const baseRevision = (await client.listRevisions(id)).find(
-    (item) => item.revision === base,
-  );
-  if (baseRevision === undefined)
-    throw new ArtifreeApiError(`Revision ${base} does not exist.`, {
-      status: 0,
-      code: 'not_found',
-    });
-  // Each file must be as it was in the revision the caller read.
-  const digests = new Map(
-    baseRevision.files.map((file) => [file.path, file.sha256]),
-  );
+  // With a condition for every path the request is sent as given, without
+  // reading the artifact first: the server judges the base and the files,
+  // and the retry of an edit that committed can be replayed even when the
+  // artifact has since moved to the trash. Otherwise the missing conditions
+  // are the files of the revision the caller read.
+  const digests = new Map<string, string>();
+  if (paths.some((path) => !explicit.has(path))) {
+    const baseRevision = await readRevision(client, id, base);
+    for (const file of baseRevision.files) digests.set(file.path, file.sha256);
+  }
   const edits: FileEdit[] = [];
-  for (const value of values.put ?? []) {
-    const [path, location] = splitPut(value);
+  for (const [path, location] of puts) {
     edits.push({
       op: 'put',
       ...encodeFile(path, await readRegularFile(location)),
-      expect: digests.get(path) ?? 'absent',
+      expect: explicit.get(path) ?? digests.get(path) ?? 'absent',
     });
   }
-  for (const path of values.delete ?? []) {
-    const expect = digests.get(path);
+  for (const path of deletes) {
+    const expect = explicit.get(path) ?? digests.get(path);
     if (expect === undefined)
       throw new UsageError(
         `--delete ${path}: revision ${base} has no such file.`,
+      );
+    if (expect === 'absent')
+      throw new UsageError(
+        `--delete ${path}: a delete needs the digest of the file, not absent.`,
       );
     edits.push({ op: 'delete', path, expect });
   }

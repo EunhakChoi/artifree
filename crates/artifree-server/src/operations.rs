@@ -47,6 +47,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::auth::hex;
+use crate::changes::Feed;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
 use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey};
@@ -212,7 +213,7 @@ impl From<ArtifactError> for ApiError {
                 ErrorCode::RequestKeyReused,
                 message,
             ),
-            ArtifactError::Unavailable(_) => Self::new(
+            ArtifactError::Unavailable(_) | ArtifactError::EditUnverified => Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorCode::Unavailable,
                 message,
@@ -391,10 +392,33 @@ pub(crate) async fn edit_files(
             },
         });
     }
-    let receipt = state
+    let outcome = state
         .run(move |artifacts| artifacts.edit_files(&actor, &key, &id, base, &edits))
-        .await?;
-    Ok(announce(state, receipt))
+        .await;
+    announce_edit(state.feed(), outcome)
+}
+
+/// The answer to an edit. An edit that committed but could not be verified
+/// is still an error, yet its revision exists: the change streams are woken
+/// for it as for any commit.
+fn announce_edit(
+    feed: &Feed,
+    outcome: Result<CommitReceipt, ArtifactError>,
+) -> Result<CommitResponse, ApiError> {
+    match outcome {
+        Ok(receipt) => {
+            if receipt.delivery == Delivery::Committed {
+                feed.committed();
+            }
+            Ok(commit_response(receipt))
+        }
+        Err(error) => {
+            if error.committed_a_revision() {
+                feed.committed();
+            }
+            Err(error.into())
+        }
+    }
 }
 
 /// The condition an edit states: `absent` where `may_be_absent`, otherwise
@@ -1659,6 +1683,99 @@ mod tests {
     fn u32_at(bytes: &[u8], at: usize) -> Result<usize, Box<dyn Error>> {
         let value = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
         Ok(usize::try_from(value)?)
+    }
+
+    fn receipt(delivery: Delivery) -> Result<CommitReceipt, Box<dyn Error>> {
+        let artifact = ArtifactRecord {
+            id: format!("art_{}", "a".repeat(32)).parse()?,
+            owner: "owner".parse()?,
+            kind: ArtifactKind::App,
+            title: "Edit".parse()?,
+            pinned: false,
+            current_revision: SourceRevision(2),
+            metadata_revision: MetadataRevision(1),
+            deleted_at: None,
+            created_at: UnixMillis(0),
+            updated_at: UnixMillis(1),
+        };
+        let revision = RevisionRecord {
+            revision: SourceRevision(2),
+            created_by: "owner".parse()?,
+            created_at: UnixMillis(1),
+            files: Vec::new(),
+        };
+        Ok(CommitReceipt {
+            artifact,
+            revision,
+            delivery,
+        })
+    }
+
+    #[test]
+    fn an_edit_wakes_the_change_streams_whenever_it_committed_a_revision()
+    -> Result<(), Box<dyn Error>> {
+        let cases: [(&str, Result<CommitReceipt, ArtifactError>, bool); 8] = [
+            ("committed", Ok(receipt(Delivery::Committed)?), true),
+            ("replayed", Ok(receipt(Delivery::Replayed)?), false),
+            (
+                "committed but not as asked",
+                Err(ArtifactError::EditNotAsRequested),
+                true,
+            ),
+            (
+                "committed but not checked",
+                Err(ArtifactError::EditUnverified),
+                true,
+            ),
+            (
+                "refused for its files",
+                Err(ArtifactError::FilesChanged {
+                    current: SourceRevision(2),
+                    files: Vec::new(),
+                    total: 1,
+                }),
+                false,
+            ),
+            (
+                "store down before the commit",
+                Err(ArtifactError::Unavailable("down".into())),
+                false,
+            ),
+            ("key reused", Err(ArtifactError::RequestKeyReused), false),
+            (
+                "missing",
+                Err(ArtifactError::NotFound(Missing::Artifact)),
+                false,
+            ),
+        ];
+        for (what, outcome, wakes) in cases {
+            let feed = Feed::new(4);
+            let heard = feed.wakeups();
+            let answer = announce_edit(&feed, outcome);
+            assert_eq!(
+                heard.has_changed()?,
+                wakes,
+                "{what}: the streams are woken exactly when a revision was committed"
+            );
+            assert_eq!(
+                answer.is_ok(),
+                what == "committed" || what == "replayed",
+                "{what}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_edit_committed_but_not_verified_is_an_error_with_its_own_status() {
+        assert_eq!(
+            ApiError::from(ArtifactError::EditNotAsRequested).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ApiError::from(ArtifactError::EditUnverified).status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

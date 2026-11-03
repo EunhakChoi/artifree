@@ -50,7 +50,10 @@ expect }` or `{ op: "delete", path, expect }`: the shape of a save's change
    as they are then, even if they changed after the base. This is the "stale
    disjoint" case, and the only way the new revision differs from a save's.
 5. **The base revision.** Required, and a revision the artifact has (`1` to the
-   current one); `0` or a later one is `404 not_found`. It is **not** a
+   current one); `0` or a later one is `404 not_found`: a revision the
+   artifact does not have is a missing revision, as it is for restore and
+   duplicate, not a conflict (this command has no `revision_conflict`, because
+   the head having moved is not its failure). It is **not** a
    condition and does not fence the commit. It is the revision the caller read
    the digests from; it is part of the request's identity (decision 9) and the
    commit response is the same as a save's. This is how the rule "a mutation
@@ -125,7 +128,12 @@ IMMEDIATE` transaction: the request key lookup (replay, reuse, trash), the
     that does not say which check failed; the revision exists, and the message
     says to check the history. This is the server's check of its store, shared
     by HTTP and MCP; the client function checks too (decision 13). Tests use a
-    store that misreports the bytes, a digest, and an extra file.
+    store that misreports the bytes, a digest, and an extra file. If the store
+    cannot be read for the check, the commit also stands and the answer is
+    `503 unavailable` (the message says to retry with the same key, which
+    returns the receipt). In both cases the revision exists, so the operation
+    still wakes the change streams (SSE, the web workspace) as for any commit;
+    the error stays an error. A replay wakes nothing.
 13. **Clients.** The TypeScript function `editFiles(client, id, request,
 options)` is not a method of `ArtifreeClient`, because that class is in the
     web workspace's main bundle, which has no room (decision 0033); it reaches
@@ -139,8 +147,16 @@ options)` is not a method of `ArtifreeClient`, because that class is in the
     does not fit stays a plain error with code `file_conflict`. The CLI
     `artifree artifact edit <id> --base <n> (--put <path>=<local>)...
 (--delete <path>)...` sets each `expect` to the file's digest in revision
-    `n` (`absent` for a put of a path `n` lacks); a delete of a path `n` lacks is
-    a usage error. On a conflict it prints `error[file_conflict]`,
+    `n`, read with one single-revision request (`absent` for a put of a path
+    `n` lacks); a delete of a path `n` lacks is a usage error. `--expect
+<path>=<sha256|absent>` (repeatable) states a condition itself, for a path
+    that `--put` or `--delete` names, once (usage errors otherwise; `absent` is
+    not allowed for a delete). When every path has one, the CLI reads nothing
+    and sends the request as given, so that the retry of an edit whose answer
+    was lost still reaches the server after the artifact moved to the trash:
+    repeat the same command with `--expect` for every path and the same
+    `--idempotency-key`. Without them the retry derives the conditions, needs to
+    read the artifact, and fails with `not_found`. On a conflict it prints `error[file_conflict]`,
     `current_revision=`, one `conflict <path> <sha256|absent>` line per listed
     file, and `conflicts=<total>` on stderr; stdout stays empty.
 14. **Not a merge.** A file is replaced whole or removed. Two edits to one file
@@ -165,7 +181,7 @@ options)` is not a method of `ArtifreeClient`, because that class is in the
   line or range patches, or a conflict resolver; a rename operation (a put of
   the new path with `absent` and a delete of the old path with its digest in one
   request is an atomic rename); conditions on a directory or on files no edit
-  names; a way for the CLI to send a digest other than the base's; a dry run;
+  names; a dry run;
   a mark in the history that a revision came from an edit.
 - The base revision is validated but fences nothing: an edit can apply on top of
   any number of later revisions, by design (decisions 3 to 5). A caller that
@@ -197,7 +213,7 @@ stored; eight racing edits of different files all apply; the trash),
 fingerprint), `crates/artifree-server/tests/file_edits.rs` (the strict save
 still conflicts where the edit of the same base applies, a conflict names the
 file, a store that misreports bytes, a digest or a file makes a 500 though the
-revision exists, a replay is not read back, a key is shared with saves),
+revision exists, a store that cannot be read makes a 503 though the revision exists (the operation wakes the change streams for both, a unit test), a replay is not read back, a key is shared with saves),
 `authorization.rs` (another actor, an empty request, a repeating request),
 `http_api.rs` (the contrast over HTTP, the conflict body, replay after the head
 moved and in another order, twelve refused requests that write nothing and
@@ -211,7 +227,9 @@ request, six answers that do not match, base64, a conflict, lists whose
 numbers do not fit, the client's bound of 32 listed files held to the schema's
 `maxItems`, other failures; the CLI against a real server process: an
 edit past a moved head, a refused edit with its stderr lines, nothing written,
-replay under the same key, a create and a delete, usage errors, the bodies
+replay under the same key, a create and a delete, usage errors, the retry of a
+lost answer from the trash with `--expect` and not without it, a stated
+condition replacing the derived one, malformed `--expect` values, the bodies
 against the API schema).
 
 ## Alternatives

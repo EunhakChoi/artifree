@@ -68,13 +68,18 @@ function clock() {
   };
 }
 
-/** Waits, a turn at a time, for a condition made by real asynchronous work. */
+/**
+ * Waits, a turn at a time, for a condition made by real asynchronous work.
+ * The limit is a time, not a count of turns: work done on the thread pool
+ * (`crypto.subtle`) can take more than any fixed number of turns when the
+ * machine is busy.
+ */
 async function until(condition) {
-  for (let turn = 0; turn < 1000; turn += 1) {
-    if (condition()) return;
+  const deadline = Date.now() + 10_000;
+  while (!condition()) {
+    if (Date.now() > deadline) assert.fail('The condition never became true.');
     await new Promise((resolve) => setImmediate(resolve));
   }
-  assert.fail('The condition never became true.');
 }
 
 async function settle() {

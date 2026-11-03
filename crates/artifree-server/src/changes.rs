@@ -87,6 +87,12 @@ impl Feed {
         self.commits.send_replace(());
     }
 
+    /// A receiver that sees the wake-ups from now on, for tests.
+    #[cfg(test)]
+    pub(crate) fn wakeups(&self) -> watch::Receiver<()> {
+        self.commits.subscribe()
+    }
+
     /// Ends every open stream and every stream opened later.
     pub(crate) fn close(&self) {
         self.closing.send_replace(true);

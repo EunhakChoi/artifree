@@ -31,7 +31,7 @@ export class ArtifreeApiError extends Error {
       currentRevision?: number | undefined;
       currentMetadataRevision?: number | undefined;
       currentDataVersion?: number | undefined;
-      retryAfterSeconds?: number;
+      retryAfterSeconds?: number | undefined;
       body?: unknown;
       cause?: unknown;
     },

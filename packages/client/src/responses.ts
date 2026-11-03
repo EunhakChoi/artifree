@@ -195,7 +195,7 @@ export function revisionFile(value: unknown): RevisionFile | undefined {
   return { path, size, sha256, media_type };
 }
 
-function revision(value: unknown): Revision | undefined {
+export function revision(value: unknown): Revision | undefined {
   if (!isRecord(value) || !Array.isArray(value.files)) return undefined;
   const { revision: number, created_by, created_at_ms } = value;
   const files = list(value.files, revisionFile);

@@ -87,6 +87,10 @@ pub enum ArtifactError {
     /// The edit committed but the stored revision is not what was asked for.
     /// The revision exists; the history shows it (decision 0035).
     EditNotAsRequested,
+    /// The edit committed but the store could not be read to check it. The
+    /// revision exists; a retry with the same key returns its receipt
+    /// (decision 0035).
+    EditUnverified,
     /// The metadata change was prepared against an older metadata revision;
     /// nothing was written.
     MetadataConflict {
@@ -147,6 +151,9 @@ impl fmt::Display for ArtifactError {
             Self::EditNotAsRequested => formatter.write_str(
                 "the edit was saved but the stored revision is not what was asked for; check the history",
             ),
+            Self::EditUnverified => formatter.write_str(
+                "the edit was saved but could not be checked; retry with the same key to get its receipt",
+            ),
             Self::MetadataConflict { current } => write!(
                 formatter,
                 "artifact metadata changed; current metadata revision is {}",
@@ -175,6 +182,16 @@ impl fmt::Display for ArtifactError {
             Self::Data(error) => write!(formatter, "{error}"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
+    }
+}
+
+impl ArtifactError {
+    /// Whether a write that failed with this error had already committed a
+    /// revision, so that followers of the change feed must still learn of it.
+    /// Only an edit that could not be verified after its commit does.
+    #[must_use]
+    pub fn committed_a_revision(&self) -> bool {
+        matches!(self, Self::EditNotAsRequested | Self::EditUnverified)
     }
 }
 
@@ -398,7 +415,9 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// edit, a path edited twice, a result that is no valid package, or one
     /// that equals the current revision, [`ArtifactError::FilesChanged`],
     /// [`ArtifactError::RequestKeyReused`],
-    /// [`ArtifactError::EditNotAsRequested`], or
+    /// [`ArtifactError::EditNotAsRequested`] or
+    /// [`ArtifactError::EditUnverified`] (the revision exists, see
+    /// [`ArtifactError::committed_a_revision`]), or
     /// [`ArtifactError::Unavailable`].
     pub fn edit_files(
         &self,
@@ -431,7 +450,11 @@ impl<S: ArtifactStore> ArtifactService<S> {
             edits,
         })?;
         if receipt.delivery == Delivery::Committed {
-            self.read_back(id, &receipt.revision, edits)?;
+            self.read_back(id, &receipt.revision, edits)
+                .map_err(|error| match error {
+                    ArtifactError::Unavailable(_) => ArtifactError::EditUnverified,
+                    other => other,
+                })?;
         }
         Ok(receipt)
     }

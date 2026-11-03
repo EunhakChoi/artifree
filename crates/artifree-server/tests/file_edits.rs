@@ -55,6 +55,8 @@ const HONEST: u8 = 0;
 const OTHER_BYTES: u8 = 1;
 const OTHER_DIGEST: u8 = 2;
 const EXTRA_FILE: u8 = 3;
+/// The store cannot be read for the new revision.
+const UNREADABLE: u8 = 4;
 
 /// A real store that lies about the revisions it reads back.
 struct Misreporting {
@@ -110,6 +112,9 @@ impl ArtifactStore for Misreporting {
         id: &ArtifactId,
         revision: SourceRevision,
     ) -> Result<Option<RevisionRecord>, StoreError> {
+        if self.mode.load(Ordering::SeqCst) == UNREADABLE && revision.0 >= 3 {
+            return Err(StoreError::Unavailable("injected read failure".into()));
+        }
         let mut record = self.inner.revision(id, revision)?;
         // Only the revision the edit created is misreported: the earlier one
         // is what the edit is compared with.
@@ -431,5 +436,49 @@ fn a_retry_is_the_same_request_in_any_order_but_not_under_other_conditions() -> 
     );
     let other_base = run(1, &[put_notes(notes), put_index(index)]);
     assert_eq!(other_base.map(|_| ()), Err(ArtifactError::RequestKeyReused));
+    Ok(())
+}
+
+#[test]
+fn an_edit_whose_commit_cannot_be_checked_is_an_error_that_says_a_revision_exists() -> TestResult {
+    let fixture = fixture("edit-unverified")?;
+    let notes = digest_of(&fixture, 1, "notes.txt")?;
+    fixture.mode.store(UNREADABLE, Ordering::SeqCst);
+    let edits = [put_notes(FileExpectation::Sha256(notes))];
+
+    let result = fixture.service.edit_files(
+        &fixture.owner,
+        &parsed("edit-key-1"),
+        &fixture.id,
+        SourceRevision(2),
+        &edits,
+    );
+
+    let Err(error) = result else {
+        return Err("an unchecked edit must not be reported as verified".into());
+    };
+    assert_eq!(error, ArtifactError::EditUnverified);
+    assert!(error.committed_a_revision());
+    assert_eq!(
+        fixture
+            .service
+            .artifact(&fixture.owner, &fixture.id)?
+            .current_revision,
+        SourceRevision(3),
+        "the revision was committed"
+    );
+    // The retry returns the receipt of that revision.
+    fixture.mode.store(HONEST, Ordering::SeqCst);
+    let again = fixture.service.edit_files(
+        &fixture.owner,
+        &parsed("edit-key-1"),
+        &fixture.id,
+        SourceRevision(2),
+        &edits,
+    )?;
+    assert_eq!(
+        (again.delivery, again.revision.revision),
+        (Delivery::Replayed, SourceRevision(3))
+    );
     Ok(())
 }

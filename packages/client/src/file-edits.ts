@@ -2,11 +2,18 @@ import type {
   CommitResponse,
   ConflictingFile,
   EditFilesRequest,
+  Revision,
 } from '@artifree/contracts';
 import { decodeBase64 } from './source-part.js';
 import type { ArtifreeClient, MutationOptions } from './client.js';
 import { ArtifreeApiError } from './errors.js';
-import { isCount, isRecord, list, parseCommit } from './responses.js';
+import {
+  isCount,
+  isRecord,
+  list,
+  parseCommit,
+  revision as parseRevision,
+} from './responses.js';
 
 /** The most files one `file_conflict` lists (decision 0035). */
 const MAX_LISTED_CONFLICTS = 32;
@@ -27,9 +34,10 @@ export class FileConflictError extends ArtifreeApiError {
     super(cause.message, {
       status: cause.status,
       code: cause.code,
-      ...(cause.currentRevision === undefined
-        ? {}
-        : { currentRevision: cause.currentRevision }),
+      currentRevision: cause.currentRevision,
+      currentMetadataRevision: cause.currentMetadataRevision,
+      currentDataVersion: cause.currentDataVersion,
+      retryAfterSeconds: cause.retryAfterSeconds,
       body: cause.body,
       cause,
     });
@@ -69,6 +77,23 @@ function conflictsOf(
   )
     return undefined;
   return { files, total };
+}
+
+/**
+ * One revision's manifest. Unlike `listRevisions` it does not read the whole
+ * history. Like `editFiles` it is a function, to keep the client class out of
+ * the web workspace's way.
+ */
+export async function readRevision(
+  client: ArtifreeClient,
+  id: string,
+  revision: number,
+): Promise<Revision> {
+  return client.json(
+    'GET',
+    `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}`,
+    parseRevision,
+  );
 }
 
 /**
