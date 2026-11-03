@@ -13,6 +13,7 @@ pub mod origin;
 pub mod preview;
 pub mod proxy;
 mod ranges;
+pub mod rooms;
 mod runtime_policy;
 mod runtime_sessions;
 mod runtime_source;

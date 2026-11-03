@@ -219,8 +219,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0029](docs/decisions/0029-retention-and-cleanup.md),
 [0030](docs/decisions/0030-persistent-jobs-and-worker.md),
 [0031](docs/decisions/0031-app-data.md), and
-[0032](docs/decisions/0032-runtime-source-read-and-download.md), and
-[0033](docs/decisions/0033-runtime-source-write.md)).
+[0032](docs/decisions/0032-runtime-source-read-and-download.md),
+[0033](docs/decisions/0033-runtime-source-write.md), and
+[0034](docs/decisions/0034-room-and-presence.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -239,8 +240,9 @@ the browser and recovered by choice after a reload or a closed tab (A10);
 the browser must provide Web Locks to keep drafts safely. R04 adds the first
 runtime metadata read, R05 adds an explicit connection-scoped metadata grant,
 R11a adds read-only source listing and reading and user-confirmed download
-requests with their own grants, and R11b lets a preview save one file under a
-separate edit grant.
+requests with their own grants, R11b lets a preview save one file under a
+separate edit grant, and R12 adds an in-memory room per artifact for presence and
+ephemeral events (HTTP and the TypeScript client only).
 The source editor can stage a saved selection and, after review, send it to a
 registered MCP agent inbox (A08). The agent must poll and acknowledge; receipt
 does not establish that a model completed the requested work.
@@ -323,6 +325,22 @@ preview, subscriptions, uploaded assets, replacing a view in place, deleting or
 renaming files, several files in one save, a prompt for each save, roles (a
 viewer is not refused because none exists), and any claim that a preview cannot
 use the network. No MCP tool was added or changed.
+
+### Rooms and presence (decision 0034)
+
+A runtime connection (a browser tab) can join the room of an artifact as a
+named `slot` participant, keep it with a heartbeat, send short ephemeral events,
+and leave. The server tells `isMe` (my participant) and `sameTab` (my
+connection) apart from facts it issued; nothing a peer sends is used. A lease
+lasts 15 s; a join in the same slot resumes the participant under a new epoch
+and the old one is refused. Limits: 64 rooms, 16 participants per room, 4 per
+tab, 4 events per second per participant (burst 8), 128 kept events, 512-byte
+events, 256-byte states, and a room request budget apart from the owner's. A
+late joiner never receives older events. Rooms are memory of one server process:
+a restart empties them, nothing is stored, and events have no delivery
+guarantee. **Not implemented:** several users or roles (S01, S02), a room
+capability for a sandboxed frame, a web or CLI surface, a push stream,
+subscriptions (R07), an outbox (R08), and any MCP tool.
 
 ## Verification
 

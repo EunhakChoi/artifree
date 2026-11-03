@@ -43,3 +43,19 @@ export type {
 } from './change-feed.js';
 export { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 export type { FailureCode } from './errors.js';
+export {
+  followRoom,
+  identityOf,
+  joinRoom,
+  leaveRoom,
+  parseRoomSnapshot,
+  pollRoom,
+  sendRoomEvent,
+} from './room.js';
+export type {
+  FollowRoomOptions,
+  FollowedRoom,
+  RoomCallOptions,
+  RoomExpectation,
+  RoomIdentity,
+} from './room.js';

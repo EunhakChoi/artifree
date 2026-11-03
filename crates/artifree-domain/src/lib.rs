@@ -9,6 +9,7 @@ pub mod data;
 pub mod identity;
 pub mod job;
 pub mod package;
+pub mod room;
 
 /// The family of an artifact's authoritative source model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

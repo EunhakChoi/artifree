@@ -5,7 +5,9 @@ Artifree is in early development: local HTML artifacts work end to end
 opted-in preview can read its own metadata, list and read its own pinned
 source, ask the user to save a file, and, under a separate edit grant, save one
 file as a new revision, each with its own connection grant (decisions 0019,
-0020, 0032 and 0033). Other runtime capabilities remain proposed. Keep implemented and proposed behavior
+0020, 0032 and 0033). Tabs can also share an in-memory room for presence and
+ephemeral events through HTTP and the TypeScript client (decision 0034); a
+frame cannot reach it. Other runtime capabilities remain proposed. Keep implemented and proposed behavior
 explicitly separate in code, UI, docs, and completion reports.
 
 Read `docs/roadmap.md` before starting the next feature. It records PR-sized

@@ -1476,7 +1476,7 @@ export class ArtifreeClient {
     this.runtimeClosing = false;
   }
 
-  private requireViewSession(view: RuntimeView): string {
+  private requireViewSession(view: Pick<RuntimeView, 'session_id'>): string {
     const session = this.runtimeSessionId;
     if (this.runtimeClosing || view.session_id !== session)
       throw new RuntimeConnectionReplacedError();
@@ -1568,7 +1568,7 @@ export class ArtifreeClient {
    * adding a method here: this class is in the main bundle, which has no room.
    */
   async runtimeCall<T>(
-    view: RuntimeView,
+    view: Pick<RuntimeView, 'session_id'>,
     run: (
       source: typeof RuntimeSource,
       frame: RuntimeSource.FrameTransport,

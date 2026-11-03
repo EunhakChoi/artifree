@@ -1652,6 +1652,253 @@
       ],
       "type": "object"
     },
+    "RoomEvent": {
+      "additionalProperties": false,
+      "description": "One ephemeral event, as the viewer of a [`RoomSnapshot`] sees it.",
+      "properties": {
+        "data": {
+          "description": "The sender's text.",
+          "type": "string"
+        },
+        "is_me": {
+          "description": "Whether the viewer's own participant sent it.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "What the sender says the event is about.",
+          "type": "string"
+        },
+        "participant": {
+          "description": "The sender's participant.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "same_tab": {
+          "description": "Whether it came from the viewer's tab.",
+          "type": "boolean"
+        },
+        "seq": {
+          "description": "The event's position in the room, from 1. It is not a change feed\ncursor and not a revision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tab": {
+          "description": "The sender's tab, labelled as in [`RoomMember::tab`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "participant",
+        "tab",
+        "is_me",
+        "same_tab",
+        "kind",
+        "data"
+      ],
+      "type": "object"
+    },
+    "RoomEventReceipt": {
+      "additionalProperties": false,
+      "description": "What a sent event was given.",
+      "properties": {
+        "seq": {
+          "description": "The event's position in the room. It says the room accepted the\nevent, not that anyone read it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq"
+      ],
+      "type": "object"
+    },
+    "RoomEventRequest": {
+      "additionalProperties": false,
+      "description": "Sends one ephemeral event to the room (decision 0034). It is delivered to\nthe participants present who poll before the room drops it, and never\nkept for anyone else: there is no outbox, no acknowledgement and no\nretry that makes it arrive.",
+      "properties": {
+        "data": {
+          "description": "The event's text, at most 512 bytes of UTF-8; the server counts\nbytes. The server does not read it.",
+          "maxLength": 512,
+          "type": "string"
+        },
+        "kind": {
+          "description": "What the event is about: 1 to 32 ASCII letters, digits, `.`, `_` or\n`-`.",
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ],
+      "type": "object"
+    },
+    "RoomHeartbeatRequest": {
+      "additionalProperties": false,
+      "description": "Renews a participant's lease and reads the room (decision 0034). The\nparticipant and its epoch are in the route.",
+      "properties": {
+        "after": {
+          "description": "The newest event position the caller has read, from the `head` of its\nlast response. Events at or before it are not returned again, and\nevents from before the participant joined are never returned\nwhatever this says. A position past the room's newest event is\nrefused.",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "description": "A new state of at most 256 bytes; omitted keeps the current one.",
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "after"
+      ],
+      "type": "object"
+    },
+    "RoomJoinRequest": {
+      "additionalProperties": false,
+      "description": "Joins the room of an artifact as one participant of the caller's tab, or\nresumes the participant that tab already has in `slot` (decision 0034).\nThe tab is the runtime connection named in the route, never a field.",
+      "properties": {
+        "slot": {
+          "description": "The tab's own name for this participant, such as `page`: 1 to 32\nASCII letters, digits, `.`, `_` or `-`. Joining again with the same\nslot resumes the same participant instead of adding another. A slot\nmeans nothing outside the tab that chose it and other participants\nnever see it.",
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "type": "string"
+        },
+        "state": {
+          "description": "What the participant tells the others about itself, at most 256 bytes\nof UTF-8; the server counts bytes. Omitted means empty.",
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "slot"
+      ],
+      "type": "object"
+    },
+    "RoomMember": {
+      "additionalProperties": false,
+      "description": "One participant in a room, as the viewer of a [`RoomSnapshot`] sees it.\n`is_me` and `same_tab` are computed by the server from the connection\nthat asked; the participant sends neither.",
+      "properties": {
+        "actor": {
+          "description": "The account the member acts as. Every member of a room acts as the\nartifact's owner today.",
+          "type": "string"
+        },
+        "is_me": {
+          "description": "Whether this member is the viewer's own participant.",
+          "type": "boolean"
+        },
+        "participant": {
+          "description": "The participant, a number the server assigned. It is a label, not a\ncredential.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "same_tab": {
+          "description": "Whether this member is in the viewer's tab. The viewer's own\nparticipant is in its own tab.",
+          "type": "boolean"
+        },
+        "state": {
+          "description": "What the member says about itself.",
+          "type": "string"
+        },
+        "tab": {
+          "description": "The member's tab as this room labels tabs; equal numbers mean the\nsame tab while the tab has a participant in the room.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "participant",
+        "tab",
+        "actor",
+        "is_me",
+        "same_tab",
+        "state"
+      ],
+      "type": "object"
+    },
+    "RoomSnapshot": {
+      "additionalProperties": false,
+      "description": "The viewer's identity in a room, who is present, and the events it has\nnot read. A join and a heartbeat answer the same way.",
+      "properties": {
+        "epoch": {
+          "description": "The viewer's connection generation, to send with every later call. A\njoin that resumes the participant returns a newer one, and the\nconnection that held the older one can no longer act.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "events": {
+          "description": "Events after the requested position, oldest first. A join returns\nnone.",
+          "items": {
+            "$ref": "#/$defs/RoomEvent"
+          },
+          "type": "array"
+        },
+        "head": {
+          "description": "The newest event's position, 0 if the room never had one. Send it as\n`after` once its events were read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lease_ms": {
+          "description": "How long the lease lasts from this response, in milliseconds. Renew\nwell before it ends; the server measures it, not the client.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "members": {
+          "description": "Everyone present, the viewer included, by participant.",
+          "items": {
+            "$ref": "#/$defs/RoomMember"
+          },
+          "type": "array"
+        },
+        "missed": {
+          "description": "Whether the room dropped events the caller had not read. Ephemeral\nevents can be lost; this says when it happened to this caller.",
+          "type": "boolean"
+        },
+        "participant": {
+          "description": "The viewer's participant. A join that resumes a participant returns\nthe same number as before; one after the lease ran out returns a new\none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tab": {
+          "description": "The viewer's tab as this room labels it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "participant",
+        "epoch",
+        "tab",
+        "lease_ms",
+        "members",
+        "events",
+        "head",
+        "missed"
+      ],
+      "type": "object"
+    },
     "RotateTokenResponse": {
       "additionalProperties": false,
       "description": "Response returned when a token is rotated.\nThe new `secret` is displayed only once.",
@@ -2638,6 +2885,21 @@
     },
     {
       "$ref": "#/$defs/RuntimeSourceWriteReceipt"
+    },
+    {
+      "$ref": "#/$defs/RoomJoinRequest"
+    },
+    {
+      "$ref": "#/$defs/RoomHeartbeatRequest"
+    },
+    {
+      "$ref": "#/$defs/RoomEventRequest"
+    },
+    {
+      "$ref": "#/$defs/RoomEventReceipt"
+    },
+    {
+      "$ref": "#/$defs/RoomSnapshot"
     },
     {
       "$ref": "#/$defs/ErrorResponse"
