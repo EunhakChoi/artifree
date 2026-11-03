@@ -45,6 +45,10 @@ interface Expected {
   readonly after: string | undefined;
 }
 
+/** What a data path is, for the error of one that is not. */
+export const DATA_PATH_RULE =
+  'path is empty or 1 to 16 segments of 1 to 64 letters, digits, "_" or "-", separated by single "/".';
+
 const encoder = new TextEncoder();
 
 function byteLength(text: string): number {
@@ -63,7 +67,27 @@ export function compareUtf8(left: string, right: string): number {
   return a.length - b.length;
 }
 
-function invalidRequest(message: string): ArtifreeApiError {
+const SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
+/** Most segments in a data path. */
+const MAX_PATH_SEGMENTS = 16;
+
+/**
+ * Whether `path` is a data path in the one form the server accepts and echoes:
+ * empty (the root), or 1 to 16 segments of 1 to 64 ASCII letters, digits, `_`
+ * or `-`, separated by single `/` (no leading, trailing or doubled `/`).
+ * Anything else would never match the path the server reports back.
+ */
+export function isDataPath(path: string): boolean {
+  if (path === '') return true;
+  const segments = path.split('/');
+  return (
+    segments.length <= MAX_PATH_SEGMENTS &&
+    segments.every((segment) => SEGMENT.test(segment))
+  );
+}
+
+/** The error for a request the client refuses before sending it. */
+export function invalidRequest(message: string): ArtifreeApiError {
   return new ArtifreeApiError(message, { status: 0, code: 'invalid_request' });
 }
 
@@ -208,6 +232,7 @@ export async function listDataMembers(
       `after is a member name of 1 to ${MAX_MEMBER_NAME_BYTES} bytes.`,
     );
   const path = request.path ?? '';
+  if (!isDataPath(path)) throw invalidRequest(DATA_PATH_RULE);
   const parameters = new URLSearchParams();
   if (path !== '') parameters.set('path', path);
   if (prefix !== '') parameters.set('prefix', prefix);

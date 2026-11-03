@@ -1,5 +1,6 @@
 import type { AppData, DataEventTooLarge } from '@artifree/contracts';
 import { parseRetryAfter, type ClientConfiguration } from './client.js';
+import { DATA_PATH_RULE, invalidRequest, isDataPath } from './data-query.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord, parseAppData, parseError } from './responses.js';
 
@@ -223,10 +224,32 @@ interface Watched {
 }
 
 /**
+ * Whether an event of `type` is acceptable after the one with version
+ * `lastVersion` (`undefined` before any): for the watched artifact and path,
+ * and with a `data_version` greater than every one delivered before. A
+ * `snapshot` is the first, a `change` is never first, and a `too_large` stands
+ * in for either.
+ */
+function inOrder(
+  type: 'snapshot' | 'change' | 'too_large',
+  event: { artifact_id: string; path: string; data_version: number },
+  watched: Watched,
+  lastVersion: number | undefined,
+): boolean {
+  if (event.artifact_id !== watched.artifactId || event.path !== watched.path)
+    return false;
+  if (type === 'snapshot' && lastVersion !== undefined) return false;
+  if (type === 'change' && lastVersion === undefined) return false;
+  return lastVersion === undefined || event.data_version > lastVersion;
+}
+
+/**
  * The validated events of one connection. The first is a `snapshot`, each
  * later one a `change` whose `data_version` is greater than the one before,
- * all for the watched artifact and path. A `too_large` event rejects with
- * `data_too_large`; an event of a type this client does not know is skipped.
+ * all for the watched artifact and path. A `too_large` event is held to the
+ * same rules (the right artifact and path, and newer than what was delivered)
+ * and then rejects with `data_too_large`; an event of a type this client does
+ * not know is skipped.
  */
 async function* dataEvents(
   chunks: AsyncIterable<string>,
@@ -247,13 +270,9 @@ async function* dataEvents(
     }
     if (type === 'too_large') {
       const large = parseTooLarge(value);
-      if (
-        large === undefined ||
-        large.artifact_id !== watched.artifactId ||
-        large.path !== watched.path
-      )
+      if (large === undefined || !inOrder(type, large, watched, lastVersion))
         throw invalidResponse(
-          'The data stream sent a too_large event that does not match the contract or the watched path.',
+          'The data stream sent a too_large event that does not match the contract, the watched path, or its order.',
         );
       throw new ArtifreeApiError(
         `The value at "${watched.path}" is over ${large.max_bytes} bytes and is not streamed; watch a smaller path.`,
@@ -261,13 +280,7 @@ async function* dataEvents(
       );
     }
     const state = parseAppData(value);
-    if (
-      state === undefined ||
-      state.artifact_id !== watched.artifactId ||
-      state.path !== watched.path ||
-      (type === 'snapshot') !== (lastVersion === undefined) ||
-      (lastVersion !== undefined && state.data_version <= lastVersion)
-    )
+    if (state === undefined || !inOrder(type, state, watched, lastVersion))
       throw invalidResponse(
         `The data stream sent a ${type} event that does not match the contract or its order.`,
       );
@@ -366,6 +379,9 @@ async function openStream(
  * hammered. A connection that receives nothing for {@link IDLE_TIMEOUT_MS}
  * is dropped.
  *
+ * Rejects at once with `invalid_request`, sending nothing, for a path that is
+ * not in the form the server accepts (no leading, trailing or doubled `/`).
+ *
  * Resolves when the signal aborts. Rejects with the failure when a new
  * connection cannot help (a `4xx` other than `429`, a response that is not the
  * stream, an event that breaks the contract, `data_too_large`), or with what
@@ -379,6 +395,9 @@ export async function followData(
   const { signal, onEvent, onConnect, onDisconnect } = options;
   const timers = options.timers ?? REAL_TIMERS;
   const watched: Watched = { artifactId, path: options.path ?? '' };
+  // The server answers with the path it accepted; a path it would not accept
+  // (or would write differently) can never match and is refused here.
+  if (!isDataPath(watched.path)) throw invalidRequest(DATA_PATH_RULE);
   let attempt = 0;
   while (!signal.aborted) {
     let failure: ArtifreeApiError | undefined;

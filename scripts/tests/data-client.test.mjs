@@ -441,13 +441,13 @@ test('A stream delivers its snapshot and then each change, as sent', async () =>
   const { events, calls, outcome } = await run(
     [
       eventStream([
-        frame('snapshot', state(3, { a: 1 }, 'to do/x')),
+        frame('snapshot', state(3, { a: 1 }, 'to-do/x')),
         ': keepalive\n\n',
-        frame('change', state(5, { a: 2 }, 'to do/x')),
-        frame('change', { ...state(6, undefined, 'to do/x') }),
+        frame('change', state(5, { a: 2 }, 'to-do/x')),
+        frame('change', { ...state(6, undefined, 'to-do/x') }),
       ]),
     ],
-    { path: 'to do/x' },
+    { path: 'to-do/x' },
   );
   assert.deepEqual(outcome, { resolved: true });
   assert.deepEqual(
@@ -463,7 +463,7 @@ test('A stream delivers its snapshot and then each change, as sent', async () =>
     url.origin + url.pathname,
     `http://api.test/v1/artifacts/${ART}/data/events`,
   );
-  assert.equal(url.searchParams.get('path'), 'to do/x');
+  assert.equal(url.searchParams.get('path'), 'to-do/x');
   assert.equal(calls[0].init.headers.authorization, 'Bearer secret');
   assert.equal(calls[0].init.headers.accept, 'text/event-stream');
 });
@@ -541,23 +541,125 @@ test('A value too large to stream rejects with data_too_large and is not retried
   assert.equal(malformed.outcome.error.code, 'invalid_response');
 });
 
-test('A too_large event for another artifact or path is invalid_response, not data_too_large', async () => {
-  const elsewhere = {
-    'another artifact': { artifact_id: 'art_' + '1'.repeat(32), path: 'n' },
-    'another path': { artifact_id: ART, path: 'other' },
+const OTHER_ART = `art_${'1'.repeat(32)}`;
+
+/** An event of `type` about `n` at `version`, with parts overridden. */
+function eventAbout(type, version, { artifact = ART, path = 'n' } = {}) {
+  return type === 'too_large'
+    ? frame('too_large', {
+        artifact_id: artifact,
+        path,
+        data_version: version,
+        max_bytes: 131072,
+      })
+    : frame(type, { ...state(version, 1, path), artifact_id: artifact });
+}
+
+test('Every event type is held to the watched artifact, path, and order', async () => {
+  const types = ['snapshot', 'change', 'too_large'];
+  // After a snapshot at version 5 was delivered.
+  const after = {
+    'another artifact': { version: 6, where: { artifact: OTHER_ART } },
+    'another path': { version: 6, where: { path: 'other' } },
+    'a stale version': { version: 4, where: {} },
+    'an equal version': { version: 5, where: {} },
   };
-  for (const [label, target] of Object.entries(elsewhere)) {
-    const { outcome, calls } = await run([
-      eventStream([
-        frame('too_large', { ...target, data_version: 1, max_bytes: 131072 }),
-      ]),
-    ]);
+  for (const type of types)
+    for (const [label, { version, where }] of Object.entries(after)) {
+      const { outcome, calls, events } = await run([
+        eventStream(
+          [eventAbout('snapshot', 5), eventAbout(type, version, where)],
+          {
+            end: false,
+          },
+        ),
+      ]);
+      assert.ok(
+        outcome.error instanceof ArtifreeApiError &&
+          outcome.error.code === 'invalid_response',
+        `${type} with ${label}: ${String(outcome.error)}`,
+      );
+      assert.equal(calls.length, 1, `${type} with ${label} was retried`);
+      assert.equal(events.length, 1, `${type} with ${label} was delivered`);
+    }
+  // As the first event of a connection.
+  const first = {
+    'another artifact': { version: 1, where: { artifact: OTHER_ART } },
+    'another path': { version: 1, where: { path: 'other' } },
+  };
+  for (const type of types)
+    for (const [label, { version, where }] of Object.entries(first)) {
+      const { outcome, events } = await run([
+        eventStream([eventAbout(type, version, where)], { end: false }),
+      ]);
+      assert.equal(
+        outcome.error?.code,
+        'invalid_response',
+        `first ${type} with ${label}: ${String(outcome.error)}`,
+      );
+      assert.equal(events.length, 0);
+    }
+  const changeFirst = await run([
+    eventStream([eventAbout('change', 1)], { end: false }),
+  ]);
+  assert.equal(changeFirst.outcome.error?.code, 'invalid_response');
+  // What is accepted: a newer change, and a too_large that is newer than what
+  // was delivered or first.
+  const newer = await run([
+    eventStream([eventAbout('snapshot', 5), eventAbout('change', 6)]),
+  ]);
+  assert.deepEqual(newer.outcome, { resolved: true });
+  assert.deepEqual(
+    newer.events.map(({ data }) => data.data_version),
+    [5, 6],
+  );
+  for (const events of [
+    [eventAbout('snapshot', 5), eventAbout('too_large', 6)],
+    [eventAbout('too_large', 1)],
+  ]) {
+    const { outcome, calls } = await run([eventStream(events)]);
+    assert.equal(outcome.error?.code, 'data_too_large');
+    assert.equal(calls.length, 1);
+  }
+});
+
+test('A path the server would not accept is refused before anything is sent', async () => {
+  const paths = [
+    'a//b',
+    '/a',
+    'a/',
+    '/',
+    'a b',
+    'é',
+    '../x',
+    'a/./b',
+    'a'.repeat(65),
+    Array.from({ length: 17 }, () => 's').join('/'),
+  ];
+  for (const path of paths) {
+    const { outcome, calls } = await run([eventStream([])], { path });
     assert.ok(
       outcome.error instanceof ArtifreeApiError &&
-        outcome.error.code === 'invalid_response',
-      `${label}: ${String(outcome.error)}`,
+        outcome.error.code === 'invalid_request',
+      `${JSON.stringify(path)}: ${String(outcome.error)}`,
     );
-    assert.equal(calls.length, 1, label);
+    assert.equal(calls.length, 0, JSON.stringify(path));
+    const asked = recordingClient(() => jsonResponse({}));
+    const listing = await listDataMembers(asked.client, ART, { path }).then(
+      () => undefined,
+      (error) => error,
+    );
+    assert.equal(listing?.code, 'invalid_request', JSON.stringify(path));
+    assert.equal(asked.calls.length, 0, JSON.stringify(path));
+  }
+  // The longest accepted forms.
+  const longest = [
+    'a'.repeat(64),
+    Array.from({ length: 16 }, () => 's').join('/'),
+  ];
+  for (const path of longest) {
+    const { calls } = await run([eventStream([])], { path });
+    assert.ok(calls.length > 0, `${path} was not sent`);
   }
 });
 
