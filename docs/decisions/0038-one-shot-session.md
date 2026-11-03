@@ -81,8 +81,11 @@ after it was killed.
 6. **The marker and the owner check.** The marker `.artifree-session` is
    `artifree-session 1`, `pid <n>`, and, where `/proc` exists, `start <ticks>`
    (the process start time). The owner has ended when `/proc/<pid>/stat` is
-   missing, shows a zombie (state `Z` or `X`), or has a different start time
-   (the process id was reused). **Where `/proc` does not exist (macOS,
+   definitely not found, shows a zombie (state `Z` or `X`), or has a different
+   start time (the process id was reused). Every other outcome (permission
+   denied, any other read error, a file that does not parse, a marker without a
+   start time to compare) says nothing and counts as "running", so the directory
+   is kept; the lookup has three results (running, gone, unknown) for this reason. **Where `/proc` does not exist (macOS,
    Windows) nothing can be shown to have ended, so the sweep removes
    nothing there** and a killed session's directory stays until removed by
    hand. This errs toward keeping data: a wrongly kept directory costs disk

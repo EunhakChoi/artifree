@@ -110,6 +110,12 @@ impl SessionDir {
     /// is left alone.
     #[must_use]
     pub fn sweep_stale(&self) -> SweepReport {
+        self.sweep_stale_in(Path::new(PROC_ROOT))
+    }
+
+    /// As [`SessionDir::sweep_stale`], reading the process table from
+    /// `proc_root`. Tests give it a directory laid out like `/proc`.
+    fn sweep_stale_in(&self, proc_root: &Path) -> SweepReport {
         let mut report = SweepReport::default();
         let Some(root) = self.path.parent() else {
             return report;
@@ -118,9 +124,14 @@ impl SessionDir {
             return report;
         };
         let own_owner = file_owner(&self.path);
+        if cfg!(unix) && own_owner.is_none() {
+            // Without our own user there is nothing to compare a directory's
+            // owner with, and two unknown owners must not count as equal.
+            return report;
+        }
         for entry in entries.flatten() {
             let candidate = entry.path();
-            if candidate == self.path || !is_stale_session(&candidate, own_owner) {
+            if candidate == self.path || !is_stale_session(&candidate, own_owner, proc_root) {
                 continue;
             }
             match remove_tree(&candidate) {
@@ -164,7 +175,7 @@ fn remove_tree(path: &Path) -> io::Result<()> {
 }
 
 /// Whether `candidate` is a session directory whose owner has ended.
-fn is_stale_session(candidate: &Path, own_owner: Option<u32>) -> bool {
+fn is_stale_session(candidate: &Path, own_owner: Option<u32>, proc_root: &Path) -> bool {
     let named_like_a_session = candidate
         .file_name()
         .and_then(|name| name.to_str())
@@ -192,7 +203,7 @@ fn is_stale_session(candidate: &Path, own_owner: Option<u32>) -> bool {
     else {
         return false;
     };
-    owner.has_ended()
+    owner.has_ended(proc_root)
 }
 
 /// The user that owns a file, where the platform reports one.
@@ -234,41 +245,72 @@ impl Marker {
         Some(Self { pid, start })
     }
 
-    /// Whether the owner is known to be gone. When this platform cannot tell,
-    /// the owner counts as running, so a directory is never removed on a guess.
-    fn has_ended(&self) -> bool {
-        if !process_table_available() {
+    /// Whether the owner is known to be gone. Only a process table that says
+    /// so counts: a process that is missing from it, a zombie, or one with a
+    /// different start time than the marker's. Anything the table cannot say
+    /// (it is not there, a file cannot be read or understood) leaves the owner
+    /// counted as running, so a directory is never removed on a guess.
+    fn has_ended(&self, proc_root: &Path) -> bool {
+        if !process_table_available(proc_root) {
             return false;
         }
-        match process_start_and_state(self.pid) {
-            None => true,
-            Some((state, start)) => {
+        match look_up_process(proc_root, self.pid) {
+            ProcessLookup::Gone => true,
+            ProcessLookup::Unknown => false,
+            ProcessLookup::Running { state, start } => {
                 // A zombie has ended; a different start time means that the
-                // process id now belongs to another process.
+                // process id now belongs to another process. A marker without
+                // a start time cannot show the second, so it shows only the first.
                 matches!(state, 'Z' | 'X') || self.start.is_some_and(|marked| marked != start)
             }
         }
     }
 }
 
-/// Whether `/proc/<pid>/stat` can be read on this platform.
-fn process_table_available() -> bool {
-    Path::new("/proc/self/stat").is_file()
+/// Where the process table is on Linux.
+const PROC_ROOT: &str = "/proc";
+
+/// What the process table says about one process id.
+#[derive(Debug, PartialEq, Eq)]
+enum ProcessLookup {
+    /// The process exists, in this state, started at this time (clock ticks
+    /// since boot).
+    Running { state: char, start: u64 },
+    /// The table has no entry for the process: it was definitely not found.
+    Gone,
+    /// The table could not be read or understood (permission denied, an I/O
+    /// error, an unexpected format). This says nothing about the process.
+    Unknown,
+}
+
+/// Whether a process table is present under `proc_root` at all.
+fn process_table_available(proc_root: &Path) -> bool {
+    proc_root.join("self").join("stat").is_file()
+}
+
+/// Looks `pid` up in the process table under `proc_root`. Only a missing
+/// `<pid>/stat` is [`ProcessLookup::Gone`]; every other failure is unknown.
+fn look_up_process(proc_root: &Path, pid: u32) -> ProcessLookup {
+    match fs::read_to_string(proc_root.join(pid.to_string()).join("stat")) {
+        Ok(text) => match parse_stat(&text) {
+            Some((state, start)) => ProcessLookup::Running { state, start },
+            None => ProcessLookup::Unknown,
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => ProcessLookup::Gone,
+        Err(_) => ProcessLookup::Unknown,
+    }
 }
 
 /// The start time of a running process in clock ticks since boot, where known.
 fn process_start(pid: u32) -> Option<u64> {
-    process_start_and_state(pid).map(|(_, start)| start)
+    match look_up_process(Path::new(PROC_ROOT), pid) {
+        ProcessLookup::Running { start, .. } => Some(start),
+        ProcessLookup::Gone | ProcessLookup::Unknown => None,
+    }
 }
 
-/// The state letter and start time from `/proc/<pid>/stat`, or `None` when
-/// the file is missing or unreadable. The command name is skipped by looking
-/// for the last `)`, because the name can hold spaces and parentheses.
-fn process_start_and_state(pid: u32) -> Option<(char, u64)> {
-    parse_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
-}
-
-/// Reads the state and start time from the text of a `/proc/<pid>/stat` file.
+/// Reads the state and start time from the text of a `/proc/<pid>/stat` file,
+/// or `None` when it is not in that format.
 fn parse_stat(text: &str) -> Option<(char, u64)> {
     let after_name = text.get(text.rfind(')')? + 1..)?;
     let mut fields = after_name.split_whitespace();
@@ -319,7 +361,6 @@ mod tests {
     }
 
     /// Writes a session directory the way a session that was killed leaves it.
-    #[cfg(target_os = "linux")]
     fn leave_behind(root: &Path, name: &str, marker: Option<&str>) -> io::Result<PathBuf> {
         let dir = root.join(name);
         data_dir::create_new_data_dir(&dir)?;
@@ -510,5 +551,140 @@ mod tests {
         let line = format!("42 (we ird) name) R {zeros}777 0 0\n");
         assert_eq!(parse_stat(&line), Some(('R', 777)));
         assert_eq!(parse_stat("42 (short) R 1 2"), None);
+    }
+    /// A directory laid out like `/proc`, with only `self/stat`.
+    fn fake_proc(root: &Root) -> io::Result<PathBuf> {
+        fs::create_dir_all(root.0.join("self"))?;
+        fs::write(root.0.join("self").join("stat"), stat_text('R', 1))?;
+        Ok(root.0.clone())
+    }
+
+    /// The text of a `stat` file with the given state and start time.
+    fn stat_text(state: char, start: u64) -> String {
+        format!("1 (x) {state} {}{start} 0\n", "0 ".repeat(18))
+    }
+
+    /// Adds `<pid>/stat` with `text` to a fake process table.
+    fn add_process(proc: &Path, pid: u32, text: &str) -> io::Result<()> {
+        fs::create_dir_all(proc.join(pid.to_string()))?;
+        fs::write(proc.join(pid.to_string()).join("stat"), text)
+    }
+
+    /// Adds a `<pid>/stat` that cannot be read as a file: a read of it fails
+    /// with an error that is not "not found".
+    fn add_unreadable_process(proc: &Path, pid: u32) -> io::Result<()> {
+        fs::create_dir_all(proc.join(pid.to_string()).join("stat"))
+    }
+
+    #[test]
+    fn only_a_missing_entry_is_gone_and_every_other_failure_is_unknown() -> TestResult {
+        let root = Root::new();
+        let proc = fake_proc(&root)?;
+        add_process(&proc, 103, &stat_text('S', 5))?;
+        add_process(&proc, 101, "not a stat file")?;
+        add_unreadable_process(&proc, 102)?;
+
+        assert_eq!(look_up_process(&proc, 100), ProcessLookup::Gone);
+        assert_eq!(look_up_process(&proc, 101), ProcessLookup::Unknown);
+        assert_eq!(look_up_process(&proc, 102), ProcessLookup::Unknown);
+        assert_eq!(
+            look_up_process(&proc, 103),
+            ProcessLookup::Running {
+                state: 'S',
+                start: 5
+            }
+        );
+        assert!(process_table_available(&proc));
+        assert!(!process_table_available(&proc.join("nowhere")));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_stat_file_that_may_not_be_read_is_unknown() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Root::new();
+        let proc = fake_proc(&root)?;
+        add_process(&proc, 104, &stat_text('S', 5))?;
+        let file = proc.join("104").join("stat");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000))?;
+        if fs::read_to_string(&file).is_ok() {
+            // The tests run as a user who can read any file; the unreadable
+            // directory case above covers the same branch.
+            return Ok(());
+        }
+        assert_eq!(look_up_process(&proc, 104), ProcessLookup::Unknown);
+        Ok(())
+    }
+
+    #[test]
+    fn an_owner_counts_as_ended_only_when_the_table_shows_it() -> TestResult {
+        let root = Root::new();
+        let proc = fake_proc(&root)?;
+        add_process(&proc, 110, &stat_text('S', 5))?;
+        add_process(&proc, 111, &stat_text('Z', 5))?;
+        add_process(&proc, 112, &stat_text('X', 5))?;
+        add_process(&proc, 113, "garbage")?;
+        add_unreadable_process(&proc, 114)?;
+        let marker = |pid, start| Marker { pid, start };
+
+        // Shown to be over: no entry, a zombie, a dead process, another start time.
+        assert!(marker(109, Some(5)).has_ended(&proc), "no entry");
+        assert!(marker(111, Some(5)).has_ended(&proc), "zombie");
+        assert!(marker(112, None).has_ended(&proc), "dead");
+        assert!(marker(110, Some(6)).has_ended(&proc), "pid reused");
+        // Not shown: running, running without a start time to compare,
+        // and every case where the table says nothing.
+        assert!(!marker(110, Some(5)).has_ended(&proc), "running");
+        assert!(!marker(110, None).has_ended(&proc), "no start to compare");
+        assert!(!marker(113, Some(5)).has_ended(&proc), "unparsable stat");
+        assert!(!marker(114, Some(5)).has_ended(&proc), "unreadable stat");
+        assert!(
+            !marker(109, Some(5)).has_ended(&proc.join("nowhere")),
+            "no process table"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_sweep_keeps_a_directory_whose_owner_state_is_unknown() -> TestResult {
+        let sessions = Root::new();
+        let table = Root::new();
+        let proc = fake_proc(&table)?;
+        add_process(&proc, 201, &stat_text('S', 5))?;
+        add_unreadable_process(&proc, 202)?;
+        add_process(&proc, 203, "not a stat file")?;
+        let marker = |pid: u32| format!("{MARKER_HEADER}\npid {pid}\nstart 5\n");
+        let gone = leave_behind(
+            &sessions.0,
+            "artifree-session-0000000000000100",
+            Some(&marker(200)),
+        )?;
+        let kept: Vec<PathBuf> = [201, 202, 203]
+            .into_iter()
+            .map(|pid| {
+                leave_behind(
+                    &sessions.0,
+                    &format!("artifree-session-000000000000{pid:04}"),
+                    Some(&marker(pid)),
+                )
+            })
+            .collect::<io::Result<_>>()?;
+        let session = SessionDir::create(&sessions.0)?;
+
+        let report = session.sweep_stale_in(&proc);
+
+        assert_eq!(
+            report,
+            SweepReport {
+                removed: 1,
+                failed: 0
+            }
+        );
+        assert!(!gone.exists(), "the owner that is not in the table is gone");
+        for dir in kept {
+            assert!(dir.exists(), "{} must be kept", dir.display());
+        }
+        Ok(())
     }
 }
