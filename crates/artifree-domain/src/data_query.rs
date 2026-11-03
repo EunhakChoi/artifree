@@ -17,8 +17,9 @@ pub const DEFAULT_LIMIT: usize = 50;
 /// Most members in a page.
 pub const MAX_LIMIT: usize = 100;
 /// Most bytes of member names and canonical values in a page that selects
-/// values. The first member is always listed, so a page makes progress: a
-/// value is at most [`crate::data::MAX_VALUE_BYTES`] and a name 256 bytes.
+/// values. A member whose name and value together exceed it is listed by name
+/// alone and marked [`Member::too_large`], so the bound always holds and a
+/// page always makes progress: a name is at most 256 bytes.
 pub const MAX_PAGE_BYTES: usize = 512 * 1024;
 /// Most bytes in a name prefix.
 pub const MAX_PREFIX_BYTES: usize = MAX_SEGMENT_BYTES;
@@ -126,8 +127,12 @@ impl MembersQuery {
 pub struct Member {
     /// The member's name.
     pub name: String,
-    /// Its value, when the query selects values.
+    /// Its value, when the query selects values and the value fits a page.
     pub value: Option<DataValue>,
+    /// The query selects values, but this member's name and value together
+    /// exceed [`MAX_PAGE_BYTES`], so `value` is left out. Read the member with
+    /// a `get` of its path.
+    pub too_large: bool,
 }
 
 /// A page of members.
@@ -170,22 +175,26 @@ impl DataSpace {
         let mut bytes = 0_usize;
         let mut more = false;
         for (name, value) in matching {
+            // A member that cannot fit a page by itself is listed without its
+            // value, so the page bound is exact and a listing never stalls.
+            let canonical = values.then(|| value.to_canonical());
+            let too_large = canonical
+                .as_ref()
+                .is_some_and(|text| name.len() + text.len() > MAX_PAGE_BYTES);
             let weight = name.len()
-                + if values {
-                    value.to_canonical().len()
-                } else {
-                    0
+                + match &canonical {
+                    Some(text) if !too_large => text.len(),
+                    _ => 0,
                 };
-            if entries.len() == query.limit()
-                || (!entries.is_empty() && bytes + weight > MAX_PAGE_BYTES)
-            {
+            if entries.len() == query.limit() || bytes + weight > MAX_PAGE_BYTES {
                 more = true;
                 break;
             }
             bytes += weight;
             entries.push(Member {
                 name: name.clone(),
-                value: values.then(|| value.clone()),
+                value: (values && !too_large).then(|| value.clone()),
+                too_large,
             });
         }
         let next_after = more
@@ -350,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_of_values_stops_at_the_byte_bound_but_always_holds_one_member() -> TestResult {
+    fn a_page_of_values_stops_at_the_byte_bound() -> TestResult {
         let big = "x".repeat(250 * 1024);
         let text = format!(r#"{{"a":"{big}","b":"{big}","c":"{big}"}}"#);
         let data = space(&text);
@@ -382,6 +391,56 @@ mod tests {
         let single = space(&format!(r#"{{"only":"{}"}}"#, "y".repeat(255 * 1024)));
         let page = single.members(&query("", None, Some(MemberSelect::Values), None, None)?);
         assert_eq!(names(&page), ["only"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_member_too_large_for_a_page_is_listed_without_its_value_and_the_bound_holds() -> TestResult
+    {
+        // A subtree can grow past a page through several writes.
+        let part = "x".repeat(250 * 1024);
+        let text =
+            format!(r#"{{"big":{{"a":"{part}","b":"{part}","c":"{part}"}},"small":1,"z":[2]}}"#);
+        let data = space(&text);
+        let page = data.members(&query("", None, Some(MemberSelect::Values), None, None)?);
+        assert_eq!(names(&page), ["big", "small", "z"]);
+        let flags: Vec<(bool, bool)> = page
+            .entries
+            .iter()
+            .map(|member| (member.too_large, member.value.is_some()))
+            .collect();
+        assert_eq!(
+            flags,
+            [(true, false), (false, true), (false, true)],
+            "only the member that cannot fit a page loses its value"
+        );
+        let held: usize = page
+            .entries
+            .iter()
+            .map(|member| {
+                member.name.len()
+                    + member
+                        .value
+                        .as_ref()
+                        .map_or(0, |value| value.to_canonical().len())
+            })
+            .sum();
+        assert!(held <= MAX_PAGE_BYTES, "{held} bytes in a page");
+        // Paging goes past it with a cursor, one member at a time.
+        let first = data.members(&query("", None, Some(MemberSelect::Values), Some(1), None)?);
+        assert_eq!(names(&first), ["big"]);
+        assert_eq!(first.next_after.as_deref(), Some("big"));
+        let rest = data.members(&query(
+            "",
+            None,
+            Some(MemberSelect::Values),
+            None,
+            first.next_after.as_deref(),
+        )?);
+        assert_eq!(names(&rest), ["small", "z"]);
+        // As names nothing is withheld: no value was asked for.
+        let listed = data.members(&query("", None, None, None, None)?);
+        assert!(listed.entries.iter().all(|member| !member.too_large));
         Ok(())
     }
 

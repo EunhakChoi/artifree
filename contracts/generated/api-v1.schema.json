@@ -568,6 +568,13 @@
           "description": "The member's name.",
           "type": "string"
         },
+        "too_large": {
+          "description": "True when the query selected `values` but this member's name and value\ntogether exceed the 512 KiB bound of a page, so `value` is left out;\nread it with `GET data` at its path. Absent otherwise.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "value": {
           "anyOf": [
             {

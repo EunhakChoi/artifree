@@ -933,6 +933,11 @@ pub struct DataMember {
         skip_serializing_if = "Option::is_none"
     )]
     pub value: Option<JsonValue>,
+    /// True when the query selected `values` but this member's name and value
+    /// together exceed the 512 KiB bound of a page, so `value` is left out;
+    /// read it with `GET data` at its path. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub too_large: Option<bool>,
 }
 
 /// The committed state a page reports. Nothing in it is pending: the server

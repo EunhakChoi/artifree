@@ -585,6 +585,70 @@ async fn a_page_of_values_is_bounded_in_bytes() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_member_too_large_for_a_page_is_listed_without_its_value() -> TestResult {
+    let harness = Harness::new();
+    let id = harness.artifact(OWNER, "toolarge").await?;
+    // Each write is within the value limit; together they are not within a page.
+    let part = "x".repeat(250 * 1024);
+    let mut version = 0;
+    for name in ["a", "b", "c"] {
+        version = harness
+            .set(
+                &id,
+                &format!("set-big-{name}-00"),
+                version,
+                &format!("items/big/{name}"),
+                json!(part),
+            )
+            .await?;
+    }
+    version = harness
+        .set(&id, "set-small-00000", version, "items/small", json!(7))
+        .await?;
+    let page = harness
+        .members(&id, "?path=items&select=values&limit=100")
+        .await?;
+    assert_eq!(names(&page), ["big", "small"]);
+    let members = &page["canonical"]["members"];
+    assert_eq!(members[0]["too_large"], json!(true));
+    assert!(
+        members[0].get("value").is_none(),
+        "the value of a member too large for a page was sent: {members}"
+    );
+    assert_eq!(members[1]["value"], json!(7));
+    assert!(members[1].get("too_large").is_none(), "{members}");
+    assert_eq!(page["canonical"]["data_version"], json!(version));
+    assert!(
+        page.to_string().len() <= 512 * 1024,
+        "the page is {} bytes",
+        page.to_string().len()
+    );
+    // A page of one still moves on past it.
+    let first = harness
+        .members(&id, "?path=items&select=values&limit=1")
+        .await?;
+    assert_eq!(first["canonical"]["next_after"], "big");
+    let next = harness
+        .members(&id, "?path=items&select=values&limit=1&after=big")
+        .await?;
+    assert_eq!(names(&next), ["small"]);
+    // Names are not withheld, and the value is still readable.
+    let listed = harness.members(&id, "?path=items").await?;
+    assert!(listed["canonical"]["members"][0].get("too_large").is_none());
+    let read = harness
+        .ok(
+            "GET",
+            &format!("/v1/artifacts/{id}/data?path=items/big"),
+            OWNER,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(read["value"]["a"], json!(part));
+    Ok(())
+}
+
+#[tokio::test]
 async fn queries_that_break_a_rule_are_refused_before_anything_is_read() -> TestResult {
     let harness = Harness::new();
     let id = harness.artifact(OWNER, "rules").await?;

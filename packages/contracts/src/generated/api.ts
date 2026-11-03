@@ -1797,6 +1797,12 @@ export interface DataMember {
    */
   name: string;
   /**
+   * True when the query selected `values` but this member's name and value
+   * together exceed the 512 KiB bound of a page, so `value` is left out;
+   * read it with `GET data` at its path. Absent otherwise.
+   */
+  too_large?: boolean | null;
+  /**
    * Its value, when the query selected `values`. A stored `null` is present
    * as `null`.
    */
