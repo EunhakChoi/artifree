@@ -316,8 +316,22 @@ checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge has no data capability** (it grants `metadata.read`, `source.read`, and
-`source.download`). Subscriptions and queries (R07) and
-assets (R09) are not implemented.
+`source.download`). Assets (R09) are not implemented.
+
+R07 adds two reads of application data over HTTP and the TypeScript client
+([0040](decisions/0040-data-queries-and-subscriptions.md)): a query that lists
+the members of a collection path in pages (UTF-8 byte order, a cursor, 100
+members, 32 KiB per value and 256 KiB per page, `too_large` members without a
+value) and a server-sent event stream of one path (`snapshot`, then `change`
+with the whole value when `data_version` moves, `too_large` and an end for a
+value over 128 KiB). The stream keeps no history: it remembers the version it
+last sent, reads storage when this process announces a data write (at most once
+per 250 ms per stream) and every 15 s, and every read is the access check, so
+trash, purge, a disabled user, and a revoked token end it; it ends by itself
+after 10 minutes, and a reconnect is a fresh snapshot (`Last-Event-ID` is
+refused). Eight streams per actor and 128 per process are admitted by a table
+that holds counts only. Source revisions and data versions are separate
+fields. A frame, the CLI, MCP, and the web workspace do not use either route.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

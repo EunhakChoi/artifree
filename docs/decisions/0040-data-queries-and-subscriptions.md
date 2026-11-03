@@ -33,14 +33,14 @@ changed. The outbox (R08) and any other subscription kind are not implemented.
    or repeated parameter is `400`):
    - `path`: the grammar of 0031 decision 2 (0 to 16 segments of 1 to 64
      `[A-Za-z0-9_-]`; absent or empty is the root). A breach is `422
-     invalid_request`.
+invalid_request`.
    - `select`: `names` (default) or `values`.
    - `limit`: a whole number from 1 to 100 (default 50), else `422`.
    - `after`: a member name, 1 to 256 bytes (0031 decision 3), the cursor.
      Members after it in order are returned. Empty or longer is `422`.
 
    The answer is `DataMembers {artifact_id, path, select, limit, after?,
-   data_version, is_collection, members, next_after?}`. The first five fields
+data_version, is_collection, members, next_after?}`. The first five fields
    echo the normalized query. `is_collection` is true when an object is at the
    path; for a missing path or any other value it is false, `members` is
    empty, and the answer is still `200`. Members are in **UTF-8 byte order of
@@ -50,9 +50,10 @@ changed. The outbox (R08) and any other subscription kind are not implemented.
    Reading the whole collection is following `next_after` until it is absent;
    a write between two pages is seen by the page after it, and
    `data_version` of each page says which version that page was read at.
+
 3. **Bounded pages.** Under `select=names` a member is `{name}`. Under
    `select=values` it is **exactly one of** `{name, value}` or `{name,
-   too_large: true}`: a member whose canonical value is larger than 32 KiB
+too_large: true}`: a member whose canonical value is larger than 32 KiB
    (`MAX_MEMBER_VALUE_BYTES`) has no value and is marked `too_large`, so a
    caller reads it by `GET data?path=`. The values of one page add up to at
    most 256 KiB (`MAX_PAGE_VALUE_BYTES`); the page ends before the member that
@@ -66,7 +67,7 @@ changed. The outbox (R08) and any other subscription kind are not implemented.
    `Last-Event-ID` is refused with `400 invalid_request`, and a client that
    reconnects receives a fresh snapshot. Events:
    - `snapshot`: the first event, once. Data is `AppData` (0031): `{artifact_id,
-     path, data_version, exists, value?}`.
+path, data_version, exists, value?}`.
    - `change`: the **full current value** at the path, as `AppData`, sent when
      the data version read is greater than the last one sent on this stream.
      A write elsewhere in the space moves the version and so is also sent; a
@@ -77,6 +78,7 @@ changed. The outbox (R08) and any other subscription kind are not implemented.
      it again, so the client treats it as permanent (`data_too_large`).
 
    `data_version` is strictly increasing on one stream. Events carry no `id`.
+
 5. **Reads, not queues.** The server holds, per stream, the version last sent
    and nothing else about the data: no value, no history, no per-artifact
    state. A process-wide notification (a counter in a `watch` channel, no

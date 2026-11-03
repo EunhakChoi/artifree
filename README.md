@@ -251,8 +251,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0033](docs/decisions/0033-runtime-source-write.md),
 [0034](docs/decisions/0034-room-and-presence.md),
 [0035](docs/decisions/0035-per-file-conditional-edit.md),
-[0036](docs/decisions/0036-multi-user-identity.md), and
-[0037](docs/decisions/0037-release-publishing-and-supply-chain.md)).
+[0036](docs/decisions/0036-multi-user-identity.md),
+[0037](docs/decisions/0037-release-publishing-and-supply-chain.md), and
+[0040](docs/decisions/0040-data-queries-and-subscriptions.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -370,8 +371,32 @@ events, 256-byte states, and a room request budget apart from the owner's. A
 late joiner never receives older events. Rooms are memory of one server process:
 a restart empties them, nothing is stored, and events have no delivery
 guarantee. **Not implemented:** roles and sharing (S02), a room
-capability for a sandboxed frame, a web or CLI surface, a push stream,
-subscriptions (R07), an outbox (R08), and any MCP tool.
+capability for a sandboxed frame, a web or CLI surface, a push stream, an outbox
+(R08), and any MCP tool.
+
+### Data queries and subscriptions (decision 0040)
+
+Over HTTP and the TypeScript client (`listDataMembers`, `followData`; no CLI,
+MCP tool, frame, or web screen), an owner's or agent's application data can be
+listed and followed. `GET /v1/artifacts/{id}/data/members` lists the members of
+the object at a path in the byte order of their UTF-8 names, 1 to 100 at a time
+(`select` names or values, `after` a member name), with a per-value bound
+(32 KiB, larger is `too_large` without a value) and a per-page bound
+(256 KiB); the answer echoes the normalized query and states the `data_version`
+it was read at, which is never a source revision. `GET
+/v1/artifacts/{id}/data/events?path=` is a server-sent event stream of one path:
+a `snapshot`, then a `change` with the whole new value when the version moves
+(coalesced: one read per stream per 250 ms at most), a `too_large` event and an
+end for a value over 128 KiB, and a clean end after 10 minutes. There is **no
+replay, no resume (`Last-Event-ID` is `400`), and no history**: a client that
+reconnects receives a fresh snapshot. A stream rereads storage every 15 s, which
+also re-checks access, so a trashed or purged artifact, a disabled user, or a
+revoked token ends it. At most 8 streams per actor (`429`, `Retry-After`) and
+128 per process (`503`). A write by another process arrives within 15 s.
+`followData` checks every event against the contract and reconnects with
+backoff after a lost connection, `429`, `5xx`, or a clean end. **Not
+implemented:** use from a frame, the runtime SDK, the web workspace, the CLI, or
+MCP; filters and aggregates; replay or delivery guarantees; the outbox (R08).
 
 ### Users (decision 0036)
 

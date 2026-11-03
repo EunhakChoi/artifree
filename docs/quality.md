@@ -340,6 +340,37 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the client and the CLI against a stand-in server. Each guard was checked by
   breaking it and watching a named test fail. These tests do not show roles,
   sharing, OAuth, or a web screen for users, because none exist.
+- Data queries and subscriptions (decision 0040): `crates/artifree-domain/src/members.rs`
+  (UTF-8 byte order against UTF-16 order, the exclusive cursor, an exact fit, both
+  bounds, `too_large`, a path that holds no object), `tests/data_members.rs` (the
+  route: defaults and echo, paging by `next_after` across multi-byte names, the
+  bounds, every parameter out of range, the same 404 for missing, foreign, and
+  trashed artifacts, an agent token), `crates/artifree-server/src/data_events/tests.rs`
+  (the pace decision as a function of instants: the lifetime before a wake and a
+  due heartbeat, no wait past the lifetime, a writer that never pauses; the table of
+  places: per-actor and per-process bounds, entries gone with the last stream, a
+  precheck that records nothing; over the router: snapshot then full values with
+  rising versions, coalescing against elapsed time, `too_large` at and over the
+  bound, refusals that read no storage, the same 404 holding no place, trash and
+  purge, a write nobody announced arriving at the heartbeat, a busy writer not
+  keeping a stream past its lifetime, writes that succeed with no subscriber and
+  with one that never reads, a stored space that cannot be parsed, disable,
+  revoke, shutdown, a dropped connection freeing its place, the limits with
+  `Retry-After` and zero reads for a refused request, and many opens on one
+  executor thread with one blocking thread), the route table of
+  `tests/multi_user.rs` (both routes classified, and the confirmation count), and
+  `scripts/tests/data-queries.test.mjs` (the event parser measured in bytes, with
+  200,000 two-byte characters, one-byte chunks in linear time, CR/LF split across
+  chunks; every event type against every fault; the order rules; the retry
+  classification and its waits with injected timers and clock; abort before the
+  request, during a wait and a read, and from a chunk of several events; local
+  validation of the path grammar; the client's constants against the Rust source
+  and the generated schema; member pages against every echo and order fault; and
+  the real binary). Each guard was checked by breaking it and watching a named
+  test fail. These tests do not show use from a frame, the CLI, MCP, or the web
+  workspace (none exists), delivery or replay (there is none), or that the 10
+  minute lifetime and the 15 s heartbeat of the defaults elapse (the tests inject
+  shorter ones).
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,
