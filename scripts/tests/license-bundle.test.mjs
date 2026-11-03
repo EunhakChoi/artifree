@@ -159,10 +159,48 @@ test('a declared license file outside the usual names is collected', async () =>
   );
 });
 
-test('source files that only look like license names are ignored', async () => {
+test('license files with dotted or dashed suffixes are all collected', async () => {
   const dir = await component({
+    'LICENSE.MIT': MIT,
+    LICENSE: APACHE,
+    'COPYING.LESSER': 'lesser\n',
+    LICENCE: 'licence\n',
+    UNLICENSE: 'unlicense\n',
+    'NOTICE.txt': 'notice\n',
+    'PATENTS-GRANT': 'patents\n',
+    COPYRIGHT: 'copyright\n',
+    'license-checker.js': 'module.exports = 1;',
+  });
+  assert.deepEqual(
+    (await findLicenseFiles(dir)).map((f) => f.name),
+    [
+      'COPYING.LESSER',
+      'COPYRIGHT',
+      'LICENCE',
+      'LICENSE',
+      'LICENSE.MIT',
+      'NOTICE.txt',
+      'PATENTS-GRANT',
+      'UNLICENSE',
+    ],
+  );
+});
+
+test('LICENSE.MIT alone is collected', async () => {
+  const dir = await component({ 'LICENSE.MIT': MIT, 'README.md': 'r' });
+  assert.deepEqual(
+    (await findLicenseFiles(dir)).map((f) => f.name),
+    ['LICENSE.MIT'],
+  );
+});
+
+test('names that only look like license files are ignored', async () => {
+  const dir = await component({
+    'LICENSEE.txt': 'x',
     'license.rs': 'fn main() {}',
     'licensing.md': 'x',
+    'license-checker.js': 'x',
+    'notices.json': '{}',
   });
   assert.deepEqual(await findLicenseFiles(dir), []);
 });

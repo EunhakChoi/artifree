@@ -70,12 +70,19 @@ const PUBLISH_CONDITIONS = [
   "github.repository == 'EunhakChoi/artifree'",
 ];
 
+function runText(job) {
+  return (job.steps ?? []).map((step) => step.run ?? '').join('\n');
+}
+
 /**
  * Rules for .github/workflows/release.yml (decision 0037). Publishing must be
  * impossible from a pull request, a fork, a branch push, or a dry run; only the
- * two named publishing jobs may hold a write token, and only after the build
- * and image checks; no secret except the job token exists; and nothing from the
- * tag or event is interpolated into a shell script.
+ * two named publishing jobs may hold a write token, one approval gate (the
+ * `approve` job, the only job with an environment) comes before any side
+ * effect, the image is pushed after the draft release, the publishing jobs
+ * recheck tag, main, and CI, and the attestation settings match what the
+ * documents tell consumers to verify; no secret except the job token exists;
+ * and nothing from the tag or event is interpolated into a shell script.
  */
 export function checkReleaseWorkflow(workflow) {
   assert.deepEqual(
@@ -102,6 +109,7 @@ export function checkReleaseWorkflow(workflow) {
     'Only the job token may be used; no repository secret.',
   );
   const privileged = [];
+  const gated = [];
   for (const [name, job] of Object.entries(workflow.jobs)) {
     assert.ok(
       job.permissions && typeof job.permissions === 'object',
@@ -115,6 +123,7 @@ export function checkReleaseWorkflow(workflow) {
       Number.isInteger(job['timeout-minutes']) && job['timeout-minutes'] > 0,
       `Missing job timeout: ${name}`,
     );
+    if (Object.hasOwn(job, 'environment')) gated.push(name);
     if (Object.values(job.permissions).includes('write')) {
       privileged.push(name);
       assert.ok(
@@ -126,14 +135,11 @@ export function checkReleaseWorkflow(workflow) {
           String(job.if).includes(condition),
           `Publishing job ${name} must require: ${condition}`,
         );
-      assert.equal(
-        job.environment,
-        'release',
-        `${name} needs the release environment.`,
-      );
       assert.ok(
-        ['build', 'image-check'].every((need) => job.needs?.includes(need)),
-        `${name} must wait for the build and image checks.`,
+        ['build', 'image-check', 'approve'].every((need) =>
+          job.needs?.includes(need),
+        ),
+        `${name} must wait for the build and image checks and the approval.`,
       );
     } else {
       assert.ok(
@@ -172,5 +178,87 @@ export function checkReleaseWorkflow(workflow) {
     privileged.sort(),
     PUBLISHING_JOBS,
     'Exactly the publishing jobs may hold a write token.',
+  );
+
+  const { approve, release } = workflow.jobs;
+  const imageJob = workflow.jobs['publish-image'];
+  assert.deepEqual(
+    gated,
+    ['approve'],
+    'Exactly one job, approve, uses an environment: one approval before any side effect.',
+  );
+  assert.equal(
+    approve.environment,
+    'release',
+    'approve needs the release environment.',
+  );
+  assert.deepEqual(
+    approve.permissions,
+    {},
+    'The approval job needs no token rights.',
+  );
+  for (const condition of PUBLISH_CONDITIONS)
+    assert.ok(
+      String(approve.if).includes(condition),
+      `approve must require: ${condition}`,
+    );
+  assert.ok(
+    imageJob.needs.includes('release'),
+    'The image is pushed after the draft release, as the last irreversible step.',
+  );
+  const recheck = runText(release);
+  for (const needle of [
+    'release-assets.mjs check-tag',
+    'git merge-base --is-ancestor',
+    'release-assets.mjs check-ci',
+    'release-assets.mjs check-set',
+    'gh release view',
+    '--draft',
+  ])
+    assert.ok(
+      recheck.includes(needle),
+      `The release job must run before publishing: ${needle}`,
+    );
+  assert.ok(
+    runText(imageJob).includes('docker manifest inspect'),
+    'The image job must refuse to overwrite an existing tag.',
+  );
+
+  // The documented verification (docs/release-packages.md) reads attestations
+  // from the GitHub attestations API, which the action always writes to. Pin
+  // the exact combination so workflow and documents cannot drift.
+  const attestations = Object.entries(workflow.jobs).flatMap(([name, job]) =>
+    (job.steps ?? [])
+      .filter((step) =>
+        step.uses?.startsWith('actions/attest-build-provenance@'),
+      )
+      .map((step) => ({ name, with: step.with ?? {} })),
+  );
+  assert.deepEqual(
+    attestations.map((a) => a.name).sort(),
+    ['publish-image', 'release'],
+    'Archives and the image are each attested, once.',
+  );
+  for (const attestation of attestations)
+    assert.strictEqual(
+      attestation.with['create-storage-record'],
+      false,
+      'Storage records need an organization-owned repository and are not what verification reads.',
+    );
+  const archives = attestations.find((a) => a.name === 'release').with;
+  assert.equal(archives['subject-checksums'], 'dist/SHA256SUMS');
+  assert.ok(
+    !Object.hasOwn(archives, 'push-to-registry'),
+    'Archive attestations are not pushed to a registry.',
+  );
+  const image = attestations.find((a) => a.name === 'publish-image').with;
+  assert.strictEqual(
+    image['push-to-registry'],
+    true,
+    'The image attestation is pushed to the registry too.',
+  );
+  assert.ok(
+    image['subject-digest'] && image['subject-name'],
+    'The image is attested by name and digest.',
   );
 }

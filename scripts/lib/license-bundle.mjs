@@ -19,9 +19,21 @@ import { sha256 } from './release-layout.mjs';
 export const LICENSE_INDEX_PATH = 'LICENSES/INDEX.json';
 export const LICENSE_TEXT_DIR = 'LICENSES/texts';
 
-// LICENSE, LICENSE-MIT, LICENCE.md, COPYING, NOTICE, UNLICENSE, COPYRIGHT.
+// Base names LICENSE, LICENCE, COPYING, NOTICE, UNLICENSE, COPYRIGHT, PATENTS,
+// optionally followed by a `.`, `-`, or `_` suffix: LICENSE-MIT, LICENSE.APACHE2,
+// COPYING.LESSER, LICENSE.md. LICENSEE.txt does not match.
 const LICENSE_FILE_NAME =
-  /^(?:licen[sc]e|copying|notice|unlicense|copyright)(?:[-_][\w.-]*?)?(?:\.(?:txt|md|markdown|rst))?$/i;
+  /^(?:licen[sc]e|copying|notice|unlicense|copyright|patents)(?:[._-].*)?$/i;
+
+// A matching name that ends in source or data code is not a license text
+// (license-checker.js, license.rs).
+const CODE_EXTENSION =
+  /\.(?:[cm]?[jt]sx?|d\.ts|rs|c|h|cc|cpp|hpp|go|py|rb|java|json|ya?ml|toml|lock|html?|css|map|sh|ps1)$/i;
+
+/** Whether a file name in a component's top directory is a license file. */
+export function isLicenseFileName(name) {
+  return LICENSE_FILE_NAME.test(name) && !CODE_EXTENSION.test(name);
+}
 
 /**
  * Package-relative path of the text with SHA-256 `hash`. The file name is the
@@ -35,15 +47,16 @@ export function licenseTextPath(hash) {
 const byCodePoint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * Reads the license files at the top of `dir`: names matching the license
- * pattern plus `extra` (a manifest-declared relative path such as Cargo's
+ * Reads ALL the license files at the top of `dir`: names matching the license
+ * pattern (every match is kept, not only the first) plus `extra` (a
+ * manifest-declared relative path such as Cargo's
  * `license_file`). A matching name that is not a regular file is an error,
  * because a link could point outside the component.
  */
 export async function findLicenseFiles(dir, extra = []) {
   const names = new Set(extra);
   for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (!LICENSE_FILE_NAME.test(entry.name)) continue;
+    if (!isLicenseFileName(entry.name)) continue;
     if (entry.isDirectory()) continue;
     names.add(entry.name);
   }

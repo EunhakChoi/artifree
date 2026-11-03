@@ -101,37 +101,55 @@ release has been verified. Those belong to the first release candidate (see
   trigger. A merge of a pull request therefore cannot publish. Merging this
   change creates no tag.
 - **Permissions:** `permissions: {}` at the top; every job declares its own.
-  Only `publish-image` (`contents: read`, `packages: write`, `id-token: write`,
-  `attestations: write`) and `release` (`contents: write`, `id-token: write`,
-  `attestations: write`) hold anything above read. Both require
-  `github.event_name == 'push'`, a tag ref, and `github.repository ==
-'EunhakChoi/artifree'` (not a fork, not a dry run), declare
-  `environment: release`, and wait for `build` and `image-check`. The only
-  secret is the job's `GITHUB_TOKEN`; nothing is interpolated from the tag into a
-  shell script (the tag goes through `env`). Checkouts do not keep credentials.
+  Only `release` (`contents: write`, `actions: read`, `id-token: write`,
+  `attestations: write`) and `publish-image` (`contents: read`,
+  `packages: write`, `id-token: write`, `attestations: write`) hold anything
+  above read. Both require `github.event_name == 'push'`, a tag ref, and
+  `github.repository == 'EunhakChoi/artifree'` (not a fork, not a dry run), and
+  wait for `build`, `image-check`, and `approve`. The only secret is the job's
+  `GITHUB_TOKEN`; nothing is interpolated from the tag into a shell script (the
+  tag goes through `env`). Checkouts do not keep credentials.
   `scripts/lib/workflow-policy.mjs` (`checkReleaseWorkflow`) enforces all of
   this in `npm run check` with a negative test for each rule, and `checkWorkflow`
   now also refuses write tokens anywhere in `ci.yml`.
-- **Jobs:**
+- **Jobs, in order:**
   1. `verify-tag` (tag pushes): the tag equals `package.json` and the Cargo
      workspace version (`vX.Y.Z` or `vX.Y.Z-pre`); the commit is an ancestor of
-     `origin/main`; the commit's latest completed `Quality gate` check run
-     succeeded (`gh api` on the check-runs API with the job token). The quality
-     gate is required through that status instead of re-running the checks here.
+     `origin/main`; and the commit has a completed **push** run of `ci.yml` on
+     `main` whose newest non-cancelled, non-skipped run succeeded (Actions runs
+     API with the job token). A pull-request run of the same commit, another
+     workflow, or a cancelled newer run (CI cancels superseded runs) neither
+     counts nor blocks. The quality gate is required through that run instead of
+     re-running the checks here.
   2. `build` (Linux and Windows, as the CI `package` job): build, package,
      `verify-release.mjs` on the same runner, upload as a workflow artifact
      that expires in 7 days.
   3. `image-check`: `verify-container.mjs` on the Linux archive.
-  4. `publish-image`: builds the image from the verified archive with the
-     repository Dockerfile, pushes `ghcr.io/<owner>/artifree:<version>` (no
-     `latest`), reads the digest, and attests that digest with
-     `push-to-registry`. The pushed image is rebuilt from the verified archive,
-     not the byte-identical image of `image-check`.
-  5. `release`: checks each archive against its `.sha256`, writes `SHA256SUMS`,
-     attests the files of `SHA256SUMS`, and creates a **draft** GitHub Release
-     (`--draft --verify-tag`; a `-pre` version is marked prerelease) with the
-     archives, checksum files, and notes that name the image digest and make
-     no verification claim. **A person reviews the draft and publishes it.**
+  4. `approve`: a no-op job that is the **only** job with an environment
+     (`release`). Configure required reviewers there and a tag needs exactly one
+     approval, before any side effect. The publishing jobs use no environment.
+  5. `release`: after the approval, repeats the tag, main-ancestry, and CI
+     checks (the approval can come days after step 1), then verifies that the
+     downloaded set is exactly both archives, their `.sha256` files, `SHA256SUMS`
+     (listing exactly those archives at their real hashes), and the notes; attests
+     the files of `SHA256SUMS`; refuses to continue if a release for the tag
+     exists; and creates a **draft** GitHub Release (`--draft --verify-tag`; a
+     `-pre` version is marked prerelease). The notes name the image tag and say
+     it is pushed afterwards. **A person reviews the draft and publishes it, only
+     after `publish-image` succeeded.**
+  6. `publish-image`: runs after `release`, so the image push is the last
+     irreversible step. It builds the image from the verified archive with the
+     repository Dockerfile, logs in, **refuses to overwrite an existing tag**
+     (`docker manifest inspect` must report the tag as unknown; any other answer
+     stops the job), pushes `ghcr.io/<owner>/artifree:<version>` (no `latest`),
+     reads the digest, and attests that digest. The pushed image is rebuilt from
+     the verified archive, not the byte-identical image of `image-check`.
+- **Recovery** (no automation): a failure after the first side effect leaves
+  what was done. Delete the draft release, the image version if pushed, and the
+  tag, fix the cause, and release a new version. The workflow refuses to
+  overwrite an existing release or image tag, so provenance recorded for earlier
+  bytes is never silently replaced. The same steps are in
+  `docs/release-packages.md`.
 - The workflow's helpers (`scripts/release-assets.mjs`) hold every decision the
   workflow makes, so they are unit-tested.
 - Third-party action: only `actions/attest-build-provenance` v4.2.2, pinned to
@@ -152,9 +170,29 @@ release has been verified. Those belong to the first release candidate (see
 ### 4. Archive and image provenance
 
 GitHub artifact attestations as above: the archives through `SHA256SUMS`, the
-image by digest, stored in the registry next to the image. Consumers check them
-with `gh attestation verify` (see `docs/release-packages.md`), which proves the
-file was built by this repository's workflow at a tag, not that the code is
+image by digest. **How consumers retrieve them:** `actions/attest-build-provenance`
+(a wrapper of `actions/attest` v4.2.1 at the pinned commit) uploads every
+attestation to the GitHub attestations API ("it will be uploaded to the GH
+attestations API and associated with the repository", README of `actions/attest`
+at the pinned commit), so the default `gh attestation verify <file|oci://image>
+--repo EunhakChoi/artifree` finds it with no bundle file. `create-storage-record:
+false` is not a switch for that upload: it only controls an "Artifact Metadata
+Storage Record" (the "Linked Artifacts" page), which that README says needs an
+organization-owned repository and `artifact-metadata: write`; it is off here so
+the permissions stay minimal. `push-to-registry: true` additionally stores the
+image's attestation in the registry (readable with `--bundle-from-oci`, which
+the documents do not rely on). This was settled from those READMEs and the
+`gh attestation verify` source (`--repo`, `--signer-workflow`, `--bundle`,
+`--bundle-from-oci`, `oci://` form); the local GitHub CLI used here (2.45) has no
+`attestation` command, so `--help` could not be run, and nothing has been
+verified against a real attestation. The documents use `--signer-workflow
+EunhakChoi/artifree/.github/workflows/release.yml` so that only attestations
+made by this workflow pass. `checkReleaseWorkflow` and a documents test pin the
+combination (archives: `subject-checksums` of `dist/SHA256SUMS`, no registry
+push; image: name and digest with `push-to-registry`; both
+`create-storage-record: false`; the two `gh attestation verify` lines in
+`docs/release-packages.md`), so the workflow and the documents cannot drift. The
+attestation shows the file was built by this workflow, not that the code is
 trustworthy. There is no SBOM, no Authenticode signature for the Windows binary
 (SmartScreen may warn), and no image vulnerability scan.
 
@@ -188,6 +226,17 @@ not reviewed, not attested. The documents keep the warning against
 redistributing them. The license-text reason is gone; unattested, unpublished
 output is the reason now.
 
+## Limits of the checks
+
+- The ELF check reads `GLIBC_*` versions only. It says nothing about `GLIBCXX`
+  or other libraries; the Debian 12 run is the real check for those.
+- The npm closure covers the runtime `dependencies` of `apps/web` and
+  `apps/cli`, where the web workspace's runtime libraries are declared; build
+  tools (Vite, Tailwind, esbuild) are devDependencies and are not bundled.
+- The digest check covers workflow `run:` steps, `container`/`services`/compose
+  images, Dockerfile `FROM` and `--from`; the operator examples in `docs/` run
+  locally built images and are not checked.
+
 ## Not implemented, to be recorded at the first release candidate
 
 - Pushing a tag, running the publishing jobs, creating any release, image, or
@@ -204,9 +253,9 @@ output is the reason now.
 
 These cannot be set from the repository and are not set:
 
-1. Create the `release` environment with required reviewers (the human gate
-   before anything is pushed or drafted) and allow deployments only from tags
-   `v*.*.*`.
+1. Create the `release` environment with required reviewers and allow
+   deployments only from tags `v*.*.*`. Only the `approve` job uses it, so a tag
+   needs one approval, before anything is drafted or pushed.
 2. A tag ruleset for `v*`: only maintainers create; no update or delete.
 3. Branch protection that requires the `Quality gate` status on `main` (the
    release job checks it again for the tagged commit).

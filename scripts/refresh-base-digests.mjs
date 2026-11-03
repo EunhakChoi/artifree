@@ -29,7 +29,11 @@ async function pinnedFiles(root) {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) await walk(path);
-      else if (entry.name.startsWith('Dockerfile')) files.push(path);
+      else if (
+        entry.name.startsWith('Dockerfile') ||
+        /\.ya?ml$/.test(entry.name)
+      )
+        files.push(path);
     }
   };
   await walk(deploy);
@@ -78,18 +82,63 @@ export function checkPin(pin, where) {
   );
 }
 
-function imageValues(workflow) {
-  return Object.values(workflow.jobs ?? {}).flatMap((job) => [
-    job.container?.image ?? job.container,
-    ...Object.values(job.services ?? {}).map((service) => service.image),
-  ]);
+function imageValues(document) {
+  return [
+    ...Object.values(document.jobs ?? {}).flatMap((job) => [
+      job.container?.image ?? job.container,
+      ...Object.values(job.services ?? {}).map((service) => service.image),
+    ]),
+    // Compose files.
+    ...Object.values(document.services ?? {}).map((service) => service?.image),
+  ];
+}
+
+// Options of `docker run`, `create`, and `pull` that take a separate value;
+// the first word that is neither an option nor such a value is the image.
+const VALUE_OPTIONS = new Set(
+  (
+    '-a --attach --add-host --blkio-weight --cap-add --cap-drop --cgroup-parent --cgroupns --cidfile ' +
+    '--cpus --cpu-shares --cpuset-cpus --device --dns --dns-option --dns-search --domainname --entrypoint ' +
+    '-e --env --env-file --expose --gpus --group-add --health-cmd --health-interval --health-retries ' +
+    '--health-start-period --health-timeout -h --hostname --ip --ip6 --ipc -l --label --label-file ' +
+    '--log-driver --log-opt --mac-address -m --memory --memory-swap --mount --name --network --net ' +
+    '--network-alias --pid --pids-limit --platform -p --publish --pull --restart --runtime ' +
+    '--security-opt --shm-size --stop-signal --stop-timeout --sysctl --tmpfs -u --user --userns --uts ' +
+    '-v --volume --volumes-from -w --workdir'
+  ).split(' '),
+);
+
+/**
+ * The image argument of every `docker run`, `create`, and `pull` command in a
+ * shell script: `{ command, image }`. Backslash continuations are joined; a
+ * command ends at `&&`, `||`, `;`, or `|`. Commands inside a quoted string are not found.
+ */
+export function findDockerImages(script) {
+  const images = [];
+  const flattened = script.replace(/\\\r?\n/g, ' ');
+  for (const match of flattened.matchAll(
+    /\bdocker\s+(?:container\s+|image\s+)?(run|create|pull)\b([^\n;|&]*)/g,
+  )) {
+    const words = match[2].trim().split(/\s+/).filter(Boolean);
+    let image;
+    for (let i = 0; i < words.length && image === undefined; i += 1) {
+      const word = words[i];
+      if (!word.startsWith('-')) image = word.replace(/^["']|["']$/g, '');
+      else if (!word.includes('=') && VALUE_OPTIONS.has(word)) i += 1;
+    }
+    images.push({ image: image ?? '', command: match[1] });
+  }
+  return images;
 }
 
 /**
  * Checks `files` (`{ path, text }`): every pin is well formed, one image
- * reference names one digest across all files, a Dockerfile `FROM` and a
- * workflow job `container`/`services` image is pinned, and at least one pin
- * exists. Returns the distinct pins as `{ reference, digest, places }`.
+ * reference names one digest across all files, a Dockerfile `FROM` or
+ * `--from=`, a workflow `container`/`services` image, a compose service image,
+ * and the image of every `docker run`/`create`/`pull` in a workflow `run:`
+ * step is pinned by a literal digest, and at least one pin exists. Operator
+ * examples in docs/ are not checked: they run locally built images. Returns
+ * the distinct pins as `{ reference, digest, places }`.
  */
 export function checkPins(files) {
   const byReference = new Map();
@@ -112,17 +161,29 @@ export function checkPins(files) {
         });
       }
     }
-    if (/\.ya?ml$/.test(path))
-      for (const image of imageValues(parse(text)))
-        if (typeof image === 'string' && !image.includes('${{'))
+    if (/\.ya?ml$/.test(path)) {
+      const document = parse(text) ?? {};
+      for (const image of imageValues(document))
+        if (typeof image === 'string')
           assert.match(
             image,
-            /@sha256:/,
-            `${path}: image ${image} is not pinned by digest.`,
+            /^[^$]+@sha256:/,
+            `${path}: image ${image} is not pinned by a literal digest.`,
           );
+      const scripts = Object.values(document.jobs ?? {}).flatMap((job) =>
+        (job.steps ?? []).map((step) => step.run).filter((run) => run),
+      );
+      for (const script of scripts)
+        for (const { image, command } of findDockerImages(script))
+          assert.match(
+            image,
+            /^[^$]+@sha256:/,
+            `${path}: docker ${command} uses ${image || 'an image that cannot be found'} without a literal @sha256 pin.`,
+          );
+    }
     if (/(^|\/)Dockerfile/.test(path))
       for (const line of text.split('\n'))
-        if (/^FROM\s/i.test(line))
+        if (/^FROM\s/i.test(line) || /--from=/i.test(line))
           assert.match(
             line,
             /@sha256:/,

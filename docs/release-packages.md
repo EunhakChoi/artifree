@@ -162,21 +162,49 @@ changed data format.
 > creates a **draft** release; a maintainer reviews and publishes it by hand.
 
 Download the archive, its `.sha256` file, and `SHA256SUMS` from the release.
+You need a GitHub CLI that has the `attestation` command and a login
+(`gh auth login`); the commands read the attestations from the GitHub
+attestations API, to which the release workflow's attestation action always
+uploads them. The flags below were checked against the GitHub CLI source
+(`--repo`, `--signer-workflow`, the `oci://` form); `gh attestation verify`
+itself was not run, because the CLI used while writing this has no
+`attestation` command.
 
 ```sh
 sha256sum -c artifree-<version>-linux-x64.tar.gz.sha256   # integrity
-gh attestation verify artifree-<version>-linux-x64.tar.gz --repo EunhakChoi/artifree
-gh attestation verify oci://ghcr.io/eunhakchoi/artifree:<version> --repo EunhakChoi/artifree
+gh attestation verify artifree-<version>-linux-x64.tar.gz --repo EunhakChoi/artifree --signer-workflow EunhakChoi/artifree/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/eunhakchoi/artifree:<version> --repo EunhakChoi/artifree --signer-workflow EunhakChoi/artifree/.github/workflows/release.yml
 docker pull ghcr.io/eunhakchoi/artifree:<version>
 docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/eunhakchoi/artifree:<version>
 ```
 
-The last command prints the image digest; it must equal the digest in the
-release notes and in the attestation output. Run the container by that digest
+`--signer-workflow` requires that the attestation was made by `release.yml`
+and not by some other workflow of the repository. The image attestation is also
+stored in the registry next to the image; `gh attestation verify ... --bundle-from-oci`
+would read it from there, and this guide does not rely on that. The last
+command prints the image digest, which must equal the digest that
+`gh attestation verify` reports; run the container by that digest
 (`ghcr.io/eunhakchoi/artifree@sha256:...`), not by the tag. An attestation shows
 the file was built by this repository's release workflow from a version tag; it
 does not show the code is safe, and a Windows `.zip` still has no Authenticode
 signature.
+
+## Publishing and recovery (maintainers)
+
+Pushing a tag `vX.Y.Z` (equal to the version in `package.json` and `Cargo.toml`,
+on a commit of `main` whose CI run succeeded) starts the release workflow. It
+builds and verifies, waits for one approval of the `release` environment, checks
+the tag, main, and CI again, creates a **draft** release with attested archives,
+and only then pushes and attests the image. Publish the draft by hand, and only
+after the `Publish and attest the image` job succeeded.
+
+If a run fails after the first side effect there is no automatic cleanup and
+the workflow refuses to overwrite anything (an existing release for the tag, or
+an existing image tag, stops it). Recover by hand: delete the draft release,
+delete the image version `ghcr.io/eunhakchoi/artifree:<version>` if it was
+pushed (GitHub package settings), delete the tag, fix the cause, and release
+under a new version. The attestations that were created stay in the attestations
+API; they only attest bytes that no longer have a release.
 
 ## Base image digests
 

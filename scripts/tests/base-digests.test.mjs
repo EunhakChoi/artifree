@@ -6,6 +6,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   checkPins,
+  findDockerImages,
   findPins,
   parseReference,
   readPinFiles,
@@ -226,4 +227,138 @@ test('resolve mode refuses to run in CI', async () => {
     }),
     /does not run in CI/,
   );
+});
+
+const workflowWith = (script) =>
+  file(
+    '.github/workflows/w.yml',
+    `jobs:\n  j:\n    steps:\n      - run: |\n${script
+      .split('\n')
+      .map((line) => `          ${line}`)
+      .join('\n')}\n`,
+  );
+const pinnedBase = file('d/Dockerfile', `FROM debian:12@sha256:${A}`);
+
+test('the image of docker run, create, and pull is found past options and continuations', () => {
+  assert.deepEqual(
+    findDockerImages(
+      [
+        'docker run --rm --network none --read-only --tmpfs /tmp:rw,size=1m \\',
+        '  --volume "$PWD/a:/a:ro" --workdir /work \\',
+        '  node:22@sha256:abc \\',
+        "  sh -c 'ls'",
+        'docker run "quoted:1" true',
+        'docker pull -q --platform linux/amd64 debian:12 && echo done',
+        'docker container create -e A=1 -p 80:80 nginx:1',
+        'docker build --tag x .',
+      ].join('\n'),
+    ),
+    [
+      { command: 'run', image: 'node:22@sha256:abc' },
+      { command: 'run', image: 'quoted:1' },
+      { command: 'pull', image: 'debian:12' },
+      { command: 'create', image: 'nginx:1' },
+    ],
+  );
+});
+
+test('an unpinned docker run image in a workflow step is refused', () => {
+  checkPins([
+    pinnedBase,
+    workflowWith(`docker run --rm node:22@sha256:${A} node --version`),
+  ]);
+  assert.throws(
+    () =>
+      checkPins([
+        pinnedBase,
+        workflowWith(
+          'docker run --rm --network none node:22.12.0-bookworm-slim node --version',
+        ),
+      ]),
+    /docker run uses node:22.12.0-bookworm-slim without a literal @sha256 pin/,
+  );
+  assert.throws(
+    () => checkPins([pinnedBase, workflowWith('docker pull debian:12')]),
+    /docker pull uses debian:12 without/,
+  );
+  assert.throws(
+    () => checkPins([pinnedBase, workflowWith('docker run "$IMAGE" true')]),
+    /without a literal @sha256 pin/,
+  );
+  assert.throws(
+    () => checkPins([pinnedBase, workflowWith('docker run --rm')]),
+    /an image that cannot be found/,
+  );
+});
+
+test('a matrix-expression image or an unpinned compose or --from image is refused', () => {
+  assert.throws(
+    () =>
+      checkPins([
+        pinnedBase,
+        file(
+          '.github/workflows/w.yml',
+          'jobs:\n  j:\n    container:\n      image: ${{ matrix.image }}\n',
+        ),
+      ]),
+    /not pinned by a literal digest/,
+  );
+  assert.throws(
+    () =>
+      checkPins([
+        pinnedBase,
+        file(
+          '.github/workflows/w.yml',
+          `jobs:\n  j:\n    container:\n      image: \${{ matrix.image }}@sha256:${A}\n`,
+        ),
+      ]),
+    /not pinned by a literal digest/,
+  );
+  checkPins([
+    pinnedBase,
+    file(
+      'deploy/c/compose.yml',
+      `services:\n  a:\n    image: caddy:2@sha256:${A}\n`,
+    ),
+  ]);
+  assert.throws(
+    () =>
+      checkPins([
+        pinnedBase,
+        file('deploy/c/compose.yml', 'services:\n  a:\n    image: caddy:2\n'),
+      ]),
+    /image caddy:2 is not pinned/,
+  );
+  assert.throws(
+    () =>
+      checkPins([
+        pinnedBase,
+        file('d/Dockerfile', 'COPY --from=busybox:1 /bin/true /true'),
+      ]),
+    /is not pinned by digest/,
+  );
+});
+
+test('yaml files under deploy and every workflow are read as pin files', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'artifree-pinfiles-'));
+  try {
+    await mkdir(join(dir, 'deploy', 'c'), { recursive: true });
+    await mkdir(join(dir, '.github', 'workflows'), { recursive: true });
+    await writeFile(join(dir, 'deploy', 'c', 'Dockerfile.dev'), 'x\n');
+    await writeFile(join(dir, 'deploy', 'c', 'compose.yml'), 'x\n');
+    await writeFile(join(dir, 'deploy', 'c', 'other.yaml'), 'x\n');
+    await writeFile(join(dir, 'deploy', 'c', 'notes.md'), 'x\n');
+    await writeFile(join(dir, '.github', 'workflows', 'w.yml'), 'x\n');
+    assert.deepEqual(
+      (await readPinFiles(dir)).map((f) => f.path),
+      [
+        '.github/workflows/w.yml',
+        'deploy/c/Dockerfile.dev',
+        'deploy/c/compose.yml',
+        'deploy/c/other.yaml',
+      ],
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

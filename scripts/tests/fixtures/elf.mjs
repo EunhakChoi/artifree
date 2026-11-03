@@ -1,8 +1,12 @@
 /**
  * A minimal ELF64 little-endian file whose only content is a version-needs
  * section: `needs` maps a library name to the version names it requires.
+ * `options`: `extendedCount` stores the section count in the first section
+ * header (e_shnum 0), `shnum` overrides e_shnum, `auxOffset` overrides where
+ * the first version need points to its entries, `needCount` the declared number
+ * of version needs, `auxCount` the declared number of versions of the first need.
  */
-export function elfWithNeeds(needs) {
+export function elfWithNeeds(needs, options = {}) {
   const strings = [Buffer.alloc(1)];
   let stringSize = 1;
   const stringAt = (text) => {
@@ -17,9 +21,12 @@ export function elfWithNeeds(needs) {
   entries.forEach(([library, versions], n) => {
     const need = Buffer.alloc(16);
     need.writeUInt16LE(1, 0);
-    need.writeUInt16LE(versions.length, 2);
+    need.writeUInt16LE(
+      n === 0 ? (options.auxCount ?? versions.length) : versions.length,
+      2,
+    );
     need.writeUInt32LE(stringAt(library), 4);
-    need.writeUInt32LE(16, 8);
+    need.writeUInt32LE(n === 0 ? (options.auxOffset ?? 16) : 16, 8);
     const auxiliaries = versions.map((version, i) => {
       const aux = Buffer.alloc(16);
       aux.writeUInt32LE(stringAt(version), 8);
@@ -44,7 +51,7 @@ export function elfWithNeeds(needs) {
   header.writeUInt16LE(0x3e, 18); // x86-64
   header.writeBigUInt64LE(BigInt(tableAt), 0x28);
   header.writeUInt16LE(0x40, 0x3a);
-  header.writeUInt16LE(3, 0x3c);
+  header.writeUInt16LE(options.extendedCount ? 0 : (options.shnum ?? 3), 0x3c);
   const table = Buffer.alloc(3 * 0x40);
   const put = (index, type, offset, size, link, info) => {
     const at = index * 0x40;
@@ -54,7 +61,15 @@ export function elfWithNeeds(needs) {
     table.writeUInt32LE(link, at + 0x28);
     table.writeUInt32LE(info, at + 0x2c);
   };
-  put(1, 0x6ffffffe, needsAt, verneed.length, 2, entries.length);
+  if (options.extendedCount) table.writeBigUInt64LE(3n, 0x20); // first header: real count
+  put(
+    1,
+    0x6ffffffe,
+    needsAt,
+    verneed.length,
+    2,
+    options.needCount ?? entries.length,
+  );
   put(2, 3, stringsAt, dynstr.length, 0, 0);
   return Buffer.concat([header, dynstr, verneed, table]);
 }

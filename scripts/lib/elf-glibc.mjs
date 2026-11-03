@@ -43,27 +43,53 @@ export function compareVersions(a, b) {
  */
 export function requiredGlibcVersions(bytes) {
   assert.ok(
-    bytes.length > 0x40 &&
+    bytes.length >= 0x40 &&
       bytes.readUInt32BE(0) === 0x7f454c46 &&
       bytes[4] === 2 &&
       bytes[5] === 1,
     'Not a 64-bit little-endian ELF file.',
   );
-  const tableOffset = number(bytes.readBigUInt64LE(0x28));
-  const entrySize = bytes.readUInt16LE(0x3a);
-  const count = bytes.readUInt16LE(0x3c);
+  // Every read goes through these, so a table that points past the end of the
+  // file is a clear error and not a RangeError.
+  const u16 = (at) => {
+    assert.ok(at >= 0 && at + 2 <= bytes.length, 'ELF file is truncated.');
+    return bytes.readUInt16LE(at);
+  };
+  const u32 = (at) => {
+    assert.ok(at >= 0 && at + 4 <= bytes.length, 'ELF file is truncated.');
+    return bytes.readUInt32LE(at);
+  };
+  const u64 = (at) => {
+    assert.ok(at >= 0 && at + 8 <= bytes.length, 'ELF file is truncated.');
+    return number(bytes.readBigUInt64LE(at));
+  };
+  const tableOffset = u64(0x28);
+  const entrySize = u16(0x3a);
   assert.ok(
-    entrySize >= 0x40 && tableOffset + count * entrySize <= bytes.length,
+    tableOffset !== 0,
+    'The ELF file has no section header table; its glibc requirement cannot be read.',
+  );
+  assert.ok(entrySize >= 0x40, 'ELF section header size is invalid.');
+  let count = u16(0x3c);
+  // 0 means the real count is in the size field of the first section header;
+  // counts from 0xff00 up are reserved values, not counts.
+  if (count === 0) count = u64(tableOffset + 0x20);
+  assert.ok(
+    count < 0xff00 || u16(0x3c) === 0,
+    'ELF section count is a reserved value.',
+  );
+  assert.ok(
+    tableOffset + count * entrySize <= bytes.length,
     'ELF section table is out of range.',
   );
   const section = (index) => {
     const at = tableOffset + index * entrySize;
     return {
-      type: bytes.readUInt32LE(at + 4),
-      offset: number(bytes.readBigUInt64LE(at + 0x18)),
-      size: number(bytes.readBigUInt64LE(at + 0x20)),
-      link: bytes.readUInt32LE(at + 0x28),
-      info: bytes.readUInt32LE(at + 0x2c),
+      type: u32(at + 4),
+      offset: u64(at + 0x18),
+      size: u64(at + 0x20),
+      link: u32(at + 0x28),
+      info: u32(at + 0x2c),
     };
   };
   const versions = new Map();
@@ -83,19 +109,29 @@ export function requiredGlibcVersions(bytes) {
     );
     let need = needs.offset;
     for (let n = 0; n < needs.info; n += 1) {
-      const auxCount = bytes.readUInt16LE(need + 2);
-      let aux = need + bytes.readUInt32LE(need + 8);
+      const auxCount = u16(need + 2);
+      let aux = need + u32(need + 8);
       for (let a = 0; a < auxCount; a += 1) {
-        const name = cString(stringBytes, bytes.readUInt32LE(aux + 8));
+        const name = cString(stringBytes, u32(aux + 8));
         const match = GLIBC_VERSION.exec(name);
         if (match)
           versions.set(
             `${match[1]}.${match[2]}${match[3] === undefined ? '' : `.${match[3]}`}`,
             [Number(match[1]), Number(match[2]), Number(match[3] ?? 0)],
           );
-        aux += bytes.readUInt32LE(aux + 12);
+        const nextAux = u32(aux + 12);
+        assert.ok(
+          nextAux !== 0 || a === auxCount - 1,
+          'ELF version aux list ends early.',
+        );
+        aux += nextAux;
       }
-      need += bytes.readUInt32LE(need + 12);
+      const nextNeed = u32(need + 12);
+      assert.ok(
+        nextNeed !== 0 || n === needs.info - 1,
+        'ELF version need list ends early.',
+      );
+      need += nextNeed;
     }
   }
   return [...versions.entries()]

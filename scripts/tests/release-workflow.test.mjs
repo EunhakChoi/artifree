@@ -91,18 +91,153 @@ const mutations = [
     /github.repository == 'EunhakChoi\/artifree'/,
   ],
   [
-    'a publishing job without the release environment',
+    'a publishing job with its own environment (a second approval)',
     (w) => {
-      delete w.jobs.release.environment;
+      w.jobs.release.environment = 'release';
     },
-    /needs the release environment/,
+    /Exactly one job, approve, uses an environment/,
+  ],
+  [
+    'an approval job without the environment',
+    (w) => {
+      delete w.jobs.approve.environment;
+    },
+    /Exactly one job, approve, uses an environment/,
+  ],
+  [
+    'an approval job in another environment',
+    (w) => {
+      w.jobs.approve.environment = 'staging';
+    },
+    /approve needs the release environment/,
+  ],
+  [
+    'an approval job with token rights',
+    (w) => {
+      w.jobs.approve.permissions = { contents: 'read' };
+    },
+    /approval job needs no token rights/,
+  ],
+  [
+    'an approval job that also runs on dry runs',
+    (w) => {
+      w.jobs.approve.if = "${{ github.ref_type == 'tag' }}";
+    },
+    /approve must require: github.event_name == 'push'/,
+  ],
+  [
+    'a publishing job that does not wait for the approval',
+    (w) => {
+      w.jobs.release.needs = ['build', 'image-check'];
+    },
+    /wait for the build and image checks and the approval/,
   ],
   [
     'a publishing job that does not wait for the checks',
     (w) => {
-      w.jobs['publish-image'].needs = ['build'];
+      w.jobs['publish-image'].needs = ['approve', 'release'];
     },
-    /wait for the build and image checks/,
+    /wait for the build and image checks and the approval/,
+  ],
+  [
+    'the image pushed before the draft release',
+    (w) => {
+      w.jobs['publish-image'].needs = ['build', 'image-check', 'approve'];
+    },
+    /after the draft release/,
+  ],
+  [
+    'a release job that no longer rechecks the tag',
+    (w) => {
+      for (const step of w.jobs.release.steps)
+        if (step.run)
+          step.run = step.run.replace('release-assets.mjs check-tag', 'true');
+    },
+    /must run before publishing: release-assets.mjs check-tag/,
+  ],
+  [
+    'a release job without an archive attestation',
+    (w) => {
+      w.jobs.release.steps = w.jobs.release.steps.filter(
+        (step) => !step.uses?.startsWith('actions/attest-build-provenance@'),
+      );
+    },
+    /each attested, once/,
+  ],
+  [
+    'a release job that no longer rechecks CI',
+    (w) => {
+      for (const step of w.jobs.release.steps)
+        if (step.run)
+          step.run = step.run.replace('release-assets.mjs check-ci', 'true');
+    },
+    /must run before publishing: release-assets.mjs check-ci/,
+  ],
+  [
+    'a release job that no longer rechecks main',
+    (w) => {
+      for (const step of w.jobs.release.steps)
+        if (step.run)
+          step.run = step.run.replace('git merge-base --is-ancestor', 'true');
+    },
+    /must run before publishing: git merge-base --is-ancestor/,
+  ],
+  [
+    'a release job that does not verify the asset set',
+    (w) => {
+      for (const step of w.jobs.release.steps)
+        if (step.run) step.run = step.run.replace('check-set', 'sums');
+    },
+    /must run before publishing: release-assets.mjs check-set/,
+  ],
+  [
+    'a release that is not a draft',
+    (w) => {
+      for (const step of w.jobs.release.steps)
+        if (step.run) step.run = step.run.replace('--draft', '');
+    },
+    /must run before publishing: --draft/,
+  ],
+  [
+    'an image push that may overwrite a tag',
+    (w) => {
+      for (const step of w.jobs['publish-image'].steps)
+        if (step.run)
+          step.run = step.run.replace('docker manifest inspect', 'true');
+    },
+    /refuse to overwrite an existing tag/,
+  ],
+  [
+    'a storage record on the image attestation',
+    (w) => {
+      delete w.jobs['publish-image'].steps.at(-1).with['create-storage-record'];
+    },
+    /Storage records need an organization-owned repository/,
+  ],
+  [
+    'an image attestation that is not pushed to the registry',
+    (w) => {
+      w.jobs['publish-image'].steps.at(-1).with['push-to-registry'] = false;
+    },
+    /pushed to the registry too/,
+  ],
+  [
+    'an archive attestation pushed to a registry',
+    (w) => {
+      w.jobs.release.steps.find((step) =>
+        step.uses?.startsWith('actions/attest-build-provenance@'),
+      ).with['push-to-registry'] = true;
+    },
+    /not pushed to a registry/,
+  ],
+  [
+    'an archive attestation of other files',
+    (w) => {
+      w.jobs.release.steps.find((step) =>
+        step.uses?.startsWith('actions/attest-build-provenance@'),
+      ).with['subject-checksums'] = 'dist/OTHER';
+    },
+    /dist\/SHA256SUMS/,
   ],
   [
     'a write token in the build job',
@@ -179,3 +314,21 @@ for (const [name, mutate, pattern] of mutations) {
     assert.throws(() => checkReleaseWorkflow(invalid), pattern);
   });
 }
+
+test('the documented verification commands match what the workflow attests', async () => {
+  const docs = await readFile(
+    new URL('../../docs/release-packages.md', import.meta.url),
+    'utf8',
+  );
+  const signer = 'EunhakChoi/artifree/.github/workflows/release.yml';
+  const flags = `--repo EunhakChoi/artifree --signer-workflow ${signer}`;
+  // Default retrieval (the attestations API), no --bundle: the action always
+  // uploads there. The workflow's own policy test pins the attest settings.
+  assert.deepEqual(
+    docs.split('\n').filter((line) => line.startsWith('gh attestation verify')),
+    [
+      `gh attestation verify artifree-<version>-linux-x64.tar.gz ${flags}`,
+      `gh attestation verify oci://ghcr.io/eunhakchoi/artifree:<version> ${flags}`,
+    ],
+  );
+});

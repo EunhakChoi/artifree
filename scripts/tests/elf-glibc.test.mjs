@@ -54,6 +54,49 @@ test('a file that is not an ELF64 little-endian executable is refused', () => {
   assert.throws(() => requiredGlibcVersions(elf), /Not a 64-bit/);
 });
 
+test('a section count stored in the first section header is honored', () => {
+  const elf = elfWithNeeds(
+    { 'libc.so.6': ['GLIBC_2.34', 'GLIBC_2.17'] },
+    { extendedCount: true },
+  );
+  assert.deepEqual(requiredGlibcVersions(elf), ['2.17', '2.34']);
+});
+
+test('a reserved section count is refused with a clear error', () => {
+  const elf = elfWithNeeds({ 'libc.so.6': ['GLIBC_2.34'] }, { shnum: 0xff00 });
+  assert.throws(
+    () => requiredGlibcVersions(elf),
+    /section count is a reserved value/,
+  );
+});
+
+test('a version list that points past the end of the file is a clear error', () => {
+  const elf = elfWithNeeds(
+    { 'libc.so.6': ['GLIBC_2.34'] },
+    { auxOffset: 0x7fffff00 },
+  );
+  assert.throws(() => requiredGlibcVersions(elf), /ELF file is truncated/);
+});
+
+test('a declared need count the list cannot satisfy ends early instead of looping', () => {
+  const elf = elfWithNeeds(
+    { 'libc.so.6': ['GLIBC_2.34'] },
+    { needCount: 0xffffffff },
+  );
+  assert.throws(() => requiredGlibcVersions(elf), /need list ends early/);
+});
+
+test('a declared version count the list cannot satisfy ends early', () => {
+  const elf = elfWithNeeds({ 'libc.so.6': ['GLIBC_2.34'] }, { auxCount: 5 });
+  assert.throws(() => requiredGlibcVersions(elf), /aux list ends early/);
+});
+
+test('a file without a section header table is refused, not read as glibc-free', () => {
+  const elf = elfWithNeeds({ 'libc.so.6': ['GLIBC_2.34'] });
+  elf.writeBigUInt64LE(0n, 0x28);
+  assert.throws(() => requiredGlibcVersions(elf), /no section header table/);
+});
+
 test('a truncated version table is refused instead of read past its end', () => {
   const elf = elfWithNeeds({ 'libc.so.6': ['GLIBC_2.34'] });
   assert.throws(() => requiredGlibcVersions(elf.subarray(0, elf.length - 8)));

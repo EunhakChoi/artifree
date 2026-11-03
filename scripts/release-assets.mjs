@@ -11,9 +11,12 @@ import { sha256 } from './lib/release-layout.mjs';
  * workflow only calls them. Node built-ins only.
  *
  *   check-tag <tag>        the tag is vX.Y.Z[-pre] and equals the repository version
- *   check-ci <sha>         the commit's `Quality gate` check run succeeded
- *   sums <dir>             verify each archive against its .sha256, write SHA256SUMS
+ *   check-ci <sha>         the commit's push run of ci.yml on main succeeded
+ *   sums <dir>             <dir> holds exactly the archives and their .sha256
+ *                          files; write SHA256SUMS
  *   notes <dir> <version>  write RELEASE_NOTES.md (image reference from IMAGE_REF)
+ *   check-set <dir>        <dir> holds exactly the release assets, and SHA256SUMS
+ *                          matches them
  */
 
 const TAG = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
@@ -36,29 +39,58 @@ export function versionFromTag(tag, { packageVersion, cargoVersion }) {
   return match[1];
 }
 
-/** The `[workspace.package]` version of a Cargo.toml text. */
+/**
+ * The `[workspace.package]` version of a Cargo.toml text: the first
+ * `version = "..."` line in that table, which ends at the next table header
+ * (a line that is only `[name]` and an optional comment). Arrays and comments
+ * that contain `[` do not end it.
+ */
 export function cargoWorkspaceVersion(toml) {
-  const section = /\[workspace\.package\]([^[]*)/.exec(toml);
-  const match = /^version\s*=\s*"([^"]+)"/m.exec(section?.[1] ?? '');
-  assert.ok(match, 'No [workspace.package] version in Cargo.toml.');
-  return match[1];
+  let inTable = false;
+  for (const line of toml.split(/\r?\n/)) {
+    if (/^\s*\[[^\]]+\]\s*(#.*)?$/.test(line)) {
+      inTable = line.trim().startsWith('[workspace.package]');
+      continue;
+    }
+    const match = inTable ? /^version\s*=\s*"([^"]+)"/.exec(line) : null;
+    if (match) return match[1];
+  }
+  return assert.fail('No [workspace.package] version in Cargo.toml.');
 }
 
+/** The workflow file whose push run on `main` is the quality evidence. */
+const CI_WORKFLOW_PATH = '.github/workflows/ci.yml';
+
 /**
- * Requires the most recently completed `Quality gate` check run of a commit to
- * have succeeded. `runs` are `{ name, status, conclusion, completed_at }`.
- * A commit that CI has not finished, or whose latest run failed, is refused.
+ * Requires the newest meaningful CI run of commit `sha` to have succeeded.
+ * `runs` are Actions workflow runs (`path`, `event`, `head_branch`,
+ * `head_sha`, `status`, `conclusion`, `created_at`). Only completed push runs
+ * of `ci.yml` on `main` for that commit count: a pull-request run of the same
+ * commit or another workflow does not. Cancelled and skipped runs (CI cancels
+ * superseded runs) are ignored. The newest remaining run must have succeeded.
  */
-export function assertQualityGate(runs) {
-  const gates = runs
-    .filter((run) => run.name === 'Quality gate' && run.status === 'completed')
-    .sort((a, b) => (a.completed_at < b.completed_at ? -1 : 1));
-  assert.ok(gates.length > 0, 'No completed Quality gate run for this commit.');
-  const latest = gates[gates.length - 1];
+export function assertQualityGate(runs, sha) {
+  const relevant = runs
+    .filter(
+      (run) =>
+        run.path === CI_WORKFLOW_PATH &&
+        run.event === 'push' &&
+        run.head_branch === 'main' &&
+        run.head_sha === sha &&
+        run.status === 'completed' &&
+        run.conclusion !== 'cancelled' &&
+        run.conclusion !== 'skipped',
+    )
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+  assert.ok(
+    relevant.length > 0,
+    `No completed push run of ci.yml on main for ${sha}.`,
+  );
+  const latest = relevant[relevant.length - 1];
   assert.equal(
     latest.conclusion,
     'success',
-    `The latest Quality gate run for this commit is ${latest.conclusion}.`,
+    `The latest CI run on main for this commit is ${latest.conclusion}.`,
   );
 }
 
@@ -93,7 +125,74 @@ export function buildSums(files) {
     .join('');
 }
 
-/** The draft release description. It makes no verification claim. */
+/**
+ * Requires the downloaded build outputs (`{ name, bytes }`) to be archives and
+ * the `.sha256` file of each of them, and nothing else. Returns the archives.
+ */
+export function assertDownloadedSet(entries) {
+  const archives = entries.filter((entry) =>
+    /\.(tar\.gz|zip)$/.test(entry.name),
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.name).sort(),
+    archives.flatMap((a) => [a.name, `${a.name}.sha256`]).sort(),
+    'The release directory holds files other than archives and their .sha256.',
+  );
+  return archives;
+}
+
+/**
+ * Requires `entries` (`{ name, bytes }`, the files of the release directory) to
+ * be exactly the release assets: both archives of one version, their `.sha256`
+ * files, `SHA256SUMS`, and `RELEASE_NOTES.md`, nothing else, with `SHA256SUMS`
+ * listing exactly the archives at their real hashes.
+ */
+export function assertReleaseSet(entries) {
+  const byName = new Map(entries.map((entry) => [entry.name, entry.bytes]));
+  assert.equal(byName.size, entries.length, 'Duplicate file name.');
+  const archives = entries.filter((entry) =>
+    /^artifree-.+\.(tar\.gz|zip)$/.test(entry.name),
+  );
+  const versions = new Set(
+    archives.map(
+      (entry) => /^artifree-(.+)-(?:linux|windows)-x64\./.exec(entry.name)?.[1],
+    ),
+  );
+  assert.equal(versions.size, 1, 'The archives are of different versions.');
+  const [version] = versions;
+  assert.ok(version, 'An archive name does not carry a version.');
+  const archiveNames = ARCHIVE_SUFFIXES.map(
+    (suffix) => `artifree-${version}-${suffix}`,
+  );
+  const expected = [
+    ...archiveNames,
+    ...archiveNames.map((name) => `${name}.sha256`),
+    'RELEASE_NOTES.md',
+    'SHA256SUMS',
+  ].sort();
+  assert.deepEqual(
+    [...byName.keys()].sort(),
+    expected,
+    'The release directory is not exactly the expected assets.',
+  );
+  const sums = buildSums(
+    archiveNames.map((name) => ({
+      name,
+      bytes: byName.get(name),
+      checksum: byName.get(`${name}.sha256`).toString('utf8'),
+    })),
+  );
+  assert.equal(
+    byName.get('SHA256SUMS').toString('utf8'),
+    sums,
+    'SHA256SUMS does not list exactly the archives at their hashes.',
+  );
+}
+
+/**
+ * The draft release description. It makes no verification claim. `image` is
+ * the image reference (name and tag) the later `publish-image` job pushes.
+ */
 export function releaseNotes({ version, image }) {
   return [
     `Artifree ${version}`,
@@ -104,8 +203,8 @@ export function releaseNotes({ version, image }) {
     '- Archives: Linux x64 (.tar.gz) and Windows x64 (.zip), with `.sha256` files',
     '  and one `SHA256SUMS`.',
     image
-      ? `- Container image: \`${image}\``
-      : '- Container image: none was published.',
+      ? `- Container image: \`${image}\`, pushed by the publish-image job AFTER this draft was created. Publish this draft only if that job succeeded.`
+      : '- Container image: none.',
     '- Provenance: GitHub artifact attestations for the archives and the image.',
     '',
     'Nothing here states that a signature was checked; see the verification',
@@ -114,7 +213,7 @@ export function releaseNotes({ version, image }) {
   ].join('\n');
 }
 
-function ghCheckRuns(sha) {
+function ghWorkflowRuns(sha) {
   const repository = process.env.GITHUB_REPOSITORY;
   assert.match(
     repository ?? '',
@@ -127,9 +226,9 @@ function ghCheckRuns(sha) {
     [
       'api',
       '--paginate',
-      `repos/${repository}/commits/${sha}/check-runs?per_page=100`,
+      `repos/${repository}/actions/runs?head_sha=${sha}&event=push&branch=main&per_page=100`,
       '--jq',
-      '.check_runs[] | {name, status, conclusion, completed_at}',
+      '.workflow_runs[] | {path, event, head_branch, head_sha, status, conclusion, created_at}',
     ],
     { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   );
@@ -137,6 +236,19 @@ function ghCheckRuns(sha) {
     .split('\n')
     .filter((line) => line !== '')
     .map((line) => JSON.parse(line));
+}
+
+/** Regular files of `dir` as `{ name, bytes }`; any other entry is an error. */
+async function releaseFiles(dir) {
+  const files = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    assert.ok(entry.isFile(), `Not a regular file: ${entry.name}`);
+    files.push({
+      name: entry.name,
+      bytes: await readFile(join(dir, entry.name)),
+    });
+  }
+  return files;
 }
 
 async function main() {
@@ -157,20 +269,24 @@ async function main() {
     });
     console.log(version);
   } else if (command === 'check-ci') {
-    assertQualityGate(ghCheckRuns(first));
-    console.log('The Quality gate succeeded for this commit.');
+    assertQualityGate(ghWorkflowRuns(first), first);
+    console.log('The CI run on main succeeded for this commit.');
   } else if (command === 'sums') {
-    const names = (await readdir(first)).filter((name) =>
-      /\.(tar\.gz|zip)$/.test(name),
+    const files = (await releaseFiles(first)).filter(
+      (file) => file.name !== 'SHA256SUMS',
     );
-    const files = await Promise.all(
-      names.map(async (name) => ({
-        name,
-        bytes: await readFile(join(first, name)),
-        checksum: await readFile(join(first, `${name}.sha256`), 'utf8'),
-      })),
+    const archives = assertDownloadedSet(files);
+    const text = (name) =>
+      files.find((file) => file.name === name).bytes.toString('utf8');
+    await writeFile(
+      join(first, 'SHA256SUMS'),
+      buildSums(
+        archives.map((a) => ({ ...a, checksum: text(`${a.name}.sha256`) })),
+      ),
     );
-    await writeFile(join(first, 'SHA256SUMS'), buildSums(files));
+  } else if (command === 'check-set') {
+    assertReleaseSet(await releaseFiles(first));
+    console.log('The release directory is exactly the expected assets.');
   } else if (command === 'notes') {
     assert.ok(second, 'notes needs a version.');
     await writeFile(
