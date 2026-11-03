@@ -149,11 +149,22 @@ impl Harness {
             .get(header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        // An event stream never ends: a test that expected a refusal and was
+        // given a stream must fail on the status, not wait for the body.
+        let streaming = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"));
+        let text = if streaming {
+            String::new()
+        } else {
+            let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
         Ok(Reply {
             status,
             retry_after,
-            text: String::from_utf8_lossy(&bytes).into_owned(),
+            text,
         })
     }
 
