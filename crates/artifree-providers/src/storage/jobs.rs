@@ -360,9 +360,16 @@ struct Due {
 /// job whose time came, or a running job whose lease expired, of an artifact
 /// outside the trash and not purged. A job of an artifact in the trash is
 /// opaque like the artifact (decision 0030): it is left as it is and becomes
-/// due again when the artifact is recovered.
+/// due again when the artifact is recovered. The same holds for a job whose
+/// owning user is disabled (decision 0036): it is not taken, no attempt is
+/// used, and it is due again when the user is enabled. The user is read in the
+/// same statement as the job, and the claim runs in a write transaction, so a
+/// disable that commits before the claim is seen by it and one that commits
+/// after it comes too late to matter (a job already running is not stopped).
+/// An actor with no row in `users` is not disabled.
 const DUE: &str = "FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
      WHERE a.purged_at IS NULL AND a.deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = j.actor AND u.disabled_at IS NOT NULL)
        AND ((j.state IN ('queued', 'retry_scheduled') AND j.run_after <= ?1)
          OR (j.state = 'running' AND j.lease_expires_at <= ?1))";
 

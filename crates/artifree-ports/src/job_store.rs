@@ -277,7 +277,11 @@ pub trait JobStore {
     /// Claims the oldest job that is due: a queued or retry-scheduled job
     /// whose time came, or a running job whose lease expired. Only jobs of an
     /// artifact outside the trash and not purged are due; the others wait
-    /// untouched until the artifact is recovered. Jobs found on the way that
+    /// untouched until the artifact is recovered. Likewise a job whose owning
+    /// user is disabled is not due: it waits untouched (no attempt is used)
+    /// until the user is enabled, and the check is part of the claim, not a
+    /// separate read before it. A job already running when the user is
+    /// disabled is not stopped. Jobs found on the way that
     /// can only end are ended and returned in [`Claim::settled`]: an expired
     /// lease with a cancel requested becomes cancelled, and one on its last
     /// attempt becomes failed with [`JobFailure::LeaseExpired`].
