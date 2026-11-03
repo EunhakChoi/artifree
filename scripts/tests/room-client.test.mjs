@@ -911,3 +911,289 @@ test('A loss after a heartbeat that worked is joined again at once, whenever it 
   assert.deepEqual(waits, [3_000, 3_000, 3_000, 3_000, 3_000, 3_000, 3_000]);
   assert.deepEqual(failures, []);
 });
+
+/**
+ * A room as the server keeps it for one follower: the participant is made by
+ * the first join (floor and read position at the head then), a resumed join
+ * returns the events after the read position, a heartbeat the events after
+ * what it reports and moves the read position there.
+ */
+function lostJoinRoom() {
+  const room = { head: 10, events: [], read: undefined, afters: [] };
+  const after = (seq) => room.events.filter((e) => e.seq > seq);
+  const respond = (request) => {
+    if (request.path.endsWith('/leave'))
+      return new Response(null, { status: 204 });
+    if (request.path.endsWith('/heartbeat')) {
+      room.afters.push(request.body.after);
+      room.read = Math.max(room.read, request.body.after);
+      return Response.json(
+        snapshot({ head: room.head, events: after(request.body.after) }),
+      );
+    }
+    const first = room.read === undefined;
+    room.read ??= room.head;
+    if (first) throw new TypeError('the answer was lost');
+    return Response.json(
+      snapshot({ head: room.head, events: after(room.read) }),
+    );
+  };
+  /** Another participant sends `count` events. */
+  const send = (count) => {
+    for (let i = 0; i < count; i += 1) {
+      room.head += 1;
+      room.events.push(event(room.head, 3, 1));
+    }
+  };
+  return { room, respond, send };
+}
+
+async function followLostJoin(sleeps) {
+  const { room, respond, send } = lostJoinRoom();
+  const stops = new AbortController();
+  const { client } = await clientWith(respond);
+  const received = [];
+  const waits = [];
+  await followRoom(client, {
+    artifactId: ARTIFACT,
+    slot: 'page',
+    signal: stops.signal,
+    onSnapshot: (followed) => received.push(followed),
+    sleep: async (milliseconds) => {
+      waits.push(milliseconds);
+      // While the follower waits to retry the join, others go on sending.
+      if (waits.length === 1) send(2);
+      if (waits.length >= sleeps) stops.abort();
+    },
+  });
+  return { room, received, waits };
+}
+
+test('A join whose answer was lost resumes and hands over what was sent meanwhile, once', async () => {
+  const { room, received, waits } = await followLostJoin(4);
+  assert.deepEqual(waits, [500, 3_000, 3_000, 3_000]);
+  assert.deepEqual(
+    received.map((r) => [r.joined, r.snapshot.events.map((e) => e.seq)]),
+    [
+      [true, [11, 12]],
+      [false, []],
+      [false, []],
+    ],
+    'both events arrive in the join answer and are never handed over again',
+  );
+  assert.deepEqual(
+    room.afters,
+    [12, 12],
+    'the heartbeats read on from the head of the resumed join, skipping nothing',
+  );
+});
+
+test('A resumed join that lost events to the room says so and is handed over as it is', async () => {
+  const { room, respond, send } = lostJoinRoom();
+  const stops = new AbortController();
+  const { client } = await clientWith((request) => {
+    const answer = respond(request);
+    if (request.path.endsWith('/heartbeat') || request.path.endsWith('/leave'))
+      return answer;
+    return answer
+      .json()
+      .then((body) => Response.json({ ...body, missed: true }));
+  });
+  const received = [];
+  let waits = 0;
+  await followRoom(client, {
+    artifactId: ARTIFACT,
+    slot: 'page',
+    signal: stops.signal,
+    onSnapshot: (followed) => received.push(followed),
+    sleep: async () => {
+      waits += 1;
+      if (waits === 1) send(2);
+      else stops.abort();
+    },
+  });
+  assert.deepEqual(
+    received.map((r) => [r.joined, r.snapshot.missed]),
+    [[true, true]],
+  );
+  assert.equal(room.read, 10, 'nothing moved the read position past the floor');
+});
+
+test(
+  'A signal aborted by state() just before the first join settles within the bound',
+  { timeout: 5_000 },
+  async () => {
+    const stops = new AbortController();
+    const timers = [];
+    const { client, requests } = await clientWith(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          // A join that never answers, on a transport honoring the signal
+          // (as fetch does, also when it is already aborted when sent).
+          const aborted = () =>
+            reject(new DOMException('aborted', 'AbortError'));
+          if (request.signal.aborted) aborted();
+          request.signal.addEventListener('abort', aborted);
+        }),
+    );
+    await followRoom(client, {
+      artifactId: ARTIFACT,
+      slot: 'page',
+      signal: stops.signal,
+      state: () => {
+        stops.abort();
+        return 'busy';
+      },
+      onSnapshot: () => assert.fail('no snapshot'),
+      sleep: async () => assert.fail('no wait'),
+      cleanupTimer: async (milliseconds) => {
+        timers.push(milliseconds);
+      },
+    });
+    assert.deepEqual(timers, [3_000]);
+    assert.equal(requests.length, 1, 'the join was sent and then given up');
+  },
+);
+
+test(
+  'A cleanup timer that fails ends the wait like one that ran out',
+  { timeout: 5_000 },
+  async () => {
+    const stops = new AbortController();
+    const { client, requests } = await clientWith(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          const aborted = () =>
+            reject(new DOMException('aborted', 'AbortError'));
+          if (request.signal.aborted) aborted();
+          request.signal.addEventListener('abort', aborted);
+        }),
+    );
+    await followRoom(client, {
+      artifactId: ARTIFACT,
+      slot: 'page',
+      signal: stops.signal,
+      state: () => {
+        stops.abort();
+        return 'busy';
+      },
+      onSnapshot: () => assert.fail('no snapshot'),
+      sleep: async () => assert.fail('no wait'),
+      cleanupTimer: async () => {
+        throw new Error('the timer broke');
+      },
+    });
+    assert.equal(requests.length, 1);
+  },
+);
+
+test('A signal that is already aborted sends nothing and starts no timer', async () => {
+  const stops = new AbortController();
+  stops.abort();
+  const timers = [];
+  const { client, requests } = await clientWith(() => assert.fail('no call'));
+  await followRoom(client, {
+    artifactId: ARTIFACT,
+    slot: 'page',
+    signal: stops.signal,
+    onSnapshot: () => assert.fail('no snapshot'),
+    cleanupTimer: async (milliseconds) => {
+      timers.push(milliseconds);
+    },
+  });
+  assert.deepEqual([requests.length, timers], [0, []]);
+});
+
+test(
+  'The join and the leave after an abort share one bound, and never take two',
+  { timeout: 5_000 },
+  async () => {
+    const stops = new AbortController();
+    const timers = [];
+    let expire = () => assert.fail('no timer was started');
+    let answerJoin = () => assert.fail('no join was sent');
+    let joinSent = () => {};
+    let leaveSent = () => {};
+    const joinAsked = new Promise((resolve) => {
+      joinSent = resolve;
+    });
+    const leaveAsked = new Promise((resolve) => {
+      leaveSent = resolve;
+    });
+    const { client, requests } = await clientWith((request) => {
+      if (request.path.endsWith('/leave')) {
+        leaveSent();
+        return new Promise(() => {}); // never answers, nor honors the signal
+      }
+      return new Promise((resolve, reject) => {
+        answerJoin = () => resolve(Response.json(snapshot()));
+        request.signal.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        );
+        joinSent();
+      });
+    });
+    let settled = false;
+    const following = followRoom(client, {
+      artifactId: ARTIFACT,
+      slot: 'page',
+      signal: stops.signal,
+      onSnapshot: () => assert.fail('nothing is handed over after an abort'),
+      sleep: async () => assert.fail('no wait'),
+      cleanupTimer: (milliseconds, signal) => {
+        timers.push(milliseconds);
+        return new Promise((resolve) => {
+          expire = resolve;
+          signal.addEventListener('abort', () => resolve());
+        });
+      },
+    }).then(() => {
+      settled = true;
+    });
+    await joinAsked;
+    stops.abort();
+    answerJoin(); // late, but within the bound: the participant is known
+    await leaveAsked;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, 'the unanswered leave is waited for');
+    expire(); // the one bound, counted from the abort, runs out
+    await following;
+    assert.deepEqual(timers, [3_000], 'one timer for the join and the leave');
+    assert.deepEqual(
+      requests.map((r) => r.path.replace(ROOM, '')),
+      ['', '/4/7/leave'],
+    );
+  },
+);
+
+/** The wait the follower chooses after a 429 asking for `seconds`. */
+async function waitAfterRetryAfter(seconds, retryDelayMs) {
+  const { waits } = await follow(
+    (request, count) =>
+      count === 2
+        ? new Response(
+            JSON.stringify({ error: { code: 'rate_limited', message: 'x' } }),
+            { status: 429, headers: { 'retry-after': String(seconds) } },
+          )
+        : snapshot(),
+    { sleeps: 2, options: retryDelayMs ? { retryDelayMs } : {} },
+  );
+  return waits[1];
+}
+
+test('A Retry-After shorter than the minimum delay waits the minimum', async () => {
+  assert.equal(await waitAfterRetryAfter(0), 500);
+  assert.equal(
+    await waitAfterRetryAfter(1, { min: 2_000, max: 15_000 }),
+    2_000,
+  );
+});
+
+test('A Retry-After longer than the maximum delay waits the maximum', async () => {
+  assert.equal(await waitAfterRetryAfter(3_600), 15_000);
+  assert.equal(await waitAfterRetryAfter(60, { min: 500, max: 4_000 }), 4_000);
+});
+
+test('A Retry-After between the limits is waited as asked', async () => {
+  assert.equal(await waitAfterRetryAfter(7), 7_000);
+});

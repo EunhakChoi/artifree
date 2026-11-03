@@ -317,8 +317,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   oversized body that answers a dead or another actor's connection exactly as a
   valid body does. Node tests give the client parser about thirty
   inconsistent responses, check local validation without a request and the
-  follower's backoff, rejoin, repeated-loss wait and abort (a leave or a first join that never answers cannot keep it from settling), and run the real binary with every room
-  response validated against the published schema. Each guard was checked by
+  follower's backoff (a Retry-After kept between the minimum and the maximum), rejoin, repeated-loss wait and abort (a first join or a leave that never answers, or a signal aborted by `state()` before the join, cannot keep it from settling; the join and the leave share one bound), a join whose answer was lost and resumed without skipping what came meanwhile, and run the real binary with every room
+  response validated against the published schema, including that lost first join. The follower does not rejoin after a restart; it rejects with `runtime_session_expired`. Each guard was checked by
   breaking it and watching a named test fail. These tests do not show multiple
   users, that a frame can use a room, or anything about MCP; no browser smoke
   covers rooms because no web code uses them.

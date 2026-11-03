@@ -170,8 +170,14 @@ runtime_session_expired`), then the live artifact (`404`; a trashed artifact
     read with a monotonic clock the server owns. No row, no WAL entry, no
     change record, no outbox. A restart empties every room; a test restarts the
     binary on the same data directory and checks that the database holds no
-    room data. Clients that follow the room (`followRoom`) notice `not_found`,
-    join again at once and get a new participant.
+    room data. A restart also empties the runtime-connection store, so every
+    call that names an old connection answers `404 runtime_session_expired`;
+    `followRoom` treats that as a failure retrying cannot fix and rejects, and
+    the app must open a new runtime connection and follow again. Rejoining by
+    itself is limited to a participant lost while the connection stays live
+    (`not_found`: the lease ran out in a long outage, or another connection of
+    the tab replaced it). A connection also ends after 24 hours, with the same
+    consequence.
 11. **Client.** `packages/client/src/room.ts` (`joinRoom`, `pollRoom`,
     `sendRoomEvent`, `leaveRoom`, `identityOf`, `followRoom`, `parseRoomSnapshot`)
     is a separate module that reuses the client's runtime call path and is not
@@ -189,12 +195,16 @@ runtime_session_expired`), then the live artifact (`404`; a trashed artifact
     heartbeat succeeded (two followers of one slot in one tab replace each
     other's epoch) is joined again only after a wait that doubles from 0.5 s to
     15 s, reported to `onDisconnect`; the first loss still rejoins at once.
-    After an abort `followRoom` settles within about 3 s whatever the network
-    does: a first join that was already in flight is given 3 s and, if it
-    still made a participant, that participant is left; the leave itself is
-    given 3 s; past that the lease (15 s) ends the participant. This relies on
-    the transport honoring an `AbortSignal` for the join; the leave is also
-    raced against its timer.
+    After an abort `followRoom` settles within about 3 s: one deadline starts
+    when the abort happens (the listener is installed before anything, such as
+    `state()`, can abort the signal) and is shared by everything left to do. A first join
+    already in flight is waited for until then and, if it made a participant,
+    that participant is left; the leave gives up at the same deadline; past it
+    the lease (15 s) ends the participant. The join and heartbeat rely on the
+    transport honoring an `AbortSignal`; the leave is also raced against the
+    deadline. A wait chosen by `Retry-After` is kept within the retry delays
+    (0.5 s to 15 s), so `Retry-After: 0` is not a hot loop and a huge value
+    does not stall the follower past its lease.
 
 ## Not implemented
 

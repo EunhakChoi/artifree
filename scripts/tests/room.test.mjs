@@ -291,6 +291,75 @@ test('A follower keeps a tab present, hears the others, and rejoins when its par
   }
 });
 
+test('A follower whose first join answer is lost resumes it and misses nothing sent meanwhile', async () => {
+  const own = await startServer(binary, join(scratch, 'lost-join-data'));
+  const stops = new AbortController();
+  try {
+    const id = await artifact(own);
+    const sender = await tab(own);
+    const peer = await joinRoom(sender, id, { slot: 'page' });
+    // The server handles the follower's first join and makes its participant;
+    // the answer never reaches the follower.
+    let lost = false;
+    const afters = [];
+    const followed = new ArtifreeClient({
+      baseUrl: own.api_url,
+      accessToken: own.token,
+      fetch: async (url, init) => {
+        const { pathname } = new URL(url);
+        if (pathname.endsWith('/heartbeat'))
+          afters.push(JSON.parse(init.body).after);
+        const response = await fetch(url, init);
+        if (!lost && pathname.endsWith('/room/participants')) {
+          lost = true;
+          await response.arrayBuffer();
+          throw new TypeError('the answer was lost');
+        }
+        return response;
+      },
+    });
+    await followed.openRuntimeSession();
+    const received = [];
+    let waits = 0;
+    await followRoom(followed, {
+      artifactId: id,
+      slot: 'page',
+      signal: stops.signal,
+      onSnapshot: (item) => received.push(item),
+      sleep: async () => {
+        waits += 1;
+        // The follower waits to retry its join: the peer speaks meanwhile.
+        if (waits === 1)
+          for (const data of ['one', 'two'])
+            await sendRoomEvent(sender, identityOf(id, peer), {
+              kind: 'k',
+              data,
+            });
+        if (waits >= 4) stops.abort();
+      },
+    });
+    assert.ok(lost, 'the first join was sent and its answer was lost');
+    assert.deepEqual(
+      received.map((r) => [r.joined, r.snapshot.events.map((e) => e.data)]),
+      [
+        [true, ['one', 'two']],
+        [false, []],
+        [false, []],
+      ],
+      'both events reach the follower once, in the resumed join',
+    );
+    assert.equal(received[0].snapshot.missed, false);
+    assert.equal(received[0].snapshot.members.length, 2, 'one participant');
+    assert.deepEqual(afters, [2, 2], 'no heartbeat reads from before them');
+    // It left on abort: only the peer is in the room.
+    const left = await pollRoom(sender, identityOf(id, peer), { after: 0 });
+    assert.deepEqual(flags(left), [[peer.participant, true, true]]);
+  } finally {
+    stops.abort();
+    await own.stop();
+  }
+});
+
 test('Every room response the real server sent obeys the published schema', () => {
   for (const [method, path, text] of bodies) {
     const body = JSON.parse(text);
