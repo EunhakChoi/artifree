@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -128,12 +129,24 @@ impl Drop for Slot {
     }
 }
 
+/// What data streams use at one moment, for diagnostics and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataStreamUsage {
+    /// Streams open now, in the whole process; `u32::MAX` if the counts
+    /// cannot be used.
+    pub open: u32,
+    /// Reads of storage that streams, and requests to open one, have asked
+    /// for so far (counted when asked, not when done).
+    pub reads: u64,
+}
+
 /// What all data streams of the process share: the wake-up signal for a
-/// write to data and the counts of open streams.
+/// write to data, the counts of open streams, and the count of reads.
 #[derive(Debug)]
 pub(crate) struct DataStreams {
     wakes: watch::Sender<()>,
     counts: Arc<Mutex<Counts>>,
+    reads: AtomicU64,
     settings: DataStreamSettings,
 }
 
@@ -142,8 +155,37 @@ impl DataStreams {
         Self {
             wakes: watch::Sender::new(()),
             counts: Arc::default(),
+            reads: AtomicU64::new(0),
             settings,
         }
+    }
+
+    pub(crate) fn usage(&self) -> DataStreamUsage {
+        DataStreamUsage {
+            open: self.counts.lock().map_or(u32::MAX, |counts| counts.total),
+            reads: self.reads.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Whether `actor` may open a stream now, recording nothing. A request
+    /// the limits would refuse is refused with this before any storage is
+    /// read; the place itself is taken by [`Self::open`] afterwards, which
+    /// checks again.
+    fn has_room(&self, actor: &ActorId) -> Result<(), Refusal> {
+        let counts = self.counts.lock().map_err(|_| Refusal::Unusable)?;
+        self.check(&counts, actor).map(|_| ())
+    }
+
+    /// The actor's open streams, if the limits leave room for one more.
+    fn check(&self, counts: &Counts, actor: &ActorId) -> Result<u32, Refusal> {
+        if counts.total >= self.settings.process {
+            return Err(Refusal::Process);
+        }
+        let open = counts.per_actor.get(actor).copied().unwrap_or(0);
+        if open >= self.settings.per_actor {
+            return Err(Refusal::Actor);
+        }
+        Ok(open)
     }
 
     /// Wakes every open data stream. Called after a write to data committed;
@@ -153,16 +195,12 @@ impl DataStreams {
     }
 
     /// Takes a place for one stream of `actor`, or says which limit is full.
-    /// A refusal records nothing.
+    /// Checking and taking are one step under the lock, so requests that
+    /// passed [`Self::has_room`] together cannot exceed a limit. A refusal
+    /// records nothing.
     fn open(&self, actor: &ActorId) -> Result<Slot, Refusal> {
         let mut counts = self.counts.lock().map_err(|_| Refusal::Unusable)?;
-        if counts.total >= self.settings.process {
-            return Err(Refusal::Process);
-        }
-        let open = counts.per_actor.get(actor).copied().unwrap_or(0);
-        if open >= self.settings.per_actor {
-            return Err(Refusal::Actor);
-        }
+        let open = self.check(&counts, actor)?;
         counts.total += 1;
         counts.per_actor.insert(actor.clone(), open + 1);
         Ok(Slot {
@@ -203,15 +241,22 @@ pub(crate) async fn stream(
     // Subscribe before the first read, so a data write after it wakes the stream.
     let wakes = streams.wakes.subscribe();
     let closing = feed.subscribe_closing();
-    // The place comes first, so that a request the limits refuse costs no
-    // storage work. It is held only while the request lasts if the first read,
-    // which is also the access check, fails: an artifact the caller cannot see
-    // leaves no place taken and nothing registered.
+    // Looking at the limits records nothing, so a request they refuse costs no
+    // storage work and one that is not allowed to see the artifact holds no
+    // place while it is checked.
+    if let Err(refusal) = streams.has_room(&auth.actor) {
+        return Ok(too_many_streams(refusal));
+    }
+    // The first read is also the access check: an artifact the caller cannot
+    // see ends here, having taken no place and registered nothing.
+    let first = read_state(&state, &auth.actor, &artifact, &watched).await?;
+    // Only now is the place taken, checking the limits again: requests that
+    // were all admitted above and are all allowed to read can still not
+    // exceed them, and each loser has cost one read.
     let slot = match streams.open(&auth.actor) {
         Ok(slot) => slot,
         Err(refusal) => return Ok(too_many_streams(refusal)),
     };
-    let first = read_state(&state, &auth.actor, &artifact, &watched).await?;
     let (revoked, registration) = if let Some(token_id) = &auth.token_id {
         let (tx, rx) = watch::channel(false);
         let Some(registration) = feed.register_token_stream(&auth.actor, token_id, tx) else {
@@ -288,6 +333,7 @@ async fn read_state(
     path: &DataPath,
 ) -> Result<DataRead, artifree_core::artifacts::ArtifactError> {
     let (actor, artifact, path) = (actor.clone(), artifact.clone(), path.clone());
+    state.data_streams().reads.fetch_add(1, Ordering::Relaxed);
     state
         .run(move |artifacts| artifacts.data(&actor, &artifact, &path))
         .await
@@ -668,6 +714,30 @@ mod tests {
         drop(first);
         assert_eq!(streams.open_counts(), (2, 2));
         let _again = streams.open(&alice).map_err(|_| "after a close")?;
+        Ok(())
+    }
+
+    #[test]
+    fn looking_at_the_limits_records_nothing_and_refuses_at_the_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let streams = streams(1, 2);
+        let (alice, bob, carol) = (actor(1)?, actor(2)?, actor(3)?);
+        for _ in 0..5 {
+            assert_eq!(streams.has_room(&alice), Ok(()));
+        }
+        assert_eq!(streams.open_counts(), (0, 0), "looking took a place");
+        let _hers = streams.open(&alice).map_err(|_| "alice")?;
+        assert_eq!(streams.has_room(&alice), Err(Refusal::Actor));
+        assert_eq!(streams.has_room(&bob), Ok(()));
+        let _his = streams.open(&bob).map_err(|_| "bob")?;
+        assert_eq!(streams.has_room(&carol), Err(Refusal::Process));
+        assert_eq!(streams.usage().open, 2);
+        // Two requests that both looked at one free place: only one gets it.
+        let streams = self::streams(1, 8);
+        assert_eq!(streams.has_room(&alice), Ok(()));
+        assert_eq!(streams.has_room(&alice), Ok(()));
+        let _won = streams.open(&alice).map_err(|_| "first")?;
+        assert_eq!(streams.open(&alice).err(), Some(Refusal::Actor));
         Ok(())
     }
 

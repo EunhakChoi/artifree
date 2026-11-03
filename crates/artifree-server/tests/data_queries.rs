@@ -905,26 +905,30 @@ async fn a_request_the_limits_refuse_costs_no_storage_read() -> TestResult {
     });
     let id = harness.artifact("limit-reads").await?;
     let other = harness.artifact("limit-reads-other").await?;
-    // A space must exist for the damage below to reach it.
-    harness.set(&id, "n", 0, &json!(1)).await?;
-    harness.set(&other, "n", 0, &json!(1)).await?;
     let mut open = harness.follow(&id, "?path=n").await?;
     open.expect("snapshot").await?;
-    // Storage can no longer be read for anyone: a request that reads it fails
-    // with 503 or ends the stream. The one place of the actor is in use.
-    harness.raw("UPDATE app_data SET data_version = 7, document = '{\"n\":{\"a\":1,\"a\":2}}'")?;
+    // The actor's one place is in use. Whatever the artifact, the limit is
+    // the answer and storage is not read for it.
+    let before = harness.state.data_stream_usage();
     for target in [
         id.as_str(),
         other.as_str(),
         "art_00000000000000000000000000000000",
     ] {
         let response = harness.open_as(OWNER, target, "?path=n", None).await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::TOO_MANY_REQUESTS,
-            "{target}: the limit is answered before storage is read"
-        );
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "{target}");
     }
+    assert_eq!(
+        harness.state.data_stream_usage(),
+        before,
+        "a refusal read storage"
+    );
+    // The counter does count reads: an allowed request is one.
+    let person = harness.person("reader").await?;
+    let mine = harness.artifact_for(&person.secret, "mine").await?;
+    let mut stream = harness.follow_as(&person.secret, &mine, "").await?;
+    stream.expect("snapshot").await?;
+    assert_eq!(harness.state.data_stream_usage().reads, before.reads + 1);
     Ok(())
 }
 
@@ -932,17 +936,14 @@ async fn a_request_the_limits_refuse_costs_no_storage_read() -> TestResult {
 async fn commits_that_do_not_touch_this_data_do_not_wake_a_stream() -> TestResult {
     let harness = Harness::new(DataStreamSettings {
         heartbeat: Duration::from_secs(30),
+        min_read_interval: Duration::from_millis(1),
         ..quick(1, 8)
     });
     let id = harness.artifact("quiet").await?;
-    // A space must exist for the damage below to reach it.
-    harness.set(&id, "n", 0, &json!(1)).await?;
     let mut open = harness.follow(&id, "?path=n").await?;
     open.expect("snapshot").await?;
-    // A read now would fail and end the stream, so a stream that read after
-    // each commit of anyone would end here.
-    harness.raw("UPDATE app_data SET data_version = 7, document = '{\"n\":{\"a\":1,\"a\":2}}'")?;
-    // Commits of other artifacts, each of which wakes the change feed.
+    let opened = harness.state.data_stream_usage();
+    // Commits of another artifact, each of which wakes the change feed.
     let unrelated = harness.artifact("unrelated").await?;
     for pinned in [true, false, true] {
         let meta = harness
@@ -959,14 +960,105 @@ async fn commits_that_do_not_touch_this_data_do_not_wake_a_stream() -> TestResul
             .await?;
         assert_eq!(patched.status, StatusCode::OK, "{}", patched.text);
     }
-    // A negative cannot be waited for; a stream that was going to read would
-    // have done so within milliseconds, and this waits far longer.
-    let still_open = tokio::time::timeout(Duration::from_millis(800), open.ends()).await;
-    assert!(still_open.is_err(), "the stream read storage and ended");
-    // It still holds its place.
-    let refused = harness.open_as(OWNER, &id, "?path=n", None).await?;
-    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    // A write to this data is the one thing that wakes the stream. Once its
+    // change has arrived, every wake-up before it has been served, so the
+    // stream read once for it and for nothing else.
+    let version = harness.set(&id, "n", 0, &json!("mine")).await?;
+    let change = open.expect("change").await?;
+    assert_eq!(change.data["data_version"], version);
+    assert_eq!(
+        harness.state.data_stream_usage().reads,
+        opened.reads + 1,
+        "commits of other artifacts made the stream read"
+    );
     Ok(())
+}
+
+/// Waits until `reads` requests have asked to read storage.
+async fn until_reads(harness: &Harness, reads: u64) -> TestResult {
+    eventually("the requests to ask for their first read", || async {
+        Ok(harness.state.data_stream_usage().reads >= reads)
+    })
+    .await
+}
+
+#[test]
+fn a_request_that_cannot_see_the_artifact_holds_no_place_while_it_is_checked() -> TestResult {
+    for case in ["foreign", "missing"] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let harness = Harness::new(quick(2, 8));
+            let alice = harness.person("alice").await?;
+            let hers = harness.artifact_for(&alice.secret, "hers").await?;
+            let target = if case == "foreign" {
+                hers.as_str()
+            } else {
+                "art_00000000000000000000000000000000"
+            };
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let holder = tokio::task::spawn_blocking(move || {
+                let _released = held.recv();
+            });
+            let before = harness.state.data_stream_usage();
+            // The owner token needs no lookup in storage, so the request reaches its
+            // first read while the pool is held.
+            let asking = harness.open_as(OWNER, target, "", None);
+            let looking = async {
+                let reached = until_reads(&harness, before.reads + 1).await;
+                // The request is inside its access check now.
+                let usage = harness.state.data_stream_usage();
+                release.send(())?;
+                reached?;
+                Ok::<_, TestError>(usage)
+            };
+            let (response, usage) = tokio::join!(asking, looking);
+            holder.await?;
+            let usage = usage?;
+            assert_eq!(
+                usage.open, 0,
+                "{case}: the request held a place while checked"
+            );
+            assert_eq!(response?.status(), StatusCode::NOT_FOUND, "{case}");
+            assert_eq!(harness.state.data_stream_usage().open, 0, "{case}");
+            Ok::<(), TestError>(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn requests_admitted_together_cannot_exceed_the_limit() -> TestResult {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let harness = Harness::new(quick(1, 8));
+        let id = harness.artifact("race").await?;
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let holder = tokio::task::spawn_blocking(move || {
+            let _released = held.recv();
+        });
+        let before = harness.state.data_stream_usage();
+        let first = harness.open_as(OWNER, &id, "", None);
+        let second = harness.open_as(OWNER, &id, "", None);
+        let looking = async {
+            // Both are past the look at the limits and inside their read.
+            let reached = until_reads(&harness, before.reads + 2).await;
+            release.send(())?;
+            reached
+        };
+        let (first, second, looked) = tokio::join!(first, second, looking);
+        holder.await?;
+        looked?;
+        let mut statuses = [first?.status(), second?.status()];
+        statuses.sort_by_key(StatusCode::as_u16);
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS]);
+        Ok::<(), TestError>(())
+    })
 }
 
 /// Writes every few milliseconds, as long as the future is polled.

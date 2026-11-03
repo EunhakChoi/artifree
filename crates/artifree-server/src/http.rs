@@ -266,6 +266,13 @@ impl AppState {
         &self.shared.data_streams
     }
 
+    /// What data streams use now: open streams and reads of storage asked
+    /// for (decision 0040).
+    #[must_use]
+    pub fn data_stream_usage(&self) -> crate::data_events::DataStreamUsage {
+        self.shared.data_streams.usage()
+    }
+
     pub(crate) fn download_builds(&self) -> &Slots {
         &self.shared.download_builds
     }
