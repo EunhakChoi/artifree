@@ -89,6 +89,26 @@ and starting a newer build on an older data directory upgrades it. See the
 The access token is not part of a backup; a restored directory gets a new
 one. Windows and container use of these commands is not verified outside CI.
 
+A one-shot session ([decision 0038](docs/decisions/0038-one-shot-session.md))
+is the other storage mode: `artifree-server serve --one-shot-ttl-seconds 3600`
+(instead of `--data-dir`) runs the same server on a new private temporary data
+directory and stops after that many seconds (1 to 604800), on Ctrl+C, or on
+SIGTERM, and then deletes the directory with the database and token in it. A
+new session starts empty: it has a new access token, and tokens, preview
+addresses, and jobs of an earlier session do not exist in it and do not
+authenticate. `--session-root <dir>` chooses where session directories are
+made (default: the system temporary directory). The readiness line says
+`"mode":"one_shot"` (`"persistent"` for `--data-dir`) and the server prints a
+line on stderr saying that nothing is kept; **the HTTP API, MCP tools, and
+contracts do not report the mode.** A session that was killed (SIGKILL, power
+loss) leaves its directory behind; the next one-shot start removes such a
+directory, but only on Linux and only when the marker in it shows that its owner
+process is gone. The lifetime is the lifetime of the data, not of any tunnel or
+public address: there is no tunnel, and a tunnel in front of a session keeps its
+own lifetime. **Not implemented:** sweeping on macOS and Windows, a sweep
+without starting another session, SIGHUP handling, secure erasure, a worker for
+one-shot data, any API or web indicator of the mode, and Windows verification.
+
 Nothing is removed unless asked. `artifact purge <id> --base-metadata <n> --yes`
 removes an artifact that is already in the trash for good (its files and
 titles; request keys, change sequences, and copies stay), and `content cleanup`
@@ -234,8 +254,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0033](docs/decisions/0033-runtime-source-write.md),
 [0034](docs/decisions/0034-room-and-presence.md),
 [0035](docs/decisions/0035-per-file-conditional-edit.md),
-[0036](docs/decisions/0036-multi-user-identity.md), and
-[0037](docs/decisions/0037-release-publishing-and-supply-chain.md)).
+[0036](docs/decisions/0036-multi-user-identity.md),
+[0037](docs/decisions/0037-release-publishing-and-supply-chain.md), and
+[0038](docs/decisions/0038-one-shot-session.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

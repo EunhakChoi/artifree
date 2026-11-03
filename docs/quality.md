@@ -340,6 +340,27 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the client and the CLI against a stand-in server. Each guard was checked by
   breaking it and watching a named test fail. These tests do not show roles,
   sharing, OAuth, or a web screen for users, because none exist.
+- One-shot sessions (decision 0038), as real server processes started on free
+  ports in a private session root: the session and data directories are mode
+  700 and hold the marker; SIGTERM, SIGINT, and the end of a 3 second lifetime
+  each stop the process with exit code 0 and leave the root empty (the lifetime
+  case also checks that the server answered before and not after, and did not
+  stop early); a client holding a request open cannot keep the data past the
+  five second drain bound; a killed session's directory stays until a later
+  session starts, is removed by that session only (the live one is kept, and the
+  sweep of a live owner removes nothing), and a directory without a marker or
+  not named like a session is never removed. A session filled with an
+  artifact, a job, a preview link, and an issued token is killed; the next
+  session starts empty and answers the old owner and issued tokens `401`, the
+  old job `404`, and the old preview address `404` on its content origin, after
+  the same requests succeeded in the old one. Persistent mode keeps its token
+  and artifact across a restart and reports `persistent`; contradictory
+  storage options are refused before anything is created. Unit tests cover the
+  marker format, a process id reused with another start time, symbolic links,
+  and the stat parser. Each guard was checked by breaking it and watching a
+  named test fail (listed in the pull request). These tests are Linux and Unix
+  only: they do not show macOS or Windows behavior, the sweep without a later
+  session, SIGHUP, or secure erasure.
 - Source handoff: the real server and official MCP client exercise stage,
   cancel, send replay, session secrets, selection digest and UTF-16 boundaries,
   polling, acknowledgement, a missing source followed by another delivery,
