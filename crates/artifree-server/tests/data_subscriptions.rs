@@ -243,9 +243,9 @@ impl Harness {
         key: &str,
         base: u64,
         path: &str,
-        patch: Value,
+        document: Value,
     ) -> Result<u64, TestError> {
-        self.write(id, "PATCH", key, base, path, Some(("patch", patch)))
+        self.write(id, "PATCH", key, base, path, Some(("patch", document)))
             .await
     }
 
@@ -1311,31 +1311,28 @@ fn apply(state: &mut Option<Value>, watched: &str, event: &Event) {
         *state = value;
         return;
     }
-    match value {
-        Some(value) => {
-            let mut node = state.get_or_insert_with(|| json!({}));
-            for name in &relative[..relative.len() - 1] {
-                if !node.is_object() {
-                    *node = json!({});
-                }
-                node = &mut node[*name];
-                if node.is_null() {
-                    *node = json!({});
-                }
-            }
+    if let Some(value) = value {
+        let mut node = state.get_or_insert_with(|| json!({}));
+        for name in &relative[..relative.len() - 1] {
             if !node.is_object() {
                 *node = json!({});
             }
-            node[relative[relative.len() - 1]] = value;
+            node = &mut node[*name];
+            if node.is_null() {
+                *node = json!({});
+            }
         }
-        None => {
-            let mut node = state.as_mut();
-            for name in &relative[..relative.len() - 1] {
-                node = node.and_then(|node| node.get_mut(*name));
-            }
-            if let Some(object) = node.and_then(Value::as_object_mut) {
-                object.remove(relative[relative.len() - 1]);
-            }
+        if !node.is_object() {
+            *node = json!({});
+        }
+        node[relative[relative.len() - 1]] = value;
+    } else {
+        let mut node = state.as_mut();
+        for name in &relative[..relative.len() - 1] {
+            node = node.and_then(|node| node.get_mut(*name));
+        }
+        if let Some(object) = node.and_then(Value::as_object_mut) {
+            object.remove(relative[relative.len() - 1]);
         }
     }
 }
