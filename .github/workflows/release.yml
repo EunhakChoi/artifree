@@ -157,9 +157,11 @@ jobs:
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           docker push "$image:${TAG#v}"
           reference="$(docker inspect --format '{{index .RepoDigests 0}}' "$image:${TAG#v}")"
-          echo "reference=$reference" >> "$GITHUB_OUTPUT"
-          echo "digest=${reference#*@}" >> "$GITHUB_OUTPUT"
-          echo "name=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "reference=$reference"
+            echo "digest=${reference#*@}"
+            echo "name=$image"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.push.outputs.name }}
