@@ -20,6 +20,29 @@ export type {
   RuntimeViewOptions,
 } from './client.js';
 export { cursorOf } from './change-feed.js';
+export {
+  DEFAULT_PAGE_MEMBERS,
+  MAX_MEMBER_NAME_BYTES,
+  MAX_PAGE_MEMBERS,
+  compareUtf8,
+  listDataMembers,
+  parseDataMembers,
+} from './data-query.js';
+export type { DataMembersRequest } from './data-query.js';
+export {
+  HEALTHY_AFTER_MS,
+  IDLE_TIMEOUT_MS,
+  MAX_BACKOFF_MS,
+  MAX_EVENT_BYTES,
+  MIN_WAIT_MS,
+  RETRY_AFTER_CEILING_MS,
+  followData,
+} from './data-stream.js';
+export type {
+  DataStreamEvent,
+  DataStreamTimers,
+  FollowDataOptions,
+} from './data-stream.js';
 export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
 export {
