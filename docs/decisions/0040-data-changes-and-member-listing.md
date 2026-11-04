@@ -74,9 +74,14 @@ Two things are in scope and the rest is not.
    data write", and the implementation must pass that actor to the row
    explicitly (a new `record_change` parameter or sibling function) so that
    sharing (S02), which would let two actors have spaces for one artifact,
-   cannot send A's data change to the owner's feed. Acceptance: a test in which
-   actor B has its own feed and artifact, and A's data writes leave B's feed,
-   head, and streams unchanged (rule 46).
+   cannot send A's data change to the owner's feed. Acceptance (rule 46): a
+   lower-level store test that calls the row-recording function with a writer
+   actor different from the artifact's owner and asserts that the row, its
+   `actor_seq`, and `actor_feeds.head` land in the **writer's** feed and the
+   owner's feed is unchanged; it must fail if the explicit actor is removed
+   (owner lookup). An HTTP-level two-user test is an additional check, not a
+   substitute: today a write to another actor's artifact is refused, so that
+   test alone cannot tell the two routings apart.
 6. **Schema.** A schema step (the next version after the current 10) rebuilds
    `changes` as earlier versions did: the `kind` CHECK gains `'data_changed'`;
    a nullable `data_version INTEGER` column is added with
@@ -171,8 +176,10 @@ Two things are in scope and the rest is not.
     covered by a read, initially none).
     1. Open the feed and wait for `ready`. Events are buffered by the client
        from here on.
-    2. Read `GET data` for `P` (the snapshot). Deliver it as a **snapshot** and
-       start an epoch with `seen` = its `data_version`.
+    2. Read `GET data` for `P` (the snapshot). Deliver it as a **snapshot**,
+       start an epoch with `seen` = its `data_version`, and clear `dirty`.
+       Events buffered meanwhile are then applied in order (step 3). A `404`
+       on this read is handled by rule 27.
     3. For each `data_changed` for `A` with `data_version` greater than `seen`
        (and greater than `dirty`), set `dirty` to it. For any other change of
        `A` see rule 25. Changes of other artifacts and other kinds are ignored.
@@ -180,10 +187,13 @@ Two things are in scope and the rest is not.
        Only one read is in flight. When the read returns version `v`: if `v` is
        greater than `seen`, deliver an **update**, set `seen` to `v`, and clear
        `dirty` if `dirty <= v`; if `v` equals `seen`, deliver nothing; if `v` is
-       less than `seen`, start a new epoch (rule 24).
+       less than `seen`, start a new epoch (rule 24). A `v` below `dirty` (below a
+       version an event of this connection already named) cannot happen with one
+       database and is `invalid_response` (trust rule 3), which also prevents a
+       read loop. A `404` is handled by rule 27.
     5. On `reset`, on a reconnect (a new `ready`), or after a stream error that
-       ended the connection, return to step 2 (a new epoch, delivered as a
-       snapshot, even if the version is the same).
+       ended the connection, abandon any read in flight and return to step 2 (a
+       new epoch, delivered as a snapshot, even if the version is the same).
 22. **Guarantees.** Given an unbroken feed, (a) no lost update: every committed
     data change after the follower's subscription is either at or below the
     version of a later read or raises `dirty` and causes a read; (b) versions
@@ -208,11 +218,15 @@ Two things are in scope and the rest is not.
     **snapshot**, never as an update. The application's rule is: a snapshot
     replaces everything; an update is newer than the last delivery of its
     epoch. Within an epoch no delivered version is lower than an earlier one.
-25. **Other changes of the same artifact.** `deleted` stops reads: the follower
-    delivers one `unavailable` notice and reads no more until `recovered`
-    (a read would be `404`, 0031 decision 8). `recovered` triggers step 2.
-    `purged` ends the follower's reads with the same notice and no recovery is
-    awaited. `created`, `revised`, `metadata_updated`, and `unknown` for the
+25. **Other changes of the same artifact.** `deleted` (trash) makes the
+    follower **unavailable**: it delivers one `unavailable` notice (reason
+    `trashed`), discards the result of any read in flight, and reads no more
+    (a read would be `404`, 0031 decision 8). While unavailable, events for the
+    artifact other than `recovered` and `purged` are ignored. `recovered`
+    triggers step 2. An observed `purged` ends the follower: it delivers an
+    `unavailable` notice with reason `purged` (even if a `trashed` notice was
+    delivered before, because the reason differs) and resolves quietly. While
+    available, `created`, `revised`, `metadata_updated`, and `unknown` for the
     artifact trigger nothing, because source revisions and data versions are
     unrelated (0031 decision 1) and an `unknown` kind carries no `data_version`
     to compare.
@@ -220,10 +234,60 @@ Two things are in scope and the rest is not.
     a remembered cursor; it takes the head at each connect and a fresh
     snapshot (rule 21). The server's resume support is unchanged and unused
     by this routine.
-27. **A read that fails.** A `404` on a read ends the follower with the error
-    (it is not retried; the app may start a new follower). A `429`, a `5xx`, or
-    a dropped connection on a read is retried by the rule of 0006 decision 10 as
-    amended by rule 18; any other `4xx` rejects.
+27. **A read that fails, and the state machine.**
+    - A `404` on the follower's **first snapshot read** (no snapshot has ever
+      been delivered) rejects `followData` with the error: an unknown artifact
+      is the caller's error. It is not retried.
+    - A `404` on any read **after** a snapshot was delivered (in an earlier
+      epoch, or an update read) is not terminal: the follower becomes
+      unavailable (rule 25), delivers `unavailable` (reason `trashed`) once, not
+      again while it stays unavailable, keeps the feed open, and waits. A `404`
+      on a later step-2 read (after `recovered`, `reset`, or a reconnect) keeps
+      waiting silently.
+    - A `429`, a `5xx`, or a dropped connection on a read is retried by the
+      rule of 0006 decision 10 as amended by rule 18 (the feed stays open; if
+      the stream itself dropped, step 5 applies). Any other `4xx` rejects.
+    - **Limitation, stated:** a purge that happens while the follower is
+      disconnected looks like the trash state (`404`, no `purged` event
+      observed). The follower waits until the application aborts it or the
+      artifact returns. The application owns the follower's lifetime through
+      its abort signal.
+
+    The follower is a state machine. States: `connecting` (feed opening, until
+    `ready`), `snapshotting` (step 2 in flight), `following` (idle), `reading`
+    (an update read in flight), `unavailable`, `ended`. Abort in any state moves
+    to `ended` quietly (rule 43). `drop` is a stream end or error.
+
+    | State                 | Event                                       | Action; next state                                                                              |
+    | --------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+    | connecting            | `ready`                                     | Start step 2; snapshotting                                                                      |
+    | connecting            | drop, `429`, `5xx` on open                  | Back off (rule 44); connecting                                                                  |
+    | connecting            | other `4xx` on open                         | Reject; ended                                                                                   |
+    | snapshotting          | read `200`                                  | Deliver snapshot, apply buffered events; following (or reading, or unavailable by those events) |
+    | snapshotting          | read `404`, no snapshot ever delivered      | Reject; ended                                                                                   |
+    | snapshotting          | read `404`, a snapshot was delivered before | Deliver `unavailable` unless already unavailable; unavailable                                   |
+    | snapshotting, reading | read `429`, `5xx`                           | Back off, retry the read; same state                                                            |
+    | snapshotting, reading | read other `4xx`                            | Reject; ended                                                                                   |
+    | snapshotting, reading | drop or `reset`                             | Abandon read; connecting (drop) or snapshotting (reset)                                         |
+    | following             | `data_changed` with version above `seen`    | Set `dirty`; reading                                                                            |
+    | following, reading    | `data_changed` not above `seen`             | Ignore                                                                                          |
+    | reading               | `data_changed` above `dirty`                | Raise `dirty`; reading (coalesced)                                                              |
+    | reading               | read `200`                                  | Deliver per step 4; following, or reading if `dirty` remains                                    |
+    | reading               | read `404`                                  | Deliver `unavailable`; unavailable                                                              |
+    | following, reading    | `deleted`                                   | Discard read in flight; deliver `unavailable`; unavailable                                      |
+    | following, reading    | `purged`                                    | Deliver `unavailable` (purged); ended                                                           |
+    | following             | `reset` or new `ready` after drop           | snapshotting                                                                                    |
+    | unavailable           | `recovered`, `reset`, new `ready`           | snapshotting (a `404` there waits silently)                                                     |
+    | unavailable           | `purged`                                    | Deliver `unavailable` (purged); ended                                                           |
+    | unavailable           | drop                                        | Back off; connecting (stays unavailable on `ready` until the read)                              |
+    | unavailable           | any other change                            | Ignore                                                                                          |
+    | any                   | callback throws                             | Reject; ended (abort wins, rule 43)                                                             |
+
+    The audit of rules 20 to 27 found three contradictions, all fixed here: the
+    old rule 27 ended the follower on a `404` although rule 25 waits for
+    `recovered`; a read returning a version below a named `dirty` could loop
+    forever (now `invalid_response`); and a read in flight when `deleted`
+    arrived had no defined fate (discarded).
 
 ### Member listing
 
@@ -296,8 +360,10 @@ Two things are in scope and the rest is not.
     whose name does not (non-ASCII, over 64 bytes, or with a character outside
     the set; 0031 decision 3 allows names up to 256 bytes) cannot be read by
     `GET data` and is skipped; it does not count toward `limit` and does not make
-    `next` present. This is a consequence of 0031 decisions 2 and 3, reported
-    in the PR as an open question. The order for the listed names is the byte
+    `next` present. This is a consequence of 0031 decisions 2 and 3. The roadmap
+    follow-up R06b extends the path grammar to UTF-8; when it lands, the listing
+    follows the extended grammar and the page-size bound of rule 35 must be
+    recomputed. The order for the listed names is the byte
     order of rule 30.
 35. **Bounds.** With names limited to 64 ASCII bytes, a page of 100 names is at
     most 6,400 bytes of names, plus quotes and commas (at most 7,000 bytes),
@@ -392,7 +458,10 @@ Rules 36 to 42 are trust rules 1 to 7; cite them as "0040 rule 3x" or as
     set, update, and delete each produce one row with the new `data_version` and
     the artifact's current `revision` and `metadata_revision`; a replay, a
     no-op, a conflict, and a refused write record nothing; a rolled-back
-    transaction records nothing; a two-user test shows actor B's feed, head, and
+    transaction records nothing; the store test of rule 5 (writer actor differs
+    from the owner; row, `actor_seq`, and head land in the writer's feed, the
+    owner's feed is unchanged, and it fails without the explicit actor) and, as
+    an additional check, a two-user HTTP test showing actor B's feed, head, and
     stream unchanged by A's data writes; a stream receives the row; an old
     cursor of a previous feed gets `reset`; duplicate with `copy_data` records no
     `data_changed`; purge records `purged` only; a schema 10 fixture upgrades with
@@ -419,7 +488,11 @@ Rules 36 to 42 are trust rules 1 to 7; cite them as "0040 rule 3x" or as
     the algorithm of rule 21 against a scripted server (no lost update across
     a commit between subscribe and read; a version going backwards is delivered
     as a snapshot; coalescing; `reset` and reconnect re-read; `deleted` then
-    `recovered`); every row of the table of rule 43; an event larger than the
+    `recovered`; and scripted-server cases for deleted, disconnect, recovered;
+    deleted, disconnect, purge unobserved (keeps waiting, exactly one
+    `unavailable`); purged observed (ends with reason `purged`); a first-read
+    `404` rejects; `reset` while unavailable; every transition of the table of
+    rule 27); every row of the table of rule 43; an event larger than the
     bound is `invalid_response`; a stall of 45 seconds reconnects (with a fake
     clock); with a random source returning 0 and a value just below 1 the delay is
     base/2 and just below base; a `Retry-After` larger than the jittered delay
@@ -429,11 +502,10 @@ Rules 36 to 42 are trust rules 1 to 7; cite them as "0040 rule 3x" or as
 49. **R07d: user-facing documentation.** Only if a user document for application
     data exists when R07a to R07c are merged; otherwise this slice is dropped.
     Scope: that document and the roadmap status. No behavior.
-50. **R07e: first consumer (to be confirmed by the owner).** A read-only data
-    panel in the web workspace of the open artifact, updated through
-    `followData` without polling. Whether this slice is built is the owner's
-    decision; R07a to R07d do not depend on it. It does not give frames or previews
-    access to data.
+50. **R07e: first consumer (owner-approved).** A read-only data panel in the web
+    workspace of the open artifact, updated through `followData` without
+    polling. It depends on R07a to R07c and comes after R07c. It does not give
+    frames or previews access to data.
 51. **Size.** Each code pull request targets under about 3,000 lines excluding
     generated files. The three review rounds of `.github/CONTRIBUTING.md` are
     counted on the code pull requests after this specification is merged, and a
