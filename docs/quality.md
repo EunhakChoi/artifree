@@ -322,6 +322,21 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   breaking it and watching a named test fail. These tests do not show multiple
   users (those are in the next item), that a frame can use a room, or anything
   about MCP; no browser smoke covers rooms because no web code uses them.
+- Data members and subscriptions (decision 0040): Rust unit tests for the page
+  rules (byte order, exclusive cursor, member and page bounds, shapes) and the
+  registry bounds; in-crate tests with a hold seam that revoke or rotate a token
+  between authentication and registration and between registration and the
+  re-check, and with a single blocking thread parked so that a stalled storage
+  call cannot keep an open or a running stream after a revocation or the open
+  timeout; integration tests over the real router and store for paging, typed
+  corruption, snapshot and change, coalescing by a read counter, `too_large`,
+  idle reads, trash, lifetime, limits with `Retry-After` and zero reads on a
+  refusal, and revocation; two cases in the two-user route table. The client
+  tests (`scripts/tests/data-client.test.mjs`) cover the byte-level parser, the
+  event validation table, retry and abort tables, and compare the grammar with
+  the Rust constants; `data-stream.test.mjs` runs the client against the binary.
+  They do not show cross-process wake-ups, cancelling a blocking read already
+  started, or any CLI, MCP, frame, or web use.
 - Multi-user identity (decision 0036), in process with the owner and two
   registered users: a table that sends every artifact-scoped HTTP route and
   MCP tool the other users' real names and names nobody holds and requires the

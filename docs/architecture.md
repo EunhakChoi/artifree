@@ -172,6 +172,8 @@ in the Rust core.
 | `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version) |
 | `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)           |
 | `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)     |
+| `GET /v1/artifacts/{id}/data/members`                                              | Page through the members of a collection path     |
+| `GET /v1/artifacts/{id}/data/events`                                               | Follow one data path as server-sent events        |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"? } }` with
 `invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `forbidden` (403, a runtime frame call whose capability is not granted), `not_found` (404),
@@ -195,6 +197,22 @@ no content. An open stream takes one of the actor's `--change-streams` slots
 instead of a request slot. The TypeScript client's `followChanges`
 reconnects after lost connections, `429`, and `5xx`, and stops on other
 failures.
+
+`GET /v1/artifacts/{id}/data/members` and `GET /v1/artifacts/{id}/data/events`
+([decision 0040](decisions/0040-data-queries-and-subscriptions.md)) read the
+application data of decision 0031. The query validates and echoes its
+normalized `path`, `select` (`names` or `values`), `limit` (1 to 100), and
+`after` cursor, returns members in UTF-8 byte order within 32 KiB per member
+and 256 KiB per page, and reports `data_version`, the version of the data
+space and never a source revision. The stream sends `snapshot` and then
+`change` events carrying the full new value; versions only grow within one
+connection and a reconnect starts with a new authoritative snapshot, because
+nothing is replayed. It ends with `too_large` over 128 KiB, after 10
+minutes, and when the artifact, token, or user goes away; an actor may hold
+8 and the process 128. Wake-ups are one per-process counter, so a write by
+another process is found only by the 15 s idle read. The TypeScript client
+has `listDataMembers` and `followData`. No CLI, MCP tool, frame, or web
+screen uses them.
 
 ## MCP
 
