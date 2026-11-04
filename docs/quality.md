@@ -588,6 +588,35 @@ supported runtime in `engines`; nothing else would catch code that uses APIs
 missing from Node 22. Rust needs no such rule: the Rust 1.88.0 job rejects
 crates that raise the minimum version.
 
+## Client trust rule for server responses
+
+Proposed in [decision 0040](decisions/0040-data-changes-and-member-listing.md)
+(rules 36 to 42) for the TypeScript client work of R07; **not yet implemented
+or enforced by any check**, and the existing client is not audited against it.
+The rules say what a client verifies, so that a review finding can be sorted
+into blocker or follow-up.
+
+1. The server is authoritative for data-domain rules. The client does not
+   re-check storability: surrogates, duplicate names, node count, nesting, name
+   length, canonical byte size, or number formatting.
+2. The client checks shape, not meaning: every field it reads has the type its
+   TypeScript declaration claims, integers are safe integers, and enumerations
+   are closed with an `unknown` fallback, as `FeedChange` already has.
+3. The client checks what its own state machine depends on: the echoed artifact
+   identifier equals the one asked for, data versions follow their ordering
+   rules, event types are known, `next` is present exactly when paging
+   continues, and the error code decides retry or stop.
+4. Memory and denial-of-service limits are transport limits: one generic bound
+   on the SSE line, event, and pending size (the existing feed parser has none
+   today; slice R07c adds it) and the existing response-body cap. The client
+   never computes canonical JSON size.
+5. A violation of rules 2 to 4 is `invalid_response`, decided once per message,
+   and never retried.
+6. Wire shapes come from the generated contracts (`artifree-contracts`); a rule
+   must not exist only in TypeScript.
+7. A review finding that asks for a check outside rules 1 to 6 is a follow-up,
+   not a blocker.
+
 ## Limits and the next implementation
 
 There are no arbitrary coverage-percentage gates for empty modules. The

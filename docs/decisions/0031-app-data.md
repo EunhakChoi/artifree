@@ -15,6 +15,10 @@ its own, and names the path grammar, the patch rules, the limits, and every
 error as Artifree's own decisions. Nothing below is an observation of the
 original product.
 
+> Amended by [0040](0040-data-changes-and-member-listing.md) (proposed; not
+> implemented): decision 14 only. Data changes are to be announced in the change
+> feed. Until 0040's slices are implemented, decision 14 describes the behavior.
+
 ## Context
 
 An artifact is a package of files, and each revision of it is immutable. An app

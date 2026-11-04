@@ -153,21 +153,27 @@ The maintainer's Codex review procedure is:
 1. Open a ready PR after local verification. Its automatic review is round one;
    do not duplicate it with a comment. Further rounds are requested with the
    exact comment `@codex review`.
-2. Allow 15 minutes per round, measured from PR creation or the subsequent
+2. A feature whose behavior is not already specified in an ADR or a detailed
+   roadmap row first gets a docs-only specification pull request. The three
+   review rounds are counted on the code pull requests after that
+   specification is merged, and a code pull request may not change a numbered
+   rule of the merged specification; a needed change is a separate amendment
+   pull request.
+3. Allow 15 minutes per round, measured from PR creation or the subsequent
    request comment. Errors and reviews unfinished at the deadline consume a
    failed round. A later result does not undo that failure.
-3. Permit at most three rounds on a PR, including the initial review and service
+4. Permit at most three rounds on a PR, including the initial review and service
    errors or timeouts. Track its HEAD, trigger/completion timestamps, outcome,
    and findings. Moving the work between agents does not reset the count.
-4. Evaluate findings and address the shared cause across affected paths. Settle
+5. Evaluate findings and address the shared cause across affected paths. Settle
    design choices before another review. Local or subagent review is additional
    evidence and cannot substitute for the Codex PR review.
-5. After three rounds without a pass, close the PR and explain the cause and
+6. After three rounds without a pass, close the PR and explain the cause and
    revised approach. Create a new branch from latest `main` and independently
    reimplement the change with the findings and regression requirements
    incorporated. Do not reopen the failed branch or merge, cherry-pick, or copy
    its implementation into the replacement. The replacement PR starts at one.
-6. Merge only when the current HEAD has a completed, finding-free Codex review,
+7. Merge only when the current HEAD has a completed, finding-free Codex review,
    all required CI passes, review conversations are resolved, and conflicts are
    cleared. A status label, silence, old-HEAD review, or CI alone is insufficient.
    Changes after review require checks and review of the new HEAD within the
