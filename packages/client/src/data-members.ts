@@ -1,13 +1,20 @@
-import type { DataMember, DataMembers, DataSelect } from '@artifree/contracts';
+import type {
+  DataMember,
+  DataMembers,
+  DataSelect,
+  JsonValue,
+} from '@artifree/contracts';
 import type { ClientConfiguration, ReadOptions } from './client.js';
 import {
   DATA_LIMITS,
   canonicalBytes,
   compareUtf8,
   isDataPath,
-  isStoredJson,
+  hasRepeatedMember,
+  isMemberName,
   nestingAllowedAt,
   pathDepth,
+  storedJsonNodes,
   utf8Length,
 } from './data-json.js';
 import { checkArtifactId, getResponse } from './data-http.js';
@@ -92,38 +99,47 @@ function onlyKeys(
 interface Parsed {
   readonly member: DataMember;
   readonly bytes: number;
+  /** Values the member holds, counting itself; 0 when it has no value. */
+  readonly nodes: number;
 }
 
 function parseMember(
   value: unknown,
   query: Normalized,
   memberNesting: number,
+  nodesLeft: number,
 ): Parsed | undefined {
   if (!isRecord(value) || !onlyKeys(value, MEMBER_KEYS)) return undefined;
   const { name } = value;
-  if (typeof name !== 'string') return undefined;
+  if (typeof name !== 'string' || !isMemberName(name)) return undefined;
   const nameBytes = utf8Length(name);
-  if (nameBytes === 0 || nameBytes > DATA_LIMITS.maxMemberNameBytes)
-    return undefined;
   const hasValue = Object.hasOwn(value, 'value');
   const hasTooLarge = Object.hasOwn(value, 'too_large');
   if (query.select === 'names') {
     return hasValue || hasTooLarge
       ? undefined
-      : { member: { name }, bytes: nameBytes };
+      : { member: { name }, bytes: nameBytes, nodes: 0 };
   }
   // Under values exactly one of the two is present.
   if (hasValue === hasTooLarge) return undefined;
   // A member over its bound is announced, never sent, and costs its name only.
   if (hasTooLarge)
     return value.too_large === true
-      ? { member: { name, too_large: true }, bytes: nameBytes }
+      ? { member: { name, too_large: true }, bytes: nameBytes, nodes: 0 }
       : undefined;
   const found: unknown = value.value;
-  if (!isStoredJson(found, memberNesting)) return undefined;
-  const valueBytes = canonicalBytes(found);
+  const nodes = storedJsonNodes(found, memberNesting, nodesLeft);
+  if (nodes === undefined) return undefined;
+  // Checked by storedJsonNodes above, which has no type guard form that also
+  // returns the count.
+  const stored = found as JsonValue;
+  const valueBytes = canonicalBytes(stored);
   if (valueBytes > DATA_LIMITS.memberMaxBytes) return undefined;
-  return { member: { name, value: found }, bytes: nameBytes + valueBytes };
+  return {
+    member: { name, value: stored },
+    bytes: nameBytes + valueBytes,
+    nodes,
+  };
 }
 
 /**
@@ -159,12 +175,16 @@ function parsePage(
   const members: DataMember[] = [];
   let previous = query.after;
   let pageBytes = 0;
+  // The values of the members and the containers on the way to them are all
+  // values of one space (the root is not counted).
+  let nodesLeft = DATA_LIMITS.maxSpaceValues - pathDepth(query.path);
   for (const item of raw) {
-    const parsed = parseMember(item, query, nesting);
+    const parsed = parseMember(item, query, nesting, nodesLeft);
     if (parsed === undefined) return undefined;
     const { member } = parsed;
     if (previous !== undefined && compareUtf8(member.name, previous) <= 0)
       return undefined;
+    nodesLeft -= parsed.nodes;
     pageBytes += parsed.bytes;
     if (pageBytes > DATA_LIMITS.pageMaxBytes) return undefined;
     previous = member.name;
@@ -238,6 +258,9 @@ export async function listDataMembers(
   } catch {
     throw broken('The members response is not JSON.');
   }
+  // JSON.parse keeps the last of two equal names; the domain stores neither.
+  if (hasRepeatedMember(text))
+    throw broken('The members response repeats a member name.');
   const page = parsePage(answer, artifactId, query);
   if (page === undefined)
     throw broken('The members response does not match the contract.');

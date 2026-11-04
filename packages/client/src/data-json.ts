@@ -14,6 +14,8 @@ export const DATA_LIMITS = {
   maxNesting: 32,
   /** Bytes in a member name. */
   maxMemberNameBytes: 256,
+  /** Values in a data space below its root: arrays, objects, and scalars. */
+  maxSpaceValues: 10_000,
   /** Most members one page may be asked for. */
   maxMembersLimit: 100,
   /** Members per page when no limit is given. */
@@ -56,57 +58,152 @@ export function nestingAllowedAt(depth: number): number {
   return DATA_LIMITS.maxNesting - depth;
 }
 
+/**
+ * The most values (counting the value itself and everything in it) that a
+ * value at a path with `depth` segments may hold. The space counts every
+ * value below its root, the containers along the path included, so a value
+ * at a deeper path has room for fewer; at the root the root object is not
+ * counted.
+ */
+export function nodesAllowedAt(depth: number): number {
+  return DATA_LIMITS.maxSpaceValues + 1 - depth;
+}
+
+const SURROGATE = /[\ud800-\udfff]/;
+
+/**
+ * Whether `text` is valid Unicode: a surrogate code unit may appear only as
+ * half of a pair (the domain refuses `"\ud800"` as it refuses any other text
+ * that is not Unicode). Nothing else about text is restricted.
+ */
+export function isWellFormedText(text: string): boolean {
+  if (!SURROGATE.test(text)) return true;
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Whether `name` is a member name the server could have stored. */
-function isMemberName(name: string): boolean {
+export function isMemberName(name: string): boolean {
   // A UTF-16 unit takes at least one and at most three bytes in UTF-8.
   if (name.length === 0 || name.length > DATA_LIMITS.maxMemberNameBytes)
     return false;
+  if (!isWellFormedText(name)) return false;
   if (name.length * 3 <= DATA_LIMITS.maxMemberNameBytes) return true;
   return utf8Length(name) <= DATA_LIMITS.maxMemberNameBytes;
 }
 
 /**
- * Whether `value` is JSON the server could have stored: plain objects and
- * arrays, strings, booleans, `null`, and finite numbers of magnitude at most
- * 2^53 - 1, at every depth, with containers nested at most `maxNesting`
- * deep (a scalar is 0, a container is 1 more than its deepest child), and
- * with every member name, at every depth, of 1 to 256 UTF-8 bytes (the bound
- * the domain enforces). A `__proto__` key is an ordinary own member here:
- * nothing is assigned. Checked without recursion, so a hostile depth cannot
- * exhaust the stack.
+ * How many values `value` holds, counting itself, if it is JSON the server
+ * could have stored; `undefined` if it is not, or if it holds more than
+ * `maxNodes`. Stored means: plain objects and arrays, strings of valid
+ * Unicode, booleans, `null`, and finite numbers of magnitude at most
+ * 2^53 - 1, at every depth; containers nested at most `maxNesting` deep (a
+ * scalar is 0, a container is 1 more than its deepest child); every member
+ * name, at every depth, of valid Unicode and 1 to 256 UTF-8 bytes. A
+ * `__proto__` key is an ordinary own member here: nothing is assigned. The
+ * walk is iterative, so a hostile depth cannot exhaust the stack, and it stops
+ * as soon as a bound is passed. Repeated member names cannot be seen in a
+ * parsed value; {@link hasRepeatedMember} finds them in its text.
  */
-export function isStoredJson(
+export function storedJsonNodes(
   value: unknown,
   maxNesting: number,
-): value is JsonValue {
+  maxNodes: number,
+): number | undefined {
   const stack: Array<{ node: unknown; level: number }> = [
     { node: value, level: 0 },
   ];
+  let nodes = 0;
   for (let item = stack.pop(); item !== undefined; item = stack.pop()) {
     const { node, level } = item;
-    if (node === null || typeof node === 'string' || typeof node === 'boolean')
-      continue;
-    if (typeof node === 'number') {
-      if (!Number.isFinite(node) || Math.abs(node) > Number.MAX_SAFE_INTEGER)
-        return false;
+    nodes += 1;
+    if (nodes > maxNodes) return undefined;
+    if (node === null || typeof node === 'boolean') continue;
+    if (typeof node === 'string') {
+      if (!isWellFormedText(node)) return undefined;
       continue;
     }
-    if (typeof node !== 'object') return false;
+    if (typeof node === 'number') {
+      // One comparison refuses NaN, both infinities, and anything beyond
+      // 2^53 - 1.
+      if (!(Math.abs(node) <= Number.MAX_SAFE_INTEGER)) return undefined;
+      continue;
+    }
+    if (typeof node !== 'object') return undefined;
     const depth = level + 1;
-    if (depth > maxNesting) return false;
+    if (depth > maxNesting) return undefined;
     if (Array.isArray(node)) {
       for (const child of node as unknown[])
         stack.push({ node: child, level: depth });
       continue;
     }
     const prototype: unknown = Object.getPrototypeOf(node);
-    if (prototype !== Object.prototype && prototype !== null) return false;
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
     for (const [name, child] of Object.entries(node)) {
-      if (!isMemberName(name)) return false;
+      if (!isMemberName(name)) return undefined;
       stack.push({ node: child, level: depth });
     }
   }
-  return true;
+  return nodes;
+}
+
+/** Whether `value` is {@link storedJsonNodes}-valid within the two bounds. */
+export function isStoredJson(
+  value: unknown,
+  maxNesting: number,
+  maxNodes: number,
+): value is JsonValue {
+  return storedJsonNodes(value, maxNesting, maxNodes) !== undefined;
+}
+
+/**
+ * Whether the JSON `text` has an object with a member name twice (names
+ * compared after unescaping, so `"a"` and `"\u0061"` are the same), which the
+ * domain refuses to store and `JSON.parse` silently collapses. `text` must
+ * already have parsed as JSON. Iterative, one pass.
+ */
+export function hasRepeatedMember(text: string): boolean {
+  // One entry per open container: the names an object has so far, or
+  // `undefined` for an array; `key` is whether the next string is a name.
+  const open: Array<{ names: Set<string> | undefined; key: boolean }> = [];
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === '"') {
+      let end = index + 1;
+      while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+      const top = open.at(-1);
+      if (top?.names !== undefined && top.key) {
+        const token = text.slice(index, end + 1);
+        const name: unknown = token.includes('\\')
+          ? JSON.parse(token)
+          : token.slice(1, -1);
+        if (typeof name !== 'string' || top.names.has(name)) return true;
+        top.names.add(name);
+        top.key = false;
+      }
+      index = end + 1;
+      continue;
+    }
+    if (char === '{') open.push({ names: new Set(), key: true });
+    else if (char === '[') open.push({ names: undefined, key: false });
+    else if (char === '}' || char === ']') open.pop();
+    else if (char === ',') {
+      const top = open.at(-1);
+      if (top?.names !== undefined) top.key = true;
+    }
+    index += 1;
+  }
+  return false;
 }
 
 /** The bytes a string takes in canonical JSON text, quotes included. */
@@ -162,7 +259,7 @@ function numberBytes(value: number): number {
  * escaped only where JSON requires it (`"`, `\\`, and controls; everything
  * else, `/` and non-ASCII included, verbatim), numbers as
  * {@link numberBytes} says. Member order does not change the length, so none
- * is imposed. `value` must pass {@link isStoredJson}. Iterative, like it.
+ * is imposed. `value` must pass {@link storedJsonNodes}. Iterative, like it.
  */
 export function canonicalBytes(value: JsonValue): number {
   let total = 0;

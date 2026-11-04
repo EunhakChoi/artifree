@@ -1582,3 +1582,326 @@ for (const [kind, script, options] of CALLBACK_KINDS) {
     });
   }
 }
+
+// Everything the data domain refuses to store, refused on receipt -----------------------------
+
+const rawSnapshot = (valueText, { path = '', version = 1 } = {}) =>
+  frame(
+    'snapshot',
+    `{"artifact_id":"${A}","path":"${path}","data_version":${version},"exists":true,"value":${valueText}}`,
+  );
+const nulls = (count) => Array.from({ length: count }, () => null);
+const rawPager = (text, calls = []) =>
+  config(async (url) => {
+    calls.push(String(url));
+    return new Response(text, { status: 200 });
+  });
+const rawPage = (membersText, over = {}) =>
+  `{"artifact_id":"${A}","path":"${over.path ?? ''}","select":"values","limit":50,"data_version":3,"exists":true,"members":${membersText}}`;
+
+// Values in a space below its root: 10000, the containers on the way included.
+// The Rust side pins the same table (a_value_has_room_for_the_space_limit_...).
+const NODE_ROOMS = [
+  // [segments in the path, nulls in the array that fits]
+  [0, 9_999],
+  [1, 9_999],
+  [2, 9_998],
+  [16, 9_984],
+];
+
+for (const [depth, fits] of NODE_ROOMS) {
+  test(`follow: at a path of ${depth} segments ${fits} nulls in an array fit and one more does not`, async () => {
+    const segments = Array.from({ length: depth }, (_, i) => `s${i + 1}`);
+    const path = segments.join('/');
+    // At the root the value is the space itself, so it needs a member.
+    const valueOf = (count) =>
+      depth === 0 ? { a: nulls(count) } : nulls(count);
+    const ok = await run(
+      ending(eventResponse([snapshot(1, valueOf(fits), path)])),
+      { path },
+    );
+    assert.equal(ok.log.events.length, 1, 'the largest value that fits');
+    const over = await run(
+      [eventResponse([snapshot(1, valueOf(fits + 1), path)])],
+      {
+        path,
+      },
+    );
+    assert.equal(over.error?.code, 'invalid_response');
+    assert.equal(over.log.events.length, 0);
+    assert.equal(over.log.calls.length, 1, 'and it is not retried');
+  });
+}
+
+test('follow: a change over the value count is refused too', async () => {
+  const { error, log } = await run([
+    eventResponse([snapshot(1, {}), change(2, { a: nulls(10_000) })]),
+  ]);
+  assert.equal(error?.code, 'invalid_response');
+  assert.equal(log.events.length, 1);
+});
+
+test('members: the values of a page share the space limit with the path above them', async () => {
+  const member = (name, count) => ({ name, value: nulls(count) });
+  // The collection at the root: members may hold 10000 values together.
+  const request = { select: 'values' };
+  const root = (second) =>
+    pager(valuesPage([member('a', 4_999), member('b', second)]));
+  const ok = await listDataMembers(root(4_999), A, request);
+  assert.equal(ok.members.length, 2, '5000 + 5000 values');
+  await assert.rejects(
+    listDataMembers(root(5_000), A, request),
+    (e) => e.code === 'invalid_response',
+  );
+  // At path c the collection is itself one value of the space.
+  const below = (second) =>
+    pager(valuesPage([member('a', 4_999), member('b', second)], { path: 'c' }));
+  const withPath = { select: 'values', path: 'c' };
+  assert.equal(
+    (await listDataMembers(below(4_998), A, withPath)).members.length,
+    2,
+  );
+  await assert.rejects(
+    listDataMembers(below(4_999), A, withPath),
+    (e) => e.code === 'invalid_response',
+  );
+  // A single member may not pass the limit alone either.
+  await assert.rejects(
+    listDataMembers(pager(valuesPage([member('a', 10_000)])), A, request),
+    (e) => e.code === 'invalid_response',
+  );
+});
+
+test('the client value count is the Rust constant', () => {
+  assert.equal(
+    DATA_LIMITS.maxSpaceValues,
+    rustConstant('crates/artifree-domain/src/data.rs', 'MAX_SPACE_VALUES'),
+  );
+});
+
+/** A JSON \\u escape, built so that no tool rewrites it in this file. */
+const esc = (hex) => '\\u' + hex;
+
+const LONE_SURROGATES = [
+  ['a lone high surrogate', String.raw`"\ud800"`],
+  ['a lone low surrogate', String.raw`"\udc00"`],
+  ['a high surrogate before text', String.raw`"\ud800A"`],
+  [
+    'a high surrogate before a high one',
+    `"${esc('d800')}${esc('d800')}${esc('dc00')}"`,
+  ],
+  ['a low surrogate before a high one', `"${esc('dc00')}${esc('d800')}"`],
+  ['a pair broken by the end', String.raw`"x\ud83d"`],
+  ['a lone surrogate in a member name', String.raw`{"\ud800":1}`],
+  ['a lone surrogate in a nested name', String.raw`{"a":[{"b\udfff":1}]}`],
+  ['a lone surrogate in a nested string', String.raw`{"a":{"b":["\udc00"]}}`],
+];
+
+for (const [name, valueText] of LONE_SURROGATES) {
+  test(`follow: ${name} is refused`, async () => {
+    const text = valueText.startsWith('{') ? valueText : `{"v":${valueText}}`;
+    const { error, log } = await run([eventResponse([rawSnapshot(text)])]);
+    assert.equal(error?.code, 'invalid_response');
+    assert.equal(log.events.length, 0);
+  });
+
+  test(`members: ${name} is refused`, async () => {
+    // As a value, or as the member's own name.
+    const member = valueText.startsWith('{')
+      ? `[{"name":"a","value":${valueText}}]`
+      : `[{"name":"a","value":{"v":${valueText}}}]`;
+    await assert.rejects(
+      listDataMembers(rawPager(rawPage(member)), A, { select: 'values' }),
+      (e) => e.code === 'invalid_response',
+    );
+  });
+}
+
+test('members: a lone surrogate in a member name is refused', async () => {
+  for (const name of [String.raw`\ud800`, String.raw`a\udc00`]) {
+    await assert.rejects(
+      listDataMembers(rawPager(rawPage(`[{"name":"${name}","value":1}]`)), A, {
+        select: 'values',
+      }),
+      (e) => e.code === 'invalid_response',
+      name,
+    );
+  }
+});
+
+test('text that is valid Unicode is delivered as the domain stores it', async () => {
+  // Pairs, U+0000, other controls, and noncharacters are all storable.
+  const text = `{"${esc('d83d')}${esc('de00')}":"${esc('d83d')}${esc('de00')}${esc('0000')}${esc('0001')}${esc('fffe')}${esc('ffff')}","é":["${esc('0000')}"]}`;
+  const { error, log } = await run(ending(eventResponse([rawSnapshot(text)])));
+  assert.equal(error, undefined);
+  assert.equal(log.events.length, 1);
+  assert.equal(
+    log.events[0].data.value['\u{1F600}'],
+    '\u{1F600}\u0000\u0001￾￿',
+  );
+  const page = await listDataMembers(
+    rawPager(
+      rawPage(
+        `[{"name":"${esc('d83d')}${esc('de00')}","value":"${esc('0000')}"}]`,
+      ),
+    ),
+    A,
+    { select: 'values' },
+  );
+  assert.equal(page.members[0].name, '\u{1F600}');
+});
+
+const REPEATED = [
+  ['at the top of the value', '{"a":1,"a":2}'],
+  ['nested', '{"x":[{"a":1,"b":2,"a":3}]}'],
+  ['spelled with an escape', `{"a":1,"${esc('0061')}":2}`],
+  ['both escaped', `{"${esc('0061')}":1,"${esc('0061')}":2}`],
+  ['with an escaped quote', String.raw`{"a\"b":1,"a\"b":2}`],
+  ['after other members', '{"a":1,"b":{"c":1},"d":[1,2],"a":null}'],
+  ['empty values between', '{"a":{},"b":[],"a":{}}'],
+];
+
+for (const [name, valueText] of REPEATED) {
+  test(`follow: a name repeated ${name} is refused`, async () => {
+    const { error, log } = await run([eventResponse([rawSnapshot(valueText)])]);
+    assert.equal(error?.code, 'invalid_response');
+    assert.equal(log.events.length, 0);
+  });
+
+  test(`members: a name repeated ${name} is refused`, async () => {
+    await assert.rejects(
+      listDataMembers(
+        rawPager(rawPage(`[{"name":"m","value":${valueText}}]`)),
+        A,
+        { select: 'values' },
+      ),
+      (e) => e.code === 'invalid_response',
+    );
+  });
+}
+
+test('a name repeated in the envelope itself is refused, and equal names in different objects are not', async () => {
+  const dup = frame(
+    'snapshot',
+    `{"artifact_id":"${A}","path":"","data_version":1,"data_version":2,"exists":true,"value":{}}`,
+  );
+  const refused = await run([eventResponse([dup])]);
+  assert.equal(refused.error?.code, 'invalid_response');
+  // The same name in sibling objects, in an array's objects, as a name and a
+  // string value, and across the envelope and the value, is fine.
+  const fine = await run(
+    ending(
+      eventResponse([
+        rawSnapshot(
+          '{"a":{"a":"a"},"b":[{"a":1},{"a":2}],"path":{"path":"a"}}',
+        ),
+      ]),
+    ),
+  );
+  assert.equal(fine.error, undefined);
+  assert.equal(fine.log.events.length, 1);
+  const duplicated = rawPage('[{"name":"a"},{"name":"b"}]').replace(
+    '"limit":50,',
+    '"limit":50,"limit":50,',
+  );
+  await assert.rejects(
+    listDataMembers(rawPager(duplicated), A, { select: 'values' }),
+    (e) => e.code === 'invalid_response',
+  );
+});
+
+// A chunk is not copied before it is checked ------------------------------------------------------
+
+/** A chunk that records how many bytes were ever sliced out of it. */
+class CountingChunk extends Uint8Array {
+  static spans = [];
+  subarray(start, end) {
+    CountingChunk.spans.push((end ?? this.length) - (start ?? 0));
+    return super.subarray(start, end);
+  }
+}
+
+function countingChunk(size, fill = 0x61) {
+  const chunk = new CountingChunk(size);
+  chunk.fill(fill);
+  CountingChunk.spans = [];
+  return chunk;
+}
+
+const widest = () => Math.max(0, ...CountingChunk.spans);
+
+test('parser: one enormous chunk with no line ending is refused without being copied', async () => {
+  // Each limit alone must stop it: the other is set out of reach.
+  const lineOnly = { lineBytes: 8192, dataBytes: 8192, pendingBytes: 2 ** 40 };
+  const pendingOnly = {
+    lineBytes: 2 ** 40,
+    dataBytes: 2 ** 40,
+    pendingBytes: 9000,
+  };
+  for (const [name, prefix, limits, copied] of [
+    ['the line limit', '', lineOnly, 8192],
+    ['the line limit after short lines', 'data: x\n', lineOnly, 8192],
+    [
+      'the pending limit',
+      'data: ' + 'y'.repeat(7000) + '\n',
+      pendingOnly,
+      9000,
+    ],
+    ['both limits', '', LIMITS, 8192],
+  ]) {
+    const huge = countingChunk(64 * 1024 * 1024);
+    await assert.rejects(
+      collect([prefix, huge], limits),
+      (e) => e instanceof ArtifreeApiError && e.code === 'invalid_response',
+      name,
+    );
+    assert.ok(
+      widest() <= copied + 1,
+      `${name}: ${widest()} bytes were sliced out of a 64 MiB chunk`,
+    );
+  }
+});
+
+test('parser: an enormous line that does end in the same chunk is refused uncopied too', async () => {
+  const huge = countingChunk(32 * 1024 * 1024);
+  huge[huge.length - 1] = 0x0a;
+  await invalid([huge]);
+  assert.ok(widest() <= LIMITS.lineBytes, `${widest()} bytes sliced`);
+});
+
+test('parser: a line of exactly the limit still passes, however it is cut', async () => {
+  const line = 'data: ' + 'z'.repeat(LIMITS.lineBytes - 6);
+  for (const parts of splits(line + '\n\n').filter((_, i) => i % 997 === 0))
+    assert.deepEqual(await collect(parts), [
+      { type: 'message', data: 'z'.repeat(LIMITS.lineBytes - 6) },
+    ]);
+  await invalid([line + 'z' + '\n\n']);
+});
+
+test('follow: numbers up to 2^53 - 1 in magnitude are delivered, the next is not', async () => {
+  const { log } = await run(
+    ending(
+      eventResponse([
+        snapshot(1, {
+          a: 9_007_199_254_740_991,
+          b: [-9_007_199_254_740_991, 0.5],
+        }),
+      ]),
+    ),
+  );
+  assert.equal(log.events.length, 1);
+  const over = await run([
+    eventResponse([rawSnapshot('{"a":9007199254740992}')]),
+  ]);
+  assert.equal(over.error?.code, 'invalid_response');
+});
+
+test('parser: a pending event counts against the next line before it is read', async () => {
+  const limits = { lineBytes: 8192, dataBytes: 8192, pendingBytes: 9000 };
+  const huge = countingChunk(16 * 1024 * 1024);
+  await assert.rejects(
+    collect(['data: ' + 'y'.repeat(7000) + '\n', 'data: ', huge], limits),
+    (e) => e.code === 'invalid_response',
+  );
+  assert.ok(widest() <= limits.lineBytes, `${widest()} bytes sliced`);
+});

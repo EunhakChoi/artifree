@@ -931,6 +931,38 @@ mod tests {
     const CANONICAL_VECTORS: &str =
         include_str!("../../../scripts/tests/fixtures/data-canonical.tsv");
 
+    /// The room a value has at a path of `depth` segments: the client
+    /// (`nodesAllowedAt`) holds received values to the same table.
+    #[test]
+    fn a_value_has_room_for_the_space_limit_minus_the_values_on_its_path() {
+        // (depth, nulls in the array at the path): the most that fits.
+        // At the root the value is the whole space, `{"a":[nulls]}`.
+        for (depth, nulls) in [(0_usize, 9_999_usize), (1, 9_999), (2, 9_998), (16, 9_984)] {
+            for (extra, fits) in [(0, true), (1, false)] {
+                let array = format!("[{}]", vec!["null"; nulls + extra].join(","));
+                let mut text = if depth == 0 {
+                    format!("{{\"a\":{array}}}")
+                } else {
+                    array
+                };
+                for level in (1..=depth).rev() {
+                    text = format!("{{\"s{level}\":{text}}}");
+                }
+                let space = DataValue::parse_unbounded(&text).and_then(DataSpace::new);
+                let count = nulls + extra;
+                if fits {
+                    assert!(space.is_ok(), "depth {depth}, {count} nulls should fit");
+                } else {
+                    assert_eq!(
+                        space.err(),
+                        Some(DataError::TooLarge(DataLimit::SpaceValues)),
+                        "depth {depth}, {count} nulls should be refused for the value count"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_canonical_text_of_the_shared_vectors_is_the_pinned_one() -> TestResult {
         let mut count = 0;

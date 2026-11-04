@@ -4,8 +4,10 @@ import {
   DATA_LIMITS,
   canonicalBytes,
   isDataPath,
+  hasRepeatedMember,
   isStoredJson,
   nestingAllowedAt,
+  nodesAllowedAt,
   pathDepth,
 } from './data-json.js';
 import { checkArtifactId, getResponse, retryAfterMs } from './data-http.js';
@@ -139,6 +141,9 @@ function validate(
 ): DataEvent | ArtifreeApiError {
   if (seen.ended) return broken('The stream sent an event after it ended.');
   const data = jsonOf(text);
+  // JSON.parse keeps the last of two equal names; the domain stores neither.
+  if (data !== undefined && hasRepeatedMember(text))
+    return broken(`The stream sent a ${type} event that repeats a name.`);
   if (type === 'error') {
     const failure = parseError(data);
     if (failure === undefined)
@@ -195,8 +200,9 @@ function validate(
     const found: unknown = data.value;
     // The value alone is held to the event bound, in canonical bytes; the
     // framing allowance of the line limits never widens it.
+    const depth = pathDepth(path);
     if (
-      !isStoredJson(found, nestingAllowedAt(pathDepth(path))) ||
+      !isStoredJson(found, nestingAllowedAt(depth), nodesAllowedAt(depth)) ||
       (path === '' && !isRecord(found)) ||
       canonicalBytes(found) > DATA_LIMITS.eventMaxBytes
     )

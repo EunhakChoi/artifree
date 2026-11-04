@@ -155,6 +155,12 @@ export async function* serverSentEvents(
         bomDone = true;
         bomSeen = 0;
       }
+      // Stop reading a line the moment it cannot fit, not at its end: nothing
+      // of a chunk is copied before this has seen the bytes that would be.
+      if (line.length + (index - start) > limits.lineBytes)
+        throw broken('A line of the event stream is too long.');
+      if (line.length + (index - start) + dataBytes > limits.pendingBytes)
+        throw broken('The event stream holds too much of an unfinished event.');
       if (afterCr) {
         afterCr = false;
         if (byte === LF) {
