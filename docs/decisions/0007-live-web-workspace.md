@@ -3,6 +3,10 @@
 Date: 2026-10-28. Status: accepted. Builds on
 [0005](0005-request-limits.md) and [0006](0006-change-feed.md).
 
+> Amended by [0040](0040-data-changes-and-member-listing.md) (proposed; takes
+> effect when the slice merges): decision 4, as the workspace ignores
+> `data_changed` instead of reading again as for an unknown kind (R07a).
+
 ## Context
 
 The change feed (decision 0006) tells clients what was committed, but the

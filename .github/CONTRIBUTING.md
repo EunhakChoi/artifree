@@ -12,6 +12,15 @@ Read the relevant [decisions](../docs/decisions/) and callers before extending a
 contract. Record a significant new decision before spreading its assumptions
 across modules.
 
+A feature whose behavior is not already specified in a decision record or a
+detailed roadmap row first gets a documentation-only specification pull
+request: a decision record with status proposed and the roadmap rows, with no
+code. The specification pull request has its own review rounds; the three
+rounds of the procedure below are counted separately on each code pull request
+that follows it. A code pull request may not change a numbered rule of the
+merged specification; a rule is amended by a separate documentation pull
+request.
+
 Use a fresh branch based on current `main`; an isolated worktree is useful when
 other work is present. Preserve existing local changes. A PR should deliver one
 reviewable result together with its tests, compatibility considerations, and

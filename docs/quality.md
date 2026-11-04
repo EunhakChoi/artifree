@@ -556,6 +556,32 @@ schema rejection tests do not assume whether an enum is emitted as `enum` or
   there), secure erase and quotas (not implemented), and signal handling on
   Windows beyond the TTL path.
 
+## Client trust rules (proposed, not enforced)
+
+Proposed by [decision 0040](decisions/0040-data-changes-and-member-listing.md)
+rule 22 for the TypeScript client of slice R07c. Nothing checks them yet, and
+the client today does not follow rule 4.
+
+1. The server owns the data-domain rules. The client does not re-check
+   storability (surrogates, duplicate names, value count, nesting, name
+   length, canonical size, number spelling) and never computes canonical sizes.
+2. Shape, not meaning: fields have the TypeScript type claimed, integers are
+   safe, and enums are closed with an `unknown` fallback where the contract may
+   grow.
+3. The client checks what its own state machine depends on: an echoed artifact
+   identifier equals the one asked, the version ordering of decision 0040, known
+   event types, a present `next_page_token` is a non-empty string, and the
+   failure's class decides between retrying and stopping.
+4. Memory bounds are transport bounds: event-stream lines and events, and the
+   success and error bodies of the requests decision 0040 names, are read up to
+   a fixed size and cancelled past it.
+5. A violation of rules 2 to 4 is `invalid_response`, decided once per message
+   and never retried.
+6. Wire shapes come from the generated contracts; no rule exists only in
+   TypeScript.
+7. A review finding that asks for a check outside rules 1 to 6 is a follow-up,
+   not a blocker.
+
 ## CI and local use
 
 `npm run check` performs formatting, code/CSS lint, generated drift, architecture,

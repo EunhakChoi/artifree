@@ -15,6 +15,10 @@ its own, and names the path grammar, the patch rules, the limits, and every
 error as Artifree's own decisions. Nothing below is an observation of the
 original product.
 
+> Amended by [0040](0040-data-changes-and-member-listing.md) (proposed; takes
+> effect when the slice merges): decision 14, as a data write that changes the
+> space records a `data_changed` change in the feed (R07a).
+
 ## Context
 
 An artifact is a package of files, and each revision of it is immutable. An app

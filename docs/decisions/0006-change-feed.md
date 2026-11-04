@@ -8,6 +8,12 @@ Date: 2026-10-28. Status: accepted. Builds on
 > `sequence` below stays the global write order in the database, and the
 > position a cursor carries and the head are the actor's own (`actor_seq`).
 
+> Amended by [0040](0040-data-changes-and-member-listing.md) (proposed; takes
+> effect when the slice merges): decision 6, as the feed also carries the
+> `data_changed` rows of the actor whose data space changed (R07a), and
+> decision 10, with jitter, a clamped `Retry-After` floor, a stall timer, and
+> a counter reset only after a connection stays open (R07c).
+
 ## Context
 
 An agent can save an artifact while the web workspace shows it, but nothing
