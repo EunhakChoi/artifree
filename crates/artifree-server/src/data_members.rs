@@ -13,6 +13,7 @@ use artifree_contracts::api::{
     DATA_MEMBERS_MAX_LIMIT, DATA_PAGE_MAX_BYTES, DataMember, DataMembers, DataMembersQuery,
     DataSelect, JsonValue,
 };
+use artifree_core::artifacts::ArtifactError;
 use artifree_domain::data::{DataPath, DataValue};
 use axum::Json;
 use axum::extract::rejection::{PathRejection, QueryRejection};
@@ -67,14 +68,29 @@ pub(crate) struct Page {
     pub(crate) next_after: Option<String>,
 }
 
+/// A stored member value whose text is not JSON the response can carry. The
+/// page fails then, as a fault of the stored data, instead of listing a
+/// member with neither a value nor the `too_large` marker.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Unsendable;
+
+/// The value of a member as the response carries it.
+fn sendable(text: String) -> Result<JsonValue, Unsendable> {
+    JsonValue::from_text(text).ok_or(Unsendable)
+}
+
 /// The page of `query` over the value found at its path.
-pub(crate) fn page(found: Option<&DataValue>, query: &MembersQuery) -> Page {
+///
+/// # Errors
+///
+/// [`Unsendable`] when a stored member value cannot be written as JSON.
+pub(crate) fn page(found: Option<&DataValue>, query: &MembersQuery) -> Result<Page, Unsendable> {
     let Some(DataValue::Object(members)) = found else {
-        return Page {
+        return Ok(Page {
             exists: false,
             members: Vec::new(),
             next_after: None,
-        };
+        });
     };
     let start = query
         .after
@@ -116,12 +132,12 @@ pub(crate) fn page(found: Option<&DataValue>, query: &MembersQuery) -> Page {
             },
             Some(text) => DataMember {
                 name: name.clone(),
-                value: JsonValue::from_text(text),
+                value: Some(sendable(text)?),
                 too_large: None,
             },
         });
     }
-    page
+    Ok(page)
 }
 
 /// `GET /v1/artifacts/{id}/data/members`.
@@ -141,7 +157,10 @@ pub(crate) async fn list(
     let (version, page) = state
         .run(move |artifacts| {
             let read = artifacts.data(&actor, &id, &query.path)?;
-            Ok((read.version, page(read.value.as_ref(), &query)))
+            let page = page(read.value.as_ref(), &query).map_err(|Unsendable| {
+                ArtifactError::DataCorrupt("a member value cannot be sent as JSON".into())
+            })?;
+            Ok((read.version, page))
         })
         .await?;
     Ok(Json(DataMembers {
@@ -160,6 +179,19 @@ pub(crate) async fn list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paged(found: Option<&DataValue>, query: &MembersQuery) -> Page {
+        page(found, query).unwrap_or_else(|_| panic!("the fixture page should be sendable"))
+    }
+
+    #[test]
+    fn text_that_is_not_json_cannot_be_a_member_value() {
+        assert_eq!(sendable("{nope".into()), Err(Unsendable));
+        assert_eq!(
+            sendable("[1,2]".into()).map(|value| value.get().to_owned()),
+            Ok("[1,2]".to_owned())
+        );
+    }
 
     fn object(text: &str) -> DataValue {
         DataValue::parse_unbounded(text).unwrap_or_else(|error| panic!("fixture {text}: {error}"))
@@ -182,9 +214,9 @@ mod tests {
     fn members_come_in_utf8_byte_order_and_after_is_exclusive() {
         // "Z" (0x5A) < "a" (0x61) < "é" (0xC3 0xA9): byte order, not locale.
         let value = object(r#"{"é":1,"a":2,"Z":3,"b":4}"#);
-        let all = page(Some(&value), &query(DataSelect::Names, 10, None));
+        let all = paged(Some(&value), &query(DataSelect::Names, 10, None));
         assert_eq!(names(&all), ["Z", "a", "b", "é"]);
-        let rest = page(Some(&value), &query(DataSelect::Names, 10, Some("a")));
+        let rest = paged(Some(&value), &query(DataSelect::Names, 10, Some("a")));
         assert_eq!(names(&rest), ["b", "é"]);
         assert_eq!(rest.next_after, None);
     }
@@ -192,12 +224,12 @@ mod tests {
     #[test]
     fn next_after_is_present_exactly_when_more_members_follow() {
         let value = object(r#"{"a":1,"b":2,"c":3}"#);
-        let two = page(Some(&value), &query(DataSelect::Names, 2, None));
+        let two = paged(Some(&value), &query(DataSelect::Names, 2, None));
         assert_eq!(
             (names(&two), two.next_after.as_deref()),
             (vec!["a", "b"], Some("b"))
         );
-        let exact = page(Some(&value), &query(DataSelect::Names, 3, None));
+        let exact = paged(Some(&value), &query(DataSelect::Names, 3, None));
         assert_eq!(
             (names(&exact), exact.next_after.as_deref()),
             (vec!["a", "b", "c"], None)
@@ -208,7 +240,7 @@ mod tests {
     fn names_carry_neither_value_nor_too_large_and_values_exactly_one() {
         let big = "x".repeat(DATA_MEMBER_MAX_BYTES);
         let value = object(&format!(r#"{{"big":"{big}","small":1}}"#));
-        let names_only = page(Some(&value), &query(DataSelect::Names, 10, None));
+        let names_only = paged(Some(&value), &query(DataSelect::Names, 10, None));
         assert!(
             names_only
                 .members
@@ -216,7 +248,7 @@ mod tests {
                 .all(|m| m.value.is_none() && m.too_large.is_none()),
             "{names_only:?}"
         );
-        let values = page(Some(&value), &query(DataSelect::Values, 10, None));
+        let values = paged(Some(&value), &query(DataSelect::Values, 10, None));
         let shapes: Vec<(bool, bool)> = values
             .members
             .iter()
@@ -232,7 +264,7 @@ mod tests {
         let at = "x".repeat(DATA_MEMBER_MAX_BYTES - 2);
         let over = "x".repeat(DATA_MEMBER_MAX_BYTES - 1);
         let value = object(&format!(r#"{{"at":"{at}","over":"{over}"}}"#));
-        let values = page(Some(&value), &query(DataSelect::Values, 10, None));
+        let values = paged(Some(&value), &query(DataSelect::Values, 10, None));
         assert_eq!(values.members[0].too_large, None);
         assert!(values.members[0].value.is_some());
         assert_eq!(values.members[1].too_large, Some(true));
@@ -244,7 +276,7 @@ mod tests {
         let text = "y".repeat(30_000);
         let members: Vec<String> = (0..9).map(|n| format!(r#""m{n}":"{text}""#)).collect();
         let value = object(&format!("{{{}}}", members.join(",")));
-        let first = page(Some(&value), &query(DataSelect::Values, 100, None));
+        let first = paged(Some(&value), &query(DataSelect::Values, 100, None));
         assert!(first.members.len() < 9 && !first.members.is_empty());
         let last = first.members.last().map(|m| m.name.clone());
         assert_eq!(first.next_after, last);
@@ -260,7 +292,7 @@ mod tests {
     fn a_missing_path_or_a_value_that_is_not_an_object_has_no_members() {
         let scalar = object("[1,2]");
         for found in [None, Some(&scalar)] {
-            let empty = page(found, &query(DataSelect::Names, 5, None));
+            let empty = paged(found, &query(DataSelect::Names, 5, None));
             assert_eq!(
                 empty,
                 Page {

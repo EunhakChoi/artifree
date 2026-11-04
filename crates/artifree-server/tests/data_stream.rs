@@ -551,6 +551,30 @@ async fn a_write_by_another_process_is_found_by_the_idle_read() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_version_that_goes_back_ends_the_stream_with_a_retryable_error() -> TestResult {
+    let harness = Harness::with(DataStreamSettings {
+        heartbeat: Duration::from_millis(50),
+        ..quick()
+    })?;
+    let id = harness.artifact("restored").await?;
+    harness.set(OWNER, &id, "", 0, &json!({ "k": 1 })).await?;
+    harness.set(OWNER, &id, "k", 1, &json!(2)).await?;
+    let mut events = harness.follow(OWNER, &id, "").await?;
+    assert_eq!(events.expect("snapshot").await?.data["data_version"], 2);
+    harness.sql(
+        "UPDATE app_data SET data_version = 1, document = '{\"k\":1}' WHERE artifact_id = ?1",
+        &id,
+    )?;
+    let event = events.expect("error").await?;
+    assert_eq!(event.data["error"]["code"], "unavailable", "{event:?}");
+    events.ended().await?;
+    // Opening again is the recovery: a fresh snapshot at the older version.
+    let mut again = harness.follow(OWNER, &id, "").await?;
+    assert_eq!(again.expect("snapshot").await?.data["data_version"], 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn trashing_the_artifact_ends_the_stream() -> TestResult {
     let harness = Harness::with(quick())?;
     let id = harness.artifact("bin").await?;
@@ -566,6 +590,10 @@ async fn trashing_the_artifact_ends_the_stream() -> TestResult {
         )
         .await?;
     assert_eq!(trashed.status, StatusCode::OK, "{}", trashed.text);
+    // Never a silent end: the stream says why, with the code the next open
+    // would answer.
+    let event = events.expect("error").await?;
+    assert_eq!(event.data["error"]["code"], "not_found", "{event:?}");
     events.ended().await?;
     let again = harness.open(OWNER, &id, "").await?;
     assert_eq!(again.status(), StatusCode::NOT_FOUND);

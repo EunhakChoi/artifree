@@ -925,6 +925,25 @@ mod tests {
         DataValue::parse(text).unwrap_or_else(|error| panic!("{text}: {error}"))
     }
 
+    /// Pairs of JSON text and its canonical text, one pair per line, shared
+    /// with the TypeScript client, which counts the bytes of the canonical
+    /// text to hold received values to the bounds stated here.
+    const CANONICAL_VECTORS: &str =
+        include_str!("../../../scripts/tests/fixtures/data-canonical.tsv");
+
+    #[test]
+    fn the_canonical_text_of_the_shared_vectors_is_the_pinned_one() -> TestResult {
+        let mut count = 0;
+        for line in CANONICAL_VECTORS.lines() {
+            let (input, expected) = line.split_once('\t').ok_or("a vector needs a tab")?;
+            let parsed = DataValue::parse_unbounded(input)?;
+            assert_eq!(parsed.to_canonical(), expected, "input {input}");
+            count += 1;
+        }
+        assert!(count >= 10, "the vectors were not read: {count}");
+        Ok(())
+    }
+
     fn path(text: &str) -> DataPath {
         text.parse()
             .unwrap_or_else(|error| panic!("{text}: {error}"))

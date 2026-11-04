@@ -19,7 +19,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    AppData, DATA_EVENT_MAX_BYTES, DataEventsQuery, DataStreamTooLarge, ErrorResponse, JsonValue,
+    AppData, DATA_EVENT_MAX_BYTES, DataEventsQuery, DataStreamTooLarge, ErrorBody, ErrorCode,
+    ErrorResponse, JsonValue,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_domain::data::DataPath;
@@ -57,7 +58,10 @@ pub struct DataStreamSettings {
     pub heartbeat: Duration,
     /// How long a stream lives before it ends cleanly.
     pub lifetime: Duration,
-    /// How long the whole open may take.
+    /// How long the whole open may take. It is also the longest a reader that
+    /// left during the open can keep its registration: the HTTP layer does not
+    /// cancel a handler whose client closed the connection while the response
+    /// is still pending, so only this deadline frees it.
     pub open_timeout: Duration,
 }
 
@@ -71,7 +75,7 @@ impl Default for DataStreamSettings {
             throttle: Duration::from_millis(250),
             heartbeat: Duration::from_secs(15),
             lifetime: Duration::from_secs(10 * 60),
-            open_timeout: Duration::from_secs(30),
+            open_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -94,13 +98,13 @@ fn refusal_response(refusal: Refusal) -> Response {
     let (status, code, seconds, message) = match refusal {
         Refusal::Actor => (
             StatusCode::TOO_MANY_REQUESTS,
-            artifree_contracts::api::ErrorCode::RateLimited,
+            ErrorCode::RateLimited,
             ACTOR_RETRY_SECONDS,
             "too many data streams are open; close one or retry after the given delay",
         ),
         Refusal::Process | Refusal::Broken => (
             StatusCode::SERVICE_UNAVAILABLE,
-            artifree_contracts::api::ErrorCode::Unavailable,
+            ErrorCode::Unavailable,
             PROCESS_RETRY_SECONDS,
             "the server cannot take another data stream now; retry after the given delay",
         ),
@@ -201,6 +205,9 @@ impl DataStreams {
         }
     }
 
+    /// The settings in force. A poisoned lock fails closed: it yields the
+    /// documented defaults, never a value an embedder set, and
+    /// [`Self::set_settings`] then changes nothing.
     pub(crate) fn settings(&self) -> DataStreamSettings {
         self.settings.lock().map(|s| *s).unwrap_or_default()
     }
@@ -387,12 +394,18 @@ struct Race {
 impl Race {
     /// Awaits `work` unless shutdown, revocation, the reader leaving, or the
     /// deadline comes first. Cancelling the call leaves nothing half set.
+    ///
+    /// Only a value sent on a signal ends the wait. A signal whose sender was
+    /// dropped says nothing, so its branch stays out of the race instead of
+    /// ending every wait at once: the sender of `closing` lives in the
+    /// application state and the sender of `revoked` in the registration this
+    /// stream holds, so neither can go while a stream runs.
     async fn run<T>(&mut self, work: impl Future<Output = T>) -> Result<T, Ended> {
         let reader = &self.reader;
         tokio::select! {
             biased;
-            _ = self.closing.wait_for(|closing| *closing) => Err(Ended::Closing),
-            _ = self.revoked.wait_for(|revoked| *revoked) => Err(Ended::Revoked),
+            Ok(_) = self.closing.wait_for(|closing| *closing) => Err(Ended::Closing),
+            Ok(_) = self.revoked.wait_for(|revoked| *revoked) => Err(Ended::Revoked),
             () = async {
                 match reader {
                     Some(sender) => sender.closed().await,
@@ -473,6 +486,7 @@ fn event_of(name: &str, data: &impl serde::Serialize) -> Option<Event> {
 }
 
 /// What the producer does after an event.
+#[derive(Debug, PartialEq, Eq)]
 enum Flow {
     Continue,
     Stop,
@@ -492,6 +506,76 @@ struct Producer {
     /// Held until the producer ends.
     _place: Place,
     _registration: Registration,
+}
+
+/// What a read means for the stream, given the newest version it sent.
+enum Step {
+    /// A newer version: send it.
+    Send(Read),
+    /// The version it already sent: nothing to say.
+    Unchanged,
+    /// The stream cannot go on; the body says why.
+    Fail(Box<ErrorBody>),
+}
+
+/// Decides what a read means (decision 0040, item 5). Every way the stream can
+/// stop on its own ends in an `error` event with the typed body the same fault
+/// would have as an HTTP response, so the follower can tell a fault that
+/// retrying cannot fix (`internal`, `not_found`) from one it can
+/// (`unavailable`) and never meets a silent end.
+fn step(found: Result<Read, ArtifactError>, last: u64) -> Step {
+    match found {
+        Ok(read) if read.version > last => Step::Send(read),
+        Ok(read) if read.version == last => Step::Unchanged,
+        // A restored database. The reader opens again for a fresh snapshot,
+        // with its backoff, instead of a stream that can never catch up.
+        Ok(_) => Step::Fail(
+            ApiError::unavailable("the data version went back; open the stream again").body,
+        ),
+        Err(error) => Step::Fail(ApiError::from(error).body),
+    }
+}
+
+/// A read, ready to send.
+enum Outgoing {
+    /// An event; the stream goes on after it unless the flow says stop.
+    Event(Event, Flow),
+    /// The stored value cannot be sent as JSON.
+    Unsendable,
+}
+
+/// Builds the event of a read: `name` with the value, or `too_large` when the
+/// value text is over the event bound.
+fn outgoing(name: &'static str, read: Read, artifact_id: String, path: String) -> Outgoing {
+    if read
+        .text
+        .as_ref()
+        .is_some_and(|text| text.len() > DATA_EVENT_MAX_BYTES)
+    {
+        let notice = DataStreamTooLarge {
+            artifact_id,
+            path,
+            data_version: read.version,
+            limit_bytes: DATA_EVENT_MAX_BYTES as u64,
+        };
+        return event_of("too_large", &notice).map_or(Outgoing::Unsendable, |event| {
+            Outgoing::Event(event, Flow::Stop)
+        });
+    }
+    let value = read.text.map(JsonValue::from_text);
+    if matches!(value, Some(None)) {
+        return Outgoing::Unsendable;
+    }
+    let data = AppData {
+        artifact_id,
+        path,
+        data_version: read.version,
+        exists: value.is_some(),
+        value: value.flatten(),
+    };
+    event_of(name, &data).map_or(Outgoing::Unsendable, |event| {
+        Outgoing::Event(event, Flow::Continue)
+    })
 }
 
 impl Producer {
@@ -518,79 +602,44 @@ impl Producer {
                 .race
                 .run(read(&self.state, &self.actor, &self.artifact, &self.path))
                 .await?;
-            match found {
-                Ok(read) if read.version > self.last => {
+            match step(found, self.last) {
+                Step::Send(read) => {
                     if matches!(self.publish("change", read).await?, Flow::Stop) {
                         return Ok(());
                     }
                 }
-                // Unchanged: nothing to send.
-                Ok(read) if read.version == self.last => {}
-                Err(ArtifactError::DataCorrupt(reason)) => {
-                    self.send_error(&reason).await?;
+                Step::Unchanged => {}
+                Step::Fail(body) => {
+                    self.send_failure(body).await?;
                     return Ok(());
                 }
-                // A version that went back (a restored database), an artifact
-                // that is gone (trash, purge), or failing storage: the reader
-                // opens again and learns which.
-                Ok(_) | Err(_) => return Ok(()),
             }
         }
     }
 
     async fn publish(&mut self, name: &'static str, read: Read) -> Result<Flow, Ended> {
         self.last = read.version;
-        let path = self.path.to_string();
-        let artifact_id = self.artifact.to_string();
-        let event = if read
-            .text
-            .as_ref()
-            .is_some_and(|text| text.len() > DATA_EVENT_MAX_BYTES)
-        {
-            event_of(
-                "too_large",
-                &DataStreamTooLarge {
-                    artifact_id,
-                    path,
-                    data_version: read.version,
-                    limit_bytes: DATA_EVENT_MAX_BYTES as u64,
-                },
-            )
-            .map(|event| (event, Flow::Stop))
-        } else {
-            let value = read.text.map(JsonValue::from_text);
-            if matches!(value, Some(None)) {
-                return Ok(Flow::Stop);
+        match outgoing(name, read, self.artifact.to_string(), self.path.to_string()) {
+            Outgoing::Event(event, flow) => {
+                self.send(event).await?;
+                Ok(flow)
             }
-            let data = AppData {
-                artifact_id,
-                path,
-                data_version: read.version,
-                exists: value.is_some(),
-                value: value.flatten(),
-            };
-            event_of(name, &data).map(|event| (event, Flow::Continue))
-        };
-        let Some((event, flow)) = event else {
-            return Ok(Flow::Stop);
-        };
-        self.send(event).await?;
-        Ok(flow)
+            Outgoing::Unsendable => {
+                let body = ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::Internal,
+                    "stored data is invalid: the value cannot be sent as JSON",
+                )
+                .body;
+                self.send_failure(body).await?;
+                Ok(Flow::Stop)
+            }
+        }
     }
 
-    async fn send_error(&mut self, reason: &str) -> Result<(), Ended> {
-        let body = ErrorResponse {
-            error: artifree_contracts::api::ErrorBody {
-                code: artifree_contracts::api::ErrorCode::Internal,
-                message: format!("stored data is invalid: {reason}"),
-                current_revision: None,
-                current_metadata_revision: None,
-                current_data_version: None,
-                conflicting_files: None,
-                conflicting_files_total: None,
-            },
-        };
-        if let Some(event) = event_of("error", &body) {
+    /// Sends the terminal `error` event.
+    async fn send_failure(&mut self, body: Box<ErrorBody>) -> Result<(), Ended> {
+        if let Some(event) = event_of("error", &ErrorResponse { error: *body }) {
             self.send(event).await?;
         }
         Ok(())
@@ -734,6 +783,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::AtomicU32;
 
+    use artifree_core::artifacts::Missing;
     use artifree_domain::identity::TokenId;
     use artifree_ports::token_store::{NewTokenRecord, TokenStore as _};
     use artifree_providers::storage::SqliteStore;
@@ -748,6 +798,7 @@ mod tests {
     use crate::http::{self, Settings};
 
     type TestResult = Result<(), Box<dyn Error>>;
+    type Sent = mpsc::Receiver<Result<Event, Infallible>>;
 
     const OWNER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const SECRET: &str = "art_first";
@@ -1019,6 +1070,224 @@ mod tests {
             drop(response);
             Ok(())
         })
+    }
+
+    #[tokio::test]
+    async fn a_dropped_signal_sender_is_not_a_signal() {
+        let (closing_sender, closing) = watch::channel(false);
+        let (revoked_sender, revoked) = watch::channel(false);
+        drop((closing_sender, revoked_sender));
+        let mut race = Race {
+            closing,
+            revoked,
+            deadline: Instant::now() + Duration::from_secs(60),
+            reader: None,
+        };
+        let finished = race
+            .run(async {
+                tokio::task::yield_now().await;
+                7
+            })
+            .await;
+        assert_eq!(finished, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn a_sent_signal_still_ends_the_wait() {
+        let (closing_sender, closing) = watch::channel(false);
+        let (revoked_sender, revoked) = watch::channel(false);
+        let mut race = Race {
+            closing,
+            revoked,
+            deadline: Instant::now() + Duration::from_secs(60),
+            reader: None,
+        };
+        revoked_sender.send_replace(true);
+        assert_eq!(
+            race.run(std::future::pending::<()>()).await,
+            Err(Ended::Revoked)
+        );
+        closing_sender.send_replace(true);
+        assert_eq!(
+            race.run(std::future::pending::<()>()).await,
+            Err(Ended::Closing),
+            "closing is polled first"
+        );
+    }
+
+    fn found(version: u64) -> Read {
+        Read {
+            version,
+            text: Some("1".into()),
+        }
+    }
+
+    fn failure(step: Step) -> Result<(ErrorCode, String), &'static str> {
+        match step {
+            Step::Fail(body) => Ok((body.code, body.message)),
+            Step::Send(_) | Step::Unchanged => Err("the read should have failed the stream"),
+        }
+    }
+
+    #[test]
+    fn a_read_newer_than_the_last_is_sent_and_an_equal_one_is_not() {
+        assert!(matches!(step(Ok(found(4)), 3), Step::Send(read) if read.version == 4));
+        assert!(matches!(step(Ok(found(3)), 3), Step::Unchanged));
+    }
+
+    #[test]
+    fn every_other_outcome_of_a_read_is_a_typed_failure() -> TestResult {
+        let (code, _) = failure(step(Ok(found(2)), 3))?;
+        assert_eq!(code, ErrorCode::Unavailable, "a version that went back");
+        let (code, message) = failure(step(Err(ArtifactError::DataCorrupt("bad".into())), 3))?;
+        assert_eq!(code, ErrorCode::Internal);
+        assert!(message.contains("stored data is invalid: bad"), "{message}");
+        let (code, _) = failure(step(Err(ArtifactError::NotFound(Missing::Artifact)), 3))?;
+        assert_eq!(code, ErrorCode::NotFound, "an artifact that is gone");
+        let (code, _) = failure(step(Err(ArtifactError::Unavailable("disk".into())), 3))?;
+        assert_eq!(code, ErrorCode::Unavailable, "failing storage");
+        Ok(())
+    }
+
+    fn outgoing_of(text: &str) -> Outgoing {
+        let read = Read {
+            version: 1,
+            text: Some(text.to_owned()),
+        };
+        outgoing("change", read, "art_x".into(), "p".into())
+    }
+
+    #[test]
+    fn a_stored_value_that_is_not_json_is_unsendable_not_silently_dropped() {
+        assert!(matches!(outgoing_of("{not json"), Outgoing::Unsendable));
+        let sendable = outgoing_of(r#"{"a":1}"#);
+        assert!(matches!(sendable, Outgoing::Event(_, Flow::Continue)));
+        let big = format!("\"{}\"", "x".repeat(DATA_EVENT_MAX_BYTES));
+        assert!(matches!(outgoing_of(&big), Outgoing::Event(_, Flow::Stop)));
+    }
+
+    #[test]
+    fn a_poisoned_settings_lock_gives_the_documented_defaults() {
+        let streams = Arc::new(DataStreams::new());
+        streams.set_settings(DataStreamSettings {
+            streams_per_actor: 1000,
+            ..DataStreamSettings::default()
+        });
+        let poisoner = Arc::clone(&streams);
+        let joined = std::thread::spawn(move || {
+            let _held = poisoner.settings.lock();
+            panic!("poisoning the settings lock on purpose");
+        })
+        .join();
+        assert!(joined.is_err(), "the thread should have panicked");
+        assert_eq!(streams.settings(), DataStreamSettings::default());
+        streams.set_settings(DataStreamSettings {
+            streams_per_actor: 1000,
+            ..DataStreamSettings::default()
+        });
+        assert_eq!(streams.settings(), DataStreamSettings::default());
+    }
+
+    #[test]
+    fn a_reader_that_leaves_during_a_stalled_open_is_released_by_the_open_timeout() -> TestResult {
+        use tokio::io::AsyncWriteExt as _;
+
+        on_a_runtime_with_one_blocking_thread(async {
+            let rig = Rig::new().await?;
+            rig.state.set_data_stream_settings(DataStreamSettings {
+                open_timeout: Duration::from_millis(300),
+                ..DataStreamSettings::default()
+            });
+            let parked = Arc::new(std::sync::Mutex::new(None));
+            let sink = Arc::clone(&parked);
+            rig.state.data_streams().set_hook(move |point| {
+                if point == Hold::AfterRegistration
+                    && let Ok(mut slot) = sink.lock()
+                {
+                    *slot = Some(park_blocking_pool());
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let server = tokio::spawn(axum::serve(listener, rig.api.clone()).into_future());
+            let mut client = tokio::net::TcpStream::connect(address).await?;
+            let request = format!(
+                "GET /v1/artifacts/{}/data/events HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {SECRET}\r\n\r\n",
+                rig.artifact
+            );
+            client.write_all(request.as_bytes()).await?;
+            // Registered, and stuck behind the parked pool.
+            until(|| rig.state.data_streams().held() == (1, 0))
+                .await
+                .map_err(|_| "the open never registered")?;
+            client.shutdown().await?;
+            drop(client);
+            // Whether or not the HTTP layer notices the reader leaving, the
+            // registration is gone once the open's own deadline has passed.
+            until(|| rig.state.data_streams().held() == (0, 0))
+                .await
+                .map_err(|_| "the registration outlived the open timeout")?;
+            server.abort();
+            Ok(())
+        })
+    }
+
+    /// A producer wired to `rig` that has sent nothing yet, and the end that
+    /// receives what it sends.
+    fn producer_of(rig: &Rig) -> Result<(Producer, Sent), Box<dyn Error>> {
+        let streams = rig.state.data_streams();
+        let actor = ActorId::owner();
+        let (registration, revoked) = streams.register(&actor, None).map_err(|_| "register")?;
+        let place = streams.take_place(&actor).map_err(|_| "place")?;
+        let (sender, receiver) = mpsc::channel(8);
+        let producer = Producer {
+            state: rig.state.clone(),
+            actor,
+            artifact: operations::artifact_id(&rig.artifact).map_err(|_| "artifact id")?,
+            path: DataPath::root(),
+            sender,
+            race: Race {
+                closing: rig.state.feed().closing(),
+                revoked,
+                deadline: Instant::now() + Duration::from_secs(60),
+                reader: None,
+            },
+            wake: Wake {
+                wrote: streams.wrote.subscribe(),
+                commits: rig.state.feed().commits(),
+            },
+            settings: streams.settings(),
+            last: 0,
+            _place: place,
+            _registration: registration,
+        };
+        Ok((producer, receiver))
+    }
+
+    #[tokio::test]
+    async fn a_value_that_cannot_be_sent_ends_the_stream_with_an_error_event() -> TestResult {
+        let rig = Rig::new().await?;
+        let (mut producer, mut receiver) = producer_of(&rig)?;
+        let unsendable = Read {
+            version: 2,
+            text: Some("{not json".into()),
+        };
+        assert_eq!(producer.publish("change", unsendable).await, Ok(Flow::Stop));
+        let sent = receiver.try_recv()?;
+        let event = format!("{:?}", sent?);
+        assert!(
+            event.contains("error") && event.contains("internal"),
+            "{event}"
+        );
+        // And a value that can be sent is a change event that goes on.
+        let fine = Read {
+            version: 3,
+            text: Some("{\"a\":1}".into()),
+        };
+        assert_eq!(producer.publish("change", fine).await, Ok(Flow::Continue));
+        let event = format!("{:?}", receiver.try_recv()?);
+        assert!(event.contains("change"), "{event}");
+        Ok(())
     }
 
     #[test]
