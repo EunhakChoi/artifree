@@ -51,6 +51,8 @@ use axum::{Json, Router};
 
 use crate::auth::{AccessToken, AuthContext};
 use crate::changes::{self, Feed};
+use crate::data_members;
+use crate::data_stream::{self, DataStreamSettings, DataStreams};
 use crate::handoffs::Handoffs;
 use crate::limits::{Limiter, Refusal, RequestLimits, Slots};
 use crate::mcp;
@@ -175,6 +177,7 @@ struct Shared {
     /// Downloads being built, per actor (decision 0032).
     download_builds: Slots,
     feed: Feed,
+    data_streams: DataStreams,
     draining: AtomicUsize,
     settings: Settings,
     content_policy: HeaderValue,
@@ -242,6 +245,7 @@ impl AppState {
                 rooms: RoomHub::new(Arc::clone(&settings.room_clock)),
                 download_builds: Slots::new(crate::runtime_source::MAX_DOWNLOAD_BUILDS),
                 feed: Feed::new(settings.change_streams),
+                data_streams: DataStreams::new(),
                 draining: AtomicUsize::new(0),
                 settings,
                 content_policy,
@@ -284,6 +288,23 @@ impl AppState {
 
     pub(crate) fn feed(&self) -> &Feed {
         &self.shared.feed
+    }
+
+    pub(crate) fn data_streams(&self) -> &DataStreams {
+        &self.shared.data_streams
+    }
+
+    /// Replaces the limits and timings of data streams (decision 0040). It
+    /// affects streams opened afterwards.
+    pub fn set_data_stream_settings(&self, settings: DataStreamSettings) {
+        self.shared.data_streams.set_settings(settings);
+    }
+
+    /// How many times data streams have read storage since the process
+    /// started: the seam that shows how reads are coalesced.
+    #[must_use]
+    pub fn data_stream_reads(&self) -> u64 {
+        self.shared.data_streams.reads()
     }
 
     pub(crate) fn download_builds(&self) -> &Slots {
@@ -339,11 +360,13 @@ impl AppState {
             return Ok(AuthContext {
                 actor: ActorId::owner(),
                 token_id: None,
+                token_hash: None,
                 generation: StateGeneration::FIRST,
                 is_admin: true,
             });
         }
         let hash = hash_token_secret(token);
+        let secret_hash = hash.clone();
         let token_store = Arc::clone(&self.shared.token_store);
         let record = tokio::task::spawn_blocking(move || token_store.find_by_hash(&hash))
             .await
@@ -361,6 +384,7 @@ impl AppState {
                 Ok(AuthContext {
                     actor: record.actor,
                     token_id: Some(record.id),
+                    token_hash: Some(secret_hash),
                     generation: record.actor_generation,
                     is_admin: false,
                 })
@@ -378,6 +402,7 @@ impl AppState {
     /// cannot join again.
     pub(crate) fn revoke_actor(&self, actor: &ActorId) {
         self.shared.feed.revoke_actor(actor);
+        self.shared.data_streams.revoke_actor(actor);
         self.shared.previews.revoke_actor(actor);
         self.shared.runtime_sessions.revoke_actor(actor);
         self.shared.rooms.leave_actor(actor);
@@ -485,6 +510,8 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
                 // Inside the API-wide limit, so this one applies.
                 .layer(DefaultBodyLimit::max(MAX_DATA_BODY_BYTES)),
         )
+        .route("/v1/artifacts/{id}/data/members", get(data_members::list))
+        .route("/v1/artifacts/{id}/data/events", get(data_stream::events))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(show_job))
         .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))

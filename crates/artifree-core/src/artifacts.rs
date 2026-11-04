@@ -128,6 +128,9 @@ pub enum ArtifactError {
     /// A data path, value, or change breaks the rules of a data space
     /// (decision 0031).
     Data(DataError),
+    /// The stored data space does not parse (decision 0040). A retry does not
+    /// help; the data itself is at fault.
+    DataCorrupt(String),
     /// Storage failed. The request may be retried with the same key.
     Unavailable(String),
 }
@@ -182,6 +185,7 @@ impl fmt::Display for ArtifactError {
                 current.0
             ),
             Self::Data(error) => write!(formatter, "{error}"),
+            Self::DataCorrupt(reason) => write!(formatter, "stored data is invalid: {reason}"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }

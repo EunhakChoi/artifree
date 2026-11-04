@@ -133,6 +133,16 @@ pub trait TokenStore: Send + Sync {
     /// When the token does not exist or storage is unavailable.
     fn revoke(&self, id: &TokenId, revoked_at: &str) -> Result<(), TokenStoreError>;
 
+    /// Whether the token `id` still authenticates with the secret whose
+    /// hash is `secret_hash`: it exists, is not revoked, still has that
+    /// secret (a rotation changes it), and its user is enabled. Revoked,
+    /// rotated, disabled, and unknown all read as `false`.
+    ///
+    /// # Errors
+    ///
+    /// When storage is unavailable.
+    fn token_is_active(&self, id: &TokenId, secret_hash: &str) -> Result<bool, TokenStoreError>;
+
     /// Updates `last_used_at` timestamp.
     ///
     /// # Errors

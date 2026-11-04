@@ -482,6 +482,207 @@
       ],
       "type": "object"
     },
+    "DataEventsQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/events` (decision 0040).",
+      "properties": {
+        "path": {
+          "description": "The one path to watch, as for `GET /v1/artifacts/{id}/data`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DataMember": {
+      "additionalProperties": false,
+      "description": "One member of a collection in a members page. Under `select=values`\nexactly one of `value` and `too_large` is present; under `names` neither.",
+      "properties": {
+        "name": {
+          "description": "The member name.",
+          "type": "string"
+        },
+        "too_large": {
+          "description": "Always `true` when present: the value is over 32 KiB and is not sent.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The member's value, when it is selected and at most 32 KiB."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "DataMembers": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/data/members`. It echoes the\nnormalized query. `data_version` is the version of the data space and\nnothing else: no source or metadata revision appears here.",
+      "properties": {
+        "after": {
+          "description": "The `after` cursor of the request, when given.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space this page was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exists": {
+          "description": "Whether an object is at the path. A missing path, a scalar, or an\narray has no members and reads as `false`.",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "The limit applied.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "members": {
+          "description": "The members in UTF-8 byte order of their names, at most `limit` and\nat most 256 KiB of names and values.",
+          "items": {
+            "$ref": "#/$defs/DataMember"
+          },
+          "type": "array"
+        },
+        "next_after": {
+          "description": "The name to pass as `after` for the next page; present exactly when\nmore members follow.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path that was read, as parsed.",
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/DataSelect",
+          "description": "What was selected."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "select",
+        "limit",
+        "data_version",
+        "exists",
+        "members"
+      ],
+      "type": "object"
+    },
+    "DataMembersQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/members` (decision 0040). Every\nparameter is optional; an unknown or repeated one is `400`.",
+      "properties": {
+        "after": {
+          "description": "Return only members whose name is greater (UTF-8 byte order) than\nthis one, of 1 to 256 bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Most members to return, 1 to 100; 50 when absent.",
+          "format": "uint64",
+          "maximum": 100,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path of the collection, as for `GET /v1/artifacts/{id}/data`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "select": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSelect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to return for each member; `names` when absent."
+        }
+      },
+      "type": "object"
+    },
+    "DataSelect": {
+      "description": "What a members query returns for each member.",
+      "oneOf": [
+        {
+          "const": "names",
+          "description": "Member names only.",
+          "type": "string"
+        },
+        {
+          "const": "values",
+          "description": "Names and values; a member over 32 KiB has no value and `too_large`.",
+          "type": "string"
+        }
+      ]
+    },
+    "DataStreamTooLarge": {
+      "additionalProperties": false,
+      "description": "Data of the `too_large` event of `GET /v1/artifacts/{id}/data/events`: the\nvalue at the watched path is over the event bound, so the stream ends and\nmust not be reopened for this reason.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space at which the value was too large.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limit_bytes": {
+          "description": "The bound the value exceeded, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The watched path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "data_version",
+        "limit_bytes"
+      ],
+      "type": "object"
+    },
     "DataWriteResponse": {
       "additionalProperties": false,
       "description": "Response of the three writes of application data.",
@@ -3185,6 +3386,12 @@
     },
     {
       "$ref": "#/$defs/DataWriteResponse"
+    },
+    {
+      "$ref": "#/$defs/DataMembers"
+    },
+    {
+      "$ref": "#/$defs/DataStreamTooLarge"
     }
   ],
   "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",

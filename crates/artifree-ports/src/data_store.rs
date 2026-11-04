@@ -70,6 +70,9 @@ pub enum DataStoreError {
     /// The change is refused by the rules of the space (decision 0031);
     /// nothing was written and no key was recorded.
     Rejected(DataError),
+    /// The stored space does not parse: a fault of the stored data, not a
+    /// wait, so a retry does not help.
+    Corrupt(String),
     /// Storage could not complete the operation.
     Unavailable(String),
 }
@@ -85,6 +88,7 @@ impl fmt::Display for DataStoreError {
                 write!(formatter, "the data is at version {}", current.0)
             }
             Self::Rejected(error) => write!(formatter, "{error}"),
+            Self::Corrupt(reason) => write!(formatter, "stored data is invalid: {reason}"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -114,7 +118,8 @@ pub trait DataStore {
     ///
     /// # Errors
     ///
-    /// [`DataStoreError::NotFound`] or [`DataStoreError::Unavailable`].
+    /// [`DataStoreError::NotFound`], [`DataStoreError::Corrupt`], or
+    /// [`DataStoreError::Unavailable`].
     fn read_data(
         &self,
         artifact: &ArtifactId,

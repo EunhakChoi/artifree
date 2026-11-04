@@ -67,7 +67,9 @@ export type ApiBody =
   | SetDataRequest
   | UpdateDataRequest
   | DeleteDataRequest
-  | DataWriteResponse;
+  | DataWriteResponse
+  | DataMembers
+  | DataStreamTooLarge;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -222,6 +224,10 @@ export type JsonValue =
   | number
   | boolean
   | null;
+/**
+ * What a members query returns for each member.
+ */
+export type DataSelect = 'names' | 'values';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -1740,6 +1746,90 @@ export interface DataWriteResponse {
    * True when an earlier request with the same key already did it.
    */
   replayed: boolean;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/data/members`. It echoes the
+ * normalized query. `data_version` is the version of the data space and
+ * nothing else: no source or metadata revision appears here.
+ */
+export interface DataMembers {
+  /**
+   * The `after` cursor of the request, when given.
+   */
+  after?: string | null;
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space this page was read at.
+   */
+  data_version: number;
+  /**
+   * Whether an object is at the path. A missing path, a scalar, or an
+   * array has no members and reads as `false`.
+   */
+  exists: boolean;
+  /**
+   * The limit applied.
+   */
+  limit: number;
+  /**
+   * The members in UTF-8 byte order of their names, at most `limit` and
+   * at most 256 KiB of names and values.
+   */
+  members: DataMember[];
+  /**
+   * The name to pass as `after` for the next page; present exactly when
+   * more members follow.
+   */
+  next_after?: string | null;
+  /**
+   * The path that was read, as parsed.
+   */
+  path: string;
+  select: DataSelect;
+}
+/**
+ * One member of a collection in a members page. Under `select=values`
+ * exactly one of `value` and `too_large` is present; under `names` neither.
+ */
+export interface DataMember {
+  /**
+   * The member name.
+   */
+  name: string;
+  /**
+   * Always `true` when present: the value is over 32 KiB and is not sent.
+   */
+  too_large?: boolean | null;
+  /**
+   * The member's value, when it is selected and at most 32 KiB.
+   */
+  value?: JsonValue | null;
+}
+/**
+ * Data of the `too_large` event of `GET /v1/artifacts/{id}/data/events`: the
+ * value at the watched path is over the event bound, so the stream ends and
+ * must not be reopened for this reason.
+ */
+export interface DataStreamTooLarge {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space at which the value was too large.
+   */
+  data_version: number;
+  /**
+   * The bound the value exceeded, in bytes.
+   */
+  limit_bytes: number;
+  /**
+   * The watched path.
+   */
+  path: string;
 }
 
 /**

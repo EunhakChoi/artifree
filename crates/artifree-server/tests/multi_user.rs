@@ -136,6 +136,20 @@ impl Harness {
         })
     }
 
+    /// The status of a GET, without reading the body (a stream has no end).
+    async fn head_status(&self, path: &str, token: &str) -> Result<StatusCode, TestError> {
+        let response = self
+            .api
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        Ok(response.status())
+    }
+
     /// Sends a request that must answer `status`, and returns its body.
     async fn expect<T: DeserializeOwned>(
         &self,
@@ -743,6 +757,9 @@ enum Holder {
     /// Closing is idempotent: the holder gets a success, and anyone else the
     /// same success, which closes nothing of the holder's.
     Closes,
+    /// A stream (server-sent events): the holder gets a success status, read
+    /// from the response head because the body does not end by itself.
+    Streams,
 }
 
 /// What a caller of the isolation table holds.
@@ -790,7 +807,7 @@ const ROOM_ROUTE: &str = "/v1/runtime-sessions/{session}/artifacts/{artifact}/ro
     reason = "A table of every route reads best as one list."
 )]
 fn http_cases() -> Vec<Case> {
-    use Holder::{Closes, Purges, Reaches, Succeeds};
+    use Holder::{Closes, Purges, Reaches, Streams, Succeeds};
     vec![
         case("show", "GET", "/v1/artifacts/{artifact}", None, Succeeds),
         case(
@@ -835,6 +852,20 @@ fn http_cases() -> Vec<Case> {
             "/v1/artifacts/{artifact}/data",
             None,
             Succeeds,
+        ),
+        case(
+            "data members",
+            "GET",
+            "/v1/artifacts/{artifact}/data/members?select=values",
+            None,
+            Succeeds,
+        ),
+        case(
+            "data events",
+            "GET",
+            "/v1/artifacts/{artifact}/data/events?path=notes",
+            None,
+            Streams,
         ),
         case(
             "agent sessions",
@@ -1274,6 +1305,18 @@ async fn state_is_untouched(harness: &Harness, alice: &Person, ids: &Ids) -> Tes
 async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids) -> TestResult {
     for (number, case) in http_cases().iter().enumerate() {
         let key = format!("alice-case-{number:03}");
+        if case.holder == Holder::Streams {
+            let status = harness
+                .head_status(&ids.fill(case.route), &alice.secret)
+                .await?;
+            assert!(
+                status.is_success(),
+                "alice: {} {}: {status}",
+                case.name,
+                case.route
+            );
+            continue;
+        }
         let reply = harness
             .send(
                 case.method,
@@ -1284,7 +1327,7 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
             )
             .await?;
         match case.holder {
-            Holder::Succeeds | Holder::Closes | Holder::Purges => assert!(
+            Holder::Succeeds | Holder::Closes | Holder::Purges | Holder::Streams => assert!(
                 reply.status.is_success(),
                 "alice: {} ({} {}): {} {}",
                 case.name,

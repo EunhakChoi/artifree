@@ -22,6 +22,9 @@ pub(crate) struct AuthContext {
     pub(crate) actor: ActorId,
     /// The token ID if an issued token was used, or None for the bootstrap owner token.
     pub(crate) token_id: Option<TokenId>,
+    /// The hash of the secret the token authenticated with, for a check that
+    /// it still does (a rotation changes it). `None` for the owner token.
+    pub(crate) token_hash: Option<String>,
     /// The state generation the actor had when the token authenticated (the
     /// owner's never changes). Whatever the request registers and leaves
     /// behind is confirmed against it (`AppState::ensure_current`).

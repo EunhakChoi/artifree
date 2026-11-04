@@ -137,6 +137,7 @@ fn data_error(error: DataStoreError) -> ArtifactError {
         DataStoreError::RequestKeyReused => ArtifactError::RequestKeyReused,
         DataStoreError::VersionConflict { current } => ArtifactError::DataConflict { current },
         DataStoreError::Rejected(error) => ArtifactError::Data(error),
+        DataStoreError::Corrupt(reason) => ArtifactError::DataCorrupt(reason),
         DataStoreError::Unavailable(reason) => ArtifactError::Unavailable(reason),
         other => ArtifactError::Unavailable(other.to_string()),
     }

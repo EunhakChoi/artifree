@@ -2329,6 +2329,7 @@ fn a_stream_for_a_user_disabled_meanwhile_is_refused_and_one_for_an_enabled_user
         let caller = || crate::auth::AuthContext {
             actor: alice.clone(),
             token_id: "tok_0123456789abcdef0123456789abcdef".parse().ok(),
+            token_hash: None,
             generation: StateGeneration::FIRST,
             is_admin: false,
         };

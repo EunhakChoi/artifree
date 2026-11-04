@@ -83,7 +83,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/data.rs",
         ComponentStatus::Implemented,
-        "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Structured edits, change subscriptions, queries, and access from the content runtime are planned.",
+        "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Member queries and a single-path subscription (SSE) are over HTTP and the TypeScript client only. Structured edits, MCP or CLI access to them, cross-process wake-ups, and access from the content runtime are planned.",
     ),
     (
         "jobs",
@@ -164,6 +164,6 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/client",
         ComponentStatus::Implemented,
-        "Fetch-based HTTP API v1 client with structured errors, change feed following, and application data reads and writes.",
+        "Fetch-based HTTP API v1 client with structured errors, change feed following, application data reads and writes, and data member queries and subscriptions.",
     ),
 ];

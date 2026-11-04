@@ -94,6 +94,16 @@ impl Feed {
         self.commits.subscribe()
     }
 
+    /// A receiver of the shutdown signal; it reads `true` once closed.
+    pub(crate) fn closing(&self) -> watch::Receiver<bool> {
+        self.closing.subscribe()
+    }
+
+    /// A receiver of the commit wake-ups from now on.
+    pub(crate) fn commits(&self) -> watch::Receiver<()> {
+        self.commits.subscribe()
+    }
+
     /// Ends every open stream and every stream opened later.
     pub(crate) fn close(&self) {
         self.closing.send_replace(true);

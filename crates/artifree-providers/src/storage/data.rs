@@ -26,7 +26,7 @@ fn read_space(
     connection: &Connection,
     artifact: &ArtifactId,
     actor: &ActorId,
-) -> Result<DataSnapshot, StoreError> {
+) -> Result<DataSnapshot, DataStoreError> {
     let stored: Option<(i64, String)> = connection
         .query_row(
             "SELECT data_version, document FROM app_data WHERE artifact_id = ?1 AND actor = ?2",
@@ -34,7 +34,7 @@ fn read_space(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(unavailable)?;
+        .map_err(|error| DataStoreError::Unavailable(error.to_string()))?;
     let Some((version, document)) = stored else {
         return Ok(DataSnapshot {
             version: AppDataVersion::EMPTY,
@@ -42,8 +42,11 @@ fn read_space(
         });
     };
     Ok(DataSnapshot {
-        version: AppDataVersion(u64::try_from(version).map_err(corrupt)?),
-        space: DataSpace::from_canonical(&document).map_err(corrupt)?,
+        version: AppDataVersion(
+            u64::try_from(version).map_err(|error| DataStoreError::Corrupt(error.to_string()))?,
+        ),
+        space: DataSpace::from_canonical(&document)
+            .map_err(|error| DataStoreError::Corrupt(error.to_string()))?,
     })
 }
 
@@ -220,7 +223,7 @@ impl DataStore for SqliteStore {
         if !artifact_in_place(&snapshot, artifact)? {
             return Err(DataStoreError::NotFound);
         }
-        Ok(read_space(&snapshot, artifact, actor)?)
+        read_space(&snapshot, artifact, actor)
     }
 
     fn write_data(&self, request: DataWrite<'_>) -> Result<DataReceipt, DataStoreError> {

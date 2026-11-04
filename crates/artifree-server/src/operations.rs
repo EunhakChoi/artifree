@@ -1608,6 +1608,10 @@ async fn write_data(
             artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)
         })
         .await?;
+    // After the commit; the notification cannot fail or wait (decision 0040).
+    if outcome.changed && outcome.delivery == Delivery::Committed {
+        state.data_streams().wrote();
+    }
     Ok(DataWriteResponse {
         artifact_id: artifact,
         path,

@@ -311,6 +311,12 @@ impl TokenStore for SqliteTokenStore {
         Ok(())
     }
 
+    fn token_is_active(&self, id: &TokenId, secret_hash: &str) -> Result<bool, TokenStoreError> {
+        let connection = self.connect()?;
+        let record = token_by_id(&connection, id)?;
+        Ok(record.is_some_and(|record| record.is_active() && record.secret_hash == secret_hash))
+    }
+
     fn touch(&self, id: &TokenId, last_used_at: &str) -> Result<(), TokenStoreError> {
         let connection = self.connect()?;
         connection
@@ -419,6 +425,49 @@ mod tests {
         assert_eq!(list2[0].id, id1);
         assert_eq!(list2[0].revoked_at.as_deref(), Some("2026-11-01T00:10:00Z"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_token_is_active_only_with_its_current_secret_and_until_revoked() -> TestResult {
+        let dir = std::env::temp_dir().join(format!("artifree-test-active-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let db_path = dir.join("test.db");
+        crate::storage::SqliteStore::open(&db_path)?;
+        let store = SqliteTokenStore::open(&db_path)?;
+        let id = TokenId::from_random([7; 16]);
+        let first = hash_token_secret("art_first");
+        store.create(&NewTokenRecord {
+            id: id.clone(),
+            actor: ActorId::owner(),
+            name: "agent".into(),
+            secret_hash: first.clone(),
+            prefix: "art_...".into(),
+            created_at: "2026-11-01T00:00:00Z".into(),
+        })?;
+        assert!(
+            store.token_is_active(&id, &first)?,
+            "a fresh token is active"
+        );
+        assert!(!store.token_is_active(&id, "other")?, "a different secret");
+        let unknown = TokenId::from_random([8; 16]);
+        assert!(
+            !store.token_is_active(&unknown, &first)?,
+            "an unknown token"
+        );
+
+        let second = hash_token_secret("art_second");
+        store.rotate(&id, &second, "art_...")?;
+        assert!(
+            !store.token_is_active(&id, &first)?,
+            "the rotated-out secret"
+        );
+        assert!(store.token_is_active(&id, &second)?, "the new secret");
+
+        store.revoke(&id, "2026-11-01T00:10:00Z")?;
+        assert!(!store.token_is_active(&id, &second)?, "a revoked token");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

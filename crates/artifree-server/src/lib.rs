@@ -3,6 +3,8 @@
 
 pub mod auth;
 pub mod changes;
+mod data_members;
+pub mod data_stream;
 mod handoffs;
 pub mod http;
 mod inventory;
