@@ -383,6 +383,16 @@ impl Stream {
         Ok(())
     }
 
+    /// The `data_changed` events seen, as their JSON.
+    fn data_changes(&self) -> Vec<Value> {
+        self.seen
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .filter(|event| event["change"] == "data_changed")
+            .collect()
+    }
+
     /// The numbers of the `id: feed.number` lines seen.
     fn numbers(&self) -> Vec<u64> {
         self.seen
@@ -1825,6 +1835,112 @@ async fn each_user_has_a_change_feed_of_its_own() -> TestResult {
     );
     alice_stream.settle().await?;
     assert!(!alice_stream.seen.contains(bobs), "{}", alice_stream.seen);
+    Ok(())
+}
+
+/// A data write is announced to the stream of the user whose space it changed
+/// and to no other; a write on another user's artifact is `404` and adds
+/// nothing to either feed (decision 0040).
+#[tokio::test]
+async fn a_data_write_reaches_only_its_writers_stream_and_a_foreign_write_adds_nothing()
+-> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let bob = harness.person("bob").await?;
+    let ids = fixture(&harness, &alice, "alice").await?;
+    let mut alice_stream = harness.open_stream(&alice.secret).await?;
+    let mut bob_stream = harness.open_stream(&bob.secret).await?;
+    let data_path = format!("/v1/artifacts/{}/data", ids.artifact);
+
+    // Alice's write reaches Alice, with her next version, and not Bob.
+    let _: Value = harness
+        .expect(
+            200,
+            "PUT",
+            &data_path,
+            &alice.secret,
+            Some("alice-data-00002"),
+            Some(json!({ "path": "notes", "base_data_version": 1, "value": { "n": 2 } })),
+        )
+        .await?;
+    alice_stream.until("data_changed").await?;
+    let mine = alice_stream.data_changes();
+    assert_eq!(mine.len(), 1, "{}", alice_stream.seen);
+    assert_eq!(mine[0]["artifact_id"], json!(ids.artifact));
+    assert_eq!(mine[0]["data_version"], 2);
+    bob_stream.settle().await?;
+    assert!(
+        bob_stream.data_changes().is_empty() && !bob_stream.seen.contains(&ids.artifact),
+        "Bob heard Alice's write: {}",
+        bob_stream.seen
+    );
+
+    // Bob's write on Alice's artifact is not found, and adds a row to neither
+    // feed: Alice's stream and Bob's stay quiet, and Alice's space is as it was.
+    let numbers = alice_stream.numbers();
+    let refused = harness
+        .send(
+            "PUT",
+            &data_path,
+            Some(&bob.secret),
+            Some("bob-data-0000001"),
+            Some(
+                json!({ "path": "notes", "base_data_version": 0, "value": { "n": 9 } }).to_string(),
+            ),
+        )
+        .await?;
+    assert_eq!(refused.status.as_u16(), 404, "{}", refused.text);
+    alice_stream.settle().await?;
+    bob_stream.settle().await?;
+    assert_eq!(alice_stream.numbers(), numbers, "{}", alice_stream.seen);
+    assert_eq!(alice_stream.data_changes().len(), 1);
+    assert!(bob_stream.data_changes().is_empty(), "{}", bob_stream.seen);
+    assert_eq!(bob_stream.numbers(), vec![0], "{}", bob_stream.seen);
+    let read: Value = harness
+        .expect(
+            200,
+            "GET",
+            &format!("{data_path}?path=notes"),
+            &alice.secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(read["value"], json!({ "n": 2 }));
+
+    // Bob's write on his own artifact reaches Bob alone.
+    let bobs: Value = harness
+        .expect(
+            201,
+            "POST",
+            "/v1/artifacts",
+            &bob.secret,
+            Some("bob-create-000001"),
+            Some(json!({ "title": "Mine", "files": [
+                { "path": "index.html", "encoding": "utf8", "content": ENTRY }] })),
+        )
+        .await?;
+    let bobs = bobs["artifact"]["id"].as_str().ok_or("id")?.to_owned();
+    let _: Value = harness
+        .expect(
+            200,
+            "PUT",
+            &format!("/v1/artifacts/{bobs}/data"),
+            &bob.secret,
+            Some("bob-data-0000002"),
+            Some(json!({ "path": "x", "base_data_version": 0, "value": 1 })),
+        )
+        .await?;
+    bob_stream.until("data_changed").await?;
+    let theirs = bob_stream.data_changes();
+    assert_eq!(theirs.len(), 1, "{}", bob_stream.seen);
+    assert_eq!(
+        (&theirs[0]["artifact_id"], &theirs[0]["data_version"]),
+        (&json!(bobs), &json!(1))
+    );
+    alice_stream.settle().await?;
+    assert_eq!(alice_stream.data_changes().len(), 1);
+    assert!(!alice_stream.seen.contains(&bobs), "{}", alice_stream.seen);
     Ok(())
 }
 

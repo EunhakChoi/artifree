@@ -108,6 +108,7 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   deleted: true,
   recovered: true,
   purged: true,
+  data_changed: true,
 };
 
 // A record for the same reason as the error codes: a part added later must

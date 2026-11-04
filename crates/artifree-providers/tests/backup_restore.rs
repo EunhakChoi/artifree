@@ -15,7 +15,7 @@ use artifree_domain::identity::{ActorId, TokenId, UnixMillis};
 use artifree_domain::job::{Finding, JobKind, JobState, Problem, VerifyReport, WorkerId};
 use artifree_domain::{AppDataVersion, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
-    ArtifactListing, ArtifactStore, CommitReceipt, Delivery, ListOrder, StoreError,
+    ArtifactListing, ArtifactStore, ChangeKind, CommitReceipt, Delivery, ListOrder, StoreError,
 };
 use artifree_ports::artifact_store::{PurgeRequest, RequestFingerprint, RequestIdentity};
 use artifree_ports::data_store::{DataStore, DataWrite};
@@ -338,7 +338,7 @@ fn a_backup_is_one_private_file_without_scratch_leftovers() -> TestResult {
 
 #[test]
 fn an_older_backup_keeps_its_version_and_a_restore_upgrades_it() -> TestResult {
-    for version in 1..=8 {
+    for version in 1..=10 {
         let layout = Layout::new();
         historical_database(&layout.database(), version)?;
         let source = files_of(&layout.data());
@@ -366,6 +366,33 @@ fn an_older_backup_keeps_its_version_and_a_restore_upgrades_it() -> TestResult {
         let body =
             store.revision_file(&old_artifact(), SourceRevision(2), &parsed("index.html"))?;
         assert_eq!(body.as_deref(), Some(OLD_BODY.as_bytes()));
+        if version >= 9 {
+            // The restored file went through the data change step: a data
+            // write is recorded in the feed (decision 0040).
+            let owner = actor("owner");
+            let change = DataChange::Set {
+                path: parsed("greeting"),
+                value: DataValue::parse("1")?,
+            };
+            store.write_data(DataWrite {
+                request: RequestIdentity {
+                    actor: &owner,
+                    key: &key("after-restore"),
+                    fingerprint: RequestFingerprint([8; 32]),
+                },
+                artifact: &old_artifact(),
+                base: AppDataVersion(0),
+                change: &change,
+                now: UnixMillis(2_000),
+            })?;
+            let page = store.changes(&owner, ChangeSequence(0), 100)?;
+            let last = page.changes.last().ok_or("no change after the write")?;
+            assert_eq!(
+                (last.kind, last.data_version),
+                (ChangeKind::DataChanged, Some(AppDataVersion(1))),
+                "v{version}"
+            );
+        }
     }
     Ok(())
 }

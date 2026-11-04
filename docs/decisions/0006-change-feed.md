@@ -8,11 +8,12 @@ Date: 2026-10-28. Status: accepted. Builds on
 > `sequence` below stays the global write order in the database, and the
 > position a cursor carries and the head are the actor's own (`actor_seq`).
 
-> Amended by [0040](0040-data-changes-and-member-listing.md) (proposed; takes
-> effect when the slice merges): decision 6, as the feed also carries the
-> `data_changed` rows of the actor whose data space changed (R07a), and
-> decision 10, with jitter, a clamped `Retry-After` floor, a stall timer, and
-> a counter reset only after a connection stays open (R07c).
+> Amended by [0040](0040-data-changes-and-member-listing.md), in effect since
+> R07a: decision 6, as the feed also carries the `data_changed` rows of the
+> actor whose data space changed, and decision 5, as a data write that recorded
+> such a row wakes this process's streams as a commit does. Proposed, taking
+> effect when R07c merges: decision 10, with jitter, a clamped `Retry-After`
+> floor, a stall timer, and a counter reset only after a connection stays open.
 
 ## Context
 
@@ -71,13 +72,17 @@ delivery guarantees; everything below about them is an Artifree decision.
    feed's head, gets `reset` with the head; the client then reads all state
    again. A malformed cursor is `400 invalid_request`. A comment line after
    15 idle seconds keeps the connection open.
-5. **Wake-up.** A stream rereads storage after this process commits and
+5. **Wake-up.** A stream rereads storage after this process commits (a data
+   write that changed the space included, decision 0040) and
    every 15 seconds, so a commit by another process on the same database,
    or a missed wake-up, arrives within that time. The in-memory signal
    carries no data, and a stream subscribes to it before its first read.
 6. **Authorization.** The stream authenticates like every route, with the
    bearer header only; a token in the query string is not accepted. It
-   carries changes of artifacts the actor owns. The head counts every
+   carries changes of artifacts the actor owns, and the `data_changed` changes
+   of the actor's own data spaces (decision 0040): a data write is recorded in
+   the feed of the actor whose space it changed, named by the write and not
+   looked up from the artifact. The head counts every
    actor's commits, which reveals how many commits others made; with one
    local owner nobody else exists, and multi-user identity (S01) must
    revisit this together with the owner filter in storage.

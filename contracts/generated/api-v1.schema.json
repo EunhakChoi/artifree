@@ -144,7 +144,7 @@
     },
     "ArtifactChange": {
       "additionalProperties": false,
-      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata. Retries that replay a commit, failed\ncommits, and updates that changed nothing have none.\nIt names what to read again and carries no content.",
+      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata, or one data write that changed the actor's\ndata space. Retries that replay a commit, failed commits, and updates that\nchanged nothing have none. It names what to read again and carries no\ncontent, path, or value.",
       "properties": {
         "artifact_id": {
           "description": "The changed artifact.",
@@ -163,14 +163,23 @@
           "description": "Opaque feed position of this change, also the event's `id`.",
           "type": "string"
         },
+        "data_version": {
+          "description": "The version the write left the data space at, a positive number.\nPresent exactly for `data_changed`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "metadata_revision": {
-          "description": "The metadata revision after the commit.",
+          "description": "The metadata revision after the commit, or the current one for a data\nchange.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "revision": {
-          "description": "The revision the commit created, or the current one for a metadata\nchange (`metadata_updated`, `deleted`, `recovered`, or `purged`).",
+          "description": "The revision the commit created, or the current one for a metadata\nchange (`metadata_updated`, `deleted`, `recovered`, or `purged`) or a\ndata change (`data_changed`). Never a data version.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -300,6 +309,11 @@
         {
           "const": "purged",
           "description": "The artifact was removed from the trash for good; reading it is\n`not_found` and it never returns.",
+          "type": "string"
+        },
+        {
+          "const": "data_changed",
+          "description": "A write changed the data space of the actor whose stream carries this\nchange. The event names the space's new `data_version`, and no path or\nvalue; read the data again. The artifact's source and metadata did not\nchange.",
           "type": "string"
         }
       ]

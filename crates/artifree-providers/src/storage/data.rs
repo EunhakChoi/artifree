@@ -7,6 +7,9 @@
 //! two connections cannot both pass the same base version. A space nobody wrote
 //! has no row and is at version 0.
 //!
+//! A write that changed the space also appends a `data_changed` row to the feed
+//! of the actor whose space it is, last in the same transaction (decision 0040).
+//!
 //! Neither table holds a content digest or a blob. A purge deletes the rows of
 //! the artifact's spaces and blanks the fingerprints of its keys, both inside
 //! the purge transaction and with `secure_delete` on.
@@ -19,7 +22,7 @@ use artifree_ports::data_store::{DataReceipt, DataSnapshot, DataStore, DataStore
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::jobs::artifact_in_place;
-use super::{SqliteStore, corrupt, key_used_elsewhere, unavailable};
+use super::{SqliteStore, corrupt, key_used_elsewhere, record_data_change, unavailable};
 
 /// The space of `actor` as stored, or the empty space at version 0.
 fn read_space(
@@ -156,6 +159,18 @@ fn write(
             ],
         )
         .map_err(unavailable)?;
+    // Last: after the data row and the key, in the same transaction, so a
+    // failure here undoes both (decision 0040). The actor is the one whose
+    // space changed, named here and not looked up from the artifact.
+    if applied.changed {
+        record_data_change(
+            transaction,
+            request.request.actor,
+            request.artifact,
+            version,
+            request.now,
+        )?;
+    }
     Ok(DataReceipt {
         version,
         changed: applied.changed,

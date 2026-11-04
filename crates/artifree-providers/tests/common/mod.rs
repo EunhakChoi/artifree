@@ -311,6 +311,11 @@ pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Er
     if version >= 9 {
         connection.execute_batch(history::STEP_9)?;
     }
+    if version >= 10 {
+        connection.execute_batch(history::STEP_10)?;
+        connection.execute_batch(HEAD_AT_5)?;
+        connection.execute_batch(history::STEP_10_HEADS)?;
+    }
     connection.pragma_update(None, "user_version", version)
 }
 

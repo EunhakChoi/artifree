@@ -50,7 +50,7 @@ use crate::schema;
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FilePackage, PackageError, PackagePath};
-use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+use artifree_domain::{AppDataVersion, ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord,
     CleanupReceipt, CleanupRequest, CommitReceipt, ConditionalCommit, ContentSetDigest, Delivery,
@@ -83,8 +83,9 @@ impl SqliteStore {
     /// metadata revisions, a version 1 to 3 database the latest commit time,
     /// a version 1 to 4 database the trash, with no artifact in it, a
     /// version 1 to 5 database the token table unless it has one, and a
-    /// version 1 to 6 database the purge tombstone column, and a version 1 to
-    /// 7 database the job tables.
+    /// version 1 to 6 database the purge tombstone column, a version 1 to
+    /// 7 database the job tables, and a version 1 to 10 database the change
+    /// kind of a data change and its data version (decision 0040).
     ///
     /// The upgrade runs in one transaction before the file is switched to WAL.
     /// An open that fails leaves the file byte for byte as it was: a newer
@@ -719,7 +720,7 @@ impl ArtifactStore for SqliteStore {
         let mut statement = snapshot
             .prepare(
                 "SELECT c.actor_seq, c.artifact_id, c.kind, c.revision, c.metadata_revision,
-                     c.committed_at
+                     c.data_version, c.committed_at
                  FROM changes c
                  WHERE c.actor = ?2 AND c.actor_seq > ?1
                  ORDER BY c.actor_seq LIMIT ?3",
@@ -739,14 +740,15 @@ impl ArtifactStore for SqliteStore {
                         row.get::<_, String>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, i64>(6)?,
                     ))
                 },
             )
             .map_err(unavailable)?;
         let mut changes = Vec::new();
         for row in rows {
-            let (sequence, artifact, kind, revision, metadata, committed_at) =
+            let (sequence, artifact, kind, revision, metadata, data_version, committed_at) =
                 row.map_err(unavailable)?;
             changes.push(ChangeRecord {
                 sequence: stored_sequence(sequence)?,
@@ -758,10 +760,14 @@ impl ArtifactStore for SqliteStore {
                     "deleted" => ChangeKind::Deleted,
                     "recovered" => ChangeKind::Recovered,
                     "purged" => ChangeKind::Purged,
+                    "data_changed" => ChangeKind::DataChanged,
                     other => return Err(corrupt(format!("change kind {other}"))),
                 },
                 revision: stored_revision(revision)?,
                 metadata_revision: stored_metadata(metadata)?,
+                data_version: data_version
+                    .map(|version| u64::try_from(version).map(AppDataVersion).map_err(corrupt))
+                    .transpose()?,
                 committed_at: UnixMillis(committed_at),
             });
         }
@@ -1147,6 +1153,62 @@ fn record_change(
     transaction: &Transaction<'_>,
     id: &ArtifactId,
     kind: ChangeKind,
+    position: Position,
+    now: UnixMillis,
+) -> Result<(), StoreError> {
+    // The change belongs to the artifact's owner (decision 0036). Only the
+    // kinds of a commit to the artifact itself take their feed from here; a
+    // data change names the actor whose space changed ([`record_data_change`]).
+    let owner: String = transaction
+        .query_row(
+            "SELECT owner FROM artifacts WHERE id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    append_change(transaction, &owner, id, kind, None, position, now)
+}
+
+/// Appends the data change of a write that left `actor`'s space of the
+/// artifact at `version` (decision 0040). The feed is the one of `actor`, whose
+/// space changed, and not that of the artifact's owner: the two are the same
+/// actor today (decision 0031), and sharing would make them differ. The
+/// revision and metadata revision are the artifact's current ones.
+fn record_data_change(
+    transaction: &Transaction<'_>,
+    actor: &ActorId,
+    id: &ArtifactId,
+    version: AppDataVersion,
+    now: UnixMillis,
+) -> Result<(), StoreError> {
+    let (revision, metadata): (i64, i64) = transaction
+        .query_row(
+            "SELECT current_revision, metadata_revision FROM artifacts WHERE id = ?1",
+            [id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(unavailable)?;
+    let position = (stored_revision(revision)?, stored_metadata(metadata)?);
+    append_change(
+        transaction,
+        actor.as_str(),
+        id,
+        ChangeKind::DataChanged,
+        Some(version),
+        position,
+        now,
+    )
+}
+
+/// Takes the next number of `actor`'s feed (decision 0036) and writes the
+/// change row under it. The upsert and the insert are in the caller's write
+/// transaction, so two commits never take the same number.
+fn append_change(
+    transaction: &Transaction<'_>,
+    actor: &str,
+    id: &ArtifactId,
+    kind: ChangeKind,
+    data_version: Option<AppDataVersion>,
     (revision, metadata): Position,
     now: UnixMillis,
 ) -> Result<(), StoreError> {
@@ -1157,37 +1219,31 @@ fn record_change(
         ChangeKind::Deleted => "deleted",
         ChangeKind::Recovered => "recovered",
         ChangeKind::Purged => "purged",
+        ChangeKind::DataChanged => "data_changed",
         _ => {
             return Err(StoreError::Unavailable(
                 "this store cannot record that change".into(),
             ));
         }
     };
-    // The change belongs to the artifact's owner, and takes the next number of
-    // that owner's own feed (decision 0036): a user's cursors and head count
-    // only that user's changes. The upsert and the insert are in the commit's
-    // write transaction, so two commits never take the same number.
-    let actor: String = transaction
-        .query_row(
-            "SELECT owner FROM artifacts WHERE id = ?1",
-            [id.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)?;
+    let data_version = data_version
+        .map(|version| i64::try_from(version.0).map_err(corrupt))
+        .transpose()?;
     let sequence: i64 = transaction
         .query_row(
             "INSERT INTO actor_feeds (actor, head) VALUES (?1, 1)
              ON CONFLICT (actor) DO UPDATE SET head = head + 1
              RETURNING head",
-            [actor.as_str()],
+            [actor],
             |row| row.get(0),
         )
         .map_err(unavailable)?;
     transaction
         .execute(
             "INSERT INTO changes
-                 (actor, actor_seq, artifact_id, kind, revision, metadata_revision, committed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (actor, actor_seq, artifact_id, kind, revision, metadata_revision, data_version,
+                  committed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 actor,
                 sequence,
@@ -1195,6 +1251,7 @@ fn record_change(
                 kind,
                 sql_revision(revision)?,
                 sql_metadata(metadata)?,
+                data_version,
                 now.0
             ],
         )

@@ -1423,6 +1423,11 @@ pub enum ChangeKind {
     /// The artifact was removed from the trash for good; reading it is
     /// `not_found` and it never returns.
     Purged,
+    /// A write changed the data space of the actor whose stream carries this
+    /// change. The event names the space's new `data_version`, and no path or
+    /// value; read the data again. The artifact's source and metadata did not
+    /// change.
+    DataChanged,
 }
 
 /// Summary information for an access token.
@@ -1535,9 +1540,10 @@ pub struct UserList {
 }
 
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
-/// revision or changed metadata. Retries that replay a commit, failed
-/// commits, and updates that changed nothing have none.
-/// It names what to read again and carries no content.
+/// revision or changed metadata, or one data write that changed the actor's
+/// data space. Retries that replay a commit, failed commits, and updates that
+/// changed nothing have none. It names what to read again and carries no
+/// content, path, or value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactChange {
@@ -1548,10 +1554,16 @@ pub struct ArtifactChange {
     /// What the commit did.
     pub change: ChangeKind,
     /// The revision the commit created, or the current one for a metadata
-    /// change (`metadata_updated`, `deleted`, `recovered`, or `purged`).
+    /// change (`metadata_updated`, `deleted`, `recovered`, or `purged`) or a
+    /// data change (`data_changed`). Never a data version.
     pub revision: u64,
-    /// The metadata revision after the commit.
+    /// The metadata revision after the commit, or the current one for a data
+    /// change.
     pub metadata_revision: u64,
+    /// The version the write left the data space at, a positive number.
+    /// Present exactly for `data_changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_version: Option<u64>,
     /// Commit time in Unix milliseconds.
     pub committed_at_ms: i64,
 }

@@ -3,6 +3,7 @@
 //! replays or conflicts, resets a foreign cursor, and is bounded per actor
 //! and ended by shutdown.
 use std::future::poll_fn;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,6 +16,7 @@ use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
 use axum::Router;
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body::Body as _;
 use serde_json::{Value, json};
@@ -169,6 +171,49 @@ impl Harness {
     ) -> Result<Value, TestError> {
         let change = json!({ "base_metadata_revision": base, "title": title });
         self.send(Request::patch(format!("/v1/artifacts/{id}")), key, change)
+            .await
+    }
+
+    /// A tool call on `/mcp` as the owner, and its JSON-RPC result. The real
+    /// server records the socket peer, which `oneshot` has not, so the call
+    /// comes from loopback.
+    async fn tool(&self, name: &str, arguments: Value) -> Result<Value, TestError> {
+        let message = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        });
+        let request = Request::post("/mcp")
+            .header(header::HOST, "127.0.0.1:7410")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-11-25")
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .body(Body::from(message.to_string()))?;
+        let response = self
+            .api
+            .clone()
+            .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                40_000,
+            )))))
+            .oneshot(request)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let reply: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        Ok(reply["result"].clone())
+    }
+
+    async fn put_data(
+        &self,
+        id: &str,
+        key: &str,
+        base: u64,
+        path: &str,
+        value: &Value,
+    ) -> Result<Value, TestError> {
+        let body = json!({ "path": path, "base_data_version": base, "value": value });
+        self.send(Request::put(format!("/v1/artifacts/{id}/data")), key, body)
             .await
     }
 
@@ -571,5 +616,164 @@ async fn closing_ends_open_streams_and_later_ones() -> TestResult {
         later.next().await?.is_none(),
         "a stream opened after the close sent an event"
     );
+    Ok(())
+}
+
+/// A data write that changed the space is announced to the writer's stream at
+/// once, over HTTP and over MCP: the stream gets it long before the 15-second
+/// reread would find it. The event names the artifact's current positions and
+/// the version the write left, and carries no path or value.
+#[tokio::test]
+async fn a_data_write_over_http_or_mcp_reaches_the_stream_at_once() -> TestResult {
+    let harness = Harness::new(4);
+    let created = harness.create("feed-create-1").await?;
+    let id = created["artifact"]["id"]
+        .as_str()
+        .ok_or("no id")?
+        .to_owned();
+    harness.save(&id, "feed-save-2", 1).await?;
+    let mut events = harness.follow(None).await?;
+    let ready = events.expect("ready").await?;
+    let head = sequence(&ready.id);
+
+    let written = harness
+        .put_data(
+            &id,
+            "feed-data-1",
+            0,
+            "todos/first",
+            &json!({ "title": "secret" }),
+        )
+        .await?;
+    assert_eq!(written["data_version"], 1, "{written}");
+    let over_http = events.expect("change").await?;
+    assert_eq!(sequence(&over_http.id), head + 1);
+    let mut shown = over_http.data.clone();
+    let committed_at = shown
+        .as_object_mut()
+        .and_then(|object| object.remove("committed_at_ms"))
+        .ok_or("no commit time")?;
+    assert!(
+        committed_at.as_i64().is_some_and(|ms| ms > 0),
+        "{committed_at}"
+    );
+    assert_eq!(
+        shown,
+        json!({
+            "cursor": over_http.id,
+            "artifact_id": id,
+            "change": "data_changed",
+            "revision": 2,
+            "metadata_revision": 1,
+            "data_version": 1,
+        }),
+        "the revisions are the artifact's, and the data version is its own"
+    );
+    assert!(
+        !over_http.data.to_string().contains("secret")
+            && !over_http.data.to_string().contains("todos"),
+        "an event carries no path and no value: {}",
+        over_http.data
+    );
+
+    let through_mcp = harness
+        .tool(
+            "set_data",
+            json!({
+                "artifact_id": id, "path": "todos/second", "base_data_version": 1,
+                "value": "2", "idempotency_key": "feed-mcp-data-1"
+            }),
+        )
+        .await?;
+    assert_eq!(through_mcp["isError"], false, "{through_mcp}");
+    let over_mcp = events.expect("change").await?;
+    assert_eq!(sequence(&over_mcp.id), head + 2);
+    assert_eq!(over_mcp.data["change"], "data_changed");
+    assert_eq!(over_mcp.data["data_version"], 2);
+    assert_eq!(over_mcp.data["revision"], 2);
+
+    // A cursor from before the writes catches up on them, in order.
+    let (feed, _) = ready.id.split_once('.').ok_or("not a cursor")?;
+    let mut behind = harness.follow(Some(&format!("{feed}.{head}"))).await?;
+    let versions = [
+        behind.expect("change").await?.data["data_version"].clone(),
+        behind.expect("change").await?.data["data_version"].clone(),
+    ];
+    assert_eq!(versions, [json!(1), json!(2)]);
+    Ok(())
+}
+
+/// Nothing is announced for a replay of a data write, a write that changed
+/// nothing, a stale base, a path through a scalar, or an unknown artifact: they
+/// record no row (decision 0040).
+#[tokio::test]
+async fn a_replayed_unchanged_or_refused_data_write_is_not_announced() -> TestResult {
+    let harness = Harness::new(4);
+    let created = harness.create("feed-create-1").await?;
+    let id = created["artifact"]["id"]
+        .as_str()
+        .ok_or("no id")?
+        .to_owned();
+    let mut events = harness.follow(None).await?;
+    events.expect("ready").await?;
+    let value = json!({ "title": "secret" });
+    harness
+        .put_data(&id, "feed-data-1", 0, "todos/first", &value)
+        .await?;
+    events.expect("change").await?;
+    harness
+        .put_data(&id, "feed-data-2", 1, "todos/second", &json!(2))
+        .await?;
+    events.expect("change").await?;
+
+    // Nothing is announced for a replay, a write that changed nothing, a stale
+    // base, a refused path, or an unknown artifact.
+    let replay = harness
+        .put_data(
+            &id,
+            "feed-data-1",
+            0,
+            "todos/first",
+            &json!({ "title": "secret" }),
+        )
+        .await?;
+    assert_eq!(replay["replayed"], true);
+    let no_op = harness
+        .send(
+            Request::delete(format!("/v1/artifacts/{id}/data")),
+            "feed-data-noop",
+            json!({ "path": "nothing/here", "base_data_version": 2 }),
+        )
+        .await?;
+    assert_eq!(no_op["changed"], false, "{no_op}");
+    let stale = harness
+        .put_data(&id, "feed-data-stale", 1, "x", &json!(1))
+        .await?;
+    assert_eq!(stale["error"]["code"], "data_conflict");
+    let through = harness
+        .put_data(
+            &id,
+            "feed-data-through",
+            2,
+            "todos/first/title/deeper",
+            &json!(1),
+        )
+        .await?;
+    assert_eq!(through["error"]["code"], "data_path_conflict");
+    let missing = harness
+        .put_data(
+            &format!("art_{}", "0".repeat(32)),
+            "feed-data-missing",
+            0,
+            "x",
+            &json!(1),
+        )
+        .await?;
+    assert_eq!(missing["error"]["code"], "not_found");
+    assert!(
+        events.quiet().await,
+        "a replay, a no-op, or a refusal was announced"
+    );
+
     Ok(())
 }

@@ -84,9 +84,7 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
         assert_jobs_work_beside_old_keys(&store, version)?;
         assert_data_works_beside_old_keys(&store, version)?;
 
-        // The feed head never moves back through an upgrade.
-        let page = store.changes(&owner, ChangeSequence(0), 100)?;
-        assert_eq!(page.head, ChangeSequence(if version >= 2 { 5 } else { 0 }));
+        assert_feed_head_and_data_change(&store, version)?;
 
         let trash = store.list_artifacts(ArtifactListing {
             owner: &owner,
@@ -330,6 +328,164 @@ fn an_upgrade_gives_every_actor_with_changes_the_old_head() -> TestResult {
     Ok(())
 }
 
+const OTHER_ID: &str = "art_11111111111111111111111111111111";
+
+/// A version 10 file with a change of every kind that existed then, in the
+/// feeds of two actors: "owner" at position 9 and "other" at position 1, with
+/// the global sequence at 12, above its newest row.
+fn version_10_with_every_kind(path: &std::path::Path) -> TestResult {
+    historical_database(path, 10)?;
+    Connection::open(path)?.execute_batch(&format!(
+        "INSERT INTO artifacts (id, owner, kind, title, current_revision, created_at, updated_at,
+             pinned, metadata_revision)
+             VALUES ('{OTHER_ID}', 'other', 'app', 'Theirs', 1, 700, 700, 0, 1);
+         INSERT INTO revisions VALUES ('{OTHER_ID}', 1, 'other', 700);
+         INSERT INTO revision_files VALUES ('{OTHER_ID}', 1, 'index.html', 12, zeroblob(32));
+         INSERT INTO metadata_revisions
+             (artifact_id, metadata_revision, title, pinned, created_by, created_at)
+             VALUES ('{OTHER_ID}', 1, 'Theirs', 0, 'other', 700);
+         INSERT INTO changes
+             (sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision, committed_at)
+             VALUES (6, 'owner', 6, '{OLD_ID}', 'metadata_updated', 2, 2, 310),
+                    (7, 'owner', 7, '{TRASHED_ID}', 'deleted', 1, 2, 400),
+                    (8, 'owner', 8, '{TRASHED_ID}', 'recovered', 1, 1, 410),
+                    (9, 'owner', 9, '{TRASHED_ID}', 'purged', 1, 2, 500),
+                    (10, 'other', 1, '{OTHER_ID}', 'created', 1, 1, 700);
+         UPDATE actor_feeds SET head = 9 WHERE actor = 'owner';
+         INSERT INTO actor_feeds (actor, head) VALUES ('other', 1);
+         UPDATE sqlite_sequence SET seq = 12 WHERE name = 'changes';",
+        OLD_ID = common::OLD_ID,
+    ))?;
+    Ok(())
+}
+
+/// Everything the upgrade must keep by value: each change row without the new
+/// column, each actor's head, the global sequence, and the feed's identity.
+fn feed_state(path: &std::path::Path) -> Result<Vec<String>, rusqlite::Error> {
+    let connection = Connection::open(path)?;
+    let mut state = Vec::new();
+    for query in [
+        "SELECT 'row ' || sequence || '|' || actor || '|' || actor_seq || '|' || artifact_id || '|'
+             || kind || '|' || revision || '|' || metadata_revision || '|' || committed_at
+         FROM changes ORDER BY sequence",
+        "SELECT 'head ' || actor || '|' || head FROM actor_feeds ORDER BY actor",
+        "SELECT 'sequence ' || seq FROM sqlite_sequence WHERE name = 'changes'",
+        "SELECT 'feed ' || hex(id) FROM feed",
+    ] {
+        let mut statement = connection.prepare(query)?;
+        for line in statement.query_map([], |row| row.get::<_, String>(0))? {
+            state.push(line?);
+        }
+    }
+    Ok(state)
+}
+
+/// Decision 0040: the step to schema 11 keeps every change row of every kind
+/// by value, with its global sequence, and every actor's head; a cursor handed
+/// out before still resumes in the same feed; and the next data change takes
+/// the next numbers.
+#[test]
+fn a_version_10_file_with_every_kind_keeps_its_feed_through_the_data_change_step() -> TestResult {
+    let dir = TempDir::new();
+    let path = database_in(dir.path());
+    version_10_with_every_kind(&path)?;
+    let before = feed_state(&path)?;
+    assert_eq!(
+        before
+            .iter()
+            .filter(|line| line.starts_with("row "))
+            .count(),
+        7
+    );
+    assert_eq!(user_version(&path)?, 10);
+
+    let store = SqliteStore::open(&path)?;
+
+    assert_eq!(user_version(&path)?, SCHEMA_VERSION);
+    assert_eq!(
+        feed_state(&path)?,
+        before,
+        "rows, heads, sequence, and feed identity"
+    );
+    let unversioned: i64 = Connection::open(&path)?.query_row(
+        "SELECT count(*) FROM changes WHERE data_version IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(unversioned, 7, "no old row gains a data version");
+
+    let owner = actor("owner");
+    let resumed = store.changes(&owner, ChangeSequence(5), 100)?;
+    let seen: Vec<_> = resumed
+        .changes
+        .iter()
+        .map(|change| (change.sequence.0, change.kind, change.data_version))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (6, ChangeKind::MetadataUpdated, None),
+            (7, ChangeKind::Deleted, None),
+            (8, ChangeKind::Recovered, None),
+            (9, ChangeKind::Purged, None)
+        ]
+    );
+    assert_eq!(
+        resumed.head,
+        ChangeSequence(9),
+        "an older cursor stays within the head"
+    );
+    let feed_id: Vec<u8> =
+        Connection::open(&path)?.query_row("SELECT id FROM feed", [], |row| row.get(0))?;
+    assert_eq!(
+        resumed.feed.as_bytes().as_slice(),
+        feed_id.as_slice(),
+        "the feed keeps its identity, so no cursor is reset"
+    );
+    let other = store.changes(&actor("other"), ChangeSequence(0), 100)?;
+    assert_eq!(other.changes.len(), 1);
+    assert_eq!(other.head, ChangeSequence(1));
+
+    // The first data change continues both numberings.
+    let change = DataChange::Set {
+        path: parsed("greeting"),
+        value: DataValue::parse("1")?,
+    };
+    store.write_data(DataWrite {
+        request: RequestIdentity {
+            actor: &owner,
+            key: &key("first-data-change"),
+            fingerprint: RequestFingerprint([6; 32]),
+        },
+        artifact: &old_artifact(),
+        base: AppDataVersion(0),
+        change: &change,
+        now: UnixMillis(2_000),
+    })?;
+    let after = store.changes(&owner, ChangeSequence(9), 100)?;
+    let numbers: Vec<_> = after
+        .changes
+        .iter()
+        .map(|change| (change.sequence.0, change.kind, change.data_version))
+        .collect();
+    assert_eq!(
+        numbers,
+        [(10, ChangeKind::DataChanged, Some(AppDataVersion(1)))]
+    );
+    let global: i64 = Connection::open(&path)?.query_row(
+        "SELECT sequence FROM changes WHERE actor = 'owner' AND actor_seq = 10",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(global, 13, "the global sequence went on after its old head");
+    assert_eq!(
+        store.changes(&actor("other"), ChangeSequence(0), 100)?.head,
+        ChangeSequence(1),
+        "another actor's head is not moved"
+    );
+    Ok(())
+}
+
 /// The tables of persistent jobs exist and work on the old artifact, and their
 /// keys share one space with the keys the file already held.
 fn assert_jobs_work_beside_old_keys(store: &SqliteStore, version: i64) -> TestResult {
@@ -416,6 +572,24 @@ fn assert_data_works_beside_old_keys(store: &SqliteStore, version: i64) -> TestR
     Ok(())
 }
 
+/// The feed head never moves back through an upgrade; the data write of
+/// [`assert_data_works_beside_old_keys`] is the one change after it, and is
+/// recorded as a data change (decision 0040).
+fn assert_feed_head_and_data_change(store: &SqliteStore, version: i64) -> TestResult {
+    let page = store.changes(&actor("owner"), ChangeSequence(0), 100)?;
+    assert_eq!(page.head, ChangeSequence(if version >= 2 { 6 } else { 1 }));
+    let written = page
+        .changes
+        .last()
+        .ok_or("the data write was not recorded")?;
+    assert_eq!(
+        (written.kind, written.data_version),
+        (ChangeKind::DataChanged, Some(AppDataVersion(1))),
+        "version {version}"
+    );
+    Ok(())
+}
+
 /// The trashed artifact of a version 5 or 6 file shares its content with
 /// "Old"; removing it for good keeps what "Old" refers to.
 fn purge_the_trashed_artifact(store: &SqliteStore, version: i64) -> TestResult {
@@ -439,7 +613,11 @@ fn purge_the_trashed_artifact(store: &SqliteStore, version: i64) -> TestResult {
         "version {version}"
     );
     let page = store.changes(&owner, ChangeSequence(0), 100)?;
-    assert_eq!(page.head, ChangeSequence(6), "the head continues from 5");
+    assert_eq!(
+        page.head,
+        ChangeSequence(7),
+        "the head continues from 5 after the data write and the purge"
+    );
     Ok(())
 }
 
@@ -597,6 +775,32 @@ fn a_failed_migration_step_is_rolled_back_without_touching_the_file() -> TestRes
             connection.pragma_update(None, "user_version", 9)
         },
         "table actor_feeds already exists",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn a_failed_data_change_step_is_rolled_back_without_touching_the_file() -> TestResult {
+    // The data change step (version 10 to 11) fails: a table already uses the
+    // name of the rebuilt feed, which is dropped and renamed last.
+    assert_refused_untouched(
+        |connection| {
+            connection.execute_batch(history::STEP_1)?;
+            connection.execute_batch(history::STEP_2)?;
+            connection.execute_batch("INSERT INTO feed VALUES (1, zeroblob(16));")?;
+            connection.execute_batch(history::STEP_3)?;
+            connection.execute_batch(history::STEP_4)?;
+            connection.execute_batch(history::STEP_5)?;
+            connection.execute_batch(history::OLD_TOKENS)?;
+            connection.execute_batch(history::STEP_7)?;
+            connection.execute_batch(history::STEP_8)?;
+            connection.execute_batch(history::STEP_9)?;
+            connection.execute_batch(history::STEP_10)?;
+            connection.execute_batch(history::STEP_10_HEADS)?;
+            connection.execute_batch("CREATE TABLE changes_v11 (x TEXT);")?;
+            connection.pragma_update(None, "user_version", 10)
+        },
+        "table changes_v11 already exists",
     )?;
     Ok(())
 }

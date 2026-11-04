@@ -365,12 +365,17 @@ impl Producer {
                 ChangeKind::Deleted => WireKind::Deleted,
                 ChangeKind::Recovered => WireKind::Recovered,
                 ChangeKind::Purged => WireKind::Purged,
+                ChangeKind::DataChanged => WireKind::DataChanged,
                 // A kind added later is a revision to clients of this
                 // contract: they read the artifact again.
                 _ => WireKind::Revised,
             },
             revision: record.revision.0,
             metadata_revision: record.metadata_revision.0,
+            // Present exactly for `data_changed`: the store records no other
+            // kind with one (a CHECK of the table), so a copy of the field
+            // cannot put a data version on another kind.
+            data_version: record.data_version.map(|version| version.0),
             committed_at_ms: record.committed_at.0,
         }
     }

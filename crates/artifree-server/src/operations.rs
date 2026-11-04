@@ -1608,6 +1608,13 @@ async fn write_data(
             artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)
         })
         .await?;
+    // A write that changed the space appended a `data_changed` row to the
+    // actor's feed (decision 0040); wake the streams as a commit does. HTTP and
+    // MCP both write through here. A replay, and a write that changed nothing,
+    // recorded no row.
+    if outcome.delivery == Delivery::Committed && outcome.changed {
+        state.feed().committed();
+    }
     Ok(DataWriteResponse {
         artifact_id: artifact,
         path,
