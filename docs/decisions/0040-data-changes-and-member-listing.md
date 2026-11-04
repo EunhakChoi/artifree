@@ -27,8 +27,9 @@ below is presented as an observation of the original product.
   unknown fields; the web workspace then reads its list again (0007 decision
   4). The event-stream parser and the JSON and error body reads have no size
   bound. `parseRetryAfter` takes 1 to 6 digits as seconds (no date, no other
-  clamp); reconnecting waits that instead of its doubling delay, without
-  jitter. An aborted request rejects as `network_error` unless the method
+  clamp, so up to 999,999 s); reconnecting waits that instead of its doubling
+  delay, without jitter, and resets the doubling as soon as a stream is
+  accepted. An aborted request rejects as `network_error` unless the method
   calls `signal.throwIfAborted()`.
 
 ## Scope
@@ -74,7 +75,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
    and reads again: wasteful, not wrong. In R07a the client's record of known
    kinds gains `data_changed` (its type requires every contract kind), and the
    web workspace ignores it, never as unknown or as a new revision; this
-   amends 0007 decision 4.
+   amends 0007 decision 4. The amended records (0006, 0007, 0031) already
+   carry notes marked "proposed; takes effect when the slice merges".
 
 ### Member listing (R07b)
 
@@ -84,38 +86,45 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
 8. **Query**, strict as for `GET data` (an unknown or repeated parameter is
    `400 invalid_request`). `path`: optional, the root when absent or empty, a
    breach of 0031 decision 2 is `422 invalid_request`. `limit`: 1 to 100,
-   default 50. `after`: a `next` value (rule 10). `at_data_version`: optional;
-   a space at another version, older or newer, answers `409 data_conflict`
-   with `current_data_version`, and `0` matches a space never written.
-   Numbers are digits without sign or leading zero, at most 2^53 - 1; any
-   other `limit` or `at_data_version` is `400`.
+   default 50. `page_token`: an opaque `next_page_token` (rule 10).
+   `at_data_version`: optional; a space at another version, older or newer,
+   answers `409 data_conflict` with `current_data_version`, and `0` matches a
+   space never written. Numbers are digits without sign or leading zero, at
+   most 2^53 - 1; any other `limit` or `at_data_version` is `400`.
 9. **Response** `DataMembers`, from one read of the space: `artifact_id`,
    `path` (canonical), `data_version` (of that read), and:
    - `exists`: false when nothing is at the path or the path passes through a
      value that is not an object, as `GET data` reads it; `names` is then
-     empty and `next` absent. The root always exists. A value at the path that
-     is not an object (`null` and arrays included) is `409 data_path_conflict`.
-   - `names`: member names after the cursor, ascending by UTF-8 bytes, at most
-     `limit`. Only names matching the segment grammar of 0031 decision 2 are
-     listed; others (valid up to 256 bytes, 0031 decision 3) are skipped, do
-     not count toward `limit`, and do not make `next` present (`GET data`
-     returns them). Values, sizes, and types are not listed.
-   - `next`: present exactly when more listable names follow at
+     empty and `next_page_token` absent. The root always exists. A value at
+     the path that is not an object (`null` and arrays included) is
+     `409 data_path_conflict`.
+   - `names`: member names after the page token's name, ascending by UTF-8
+     bytes, at most `limit`. Only names matching the segment grammar of 0031
+     decision 2 are listed; others (valid up to 256 bytes, 0031 decision 3)
+     are skipped, do not count toward `limit`, and do not make
+     `next_page_token` present (`GET data` returns them). Values, sizes, and
+     types are not listed.
+   - `next_page_token`: present exactly when more listable names follow at
      `data_version`. `data_path_conflict`'s contract description gains this
      read case.
-   - Checks: identifier (`404`), query (`400`), path (`422`), cursor (`400`),
+   - Checks: identifier (`404`), query (`400`), path (`422`), token (`400`),
      access (`404`), then `at_data_version` and the value at the path (`409`).
-10. **Cursor.** Issued by the server: base64url without padding, at most 256
-    bytes, encoding a digest of the artifact identifier and canonical path and
-    the last listed name. One that does not decode, is longer, or is bound to
-    another artifact or path is `400 invalid_request`. It names a position,
-    not a permission; every page checks access. A page lists names greater
-    than the cursor's, so a removed name does not break paging.
+10. **Page token.** Opaque to clients, issued by the server: base64url
+    without padding of a 16-byte tag followed by the last listed name in
+    clear (1 to 64 bytes, so 17 to 80 bytes, 23 to 107 characters). The tag
+    is the first 16 bytes of SHA-256 over the artifact identifier, a zero
+    byte, and the canonical path. A token that does not decode this way (a
+    padded or longer one included), whose name breaks the segment grammar,
+    or whose tag does not match the request's artifact and path is
+    `400 invalid_request`; the check reads no storage. The token names a
+    position, not a permission: every page checks access. A page lists names
+    greater than the token's name, so a removed name does not break paging.
 11. **Consistency.** A page agrees with its own `data_version`; pages agree
     with each other only when each sends the same `at_data_version`. Without
     it, a name present at every page's version is listed exactly once; names
     added or removed meanwhile may or may not be. When R06b widens the path
-    grammar, the listing follows it and the bound of rule 19 is recomputed.
+    grammar, the listing follows it, and the token layout of rule 10 and the
+    bound of rule 19 are recomputed.
 
 ### TypeScript client (R07c)
 
@@ -126,9 +135,10 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     `GET /v1/changes` without `Last-Event-ID` and, after `ready`, reads
     `GET data` at the path: the snapshot. `onData` receives `snapshot` or
     `update` with the `AppData` read, or `unavailable`. The follower keeps
-    `seen` (the version last delivered), `named` (the highest version a
-    `data_changed` of the artifact named on this connection, 0 at `ready` or
-    `reset`), and `asked` (`named` when the read in flight was sent). A read
+    `seen` (the version last delivered), `named` (the highest version any
+    `data_changed` of the artifact named since this connection's last `ready`
+    or `reset`, where it becomes 0; every such event is recorded in S, F, and
+    R), and `asked` (`named` when the read in flight was sent). A read
     answering version `v`:
     - `v < asked` is `invalid_response`: a read sent after an event cannot
       miss its change.
@@ -155,22 +165,24 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     sets `named` to the larger value: the buffer of events that arrive during
     a read, applied when it answers. A change of any kind before `ready`
     breaks 0006 decision 4 and rejects. "—" cannot occur: only C has a
-    pending stream request, and only S and R a read.
+    pending stream request, only S and R a read, and the reset timer of rule
+    17 starts with the connection's first read answered.
 
-    | Event                                   | C       | S                | F                      | R                |
-    | --------------------------------------- | ------- | ---------------- | ---------------------- | ---------------- |
-    | stream accepted                         | wait    | —                | —                      | —                |
-    | `ready` or `reset`                      | read; S | abandon; read; S | read; S                | abandon; read; S |
-    | `data_changed` of the artifact, `n`     | reject  | record           | if `n > seen`: read; R | record           |
-    | `deleted` or `purged` of the artifact   | reject  | end              | end                    | end              |
-    | any other change                        | reject  | nothing          | nothing                | nothing          |
-    | read answers `200`                      | —       | rule 13; F or R  | —                      | rule 13; F or R  |
-    | read answers `404`                      | —       | end              | —                      | end              |
-    | stream fails, ends, or stalls (rule 18) | retry   | abandon; retry   | retry                  | abandon; retry   |
-    | read fails: network, `429`, `5xx`       | —       | abandon; retry   | —                      | abandon; retry   |
-    | other `4xx`, `invalid_response`         | reject  | reject           | reject                 | reject           |
-    | `signal` aborts                         | resolve | resolve          | resolve                | resolve          |
-    | `onData` throws                         | —       | reject           | reject                 | reject           |
+    | Event                                   | C       | S                | F                              | R                |
+    | --------------------------------------- | ------- | ---------------- | ------------------------------ | ---------------- |
+    | stream accepted                         | wait    | —                | —                              | —                |
+    | `ready` or `reset`                      | read; S | abandon; read; S | read; S                        | abandon; read; S |
+    | `data_changed` of the artifact, `n`     | reject  | record           | record; if `n > seen`: read; R | record           |
+    | `deleted` or `purged` of the artifact   | reject  | end              | end                            | end              |
+    | any other change                        | reject  | nothing          | nothing                        | nothing          |
+    | read answers `200`                      | —       | rule 13; F or R  | —                              | rule 13; F or R  |
+    | read answers `404`                      | —       | end              | —                              | end              |
+    | stream fails, ends, or stalls (rule 18) | retry   | abandon; retry   | retry                          | abandon; retry   |
+    | read fails: network, `429`, `5xx`       | —       | abandon; retry   | —                              | abandon; retry   |
+    | other `4xx`, `invalid_response`         | reject  | reject           | reject                         | reject           |
+    | open `max` after its start (rule 17)    | —       | reset `n`        | reset `n`                      | reset `n`        |
+    | `signal` aborts                         | resolve | resolve          | resolve                        | resolve          |
+    | `onData` throws                         | —       | reject           | reject                         | reject           |
 
     An abort wins over everything, an error `onData` throws included.
 
@@ -191,14 +203,21 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
       follower rejects with `invalid_response`.
 17. **Retry** (amends 0006 decision 10, for `followChanges` and `followData`;
     what is retried is today's set, and rule 15 for reads). Attempt `n` counts
-    failures since the last success: an accepted stream for `followChanges`
-    (as today), a read answered `200` for `followData`.
-    `base = min(max, min × 2^n)`, defaults 0.5 s and 30 s;
-    `delay = base × (0.5 + 0.5u)`, `u` in [0, 1) from an injectable random
-    source, so the delay is in [base/2, base). A `Retry-After`, parsed as
-    today, is a floor: `max(Retry-After, delay)`. A clean end of a stream
-    carries no reason and is retried; a revoked token answers the next open
-    `401`, which rejects. Revocation across processes stays X04.
+    retries since its last reset. `base = min(max, min × 2^n)`, defaults `min`
+    0.5 s and `max` 30 s; `delay = base × (0.5 + 0.5u)`, `u` in [0, 1) from an
+    injectable random source, so the delay is in [base/2, base). A
+    `Retry-After`, parsed as today, is a floor clamped to one hour:
+    `max(min(Retry-After, 3600 s), delay)`. Today it is not clamped (up to
+    999,999 s) and replaces the delay. **`n` resets to 0 only when a
+    connection stays open for `max` after its start**: the stream's
+    acceptance for `followChanges`, the connection's first read answered
+    `200` for `followData`; the timer stops when the stream ends, fails, or
+    stalls. A connection dropped sooner never resets `n`, so one accepted and
+    dropped every second backs off to `max`. (Today `followChanges` resets on
+    acceptance alone.) A stalled stream (rule 18) was silent for 45 s, so even
+    when it reset `n` it reconnects at most once per 45 s. A clean end of
+    a stream carries no reason and is retried; a revoked token answers the
+    next open `401`, which rejects. Revocation across processes stays X04.
 18. **Stall.** Once a stream is accepted, 45 seconds without a byte of its body
     (comments count; the server sends one every 15 idle seconds) cancel it as
     a drop, in both functions. No timer runs before the headers: a browser may
@@ -212,8 +231,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     - Success bodies of reads by `followData` and `listDataMembers`: 1,064,960
       bytes (1 MiB + 16 KiB); past it, `invalid_response`. A `GET data` body is
       a space of at most 1,048,576 bytes and under 1,200 more. A page is at
-      most 8,130 bytes: 100 unescaped names of up to 64 bytes (6,699 quoted
-      with commas), a quoted path up to 1,041, a cursor of 258, and the rest.
+      most 7,991 bytes: 100 unescaped names of up to 64 bytes (6,699 quoted
+      with commas), a quoted path up to 1,041, a token of 109, and the rest.
     - Error bodies of their requests, stream opens included: 65,536 bytes.
       Past it, the response counts as one without an API body, and its status
       decides, as for a proxy's page today.
@@ -235,8 +254,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     | other `4xx`; body breaking rules 19, 22   | rejects                             | rejects                 |
 
 21. **`listDataMembers`** takes an artifact and optional `path`, `limit`,
-    `after`, `atDataVersion`, and `signal`, and reads one page. A caller pages
-    by passing `next` as `after` until `next` is absent.
+    `pageToken`, `atDataVersion`, and `signal`, and reads one page. A caller
+    pages by passing `next_page_token` as `pageToken` until it is absent.
 22. **Client trust rules** (copied to [quality](../quality.md)): (1) the
     server owns the data rules; the client does not re-check storability
     (surrogates, duplicates, value count, nesting, name length, canonical
@@ -244,13 +263,13 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     meaning: fields have their TypeScript type, integers are safe, enums are
     closed with an `unknown` fallback where the contract may grow. (3) The
     client checks what its own state depends on: the echoed `artifact_id`
-    equals the one asked; rules 13 and 16e; known event types; `next`, if
-    present, is a non-empty string; the failure's class decides retry or stop
-    (rules 14 and 17). (4) Memory bounds are transport bounds (rule 19). (5) A
-    violation of 2 to 4 is `invalid_response`, decided once per message and
-    never retried. (6) Wire shapes come from the generated contract; no rule
-    lives only in TypeScript. (7) A review finding asking for a check outside
-    1 to 6 is a follow-up, not a blocker.
+    equals the one asked; rules 13 and 16e; known event types;
+    `next_page_token`, if present, is a non-empty string; the failure's class
+    decides retry or stop (rules 14 and 17). (4) Memory bounds are transport
+    bounds (rule 19). (5) A violation of 2 to 4 is `invalid_response`, decided
+    once per message and never retried. (6) Wire shapes come from the
+    generated contract; no rule lives only in TypeScript. (7) A review finding
+    asking for a check outside 1 to 6 is a follow-up, not a blocker.
 
 ### Web data panel (R07e)
 
@@ -263,8 +282,9 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
 ## Slices and acceptance checks
 
 Each code pull request aims at under 3,000 lines without generated files and
-may be split further, and adds the amendment notes its rules make true (0006
-decisions 6 and 10, 0007 decision 4). Each check names the wrong
+may be split further. A code pull request only marks the amendment notes in
+0006, 0007, and 0031 effective and corrects sentences its change makes false;
+it changes no numbered rule of this record. Each check names the wrong
 implementation it fails.
 
 - **R07a** store, feed, contract, schema, web reducer (rules 1–6).
@@ -288,35 +308,42 @@ implementation it fails.
     treating it as `unknown` or as a revision).
 - **R07b** listing, server and contract (rules 7–11).
   - Order `-y, 0, B, _x, a` (fails case folding or locale order). Seven names
-    at limit 3 page 3, 3, 1; six give no `next` on the second page (fails
-    `next` for a full page). Names `a`, `a b`, `b`, `é`: limit 2 gives `a, b`
-    without `next`, limit 1 `a` with `next` then `b` without (fails counting
-    or paging past skipped names).
+    at limit 3 page 3, 3, 1; six give no `next_page_token` on the second page
+    (fails a token for a full page). Names `a`, `a b`, `b`, `é`: limit 2
+    gives `a, b` without a token, limit 1 `a` with one then `b` without
+    (fails counting or paging past skipped names).
   - `exists: false` for a missing path and one through a scalar or array;
     `409 data_path_conflict` for a scalar, `null`, or array at the path.
   - `at_data_version` equal, older, newer, and `0` unwritten; the earlier
-    cursor with the earlier version after a write is `409`.
+    page token with the earlier version after a write is `409`.
   - A core test whose fake store answers each read with a newer space gets a
     page whose names and version come from the same answer (fails two reads).
   - Refused queries (`limit` 0, 101, `05`, `+5`; unknown; repeated); 60 names
-    without `limit` give 50 and `next`. Undecodable, 257-byte, foreign-path,
-    and foreign-artifact cursors are `400`; the deepest path with a 64-byte
-    name gives a cursor of at most 256 bytes.
+    without `limit` give 50 and a token. Undecodable, padded, 108-character,
+    bad-name, foreign-path, and foreign-artifact tokens are `400`; the deepest
+    path with a 64-byte name gives a 107-character token that decodes to the
+    tag and the name (fails a digest of the name or an unbounded layout).
   - The route joins the 0036 route table (foreign, trashed, purged answer as
     unknown; an agent token works); an unclassified route fails that test.
 - **R07c** client (rules 12–22), with a fake server, timers, and random.
   - Every cell of rule 15, each failing the opposite behavior (a read per
     event, events dropped during the snapshot). `v < asked` rejects, while
     the same `v` from a read sent before the event is accepted and followed
-    by one more read.
+    by one more read. In F, an event naming `n <= seen` reads nothing, and a
+    later read answering below `n` rejects (fails not recording in F).
   - Delays with `u` = 0 and near 1, the 30-second cap, and `Retry-After`
     above and below the delay (fails no jitter, or `Retry-After` replacing
-    it). 45 s of silence reconnects; a comment every 15 s prevents it.
+    it); `Retry-After: 999999` waits 3,600 s (fails an unclamped floor). 45 s
+    of silence reconnects; a comment every 15 s prevents it.
+  - A stream accepted and dropped every second, whose reads succeed, backs
+    off to the 30-second cap in both functions (fails resetting `n` on
+    acceptance or on a `200`); one open 30 s resets it.
   - An endless line, a 1,064,961-byte success body, and a 65,537-byte error
     body stop at the bound with the body cancelled; the bounds themselves
     pass (fails reading whole and checking afterwards).
   - Every row of rule 20, abort racing an error body included; a wrong echoed
-    `artifact_id`, an empty `next`, and unsafe integers are refused.
+    `artifact_id`, an empty `next_page_token`, and unsafe integers are
+    refused.
 - **R07d** guides: README and `docs/mcp.md` describe following and listing
   (MCP still polls). Each code slice corrects the sentences it makes false.
 - **R07e** panel (rule 23), after R07c, may split into panel and live updates;

@@ -570,8 +570,8 @@ the client today does not follow rule 4.
    grow.
 3. The client checks what its own state machine depends on: an echoed artifact
    identifier equals the one asked, the version ordering of decision 0040, known
-   event types, a present `next` is a non-empty string, and the failure's class
-   decides between retrying and stopping.
+   event types, a present `next_page_token` is a non-empty string, and the
+   failure's class decides between retrying and stopping.
 4. Memory bounds are transport bounds: event-stream lines and events, and the
    success and error bodies of the requests decision 0040 names, are read up to
    a fixed size and cancelled past it.
