@@ -134,7 +134,9 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     client routine; the server keeps no follower state. It opens
     `GET /v1/changes` without `Last-Event-ID` and, after `ready`, reads
     `GET data` at the path: the snapshot. `onData` receives `snapshot` or
-    `update` with the `AppData` read, or `unavailable`. The follower keeps
+    `update` with the `AppData` read, or `unavailable`. Like `followChanges`'s
+    `onEvent`, it is synchronous: it is called once per delivery, in order,
+    and the follower does not await what it returns. The follower keeps
     `seen` (the version last delivered), `named` (the highest version any
     `data_changed` of the artifact named since this connection's last `ready`
     or `reset`, where it becomes 0; every such event is recorded in S, F, and
@@ -168,30 +170,36 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     pending stream request, only S and R a read, and the reset timer of rule
     17 starts with the connection's first read answered.
 
-    | Event                                   | C       | S                | F                              | R                |
-    | --------------------------------------- | ------- | ---------------- | ------------------------------ | ---------------- |
-    | stream accepted                         | wait    | —                | —                              | —                |
-    | `ready` or `reset`                      | read; S | abandon; read; S | read; S                        | abandon; read; S |
-    | `data_changed` of the artifact, `n`     | reject  | record           | record; if `n > seen`: read; R | record           |
-    | `deleted` or `purged` of the artifact   | reject  | end              | end                            | end              |
-    | any other change                        | reject  | nothing          | nothing                        | nothing          |
-    | read answers `200`                      | —       | rule 13; F or R  | —                              | rule 13; F or R  |
-    | read answers `404`                      | —       | end              | —                              | end              |
-    | stream fails, ends, or stalls (rule 18) | retry   | abandon; retry   | retry                          | abandon; retry   |
-    | read fails: network, `429`, `5xx`       | —       | abandon; retry   | —                              | abandon; retry   |
-    | other `4xx`, `invalid_response`         | reject  | reject           | reject                         | reject           |
-    | open `max` after its start (rule 17)    | —       | reset `n`        | reset `n`                      | reset `n`        |
-    | `signal` aborts                         | resolve | resolve          | resolve                        | resolve          |
-    | `onData` throws                         | —       | reject           | reject                         | reject           |
+    | Event                                                   | C       | S                | F                              | R                |
+    | ------------------------------------------------------- | ------- | ---------------- | ------------------------------ | ---------------- |
+    | stream accepted                                         | wait    | —                | —                              | —                |
+    | `ready` or `reset`                                      | read; S | abandon; read; S | read; S                        | abandon; read; S |
+    | `data_changed` of the artifact, `n`                     | reject  | record           | record; if `n > seen`: read; R | record           |
+    | `deleted` or `purged` of the artifact                   | reject  | end              | end                            | end              |
+    | any other change                                        | reject  | nothing          | nothing                        | nothing          |
+    | read answers `200`                                      | —       | rule 13; F or R  | —                              | rule 13; F or R  |
+    | read answers `404`                                      | —       | end              | —                              | end              |
+    | stream fails, ends, or stalls (rule 18)                 | retry   | abandon; retry   | retry                          | abandon; retry   |
+    | read fails: network, `429`, `5xx`, body stall (rule 18) | —       | abandon; retry   | —                              | abandon; retry   |
+    | other `4xx`, `invalid_response`                         | reject  | reject           | reject                         | reject           |
+    | open `max` after its start (rule 17)                    | —       | reset `n`        | reset `n`                      | reset `n`        |
+    | `signal` aborts                                         | resolve | resolve          | resolve                        | resolve          |
+    | `onData` throws                                         | —       | reject           | reject                         | reject           |
 
     An abort wins over everything, an error `onData` throws included.
 
 16. **Guarantees**, about which reads happen, not how soon:
-    - a. A change of the space committed while the follower runs is reflected
-      by a later delivery of its version or a newer one, unless the follower
-      ends, rejects, or is aborted first: a read sent after the commit
-      observes it, and its event causes such a read unless `seen` covers it;
-      after a drop, the snapshot is read after the next `ready`.
+    - a. A change of the space committed while the follower runs is not dropped.
+      Until `seen` covers it, the follower, unless it ends, rejects, or is
+      aborted, is in one of these situations, each of which leads to a read sent
+      after the commit once the requests before it are answered: such a read is
+      in flight; the change's event is still to arrive on the open stream, or
+      was recorded while an earlier read is in flight (rule 13 then reads
+      again); or it is in C, whose snapshot is read after the next `ready`. A
+      read sent after the commit that answers `200` observes it. Timeliness is
+      not promised: failures retry with backoff (rule 17), and a request that
+      gets no headers is not timed (rule 18); the application's signal bounds
+      it.
     - b. Within an epoch, delivered versions strictly increase.
     - c. A delivery is the state one read returned; intermediate versions may
       never be delivered. An update follows any increase of the space's
@@ -199,8 +207,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     - d. At most one read is in flight. Events received during one read cause
       at most one further read, none when its version is at least every
       version they named; several events are not always one read.
-    - e. A read sent after an event named `n` answers at least `n`, or the
-      follower rejects with `invalid_response`.
+    - e. A read sent after an event named `n` that answers `200` with a
+      version below `n` makes the follower reject with `invalid_response`.
 17. **Retry** (amends 0006 decision 10, for `followChanges` and `followData`;
     what is retried is today's set, and rule 15 for reads). Attempt `n` counts
     retries since its last reset. `base = min(max, min × 2^n)`, defaults `min`
@@ -208,20 +216,37 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     injectable random source, so the delay is in [base/2, base). A
     `Retry-After`, parsed as today, is a floor clamped to one hour:
     `max(min(Retry-After, 3600 s), delay)`. Today it is not clamped (up to
-    999,999 s) and replaces the delay. **`n` resets to 0 only when a
-    connection stays open for `max` after its start**: the stream's
-    acceptance for `followChanges`, the connection's first read answered
-    `200` for `followData`; the timer stops when the stream ends, fails, or
-    stalls. A connection dropped sooner never resets `n`, so one accepted and
-    dropped every second backs off to `max`. (Today `followChanges` resets on
-    acceptance alone.) A stalled stream (rule 18) was silent for 45 s, so even
-    when it reset `n` it reconnects at most once per 45 s. A clean end of
-    a stream carries no reason and is retried; a revoked token answers the
-    next open `401`, which rejects. Revocation across processes stays X04.
-18. **Stall.** Once a stream is accepted, 45 seconds without a byte of its body
-    (comments count; the server sends one every 15 idle seconds) cancel it as
-    a drop, in both functions. No timer runs before the headers: a browser may
-    hold the request without failing it (0007 decision 2).
+    999,999 s) and replaces the delay. **`n` resets to 0 only when a connection
+    stays open for `max` after its start**: the stream's acceptance for
+    `followChanges`, the connection's first read answered `200` for
+    `followData`; the timer stops when the stream ends, fails, or stalls. A
+    connection dropped sooner never resets `n`, so one accepted and dropped
+    every second backs off to `max`. (Today `followChanges` resets on acceptance
+    alone.) A stall (rule 18) needs 45 s of silence, so stalls cause at most one
+    reconnect per 45 s even when `n` was reset. A clean end of a stream carries
+    no reason and is retried; a revoked token answers the next open `401`, which
+    rejects. Revocation across processes stays X04.
+18. **Waits and stalls.** Once a response's headers have arrived, 45 seconds
+    without a byte of its body (after the headers or the previous byte) is a
+    stall: the body is cancelled and the request fails as a network failure.
+    Stream comments count; the server sends one every 15 idle seconds. **No
+    timer runs on a request before its headers**: the page's request gate and
+    the browser may hold a request without failing it (0007 decisions 1 and
+    2), so such a request waits until it is answered, fails, or the caller
+    aborts. Every wait of R07c and its bound:
+
+    | Wait                                       | Bound                                                      |
+    | ------------------------------------------ | ---------------------------------------------------------- |
+    | stream, `GET data`, or listing: no headers | none; the caller's `signal`                                |
+    | stream body, after headers                 | 45 s between bytes; then a drop (retry), in both functions |
+    | `GET data` body, after headers             | 45 s between bytes; then a failed read (abandon; retry)    |
+    | listing body, after headers                | 45 s between bytes; then `listDataMembers` rejects         |
+    | retry wait (rule 17)                       | at most 3,600 s; an abort ends it at once                  |
+    | `onData` (rule 13)                         | not awaited; a synchronous call the application owns       |
+
+    A body that trickles a byte at least every 45 s is bounded only by its
+    size (rule 19) and the caller's `signal`.
+
 19. **Transport bounds**, checked as data arrives; the body is cancelled at
     once.
     - Event streams (the parser both functions share): 65,536 UTF-16 code
@@ -245,6 +270,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     | aborted before the call                   | resolves; sends nothing             | rejects; sends nothing  |
     | abort before headers, in a body or stream | cancels; resolves; delivers no more | cancels; rejects        |
     | abort while waiting to reconnect          | resolves at once                    | never waits             |
+    | no headers, however long                  | waits; no timer (rule 18)           | waits; no timer         |
+    | 45 s without a body byte after headers    | retry (stream or read)              | rejects `network_error` |
     | `onData` aborts                           | delivers no more; resolves          | —                       |
     | `onData` throws                           | rejects with it; never retried      | —                       |
     | `onData` aborts and throws                | resolves (abort wins)               | —                       |
@@ -335,6 +362,15 @@ implementation it fails.
     above and below the delay (fails no jitter, or `Retry-After` replacing
     it); `Retry-After: 999999` waits 3,600 s (fails an unclamped floor). 45 s
     of silence reconnects; a comment every 15 s prevents it.
+  - A `GET data` whose headers arrived and whose body then sends nothing for
+    45 s (fake clock) is abandoned and followed by a new connection and
+    snapshot, while the stream keeps its comments (fails a stall timer on the
+    stream only); a listing body silent 45 s rejects `network_error`. A
+    stream open, a `GET data`, and a listing that get no headers for an hour
+    of fake time are still pending, cancelled by no timer, and abort then
+    ends them (fails any timer before headers).
+  - An `onData` that returns a promise that never settles does not delay the
+    next read or delivery (fails awaiting `onData`).
   - A stream accepted and dropped every second, whose reads succeed, backs
     off to the 30-second cap in both functions (fails resetting `n` on
     acceptance or on a `200`); one open 30 s resets it.
@@ -366,11 +402,13 @@ a "gone, maybe back" state that races recovery and purge; ending is simpler.
 
 ## Costs
 
-A schema step and a contract change. A row per changing data write, kept
-until retention (O05), at the pace the limits of 0005 allow. A follower holds
-a stream and reads after every change of the space, other paths included; the
+A schema step and a contract change. A row per changing data write, kept until
+retention (O05), at the pace the limits of 0005 allow. A follower holds a
+stream and reads after every change of the space, other paths included; the
 panel adds a second stream per page while shown, against the actor's 16 and
-the browser's six or so connections. A read that never answers holds the
-follower until an abort or a drop. A kind added later that alters data would
-not wake older followers, so such a change must also record `data_changed`.
-Names outside the path grammar are not listed until R06b.
+the browser's six or so connections. A request that gets no headers holds the
+follower or the listing until the caller aborts or the stream drops (rule 18);
+a body that trickles bytes is bounded only by its size. A kind added later
+that alters data would not wake older followers, so such a change must also
+record `data_changed`. Names outside the path grammar are not listed until
+R06b.
