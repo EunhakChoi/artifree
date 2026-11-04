@@ -455,7 +455,9 @@ async fn a_stream_starts_with_a_snapshot_then_sends_each_new_full_value() -> Tes
 #[tokio::test]
 async fn a_burst_of_writes_during_the_throttle_is_one_more_read() -> TestResult {
     let harness = Harness::with(DataStreamSettings {
-        throttle: Duration::from_millis(400),
+        // Long enough that even five slow commits (a Windows runner fsyncs
+        // for a long time) finish inside one interval.
+        throttle: Duration::from_secs(3),
         ..DataStreamSettings::default()
     })?;
     let id = harness.artifact("burst").await?;
