@@ -366,3 +366,40 @@ fn edit_bounds_and_conditions_are_the_published_ones() {
     assert_eq!(put["pattern"], "^(absent|[0-9a-f]{64})$");
     assert_eq!(delete["pattern"], "^[0-9a-f]{64}$");
 }
+
+/// A change event names a data version of at least 1: a space nobody wrote is
+/// at version 0 and no write leaves it there, so the published schema must not
+/// admit 0. Other kinds serialize without the field (decision 0040).
+#[test]
+fn a_change_event_publishes_its_data_version_bounds() -> Result<(), serde_json::Error> {
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<ArtifactChange>(),
+    )?;
+    assert_eq!(schema["properties"]["data_version"]["minimum"], 1);
+    assert_eq!(
+        schema["properties"]["data_version"]["maximum"],
+        9_007_199_254_740_991_u64
+    );
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        !required.contains(&"data_version"),
+        "the field is optional: {required:?}"
+    );
+
+    let revised: ArtifactChange = serde_json::from_value(serde_json::json!({
+        "cursor": "c.1", "artifact_id": "art_0", "change": "revised",
+        "revision": 1, "metadata_revision": 1, "committed_at_ms": 1
+    }))?;
+    assert!(
+        serde_json::to_value(&revised)?
+            .get("data_version")
+            .is_none(),
+        "a kind without a data version serializes without the field"
+    );
+    Ok(())
+}

@@ -188,6 +188,50 @@ fn each_changing_write_appends_one_row_with_the_new_version_and_the_current_posi
     Ok(())
 }
 
+/// The commit time of a data row is taken as every commit's is, so the times
+/// of a feed strictly follow its order whatever clock the request carries
+/// (the requests here say 1,000 ms, long before the commits around them).
+#[test]
+fn data_rows_take_their_commit_time_from_the_feed_and_not_from_the_request() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.write("one", 0, &set("a", "1")?)?;
+    update_metadata(
+        &fixture.store,
+        &fixture.created,
+        &key("rename"),
+        1,
+        Some("Renamed"),
+        None,
+        None,
+    )?;
+    fixture.write("two", 1, &set("a", "2")?)?;
+    revise(
+        &fixture.store,
+        &fixture.created,
+        &key("save-3"),
+        2,
+        "<h1>3</h1>",
+    )?;
+
+    let times: Vec<(ChangeKind, i64)> = fixture
+        .feed(&fixture.owner)?
+        .iter()
+        .map(|change| (change.kind, change.committed_at.0))
+        .collect();
+    assert_eq!(times.len(), 6, "{times:?}");
+    for pair in times.windows(2) {
+        assert!(
+            pair[0].1 < pair[1].1,
+            "{:?} at {} is not before {:?} at {}",
+            pair[0].0,
+            pair[0].1,
+            pair[1].0,
+            pair[1].1
+        );
+    }
+    Ok(())
+}
+
 /// A replay, a write that changes nothing, a stale base, a path conflict, an
 /// oversized space, and a write to an artifact in the trash record nothing and
 /// do not move the head.

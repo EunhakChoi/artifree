@@ -1173,14 +1173,16 @@ fn record_change(
 /// artifact at `version` (decision 0040). The feed is the one of `actor`, whose
 /// space changed, and not that of the artifact's owner: the two are the same
 /// actor today (decision 0031), and sharing would make them differ. The
-/// revision and metadata revision are the artifact's current ones.
+/// revision and metadata revision are the artifact's current ones. Its commit
+/// time is taken as every commit's is ([`commit_time`]), so the times of the
+/// feed follow its order.
 fn record_data_change(
     transaction: &Transaction<'_>,
     actor: &ActorId,
     id: &ArtifactId,
     version: AppDataVersion,
-    now: UnixMillis,
 ) -> Result<(), StoreError> {
+    let now = commit_time(transaction)?;
     let (revision, metadata): (i64, i64) = transaction
         .query_row(
             "SELECT current_revision, metadata_revision FROM artifacts WHERE id = ?1",

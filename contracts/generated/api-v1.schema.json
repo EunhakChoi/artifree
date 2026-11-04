@@ -166,7 +166,8 @@
         "data_version": {
           "description": "The version the write left the data space at, a positive number.\nPresent exactly for `data_changed`.",
           "format": "uint64",
-          "minimum": 0,
+          "maximum": 9007199254740991,
+          "minimum": 1,
           "type": [
             "integer",
             "null"

@@ -1563,6 +1563,7 @@ pub struct ArtifactChange {
     /// The version the write left the data space at, a positive number.
     /// Present exactly for `data_changed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 9_007_199_254_740_991_u64))]
     pub data_version: Option<u64>,
     /// Commit time in Unix milliseconds.
     pub committed_at_ms: i64,

@@ -168,7 +168,6 @@ fn write(
             request.request.actor,
             request.artifact,
             version,
-            request.now,
         )?;
     }
     Ok(DataReceipt {
