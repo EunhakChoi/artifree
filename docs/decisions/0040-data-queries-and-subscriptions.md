@@ -135,13 +135,14 @@ receives a fresh snapshot.
 
 ### 4. Admission and limits
 
-| Limit                           | Value   | Refusal                              |
-| ------------------------------- | ------- | ------------------------------------ |
-| Data streams per actor          | 8       | `429 rate_limited`, `Retry-After: 5` |
-| Data streams in the process     | 128     | `503 unavailable`, `Retry-After: 10` |
-| Registrations (open or opening) | 256     | `503 unavailable`, `Retry-After: 10` |
-| Registrations of one actor      | 16      | `429 rate_limited`, `Retry-After: 5` |
-| Value at the watched path       | 128 KiB | the `too_large` event                |
+| Limit                             | Value   | Refusal                              |
+| --------------------------------- | ------- | ------------------------------------ |
+| Data streams per actor            | 8       | `429 rate_limited`, `Retry-After: 5` |
+| Data streams in the process       | 128     | `503 unavailable`, `Retry-After: 10` |
+| Registrations (open or opening)   | 256     | `503 unavailable`, `Retry-After: 10` |
+| Registrations of one actor        | 16      | `429 rate_limited`, `Retry-After: 5` |
+| Value at the watched path         | 128 KiB | the `too_large` event                |
+| Opening request to its first read | 30 s    | `503 unavailable`, `Retry-After: 10` |
 
 Opening a stream is a request under the request limits of 0005; an open stream
 holds none of its slots. The order of opening is part of the contract:
@@ -168,6 +169,18 @@ holds none of its slots. The order of opening is part of the contract:
 7. The **place** is taken in one step that re-checks both counts under the
    registry lock, and the producer starts with no await between taking the
    place and spawning it.
+
+**Nothing waits unbounded.** Every `await` of a request or a producer that can
+wait on the blocking pool (the confirmation of the user, the first read, every
+later read, a hand-over to the reader) is raced against the signals that end
+it, polled first: revocation, shutdown, the lifetime, the reader leaving. An
+opening request is also bounded by the **open timeout** (30 s): beyond it the
+request is `503` with `Retry-After: 10` and its registration is released. When
+a signal wins, the producer returns and drops its place and registration at
+once; a storage call that was already handed to the blocking pool is detached
+and may still run to its end unobserved (the pool is not cancellable), so a
+pool that makes no progress at all delays that thread, never a slot or a
+stream.
 
 Registrations and places are RAII values owned by the request and then by the
 producer; every exit drops them. The registry lock is a plain mutex that is
@@ -222,7 +235,9 @@ the web entry imports them.
   strictly newer than the one before on the same connection. A new
   connection's first event is authoritative whatever its version (the space
   may have been deleted and created again, or restored); the server itself ends
-  a stream that finds a lower version. `too_large` ends following at once: the
+  a stream that finds a lower version. A stale answer from a lagging replica
+  is out of scope: this server has one database and no replicas, and anything
+  that reads another process's database is the cross-process case (X04). `too_large` ends following at once: the
   client stops with `DataTooLargeError` as soon as the event is delivered,
   however the body ends, and reads nothing after it; `exists` and `value` agree (the root exists and
   is an object); the data names no revision. Any fault ends following with

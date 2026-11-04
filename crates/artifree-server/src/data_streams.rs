@@ -63,6 +63,11 @@ pub struct DataStreamSettings {
     pub heartbeat: Duration,
     /// How long a stream lives before it ends cleanly.
     pub lifetime: Duration,
+    /// The longest an opening request may take before its first event: the
+    /// confirmation of the user and the first read. A request that takes
+    /// longer is refused with `503` and `Retry-After`, and releases what it
+    /// registered.
+    pub open_timeout: Duration,
 }
 
 impl Default for DataStreamSettings {
@@ -73,6 +78,7 @@ impl Default for DataStreamSettings {
             min_interval: Duration::from_millis(250),
             heartbeat: Duration::from_secs(15),
             lifetime: Duration::from_secs(10 * 60),
+            open_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -84,7 +90,8 @@ impl DataStreamSettings {
             || self.per_process == 0
             || self.min_interval.is_zero()
             || self.heartbeat.is_zero()
-            || self.lifetime.is_zero();
+            || self.lifetime.is_zero()
+            || self.open_timeout.is_zero();
         if zero {
             return Err("data stream limits and times must be at least 1".into());
         }
@@ -111,6 +118,9 @@ enum Refusal {
     Process,
     /// The registry is unusable: a task panicked while holding its lock.
     Unavailable,
+    /// The user could not be confirmed or the first read could not finish in
+    /// time.
+    Slow,
 }
 
 impl IntoResponse for Refusal {
@@ -132,6 +142,12 @@ impl IntoResponse for Refusal {
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorCode::Unavailable,
                 "data streams are unavailable; retry after the given delay",
+                PROCESS_RETRY_SECONDS,
+            ),
+            Self::Slow => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "the data stream could not be opened in time; retry after the given delay",
                 PROCESS_RETRY_SECONDS,
             ),
         };
@@ -419,18 +435,36 @@ pub(crate) async fn events(
     // closes the window in which a request that authenticated earlier opens a
     // stream the disable has already passed.
     let mut wake = streams.wake.subscribe();
-    state.ensure_current(&auth.actor, auth.generation).await?;
-    #[cfg(test)]
-    streams.seams.hold_opening().await;
-    // A write that committed while the user was being confirmed is covered by
-    // the first read; one after this mark stays pending for the next.
-    wake.borrow_and_update();
-    // The first read is the access check: an artifact that is missing, in the
-    // trash, purged, or another actor's is the same `404` and holds nothing
-    // but this request's registration.
-    let first = streams
-        .observe(&state, &auth.actor, &artifact, &watched)
-        .await?;
+    // Everything that can wait on the blocking pool is bounded: by a signal
+    // and by the open timeout. Either drops the registration; a storage call
+    // that was already started may finish unobserved.
+    let opening = async {
+        #[cfg(test)]
+        streams.seams.hold_opening().await;
+        state.ensure_current(&auth.actor, auth.generation).await?;
+        // A write that committed while the user was being confirmed is
+        // covered by the first read; one after this mark stays pending for
+        // the next.
+        wake.borrow_and_update();
+        // The first read is the access check: an artifact that is missing,
+        // in the trash, purged, or another actor's is the same `404` and
+        // holds nothing but this request's registration.
+        streams
+            .observe(&state, &auth.actor, &artifact, &watched)
+            .await
+            .map_err(ApiError::from)
+    };
+    let mut interruption = signals.clone();
+    let first = tokio::select! {
+        biased;
+        () = interruption.wait_ended() => {
+            return Err(signals.refusal().unwrap_or_else(|| ApiError::unavailable("the data stream was closed")));
+        }
+        opened = tokio::time::timeout(streams.settings.open_timeout, opening) => match opened {
+            Ok(first) => first?,
+            Err(_elapsed) => return Ok(Refusal::Slow.into_response()),
+        },
+    };
     if let Some(refusal) = signals.refusal() {
         return Err(refusal);
     }
@@ -580,11 +614,19 @@ impl Producer {
     async fn read(&mut self) -> Result<DataWatch, Stop> {
         self.wake.borrow_and_update();
         self.last_read = Instant::now();
-        self.state
-            .data_streams()
-            .observe(&self.state, &self.actor, &self.artifact_id, &self.watched)
-            .await
-            .map_err(|_| Stop)
+        // A read that does not finish cannot hold the stream: a signal, the
+        // lifetime, or the reader leaving ends it first. The storage call
+        // itself may finish unobserved on the blocking pool.
+        let streams = self.state.data_streams();
+        tokio::select! {
+            biased;
+            () = self.signals.wait_ended() => Err(Stop),
+            () = tokio::time::sleep_until(self.lifetime_end) => Err(Stop),
+            () = self.sender.closed() => Err(Stop),
+            watched = streams.observe(&self.state, &self.actor, &self.artifact_id, &self.watched) => {
+                watched.map_err(|_| Stop)
+            }
+        }
     }
 
     /// Sends what an observation calls for. `sent` is the version of the last

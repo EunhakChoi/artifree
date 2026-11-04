@@ -176,7 +176,9 @@ intermediate states can be skipped), and `too_large` when the value is over
 client opens a new stream and gets a new `snapshot`. A stream ends after ten
 minutes, rechecks access every 15 seconds, and is closed by a revoked token, a
 disabled user, a trashed or purged artifact, or shutdown. At most 8 streams per
-user and 128 per process are open. **Revoking a token through another server
+user and 128 per process are open, and a stream whose storage read stalls still ends
+at a revocation, shutdown, its lifetime, or the reader leaving (an opening
+request is refused with 503 after 30 seconds). **Revoking a token through another server
 process is not seen by an open stream until it ends**, and a commit by another
 process is seen at the next 15-second check. The members query and the stream
 speak of `data_version` only and never of a source revision. `listDataMembers`

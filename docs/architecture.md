@@ -330,6 +330,8 @@ value, coalesced to one storage read per 250 ms per stream, and `too_large` over
 disabling a user reaches it, re-reads at least every 15 seconds (which checks
 that the artifact is still in place), and ends after ten minutes; 8 streams per
 actor and 128 per process, with `429` and `503` refusals that read nothing.
+Every wait on storage is raced against revocation, shutdown, the lifetime, and the
+reader leaving, and an opening request has a 30-second timeout (`503`).
 A writer wakes the streams of its own process through a counter that cannot fail
 or wait, so a subscription never touches a commit. A stored space that cannot be
 read back is `500`, not an empty answer. `@artifree/client` has `listDataMembers`

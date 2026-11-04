@@ -398,6 +398,7 @@ fn the_defaults_are_the_numbers_of_the_decision() {
     assert_eq!(defaults.min_interval, Duration::from_millis(250));
     assert_eq!(defaults.heartbeat, Duration::from_secs(15));
     assert_eq!(defaults.lifetime, Duration::from_secs(600));
+    assert_eq!(defaults.open_timeout, Duration::from_secs(30));
 }
 
 #[test]
@@ -422,6 +423,10 @@ fn a_state_refuses_zero_limits_and_times() {
         },
         DataStreamSettings {
             lifetime: Duration::ZERO,
+            ..base
+        },
+        DataStreamSettings {
+            open_timeout: Duration::ZERO,
             ..base
         },
     ] {
@@ -872,6 +877,120 @@ async fn a_revocation_ends_a_stream_whose_reader_is_behind() -> TestResult {
     harness
         .streams()
         .revoke_token(&TokenId::from_random([1; 16]));
+    harness.settled(0, 0).await
+}
+
+/// A stream whose next read is stuck, as one on a blocking pool that makes
+/// no progress is. The gate is never released: the read does not finish
+/// until the stream is gone. The body stays open and unread.
+async fn stalled(harness: &Harness, secret: &str) -> Result<(Stream, Arc<Gate>), Box<dyn Error>> {
+    let id = harness.artifact(secret, "stalled-read").await?;
+    let mut stream = harness.open(secret, &id, "n").await?;
+    stream.expect("snapshot").await?;
+    let gate = Gate::new();
+    harness.streams().hold_reads(Some(Arc::clone(&gate)));
+    harness.put(secret, &id, 0, "n", &json!(1)).await?;
+    timeout(WAIT, gate.arrival()).await?;
+    assert_eq!(harness.streams().counts(), Some((1, 1)));
+    Ok((stream, gate))
+}
+
+#[tokio::test]
+async fn a_stalled_read_does_not_keep_a_stream_past_its_lifetime() -> TestResult {
+    let harness = Harness::new(DataStreamSettings {
+        lifetime: Duration::from_millis(700),
+        ..quick()
+    })?;
+    let (_, secret) = harness.user(1)?;
+    let (_stream, _gate) = stalled(&harness, &secret).await?;
+    harness.settled(0, 0).await
+}
+
+#[tokio::test]
+async fn a_revocation_ends_a_stream_whose_read_is_stalled() -> TestResult {
+    let harness = Harness::new(quick())?;
+    let (_, secret) = harness.user(1)?;
+    let (_stream, _gate) = stalled(&harness, &secret).await?;
+    harness
+        .streams()
+        .revoke_token(&TokenId::from_random([1; 16]));
+    harness.settled(0, 0).await
+}
+
+#[tokio::test]
+async fn shutdown_ends_a_stream_whose_read_is_stalled() -> TestResult {
+    let harness = Harness::new(quick())?;
+    let (_, secret) = harness.user(1)?;
+    let (_stream, _gate) = stalled(&harness, &secret).await?;
+    harness.state.close_streams();
+    harness.settled(0, 0).await
+}
+
+#[tokio::test]
+async fn a_reader_that_leaves_ends_a_stream_whose_read_is_stalled() -> TestResult {
+    let harness = Harness::new(quick())?;
+    let (_, secret) = harness.user(1)?;
+    let (stream, _gate) = stalled(&harness, &secret).await?;
+    drop(stream);
+    harness.settled(0, 0).await
+}
+
+#[tokio::test]
+async fn a_first_read_that_never_finishes_is_refused_when_the_open_times_out() -> TestResult {
+    let harness = Harness::new(DataStreamSettings {
+        open_timeout: Duration::from_millis(300),
+        ..quick()
+    })?;
+    let id = harness.artifact(OWNER, "slow-open").await?;
+    let gate = Gate::new();
+    harness.streams().hold_reads(Some(Arc::clone(&gate)));
+    let opening = harness.opening(OWNER, &id);
+    timeout(WAIT, gate.arrival()).await?;
+    assert_eq!(harness.streams().counts(), Some((0, 1)));
+    // The gate is never released.
+    let response = finish(opening).await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers().get(header::RETRY_AFTER),
+        Some(&header::HeaderValue::from(10_u32))
+    );
+    harness.settled(0, 0).await
+}
+
+#[tokio::test]
+async fn a_user_who_cannot_be_confirmed_in_time_is_refused_and_releases_the_registration()
+-> TestResult {
+    let harness = Harness::new(DataStreamSettings {
+        open_timeout: Duration::from_millis(300),
+        ..quick()
+    })?;
+    let (_, secret) = harness.user(1)?;
+    let id = harness.artifact(&secret, "unconfirmed").await?;
+    let gate = Gate::new();
+    harness.streams().hold_opening(Some(Arc::clone(&gate)));
+    let opening = harness.opening(&secret, &id);
+    timeout(WAIT, gate.arrival()).await?;
+    assert_eq!(harness.streams().counts(), Some((0, 1)));
+    let response = finish(opening).await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    harness.settled(0, 0).await
+}
+
+#[tokio::test]
+async fn a_revocation_refuses_an_open_whose_first_read_is_stalled() -> TestResult {
+    let harness = Harness::new(quick())?;
+    let (_, secret) = harness.user(1)?;
+    let id = harness.artifact(&secret, "held-open").await?;
+    let gate = Gate::new();
+    harness.streams().hold_reads(Some(Arc::clone(&gate)));
+    let opening = harness.opening(&secret, &id);
+    timeout(WAIT, gate.arrival()).await?;
+    harness
+        .streams()
+        .revoke_token(&TokenId::from_random([1; 16]));
+    // The gate is never released.
+    let response = finish(opening).await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     harness.settled(0, 0).await
 }
 

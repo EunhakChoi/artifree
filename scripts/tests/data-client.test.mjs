@@ -1771,3 +1771,63 @@ test('a value named __proto__ is kept as a member and changes no prototype', asy
   assert.equal(value.polluted, undefined);
   assert.equal({}.polluted, undefined);
 });
+
+// ------------------------------------------- too_large is terminal, always
+
+test('too_large mid-stream is terminal with events after it in the same chunk and a lost connection', async () => {
+  const run = await follow(
+    [
+      {
+        chunks: [
+          snapshot(1),
+          // One chunk: the event that ends following and one that follows it.
+          bytes(
+            `event: too_large\ndata: ${JSON.stringify(tooLarge({ data_version: 2 }))}\n\n` +
+              `event: change\ndata: ${JSON.stringify(appData({ data_version: 3 }))}\n\n`,
+          ),
+          change(4),
+          { error: new TypeError('reset') },
+        ],
+      },
+      stream(snapshot(5)),
+    ],
+    { stableMs: 0 },
+  );
+  assert.ok(run.outcome.error instanceof DataTooLargeError);
+  assert.equal(run.outcome.error.dataVersion, 2);
+  assert.deepEqual(
+    run.events.map((e) => [e.type, e.data.data_version]),
+    [
+      ['snapshot', 1],
+      ['too_large', 2],
+    ],
+  );
+  assert.equal(run.requests.length, 1, 'no reconnect');
+  assert.deepEqual(
+    run.sleeps,
+    [],
+    'no wait, so no attempt was counted or reset',
+  );
+  assert.deepEqual(run.disconnects, []);
+  assert.equal(run.cancelled.length, 1, 'the body was cancelled once');
+});
+
+test('too_large after a long stable stream is still terminal and restarts nothing', async () => {
+  const run = await follow(
+    [
+      {
+        chunks: [
+          snapshot(1),
+          { advance: 60_000 },
+          sse('too_large', tooLarge({ data_version: 2 })),
+          { error: new TypeError('reset') },
+        ],
+      },
+      stream(snapshot(3)),
+    ],
+    { stableMs: 1000 },
+  );
+  assert.ok(run.outcome.error instanceof DataTooLargeError);
+  assert.equal(run.requests.length, 1);
+  assert.deepEqual(run.sleeps, []);
+});
