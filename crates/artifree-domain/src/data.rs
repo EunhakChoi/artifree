@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Bound;
 use std::str::FromStr;
 
 /// Most segments in a path.
@@ -45,6 +46,19 @@ pub const MAX_SPACE_BYTES: usize = 1024 * 1024;
 pub const MAX_SPACE_VALUES: usize = 10_000;
 /// The largest integer a double precision number holds exactly.
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// Most members a page of a member query lists (decision 0040).
+pub const MAX_MEMBER_LIMIT: usize = 100;
+/// Members a page lists when the query gives no limit.
+pub const DEFAULT_MEMBER_LIMIT: usize = 50;
+/// Largest canonical value a listed member carries; a larger one is reported
+/// as too large and not sent.
+pub const MEMBER_VALUE_BYTES: usize = 32 * 1024;
+/// Most bytes of names and values one page lists, except that its first
+/// member is always listed.
+pub const MEMBER_PAGE_BYTES: usize = 256 * 1024;
+/// Largest canonical value a subscription sends whole.
+pub const WATCHED_VALUE_BYTES: usize = 128 * 1024;
 
 /// Which limit a request would exceed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +106,8 @@ pub enum DataError {
     /// The root of a space is an object: a change cannot make it anything
     /// else.
     RootNotObject,
+    /// A member query breaks a rule of decision 0040.
+    InvalidQuery(&'static str),
 }
 
 impl fmt::Display for DataError {
@@ -106,6 +122,7 @@ impl fmt::Display for DataError {
                 "the path crosses a value that is not an object, which a write cannot make room in",
             ),
             Self::RootNotObject => formatter.write_str("the root of a data space is an object"),
+            Self::InvalidQuery(rule) => write!(formatter, "invalid member query: {rule}"),
         }
     }
 }
@@ -876,6 +893,185 @@ fn merge(target: Option<DataValue>, patch: &DataValue) -> DataValue {
     DataValue::Object(members)
 }
 
+/// What a member query lists for each member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberSelect {
+    /// Only the names.
+    Names,
+    /// The names and the values that fit [`MEMBER_VALUE_BYTES`].
+    Values,
+}
+
+/// A validated query for the members of the object at a path (decision 0040).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberQuery {
+    path: DataPath,
+    select: MemberSelect,
+    limit: usize,
+    after: Option<String>,
+}
+
+impl MemberQuery {
+    /// A query for up to `limit` members of the object at `path`, in the order
+    /// of their names as UTF-8 bytes, after the member named `after`.
+    ///
+    /// # Errors
+    ///
+    /// [`DataError::InvalidQuery`] for a limit outside `1..=`[`MAX_MEMBER_LIMIT`]
+    /// or an `after` that is not 1 to [`MAX_MEMBER_NAME_BYTES`] bytes.
+    pub fn new(
+        path: DataPath,
+        select: MemberSelect,
+        limit: usize,
+        after: Option<String>,
+    ) -> Result<Self, DataError> {
+        if !(1..=MAX_MEMBER_LIMIT).contains(&limit) {
+            return Err(DataError::InvalidQuery(
+                "limit is a whole number from 1 to 100",
+            ));
+        }
+        if after
+            .as_ref()
+            .is_some_and(|name| name.is_empty() || name.len() > MAX_MEMBER_NAME_BYTES)
+        {
+            return Err(DataError::InvalidQuery("after is 1 to 256 bytes"));
+        }
+        Ok(Self {
+            path,
+            select,
+            limit,
+            after,
+        })
+    }
+
+    /// The path of the object.
+    #[must_use]
+    pub fn path(&self) -> &DataPath {
+        &self.path
+    }
+
+    /// What is listed for each member.
+    #[must_use]
+    pub fn select(&self) -> MemberSelect {
+        self.select
+    }
+
+    /// The most members the page lists.
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// The name after which the page starts, if any.
+    #[must_use]
+    pub fn after(&self) -> Option<&str> {
+        self.after.as_deref()
+    }
+}
+
+/// What a page carries for one member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberValue {
+    /// The query selected names only.
+    Omitted,
+    /// The canonical JSON text of the value, at most [`MEMBER_VALUE_BYTES`].
+    Value(String),
+    /// The value is larger than [`MEMBER_VALUE_BYTES`] and is not carried.
+    TooLarge,
+}
+
+/// One member of a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    /// The member's name.
+    pub name: String,
+    /// What the query selected of its value.
+    pub value: MemberValue,
+}
+
+/// A page of members (decision 0040).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberPage {
+    /// Whether anything is at the path.
+    pub exists: bool,
+    /// Whether what is there is an object.
+    pub collection: bool,
+    /// The members, in the order of their names as UTF-8 bytes.
+    pub members: Vec<Member>,
+    /// The last name listed, when members follow it.
+    pub next_after: Option<String>,
+}
+
+impl DataSpace {
+    /// One page of the members of the object at the query's path. A path with
+    /// nothing at it, or a value that is not an object, lists nothing. The
+    /// page ends at the limit, or before the member that would take the bytes
+    /// of names and values over [`MEMBER_PAGE_BYTES`]; its first member is
+    /// always listed, so every page makes progress.
+    #[must_use]
+    pub fn members(&self, query: &MemberQuery) -> MemberPage {
+        let Some(found) = self.get(&query.path) else {
+            return MemberPage {
+                exists: false,
+                collection: false,
+                members: Vec::new(),
+                next_after: None,
+            };
+        };
+        let DataValue::Object(object) = found else {
+            return MemberPage {
+                exists: true,
+                collection: false,
+                members: Vec::new(),
+                next_after: None,
+            };
+        };
+        // A `BTreeMap` of `String` iterates in the order of the UTF-8 bytes.
+        let start = query
+            .after
+            .as_deref()
+            .map_or(Bound::Unbounded, Bound::Excluded);
+        let mut remaining = object.range::<str, _>((start, Bound::Unbounded)).peekable();
+        let mut members: Vec<Member> = Vec::new();
+        let mut bytes = 0_usize;
+        while members.len() < query.limit {
+            let Some((name, value)) = remaining.peek() else {
+                break;
+            };
+            let (carried, size) = match query.select {
+                MemberSelect::Names => (MemberValue::Omitted, name.len()),
+                MemberSelect::Values => {
+                    let text = value.to_canonical();
+                    if text.len() > MEMBER_VALUE_BYTES {
+                        (MemberValue::TooLarge, name.len())
+                    } else {
+                        let size = name.len() + text.len();
+                        (MemberValue::Value(text), size)
+                    }
+                }
+            };
+            if !members.is_empty() && bytes + size > MEMBER_PAGE_BYTES {
+                break;
+            }
+            bytes += size;
+            members.push(Member {
+                name: (*name).clone(),
+                value: carried,
+            });
+            remaining.next();
+        }
+        let next_after = remaining
+            .peek()
+            .and_then(|_| members.last().map(|member| member.name.clone()));
+        MemberPage {
+            exists: true,
+            collection: true,
+            members,
+            next_after,
+        }
+    }
+}
+
 /// A change to a data space.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataChange {
@@ -1510,5 +1706,176 @@ mod tests {
         let shrink = DataChange::Remove { path: path("a") };
         assert!(grown.apply(&shrink)?.changed);
         Ok(())
+    }
+
+    fn query(at: &str, select: MemberSelect, limit: usize, after: Option<&str>) -> MemberQuery {
+        MemberQuery::new(path(at), select, limit, after.map(str::to_owned))
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn names(page: &MemberPage) -> Vec<&str> {
+        page.members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn members_are_listed_in_utf8_byte_order_not_utf16_order() {
+        // U+FF5E is EF BD 9E and U+10000 is F0 90 80 80: their bytes order
+        // them one way and their UTF-16 code units (FF5E; D800 DC00) the other.
+        let space = space("{\"a\":1,\"B\":2,\"\\uff5e\":3,\"\\ud800\\udc00\":4,\"\\u00e9\":5}");
+        let page = space.members(&query("", MemberSelect::Names, 100, None));
+        assert_eq!(names(&page), ["B", "a", "\u{e9}", "\u{ff5e}", "\u{10000}"]);
+        assert!(
+            page.members
+                .iter()
+                .all(|member| member.value == MemberValue::Omitted)
+        );
+        assert!(page.exists && page.collection && page.next_after.is_none());
+    }
+
+    #[test]
+    fn pages_chain_through_next_after_without_gaps_or_repeats() {
+        let body: Vec<String> = (0..7).map(|n| format!("\"m{n}\":{n}")).collect();
+        let space = space(&format!("{{{}}}", body.join(",")));
+        let mut seen: Vec<String> = Vec::new();
+        let mut after: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            let page = space.members(&query("", MemberSelect::Names, 3, after.as_deref()));
+            assert!(page.members.len() <= 3, "limit exceeded: {page:?}");
+            seen.extend(page.members.iter().map(|member| member.name.clone()));
+            pages += 1;
+            match page.next_after {
+                Some(next) => {
+                    assert_eq!(
+                        Some(&next),
+                        seen.last(),
+                        "next_after is the last name listed"
+                    );
+                    after = Some(next);
+                }
+                None => break,
+            }
+        }
+        assert_eq!(seen, ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]);
+        assert_eq!(pages, 3);
+    }
+
+    #[test]
+    fn after_is_exclusive_and_need_not_be_a_member() {
+        let space = space("{\"b\":1,\"d\":2}");
+        let page = space.members(&query("", MemberSelect::Names, 10, Some("b")));
+        assert_eq!(names(&page), ["d"]);
+        let page = space.members(&query("", MemberSelect::Names, 10, Some("c")));
+        assert_eq!(names(&page), ["d"]);
+        let page = space.members(&query("", MemberSelect::Names, 10, Some("d")));
+        assert!(page.members.is_empty() && page.next_after.is_none() && page.collection);
+    }
+
+    #[test]
+    fn a_value_over_the_member_bound_is_reported_not_carried() {
+        let exact = "x".repeat(MEMBER_VALUE_BYTES - 2);
+        let over = "x".repeat(MEMBER_VALUE_BYTES - 1);
+        let space = space(&format!(
+            "{{\"a\":\"{exact}\",\"b\":\"{over}\",\"c\":null}}"
+        ));
+        let page = space.members(&query("", MemberSelect::Values, 10, None));
+        assert_eq!(
+            page.members[0].value,
+            MemberValue::Value(format!("\"{exact}\""))
+        );
+        assert_eq!(page.members[1].value, MemberValue::TooLarge);
+        assert_eq!(page.members[2].value, MemberValue::Value("null".into()));
+    }
+
+    #[test]
+    fn a_page_stops_before_the_byte_bound_and_always_lists_one_member() {
+        // Each value is 30,000 bytes and its quotes: eight fit in 256 KiB.
+        let big = "x".repeat(30_000);
+        let body: Vec<String> = (0..10).map(|n| format!("\"m{n}\":\"{big}\"")).collect();
+        // Over the limit of one written value, as a space grown by many writes
+        // is: the space itself may hold 1 MiB.
+        let text = format!("{{{}}}", body.join(","));
+        let root = DataValue::parse_unbounded(&text).unwrap_or_else(|error| panic!("{error}"));
+        let space = DataSpace::new(root).unwrap_or_else(|error| panic!("{error}"));
+        let first = space.members(&query("", MemberSelect::Values, 100, None));
+        assert_eq!(first.members.len(), 8);
+        assert_eq!(first.next_after.as_deref(), Some("m7"));
+        let second = space.members(&query("", MemberSelect::Values, 100, Some("m7")));
+        assert_eq!(names(&second), ["m8", "m9"]);
+        assert!(second.next_after.is_none());
+        // Names alone are never held back by the byte bound at the limit.
+        let names_only = space.members(&query("", MemberSelect::Names, 100, None));
+        assert_eq!(names_only.members.len(), 10);
+    }
+
+    #[test]
+    fn a_page_of_exactly_the_byte_bound_is_whole() {
+        // Eight members of 32,768 bytes each (a name of 2 bytes and a value of
+        // 32,764 characters in quotes) are exactly 256 KiB; a ninth, however
+        // small, does not fit.
+        let big = "x".repeat(32_764);
+        let mut body: Vec<String> = (0..8).map(|n| format!("\"m{n}\":\"{big}\"")).collect();
+        body.push("\"m8\":1".to_owned());
+        let root = DataValue::parse_unbounded(&format!("{{{}}}", body.join(",")))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let space = DataSpace::new(root).unwrap_or_else(|error| panic!("{error}"));
+        let page = space.members(&query("", MemberSelect::Values, 100, None));
+        assert_eq!(page.members.len(), 8);
+        assert!(
+            page.members
+                .iter()
+                .all(|member| matches!(member.value, MemberValue::Value(_))),
+            "a value of exactly the member bound is carried"
+        );
+        assert_eq!(page.next_after.as_deref(), Some("m7"));
+    }
+
+    #[test]
+    fn a_path_that_is_not_an_object_lists_nothing() {
+        let space = space("{\"s\":\"text\",\"a\":[1],\"o\":{\"k\":1}}");
+        for (at, exists, collection) in [
+            ("s", true, false),
+            ("a", true, false),
+            ("missing", false, false),
+            ("s/deeper", false, false),
+            ("o", true, true),
+            ("", true, true),
+        ] {
+            let page = space.members(&query(at, MemberSelect::Names, 10, None));
+            assert_eq!((page.exists, page.collection), (exists, collection), "{at}");
+            assert!(
+                page.collection || (page.members.is_empty() && page.next_after.is_none()),
+                "{at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_member_query_refuses_what_the_grammar_refuses() {
+        let at = DataPath::root();
+        for limit in [0, MAX_MEMBER_LIMIT + 1] {
+            assert!(
+                MemberQuery::new(at.clone(), MemberSelect::Names, limit, None).is_err(),
+                "limit {limit}"
+            );
+        }
+        for limit in [1, MAX_MEMBER_LIMIT] {
+            assert!(MemberQuery::new(at.clone(), MemberSelect::Names, limit, None).is_ok());
+        }
+        for after in [String::new(), "x".repeat(MAX_MEMBER_NAME_BYTES + 1)] {
+            assert!(MemberQuery::new(at.clone(), MemberSelect::Names, 1, Some(after)).is_err());
+        }
+        assert!(
+            MemberQuery::new(
+                at,
+                MemberSelect::Names,
+                1,
+                Some("x".repeat(MAX_MEMBER_NAME_BYTES))
+            )
+            .is_ok()
+        );
     }
 }

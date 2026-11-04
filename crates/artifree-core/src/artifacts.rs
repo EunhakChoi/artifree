@@ -128,6 +128,9 @@ pub enum ArtifactError {
     /// A data path, value, or change breaks the rules of a data space
     /// (decision 0031).
     Data(DataError),
+    /// The stored data space cannot be read back (decision 0040). It is a fault
+    /// of the store; retrying does not fix it.
+    StoredDataInvalid(String),
     /// Storage failed. The request may be retried with the same key.
     Unavailable(String),
 }
@@ -182,6 +185,9 @@ impl fmt::Display for ArtifactError {
                 current.0
             ),
             Self::Data(error) => write!(formatter, "{error}"),
+            Self::StoredDataInvalid(reason) => {
+                write!(formatter, "stored data is invalid: {reason}")
+            }
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }

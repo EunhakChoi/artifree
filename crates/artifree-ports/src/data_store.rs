@@ -70,6 +70,9 @@ pub enum DataStoreError {
     /// The change is refused by the rules of the space (decision 0031);
     /// nothing was written and no key was recorded.
     Rejected(DataError),
+    /// The stored space cannot be read back: it is not a valid space or its
+    /// version is out of range. Retrying does not help (decision 0040).
+    Corrupt(String),
     /// Storage could not complete the operation.
     Unavailable(String),
 }
@@ -85,6 +88,7 @@ impl fmt::Display for DataStoreError {
                 write!(formatter, "the data is at version {}", current.0)
             }
             Self::Rejected(error) => write!(formatter, "{error}"),
+            Self::Corrupt(reason) => write!(formatter, "stored data is invalid: {reason}"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }

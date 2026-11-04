@@ -9,7 +9,9 @@
 //! restore does not touch it.
 
 use artifree_domain::AppDataVersion;
-use artifree_domain::data::{DataChange, DataPath, DataValue};
+use artifree_domain::data::{
+    DataChange, DataPath, DataValue, MemberPage, MemberQuery, WATCHED_VALUE_BYTES,
+};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
 use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWrite};
@@ -23,6 +25,35 @@ pub struct DataRead {
     pub version: AppDataVersion,
     /// The value at the path, or `None` where nothing is.
     pub value: Option<DataValue>,
+}
+
+/// One page of members and the version it was read at (decision 0040).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataMembersRead {
+    /// The version of the space when it was read.
+    pub version: AppDataVersion,
+    /// The page.
+    pub page: MemberPage,
+}
+
+/// What a subscription sends of the value at its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchedValue {
+    /// Nothing is at the path.
+    Absent,
+    /// The canonical JSON text, at most [`WATCHED_VALUE_BYTES`].
+    Value(String),
+    /// The value is larger than [`WATCHED_VALUE_BYTES`] and is not carried.
+    TooLarge,
+}
+
+/// The state of a watched path at one read (decision 0040).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataWatch {
+    /// The version of the space when it was read.
+    pub version: AppDataVersion,
+    /// The value at the path.
+    pub value: WatchedValue,
 }
 
 /// The result of a write, in terms the adapters report.
@@ -57,6 +88,60 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         Ok(DataRead {
             version: snapshot.version,
             value: snapshot.space.get(path).cloned(),
+        })
+    }
+
+    /// One page of the members of the object at the query's path in the
+    /// actor's data space of an artifact, and the space's version, read in one
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] as for [`Self::data`],
+    /// [`ArtifactError::StoredDataInvalid`] when the stored space cannot be
+    /// read back, or [`ArtifactError::Unavailable`].
+    pub fn data_members(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        query: &MemberQuery,
+    ) -> Result<DataMembersRead, ArtifactError> {
+        self.authorized(actor, id)?;
+        let snapshot = self.store.read_data(id, actor).map_err(data_error)?;
+        Ok(DataMembersRead {
+            version: snapshot.version,
+            page: snapshot.space.members(query),
+        })
+    }
+
+    /// The value at `path` as a subscription sends it: its canonical text, or
+    /// a note that it is too large to send, and the space's version.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::data`], and [`ArtifactError::StoredDataInvalid`] when the
+    /// stored space cannot be read back.
+    pub fn watch_data(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        path: &DataPath,
+    ) -> Result<DataWatch, ArtifactError> {
+        let read = self.data(actor, id, path)?;
+        let value = match read.value {
+            None => WatchedValue::Absent,
+            Some(value) => {
+                let text = value.to_canonical();
+                if text.len() > WATCHED_VALUE_BYTES {
+                    WatchedValue::TooLarge
+                } else {
+                    WatchedValue::Value(text)
+                }
+            }
+        };
+        Ok(DataWatch {
+            version: read.version,
+            value,
         })
     }
 
@@ -137,6 +222,7 @@ fn data_error(error: DataStoreError) -> ArtifactError {
         DataStoreError::RequestKeyReused => ArtifactError::RequestKeyReused,
         DataStoreError::VersionConflict { current } => ArtifactError::DataConflict { current },
         DataStoreError::Rejected(error) => ArtifactError::Data(error),
+        DataStoreError::Corrupt(reason) => ArtifactError::StoredDataInvalid(reason),
         DataStoreError::Unavailable(reason) => ArtifactError::Unavailable(reason),
         other => ArtifactError::Unavailable(other.to_string()),
     }
