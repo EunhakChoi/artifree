@@ -9,12 +9,13 @@
 //! restore does not touch it.
 
 use artifree_domain::AppDataVersion;
-use artifree_domain::data::{DataChange, DataPath, DataValue};
+use artifree_domain::data::{DataChange, DataError, DataPath, DataValue, MemberPage, Members};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
 use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWrite};
 
 use crate::artifacts::{ArtifactError, ArtifactService, Fingerprint, Missing};
+use crate::members::{DataMembersPage, MemberQuery, MemberToken};
 
 /// What a read found at a path.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +58,76 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         Ok(DataRead {
             version: snapshot.version,
             value: snapshot.space.get(path).cloned(),
+        })
+    }
+
+    /// One page of the member names of the object at a path of the actor's
+    /// data space (decision 0040, rules 9 to 11), from a single read of the
+    /// space, so that the names and the version belong together.
+    ///
+    /// The checks run in this order, each before any later one reads
+    /// anything: the page token (it must be the one issued for this artifact
+    /// and path, which needs no storage), access, then `at_data_version`, then
+    /// the value at the path. A path with nothing at it, or through a value
+    /// that is not an object, lists nothing and `exists` is false.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::InvalidPageToken`] for a token issued for another
+    /// artifact or path, [`ArtifactError::NotFound`] as for [`Self::data`],
+    /// [`ArtifactError::DataConflict`] when the space is not at
+    /// `at_data_version`, [`ArtifactError::Data`] with
+    /// [`DataError::PathConflict`] when a value that is not an object is at
+    /// the path, or [`ArtifactError::Unavailable`].
+    pub fn data_members(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        query: &MemberQuery,
+    ) -> Result<DataMembersPage, ArtifactError> {
+        let foreign = query
+            .after
+            .as_ref()
+            .is_some_and(|token| !token.matches(id, &query.path));
+        if foreign {
+            return Err(ArtifactError::InvalidPageToken);
+        }
+        self.authorized(actor, id)?;
+        let snapshot = self.store.read_data(id, actor).map_err(data_error)?;
+        if query
+            .at_data_version
+            .is_some_and(|expected| expected != snapshot.version)
+        {
+            return Err(ArtifactError::DataConflict {
+                current: snapshot.version,
+            });
+        }
+        let after = query.after.as_ref().map(MemberToken::name);
+        let page = match snapshot
+            .space
+            .members(&query.path, after, query.limit.get())
+        {
+            Members::Missing => {
+                return Ok(DataMembersPage {
+                    version: snapshot.version,
+                    exists: false,
+                    names: Vec::new(),
+                    next: None,
+                });
+            }
+            Members::NotObject => return Err(ArtifactError::Data(DataError::PathConflict)),
+            Members::Page(page) => page,
+        };
+        let MemberPage { names, more } = page;
+        let next = names
+            .last()
+            .filter(|_| more)
+            .map(|last| MemberToken::new(id, &query.path, last.clone()));
+        Ok(DataMembersPage {
+            version: snapshot.version,
+            exists: true,
+            names,
+            next,
         })
     }
 
@@ -139,5 +210,298 @@ fn data_error(error: DataStoreError) -> ArtifactError {
         DataStoreError::Rejected(error) => ArtifactError::Data(error),
         DataStoreError::Unavailable(reason) => ArtifactError::Unavailable(reason),
         other => ArtifactError::Unavailable(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use artifree_domain::change::ChangeSequence;
+    use artifree_domain::data::{DataSpace, MemberName};
+    use artifree_domain::package::{FilePackage, PackagePath};
+    use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+    use artifree_ports::artifact_store::{
+        ArtifactListing, ArtifactRecord, ChangePage, CleanupReceipt, CleanupRequest, CommitReceipt,
+        ConditionalCommit, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
+        PurgeRequest, RevisionCommit, RevisionRecord, StoreError, UnreferencedContent,
+    };
+    use artifree_ports::data_store::DataSnapshot;
+
+    use super::*;
+    use crate::members::MemberLimit;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A store that counts what the listing asks of it and answers every
+    /// `read_data` with a newer space than the one before: read `n` is at
+    /// version `n` and holds the one member `m{n}` and the scalar `s`.
+    /// `known` says whether the artifact is in place. Writes are not used.
+    struct NewerEachRead {
+        record: ArtifactRecord,
+        known: bool,
+        lookups: Cell<u32>,
+        reads: Cell<u64>,
+    }
+
+    impl NewerEachRead {
+        fn new(owner: &ActorId, id: &ArtifactId, known: bool) -> Self {
+            Self {
+                record: ArtifactRecord {
+                    id: id.clone(),
+                    owner: owner.clone(),
+                    kind: ArtifactKind::App,
+                    title: "Demo".parse().unwrap_or_else(|error| panic!("{error}")),
+                    pinned: false,
+                    current_revision: SourceRevision(1),
+                    metadata_revision: MetadataRevision(1),
+                    deleted_at: None,
+                    created_at: artifree_domain::identity::UnixMillis(1),
+                    updated_at: artifree_domain::identity::UnixMillis(1),
+                },
+                known,
+                lookups: Cell::new(0),
+                reads: Cell::new(0),
+            }
+        }
+    }
+
+    impl DataStore for NewerEachRead {
+        fn read_data(&self, _: &ArtifactId, _: &ActorId) -> Result<DataSnapshot, DataStoreError> {
+            let read = self.reads.get() + 1;
+            self.reads.set(read);
+            let text = format!(r#"{{"m{read}":1,"s":"text"}}"#);
+            Ok(DataSnapshot {
+                version: AppDataVersion(read),
+                space: DataSpace::from_canonical(&text)
+                    .unwrap_or_else(|error| panic!("{text}: {error}")),
+            })
+        }
+
+        fn write_data(&self, _: DataWrite<'_>) -> Result<DataReceipt, DataStoreError> {
+            Err(DataStoreError::Unavailable("unused".into()))
+        }
+    }
+
+    impl ArtifactStore for NewerEachRead {
+        fn create_artifact(&self, _: NewArtifact<'_>) -> Result<CommitReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn commit_revision(&self, _: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn commit_edits(&self, _: ConditionalCommit<'_>) -> Result<CommitReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn update_metadata(&self, _: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn replay_create(
+            &self,
+            _: RequestIdentity<'_>,
+        ) -> Result<Option<CommitReceipt>, StoreError> {
+            Ok(None)
+        }
+        fn purge_artifact(&self, _: PurgeRequest<'_>) -> Result<PurgeReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn unreferenced_content(&self) -> Result<UnreferencedContent, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn remove_unreferenced_content(
+            &self,
+            _: CleanupRequest<'_>,
+        ) -> Result<CleanupReceipt, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn artifact(&self, _: &ArtifactId) -> Result<Option<ArtifactRecord>, StoreError> {
+            self.lookups.set(self.lookups.get() + 1);
+            Ok(self.known.then(|| self.record.clone()))
+        }
+        fn list_artifacts(
+            &self,
+            _: ArtifactListing<'_>,
+        ) -> Result<Vec<ArtifactRecord>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn revisions(&self, _: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn revision(
+            &self,
+            _: &ArtifactId,
+            _: SourceRevision,
+        ) -> Result<Option<RevisionRecord>, StoreError> {
+            Ok(None)
+        }
+        fn revision_package(
+            &self,
+            _: &ArtifactId,
+            _: SourceRevision,
+        ) -> Result<Option<FilePackage>, StoreError> {
+            Ok(None)
+        }
+        fn revision_file(
+            &self,
+            _: &ArtifactId,
+            _: SourceRevision,
+            _: &PackagePath,
+        ) -> Result<Option<Vec<u8>>, StoreError> {
+            Ok(None)
+        }
+        fn changes(
+            &self,
+            _: &ActorId,
+            _: ChangeSequence,
+            _: usize,
+        ) -> Result<ChangePage, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+    }
+
+    struct Fixture {
+        owner: ActorId,
+        id: ArtifactId,
+        service: ArtifactService<NewerEachRead>,
+    }
+
+    fn fixture(known: bool) -> Fixture {
+        let owner: ActorId = "owner".parse().unwrap_or_else(|error| panic!("{error}"));
+        let id = ArtifactId::from_random([3; 16]);
+        let service = ArtifactService::new(NewerEachRead::new(&owner, &id, known));
+        Fixture { owner, id, service }
+    }
+
+    fn query(path: &str) -> MemberQuery {
+        MemberQuery {
+            path: path
+                .parse()
+                .unwrap_or_else(|error| panic!("{path}: {error}")),
+            after: None,
+            limit: MemberLimit::default(),
+            at_data_version: None,
+        }
+    }
+
+    fn token_for(id: &ArtifactId, path: &str) -> MemberToken {
+        let last: MemberName = "a".parse().unwrap_or_else(|error| panic!("{error}"));
+        MemberToken::new(
+            id,
+            &path.parse().unwrap_or_else(|error| panic!("{error}")),
+            last,
+        )
+    }
+
+    #[test]
+    fn a_page_takes_its_names_and_version_from_one_read() -> TestResult {
+        let Fixture { owner, id, service } = fixture(true);
+        let page = service.data_members(&owner, &id, &query(""))?;
+        assert_eq!(page.version, AppDataVersion(1));
+        let names: Vec<&str> = page.names.iter().map(MemberName::as_str).collect();
+        assert_eq!(
+            names,
+            ["m1", "s"],
+            "the names of the read that has the version"
+        );
+        assert_eq!(service.store.reads.get(), 1, "one read of the space");
+        Ok(())
+    }
+
+    #[test]
+    fn a_token_for_another_artifact_or_path_is_refused_before_any_storage_is_read() {
+        let Fixture { owner, id, service } = fixture(true);
+        let other = ArtifactId::from_random([4; 16]);
+        for (case, token, path) in [
+            ("other artifact", token_for(&other, "a"), "a"),
+            ("other path", token_for(&id, "b"), "a"),
+            ("root token on a path", token_for(&id, ""), "a"),
+            ("path token on the root", token_for(&id, "a"), ""),
+        ] {
+            let request = MemberQuery {
+                after: Some(token),
+                ..query(path)
+            };
+            assert_eq!(
+                service.data_members(&owner, &id, &request),
+                Err(ArtifactError::InvalidPageToken),
+                "{case}"
+            );
+        }
+        assert_eq!(service.store.lookups.get(), 0, "no artifact lookup");
+        assert_eq!(service.store.reads.get(), 0, "no read of the space");
+    }
+
+    #[test]
+    fn a_token_is_checked_before_access_and_access_before_the_version() {
+        let missing = fixture(false);
+        let other = ArtifactId::from_random([4; 16]);
+        let stale = MemberQuery {
+            at_data_version: Some(AppDataVersion(9)),
+            ..query("")
+        };
+        // Access: a missing artifact is not found, not a conflict.
+        assert_eq!(
+            missing
+                .service
+                .data_members(&missing.owner, &missing.id, &stale),
+            Err(ArtifactError::NotFound(Missing::Artifact))
+        );
+        assert_eq!(missing.service.store.reads.get(), 0, "no read after 404");
+        // Token: a bad token on a missing artifact is the token's error.
+        let foreign = MemberQuery {
+            after: Some(token_for(&other, "")),
+            ..stale
+        };
+        assert_eq!(
+            missing
+                .service
+                .data_members(&missing.owner, &missing.id, &foreign),
+            Err(ArtifactError::InvalidPageToken)
+        );
+        assert_eq!(missing.service.store.lookups.get(), 1, "only the 404 above");
+    }
+
+    #[test]
+    fn the_version_is_checked_before_the_value_at_the_path() -> TestResult {
+        let Fixture { owner, id, service } = fixture(true);
+        // `s` is a scalar: a conflict of the path, but only at the right version.
+        let stale = MemberQuery {
+            at_data_version: Some(AppDataVersion(7)),
+            ..query("s")
+        };
+        assert_eq!(
+            service.data_members(&owner, &id, &stale),
+            Err(ArtifactError::DataConflict {
+                current: AppDataVersion(1)
+            }),
+            "a stale version wins over a path conflict"
+        );
+        // The second read is at version 2, which `at_data_version` now names.
+        let current = MemberQuery {
+            at_data_version: Some(AppDataVersion(2)),
+            ..query("s")
+        };
+        assert_eq!(
+            service.data_members(&owner, &id, &current),
+            Err(ArtifactError::Data(DataError::PathConflict))
+        );
+        let missing = service.data_members(&owner, &id, &query("nothing/here"))?;
+        assert!(!missing.exists, "{missing:?}");
+        assert!(missing.names.is_empty() && missing.next.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_next_token_continues_after_the_last_name_of_the_page() -> TestResult {
+        let Fixture { owner, id, service } = fixture(true);
+        let one = MemberQuery {
+            limit: MemberLimit::try_from(1)?,
+            ..query("")
+        };
+        let first = service.data_members(&owner, &id, &one)?;
+        let next = first.next.ok_or("a token: `s` follows `m1`")?;
+        assert_eq!(next.name().as_str(), "m1");
+        assert!(next.matches(&id, &"".parse()?));
+        Ok(())
     }
 }

@@ -17,16 +17,16 @@
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactChange, ArtifactList, CancelJobRequest,
     CancelJobResponse, CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
-    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataWriteResponse,
+    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataMembers, DataWriteResponse,
     DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
     EnqueueJobRequest, EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff,
     HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, Preview,
-    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
-    RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
-    RotateTokenResponse, RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest,
-    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeSourceList,
-    RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
+    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest,
+    RoomJoinRequest, RoomSnapshot, RotateTokenResponse, RuntimeConnection, RuntimeDownloadOffer,
+    RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest,
+    RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
     RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest,
     SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo,
     TokenList, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
@@ -99,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<Job>(),
         generator.subschema_for::<JobList>(),
         generator.subschema_for::<AppData>(),
+        generator.subschema_for::<DataMembers>(),
         generator.subschema_for::<SetDataRequest>(),
         generator.subschema_for::<UpdateDataRequest>(),
         generator.subschema_for::<DeleteDataRequest>(),
@@ -111,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The read query has one optional field, so the root would accept any
     // empty object.
     generator.subschema_for::<ReadDataQuery>();
+    generator.subschema_for::<ReadDataMembersQuery>();
     // The cancel body has no fields, so the root would accept any empty object.
     generator.subschema_for::<CancelJobRequest>();
     let api = serde_json::json!({

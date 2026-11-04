@@ -172,6 +172,7 @@ in the Rust core.
 | `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version) |
 | `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)           |
 | `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)     |
+| `GET /v1/artifacts/{id}/data/members`                                              | One page of an object's member names (`?path=`)   |
 
 Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"? } }` with
 `invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `forbidden` (403, a runtime frame call whose capability is not granted), `not_found` (404),
@@ -316,8 +317,10 @@ checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge has no data capability** (it grants `metadata.read`, `source.read`, and
-`source.download`). Subscriptions and queries (R07) and
-assets (R09) are not implemented.
+`source.download`). A paged listing of the member names of one object exists
+over HTTP only, `GET /v1/artifacts/{id}/data/members` (decision 0040, R07b); the
+client, the CLI, and MCP have no listing yet. Subscriptions (R07a, R07c),
+queries (T11), and assets (R09) are not implemented.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured

@@ -64,6 +64,7 @@ export type ApiBody =
   | Job
   | JobList
   | AppData
+  | DataMembers
   | SetDataRequest
   | UpdateDataRequest
   | DeleteDataRequest
@@ -1241,7 +1242,8 @@ export interface ErrorBody {
    */
   conflicting_files_total?: number | null;
   /**
-   * The current data version, present for `data_conflict`.
+   * The current data version, present for `data_conflict` (of a write, or
+   * of a listing whose `at_data_version` is not current).
    */
   current_data_version?: number | null;
   /**
@@ -1659,6 +1661,44 @@ export interface AppData {
    * value that is not there, which has no `value` member.
    */
   value?: JsonValue | null;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/data/members`: one page of the member
+ * names of the object at a path of the caller's data space, read from one
+ * version of the space. Values, sizes, and types are not listed.
+ */
+export interface DataMembers {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space this page was read at.
+   */
+  data_version: number;
+  /**
+   * Whether an object is at the path. False when nothing is there or the
+   * path passes through a value that is not an object, as for
+   * `GET /v1/artifacts/{id}/data`; `names` is then empty. The root always
+   * exists.
+   */
+  exists: boolean;
+  /**
+   * Member names after the page token's name, ascending by their UTF-8
+   * bytes, at most `limit`. Only names that a path can address are listed
+   * (`[A-Za-z0-9_-]{1,64}`); other names are skipped, do not count toward
+   * `limit`, and do not make `next_page_token` present.
+   */
+  names: string[];
+  /**
+   * Present exactly when more listed names follow at `data_version`. Pass
+   * it as `page_token` for the next page.
+   */
+  next_page_token?: string | null;
+  /**
+   * The path that was listed, as parsed.
+   */
+  path: string;
 }
 /**
  * Body of `PUT /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:

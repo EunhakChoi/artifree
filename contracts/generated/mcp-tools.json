@@ -62,12 +62,12 @@
               },
               {
                 "const": "data_conflict",
-                "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                 "type": "string"
               },
               {
                 "const": "data_path_conflict",
-                "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                 "type": "string"
               },
               {
@@ -156,7 +156,7 @@
             ]
           },
           "current_data_version": {
-            "description": "The current data version, present for `data_conflict`.",
+            "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
             "minimum": 0,
             "type": [
               "integer",
@@ -447,12 +447,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -541,7 +541,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -763,12 +763,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -857,7 +857,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -1200,12 +1200,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -1294,7 +1294,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -1672,12 +1672,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -1766,7 +1766,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -2157,12 +2157,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -2251,7 +2251,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -2566,12 +2566,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -2660,7 +2660,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -3003,12 +3003,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -3097,7 +3097,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -3366,12 +3366,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -3460,7 +3460,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -3666,12 +3666,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -3760,7 +3760,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -3958,12 +3958,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -4052,7 +4052,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -4282,12 +4282,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -4376,7 +4376,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -4539,12 +4539,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -4633,7 +4633,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -5041,12 +5041,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -5135,7 +5135,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -5506,12 +5506,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -5600,7 +5600,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -6007,12 +6007,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -6101,7 +6101,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -6492,12 +6492,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -6586,7 +6586,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -6786,12 +6786,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -6880,7 +6880,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7068,12 +7068,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -7162,7 +7162,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7350,12 +7350,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -7444,7 +7444,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7627,12 +7627,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -7721,7 +7721,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7872,12 +7872,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -7966,7 +7966,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -8235,12 +8235,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -8329,7 +8329,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -8526,12 +8526,12 @@
                       },
                       {
                         "const": "data_conflict",
-                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+                        "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
                         "type": "string"
                       },
                       {
                         "const": "data_path_conflict",
-                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+                        "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
                         "type": "string"
                       },
                       {
@@ -8620,7 +8620,7 @@
                     ]
                   },
                   "current_data_version": {
-                    "description": "The current data version, present for `data_conflict`.",
+                    "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
                     "minimum": 0,
                     "type": [
                       "integer",
