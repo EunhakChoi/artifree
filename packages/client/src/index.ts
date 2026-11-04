@@ -61,3 +61,16 @@ export type {
   RoomExpectation,
   RoomIdentity,
 } from './room.js';
+export { followData, isRetryable } from './data-follow.js';
+export type {
+  DataEvent,
+  FollowDataEnd,
+  FollowDataOptions,
+  FollowDataRequest,
+  FollowDataRetry,
+} from './data-follow.js';
+export { listDataMembers } from './data-members.js';
+export type { DataMembersRequest } from './data-members.js';
+export { DATA_LIMITS } from './data-json.js';
+export { serverSentEvents } from './sse.js';
+export type { ServerSentEvent, SseLimits } from './sse.js';
