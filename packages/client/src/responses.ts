@@ -272,14 +272,27 @@ export function parseDuplicate(
   return { ...commit, copied };
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
-  return (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean' ||
-    (typeof value === 'number' && Number.isFinite(value)) ||
-    Array.isArray(value) ||
-    isRecord(value)
+/** Most levels of arrays and objects a data value nests (decision 0031). */
+export const MAX_JSON_NESTING = 32;
+
+/**
+ * Whether `value` is JSON as `JSON.parse` makes it, all the way down: finite
+ * numbers, strings, booleans, null, arrays, and objects, nested at most
+ * {@link MAX_JSON_NESTING} levels. Nothing is assigned, so a member named
+ * `__proto__` is only a key.
+ */
+export function isJsonValue(
+  value: unknown,
+  levels: number = MAX_JSON_NESTING,
+): value is JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || levels < 1) return false;
+  if (Array.isArray(value))
+    return value.every((item: unknown) => isJsonValue(item, levels - 1));
+  return Object.values(value).every((member: unknown) =>
+    isJsonValue(member, levels - 1),
   );
 }
 

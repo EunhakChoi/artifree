@@ -1051,6 +1051,89 @@ async fn opens_that_have_not_taken_a_place_are_bounded_too() -> TestResult {
 }
 
 #[tokio::test]
+async fn one_actor_cannot_fill_the_registrations_other_actors_need() -> TestResult {
+    // Two places an actor, so four registrations an actor, of 256 in all.
+    let harness = Harness::new(DataStreamSettings {
+        per_actor: 2,
+        ..quick()
+    })?;
+    let (_, hostile) = harness.user(1)?;
+    let (_, other) = harness.user(2)?;
+    let mine = harness.artifact(&hostile, "mine").await?;
+    let theirs = harness.artifact(&other, "theirs").await?;
+    let gate = Gate::new();
+    harness.streams().hold_reads(Some(Arc::clone(&gate)));
+    let mut opening = Vec::new();
+    for _ in 0..4 {
+        opening.push(harness.opening(&hostile, &mine));
+        timeout(WAIT, gate.arrival()).await?;
+    }
+    assert_eq!(harness.streams().counts(), Some((0, 4)));
+    let reads = harness.streams().reads();
+    let refused = harness
+        .call("GET", &events_uri(&mine, ""), &hostile, None, None)
+        .await?;
+    assert_eq!(
+        refused.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        refused.text
+    );
+    assert_eq!(harness.streams().reads(), reads, "a refusal read storage");
+    assert_eq!(harness.streams().counts(), Some((0, 4)));
+    // Another actor is not affected.
+    opening.push(harness.opening(&other, &theirs));
+    timeout(WAIT, gate.arrival()).await?;
+    assert_eq!(harness.streams().counts(), Some((0, 5)));
+    for _ in 0..5 {
+        gate.release();
+    }
+    let mut answers = Vec::new();
+    for handle in opening {
+        answers.push(finish(handle).await?);
+    }
+    drop(answers);
+    harness.settled(0, 0).await
+}
+
+#[tokio::test]
+async fn a_write_before_the_first_read_is_covered_by_it_and_one_after_the_mark_is_not() -> TestResult
+{
+    let harness = Harness::new(DataStreamSettings {
+        min_interval: Duration::from_millis(1),
+        ..quick()
+    })?;
+    let id = harness.artifact(OWNER, "first").await?;
+    let gate = Gate::new();
+    harness.streams().hold_opening(Some(Arc::clone(&gate)));
+    let opening = harness.opening(OWNER, &id);
+    timeout(WAIT, gate.arrival()).await?;
+    // The write commits while the request is on its way to the first read.
+    let first = harness.put(OWNER, &id, 0, "n", &json!(1)).await?;
+    gate.release();
+    let response = finish(opening).await?;
+    let mut stream = Stream {
+        body: response.into_body(),
+        text: String::new(),
+        ended: false,
+    };
+    assert_eq!(stream.expect("snapshot").await?["data_version"], first);
+    // Lets a wake-up that was wrongly left pending show itself as a read; the
+    // assertion does not depend on it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        harness.streams().reads(),
+        1,
+        "the first read left a wake-up"
+    );
+    // A write after the mark is one more read.
+    harness.put(OWNER, &id, first, "n", &json!(2)).await?;
+    assert_eq!(stream.expect("change").await?["data_version"], 2);
+    assert_eq!(harness.streams().reads(), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_missing_or_foreign_artifact_holds_nothing_and_answers_alike() -> TestResult {
     let harness = Harness::new(DataStreamSettings {
         per_actor: 2,

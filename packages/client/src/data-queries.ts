@@ -6,7 +6,7 @@ import type {
 } from '@artifree/contracts';
 import type { ArtifreeClient } from './client.js';
 import { ArtifreeApiError } from './errors.js';
-import { isCount, isRecord } from './responses.js';
+import { isCount, isJsonValue, isRecord } from './responses.js';
 
 /**
  * Member pages of application data (decision 0040). This module is loaded on
@@ -211,17 +211,6 @@ function parseMember(
   const size = jsonBytes(found);
   if (size > DATA_LIMITS.memberValueBytes * SPELLING_SLACK) return undefined;
   return { member: { name, value: found }, bytes: nameBytes + size };
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  return (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean' ||
-    (typeof value === 'number' && Number.isFinite(value)) ||
-    Array.isArray(value) ||
-    isRecord(value)
-  );
 }
 
 /**

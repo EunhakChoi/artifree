@@ -91,6 +91,11 @@ impl DataStreamSettings {
         Ok(self)
     }
 
+    /// Most streams one actor may have registered, open or still opening.
+    fn actor_registrations(self) -> usize {
+        usize::try_from(self.per_actor).map_or(usize::MAX, |count| count.saturating_mul(2))
+    }
+
     /// Most streams that may be registered, open or still opening.
     fn registrations(self) -> usize {
         usize::try_from(self.per_process).map_or(usize::MAX, |count| count.saturating_mul(2))
@@ -236,6 +241,15 @@ impl DataStreams {
         let mut registry = self.registry.lock().map_err(|_| Refusal::Unavailable)?;
         if registry.registered.len() >= self.settings.registrations() {
             return Err(Refusal::Process);
+        }
+        // An actor cannot fill the registrations other actors need.
+        let of_actor = registry
+            .registered
+            .iter()
+            .filter(|entry| entry.actor == auth.actor)
+            .count();
+        if of_actor >= self.settings.actor_registrations() {
+            return Err(Refusal::Actor);
         }
         let id = registry.next_id;
         registry.next_id = registry.next_id.wrapping_add(1);
@@ -404,8 +418,13 @@ pub(crate) async fn events(
     // The registration is what a disable ends; confirming the user after it
     // closes the window in which a request that authenticated earlier opens a
     // stream the disable has already passed.
+    let mut wake = streams.wake.subscribe();
     state.ensure_current(&auth.actor, auth.generation).await?;
-    let wake = streams.wake.subscribe();
+    #[cfg(test)]
+    streams.seams.hold_opening().await;
+    // A write that committed while the user was being confirmed is covered by
+    // the first read; one after this mark stays pending for the next.
+    wake.borrow_and_update();
     // The first read is the access check: an artifact that is missing, in the
     // trash, purged, or another actor's is the same `404` and holds nothing
     // but this request's registration.
@@ -703,6 +722,7 @@ pub(crate) mod seams {
         reads: AtomicU64,
         read_gate: Mutex<Option<Arc<Gate>>>,
         throttle_gate: Mutex<Option<Arc<Gate>>>,
+        opening_gate: Mutex<Option<Arc<Gate>>>,
     }
 
     impl Seams {
@@ -712,6 +732,14 @@ pub(crate) mod seams {
 
         pub(super) async fn after_read(&self) {
             let gate = self.read_gate.lock().ok().and_then(|gate| gate.clone());
+            if let Some(gate) = gate {
+                gate.pass().await;
+            }
+        }
+
+        /// Where an opening request waits before it marks wake-ups as seen.
+        pub(super) async fn hold_opening(&self) {
+            let gate = self.opening_gate.lock().ok().and_then(|gate| gate.clone());
             if let Some(gate) = gate {
                 gate.pass().await;
             }
@@ -739,6 +767,13 @@ pub(crate) mod seams {
         /// Holds every read at a gate, or releases the hold.
         pub(crate) fn hold_reads(&self, gate: Option<Arc<Gate>>) {
             if let Ok(mut held) = self.seams.read_gate.lock() {
+                *held = gate;
+            }
+        }
+
+        /// Holds every opening request before its first read, or releases.
+        pub(crate) fn hold_opening(&self, gate: Option<Arc<Gate>>) {
+            if let Ok(mut held) = self.seams.opening_gate.lock() {
                 *held = gate;
             }
         }

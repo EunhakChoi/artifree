@@ -79,22 +79,19 @@ function parseTooLarge(value: unknown): DataTooLarge | undefined {
 
 /**
  * Checks the events of one connection, in order, against the artifact and path
- * that were asked for and against the versions already delivered. The data
+ * that were asked for and against the versions already delivered on it. The data
  * of an event names the data space only: an object with a field of any other
  * kind, such as a source revision, is refused.
  */
 export class DataEventChecker {
   private readonly artifactId: string;
   private readonly path: string;
-  /** The newest version delivered before this connection, if any. */
-  private readonly floor: number | undefined;
   private last: number | undefined;
   private ended = false;
 
-  constructor(artifactId: string, path: string, floor: number | undefined) {
+  constructor(artifactId: string, path: string) {
     this.artifactId = artifactId;
     this.path = path;
-    this.floor = floor;
   }
 
   /** The event for `event`, or `invalid_response` when it breaks a rule. */
@@ -149,13 +146,10 @@ export class DataEventChecker {
         `The data stream sent a ${type} event about another artifact or path.`,
       );
     const version = data.data_version;
-    // The first event of a connection may repeat the newest version delivered
-    // before; every later one has to be newer than the one before.
-    const stale =
-      this.last === undefined
-        ? this.floor !== undefined && version < this.floor
-        : version <= this.last;
-    if (stale)
+    // The snapshot that opens a connection is authoritative whatever version
+    // it carries (the space may have been deleted and created again, or
+    // restored); within a connection every version has to be newer.
+    if (this.last !== undefined && version <= this.last)
       throw invalid(
         `The data stream sent a ${type} event with an old version.`,
       );
@@ -305,10 +299,9 @@ export async function followData(
   const now = options.now ?? ((): number => performance.now());
   const sleep = options.sleep ?? defaultSleep;
   const uri = `/v1/artifacts/${artifactId}/data/events?${new URLSearchParams({ path }).toString()}`;
-  let newest: number | undefined;
   let attempt = 0;
   while (!signal.aborted) {
-    const checker = new DataEventChecker(artifactId, path, newest);
+    const checker = new DataEventChecker(artifactId, path);
     let acceptedAt: number | undefined;
     let delivered = 0;
     let failure: ArtifreeApiError | undefined;
@@ -331,7 +324,6 @@ export async function followData(
         checker,
         (event) => {
           delivered += 1;
-          newest = Math.max(newest ?? 0, event.data.data_version);
           onEvent(event);
         },
         onConnect,
@@ -390,7 +382,6 @@ async function readConnection(
   signal.addEventListener('abort', cancel);
   if (signal.aborted) cancel();
   const parser = new EventStreamParser();
-  let tooLarge: DataTooLarge | undefined;
   try {
     onConnect?.();
     for (;;) {
@@ -411,14 +402,14 @@ async function readConnection(
         if (signal.aborted) return { acceptedAt, failure: undefined };
         const event = checker.check(raw);
         deliver(event);
-        if (event.type === 'too_large') tooLarge = event.data;
+        // Reconnecting would get the same answer, however the body ends.
+        if (event.type === 'too_large') throw new DataTooLargeError(event.data);
       }
     }
   } finally {
     signal.removeEventListener('abort', cancel);
     await reader.cancel().catch(() => undefined);
   }
-  if (tooLarge !== undefined) throw new DataTooLargeError(tooLarge);
   // The server ended the stream: reconnect for a fresh snapshot.
   return { acceptedAt, failure: undefined };
 }

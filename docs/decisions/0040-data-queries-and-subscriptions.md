@@ -140,6 +140,7 @@ receives a fresh snapshot.
 | Data streams per actor          | 8       | `429 rate_limited`, `Retry-After: 5` |
 | Data streams in the process     | 128     | `503 unavailable`, `Retry-After: 10` |
 | Registrations (open or opening) | 256     | `503 unavailable`, `Retry-After: 10` |
+| Registrations of one actor      | 16      | `429 rate_limited`, `Retry-After: 5` |
 | Value at the watched path       | 128 KiB | the `too_large` event                |
 
 Opening a stream is a request under the request limits of 0005; an open stream
@@ -152,9 +153,14 @@ holds none of its slots. The order of opening is part of the contract:
 3. The stream is **registered** (token streams only: the owner profile has no
    token to revoke and cannot be disabled) **before any slow read**, as the
    change feed does (0006, 0036), so a revocation that runs from now on reaches
-   it. The registration is bounded (the third row).
+   it. The registration is bounded in all and per actor (the third and fourth
+   rows, the latter twice the actor's places), so one actor's opens cannot use
+   up the registrations other actors need.
 4. `ensure_current` confirms the user after registering, so a disable that
-   passed earlier is seen.
+   passed earlier is seen. The write notification is marked as seen
+   immediately before the first read, as before every later read: a write
+   committed until then is covered by the read, one after the mark is one more
+   read.
 5. The first read is the **access check**: a missing, foreign, trashed, or
    purged artifact is `404` and holds nothing but its registration.
 6. If revocation or shutdown became visible while the read ran, the request is
@@ -196,6 +202,11 @@ the web entry imports them.
   against `1e-5`), so it refuses a member or a page only beyond **twice** the
   server's bound. That keeps an unbounded answer out; the exact accounting is
   the server's, and is proved by the Rust tests.
+- Every value the client types as JSON (a listed member, `snapshot` and
+  `change` data, and `getData`) is checked **all the way down**: finite
+  numbers only (`1e400` parses to infinity and is refused), strings,
+  booleans, null, arrays, and objects, nested at most 32 levels (the server's
+  bound). A member named `__proto__` is only a key; nothing is assigned.
 - `followData(client, options)` opens the stream and reconnects. Its parser
   reads **bytes**: a leading byte order mark is removed before anything is
   counted, however the chunks split it; lines end in LF, CRLF, or CR; every
@@ -208,17 +219,19 @@ the web entry imports them.
 - **Event rules**, checked for every event: the artifact and path are those
   requested; `snapshot` first and only once; `change` never first; `too_large`
   first or later; versions are safe integers (above 2^53 - 1 is refused) and
-  strictly newer than anything delivered on the connection, and a new
-  connection's first event is not older than anything delivered before;
-  nothing follows `too_large`; `exists` and `value` agree (the root exists and
+  strictly newer than the one before on the same connection. A new
+  connection's first event is authoritative whatever its version (the space
+  may have been deleted and created again, or restored); the server itself ends
+  a stream that finds a lower version. `too_large` ends following at once: the
+  client stops with `DataTooLargeError` as soon as the event is delivered,
+  however the body ends, and reads nothing after it; `exists` and `value` agree (the root exists and
   is an object); the data names no revision. Any fault ends following with
   `invalid_response`.
 - **Retry table.** Retried: a connection that failed (`network_error`), `429`,
   `502`, `503`, `504`, and a stream that ended cleanly. Not retried, and
   rejected: every other status (`4xx` and `500`), `invalid_response`, and
-  `DataTooLargeError` (thrown after the `too_large` event was delivered and
-  the server ended the stream; an event that follows `too_large` is
-  `invalid_response`). An error thrown
+  `DataTooLargeError` (thrown right after the `too_large` event was
+  delivered). An error thrown
   by the handler rejects too. Aborting resolves, before the first request, while
   waiting, and while reading; nothing is delivered after it.
 - **Backoff.** The delay doubles from 500 ms to a maximum (default 30 s). A

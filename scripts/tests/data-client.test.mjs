@@ -285,11 +285,11 @@ const event = (type, data) => ({
   type,
   data: typeof data === 'string' ? data : JSON.stringify(data),
 });
-const checker = (floor) => new DataEventChecker(ART, 'a/b', floor);
+const checker = () => new DataEventChecker(ART, 'a/b');
 const refused = (run) => assert.throws(run, invalidResponse);
 
 test('the checker accepts a snapshot, changes, and a final too_large', () => {
-  const c = checker(undefined);
+  const c = checker();
   assert.deepEqual(c.check(event('snapshot', appData({ data_version: 3 }))), {
     type: 'snapshot',
     data: appData({ data_version: 3 }),
@@ -306,10 +306,10 @@ test('the checker accepts a snapshot, changes, and a final too_large', () => {
 
 test('too_large may be the first event, and null and absent values are told apart', () => {
   assert.equal(
-    checker(undefined).check(event('too_large', tooLarge())).type,
+    checker().check(event('too_large', tooLarge())).type,
     'too_large',
   );
-  const c = checker(undefined);
+  const c = checker();
   assert.equal(
     c.check(event('snapshot', appData({ value: null }))).data.value,
     null,
@@ -402,7 +402,7 @@ const ORDER_FAULTS = [
 
 for (const [name, sequence] of ORDER_FAULTS) {
   test(`the checker refuses ${name}`, () => {
-    const c = checker(undefined);
+    const c = checker();
     const run = () => {
       for (const [type, version] of sequence)
         c.check(
@@ -418,26 +418,21 @@ for (const [name, sequence] of ORDER_FAULTS) {
   });
 }
 
-test('the first event of a connection is not older than anything delivered before', () => {
-  refused(() =>
-    checker(5).check(event('snapshot', appData({ data_version: 4 }))),
-  );
-  refused(() =>
-    checker(5).check(event('too_large', tooLarge({ data_version: 4 }))),
-  );
-  // Equal is the same state again after a reconnect.
+test('the first event of a connection is authoritative whatever its version', () => {
+  // The checker knows one connection only: a space that was deleted and
+  // created again, or restored, starts again at any version.
   assert.equal(
-    checker(5).check(event('snapshot', appData({ data_version: 5 }))).type,
+    checker().check(event('snapshot', appData({ data_version: 0 }))).type,
     'snapshot',
   );
   assert.equal(
-    checker(5).check(event('too_large', tooLarge({ data_version: 5 }))).type,
+    checker().check(event('too_large', tooLarge({ data_version: 0 }))).type,
     'too_large',
   );
-  assert.equal(
-    checker(5).check(event('snapshot', appData({ data_version: 6 }))).type,
-    'snapshot',
-  );
+  // Within the connection, versions still only grow.
+  const c = checker();
+  c.check(event('snapshot', appData({ data_version: 5 })));
+  refused(() => c.check(event('change', appData({ data_version: 4 }))));
 });
 
 const FIELD_FAULTS = [
@@ -484,13 +479,13 @@ const FIELD_FAULTS = [
 
 for (const [name, data, large] of FIELD_FAULTS) {
   test(`the checker refuses ${name}, in a snapshot, a change, and too_large`, () => {
-    refused(() => checker(undefined).check(event('snapshot', data)));
+    refused(() => checker().check(event('snapshot', data)));
     refused(() => {
-      const c = checker(undefined);
+      const c = checker();
       c.check(event('snapshot', appData({ data_version: 0 })));
       c.check(event('change', data));
     });
-    refused(() => checker(undefined).check(event('too_large', large)));
+    refused(() => checker().check(event('too_large', large)));
   });
 }
 
@@ -527,11 +522,11 @@ for (const [name, data] of SHAPE_FAULTS) {
 }
 
 test('the checker refuses an unknown event name, text that is not JSON, and an empty event', () => {
-  refused(() => checker(undefined).check(event('message', appData())));
-  refused(() => checker(undefined).check(event('ready', appData())));
-  refused(() => checker(undefined).check(event('snapshot', '{"artifact_id"')));
-  refused(() => checker(undefined).check(event('snapshot', '')));
-  refused(() => checker(undefined).check(event('too_large', 'null')));
+  refused(() => checker().check(event('message', appData())));
+  refused(() => checker().check(event('ready', appData())));
+  refused(() => checker().check(event('snapshot', '{"artifact_id"')));
+  refused(() => checker().check(event('snapshot', '')));
+  refused(() => checker().check(event('too_large', 'null')));
 });
 
 // ------------------------------------------------------------ list members
@@ -545,10 +540,14 @@ function listing(answer) {
     fetch: async (url, init) => {
       requests.push({ url: String(url), init });
       const body = typeof answer === 'function' ? answer(String(url)) : answer;
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      // Text is sent as written, for numbers JSON.stringify cannot spell.
+      return new Response(
+        typeof body === 'string' ? body : JSON.stringify(body),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      );
     },
   });
   return { client, requests };
@@ -1109,7 +1108,7 @@ for (const [name, first, code] of RETRIED) {
   });
 }
 
-test('following retries after a clean end with a snapshot, and refuses an older one', async () => {
+test('following retries after a clean end with a fresh snapshot of any version', async () => {
   const run = await follow([
     stream(snapshot(1), change(4)),
     stream(snapshot(4)),
@@ -1124,25 +1123,32 @@ test('following retries after a clean end with a snapshot, and refuses an older 
       ['snapshot', 6],
     ],
   );
-  const stale = await follow([
+  // A space that was deleted and created again starts over: not a fault.
+  const restarted = await follow([
     stream(snapshot(1), change(4)),
-    stream(snapshot(3)),
+    stream(snapshot(0), change(1)),
   ]);
+  assert.equal(restarted.outcome.resolved, true);
+  assert.deepEqual(
+    restarted.events.map((e) => e.data.data_version),
+    [1, 4, 0, 1],
+  );
+  // Within one connection a lower version is still a fault.
+  const stale = await follow([stream(snapshot(1), change(4), change(3))]);
   assert.equal(stale.outcome.error.code, 'invalid_response');
-  assert.equal(stale.requests.length, 2);
-  assert.equal(stale.sleeps.length, 1, 'no wait after the fault');
+  assert.equal(stale.requests.length, 1);
 });
 
-test('following retries after a lost connection and keeps the newest version', async () => {
+test('following retries after a lost connection and takes the next snapshot as it is', async () => {
   const run = await follow([
     { chunks: [snapshot(1), change(2), { error: new TypeError('reset') }] },
-    stream(snapshot(2)),
+    stream(snapshot(1)),
   ]);
   assert.equal(run.outcome.resolved, true);
   assert.equal(run.disconnects[0].error.code, 'network_error');
   assert.deepEqual(
     run.events.map((e) => e.data.data_version),
-    [1, 2, 2],
+    [1, 2, 1],
   );
 });
 
@@ -1236,13 +1242,30 @@ test('following delivers too_large and then rejects without reconnecting', async
   assert.deepEqual(run.sleeps, []);
 });
 
-test('following rejects when anything follows too_large', async () => {
+test('following stops at too_large without reading what follows it', async () => {
   const run = await follow([stream(sse('too_large', tooLarge()), change(2))]);
-  assert.equal(run.outcome.error?.code, 'invalid_response');
+  assert.ok(run.outcome.error instanceof DataTooLargeError);
   assert.deepEqual(
     run.events.map((e) => e.type),
     ['too_large'],
   );
+});
+
+test('following stops at too_large however the body ends', async () => {
+  for (const ending of [
+    { error: new TypeError('reset') },
+    { hold: true },
+    { end: true },
+  ]) {
+    const run = await follow([
+      { chunks: [sse('too_large', tooLarge()), ending] },
+      stream(snapshot(1)),
+    ]);
+    assert.ok(run.outcome.error instanceof DataTooLargeError, String(ending));
+    assert.equal(run.requests.length, 1);
+    assert.deepEqual(run.sleeps, []);
+    assert.deepEqual(run.disconnects, []);
+  }
 });
 
 test('following rejects with what the handler threw and does not reconnect', async () => {
@@ -1654,4 +1677,97 @@ test('the query the client sends has the parameters of the generated contract', 
       schema.$defs.DataMemberSelect.oneOf.map((v) => v.const),
     ['names', 'values'],
   );
+});
+
+// ------------------------------------------------- JSON is checked all the way
+
+const nested = (levels, inner) =>
+  '['.repeat(levels) + inner + ']'.repeat(levels);
+const BAD_VALUES = [
+  ['1e400 in an object', '{"n":1e400}'],
+  ['-1e400 in an array', '[1,-1e400]'],
+  ['1e400 nested deeply', '{"a":{"b":[{"c":1e400}]}}'],
+  ['1e400 under __proto__', '{"__proto__":{"n":1e400}}'],
+  ['1e400 as the value itself', '1e400'],
+  ['33 levels of arrays', nested(33, '1')],
+  ['33 levels, the innermost holding 1e400', nested(33, '1e400')],
+];
+const GOOD_VALUES = [
+  ['32 levels of arrays', nested(32, '1')],
+  ['a member named __proto__', '{"__proto__":{"n":1}}'],
+  ['numbers at the edge of finite', '[1.7976931348623157e308,-0,1e-400]'],
+];
+// The text is spliced in as written: JSON.stringify cannot spell 1e400.
+const membersText = (text) =>
+  JSON.stringify(page({ select: 'values', members: ['__member__'] })).replace(
+    '"__member__"',
+    `{"name":"a","value":${text}}`,
+  );
+
+for (const [name, text] of BAD_VALUES) {
+  test(`a members answer with a value holding ${name} is invalid_response`, async () => {
+    const { client } = listing(membersText(text));
+    await assert.rejects(
+      listDataMembers(client, ART, { select: 'values' }),
+      (error) => error.code === 'invalid_response',
+    );
+  });
+
+  test(`a snapshot with a value holding ${name} is invalid_response`, async () => {
+    const raw = JSON.stringify(appData({ value: '__value__' })).replace(
+      '"__value__"',
+      text,
+    );
+    const run = await follow([
+      stream(bytes(`event: snapshot\ndata: ${raw}\n\n`)),
+      stream(snapshot(1)),
+    ]);
+    assert.equal(run.outcome.error?.code, 'invalid_response');
+    assert.equal(run.requests.length, 1);
+    assert.deepEqual(run.events, []);
+  });
+
+  test(`a change with a value holding ${name} is invalid_response`, async () => {
+    const raw = JSON.stringify(
+      appData({ data_version: 2, value: '__value__' }),
+    ).replace('"__value__"', text);
+    const run = await follow([
+      stream(snapshot(1), bytes(`event: change\ndata: ${raw}\n\n`)),
+    ]);
+    assert.equal(run.outcome.error?.code, 'invalid_response');
+    assert.deepEqual(
+      run.events.map((e) => e.type),
+      ['snapshot'],
+    );
+  });
+
+  test(`getData with a value holding ${name} is invalid_response`, async () => {
+    const { client } = listing(
+      JSON.stringify(appData({ path: '', value: '__value__' })).replace(
+        '"__value__"',
+        text,
+      ),
+    );
+    await assert.rejects(
+      client.getData(ART),
+      (error) => error.code === 'invalid_response',
+    );
+  });
+}
+
+for (const [name, text] of GOOD_VALUES) {
+  test(`a members answer accepts a value holding ${name}`, async () => {
+    const { client } = listing(membersText(text));
+    const answer = await listDataMembers(client, ART, { select: 'values' });
+    assert.equal(answer.members.length, 1);
+  });
+}
+
+test('a value named __proto__ is kept as a member and changes no prototype', async () => {
+  const { client } = listing(membersText('{"__proto__":{"polluted":true}}'));
+  const answer = await listDataMembers(client, ART, { select: 'values' });
+  const { value } = answer.members[0];
+  assert.equal(Object.getPrototypeOf(value), Object.prototype);
+  assert.equal(value.polluted, undefined);
+  assert.equal({}.polluted, undefined);
 });
