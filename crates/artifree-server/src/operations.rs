@@ -7,12 +7,13 @@
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
     CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
-    CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
-    ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
-    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
-    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
-    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
+    CreateRuntimeViewRequest, DataMember, DataMemberSelect, DataMembers, DataWriteResponse,
+    DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
+    EnqueueJobRequest, EnqueueJobResponse, ErrorBody, ErrorCode, ExportRuntime,
+    FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff, HandoffState,
+    Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch,
+    JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery,
+    ListDataMembersQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
     PurgeArtifactResponse, RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse,
     RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
     RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
@@ -29,7 +30,10 @@ use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
-use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
+use artifree_domain::data::{
+    DEFAULT_MEMBER_LIMIT, DataChange, DataError, DataPath, DataValue, MemberQuery, MemberSelect,
+    MemberValue,
+};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
 use artifree_domain::package::{
@@ -199,6 +203,13 @@ impl From<ArtifactError> for ApiError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::DataTooLarge,
                 message,
+            ),
+            // The store holds a space it cannot read back. Not `503`: a retry
+            // does not fix it, and the reason stays in the server's data.
+            ArtifactError::StoredDataInvalid(_) => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                "the stored application data cannot be read",
             ),
             ArtifactError::InvalidPackage(_) | ArtifactError::Data(_) => {
                 Self::unprocessable(message)
@@ -513,11 +524,18 @@ pub(crate) async fn update(
         .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
     let change = MetadataChange::new(title, request.pinned, request.deleted)
         .ok_or_else(|| ApiError::unprocessable("give a title, pinned, deleted, or several"))?;
+    // Moving to the trash ends the data streams of the artifact. Nothing
+    // else needs a wake-up: a stream cannot be open for an artifact that is
+    // already in the trash, so neither restoring nor purging one concerns it.
+    let changes_access = request.deleted == Some(true);
     let receipt = state
         .run(move |artifacts| artifacts.update(&actor, &key, &id, base, &change))
         .await?;
     if receipt.delivery == Delivery::Committed {
         state.feed().committed();
+        if changes_access {
+            state.data_streams().wake();
+        }
     }
     Ok(UpdateArtifactResponse {
         artifact: artifact_dto(&receipt.artifact),
@@ -1526,6 +1544,70 @@ pub(crate) async fn read_data(
     })
 }
 
+/// One page of the members of the object at a path of the actor's data space
+/// (decision 0040).
+pub(crate) async fn list_data_members(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    query: ListDataMembersQuery,
+) -> Result<DataMembers, ApiError> {
+    let id = artifact_id(id)?;
+    let path = data_path("path", query.path.as_deref().unwrap_or_default())?;
+    let wire_select = query.select.unwrap_or(DataMemberSelect::Names);
+    let select = match wire_select {
+        DataMemberSelect::Names => MemberSelect::Names,
+        DataMemberSelect::Values => MemberSelect::Values,
+    };
+    let limit = match query.limit {
+        None => DEFAULT_MEMBER_LIMIT,
+        // Beyond `usize` is beyond the bound, which the query refuses.
+        Some(limit) => usize::try_from(limit).unwrap_or(usize::MAX),
+    };
+    let after = query.after;
+    let member_query = MemberQuery::new(path, select, limit, after.clone())
+        .map_err(|error| ApiError::unprocessable(format!("query: {error}")))?;
+    let wire_path = member_query.path().to_string();
+    let artifact = id.to_string();
+    let read = state
+        .run(move |artifacts| artifacts.data_members(&actor, &id, &member_query))
+        .await?;
+    let mut members = Vec::with_capacity(read.page.members.len());
+    for member in read.page.members {
+        let (value, too_large) = match member.value {
+            MemberValue::Omitted => (None, None),
+            MemberValue::TooLarge => (None, Some(true)),
+            MemberValue::Value(text) => (
+                Some(JsonValue::from_text(text).ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        ErrorCode::Internal,
+                        "the stored application data cannot be read",
+                    )
+                })?),
+                None,
+            ),
+        };
+        members.push(DataMember {
+            name: member.name,
+            value,
+            too_large,
+        });
+    }
+    Ok(DataMembers {
+        artifact_id: artifact,
+        path: wire_path,
+        select: wire_select,
+        limit: limit as u64,
+        after,
+        data_version: read.version.0,
+        exists: read.page.exists,
+        collection: read.page.collection,
+        members,
+        next_after: read.page.next_after,
+    })
+}
+
 pub(crate) async fn set_data(
     state: &AppState,
     actor: ActorId,
@@ -1608,6 +1690,11 @@ async fn write_data(
             artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)
         })
         .await?;
+    // The commit is durable: tell the open data streams. Nothing here can fail
+    // or wait, and the answer does not depend on it (decision 0040).
+    if outcome.changed && outcome.delivery == Delivery::Committed {
+        state.data_streams().wake();
+    }
     Ok(DataWriteResponse {
         artifact_id: artifact,
         path,

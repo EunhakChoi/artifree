@@ -171,6 +171,7 @@ async fn rotate_token(
 
     // Invalidate sessions and streams tied to previous secret
     state.feed().revoke_token(&id);
+    state.data_streams().revoke_token(&id);
     state.previews().revoke_token(&id);
     state.runtime_sessions().revoke_token(&id);
 
@@ -218,6 +219,7 @@ async fn revoke_token(
 
     // Cascading session & stream revocation
     state.feed().revoke_token(&id);
+    state.data_streams().revoke_token(&id);
     state.previews().revoke_token(&id);
     state.runtime_sessions().revoke_token(&id);
 

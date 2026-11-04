@@ -740,6 +740,11 @@ enum Holder {
     /// (`403`) before the name is read (decisions 0029 and 0036).
     Purges,
 
+    /// An event stream: the holder is answered `200` with `text/event-stream`
+    /// and the body is not read, because it does not end. Anyone else is told
+    /// the name does not exist.
+    Opens,
+
     /// Closing is idempotent: the holder gets a success, and anyone else the
     /// same success, which closes nothing of the holder's.
     Closes,
@@ -790,7 +795,7 @@ const ROOM_ROUTE: &str = "/v1/runtime-sessions/{session}/artifacts/{artifact}/ro
     reason = "A table of every route reads best as one list."
 )]
 fn http_cases() -> Vec<Case> {
-    use Holder::{Closes, Purges, Reaches, Succeeds};
+    use Holder::{Closes, Opens, Purges, Reaches, Succeeds};
     vec![
         case("show", "GET", "/v1/artifacts/{artifact}", None, Succeeds),
         case(
@@ -835,6 +840,20 @@ fn http_cases() -> Vec<Case> {
             "/v1/artifacts/{artifact}/data",
             None,
             Succeeds,
+        ),
+        case(
+            "data members",
+            "GET",
+            "/v1/artifacts/{artifact}/data/members?select=values",
+            None,
+            Succeeds,
+        ),
+        case(
+            "data events",
+            "GET",
+            "/v1/artifacts/{artifact}/data/events?path=notes",
+            None,
+            Opens,
         ),
         case(
             "agent sessions",
@@ -1274,6 +1293,25 @@ async fn state_is_untouched(harness: &Harness, alice: &Person, ids: &Ids) -> Tes
 async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids) -> TestResult {
     for (number, case) in http_cases().iter().enumerate() {
         let key = format!("alice-case-{number:03}");
+        if case.holder == Holder::Opens {
+            let request = Request::builder()
+                .method(case.method)
+                .uri(ids.fill(case.route))
+                .header(header::AUTHORIZATION, format!("Bearer {}", alice.secret))
+                .body(Body::empty())?;
+            let response = harness.api.clone().oneshot(request).await?;
+            assert_eq!(response.status(), StatusCode::OK, "alice: {}", case.name);
+            let kind = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok());
+            assert!(
+                kind.is_some_and(|kind| kind.starts_with("text/event-stream")),
+                "alice: {}: {kind:?}",
+                case.name
+            );
+            continue;
+        }
         let reply = harness
             .send(
                 case.method,
@@ -1284,7 +1322,7 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
             )
             .await?;
         match case.holder {
-            Holder::Succeeds | Holder::Closes | Holder::Purges => assert!(
+            Holder::Succeeds | Holder::Closes | Holder::Purges | Holder::Opens => assert!(
                 reply.status.is_success(),
                 "alice: {} ({} {}): {} {}",
                 case.name,

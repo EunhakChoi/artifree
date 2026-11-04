@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod changes;
+pub mod data_streams;
 mod handoffs;
 pub mod http;
 mod inventory;
@@ -25,6 +26,8 @@ mod users;
 pub mod web;
 pub mod worker;
 
+#[cfg(test)]
+mod data_stream_tests;
 #[cfg(test)]
 mod runtime_tests;
 
