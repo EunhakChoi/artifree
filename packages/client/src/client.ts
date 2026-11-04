@@ -1718,7 +1718,13 @@ export class ArtifreeClient {
     return parsed;
   }
 
-  private async send(
+  /**
+   * Sends one request and returns the successful response unread, failing
+   * with the client's errors for a failed request. Public for the same reason
+   * as {@link json}: the standalone data stream module opens its own body
+   * with it (see `followData`).
+   */
+  async send(
     method: string,
     path: string,
     {

@@ -61,3 +61,11 @@ export type {
   RoomExpectation,
   RoomIdentity,
 } from './room.js';
+export { DATA_LIMITS, listDataMembers } from './data-queries.js';
+export type {
+  DataMembersQuery,
+  ListDataMembersOptions,
+} from './data-queries.js';
+export { DataTooLargeError, followData } from './data-follow.js';
+export type { DataEvent, FollowDataOptions } from './data-follow.js';
+export { MAX_EVENT_BYTES, MAX_LINE_BYTES } from './event-stream.js';
