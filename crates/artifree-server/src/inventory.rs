@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes, and a sandboxed preview origin.",
+        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes (with member pages and a data subscription over SSE), and a sandboxed preview origin.",
     ),
     (
         "domain",
@@ -83,7 +83,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/data.rs",
         ComponentStatus::Implemented,
-        "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Structured edits, change subscriptions, queries, and access from the content runtime are planned.",
+        "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Over HTTP only: a bounded page of an object's members and a subscription to one path (a snapshot, then the new value whenever the version moves; no replay). Structured edits, a query language, and access from the content runtime are planned.",
     ),
     (
         "jobs",
@@ -164,6 +164,6 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/client",
         ComponentStatus::Implemented,
-        "Fetch-based HTTP API v1 client with structured errors, change feed following, and application data reads and writes.",
+        "Fetch-based HTTP API v1 client with structured errors, change feed following, application data reads and writes, and, in modules loaded on demand, member pages and data following.",
     ),
 ];

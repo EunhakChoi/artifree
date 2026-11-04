@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.14.0",
+  "contract_version": "0.15.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -45,7 +45,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes, and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes (with member pages and a data subscription over SSE), and a sandboxed preview origin."
     },
     {
       "id": "domain",
@@ -81,7 +81,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/data.rs",
       "status": "implemented",
-      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Structured edits, change subscriptions, queries, and access from the content runtime are planned."
+      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Over HTTP only: a bounded page of an object's members and a subscription to one path (a snapshot, then the new value whenever the version moves; no replay). Structured edits, a query language, and access from the content runtime are planned."
     },
     {
       "id": "jobs",
@@ -162,7 +162,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/client",
       "status": "implemented",
-      "summary": "Fetch-based HTTP API v1 client with structured errors, change feed following, and application data reads and writes."
+      "summary": "Fetch-based HTTP API v1 client with structured errors, change feed following, application data reads and writes, and, in modules loaded on demand, member pages and data following."
     }
   ],
   "package_rules": {

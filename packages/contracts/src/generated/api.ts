@@ -67,7 +67,9 @@ export type ApiBody =
   | SetDataRequest
   | UpdateDataRequest
   | DeleteDataRequest
-  | DataWriteResponse;
+  | DataWriteResponse
+  | DataMembers
+  | DataTooLarge;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -222,6 +224,11 @@ export type JsonValue =
   | number
   | boolean
   | null;
+/**
+ * What `GET /v1/artifacts/{id}/data/members` lists for each member (decision
+ * 0040).
+ */
+export type DataMemberSelect = 'names' | 'values';
 
 /**
  * Body of `POST /v1/artifacts`.
@@ -1740,6 +1747,92 @@ export interface DataWriteResponse {
    * True when an earlier request with the same key already did it.
    */
   replayed: boolean;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/data/members` (decision 0040): one
+ * page of the members of the object at a path, with the query as it was
+ * applied and the data version it was read at.
+ */
+export interface DataMembers {
+  /**
+   * The name the page starts after, when one was given.
+   */
+  after?: string | null;
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * Whether what is at the path is an object. Only an object has members.
+   */
+  collection: boolean;
+  /**
+   * The version of the data space the page was read at. It is unrelated to
+   * the source revision and to the metadata revision.
+   */
+  data_version: number;
+  /**
+   * Whether anything is at the path.
+   */
+  exists: boolean;
+  /**
+   * The page size that was applied.
+   */
+  limit: number;
+  /**
+   * The members, in the order of their names as UTF-8 bytes. A page is
+   * bounded: 100 members, and 256 KiB of names and listed values, but its
+   * first member is always listed.
+   */
+  members: DataMember[];
+  /**
+   * The last name listed, present when more members follow it: pass it as
+   * `after` with the same other parameters.
+   */
+  next_after?: string | null;
+  /**
+   * The path that was listed, as parsed.
+   */
+  path: string;
+  select: DataMemberSelect;
+}
+/**
+ * One member in `DataMembers`. Under `select=values` exactly one of `value`
+ * and `too_large` is present; under `select=names` neither.
+ */
+export interface DataMember {
+  /**
+   * The member's name.
+   */
+  name: string;
+  /**
+   * Present, and `true`, when the value is larger than 32 KiB and is not
+   * carried.
+   */
+  too_large?: boolean | null;
+  /**
+   * The member's value, present when its canonical text is at most 32 KiB.
+   * It can be `null`, which is present as `null`.
+   */
+  value?: JsonValue | null;
+}
+/**
+ * Data of the `too_large` event of `GET /v1/artifacts/{id}/data/events`: the
+ * value at the watched path is larger than 128 KiB. The stream ends after it.
+ */
+export interface DataTooLarge {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space the value was read at.
+   */
+  data_version: number;
+  /**
+   * The watched path, as parsed.
+   */
+  path: string;
 }
 
 /**
