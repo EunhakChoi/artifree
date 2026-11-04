@@ -1,0 +1,349 @@
+# 0040: Data changes in the feed and a member listing
+
+Date: 2026-11-04. Status: **proposed**. Builds on [0006](0006-change-feed.md),
+[0007](0007-live-web-workspace.md),
+[0027](0027-backup-restore-and-schema-upgrade.md), [0031](0031-app-data.md),
+and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
+
+> **Nothing in this record is implemented.** It fixes the design of R07 before
+> any code. "Today" describes `main` as checked when this was written; every
+> other statement is what a slice will build. A code pull request may not
+> change a numbered rule; an amendment is a separate documentation pull request.
+
+Independent Artifree design: no private evidence was consulted, and nothing
+below is presented as an observation of the original product.
+
+## Context: what exists today
+
+- Data writes (0031) record no change and wake no stream; clients poll
+  `GET data` (0031 decision 14). The store's `record_change` puts a row in the
+  feed of the artifact's owner (0036 decision 8). Data ownership is checked in
+  the core (`ArtifactService::authorized`); the store's data write checks only
+  that the artifact is neither in the trash nor purged.
+- `changes` (schema 10, current) admits six kinds by a `CHECK` and refers to
+  the revision and metadata revision by foreign keys. Contract: 0.14.0. API
+  responses carry `Cache-Control: no-store`.
+- The TypeScript client reports an unknown kind as `unknown` and ignores
+  unknown fields; the web workspace then reads its list again (0007 decision
+  4). The event-stream parser and the JSON and error body reads have no size
+  bound. `parseRetryAfter` takes 1 to 6 digits as seconds (no date, no other
+  clamp); reconnecting waits that instead of its doubling delay, without
+  jitter. An aborted request rejects as `network_error` unless the method
+  calls `signal.throwIfAborted()`.
+
+## Scope
+
+R07 is (a) notifications of application data changes and (b) a paged listing
+of the member names of one object. **Not R07:** filters, sorting, aggregates
+(T11); pending writes, acknowledgements, client queues (R08); data access from
+frames or previews; MCP tools for listing or following (MCP has no stream,
+0006 decision 3); a new streaming endpoint, server timer, or server limit.
+
+## Decisions
+
+### Data changes in the feed (R07a)
+
+1. **Kind and shape.** `ChangeKind` gains `data_changed`. `ArtifactChange`
+   gains `data_version`, present exactly for that kind: the version the write
+   left the space at. `revision` and `metadata_revision` carry the artifact's
+   current positions, never a data version. An event carries no path and no
+   value. The contract gets a minor version bump, regenerated.
+2. **When.** A set, update, or delete appends one `data_changed` row in its
+   own write transaction, after the data row and the request key, only when
+   it changed the space. A replay, a write with `changed: false`, a refused
+   write, and a rolled-back one record nothing (0006 C2). A duplicate with
+   `copy_data` records only `created`, a purge only `purged`, and a restored
+   backup already gets a new feed identity (`reset`, 0027).
+3. **Whose feed.** The row belongs to the feed of the actor whose space
+   changed, passed to the recording function explicitly. Today that actor is
+   always the owner (0031 decision 8), so the owner lookup would pick the same
+   feed by coincidence; sharing (S02) would break it. A stream still carries
+   only its own actor's rows. This amends 0006 decision 6 for this kind.
+4. **Wake-up.** A data write that recorded a row wakes this process's streams
+   as a commit does (0006 decision 5), over HTTP and MCP alike; other
+   processes' writes arrive within the 15-second reread. Every limit and timer
+   of 0006 applies unchanged.
+5. **Schema.** The version after the current one rebuilds `changes` with
+   `data_changed` in the kind `CHECK`, a nullable `data_version`,
+   `CHECK ((kind = 'data_changed') = (data_version IS NOT NULL))`, and
+   `CHECK (data_version IS NULL OR data_version >= 1)`. Rows are kept by value
+   with the global sequence and every actor's head; the step fails, changing
+   nothing, if a row would be lost (as 0036 decision 8). Fixtures of every
+   earlier version upgrade, and an older backup restores through it (0027).
+6. **Consumers.** A client built before R07a reports the kind as `unknown`
+   and reads again: wasteful, not wrong. In R07a the client's record of known
+   kinds gains `data_changed` (its type requires every contract kind), and the
+   web workspace ignores it, never as unknown or as a new revision; this
+   amends 0007 decision 4.
+
+### Member listing (R07b)
+
+7. **Route.** `GET /v1/artifacts/{id}/data/members`, with the authentication,
+   agent-token, rate-limit, `404`, and check-order rules of `GET data` (0031
+   decisions 8 and 9). No MCP tool.
+8. **Query**, strict as for `GET data` (an unknown or repeated parameter is
+   `400 invalid_request`). `path`: optional, the root when absent or empty, a
+   breach of 0031 decision 2 is `422 invalid_request`. `limit`: 1 to 100,
+   default 50. `after`: a `next` value (rule 10). `at_data_version`: optional;
+   a space at another version, older or newer, answers `409 data_conflict`
+   with `current_data_version`, and `0` matches a space never written.
+   Numbers are digits without sign or leading zero, at most 2^53 - 1; any
+   other `limit` or `at_data_version` is `400`.
+9. **Response** `DataMembers`, from one read of the space: `artifact_id`,
+   `path` (canonical), `data_version` (of that read), and:
+   - `exists`: false when nothing is at the path or the path passes through a
+     value that is not an object, as `GET data` reads it; `names` is then
+     empty and `next` absent. The root always exists. A value at the path that
+     is not an object (`null` and arrays included) is `409 data_path_conflict`.
+   - `names`: member names after the cursor, ascending by UTF-8 bytes, at most
+     `limit`. Only names matching the segment grammar of 0031 decision 2 are
+     listed; others (valid up to 256 bytes, 0031 decision 3) are skipped, do
+     not count toward `limit`, and do not make `next` present (`GET data`
+     returns them). Values, sizes, and types are not listed.
+   - `next`: present exactly when more listable names follow at
+     `data_version`. `data_path_conflict`'s contract description gains this
+     read case.
+   - Checks: identifier (`404`), query (`400`), path (`422`), cursor (`400`),
+     access (`404`), then `at_data_version` and the value at the path (`409`).
+10. **Cursor.** Issued by the server: base64url without padding, at most 256
+    bytes, encoding a digest of the artifact identifier and canonical path and
+    the last listed name. One that does not decode, is longer, or is bound to
+    another artifact or path is `400 invalid_request`. It names a position,
+    not a permission; every page checks access. A page lists names greater
+    than the cursor's, so a removed name does not break paging.
+11. **Consistency.** A page agrees with its own `data_version`; pages agree
+    with each other only when each sends the same `at_data_version`. Without
+    it, a name present at every page's version is listed exactly once; names
+    added or removed meanwhile may or may not be. When R06b widens the path
+    grammar, the listing follows it and the bound of rule 19 is recomputed.
+
+### TypeScript client (R07c)
+
+12. **Feed changes.** `FeedChange` carries `data_version` for `data_changed`;
+    one without a safe integer of at least 1 there is `invalid_response`.
+13. **`followData`** (artifact, optional path, `signal`, `onData`) is a
+    client routine; the server keeps no follower state. It opens
+    `GET /v1/changes` without `Last-Event-ID` and, after `ready`, reads
+    `GET data` at the path: the snapshot. `onData` receives `snapshot` or
+    `update` with the `AppData` read, or `unavailable`. The follower keeps
+    `seen` (the version last delivered), `named` (the highest version a
+    `data_changed` of the artifact named on this connection, 0 at `ready` or
+    `reset`), and `asked` (`named` when the read in flight was sent). A read
+    answering version `v`:
+    - `v < asked` is `invalid_response`: a read sent after an event cannot
+      miss its change.
+    - The snapshot read, or `v < seen` (only a replaced database does this),
+      delivers `snapshot` and starts an epoch; `v > seen` delivers `update`;
+      `v = seen` delivers nothing. `seen` becomes `v`.
+    - If `named > v`, one more read is sent; otherwise the follower waits.
+14. **Ending.** A `404` on any read (the snapshot included), or a `deleted` or
+    `purged` change of the artifact after `ready`, ends the follower: the read
+    in flight is aborted and its answer discarded, the stream closed, one
+    `unavailable` delivered, and the promise resolves (unless `onData` throws,
+    rule 15). It never waits for a recovery (an application starts a new
+    follower), which removes the races of trash, recovery, and purge against a
+    read. Like the server's `404`, `unavailable` does not tell missing,
+    trashed, purged, or foreign apart. Other changes of the artifact
+    (`created`, `revised`, `metadata_updated`, `recovered`, `unknown`) and of
+    other artifacts trigger nothing.
+15. **States.** Connecting (C, including the wait before reconnecting),
+    snapshotting (S), following (F), reading (R), and ended, which ignores
+    everything. The follower starts in C by opening the stream. _Abandon_
+    aborts the read in flight; answers of abandoned reads are discarded in
+    every state. _Retry_ closes the stream, waits (rule 17), and opens one
+    (C). _End_ is rule 14. _Reject_ closes everything and rejects. _Record_
+    sets `named` to the larger value: the buffer of events that arrive during
+    a read, applied when it answers. A change of any kind before `ready`
+    breaks 0006 decision 4 and rejects. "—" cannot occur: only C has a
+    pending stream request, and only S and R a read.
+
+    | Event                                   | C       | S                | F                      | R                |
+    | --------------------------------------- | ------- | ---------------- | ---------------------- | ---------------- |
+    | stream accepted                         | wait    | —                | —                      | —                |
+    | `ready` or `reset`                      | read; S | abandon; read; S | read; S                | abandon; read; S |
+    | `data_changed` of the artifact, `n`     | reject  | record           | if `n > seen`: read; R | record           |
+    | `deleted` or `purged` of the artifact   | reject  | end              | end                    | end              |
+    | any other change                        | reject  | nothing          | nothing                | nothing          |
+    | read answers `200`                      | —       | rule 13; F or R  | —                      | rule 13; F or R  |
+    | read answers `404`                      | —       | end              | —                      | end              |
+    | stream fails, ends, or stalls (rule 18) | retry   | abandon; retry   | retry                  | abandon; retry   |
+    | read fails: network, `429`, `5xx`       | —       | abandon; retry   | —                      | abandon; retry   |
+    | other `4xx`, `invalid_response`         | reject  | reject           | reject                 | reject           |
+    | `signal` aborts                         | resolve | resolve          | resolve                | resolve          |
+    | `onData` throws                         | —       | reject           | reject                 | reject           |
+
+    An abort wins over everything, an error `onData` throws included.
+
+16. **Guarantees**, about which reads happen, not how soon:
+    - a. A change of the space committed while the follower runs is reflected
+      by a later delivery of its version or a newer one, unless the follower
+      ends, rejects, or is aborted first: a read sent after the commit
+      observes it, and its event causes such a read unless `seen` covers it;
+      after a drop, the snapshot is read after the next `ready`.
+    - b. Within an epoch, delivered versions strictly increase.
+    - c. A delivery is the state one read returned; intermediate versions may
+      never be delivered. An update follows any increase of the space's
+      version, also when the value at the path is unchanged.
+    - d. At most one read is in flight. Events received during one read cause
+      at most one further read, none when its version is at least every
+      version they named; several events are not always one read.
+    - e. A read sent after an event named `n` answers at least `n`, or the
+      follower rejects with `invalid_response`.
+17. **Retry** (amends 0006 decision 10, for `followChanges` and `followData`;
+    what is retried is today's set, and rule 15 for reads). Attempt `n` counts
+    failures since the last success: an accepted stream for `followChanges`
+    (as today), a read answered `200` for `followData`.
+    `base = min(max, min × 2^n)`, defaults 0.5 s and 30 s;
+    `delay = base × (0.5 + 0.5u)`, `u` in [0, 1) from an injectable random
+    source, so the delay is in [base/2, base). A `Retry-After`, parsed as
+    today, is a floor: `max(Retry-After, delay)`. A clean end of a stream
+    carries no reason and is retried; a revoked token answers the next open
+    `401`, which rejects. Revocation across processes stays X04.
+18. **Stall.** Once a stream is accepted, 45 seconds without a byte of its body
+    (comments count; the server sends one every 15 idle seconds) cancel it as
+    a drop, in both functions. No timer runs before the headers: a browser may
+    hold the request without failing it (0007 decision 2).
+19. **Transport bounds**, checked as data arrives; the body is cancelled at
+    once.
+    - Event streams (the parser both functions share): 65,536 UTF-16 code
+      units for the unfinished line, and for one event's data and type
+      together; past either, `invalid_response`. A change event today is
+      under 400.
+    - Success bodies of reads by `followData` and `listDataMembers`: 1,064,960
+      bytes (1 MiB + 16 KiB); past it, `invalid_response`. A `GET data` body is
+      a space of at most 1,048,576 bytes and under 1,200 more. A page is at
+      most 8,130 bytes: 100 unescaped names of up to 64 bytes (6,699 quoted
+      with commas), a quoted path up to 1,041, a cursor of 258, and the rest.
+    - Error bodies of their requests, stream opens included: 65,536 bytes.
+      Past it, the response counts as one without an API body, and its status
+      decides, as for a proxy's page today.
+    - Other client calls keep their current reads.
+20. **Abort and errors.** An aborted `listDataMembers` rejects with
+    `signal.reason` (an `AbortError` by default), as `throwIfAborted()` does.
+
+    | Situation                                 | `followData`                        | `listDataMembers`       |
+    | ----------------------------------------- | ----------------------------------- | ----------------------- |
+    | aborted before the call                   | resolves; sends nothing             | rejects; sends nothing  |
+    | abort before headers, in a body or stream | cancels; resolves; delivers no more | cancels; rejects        |
+    | abort while waiting to reconnect          | resolves at once                    | never waits             |
+    | `onData` aborts                           | delivers no more; resolves          | —                       |
+    | `onData` throws                           | rejects with it; never retried      | —                       |
+    | `onData` aborts and throws                | resolves (abort wins)               | —                       |
+    | error body over its bound                 | its status decides                  | rejects; status decides |
+    | network failure, `429`, `5xx`             | retry, then a new snapshot          | rejects; no retry       |
+    | `404`                                     | read: end; stream open: rejects     | rejects                 |
+    | other `4xx`; body breaking rules 19, 22   | rejects                             | rejects                 |
+
+21. **`listDataMembers`** takes an artifact and optional `path`, `limit`,
+    `after`, `atDataVersion`, and `signal`, and reads one page. A caller pages
+    by passing `next` as `after` until `next` is absent.
+22. **Client trust rules** (copied to [quality](../quality.md)): (1) the
+    server owns the data rules; the client does not re-check storability
+    (surrogates, duplicates, value count, nesting, name length, canonical
+    size, number spelling) and never computes canonical sizes. (2) Shape, not
+    meaning: fields have their TypeScript type, integers are safe, enums are
+    closed with an `unknown` fallback where the contract may grow. (3) The
+    client checks what its own state depends on: the echoed `artifact_id`
+    equals the one asked; rules 13 and 16e; known event types; `next`, if
+    present, is a non-empty string; the failure's class decides retry or stop
+    (rules 14 and 17). (4) Memory bounds are transport bounds (rule 19). (5) A
+    violation of 2 to 4 is `invalid_response`, decided once per message and
+    never retried. (6) Wire shapes come from the generated contract; no rule
+    lives only in TypeScript. (7) A review finding asking for a check outside
+    1 to 6 is a follow-up, not a blocker.
+
+### Web data panel (R07e)
+
+23. A read-only panel shows the open artifact's root data and `data_version`,
+    kept current by `followData` without polling, only while shown and the
+    page visible (0007 W6). It stops when another artifact opens, shows a
+    notice on `unavailable`, and reads through the page's request gate (0007).
+    Frames and previews get no data.
+
+## Slices and acceptance checks
+
+Each code pull request aims at under 3,000 lines without generated files and
+may be split further, and adds the amendment notes its rules make true (0006
+decisions 6 and 10, 0007 decision 4). Each check names the wrong
+implementation it fails.
+
+- **R07a** store, feed, contract, schema, web reducer (rules 1–6).
+  - Each changing set, update, and delete adds one row with the new version
+    and the current revisions (fails a data version in `revision`); a replay,
+    no-op, stale base, path conflict, and oversized value add none, and a
+    trigger failing the `changes` insert fails the whole write with space and
+    key unchanged (fails recording early or in its own transaction).
+  - In the store, which does not check ownership, a write as actor B on A's
+    artifact adds the row to B's feed and leaves A's head (fails the owner
+    lookup). `copy_data` adds only `created`; a purge only `purged`.
+  - A version-10 fixture with every kind upgrades with rows equal by value and
+    heads unchanged, an older cursor resumes without `reset`, each `CHECK`
+    refuses its inconsistent row, and an older backup restores.
+  - HTTP and MCP writes each reach a stream within the feed tests' 5-second
+    wait (fails a missing wake-up: the reread takes 15 s). Two users: A's
+    write reaches only A's stream; B's write on A's artifact is `404` and
+    adds nothing.
+  - Other kinds serialize without `data_version`. The web workspace reads
+    nothing for `data_changed` of an open or unlisted artifact (fails
+    treating it as `unknown` or as a revision).
+- **R07b** listing, server and contract (rules 7–11).
+  - Order `-y, 0, B, _x, a` (fails case folding or locale order). Seven names
+    at limit 3 page 3, 3, 1; six give no `next` on the second page (fails
+    `next` for a full page). Names `a`, `a b`, `b`, `é`: limit 2 gives `a, b`
+    without `next`, limit 1 `a` with `next` then `b` without (fails counting
+    or paging past skipped names).
+  - `exists: false` for a missing path and one through a scalar or array;
+    `409 data_path_conflict` for a scalar, `null`, or array at the path.
+  - `at_data_version` equal, older, newer, and `0` unwritten; the earlier
+    cursor with the earlier version after a write is `409`.
+  - A core test whose fake store answers each read with a newer space gets a
+    page whose names and version come from the same answer (fails two reads).
+  - Refused queries (`limit` 0, 101, `05`, `+5`; unknown; repeated); 60 names
+    without `limit` give 50 and `next`. Undecodable, 257-byte, foreign-path,
+    and foreign-artifact cursors are `400`; the deepest path with a 64-byte
+    name gives a cursor of at most 256 bytes.
+  - The route joins the 0036 route table (foreign, trashed, purged answer as
+    unknown; an agent token works); an unclassified route fails that test.
+- **R07c** client (rules 12–22), with a fake server, timers, and random.
+  - Every cell of rule 15, each failing the opposite behavior (a read per
+    event, events dropped during the snapshot). `v < asked` rejects, while
+    the same `v` from a read sent before the event is accepted and followed
+    by one more read.
+  - Delays with `u` = 0 and near 1, the 30-second cap, and `Retry-After`
+    above and below the delay (fails no jitter, or `Retry-After` replacing
+    it). 45 s of silence reconnects; a comment every 15 s prevents it.
+  - An endless line, a 1,064,961-byte success body, and a 65,537-byte error
+    body stop at the bound with the body cancelled; the bounds themselves
+    pass (fails reading whole and checking afterwards).
+  - Every row of rule 20, abort racing an error body included; a wrong echoed
+    `artifact_id`, an empty `next`, and unsafe integers are refused.
+- **R07d** guides: README and `docs/mcp.md` describe following and listing
+  (MCP still polls). Each code slice corrects the sentences it makes false.
+- **R07e** panel (rule 23), after R07c, may split into panel and live updates;
+  needs the shadcn skill and Chromium and Firefox smoke checks: an agent's
+  write appears without reload, no `GET data` is sent while nothing changes
+  for 20 s, longer than the 15-second reread of 0006 (fails polling), and
+  trashing shows the notice.
+
+## Not implemented
+
+Everything above. What R07 excludes is listed under Scope.
+
+## Alternatives
+
+A data stream of its own adds an endpoint, a limit, and a timer for what the
+feed already orders and authorizes per actor. Values in events are large and
+stale behind a read; paths in events cannot spare a read, because the version
+is per space (0031 decision 1). A follower that waits through the trash needs
+a "gone, maybe back" state that races recovery and purge; ending is simpler.
+
+## Costs
+
+A schema step and a contract change. A row per changing data write, kept
+until retention (O05), at the pace the limits of 0005 allow. A follower holds
+a stream and reads after every change of the space, other paths included; the
+panel adds a second stream per page while shown, against the actor's 16 and
+the browser's six or so connections. A read that never answers holds the
+follower until an abort or a drop. A kind added later that alters data would
+not wake older followers, so such a change must also record `data_changed`.
+Names outside the path grammar are not listed until R06b.
