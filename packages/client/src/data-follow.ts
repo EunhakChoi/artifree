@@ -2,6 +2,7 @@ import type { AppData, DataStreamTooLarge } from '@artifree/contracts';
 import type { ClientConfiguration } from './client.js';
 import {
   DATA_LIMITS,
+  canonicalBytes,
   isDataPath,
   isStoredJson,
   nestingAllowedAt,
@@ -126,7 +127,8 @@ function jsonOf(text: string): unknown {
  * Validates one event against the request and the connection so far: the
  * right artifact and path, exact fields, a version strictly newer than the
  * last of this connection, a snapshot first and only first, nothing after a
- * `too_large`, and a value that is JSON the server could have stored.
+ * `too_large`, and a value that is JSON the server could have stored and
+ * whose canonical text is within the event bound.
  */
 function validate(
   type: string,
@@ -191,9 +193,12 @@ function validate(
   };
   if (hasValue) {
     const found: unknown = data.value;
+    // The value alone is held to the event bound, in canonical bytes; the
+    // framing allowance of the line limits never widens it.
     if (
       !isStoredJson(found, nestingAllowedAt(pathDepth(path))) ||
-      (path === '' && !isRecord(found))
+      (path === '' && !isRecord(found)) ||
+      canonicalBytes(found) > DATA_LIMITS.eventMaxBytes
     )
       return bad();
     event.value = found;
@@ -240,9 +245,11 @@ async function* bodyChunks(
  * Whether reconnecting can help, by rule: the connection failed
  * (`network_error`), the server asked for a wait (429), or the server or a
  * proxy before it is unavailable (502, 503, 504, and the typed
- * `unavailable`). A 500 `internal` (stored data that does not parse), every
- * 4xx other than 429, and a response that breaks the contract need a change
- * on the client's side.
+ * `unavailable`, which an `error` event of an accepted stream carries as
+ * status 200). A fault of the stored data (`internal`, as a 500 before the
+ * stream is accepted or as an `error` event after it), `not_found`, every 4xx
+ * other than 429, and a response that breaks the contract need a change on
+ * the client's side.
  */
 export function isRetryable(error: ArtifreeApiError): boolean {
   return (
@@ -329,7 +336,10 @@ export async function followData(
   let attempt = 0;
   while (!signal.aborted) {
     let failure: ArtifreeApiError | undefined;
-    let callbackFailure: unknown;
+    // What a callback threw. It is checked before anything is classified as
+    // a transport failure, so a retryable-looking error from a callback is
+    // never retried.
+    let callbackFailure: { readonly error: unknown } | undefined;
     let opened = false;
     let openedAt = 0;
     let delivered = 0;
@@ -359,6 +369,7 @@ export async function followData(
         if (called !== undefined) {
           await response.body.cancel().catch(() => undefined);
           if ('aborted' in called) return 'aborted';
+          callbackFailure = { error: called.threw };
           throw called.threw;
         }
       }
@@ -377,22 +388,19 @@ export async function followData(
         });
         if (called !== undefined && 'aborted' in called) return 'aborted';
         // Terminal the moment it is delivered, whatever the connection does.
-        if (checked.type === 'too_large') {
-          if (called !== undefined) throw called.threw;
-          return 'too_large';
-        }
         if (called !== undefined) {
-          callbackFailure = called.threw;
-          break;
+          callbackFailure = { error: called.threw };
+          throw called.threw;
         }
+        if (checked.type === 'too_large') return 'too_large';
       }
     } catch (error: unknown) {
+      if (callbackFailure !== undefined) throw callbackFailure.error;
       if (signal.aborted) return 'aborted';
       if (!(error instanceof ArtifreeApiError) || !isRetryable(error))
         throw error;
       failure = error;
     }
-    if (callbackFailure !== undefined) throw callbackFailure;
     if (signal.aborted) return 'aborted';
     if (opened && delivered >= 1 && clock() - openedAt >= stableMs) attempt = 0;
     const asked = failure === undefined ? undefined : retryAfterMs(failure);

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   ArtifreeApiError,
   DATA_LIMITS,
+  canonicalBytes,
   followData,
   isRetryable,
   listDataMembers,
@@ -1260,3 +1261,324 @@ test('the client grammar and bounds are the ones the Rust code states', () => {
     rustConstant(contract, 'DATA_EVENT_MAX_BYTES'),
   );
 });
+
+// Bounds the server promises, held on the client -------------------------------------------
+
+const errorEvent = (code, message = code) =>
+  frame('error', { error: { code, message } });
+
+test('canonical size: the vectors pinned by the Rust side give the same byte counts', () => {
+  const lines = readFileSync(
+    new URL('./fixtures/data-canonical.tsv', import.meta.url),
+    'utf8',
+  )
+    .split('\n')
+    .filter((line) => line !== '');
+  assert.ok(lines.length >= 10, 'the vectors were not read');
+  for (const line of lines) {
+    const [input, expected] = line.split('\t');
+    assert.equal(
+      canonicalBytes(JSON.parse(input)),
+      encoder.encode(expected).length,
+      input,
+    );
+  }
+});
+
+const bigString = (chars, char = 'x') => char.repeat(chars);
+
+test('follow: the value, not the event, is held to 131072 bytes, and the framing allowance does not widen it', async () => {
+  // {"v":"..."} is the value; its canonical text is 8 bytes of structure
+  // around the string: {"v":"x"} -> 4 + 2 + the string's own bytes.
+  const around = (chars) => ({ v: bigString(chars) });
+  const exactly = 131_072 - canonicalBytes({ v: '' });
+  const at = await run(ending(eventResponse([snapshot(1, around(exactly))])));
+  assert.equal(at.error, undefined);
+  assert.equal(at.log.events.length, 1, 'a value of exactly 131072 bytes');
+  const over = await run([eventResponse([snapshot(1, around(exactly + 1))])]);
+  assert.ok(over.error instanceof ArtifreeApiError, String(over.error));
+  assert.equal(over.error.code, 'invalid_response');
+  assert.equal(over.log.events.length, 0, 'nothing is delivered');
+  assert.equal(over.log.calls.length, 1, 'and it is not retried');
+  // A change is held to the same bound.
+  const later = await run([
+    eventResponse([snapshot(1, {}), change(2, around(exactly + 1))]),
+  ]);
+  assert.equal(later.error?.code, 'invalid_response');
+  assert.equal(later.log.events.length, 1);
+});
+
+test('follow: multi-byte and escaped content is measured in canonical bytes', async () => {
+  for (const [char, per] of [
+    ['é', 2],
+    ['€', 3],
+    ['\n', 2],
+    ['\u0001', 6],
+    ['"', 2],
+    ['\\', 2],
+  ]) {
+    const fixed = canonicalBytes({ v: '' });
+    const fits = Math.floor((131_072 - fixed) / per);
+    const ok = await run(
+      ending(eventResponse([snapshot(1, { v: bigString(fits, char) })])),
+    );
+    assert.equal(
+      ok.log.events.length,
+      1,
+      `${JSON.stringify(char)} at the bound`,
+    );
+    const over = await run([
+      eventResponse([snapshot(1, { v: bigString(fits + 1, char) })]),
+    ]);
+    assert.equal(
+      over.error?.code,
+      'invalid_response',
+      `${JSON.stringify(char)} over the bound`,
+    );
+  }
+});
+
+test('follow: member names at any depth are 1 to 256 bytes', async () => {
+  const name = (size, char = 'k') =>
+    char.repeat(size / encoder.encode(char).length);
+  const accepted = [
+    ['256 ASCII bytes', { [name(256)]: 1 }],
+    ['256 bytes of two-byte characters', { [name(256, 'é')]: 1 }],
+    ['nested 256 bytes', { a: { b: [{ [name(256)]: 1 }] } }],
+  ];
+  for (const [label, value] of accepted) {
+    const { log } = await run(ending(eventResponse([snapshot(1, value)])));
+    assert.equal(log.events.length, 1, label);
+  }
+  const refused = [
+    ['an empty name', { a: { '': 1 } }],
+    ['an empty name in an array', { a: [{ '': 1 }] }],
+    ['an empty name at the top', { '': 1 }],
+    ['257 ASCII bytes', { [name(257)]: 1 }],
+    ['258 bytes of two-byte characters', { [name(258, 'é')]: 1 }],
+    ['258 bytes of three-byte characters', { [name(258, '€')]: 1 }],
+    ['a long name two levels down', { a: { b: { [name(257)]: 1 } } }],
+    ['a long name in an array', { a: [1, { [name(257)]: 1 }] }],
+  ];
+  for (const [label, value] of refused) {
+    const { error, log } = await run([eventResponse([snapshot(1, value)])]);
+    assert.equal(error?.code, 'invalid_response', label);
+    assert.equal(log.events.length, 0, label);
+  }
+});
+
+const valuesPage = (members, over = {}) =>
+  page({ select: 'values', members, ...over });
+const ofCanonical = (name, bytes) => ({
+  name,
+  // A string takes its length plus the two quotes.
+  value: 'x'.repeat(bytes - 2),
+});
+
+test('members: a value over the member bound must come as too_large', async () => {
+  const request = { select: 'values' };
+  const exact = await listDataMembers(
+    pager(valuesPage([ofCanonical('a', 32_768)])),
+    A,
+    request,
+  );
+  assert.equal(canonicalBytes(exact.members[0].value), 32_768);
+  await assert.rejects(
+    listDataMembers(pager(valuesPage([ofCanonical('a', 32_769)])), A, request),
+    (e) => e instanceof ArtifreeApiError && e.code === 'invalid_response',
+  );
+  // The marker is what the server sends instead.
+  const marked = await listDataMembers(
+    pager(valuesPage([{ name: 'a', too_large: true }])),
+    A,
+    request,
+  );
+  assert.deepEqual(marked.members, [{ name: 'a', too_large: true }]);
+  // Multi-byte content is counted in bytes.
+  await assert.rejects(
+    listDataMembers(
+      pager(valuesPage([{ name: 'a', value: 'é'.repeat(16_384) }])),
+      A,
+      request,
+    ),
+    (e) => e.code === 'invalid_response',
+    'two-byte characters: 32770 bytes',
+  );
+});
+
+test('members: a page of names and values is held to 262144 bytes', async () => {
+  const request = { select: 'values' };
+  const names = 'abcdefgh'.split('');
+  const seven = names.slice(0, 7).map((name) => ofCanonical(name, 32_768));
+  // 8 name bytes + 7 * 32768 + the last: exactly 262144 when the last is 32760.
+  const at = await listDataMembers(
+    pager(valuesPage([...seven, ofCanonical('h', 32_760)])),
+    A,
+    request,
+  );
+  assert.equal(at.members.length, 8);
+  await assert.rejects(
+    listDataMembers(
+      pager(valuesPage([...seven, ofCanonical('h', 32_761)])),
+      A,
+      request,
+    ),
+    (e) => e instanceof ArtifreeApiError && e.code === 'invalid_response',
+  );
+  // Too-large members cost their names only, so many of them fit.
+  const marked = Array.from({ length: 100 }, (_, index) => ({
+    name: `m${String(index).padStart(3, '0')}`,
+    too_large: true,
+  }));
+  const many = await listDataMembers(
+    pager(valuesPage(marked, { limit: 100 })),
+    A,
+    { select: 'values', limit: 100 },
+  );
+  assert.equal(many.members.length, 100);
+});
+
+test('members: names count toward the page and member names stay within 256 bytes', async () => {
+  await assert.rejects(
+    listDataMembers(pager(page({ members: [{ name: 'k'.repeat(257) }] })), A),
+    (e) => e.code === 'invalid_response',
+  );
+  await assert.rejects(
+    listDataMembers(pager(page({ members: [{ name: 'é'.repeat(129) }] })), A),
+    (e) => e.code === 'invalid_response',
+  );
+  const edge = await listDataMembers(
+    pager(page({ members: [{ name: 'é'.repeat(128) }] })),
+    A,
+  );
+  assert.equal(edge.members.length, 1);
+});
+
+// A fault is the same whether it comes before the stream is accepted or after.
+
+test('follow: stored data that is invalid ends following the same way as an HTTP error or an error event', async () => {
+  const before = await run([
+    failure(500, 'internal'),
+    failure(500, 'internal'),
+  ]);
+  const after = await run([
+    eventResponse([snapshot(1, {}), errorEvent('internal')]),
+    eventResponse([snapshot(1, {})]),
+  ]);
+  for (const outcome of [before, after]) {
+    assert.ok(outcome.error instanceof ArtifreeApiError, String(outcome.error));
+    assert.equal(outcome.error.code, 'internal');
+    assert.equal(outcome.log.calls.length, 1, 'rejected, not retried');
+    assert.deepEqual(outcome.log.delays, []);
+  }
+  assert.equal(before.error.status, 500);
+  assert.equal(after.error.status, 200, 'an event, not an HTTP status');
+});
+
+test('follow: an error event that retrying cannot fix rejects and one that can is retried with backoff', async () => {
+  const gone = await run([
+    eventResponse([snapshot(1, {}), errorEvent('not_found')]),
+    eventResponse([snapshot(1, {})]),
+  ]);
+  assert.equal(gone.error?.code, 'not_found');
+  assert.equal(gone.log.calls.length, 1);
+  // A fault that persists backs off even though every connection opens and
+  // delivers a snapshot: each reconnect costs more waiting, never less.
+  const flaky = await run(
+    ending(
+      ...Array.from({ length: 4 }, () =>
+        eventResponse([snapshot(1, {}), errorEvent('unavailable')]),
+      ),
+    ),
+    { retry: { minMs: 500, maxMs: 4000 } },
+  );
+  assert.deepEqual(flaky.log.delays, [500, 1000, 2000, 4000]);
+  assert.equal(flaky.log.events.length, 4, 'a fresh snapshot each time');
+  assert.deepEqual(
+    flaky.log.disconnects.map(([code]) => code),
+    ['unavailable', 'unavailable', 'unavailable', 'unavailable'],
+  );
+});
+
+// Callbacks are not the network -------------------------------------------------------------
+
+const THROWN = [
+  [
+    'a retryable ArtifreeApiError',
+    new ArtifreeApiError('callback', { status: 0, code: 'network_error' }),
+  ],
+  [
+    'a 503',
+    new ArtifreeApiError('callback', { status: 503, code: 'unavailable' }),
+  ],
+  [
+    'a fatal ArtifreeApiError',
+    new ArtifreeApiError('callback', { status: 404, code: 'not_found' }),
+  ],
+  ['a plain Error', new Error('callback')],
+];
+
+const CALLBACK_KINDS = [
+  [
+    'onConnect',
+    () => [eventResponse([snapshot(1, {})]), eventResponse([snapshot(1, {})])],
+    (boom) => ({
+      onConnect: () => {
+        throw boom;
+      },
+    }),
+  ],
+  [
+    'onEvent for a snapshot',
+    () => [eventResponse([snapshot(1, {})]), eventResponse([snapshot(1, {})])],
+    (boom) => ({
+      onEvent: () => {
+        throw boom;
+      },
+    }),
+  ],
+  [
+    'onEvent for a change',
+    () => [
+      eventResponse([snapshot(1, {}), change(2, {})]),
+      eventResponse([snapshot(1, {})]),
+    ],
+    (boom) => ({
+      onEvent: (event) => {
+        if (event.type === 'change') throw boom;
+      },
+    }),
+  ],
+  [
+    'onEvent for too_large',
+    () => [eventResponse([tooLarge(1)]), eventResponse([snapshot(1, {})])],
+    (boom) => ({
+      onEvent: (event) => {
+        if (event.type === 'too_large') throw boom;
+      },
+    }),
+  ],
+  [
+    'onDisconnect',
+    () => [eventResponse([snapshot(1, {})]), eventResponse([snapshot(1, {})])],
+    (boom) => ({
+      onDisconnect: () => {
+        throw boom;
+      },
+    }),
+  ],
+];
+
+for (const [kind, script, options] of CALLBACK_KINDS) {
+  for (const [label, boom] of THROWN) {
+    test(`abort: ${kind} throwing ${label} rejects with it, once, and is never retried`, async () => {
+      await withoutUnhandledRejections(async () => {
+        const { result, error, log } = await run(script(), options(boom));
+        assert.equal(result, undefined);
+        assert.equal(error, boom, 'the very exception the callback threw');
+        assert.equal(log.calls.length, 1, 'no second connection');
+        assert.deepEqual(log.delays, [], 'no wait for a retry');
+      });
+    });
+  }
+}

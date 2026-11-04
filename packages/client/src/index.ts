@@ -71,6 +71,6 @@ export type {
 } from './data-follow.js';
 export { listDataMembers } from './data-members.js';
 export type { DataMembersRequest } from './data-members.js';
-export { DATA_LIMITS } from './data-json.js';
+export { DATA_LIMITS, canonicalBytes } from './data-json.js';
 export { serverSentEvents } from './sse.js';
 export type { ServerSentEvent, SseLimits } from './sse.js';

@@ -2,6 +2,7 @@ import type { DataMember, DataMembers, DataSelect } from '@artifree/contracts';
 import type { ClientConfiguration, ReadOptions } from './client.js';
 import {
   DATA_LIMITS,
+  canonicalBytes,
   compareUtf8,
   isDataPath,
   isStoredJson,
@@ -87,40 +88,52 @@ function onlyKeys(
   return Object.keys(record).every((key) => allowed.has(key));
 }
 
+/** A member of a page and the bytes the server counts for it. */
+interface Parsed {
+  readonly member: DataMember;
+  readonly bytes: number;
+}
+
 function parseMember(
   value: unknown,
   query: Normalized,
   memberNesting: number,
-): DataMember | undefined {
+): Parsed | undefined {
   if (!isRecord(value) || !onlyKeys(value, MEMBER_KEYS)) return undefined;
   const { name } = value;
-  if (
-    typeof name !== 'string' ||
-    name === '' ||
-    utf8Length(name) > DATA_LIMITS.maxMemberNameBytes
-  )
+  if (typeof name !== 'string') return undefined;
+  const nameBytes = utf8Length(name);
+  if (nameBytes === 0 || nameBytes > DATA_LIMITS.maxMemberNameBytes)
     return undefined;
   const hasValue = Object.hasOwn(value, 'value');
   const hasTooLarge = Object.hasOwn(value, 'too_large');
   if (query.select === 'names') {
-    return hasValue || hasTooLarge ? undefined : { name };
+    return hasValue || hasTooLarge
+      ? undefined
+      : { member: { name }, bytes: nameBytes };
   }
   // Under values exactly one of the two is present.
   if (hasValue === hasTooLarge) return undefined;
+  // A member over its bound is announced, never sent, and costs its name only.
   if (hasTooLarge)
-    return value.too_large === true ? { name, too_large: true } : undefined;
+    return value.too_large === true
+      ? { member: { name, too_large: true }, bytes: nameBytes }
+      : undefined;
   const found: unknown = value.value;
-  return isStoredJson(found, memberNesting)
-    ? { name, value: found }
-    : undefined;
+  if (!isStoredJson(found, memberNesting)) return undefined;
+  const valueBytes = canonicalBytes(found);
+  if (valueBytes > DATA_LIMITS.memberMaxBytes) return undefined;
+  return { member: { name, value: found }, bytes: nameBytes + valueBytes };
 }
 
 /**
  * Checks a response against the query that was sent: it echoes the
  * normalized query, the members are in strictly increasing UTF-8 byte order
  * after `after`, none is repeated, there are at most `limit`, the shapes fit
- * `select`, every value is JSON the server could have stored, and the cursor
- * names the last member.
+ * `select`, every value is JSON the server could have stored and within the
+ * member bound (a larger one comes as `too_large`), the names and values of
+ * the page together are within the page bound, and the cursor names the last
+ * member. Sizes are the canonical JSON text's UTF-8 bytes ({@link canonicalBytes}).
  */
 function parsePage(
   answer: unknown,
@@ -145,11 +158,15 @@ function parsePage(
   const nesting = nestingAllowedAt(pathDepth(query.path) + 1);
   const members: DataMember[] = [];
   let previous = query.after;
+  let pageBytes = 0;
   for (const item of raw) {
-    const member = parseMember(item, query, nesting);
-    if (member === undefined) return undefined;
+    const parsed = parseMember(item, query, nesting);
+    if (parsed === undefined) return undefined;
+    const { member } = parsed;
     if (previous !== undefined && compareUtf8(member.name, previous) <= 0)
       return undefined;
+    pageBytes += parsed.bytes;
+    if (pageBytes > DATA_LIMITS.pageMaxBytes) return undefined;
     previous = member.name;
     members.push(member);
   }
