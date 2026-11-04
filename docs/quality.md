@@ -322,6 +322,27 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   breaking it and watching a named test fail. These tests do not show multiple
   users (those are in the next item), that a frame can use a room, or anything
   about MCP; no browser smoke covers rooms because no web code uses them.
+- Data members and the data stream (decision 0040): domain unit tests pin
+  the page rules (UTF-8 byte order where UTF-16 order differs, an exclusive
+  cursor, the 32 KiB value and 256 KiB page bounds, the first member always
+  listed, non-object paths); `tests/data_members.rs` runs the query over HTTP
+  (strict parameters, `404` for another actor's or a trashed artifact, `500`
+  for an unreadable space). The stream's tests in `data_stream_tests.rs` use a
+  read counter and gates instead of sleeps: coalescing (a write after a read
+  began stays pending and causes exactly one more read), the deadlines before
+  a wake, revocation and shutdown before sending (also for an event already
+  waiting for the connection), the registration and place limits with refusals
+  that read nothing, a poisoned registry that fails new streams but never a
+  write, and writes that are not delayed by streams nobody reads. The two-user route table of `multi_user.rs` covers
+  both routes. `scripts/tests/data-client.test.mjs` tests the client with a
+  scripted `fetch`, an injected clock and sleep: byte-level parsing (BOM split
+  across chunks, limits in bytes, fatal decoding including the unfinished last
+  line), each event type against each fault, the retry table, the backoff and
+  its restart rule, aborts at every point, and a pin of the client's grammar
+  constants against the Rust source and the generated schema. These tests do not
+  show cross-process revocation (unsupported), replay (none exists), or any use
+  from the CLI, MCP, a frame, or the web workspace (none exists). Each guard was
+  checked by breaking it and watching a named test fail.
 - Multi-user identity (decision 0036), in process with the owner and two
   registered users: a table that sends every artifact-scoped HTTP route and
   MCP tool the other users' real names and names nobody holds and requires the

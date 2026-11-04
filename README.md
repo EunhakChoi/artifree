@@ -158,7 +158,32 @@ restoring a revision does not change the data, and `artifact duplicate
 there is no history, so an overwrite cannot be undone, and a purge erases it.
 **A page running in a preview cannot read or write this data** (the runtime
 bridge has no data capability), it is not in a revision or an export, and the web
-workspace has no data view or subscriptions; poll `data get`.
+workspace has no data view.
+
+Two reads follow the data without polling `data get`
+([decision 0040](docs/decisions/0040-data-queries-and-subscriptions.md);
+**HTTP and the TypeScript client only**: no CLI command, MCP tool, frame
+bridge, or web screen yet). `GET /v1/artifacts/{id}/data/members` lists the
+members of the object at a path, in the order of their names as UTF-8 bytes,
+as `names` or `values`, at most 100 per page (50 by default) and 256 KiB of
+names and values; a value over 32 KiB is `too_large` and not sent, and
+`next_after` is passed back as `after` for the next page. `GET
+/v1/artifacts/{id}/data/events?path=` is a server-sent stream about one path:
+a `snapshot`, then a `change` with the **new full value** whenever the data
+version moved (at most one read of the space per 250 ms per stream, so
+intermediate states can be skipped), and `too_large` when the value is over
+128 KiB. There is no replay and no resume cursor: after a lost connection the
+client opens a new stream and gets a new `snapshot`. A stream ends after ten
+minutes, rechecks access every 15 seconds, and is closed by a revoked token, a
+disabled user, a trashed or purged artifact, or shutdown. At most 8 streams per
+user and 128 per process are open. **Revoking a token through another server
+process is not seen by an open stream until it ends**, and a commit by another
+process is seen at the next 15-second check. The members query and the stream
+speak of `data_version` only and never of a source revision. `listDataMembers`
+and `followData` of `@artifree/client` check the question before sending it
+and every answer and event against it, read the stream as bytes, and reconnect
+after a lost connection, `429`, `502`, `503`, `504`, or a clean end (not after
+other errors, an event that breaks the contract, or `too_large`).
 
 For development with live reloading, Vite is still available:
 
@@ -251,8 +276,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0033](docs/decisions/0033-runtime-source-write.md),
 [0034](docs/decisions/0034-room-and-presence.md),
 [0035](docs/decisions/0035-per-file-conditional-edit.md),
-[0036](docs/decisions/0036-multi-user-identity.md), and
-[0037](docs/decisions/0037-release-publishing-and-supply-chain.md)).
+[0036](docs/decisions/0036-multi-user-identity.md),
+[0037](docs/decisions/0037-release-publishing-and-supply-chain.md), and
+[0040](docs/decisions/0040-data-queries-and-subscriptions.md)).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

@@ -316,8 +316,32 @@ checked copy; `JsonText` sends exact text. A duplicate copies the
 data only with `copy_data`. Data is not in the change feed, a revision, or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge has no data capability** (it grants `metadata.read`, `source.read`, and
-`source.download`). Subscriptions and queries (R07) and
-assets (R09) are not implemented.
+`source.download`). Assets (R09) are not implemented.
+
+R07 adds two reads of that space ([0040](decisions/0040-data-queries-and-subscriptions.md)),
+served by the same `ArtifactService` read as `GET data` and carrying
+`data_version` only. **Implemented:** a page of the members of one object
+(`GET .../data/members`: byte order of the names, `names` or `values`, at most
+100 members and 256 KiB per page, a value over 32 KiB reported as `too_large`,
+`next_after` as the cursor) and a per-path server-sent stream
+(`GET .../data/events`: a `snapshot`, then a `change` carrying the new full
+value, coalesced to one storage read per 250 ms per stream, and `too_large` over
+128 KiB). A stream registers before its first read so that revoking a token or
+disabling a user reaches it, re-reads at least every 15 seconds (which checks
+that the artifact is still in place), and ends after ten minutes; 8 streams per
+actor and 128 per process, with `429` and `503` refusals that read nothing.
+A writer wakes the streams of its own process through a counter that cannot fail
+or wait, so a subscription never touches a commit. A stored space that cannot be
+read back is `500`, not an empty answer. `@artifree/client` has `listDataMembers`
+and `followData` as standalone modules (not in the web entry): byte-level event
+parsing with a fatal UTF-8 decoder, local validation of the path and every
+parameter, checks of every echoed value and event, and a retry table with
+backoff that restarts only after a stable accepted connection.
+**Not implemented:** replay, a retained window or a resume cursor (a reconnect
+gets a new snapshot), a query language or list, cross-process revocation and
+wake-ups (another process is seen at the next 15-second read, a revoked token
+not until the stream ends), CLI, MCP tools, a frame bridge, web screens, a
+client outbox (R08), and any network isolation claim.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured
