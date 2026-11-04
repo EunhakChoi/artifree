@@ -333,8 +333,14 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   idle reads, trash, lifetime, limits with `Retry-After` and zero reads on a
   refusal, and revocation; two cases in the two-user route table. The client
   tests (`scripts/tests/data-client.test.mjs`) cover the byte-level parser, the
-  event validation table, retry and abort tables, and compare the grammar with
-  the Rust constants; `data-stream.test.mjs` runs the client against the binary.
+  event validation table, the byte bounds on received values (canonical sizes
+  pinned against the Rust side by `scripts/tests/fixtures/data-canonical.tsv`),
+  retry and abort tables with callback exceptions by kind, and compare the
+  grammar with the Rust constants; `data-stream.test.mjs` runs the client
+  against the binary. Unit tests cover the fault rule (every read outcome is a
+  typed failure, a dropped signal sender is not a signal) and a real socket
+  shows a reader that leaves during a stalled open is released by the open
+  timeout.
   They do not show cross-process wake-ups, cancelling a blocking read already
   started, or any CLI, MCP, frame, or web use.
 - Multi-user identity (decision 0036), in process with the owner and two

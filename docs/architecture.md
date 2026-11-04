@@ -208,10 +208,13 @@ space and never a source revision. The stream sends `snapshot` and then
 `change` events carrying the full new value; versions only grow within one
 connection and a reconnect starts with a new authoritative snapshot, because
 nothing is replayed. It ends with `too_large` over 128 KiB, after 10
-minutes, and when the artifact, token, or user goes away; an actor may hold
-8 and the process 128. Wake-ups are one per-process counter, so a write by
+minutes, and when the artifact, token, or user goes away; a fault is an HTTP
+status before the response is accepted and a terminal `error` event with the
+same typed body after it, never a silent end. An actor may hold 8 streams and
+the process 128. Wake-ups are one per-process counter, so a write by
 another process is found only by the 15 s idle read. The TypeScript client
-has `listDataMembers` and `followData`. No CLI, MCP tool, frame, or web
+has `listDataMembers` and `followData`; it holds received members and values
+to the same byte bounds, measured on the canonical JSON text. No CLI, MCP tool, frame, or web
 screen uses them.
 
 ## MCP

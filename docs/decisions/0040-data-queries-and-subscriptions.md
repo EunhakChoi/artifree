@@ -51,18 +51,38 @@ and a TypeScript client. **No frame, CLI, MCP tool, or web screen uses them**
    item 5). `Last-Event-ID` is refused `400`: there is nothing to resume.
    A value over 128 KiB ends the stream with a typed `too_large` event
    (`artifact_id`, `path`, `data_version`, `limit_bytes`), delivered once, and
-   a client must not reconnect for it. An unparsable stored value sends an
-   `error` event (the `ErrorResponse` body, code `internal`) and ends the
-   stream. A trashed, purged, or lost artifact ends the stream (the next open
-   is `404`).
+   a client must not reconnect for it.
+
+   **One rule for faults.** Before the response is accepted (authentication,
+   the token and user re-checks, the first read) a fault is an HTTP status
+   with the typed body, exactly as for the members query: a stored space that
+   does not parse is `500 internal`, a missing artifact `404`, failing storage
+   `503`. After it is accepted the same faults are one terminal `error` event
+   whose body is that same `ErrorResponse` (code `internal`, `not_found`, or
+   `unavailable`), and the stream ends. A stream never ends on a fault
+   without it: a stored value that cannot be written as JSON is an `internal`
+   event, a version that went back (a restored database) an `unavailable`
+   one, a trashed, purged, or lost artifact a `not_found` one. The only silent
+   ends are the ones that are not faults: the 10 minute lifetime, server
+   shutdown, and a revocation (the next open answers `401`). A client treats
+   both forms alike: a fault that retrying cannot fix (`internal`,
+   `not_found`, any 4xx) rejects, and `unavailable` is retried with the
+   capped backoff, which keeps growing while connections fail within the
+   stability window even when each opens and delivers a snapshot.
+
 4. **Limits.** Per actor 8 open streams (`429 rate_limited`, `Retry-After: 5`),
    per process 128 (`503 unavailable`, `Retry-After: 10`). The registrations
    of token streams (the entries revocation walks) are bounded too: 16 per
    actor and 256 per process, so a request that never reaches the stream
    still cannot grow them. A stream lives 10 minutes, then ends cleanly; the
    client reconnects. The whole open (validate, register, re-check,
-   `ensure_current`, first read, taking the place) is bounded by a 30 s open
+   `ensure_current`, first read, taking the place) is bounded by a 10 s open
    timeout that answers `503` with `Retry-After: 10` and releases everything.
+   The HTTP layer does not cancel a handler whose client closed the
+   connection while the response is pending (measured with a real socket in
+   a test), so a reader that leaves during a stalled open keeps its
+   registration until that timeout and no longer; the open cannot see the
+   reader before the response exists.
 5. **Wake-ups and coalescing.** A data write that committed (not a replay or
    a no-op) notifies after the commit through a per-process counter; the
    notification cannot fail and is never awaited, so a commit never fails or
@@ -91,7 +111,9 @@ and a TypeScript client. **No frame, CLI, MCP tool, or web screen uses them**
 8. **Every wait is raced.** The producer and the open path race every await
    (reads, sends, `ensure_current`, the heartbeat, the lifetime) against
    revocation, shutdown, the open timeout or lifetime, and the reader leaving,
-   signals first. A read runs on the blocking pool and, once started, cannot
+   signals first. Only a value sent on a signal ends a wait: a signal whose
+   sender was dropped says nothing and does not end every wait (the senders
+   live as long as the state and the registration). A read runs on the blocking pool and, once started, cannot
    be cancelled: the stream stops waiting for it and drops its place at once,
    but the read itself may still finish in the background (not implemented:
    cancelling it).
@@ -103,7 +125,22 @@ and a TypeScript client. **No frame, CLI, MCP tool, or web screen uses them**
    validated: artifact, path, a version strictly newer than the last in the
    connection, exact shapes, and every JSON value recursively (finite
    numbers, plain objects, the 32-level nesting rule). Versions above
-   2^53 - 1 are refused. Reconnects use capped doubling; the stability clock
+   2^53 - 1 are refused. The client holds received data to every bound the
+   server promises, measured in the UTF-8 bytes of the **canonical JSON
+   text** the server defines (no whitespace, strings escaped only for `"`,
+   `\\` and controls, everything else verbatim, whole numbers as digits, other
+   numbers as Rust prints a double: plain digits down to 1e-4, then `1.5e-7`
+   style; member order does not change the length): every member name at any
+   depth is 1 to 256 bytes; under `values` a member value is at most 32 KiB
+   (larger ones arrive as `too_large`) and the names and values of a page
+   together at most 256 KiB; the value of a `snapshot` or `change` is at most
+   128 KiB on its own, whatever room the framing leaves. A pinned vector file
+   (`scripts/tests/fixtures/data-canonical.tsv`) is checked by a Rust test
+   and a client test, so the two counts cannot drift. An exception thrown by
+   a callback is not a transport failure: `followData` rejects with that very
+   exception, never retries it, and a `too_large` event stays terminal.
+   The members query likewise fails with a typed `500` instead of listing a
+   member that has neither a value nor the marker. Reconnects use capped doubling; the stability clock
    starts only after an open succeeded and an event arrived; `Retry-After` is
    clamped to 500 ms to 1 h; a `too_large` event is terminal whatever follows.
    Every callback may abort the signal and the follower checks it after each.
