@@ -335,7 +335,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   tests (`scripts/tests/data-client.test.mjs`) cover the byte-level parser, the
   event validation table, the byte bounds on received values (canonical sizes
   pinned against the Rust side by `scripts/tests/fixtures/data-canonical.tsv`),
-  retry and abort tables with callback exceptions by kind, and compare the
+  the domain's storability rules on received data (value count, Unicode, repeated names), a chunk-size guard for the parser, retry and abort tables with callback exceptions by kind, and compare the
   grammar with the Rust constants; `data-stream.test.mjs` runs the client
   against the binary. Unit tests cover the fault rule (every read outcome is a
   typed failure, a dropped signal sender is not a signal) and a real socket

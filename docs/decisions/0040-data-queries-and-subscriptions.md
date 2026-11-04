@@ -130,13 +130,19 @@ and a TypeScript client. **No frame, CLI, MCP tool, or web screen uses them**
    text** the server defines (no whitespace, strings escaped only for `"`,
    `\\` and controls, everything else verbatim, whole numbers as digits, other
    numbers as Rust prints a double: plain digits down to 1e-4, then `1.5e-7`
-   style; member order does not change the length): every member name at any
-   depth is 1 to 256 bytes; under `values` a member value is at most 32 KiB
+   style; member order does not change the length): every value is something the data domain
+   can store: text of valid Unicode (a lone surrogate escape is refused, in
+   values and in names), no object with a repeated name (found in the raw text,
+   since parsing hides it), at most 10,000 values in the space counting the
+   containers on the path to it (a value at a path of d segments has room for
+   10,001 - d, and the members of a page share 10,000 - d), and every member
+   name at any depth is 1 to 256 bytes; under `values` a member value is at most 32 KiB
    (larger ones arrive as `too_large`) and the names and values of a page
    together at most 256 KiB; the value of a `snapshot` or `change` is at most
    128 KiB on its own, whatever room the framing leaves. A pinned vector file
    (`scripts/tests/fixtures/data-canonical.tsv`) is checked by a Rust test
-   and a client test, so the two counts cannot drift. An exception thrown by
+   and a client test, so the two counts cannot drift. The SSE parser refuses a line or an unfinished event as soon as it
+   cannot fit, before any of the chunk that carries it is copied. An exception thrown by
    a callback is not a transport failure: `followData` rejects with that very
    exception, never retries it, and a `too_large` event stays terminal.
    The members query likewise fails with a typed `500` instead of listing a
