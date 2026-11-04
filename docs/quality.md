@@ -604,8 +604,8 @@ into blocker or follow-up.
    are closed with an `unknown` fallback, as `FeedChange` already has.
 3. The client checks what its own state machine depends on: the echoed artifact
    identifier equals the one asked for, data versions follow their ordering
-   rules, event types are known, `next` is present exactly when paging
-   continues, and the error code decides retry or stop.
+   rules, event types are known, `next`, if present, is a non-empty string
+   (not parsed), paging continues if and only if it is present, and the error code decides retry or stop.
 4. Memory and denial-of-service limits are transport limits: one generic bound
    on the SSE line, event, and pending size (the existing feed parser has none
    today; slice R07c adds it) and the existing response-body cap. The client

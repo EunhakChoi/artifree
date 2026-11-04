@@ -99,7 +99,9 @@ Two things are in scope and the rest is not.
 9. **Web reducer.** The web workspace reducer that follows the feed (A02, 0007) ignores `data_changed`: it concerns data, not the source, and must not
    refresh the file list, the revision, or the metadata. It does not treat the
    kind as `unknown` (which today triggers a reload). A test sends a
-   `data_changed` change and shows that no read happens.
+   `data_changed` change and shows that no read happens. This is part of slice
+   R07a (rule 46), so the workspace never sees the kind as `unknown` once the
+   server can emit it.
 10. **Duplicate.** Duplicating with `copy_data` (0031 decision 11) records **no**
     `data_changed` row for the copy. The copy's `created` change already
     announces the new artifact; nobody can follow the copy's data before its
@@ -150,10 +152,10 @@ Two things are in scope and the rest is not.
     reference) is unchanged. The note at the top of 0031 says "Amended by 0040"
     and names decision 14 only.
 18. **0006 decision 9 and 10 are amended for the new client work**, implemented
-    in slice R07c and not before: (a) delays carry random jitter, a server
-    `Retry-After` is a floor (the delay is the larger of it and the computed
-    delay), where 0006 decision 10 waits `Retry-After` exactly and adds no
-    jitter; (b) the stall detection of rule 44; (c) a bounded SSE parser (rule 39).
+    in slice R07c and not before: (a) delays carry jitter as defined in rule 44 (the 30 s cap applies to the
+    base before jitter), and a server `Retry-After` is a floor (the delay is the
+    larger of it and the jittered delay), where 0006 decision 10 waits
+    `Retry-After` exactly and adds no jitter; (b) the stall detection of rule 44; (c) a bounded SSE parser (rule 39).
     0006's other text stays. Until R07c, 0006 describes the client.
 19. **Not amended.** 0006 decision 11 (retention), the stream limits, and the
     clean-end behavior (rule 45) are unchanged.
@@ -189,7 +191,10 @@ Two things are in scope and the rest is not.
     events that arrive before a read completes cause one read (coalescing); (d)
     a read is never started for a version the follower already has. The
     follower does not guarantee that it delivers every intermediate version: it
-    delivers the newest state it read, not each write. It does not claim ordering
+    delivers the newest state it read, not each write. **An update is
+    delivered whenever the space's data version increases, even when the value at
+    `P` did not change**, because the version belongs to the whole space and not
+    to a path; an application that cares compares values itself. It does not claim ordering
     against changes of other artifacts or kinds.
 23. **Why subscribe first.** Step 1 precedes step 2, so a commit between the
     two is delivered as an event with a version greater than the snapshot, or
@@ -251,7 +256,8 @@ Two things are in scope and the rest is not.
       decision 5); then `names` is empty and `next` is absent.
     - `names`: member names in ascending order of their **UTF-8 bytes**, the
       order of the canonical form (0031 decision 3), at most `limit` of them.
-    - `next`: an opaque cursor, **present exactly when** at least one more
+    - `next`: an opaque cursor, **present exactly when** (a server guarantee,
+      tested in slice R07b; a client cannot observe it) at least one more
       member follows the last name returned, absent otherwise.
 
     A page is read from one snapshot of the store (one transaction, as 0006
@@ -318,8 +324,9 @@ handles in R07 and are copied into `docs/quality.md`.
 38. **Rule 3: what the state machine depends on.** The client checks what its
     own algorithm needs: the echoed artifact identifier equals the one asked for;
     data versions are consistent with their ordering rules (rules 21, 22, 24);
-    event types are known; `next` is present exactly when paging continues
-    (rule 30); the error code decides whether to retry or stop.
+    event types are known; `next`, if present, is a non-empty string (the
+    client does not parse it and applies no length policy beyond the response
+    body cap), and paging continues if and only if `next` is present; the error code decides whether to retry or stop.
 39. **Rule 4: memory and denial of service are transport limits.** One generic
     bound on the SSE line, event, and pending buffer size, and the existing
     response-body cap of the client. The client never computes canonical JSON
@@ -360,9 +367,12 @@ Rules 36 to 42 are trust rules 1 to 7; cite them as "0040 rule 3x" or as
 
 44. **Retry and stall.** For `followData`: 0006 decision 10 applies as
     amended by rule 18: reconnect after a stream ends, and after a failure only
-    for a dropped connection, `429`, or `5xx`; the delay doubles from 0.5 s to
-    30 s with random jitter; a server `Retry-After` is a floor (use the larger
-    of it and the computed delay); the sequence restarts after a stream is
+    for a dropped connection, `429`, or `5xx`; the delay is jittered as follows.
+    For attempt `n` (0-based) the base is `min(30 s, 0.5 s x 2^n)`; the delay is
+    `base x (0.5 + 0.5 x u)`, where `u` is uniform in [0, 1) from an injectable
+    random source, so the delay lies in [base/2, base). A server `Retry-After`
+    (seconds or HTTP-date, as 0006 already parses it, itself capped at 1 hour as
+    0006 clamps it) is a floor: the delay is `max(Retry-After, jittered delay)`; the sequence restarts after a stream is
     accepted. **Stall detection:** if no bytes arrive on a stream (comments
     count) for 45 seconds, the client ends the connection like a drop and
     reconnects by this rule. The server's 15 second keepalive (0006 decision 4)
@@ -375,8 +385,9 @@ Rules 36 to 42 are trust rules 1 to 7; cite them as "0040 rule 3x" or as
 ### Slices
 
 46. **R07a: store, feed, contract.** Scope: rules 1 to 16 (schema step, the
-    row in the write transaction, per-actor, contract bump and regeneration,
-    web reducer ignoring the kind is R07c). Non-goals: listing, client, web.
+    row in the write transaction, per-actor, contract bump and regeneration, and the
+    web reducer ignoring the kind with its test of rule 9). Non-goals: listing,
+    client, any other web change.
     Acceptance checks (each must fail when its guard is removed): a changed
     set, update, and delete each produce one row with the new `data_version` and
     the artifact's current `revision` and `metadata_revision`; a replay, a
@@ -394,7 +405,8 @@ Rules 36 to 42 are trust rules 1 to 7; cite them as "0040 rule 3x" or as
     and by digits); default 50, bounds 1 and 100, 0 and 101 refused; the cursor
     resumes after a deleted name; a malformed, oversized, and foreign cursor are
     `400`; `next` is absent on the last page and present otherwise (a page of
-    exactly `limit` names with none following has no `next`); the stale and
+    exactly `limit` names with none following has no `next`; this is a server
+    guarantee tested here only); the stale and
     future precondition give `data_conflict` with `current_data_version`; a
     non-object is `data_path_conflict`; a missing path is `exists: false`; names
     outside the path grammar are skipped; strict query; an issued agent token
@@ -402,15 +414,18 @@ Rules 36 to 42 are trust rules 1 to 7; cite them as "0040 rule 3x" or as
 48. **R07c: TypeScript client.** Scope: `FeedChange` handles `data_changed`
     and `data_version`; `followData`; `listDataMembers`; the bounded SSE parser;
     stall detection; jitter and the `Retry-After` floor; the table of rule 43;
-    the web reducer ignores the kind; the trust rules; the text in
+    the trust rules; the text in
     `docs/quality.md` stays in step. Non-goals: web panel, MCP, CLI. Acceptance:
     the algorithm of rule 21 against a scripted server (no lost update across
     a commit between subscribe and read; a version going backwards is delivered
     as a snapshot; coalescing; `reset` and reconnect re-read; `deleted` then
     `recovered`); every row of the table of rule 43; an event larger than the
     bound is `invalid_response`; a stall of 45 seconds reconnects (with a fake
-    clock); `Retry-After` larger than the computed delay wins; jitter stays
-    within bounds; the web reducer test of rule 9.
+    clock); with a random source returning 0 and a value just below 1 the delay is
+    base/2 and just below base; a `Retry-After` larger than the jittered delay
+    wins and a smaller one does not (fake clock throughout); an observed `next`
+    that is an empty string or not a string is `invalid_response`, and paging
+    continues if and only if `next` is present.
 49. **R07d: user-facing documentation.** Only if a user document for application
     data exists when R07a to R07c are merged; otherwise this slice is dropped.
     Scope: that document and the roadmap status. No behavior.
