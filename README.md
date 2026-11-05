@@ -136,6 +136,8 @@ not the isolated execution that builds of React sources or model calls will
 need. Cancelling stops work and never rolls anything back. Job changes are
 not in the change feed and the web workspace has no job view; poll `job show`.
 
+### Application data
+
 Each artifact can keep application data: one JSON object per owner, with its own
 `data_version` that is unrelated to the artifact's revisions
 ([decision 0031](docs/decisions/0031-app-data.md)). `artifree data get <id>
@@ -157,8 +159,54 @@ restoring a revision does not change the data, and `artifact duplicate
 (`get_data`, `set_data`, `update_data`, `delete_data`) may read and write it;
 there is no history, so an overwrite cannot be undone, and a purge erases it.
 **A page running in a preview cannot read or write this data** (the runtime
-bridge has no data capability), it is not in a revision or an export, and the web
-workspace has no data view or subscriptions; poll `data get`.
+bridge has no data capability), and it is not in a revision or an export.
+CLI and MCP users can poll `data get` or `get_data`
+and compare versions. HTTP and TypeScript clients can instead follow changes and
+list object member names ([decision 0040](docs/decisions/0040-data-changes-and-member-listing.md)).
+The workspace Data tab shows the root and its version, following changes while
+the tab and page are visible.
+
+The TypeScript client's follower subscribes before reading the first snapshot.
+It emits `snapshot`, `update`, and terminal `unavailable` events; it can
+coalesce changes, so it does not promise every intermediate version. A write
+anywhere in the space may cause an update even if the selected value is
+unchanged. Transient failures are retried, and reconnection starts a fresh
+snapshot. A data-read `404`, deletion, or purge delivers `unavailable` and
+ends normally; after recovery, start a new follower. Stop it with an
+`AbortController`; abort resolves the returned
+promise, while other terminal failures reject. The callback runs synchronously;
+promises it returns are not awaited.
+
+Here `client` is an authenticated `ArtifreeClient` and `artifactId` identifies
+the artifact to follow:
+
+```ts
+const controller = new AbortController();
+const following = client.followData(artifactId, {
+  path: 'todos',
+  signal: controller.signal,
+  onData(event) {
+    if (event.type === 'unavailable') console.log('Artifact unavailable');
+    else console.log(event.type, event.data.data_version, event.data.value);
+  },
+});
+```
+
+When the view no longer needs updates, stop and wait for the follower:
+
+```ts
+controller.abort();
+await following;
+```
+
+`client.listDataMembers(artifactId, { path, limit, pageToken, atDataVersion,
+signal })` reads one page of names, not values. The default page size is 50 and
+the maximum is 100. Names follow byte order and the existing ASCII path grammar;
+other names are skipped. Pass `next_page_token` unchanged as `pageToken` and
+the first page's `data_version` as `atDataVersion` on each subsequent page to
+keep the listing consistent. On `data_conflict`, start again from the first
+page. A missing path has `exists: false`; a non-object value at the path fails
+with `data_path_conflict`. The listing does not retry automatically.
 
 For development with live reloading, Vite is still available:
 
