@@ -1278,6 +1278,10 @@ export interface ConflictingFile {
  * data space. Retries that replay a commit, failed commits, and updates that
  * changed nothing have none. It names what to read again and carries no
  * content, path, or value.
+ *
+ * `data_version` is present exactly when `change` is `data_changed`: the
+ * published schema requires it for that kind and forbids it for every other
+ * kind, and deserializing refuses both violations (decision 0040).
  */
 export interface ArtifactChange {
   /**

@@ -144,7 +144,24 @@
     },
     "ArtifactChange": {
       "additionalProperties": false,
-      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata, or one data write that changed the actor's\ndata space. Retries that replay a commit, failed commits, and updates that\nchanged nothing have none. It names what to read again and carries no\ncontent, path, or value.",
+      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata, or one data write that changed the actor's\ndata space. Retries that replay a commit, failed commits, and updates that\nchanged nothing have none. It names what to read again and carries no\ncontent, path, or value.\n\n`data_version` is present exactly when `change` is `data_changed`: the\npublished schema requires it for that kind and forbids it for every other\nkind, and deserializing refuses both violations (decision 0040).",
+      "else": {
+        "not": {
+          "required": [
+            "data_version"
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "change": {
+            "const": "data_changed"
+          }
+        },
+        "required": [
+          "change"
+        ]
+      },
       "properties": {
         "artifact_id": {
           "description": "The changed artifact.",
@@ -194,6 +211,16 @@
         "metadata_revision",
         "committed_at_ms"
       ],
+      "then": {
+        "properties": {
+          "data_version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "data_version"
+        ]
+      },
       "type": "object"
     },
     "ArtifactKind": {

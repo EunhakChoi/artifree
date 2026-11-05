@@ -405,8 +405,12 @@ slice list above is two pull requests.
 | R07e   | web data panel (rule 23)                        | not implemented | -            |
 
 R07a-1 also added `data_changed` to the client's record of known kinds, which
-its type requires; the web workspace does not yet ignore it (R07a-2). What R07
-excludes is listed under Scope.
+its type requires, and implements rule 12 in the client: `FeedChange` carries
+`data_version` for `data_changed` only, and an event that breaks that is
+`invalid_response`. The published schema and Rust deserialization state the same
+rule. Rules 13-22 of R07c (`followData`, `listDataMembers`, the size and
+silence limits, the retry rules) are not implemented, and the web workspace does
+not yet ignore `data_changed` (R07a-2). What R07 excludes is listed under Scope.
 
 ## Alternatives
 

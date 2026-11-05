@@ -585,7 +585,13 @@ export function parseFeedPosition(value: unknown): FeedPosition | undefined {
     : undefined;
 }
 
-/** Parses the data of a `change` feed event. */
+/**
+ * Parses the data of a `change` feed event. A `data_changed` change carries a
+ * `data_version` that is a safe integer of at least 1, and a change of any
+ * other known kind carries none; either breach makes the whole event invalid
+ * (decision 0040, rule 12). A kind this client does not know is reported as
+ * `unknown`, and fields it has beyond the contract are not read, as before.
+ */
 export function parseFeedChange(value: unknown): FeedChange | undefined {
   if (!isRecord(value)) return undefined;
   const {
@@ -594,6 +600,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     change,
     revision: number,
     metadata_revision,
+    data_version,
     committed_at_ms,
   } = value;
   if (
@@ -605,14 +612,21 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     !isTime(committed_at_ms)
   )
     return undefined;
-  return {
+  const feedChange = {
     cursor,
     artifact_id,
-    change: isChangeKind(change) ? change : 'unknown',
     revision: number,
     metadata_revision,
     committed_at_ms,
   };
+  if (!isChangeKind(change)) return { ...feedChange, change: 'unknown' };
+  if (change !== 'data_changed')
+    return Object.hasOwn(value, 'data_version')
+      ? undefined
+      : { ...feedChange, change };
+  return isCount(data_version) && data_version >= 1
+    ? { ...feedChange, change, data_version }
+    : undefined;
 }
 
 // Job vocabularies are closed on purpose. A job state or failure this client
