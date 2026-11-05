@@ -1,6 +1,14 @@
 import type { ArtifactChange, ChangeKind } from '@artifree/contracts';
 import { ArtifreeApiError } from './errors.js';
 import { parseFeedChange, parseFeedPosition } from './responses.js';
+import {
+  DEFAULT_RETRY_DELAYS,
+  RETRY_RESET_MS,
+  retryDelayMs,
+  wait,
+  type RetryDelays,
+} from './retry.js';
+import type { Clock } from './transport.js';
 
 /**
  * A committed change. `change` is `'unknown'` for a kind added to the
@@ -27,6 +35,16 @@ export function cursorOf(event: ChangeFeedEvent): string {
   return event.type === 'change' ? event.change.cursor : event.cursor;
 }
 
+/** Most UTF-16 code units of an unfinished line, or of an event's type and data. */
+const MAX_EVENT_UNITS = 65_536;
+
+function tooLarge(what: string): ArtifreeApiError {
+  return new ArtifreeApiError(
+    `The change feed sent ${what} of more than ${MAX_EVENT_UNITS} characters.`,
+    { status: 200, code: 'invalid_response' },
+  );
+}
+
 /** One dispatched server-sent event: its type and data. */
 interface ServerSentEvent {
   readonly type: string;
@@ -42,6 +60,11 @@ interface ServerSentEvent {
  * and an event not ended by a blank line discarded. `id` and `retry` are
  * ignored: feed data carries its cursor, and reconnection follows
  * {@link follow}'s own delays.
+ *
+ * The input is bounded as it arrives (decision 0040 rule 19): a line, and one
+ * event's type and data together, of more than {@link MAX_EVENT_UNITS} UTF-16
+ * code units reject with `invalid_response`, which stops reading `chunks` and
+ * so cancels the body.
  */
 async function* serverSentEvents(
   chunks: AsyncIterable<string>,
@@ -49,17 +72,24 @@ async function* serverSentEvents(
   let pending = '';
   let type = '';
   let data: string[] = [];
+  // Units of the data lines joined with LF.
+  let dataUnits = 0;
   for await (const chunk of chunks) {
     pending += chunk;
     // A final CR may be the first half of a CRLF in the next chunk.
     const lines = pending.split(/\r\n|\r(?!$)|\n/);
     pending = lines.pop() ?? '';
+    // The CR that may begin a line end is not part of the line.
+    if (pending.length - (pending.endsWith('\r') ? 1 : 0) > MAX_EVENT_UNITS)
+      throw tooLarge('a line');
     for (const line of lines) {
+      if (line.length > MAX_EVENT_UNITS) throw tooLarge('a line');
       if (line === '') {
         if (data.length > 0)
           yield { type: type || 'message', data: data.join('\n') };
         type = '';
         data = [];
+        dataUnits = 0;
         continue;
       }
       if (line.startsWith(':')) continue;
@@ -67,7 +97,11 @@ async function* serverSentEvents(
       const field = colon === -1 ? line : line.slice(0, colon);
       const value = colon === -1 ? '' : line.slice(colon + 1).replace(/^ /, '');
       if (field === 'event') type = value;
-      else if (field === 'data') data.push(value);
+      else if (field === 'data') {
+        dataUnits += value.length + (data.length > 0 ? 1 : 0);
+        data.push(value);
+      }
+      if (type.length + dataUnits > MAX_EVENT_UNITS) throw tooLarge('an event');
     }
   }
   // The body ended: a pending CR ends its line, but an event without its
@@ -137,11 +171,21 @@ export interface FollowOptions {
     retryInMs: number,
   ) => void;
   /**
-   * Reconnection delays: from `min`, doubling after each failed attempt up
-   * to `max`, in milliseconds. A `Retry-After` from the server is used
-   * instead when given.
+   * Reconnection delays in milliseconds (decision 0040 rule 17): a base
+   * from `min`, doubling with each retry up to `max`, of which a random
+   * point between half and all is waited. A `Retry-After` from the server,
+   * at most one hour, is a floor. The count of retries starts again only
+   * after a stream stayed open for 30 seconds.
    */
-  readonly retryDelayMs?: { readonly min: number; readonly max: number };
+  readonly retryDelayMs?: RetryDelays;
+}
+
+/** What {@link follow} takes from its environment, replaced in tests. */
+export interface FollowTiming {
+  /** Times the waits between streams and how long a stream stays open. */
+  readonly clock: Clock;
+  /** A number in [0, 1), the jitter of a delay. */
+  readonly random: () => number;
 }
 
 /** Opens one stream after `after`; resolves once the server accepted it. */
@@ -173,18 +217,25 @@ function retryable(error: ArtifreeApiError): boolean {
 export async function follow(
   open: OpenStream,
   options: FollowOptions,
+  { clock, random }: FollowTiming,
 ): Promise<void> {
   const { signal, onEvent, onConnect, onDisconnect } = options;
-  const { min, max } = options.retryDelayMs ?? { min: 500, max: 30_000 };
+  const delays = options.retryDelayMs ?? DEFAULT_RETRY_DELAYS;
   let cursor = options.after;
+  // Retries since a stream last stayed open for RETRY_RESET_MS.
   let attempt = 0;
   while (!signal.aborted) {
     let failure: ArtifreeApiError | undefined;
     // What onEvent threw: it ends following and is never retried.
     let rejected: { readonly error: unknown } | undefined;
+    let stopResetTimer: (() => void) | undefined;
     try {
       const events = await open(cursor, signal);
-      attempt = 0;
+      // Acceptance alone does not end the backoff: a server that accepts and
+      // drops every stream would be reconnected to at the shortest delay.
+      stopResetTimer = clock.after(RETRY_RESET_MS, () => {
+        attempt = 0;
+      });
       onConnect?.();
       for await (const event of events) {
         cursor = cursorOf(event);
@@ -200,32 +251,20 @@ export async function follow(
       if (!(error instanceof ArtifreeApiError) || !retryable(error))
         throw error;
       failure = error;
+    } finally {
+      // The stream ended, failed, or was abandoned.
+      stopResetTimer?.();
     }
     if (rejected !== undefined) throw rejected.error;
     if (signal.aborted) return;
-    const retryInMs =
-      failure?.retryAfterSeconds === undefined
-        ? Math.min(max, min * 2 ** attempt)
-        : failure.retryAfterSeconds * 1000;
+    const retryInMs = retryDelayMs(
+      attempt,
+      delays,
+      random,
+      failure?.retryAfterSeconds,
+    );
     attempt += 1;
     onDisconnect?.(failure, retryInMs);
-    await sleep(retryInMs, signal);
+    await wait(clock, retryInMs, signal);
   }
-}
-
-/** Waits `milliseconds`, or less when `signal` aborts or has aborted. */
-function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const done = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', done);
-      resolve();
-    };
-    const timer = setTimeout(done, milliseconds);
-    signal.addEventListener('abort', done);
-  });
 }

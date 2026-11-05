@@ -11,9 +11,12 @@ Date: 2026-10-28. Status: accepted. Builds on
 > Amended by [0040](0040-data-changes-and-member-listing.md), in effect since
 > R07a: decision 6, as the feed also carries the `data_changed` rows of the
 > actor whose data space changed, and decision 5, as a data write that recorded
-> such a row wakes this process's streams as a commit does. Proposed, taking
-> effect when R07c merges: decision 10, with jitter, a clamped `Retry-After`
-> floor, a stall timer, and a counter reset only after a connection stays open.
+> such a row wakes this process's streams as a commit does. In effect since
+> R07c-1, for `followChanges`: decision 10, with jitter, a `Retry-After` floor
+> clamped to one hour, a stall limit of 45 seconds after the headers, and a
+> counter reset only after a stream stayed open 30 seconds; and decision 9, as
+> the parser bounds a line and an event to 65,536 UTF-16 code units and the error
+> body of the open to 65,536 bytes. `followData` (R07c-3) is not implemented.
 
 ## Context
 
@@ -106,23 +109,28 @@ delivery guarantees; everything below about them is an Artifree decision.
    lines joined with LF; an event dispatched at a blank line only when it
    has data; and an event the body ends before its blank line discarded.
    `id` and `retry` are not used: the data carries the cursor, and delays
-   follow decision 10. Unknown event types are skipped. A known event whose
+   follow decision 10. A line, or an event's type and data together, of more
+   than 65,536 UTF-16 code units is `invalid_response` and cancels the body.
+   Unknown event types are skipped. A known event whose
    data breaks the contract is `invalid_response`. A change kind added after
    the client was built arrives as `unknown`, so an older client still reads
    the artifact again. Aborting cancels the body.
 10. **Client retry rule.** `followChanges` reconnects after a stream ends,
     and after a failure when the connection failed, the server answered
     `429`, or the server or a proxy before it answered any `5xx`, whatever
-    the body. It waits `Retry-After` when given, also on a proxy's error
-    page, otherwise from 0.5 seconds
-    doubling to 30 seconds after each failed attempt, and starts again after
-    a stream is accepted. Every other failure, including a `4xx` and a
-    successful response that is not the feed, rejects: retrying cannot fix
-    it, and so does an error thrown by the event handler. Aborting resolves
-    at once, also during a wait, and no event is delivered after it, also
-    from a chunk that held several. The analyzed client
-    adds random jitter to its delays; one local owner gains nothing from it,
-    and several instances (X04) should revisit it.
+    the body. The wait is a random point between half of a base and all of
+    it; the base starts at 0.5 seconds and doubles with each retry up to 30
+    seconds. `Retry-After`, when given, also on a proxy's error page, is a
+    floor of at most one hour for that wait. The doubling starts again only
+    after a stream stayed open for 30 seconds. Once the headers have arrived,
+    45 seconds without a byte of the body (a comment counts) fail the stream
+    as a lost connection, which is retried; a request that has no headers yet
+    is never cancelled by a timer. Every other failure, including a `4xx` and
+    a successful response that is not the feed, rejects: retrying cannot fix
+    it, and so does an error thrown by the event handler. Aborting resolves at
+    once, also during a wait, and no event is delivered after it, also from a
+    chunk that held several. The analyzed client adds random jitter to its
+    delays, and so does this one since R07c-1.
 11. **Retention.** Change rows are kept indefinitely, like request keys. The
     head comes from SQLite's record of the largest sequence issued, so
     pruning old rows will not move it back. Pruning belongs to the retention

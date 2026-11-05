@@ -53,6 +53,13 @@ import {
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 import type * as RuntimeSource from './runtime-source.js';
+import {
+  type BodyContext,
+  type Clock,
+  readBoundedErrorJson,
+  systemClock,
+  watchBody,
+} from './transport.js';
 import type {
   RuntimeDownloadTarget,
   RuntimeSourcePartBytes,
@@ -98,6 +105,13 @@ export interface ClientConfiguration {
   readonly accessToken: string;
   /** Fetch implementation; defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
+  /**
+   * Timers of the stall limit and of the waits between streams, replaced in
+   * tests; defaults to the platform's.
+   */
+  readonly clock?: Clock;
+  /** Jitter of reconnection delays, in [0, 1); defaults to `Math.random`. */
+  readonly random?: () => number;
 }
 
 /** Options for requests that only read. */
@@ -414,6 +428,12 @@ interface SendOptions {
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal | undefined;
   readonly onDispatch?: (() => void) | undefined;
+  /**
+   * Reads an error body as it arrives, up to 65,536 bytes
+   * (decision 0040 rule 19). Past that the response counts as one without an
+   * API body. Without it the whole body is read, as before.
+   */
+  readonly boundedErrors?: true;
 }
 
 type GrantState = 'settled' | 'pending' | 'unknown';
@@ -588,6 +608,8 @@ export class ArtifreeClient {
   private readonly address: Address;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly clock: Clock;
+  private readonly random: () => number;
 
   constructor(configuration: ClientConfiguration) {
     this.baseUrl = configuration.baseUrl.replace(/\/+$/, '');
@@ -595,6 +617,8 @@ export class ArtifreeClient {
     this.accessToken = configuration.accessToken;
     this.fetchImpl =
       configuration.fetch ?? ((input, init) => fetch(input, init));
+    this.clock = configuration.clock ?? systemClock;
+    this.random = configuration.random ?? Math.random;
   }
 
   /** The active server-issued runtime identity. */
@@ -1112,6 +1136,7 @@ export class ArtifreeClient {
     const response = await this.send('GET', '/v1/changes', {
       headers,
       signal: options.signal,
+      boundedErrors: true,
     });
     const mediaType = response.headers
       .get('content-type')
@@ -1126,7 +1151,12 @@ export class ArtifreeClient {
       );
     }
     return changeFeedEvents(
-      decodeText(response.body, options.signal, this.address.plain),
+      decodeText(response.body, {
+        signal: options.signal,
+        clock: this.clock,
+        subject: 'The change feed connection',
+        keepCause: this.address.plain,
+      }),
       options.signal,
     );
   }
@@ -1143,6 +1173,7 @@ export class ArtifreeClient {
       (after, signal) =>
         this.openChanges(after === undefined ? { signal } : { after, signal }),
       options,
+      { clock: this.clock, random: this.random },
     );
   }
 
@@ -1727,6 +1758,7 @@ export class ArtifreeClient {
       headers: extraHeaders,
       signal,
       onDispatch,
+      boundedErrors,
     }: SendOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
@@ -1760,7 +1792,15 @@ export class ArtifreeClient {
     if (response.ok) return response;
     // Also a proxy's error page may say when to retry.
     const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
-    const answer = await readJson(response, this.address.plain);
+    const answer =
+      boundedErrors === true
+        ? await readBoundedErrorJson(response, {
+            signal,
+            clock: this.clock,
+            subject: `The connection to ${this.address.label}`,
+            keepCause: this.address.plain,
+          })
+        : await readJson(response, this.address.plain);
     const failure = parseError(answer);
     // HTTP 429 means too many requests whoever answered it, so a proxy's
     // refusal without an API body is a rate limit too.
@@ -1789,47 +1829,36 @@ export class ArtifreeClient {
 }
 
 /**
- * The text of a streamed body. A failure while reading, such as a lost
- * connection, is a `network_error`. Stopping early or aborting `signal`
- * cancels the body, which closes its connection, also with a `fetch` that
- * ignores the signal once the response has arrived.
+ * The text of a streamed body, whose headers have arrived. A failure while
+ * reading, such as a lost connection or 45 seconds without a byte, is a
+ * `network_error`. Stopping early or aborting `signal` cancels the body,
+ * which closes its connection, also with a `fetch` that ignores the signal
+ * once the response has arrived.
  */
-async function* decodeText(
+function decodeText(
   body: ReadableStream<Uint8Array>,
-  signal: AbortSignal | undefined,
-  keepCause: boolean,
+  context: BodyContext,
 ): AsyncGenerator<string> {
-  const reader = body.getReader();
-  const cancel = (): void => {
-    reader.cancel().catch(() => undefined);
-  };
-  signal?.addEventListener('abort', cancel);
-  // Reading starts on the first iteration, possibly after an abort.
-  if (signal?.aborted === true) cancel();
+  // Watching starts now, not at the first iteration: the stall limit counts
+  // from the headers.
+  const watch = watchBody(body, context);
   // Removes a leading byte order mark, as event streams require.
   const decoder = new TextDecoder();
-  try {
-    for (;;) {
-      let chunk: ReadableStreamReadResult<Uint8Array>;
-      try {
-        chunk = await reader.read();
-      } catch (error: unknown) {
-        throw new ArtifreeApiError('The change feed connection was lost.', {
-          status: 0,
-          code: 'network_error',
-          ...causeOf(keepCause, error),
-        });
+  async function* chunks(): AsyncGenerator<string> {
+    try {
+      for (;;) {
+        const chunk = await watch.read();
+        if (chunk.done) {
+          yield decoder.decode();
+          return;
+        }
+        yield decoder.decode(chunk.value, { stream: true });
       }
-      if (chunk.done) {
-        yield decoder.decode();
-        return;
-      }
-      yield decoder.decode(chunk.value, { stream: true });
+    } finally {
+      await watch.cancel();
     }
-  } finally {
-    signal?.removeEventListener('abort', cancel);
-    await reader.cancel().catch(() => undefined);
   }
+  return chunks();
 }
 
 /** Whole seconds of a `Retry-After` header; HTTP dates are not used here. */

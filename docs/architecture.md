@@ -195,7 +195,13 @@ gets `reset`. Events name the artifact and revision to read again and carry
 no content. An open stream takes one of the actor's `--change-streams` slots
 instead of a request slot. The TypeScript client's `followChanges`
 reconnects after lost connections, `429`, and `5xx`, and stops on other
-failures.
+failures. Each wait is a random point of the upper half of a doubling delay
+(0.5 to 30 seconds), at least the server's `Retry-After` (at most one hour);
+the doubling starts again only after a stream stayed open for 30 seconds.
+Once a response's headers arrive, 45 seconds without a byte fail it; a request
+that has no headers yet is never cancelled by a timer. An event-stream line or
+event of more than 65,536 characters, and an error body of its open of more
+than 65,536 bytes, stop reading at once (decision 0040).
 
 ## MCP
 

@@ -219,6 +219,18 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   cancels an open stream, and stops events already received in the same
   chunk. A proxy's `429` without an API body is still `rate_limited`, and a
   read's signal reaches `fetch`.
+- `scripts/tests/client-transport.test.mjs`: the transport rules of decision
+  0040 (R07c-1), with a fake clock and random source and no sleeping: an
+  endless line, a line and an event at and one unit past 65,536 characters; an
+  error body at and one byte past 65,536 and a success body at and past
+  1,064,960 stopping with the body cancelled; 45 seconds of silence after
+  the headers failing a stream or a body, a comment every 15 seconds not,
+  and no timer on a request without headers for an hour; the delays at
+  the lowest and highest jitter, the cap, a `Retry-After` above and below the
+  delay and clamped to an hour; the backoff kept by a stream accepted and
+  dropped every second and restarted only by one open 30 seconds, whatever the
+  configured maximum; and an abort ending a wait or a read at once. Each guard
+  was checked by breaking it.
 - `scripts/tests/request-gate.test.mjs`: bundles the web workspace's request
   gate with esbuild and drives it with mock timers, a fake visibility source,
   and a server the test answers by hand: reads go one at a time in order
@@ -556,11 +568,14 @@ schema rejection tests do not assume whether an enum is emitted as `enum` or
   there), secure erase and quotas (not implemented), and signal handling on
   Windows beyond the TTL path.
 
-## Client trust rules (proposed, not enforced)
+## Client trust rules (proposed, partly enforced)
 
 Proposed by [decision 0040](decisions/0040-data-changes-and-member-listing.md)
-rule 22 for the TypeScript client of slice R07c. Nothing checks them yet, and
-the client today does not follow rule 4.
+rule 22 for the TypeScript client of slice R07c. Only rule 4 is enforced so
+far, by R07c-1: the event stream of `followChanges` and the error body of its
+stream open are read up to a fixed size and cancelled past it. A bounded read
+of a JSON success body exists in the client but no call uses it yet; other
+calls keep reading whole bodies. The other rules are not checked.
 
 1. The server owns the data-domain rules. The client does not re-check
    storability (surrogates, duplicate names, value count, nesting, name

@@ -2911,6 +2911,8 @@ async function followed(answers, { events: wanted = 1, after } = {}) {
   const client = new ArtifreeClient({
     baseUrl: 'http://127.0.0.1:7410',
     accessToken: 'token',
+    // The lowest delay of each base: half of it (decision 0040 rule 17).
+    random: () => 0,
     fetch: async (url, init) => {
       requests.push(init.headers['last-event-id']);
       const answer = answers.length > 1 ? answers.shift() : answers[0];
@@ -2957,13 +2959,15 @@ test('Following retries lost connections, 429, and any 5xx from the last cursor'
   );
   assert.deepEqual(result.events, [changeEvent(1), changeEvent(2)]);
   assert.deepEqual(result.requests, [cursor(0), ...Array(6).fill(cursor(1))]);
+  // Bases 1, 2, 2, 2, 2, 2 ms, halved by the lowest jitter; a Retry-After of
+  // 0 is a floor below the delay, so it does not replace it.
   assert.deepEqual(result.disconnects, [
-    [undefined, undefined, 1],
-    [0, 'network_error', 2],
-    [502, 'invalid_response', 2],
-    [504, 'invalid_response', 2],
-    [503, 'unavailable', 0],
-    [429, 'rate_limited', 0],
+    [undefined, undefined, 0.5],
+    [0, 'network_error', 1],
+    [502, 'invalid_response', 1],
+    [504, 'invalid_response', 1],
+    [503, 'unavailable', 1],
+    [429, 'rate_limited', 1],
   ]);
 });
 

@@ -400,7 +400,9 @@ slice list above was planned as two pull requests; #87 carries both slices.
 | R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87          |
 | R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
 | R07b   | member listing (rules 7-11)                     | implemented     | #86          |
-| R07c   | TypeScript client (rules 12-22)                 | not implemented | -            |
+| R07c-1 | client transport bounds and retry (17-19)       | implemented     | this PR      |
+| R07c-2 | `listDataMembers` (rules 20, 21, 22)            | not implemented | -            |
+| R07c-3 | `followData` (rules 13-16, 20)                  | not implemented | -            |
 | R07d   | user guides                                     | not implemented | -            |
 | R07e   | web data panel (rule 23)                        | not implemented | -            |
 
@@ -410,9 +412,25 @@ it: it changes nothing the page knows and reads nothing, for an open artifact, a
 unlisted one, and while the first read is pending (rule 6; 0007 decision 4).
 #87 also implements rule 12 in the client: `FeedChange` carries `data_version`
 for `data_changed` only, and an event that breaks that is `invalid_response`.
-The published schema and Rust deserialization state the same rule. Rules 13-22
-of R07c (`followData`, `listDataMembers`, the size and silence limits, the retry
-rules) are not implemented. What R07 excludes is listed under Scope.
+The published schema and Rust deserialization state the same rule. What R07
+excludes is listed under Scope.
+
+R07c is split into three pull requests. R07c-1 builds the transport that
+`followChanges` uses now and the other two will use: rule 17 (jitter, a
+`Retry-After` floor clamped to one hour, the count restarted only after a
+stream stayed open) for `followChanges`; rule 18 (a stall after 45 seconds
+without a byte once the headers arrived, no timer before them) for the change
+stream and for the error body of its open; and rule 19 for the event-stream
+parser (65,536 UTF-16 code units for a line and for one event's type and data
+joined with LF) and the error body of the stream open (65,536 bytes, past it the
+status decides). A bounded read of a JSON success body (1,064,960 bytes) exists
+in the client, with the same stall limit, but no call uses it yet; every other
+client call keeps its current read. The count restarts after 30 seconds, a
+constant, which is also the default `max`: a smaller configured `max` does not
+shorten it. Timers and the jitter come from the client's optional `clock` and
+`random`. The rest of rules 13-16 and 20-22 (`followData`, `listDataMembers`,
+the unified abort table) is not implemented; the rows above say which slice
+carries it.
 
 R07b landed in #86 (contract 0.16.0): `GET /v1/artifacts/{id}/data/members`
 with the query, response, check order, page token, and consistency of rules
