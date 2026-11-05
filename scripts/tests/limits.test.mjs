@@ -28,16 +28,26 @@ after(async () => {
   await rm(scratch, { recursive: true, force: true });
 });
 
-function cli(server, args) {
+function cli(server, args, { retryAfter } = {}) {
   const env = {
     ...process.env,
     ARTIFREE_URL: server.api_url,
     ARTIFREE_TOKEN: server.token,
   };
   delete env.ARTIFREE_TOKEN_FILE;
+  delete env.ARTIFREE_TEST_RETRY_AFTER;
+  const preload = [];
+  if (retryAfter !== undefined) {
+    env.ARTIFREE_TEST_RETRY_AFTER = retryAfter;
+    preload.push(
+      '--import',
+      new URL('../test-fixtures/cli-rate-limited-fetch.mjs', import.meta.url)
+        .href,
+    );
+  }
   const result = spawnSync(
     process.execPath,
-    ['apps/cli/dist/main.js', 'artifact', ...args],
+    [...preload, 'apps/cli/dist/main.js', 'artifact', ...args],
     { cwd: root, encoding: 'utf8', timeout: 20_000, env },
   );
   if (result.error) throw result.error;
@@ -107,7 +117,7 @@ test('MCP and the CLI share a budget; a refusal does nothing and the budget reco
   }
 });
 
-test('A refused CLI retry of a committed create says to retry, and the retry replays it', async () => {
+test('A CLI retry preserves a committed key across an injected 429 and replays it', async () => {
   const server = await startServer(binary, join(scratch, 'cli'), [
     '--request-burst',
     '1',
@@ -118,23 +128,29 @@ test('A refused CLI retry of a committed create says to retry, and the retry rep
     const site = join(scratch, 'cli-site');
     await mkdir(site, { recursive: true });
     await writeFile(join(site, 'index.html'), '<p>x</p>');
-    const create = () =>
-      cli(server, [
-        'create',
-        '--title',
-        'T',
-        '--dir',
-        site,
-        '--idempotency-key',
-        'cli-limited-1',
-      ]);
+    const create = (options) =>
+      cli(
+        server,
+        [
+          'create',
+          '--title',
+          'T',
+          '--dir',
+          site,
+          '--idempotency-key',
+          'cli-limited-1',
+        ],
+        options,
+      );
     const first = create();
     assert.equal(first.status, 0, first.stderr);
     assert.equal(JSON.parse(first.stdout).replayed, false);
-    // The same key again at once: this attempt is refused, but the key is
-    // not unused, since the first attempt committed.
-    const refused = create();
+    // Control the response at the HTTP boundary: a live limiter's remaining
+    // delay depends on how long this child process took to start. The first
+    // and final calls still commit and replay against the real server.
+    const refused = create({ retryAfter: '3' });
     assert.equal(refused.status, 1);
+    assert.equal(refused.stdout, '');
     assert.match(
       refused.stderr,
       /This attempt was not processed\. Retry after 3s with --idempotency-key cli-limited-1\./,
@@ -149,6 +165,34 @@ test('A refused CLI retry of a committed create says to retry, and the retry rep
     await server.stop();
   }
 });
+
+for (const retryAfter of ['1', '7']) {
+  test(`The CLI reports an injected Retry-After of ${retryAfter}s with the same key`, async () => {
+    const site = join(scratch, `retry-after-${retryAfter}`);
+    await mkdir(site, { recursive: true });
+    await writeFile(join(site, 'index.html'), '<p>x</p>');
+    const refused = cli(
+      { api_url: 'http://127.0.0.1:7410', token: 'fixture-token' },
+      [
+        'create',
+        '--title',
+        'T',
+        '--dir',
+        site,
+        '--idempotency-key',
+        'cli-limited-1',
+      ],
+      { retryAfter },
+    );
+    assert.equal(refused.status, 1);
+    assert.equal(refused.stdout, '');
+    assert.equal(
+      refused.stderr,
+      `This attempt was not processed. Retry after ${retryAfter}s with --idempotency-key cli-limited-1.\n` +
+        'error[rate_limited]: too many requests; retry after the given delay\n',
+    );
+  });
+}
 
 /** Sends a request's headers and part of its body, then waits. */
 function holdRequest(server, body) {
