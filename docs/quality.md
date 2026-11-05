@@ -575,14 +575,14 @@ schema rejection tests do not assume whether an enum is emitted as `enum` or
   there), secure erase and quotas (not implemented), and signal handling on
   Windows beyond the TTL path.
 
-## Client trust rules (proposed, not enforced)
+## Client trust rules
 
 Proposed by [decision 0040](decisions/0040-data-changes-and-member-listing.md)
-rule 22 for the TypeScript client of slice R07c. `listDataMembers` applies
-rules 1 to 4 to one listing page (`scripts/tests/data-members.test.mjs`); the
-change stream and the error body of its open have the R07c-1 transport bounds
-(`scripts/tests/client-transport.test.mjs`). `followData` remains unimplemented,
-and every other client call keeps its current read.
+rule 22 for the TypeScript client of slice R07c. `listDataMembers` and
+`followData` apply these rules (`scripts/tests/data-members.test.mjs` and
+`scripts/tests/follow-data.test.mjs`); the change stream and the error body of
+its open have the R07c-1 transport bounds (`scripts/tests/client-transport.test.mjs`).
+Other client calls keep their current reads.
 
 1. The server owns the data-domain rules. The client does not re-check
    storability (surrogates, duplicate names, value count, nesting, name

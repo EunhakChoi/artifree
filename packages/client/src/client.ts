@@ -63,6 +63,7 @@ import {
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 import type * as RuntimeSource from './runtime-source.js';
+import type { FollowDataOptions } from './follow-data.js';
 import type {
   RuntimeDownloadTarget,
   RuntimeSourcePartBytes,
@@ -78,6 +79,7 @@ import {
   parseCancelJob,
   parseDataWrite,
   parseDataMembers,
+  parseFollowedAppData,
   parseDuplicate,
   parseEnqueueJob,
   parseError,
@@ -436,6 +438,7 @@ interface SendOptions {
     { body: unknown; idempotencyKey: string; text?: string } | undefined;
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
+  readonly cache?: RequestCache;
   readonly signal?: AbortSignal | undefined;
   readonly onDispatch?: (() => void) | undefined;
   /**
@@ -887,6 +890,79 @@ export class ArtifreeClient {
     }
   }
 
+  /** Follows an application-data path until aborted or unavailable. */
+  async followData(
+    artifactId: string,
+    options: FollowDataOptions,
+  ): Promise<void> {
+    if (options.signal.aborted) return;
+    // Loading the optional follower may itself take time (for example while
+    // the browser fetches its chunk). Cancellation must not wait for it.
+    let onAbort = () => {};
+    const aborted = new Promise<undefined>((resolve) => {
+      onAbort = () => resolve(undefined);
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    });
+    let module: typeof import('./follow-data.js') | undefined;
+    try {
+      module = await Promise.race([import('./follow-data.js'), aborted]);
+    } finally {
+      options.signal.removeEventListener('abort', onAbort);
+    }
+    if (module === undefined || options.signal.aborted) return;
+    const { followData } = module;
+    return followData(
+      {
+        clock: this.clock,
+        open: (signal) => this.openChanges({ signal }),
+        read: (signal) =>
+          this.readFollowedData(artifactId, options.path, signal),
+      },
+      artifactId,
+      options,
+    );
+  }
+
+  private async readFollowedData(
+    artifactId: string,
+    dataPath: string | undefined,
+    signal: AbortSignal,
+  ): Promise<AppData> {
+    signal.throwIfAborted();
+    const query =
+      dataPath === undefined || dataPath === ''
+        ? ''
+        : `?path=${encodeURIComponent(dataPath)}`;
+    const path = `/v1/artifacts/${encodeURIComponent(artifactId)}/data${query}`;
+    try {
+      const response = await this.send('GET', path, {
+        signal,
+        boundedErrorBody: true,
+      });
+      const body = await readSuccessJson(response, {
+        clock: this.clock,
+        signal,
+        status: response.status,
+        what: 'data response',
+        keepCause: this.address.plain,
+      });
+      signal.throwIfAborted();
+      const result = parseFollowedAppData(body);
+      if (result === undefined || result.artifact_id !== artifactId)
+        throw new ArtifreeApiError(
+          'Data response does not match the contract.',
+          {
+            status: response.status,
+            code: 'invalid_response',
+          },
+        );
+      return result;
+    } catch (error: unknown) {
+      signal.throwIfAborted();
+      throw error;
+    }
+  }
+
   /**
    * Replaces the value at `request.path`, making the objects above it that
    * are missing, if the data is still at `request.base_data_version`. The
@@ -1187,6 +1263,9 @@ export class ArtifreeClient {
     if (options.after !== undefined) headers['last-event-id'] = options.after;
     const response = await this.send('GET', '/v1/changes', {
       headers,
+      // Firefox serializes concurrent default-cache fetches of the same SSE
+      // URL until the first response ends, which a live stream need not do.
+      cache: 'no-store',
       signal: options.signal,
       boundedErrorBody: true,
     });
@@ -1809,6 +1888,7 @@ export class ArtifreeClient {
       mutation,
       body,
       headers: extraHeaders,
+      cache,
       signal,
       onDispatch,
       boundedErrorBody,
@@ -1819,6 +1899,7 @@ export class ArtifreeClient {
       authorization: `Bearer ${this.accessToken}`,
     };
     const init: DispatchRequestInit = { method, headers };
+    if (cache !== undefined) init.cache = cache;
     if (signal !== undefined) init.signal = signal;
     if (onDispatch !== undefined) init[REQUEST_DISPATCH] = onDispatch;
     if (mutation !== undefined) {

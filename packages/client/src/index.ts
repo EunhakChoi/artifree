@@ -22,6 +22,7 @@ export type {
 } from './client.js';
 export { cursorOf } from './change-feed.js';
 export type { Clock } from './transport.js';
+export type { DataEvent, FollowDataOptions } from './follow-data.js';
 export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
 export {
