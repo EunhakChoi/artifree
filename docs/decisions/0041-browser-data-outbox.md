@@ -53,8 +53,9 @@ acquiring a lock or acknowledging a prompt does not establish physical origin.
    commands, including `recovery_required`, `retryRecoveryCandidate()`,
    `confirmRecovery(selection)`, `abandonUnresolved(selection)`,
    `continueRecovery(continuation: RecoveryContinuation)` and
-   `resumeDelivery(selection: DeliveryResumeSelection)`. `RecoveryContinuation`
-   and `DeliveryResumeSelection` are distinct opaque action types with runtime
+   `resumeDelivery(selection: DeliveryResumeSelection)`, plus
+   `retryPreparation(selection: PreparationRetrySelection)`. `RecoveryContinuation`,
+   `DeliveryResumeSelection` and `PreparationRetrySelection` are distinct opaque action types with runtime
    kind/context validation, not interchangeable strings or a generic `resume`.
    Confirmation must represent an explicit recovery choice by the caller/user,
    never a default startup, reconnect or online-event action. A consumer that
@@ -333,6 +334,39 @@ committed` assumption. A prepared record without a durable receipt is an
     unknown outcome that must replay to learn its receipt, not consult a
     current value to guess whether its write happened. Rule 17 also permits
     deliberate abandonment without learning or undoing that outcome.
+    A preparation transaction that definitively aborts leaves the already
+    accepted intent unprepared, with its original sequence/key/operation and
+    accounting intact. It is not `not_enqueued` or an uncertain HTTP outcome:
+    no request was dispatched. Enter lane-scoped `preparation_paused` with
+    reason `preparation_storage_failed`, `durablyEnqueued: true`, `prepared:
+false`, and an opaque `PreparationRetrySelection`. Block the head and
+    dependent suffix; schedule neither HTTP nor an automatic local retry.
+    Resolve the transaction's terminal event once and fence failed preparation
+    callbacks before reporting the pause; late/request-success/duplicate events
+    cannot mark an aborted preparation ready, dispatch, or downgrade a later
+    committed preparation.
+    Only deliberate `retryPreparation(selection)` attempts that one local
+    preparation transaction again. Validate token kind, page/owner/binding/
+    authority context and current unprepared row/version; stale or consumed
+    selections fail and duplicate pending actions coalesce. Preserve the
+    original numeric base or resolve the original dependency from its durable
+    predecessor receipt, never a latest read/new key or changed intent.
+    One action permits one preparation attempt; another abort returns the same
+    pause with a fresh selection and needs another deliberate action. Complete
+    must be observed before dispatch. Success clears only the preparation
+    pause; ordinary sending still requires remaining delivery budget and every
+    authority/recovery/conflict gate. Preparation attempts consume no HTTP
+    failure budget and reset neither its epoch/counters/backoff nor local
+    recovery frontier. `resumeDelivery`, paging, timers, storage/online events
+    and callbacks cannot substitute for this local retry action. Its selection
+    cannot retry an ACK write or an already prepared request.
+    After a crash, explicit owner recovery reads storage truth: an unprepared
+    intent may receive its first bounded preparation attempt in that recovery;
+    a prepared record keeps its frozen request and replays normally. A further
+    preparation failure pauses again. Do not infer either state from an old
+    callback or an individual IDB request-success event. Explicit disposal of
+    a never-prepared accepted intent remains the guarded unsent-discard path;
+    it is not unresolved-delivery abandonment.
 
 ### ACK, canonical state and trim
 
@@ -405,7 +439,9 @@ committed` assumption. A prepared record without a durable receipt is an
     also covers the prepared-body wrapper without double payload copies.
     Exceeding a cap or browser quota rejects the new enqueue without disturbing
     accepted rows. No eviction, silent volatile mode, or automatic old-item
-    deletion. Storage failures while preparing/ACKing pause sends as above.
+    deletion. Preparation failure follows rule 11's local-only typed retry;
+    ACK failure follows rule 12's explicit same-key replay. Neither is an
+    automatic storage/HTTP retry loop.
     Empty lane metadata is deleted after trim. Browser eviction/clear/private
     mode may lose data: report missing storage honestly, without reconstructing
     delivery from a remembered in-memory promise.
@@ -422,13 +458,43 @@ committed` assumption. A prepared record without a durable receipt is an
     There is no permanent unactionable invalid-response state or unbounded
     replay loop. ACK persistence failure is different: rule 12 pauses it
     immediately without automatic retry, even when budget remains.
+    Classify non-success responses from retained HTTP metadata, not just the
+    transport exception's `invalid_response`/`network_error` label. Capture
+    status and parsed `Retry-After` before reading the bounded error body, and
+    preserve them if parsing, size enforcement, cancellation or stall/whole-
+    attempt timeout fails after headers. HTTP `429` and `5xx` remain the bounded
+    retry cases above, including malformed/oversized/stalled bodies; retain the
+    clamped `Retry-After` floor. HTTP `401`/`403`/`404` enter rule 18's access
+    pause regardless of body validity; a `401` invalidates the local auth handle
+    for offline cleanup as already required. Count each dispatched failed
+    attempt once, with no retry timer for these access pauses.
+    Other non-2xx responses use rules 17–18 only when the bounded body contains
+    a recognized error with a contract-compatible status and valid required
+    fields. If a `409` cannot distinguish conflict from binding loss, or an
+    unexpected `4xx`/other non-success status or invalid/unrecognized error body
+    supplies no safe classification, immediately enter lane-scoped
+    `retry_paused` with reason `unclassified_error_response`, the observed
+    status and a `DeliveryResumeSelection`. Count one failed HTTP attempt,
+    retain the exact prepared request and block successors; do not automatically
+    replay, infer a conflict/current version/permission, rebase, adopt authority
+    or expose the raw error body/message. Generic transport failure without
+    usable response headers remains the network retry case, not guessed `409`.
+    For the unclassified pause, a deliberate `resumeDelivery` must first obtain
+    a fresh server binding and satisfy the existing owner/actor/URL/epoch and
+    generation-confirmation gates. It then permits an exact-request probe,
+    without changing method/body/base/key. An unclassified response pauses
+    again after that one attempt; a valid classified response takes its normal
+    ACK, bounded retry, conflict or access path. A changed binding cannot be
+    silently authorized by this probe or action. No canonical read is used to
+    guess whether an unknown request committed. Guarded explicit abandonment
+    remains available when replay is unavailable, with the same offline limits.
     Use 0040 rule 17's bounded retry policy with the client's injected clock
     and random source: 0.5 s doubling to 30 s, jitter multiplier in [0.5, 1),
     with parsed Retry-After as a floor clamped to one hour. A **delivery-budget
     epoch** permits at most eight consecutive unsuccessful HTTP mutation
     attempts per lane and 32 unsuccessful attempts total across the coordinator.
     Each unsuccessful delivery attempt counts once, including an invalid
-    successful response, a definitive ACK-transaction abort after a valid
+    successful response, any failed non-2xx attempt, a definitive ACK-transaction abort after a valid
     receipt, or a timeout/abort whose request may have reached the server.
     Parser failure followed by transport cancellation, or duplicate storage
     error callbacks, never count the same attempt twice. HTTP `2xx` or a
@@ -449,7 +515,7 @@ committed` assumption. A prepared record without a durable receipt is an
     delivery state/epoch and page/owner/binding/authority context; runtime validation
     rejects another action's token, stale context or consumed selection.
     Duplicate/pending delivery-resume actions coalesce without replenishing
-    an active epoch repeatedly. Authorization, conflict and inherited-owner
+    an active epoch repeatedly. Authorization, conflict, preparation-storage and inherited-owner
     recovery gates remain in force; resetting budget grants no authority.
     Reconnect, online events, new enqueues, ACK progress, timers and status/error
     callbacks never open a new epoch, reset the aggregate counter or invoke
@@ -527,7 +593,11 @@ committed` assumption. A prepared record without a durable receipt is an
     cleanup, and retain unrelated rows/checkpoints needed by surviving intents.
 18. 401, 403, 404 and binding mismatch pause, retain and report access/binding
     uncertainty; never interpret them as proof an earlier attempt did not
-    commit. A fresh binding/access check and explicit `resumeDelivery` are needed after
+    commit. For `401`/`403`/`404`, return `retry_paused` with reason
+    `access_unavailable`, the observed HTTP status and a `DeliveryResumeSelection`;
+    recognized `outbox_binding_changed` uses reason `binding_changed`. A
+    selection is not proof access returned and cannot skip the checks below.
+    A fresh binding/access check and explicit `resumeDelivery` are needed after
     credentials/access return. Even if disable/re-enable was never observed as
     a `401`, the stored generation fence rejects the old authority on the next
     send. A fresh binding may reveal a different generation for the same
@@ -567,7 +637,7 @@ committed` assumption. A prepared record without a durable receipt is an
     frontier version; stale or consumed tokens fail without changing work or
     delivery budgets. This action replenishes only the local slice's work
     allowance. It does not create a delivery-budget epoch, reset failure
-    counters/backoff, grant authority or clear delivery/conflict pauses. Normal
+    counters/backoff, grant authority or clear delivery/conflict/preparation pauses. Normal
     eligible attempts/ACKs during the slice still obey and consume/update the
     existing rule 16 epoch; paging itself never refills its budget.
     `recovery_paused` and `retry_paused` may coexist: continuing recovery can do
@@ -608,6 +678,8 @@ committed` assumption. A prepared record without a durable receipt is an
 | B16 | Commit the first server mutation but replace success with malformed JSON, oversized body, wrong artifact/path/version, or unexpected 2xx status. Each attempt remains prepared/unknown and consumes exactly one existing 8/32 failure unit, including body cancellation callbacks. If budget remains, emit delivery_retrying reason invalid_response; exhaustion emits only retry_paused with no retry timer. Replays preserve method/body/base/key and cause no second mutation/feed row. Exhaustion yields typed retry_paused, no sends until valid explicit resumeDelivery; a valid replay receipt plus ACK transaction complete can then advance. Raw bad body/foreign identifiers never leak to callbacks. Mutate the no-ACK validation or failure-count/budget guard and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | B17 | Observe a valid server receipt, inject real ACK-transaction abort, and assert one failure counted, bounded observedReceipt with ackDurable: false, immediate ack_storage_failed pause, zero further network or ACK-persistence attempts and blocked successor. Explicit resumeDelivery replays exact original operation and only its newly validated receipt plus committed ACK advances once; a continuing disk fault pauses again after one replay. Release stale/duplicate response and transaction callbacks before/after resume: none can ACK, double-count, downgrade a durable ACK or release successors. Crash before terminal storage event: persisted ACK trims without HTTP; prepared state requires explicit recovery and same-key replay. Purge/access loss after the observed receipt still permits guarded explicit abandonment without claiming rollback or replaying automatically. Break the abort pause, terminal-event or callback-generation guard and show the corresponding fault test fails.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | B18 | Under one free inherited owner, enqueue actorA’s work, then open after logout/reload as actorB at the same URL: current-binding lookup is empty but owner-wide presence is not. Assert owner_binding_quarantined, unchanged active/saved owner IDs, zero new enqueue/HTTP/trim/delete/fresh-owner allocation and a generic diagnostic with no actorA identity, URL, count, path, value or selection. Restore authenticated actorA’s original binding: same owner yields recovery_required, no send before explicit confirmation, then exact original operation replay. Repeat with another URL, saved candidate, occupied candidate slot and storage-probe failure; no reference is overwritten or treated as empty. Mixed matching/foreign bindings may recover and trim only the matching subset; empty-case owner rotation/candidate clearing must fail while any other binding’s intent/receipt/retained checkpoint remains. Same-actor/URL epoch mismatch permits only guarded explicit local abandonment; full owner emptiness is required for empty-case fresh-owner allocation or explicit saved-reference clear; the busy-owner branch still must save its reference before replacing the active ID. Break owner-wide existence or reference-preservation guard and prove these cases fail.                                                                                                                                                   |
+| B19 | Durably enqueue, expose IDB request success but abort preparation transaction: original unprepared intent/key/sequence/dependency and counters remain, preparation_paused reports durablyEnqueued true/prepared false, no HTTP or automatic local retry. One valid retryPreparation permits one local attempt; repeated abort requires a new deliberate action, stale/duplicate/wrong-phase tokens cannot retry an ACK or prepared record, and late callbacks cannot dispatch or downgrade state. Successful preparation uses the original numeric base/durable predecessor receipt, sends only after commit and only if existing delivery/authority gates allow. Neither local retry nor recovery paging refills 8/32 budget or clears retry/auth/conflict pauses. Crash with unprepared versus committed-prepared storage follows its respective explicit recovery path; unsent discard remains local. Break commit-before-dispatch, pause or no-budget-reset guards and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| B20 | Supply malformed, oversized and stalled 409 bodies and unexpected 4xx responses, including incompatible status/error-code pairs: exactly one failed mutation attempt, immediate unclassified_error_response pause, no automatic mutation retry, guessed conflict/version, authority update or raw-body leak. Only fresh binding plus valid explicit resumeDelivery permits the same frozen-request probe; another unclassified response pauses again after one. A changed actor/URL/epoch/generation cannot be silently adopted, and classified conflict/access responses use their existing gates. Invalid-body 401/403/404 still access-pause; 401 invalidates offline identity proof. Invalid-body 429/5xx retain status/bounded Retry-After and use 8/32 backoff despite body timeout/cancellation; no headers uses network policy. Assert one count per attempt, successor blocked, exact key/body/base preserved, and abandonment/offline authority rules unchanged. Break status retention or unclassified-response no-autoretry guard and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                              |
 
 Use independently authored fixtures and the repository's isolated verification
 workflow. Unit fault seams prove state transitions; real-browser IndexedDB,
@@ -618,12 +690,12 @@ This documentation change has not executed these future acceptance cases.
 
 ## Proposed PR slices
 
-| Slice | Deliverable                                                                                                                                                                                                                        | Dependencies and acceptance                                                                                     |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                            |
-| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit retry/recovery, durable admission, caps, strict recovery decoder and explicit disposal of unsent work. No sender enabled. | R08a contract; B2/B3/B8/B13 and B12 legacy-generation storage cases; B15 paging cases; B18 owner-binding cases. |
-| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                       | R08a–b, R07c follower semantics; B4–B12 and B15–B17 including fail-first rejection proofs.                      |
-| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                          | R08c; B2–B18, full gates and both browser engines where supported.                                              |
+| Slice | Deliverable                                                                                                                                                                                                                        | Dependencies and acceptance                                                                                                            |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                                                   |
+| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit retry/recovery, durable admission, caps, strict recovery decoder and explicit disposal of unsent work. No sender enabled. | R08a contract; B2/B3/B8/B13 and B12 legacy-generation storage cases; B15 paging cases; B18 owner-binding cases; B19 preparation cases. |
+| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                       | R08a–b, R07c follower semantics; B4–B12 and B15–B17 and B19–B20 including fail-first rejection proofs.                                 |
+| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                          | R08c; B2–B20, full gates and both browser engines where supported.                                                                     |
 
 No slice may advertise R08 complete before the end-to-end recovery acceptance
 has passed. Runtime-frame data access, UI adoption, orphan transfer, automatic
