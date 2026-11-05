@@ -163,6 +163,8 @@ bridge has no data capability), and it is not in a revision or an export.
 CLI and MCP users can poll `data get` or `get_data`
 and compare versions. HTTP and TypeScript clients can instead follow changes and
 list object member names ([decision 0040](docs/decisions/0040-data-changes-and-member-listing.md)).
+The workspace Data tab shows the root and its version, following changes while
+the tab and page are visible.
 
 The TypeScript client's follower subscribes before reading the first snapshot.
 It emits `snapshot`, `update`, and terminal `unavailable` events; it can
