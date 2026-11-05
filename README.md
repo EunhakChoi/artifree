@@ -439,10 +439,12 @@ do not replace the API, storage, authentication, or worker lifecycle.
 Application code, names, schemas, and sample content are written for Artifree.
 UI components are adapted from MIT-licensed shadcn/ui; their source attribution
 is retained in [third-party notices](THIRD_PARTY_NOTICES.md).
-No proprietary product bundle, decompiled source, captured account
-data, cookies, private URLs, or credentials belong here. An independent
-implementation does not by itself establish a formally separated clean-room
-process. Artifree makes no claim of compatibility with a proprietary internal
-API or of complete feature equivalence.
+Do not use original application DLLs as the execution engine. Keep credentials,
+local data, private evidence, generated verification outputs, and caches outside
+Git. Each PR receives one Codex review and one independent subagent review;
+findings are addressed without another review round. Follow
+[AGENTS.md](AGENTS.md) and [the contribution guide](.github/CONTRIBUTING.md).
+Artifree makes no claim of a formally separated clean-room process,
+compatibility with a proprietary internal API, or complete feature equivalence.
 
 Licensed under [MIT](LICENSE).
