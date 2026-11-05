@@ -21,6 +21,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { refusedFloor, useWriteGate } from './conditional-write';
 import { DuplicateDialog } from './duplicate-dialog';
+import { DataPanel } from './data-panel';
 import { ExportButton } from './export-button';
 import { HistoryPanel, useRestore } from './history-panel';
 import { MetadataActions } from './metadata-actions';
@@ -300,6 +301,7 @@ export function ArtifactDetail({
               <TabsTrigger value="preview">Preview</TabsTrigger>
               <TabsTrigger value="source">Source</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
+              <TabsTrigger value="data">Data</TabsTrigger>
             </TabsList>
             {/* The views that read the artifact are not mounted in the
                 trash; they mount afresh once it is recovered. */}
@@ -332,6 +334,19 @@ export function ArtifactDetail({
                   unsaved={unsaved}
                   restore={restore}
                   wait={sourceWait}
+                />
+              )}
+            </TabsContent>
+            <TabsContent value="data" className="mt-4">
+              {inTrash ? (
+                <InTrash what="read its data" />
+              ) : stale ? (
+                <p>Waiting until the artifact is read again.</p>
+              ) : (
+                <DataPanel
+                  client={client}
+                  artifactId={artifactId}
+                  resets={resets}
                 />
               )}
             </TabsContent>

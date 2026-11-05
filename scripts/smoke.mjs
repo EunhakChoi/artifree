@@ -14,6 +14,7 @@ import {
   checkStrictDraftRecovery,
 } from './smoke-draft-guards.mjs';
 import { checkDuplicate } from './smoke-duplicate.mjs';
+import { checkData } from './smoke-data.mjs';
 import { checkEditor } from './smoke-editor.mjs';
 import { checkExport } from './smoke-export.mjs';
 import { checkHandoff } from './smoke-handoff.mjs';
@@ -249,6 +250,7 @@ try {
     checkAccessibility,
   });
   const live = await checkLiveUpdates({ browser, origin, server: api });
+  await checkData({ browser, origin, server: api });
   const list = await checkListAndMetadata({
     browser,
     origin,
