@@ -115,6 +115,10 @@ Artifact behavior is tested at the boundary that owns it:
   size, malformed and several ranges as `400`, the whole file without a
   byte range or with `If-Range`, and a missing file, revision, or trashed
   artifact refused before any range, telling nothing of the size.
+- `crates/artifree-server/tests/serve_shutdown.rs`: one real Unix stop signal
+  sent inside the readiness callback gracefully stops all three listeners,
+  even though their shutdown futures start later. The shared latch also has
+  a unit test for waiters created after the stop request.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
