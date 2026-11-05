@@ -3,10 +3,11 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 use artifree_contracts::api::CreateTokenResponse;
-use artifree_core::jobs::{Clock, SystemClock};
+use artifree_core::jobs::Clock;
 use artifree_core::worker::{Pace, Step, WorkerConfig, run_next};
 use artifree_domain::identity::UnixMillis;
 use artifree_domain::job::WorkerId;
@@ -25,10 +26,30 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const OWNER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const UNKNOWN_JOB: &str = "job_00000000000000000000000000000000";
 
+#[derive(Debug)]
+struct ManualClock(AtomicI64);
+
+impl ManualClock {
+    fn set(&self, millis: i64) {
+        self.0.store(millis, Ordering::SeqCst);
+    }
+
+    fn advance(&self, millis: i64) {
+        self.0.fetch_add(millis, Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> UnixMillis {
+        UnixMillis(self.0.load(Ordering::SeqCst))
+    }
+}
+
 struct Harness {
     directory: PathBuf,
     database: PathBuf,
     api: Router,
+    clock: Arc<ManualClock>,
 }
 
 impl Harness {
@@ -42,12 +63,14 @@ impl Harness {
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory)?;
         let database = directory.join("db.sqlite3");
+        let clock = Arc::new(ManualClock(AtomicI64::new(1_000)));
         let state = AppState::new(
             SqliteStore::open(&database)?,
             artifree_providers::tokens::SqliteTokenStore::open(&database)?,
             AccessToken::parse(OWNER).ok_or("fixture token")?,
             Settings {
                 content_origin: "http://127.0.0.1:7411".into(),
+                clock: clock.clone(),
                 ..Settings::default()
             },
         )?;
@@ -55,6 +78,7 @@ impl Harness {
             directory,
             database,
             api: http::router(state),
+            clock,
         })
     }
 
@@ -177,7 +201,7 @@ impl Harness {
             .to_owned())
     }
 
-    /// Runs the worker once, in this process, with the system clock.
+    /// Runs the worker once with the same manual clock as the API.
     fn work(&self) -> Result<Step, Box<dyn std::error::Error>> {
         struct Never;
         impl Pace for Never {
@@ -189,7 +213,7 @@ impl Harness {
         let worker: WorkerId = "worker-test".parse()?;
         Ok(run_next(
             &store,
-            &SystemClock,
+            &*self.clock,
             &worker,
             &WorkerConfig::with_lease_ms(60_000),
             &Never,
@@ -655,6 +679,39 @@ async fn an_unknown_or_malformed_job_is_not_found_without_echoing_the_input() ->
 // --- the worker's result ---------------------------------------------------
 
 #[tokio::test]
+async fn a_job_waits_after_a_clock_rollback_until_its_enqueue_time() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let job = harness.enqueued(&id, "job-a").await?;
+
+    harness.clock.set(999);
+    let step = harness.work()?;
+    assert!(matches!(step, Step::Idle), "job is not due yet: {step:?}");
+    let waiting = harness
+        .owner("GET", &format!("/v1/jobs/{job}"), None, None)
+        .await?
+        .json()?;
+    assert_eq!(waiting["created_at_ms"], 1_000);
+    assert_eq!(waiting["state"], "queued");
+    assert_eq!(waiting["attempt"], 0, "an idle poll uses no attempt");
+    assert_eq!(waiting["started_at_ms"], Value::Null);
+
+    harness.clock.advance(1);
+    let step = harness.work()?;
+    assert!(matches!(step, Step::Finished(_)), "job is due: {step:?}");
+    let finished = harness
+        .owner("GET", &format!("/v1/jobs/{job}"), None, None)
+        .await?
+        .json()?;
+    assert_eq!(finished["state"], "succeeded");
+    assert_eq!(finished["attempt"], 1);
+    assert_eq!(finished["started_at_ms"], 1_000);
+    assert_eq!(finished["finished_at_ms"], 1_000);
+    assert_eq!(finished["result"]["verdict"], "ok");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_worker_run_shows_in_the_job() -> TestResult {
     let harness = Harness::new()?;
     let id = harness.artifact("A").await?;
@@ -802,7 +859,7 @@ async fn cancelling_a_running_job_asks_and_the_worker_confirms() -> TestResult {
     let claimed = store
         .claim_job(JobClaim {
             worker: &"worker-held".parse()?,
-            now: SystemClock.now(),
+            now: harness.clock.now(),
             lease_ms: 60_000,
         })?
         .claimed
@@ -830,7 +887,7 @@ async fn cancelling_a_running_job_asks_and_the_worker_confirms() -> TestResult {
         )
         .await?;
     assert_eq!(again.status, StatusCode::OK, "asking twice is not an error");
-    store.confirm_cancel(&claimed.lease, UnixMillis(SystemClock.now().0))?;
+    store.confirm_cancel(&claimed.lease, harness.clock.now())?;
     assert_eq!(harness.state_of(&job).await?, "cancelled");
     let ended = harness
         .owner(
@@ -860,7 +917,7 @@ async fn lists_page_newest_first_and_tokens_belong_to_their_list() -> TestResult
         .enumerate()
     {
         // Creation times order the list; each job gets its own millisecond.
-        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        harness.clock.advance(1);
         made.push(harness.enqueued(artifact, &format!("job-{number}")).await?);
     }
 
@@ -930,7 +987,7 @@ async fn a_page_token_continues_only_the_list_it_came_from_as_written() -> TestR
     let harness = Harness::new()?;
     let first = harness.artifact("A").await?;
     for number in 0..3 {
-        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        harness.clock.advance(1);
         harness.enqueued(&first, &format!("job-{number}")).await?;
     }
     let page = harness
