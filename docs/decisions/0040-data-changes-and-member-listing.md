@@ -440,7 +440,7 @@ slice list above was planned as two pull requests; #87 carries both slices.
 | R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
 | R07b   | member listing (rules 7-11)                     | implemented     | #86          |
 | R07c-1 | client transport bounds and retry policy        | implemented     | #91          |
-| R07c-2 | `listDataMembers` (rules 20-22 for the listing) | not implemented | -            |
+| R07c-2 | `listDataMembers` (rules 20-22 for the listing) | implemented     | this change  |
 | R07c-3 | `followData` (rules 13-16, 20, 22)              | not implemented | -            |
 | R07d   | user guides                                     | not implemented | -            |
 | R07e   | web data panel (rule 23)                        | not implemented | -            |
@@ -452,8 +452,8 @@ unlisted one, and while the first read is pending (rule 6; 0007 decision 4).
 #87 also implements rule 12 in the client: `FeedChange` carries `data_version`
 for `data_changed` only, and an event that breaks that is `invalid_response`.
 The published schema and Rust deserialization state the same rule. Rules 13-16
-of R07c (`followData`) and `listDataMembers` (rules 20-22 for it) are not
-implemented. What R07 excludes is listed under Scope.
+of R07c (`followData`) are not implemented. What R07 excludes is listed under
+Scope.
 
 R07c-1 is the transport that `followChanges` uses now and the next two slices
 will use: the event-stream parser with the bounds of rule 19 (an unfinished
@@ -462,15 +462,16 @@ line, and one event's type and data), reusable bounded reads of a success body
 once, the 45-second stall limit of rule 18 (no timer before the headers), and
 the retry policy of rule 17 (jitter, the clamped `Retry-After` floor, a count
 that resets only after 30 seconds open). `followChanges` and the error body of
-its stream open use them; every other client call keeps its current read. The
-helpers for a success body have no caller until `listDataMembers` and
-`followData`. The client takes an optional `clock` (stall limit and waits) and
+its stream open use them. `listDataMembers` uses both bounded body readers;
+other client calls keep their current reads. The client takes an optional
+`clock` (stall limit and waits) and
 `followChanges` an optional `random`, for tests; production uses the system
 clock and `Math.random`.
 
 R07b landed in #86 (contract 0.16.0): `GET /v1/artifacts/{id}/data/members`
 with the query, response, check order, page token, and consistency of rules
-7-11, over HTTP only (no MCP tool, no client method). Where rule 9 lists
+7-11, over HTTP (no MCP tool). The TypeScript client now offers one-page
+`listDataMembers`. Where rule 9 lists
 `at_data_version` and the value at the path together, a stale version is
 reported first, then a value that is not an object. The listing's worst-case
 page measured 7,987 bytes against the 7,991 of rule 19.
