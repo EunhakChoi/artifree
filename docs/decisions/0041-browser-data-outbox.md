@@ -192,12 +192,35 @@ feed identity`, **after target-access/in-place checks
    page. Coordinate all handles in one document through one registry;
    a second opener cannot bypass the coordinator or make a second sender.
    If Web Locks, session storage or IndexedDB is unavailable, refuse outbox
-   initialization explicitly. Once a free candidate lock is acquired, read
-   bounded recovery metadata for the same authenticated binding and return
-   `recovery_required`; send nothing, prepare nothing and perform no trim,
-   enqueue into that candidate or deletion until an explicit choice. If it
-   has no retained work, create a fresh owner for new work instead of claiming
-   recovered physical identity. Automatic reload/native-restore delivery is
+   initialization explicitly. Once a free inherited candidate lock is acquired,
+   first determine whether that owner has **any retained records across all
+   bindings**, using bounded existence-only owner-index reads over intents,
+   receipts and all retained checkpoints. Do not decode or expose other bindings'
+   payloads, identities, URLs, counts or paths through this probe. A failed or
+   uncertain probe is not empty: preserve references and report a storage error.
+   Only owner-wide emptiness permits the empty-case fresh-owner allocation;
+   an empty current-binding query alone never does.
+   If records match the authenticated URL/actor/storage epoch, read only that
+   binding's bounded recovery metadata and return `recovery_required`; send
+   nothing, prepare nothing and perform no trim, enqueue into that candidate
+   or deletion until an explicit choice. Apply rule 18 when the actor generation
+   changed. Other bindings' rows remain anchored by the same owner reference.
+   If no delivery-binding records match but the owner is occupied, return the
+   explicit non-delivering state `owner_binding_quarantined`: keep the active
+   owner ID and any saved candidate unchanged, hold its lock under the normal
+   page-lifetime rules, and refuse new enqueues or a fresh owner allocation for
+   this inherited context. Use a fixed generic diagnostic with no previous
+   actor/binding identity or payload, and do not treat it as an empty queue or
+   let `resumeDelivery`/paging clear it. A different current actor/URL receives
+   no recovery/abandonment selection for the old rows. Same-actor/URL records
+   with an epoch mismatch may offer rule 17's explicit local
+   cleanup metadata/choice, never delivery or automatic removal. The caller may
+   restore the original authenticated connection and reopen/retry recovery as
+   rule 6 describes; quarantine itself conveys no authority. This deliberately
+   limits this inherited context's availability while preserving its data;
+   existing direct writes remain available under their ordinary permissions.
+   If the owner is globally empty, create a fresh owner for new work instead
+   of claiming recovered physical identity. Automatic reload/native-restore delivery is
    not provided where original and copied session identities are ambiguous.
    Do not fall back to timestamps, localStorage
    leases, volatile success, or automatic foreign-owner adoption. This limits
@@ -221,14 +244,34 @@ feed identity`, **after target-access/in-place checks
    A saved candidate is not automatically probed, adopted, drained or deleted.
    Only `retryRecoveryCandidate()` deliberately attempts its lock again; if
    still held it reports `owner_busy` without waiting or changing rows. If
-   acquired, revalidate the authenticated binding and retained record versions,
-   then return a fresh `recovery_required` selection without sending, preparing,
+   acquired, apply rule 5's owner-wide occupancy/binding classification:
+   matching records return a fresh `recovery_required` selection after binding
+   and record-version validation, mismatched retained records preserve the
+   saved owner ID in `owner_binding_quarantined`, and globally empty candidates
+   return `recovery_empty` without automatically deleting the reference.
+   Return no selection for a different actor/URL. A permitted selection is returned without sending, preparing,
    trimming or deleting. `confirmRecovery` remains a separate explicit choice.
    The recovered queue keeps its original logical owner; it is not moved into
    the fresh owner's queue. Retry confers no proof of physical tab identity.
    Clear the saved reference only by an explicit caller action after holding
    its lock, validating binding and verifying that its queue has no retained
-   rows; it cannot discard payloads or evict an unresolved candidate.
+   records **under any binding**, not just the current visible subset; it
+   cannot discard payloads or evict an unresolved candidate. Serialize owner
+   reference changes with local enqueue/receipt/cleanup transitions. Dropping
+   or replacing the last reference to a nonempty owner is forbidden. The
+   existing busy-owner branch may replace an active ID only after successfully
+   retaining that same ID in the candidate slot; it does not establish emptiness
+   or permit later clearing it while any binding still has records.
+   Restoring the original configured URL and authenticating as the original
+   actor lets a newly opened/revalidated handle use the preserved owner ID and
+   find only its matching records. If the ID is in the saved slot, deliberately
+   call `retryRecoveryCandidate()` after that authentication. In either case
+   return `recovery_required` and require the normal explicit confirmation;
+   never switch bindings, infer an actor from a label or send on quarantine
+   exit automatically. Successful recovery/trim of one binding does not release
+   other bindings' records or their owner anchor. If the original storage epoch
+   cannot be restored, same-actor/URL local abandonment remains rule 17's path;
+   another actor cannot inspect or clear those rows.
    If a browser loses session storage, retained rows stay dormant; there is no
    orphan discovery/adoption. Explicit disposal is restricted to a current-page
    queue or an explicitly confirmed recovery queue, with its owner lock held
@@ -564,6 +607,7 @@ committed` assumption. A prepared record without a durable receipt is an
 | B15 | Drive recovery across multiple 32-row pages and the 256-local-transition pause while retry counters are nonzero; each continueRecovery advances only its durable frontier and preserves delivery epoch and remaining retry budget, apart from ordinary attempts/ACKs under rule 16. Exhaust aggregate 32 failures, repeatedly continue local recovery, and assert no new HTTP mutation, counter reset, backoff reset or cleared retry pause. Runtime rejection of a RecoveryContinuation passed to resumeDelivery, a delivery-resume selection passed to continueRecovery, and stale/consumed/wrong-context tokens leaves both budgets and authority unchanged. Only a valid deliberate resumeDelivery starts exactly one fresh bounded epoch; duplicate pending actions coalesce, recovery frontier remains stable and recovery pause still needs its continuation. Break paging’s no-refill guard and prove the test fails.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | B16 | Commit the first server mutation but replace success with malformed JSON, oversized body, wrong artifact/path/version, or unexpected 2xx status. Each attempt remains prepared/unknown and consumes exactly one existing 8/32 failure unit, including body cancellation callbacks. If budget remains, emit delivery_retrying reason invalid_response; exhaustion emits only retry_paused with no retry timer. Replays preserve method/body/base/key and cause no second mutation/feed row. Exhaustion yields typed retry_paused, no sends until valid explicit resumeDelivery; a valid replay receipt plus ACK transaction complete can then advance. Raw bad body/foreign identifiers never leak to callbacks. Mutate the no-ACK validation or failure-count/budget guard and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | B17 | Observe a valid server receipt, inject real ACK-transaction abort, and assert one failure counted, bounded observedReceipt with ackDurable: false, immediate ack_storage_failed pause, zero further network or ACK-persistence attempts and blocked successor. Explicit resumeDelivery replays exact original operation and only its newly validated receipt plus committed ACK advances once; a continuing disk fault pauses again after one replay. Release stale/duplicate response and transaction callbacks before/after resume: none can ACK, double-count, downgrade a durable ACK or release successors. Crash before terminal storage event: persisted ACK trims without HTTP; prepared state requires explicit recovery and same-key replay. Purge/access loss after the observed receipt still permits guarded explicit abandonment without claiming rollback or replaying automatically. Break the abort pause, terminal-event or callback-generation guard and show the corresponding fault test fails.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| B18 | Under one free inherited owner, enqueue actorA’s work, then open after logout/reload as actorB at the same URL: current-binding lookup is empty but owner-wide presence is not. Assert owner_binding_quarantined, unchanged active/saved owner IDs, zero new enqueue/HTTP/trim/delete/fresh-owner allocation and a generic diagnostic with no actorA identity, URL, count, path, value or selection. Restore authenticated actorA’s original binding: same owner yields recovery_required, no send before explicit confirmation, then exact original operation replay. Repeat with another URL, saved candidate, occupied candidate slot and storage-probe failure; no reference is overwritten or treated as empty. Mixed matching/foreign bindings may recover and trim only the matching subset; empty-case owner rotation/candidate clearing must fail while any other binding’s intent/receipt/retained checkpoint remains. Same-actor/URL epoch mismatch permits only guarded explicit local abandonment; full owner emptiness is required for empty-case fresh-owner allocation or explicit saved-reference clear; the busy-owner branch still must save its reference before replacing the active ID. Break owner-wide existence or reference-preservation guard and prove these cases fail.                                                                                                                                                   |
 
 Use independently authored fixtures and the repository's isolated verification
 workflow. Unit fault seams prove state transitions; real-browser IndexedDB,
@@ -574,12 +618,12 @@ This documentation change has not executed these future acceptance cases.
 
 ## Proposed PR slices
 
-| Slice | Deliverable                                                                                                                                                                                                                        | Dependencies and acceptance                                                                |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.       |
-| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit retry/recovery, durable admission, caps, strict recovery decoder and explicit disposal of unsent work. No sender enabled. | R08a contract; B2/B3/B8/B13 and B12 legacy-generation storage cases; B15 paging cases.     |
-| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                       | R08a–b, R07c follower semantics; B4–B12 and B15–B17 including fail-first rejection proofs. |
-| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                          | R08c; B2–B17, full gates and both browser engines where supported.                         |
+| Slice | Deliverable                                                                                                                                                                                                                        | Dependencies and acceptance                                                                                     |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                            |
+| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit retry/recovery, durable admission, caps, strict recovery decoder and explicit disposal of unsent work. No sender enabled. | R08a contract; B2/B3/B8/B13 and B12 legacy-generation storage cases; B15 paging cases; B18 owner-binding cases. |
+| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                       | R08a–b, R07c follower semantics; B4–B12 and B15–B17 including fail-first rejection proofs.                      |
+| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                          | R08c; B2–B18, full gates and both browser engines where supported.                                              |
 
 No slice may advertise R08 complete before the end-to-end recovery acceptance
 has passed. Runtime-frame data access, UI adoption, orphan transfer, automatic
