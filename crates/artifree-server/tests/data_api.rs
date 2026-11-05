@@ -2312,3 +2312,281 @@ fn the_published_page_size_bounds_are_the_cores() -> TestResult {
     assert!(MemberLimit::try_from(u64::try_from(MemberLimit::MAX.get())? + 1).is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn outbox_binding_get_and_head_validate_input_and_authentication() -> TestResult {
+    let harness = Harness::new()?;
+    for (method, suffix, body, token, expected) in [
+        ("GET", "", "", Some(OWNER), StatusCode::OK),
+        ("HEAD", "", "", Some(OWNER), StatusCode::OK),
+        ("GET", "?", "", Some(OWNER), StatusCode::BAD_REQUEST),
+        (
+            "GET",
+            "?unexpected=1",
+            "",
+            Some(OWNER),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("HEAD", "?", "", Some(OWNER), StatusCode::BAD_REQUEST),
+        ("GET", "", "x", Some(OWNER), StatusCode::BAD_REQUEST),
+        ("HEAD", "", "x", Some(OWNER), StatusCode::BAD_REQUEST),
+        ("GET", "", "", None, StatusCode::UNAUTHORIZED),
+        ("HEAD", "?", "x", None, StatusCode::UNAUTHORIZED),
+    ] {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("/v1/data-outbox/binding{suffix}"));
+        if let Some(token) = token {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = harness
+            .api
+            .clone()
+            .oneshot(request.body(Body::from(body))?)
+            .await?;
+        assert_eq!(response.status(), expected, "{method} {suffix} {body}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = to_bytes(response.into_body(), 4096).await?;
+        if method == "HEAD" {
+            assert!(bytes.is_empty(), "HEAD has no body");
+        } else if expected == StatusCode::OK {
+            let binding: Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(binding.as_object().ok_or("binding object")?.len(), 3);
+            assert_eq!(binding["actor_id"], "local");
+            assert_eq!(binding["actor_generation"], "1");
+            let epoch = binding["storage_epoch"].as_str().ok_or("epoch")?;
+            assert_eq!(epoch.len(), 32);
+            assert!(
+                epoch
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            );
+        } else {
+            let error: Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(
+                error["error"]["code"],
+                if expected == StatusCode::UNAUTHORIZED {
+                    "unauthenticated"
+                } else {
+                    "invalid_request"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn fenced(
+    harness: &Harness,
+    method: &str,
+    id: &str,
+    key: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+) -> Result<Reply, Box<dyn std::error::Error>> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(format!("/v1/artifacts/{id}/data"))
+        .header(header::AUTHORIZATION, format!("Bearer {OWNER}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", key);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = harness
+        .api
+        .clone()
+        .oneshot(request.body(Body::from(body.to_string()))?)
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 4096).await?;
+    Ok(Reply {
+        status,
+        text: String::from_utf8(bytes.to_vec())?,
+    })
+}
+
+#[tokio::test]
+async fn outbox_fence_is_checked_before_replay_and_refusal_leaves_key_free() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("outbox").await?;
+    let binding = harness
+        .owner("GET", "/v1/data-outbox/binding", None, None)
+        .await?
+        .json()?;
+    let epoch = binding["storage_epoch"].as_str().ok_or("epoch")?;
+    let good = [
+        ("artifree-outbox-actor", "local"),
+        ("artifree-outbox-epoch", epoch),
+        ("artifree-outbox-actor-generation", "1"),
+    ];
+    let mut stale = good;
+    stale[2].1 = "2";
+    let body = json!({"path":"item", "base_data_version":0, "value":1});
+    let denied = fenced(&harness, "PUT", &id, "outbox-write-1", &body, &stale).await?;
+    assert_eq!(denied.status, StatusCode::CONFLICT, "{}", denied.text);
+    assert_eq!(denied.json()?["error"]["code"], "outbox_binding_changed");
+    let committed = fenced(&harness, "PUT", &id, "outbox-write-1", &body, &good).await?;
+    assert_eq!(committed.status, StatusCode::OK, "{}", committed.text);
+    assert_eq!(committed.json()?["data_version"], 1);
+    assert_eq!(committed.json()?["replayed"], false);
+    let denied = fenced(&harness, "PUT", &id, "outbox-write-1", &body, &stale).await?;
+    assert_eq!(denied.status, StatusCode::CONFLICT);
+    assert_eq!(denied.json()?["error"]["code"], "outbox_binding_changed");
+    let different = json!({"path":"item", "base_data_version":0, "value":2});
+    let denied = fenced(&harness, "PUT", &id, "outbox-write-1", &different, &stale).await?;
+    assert_eq!(denied.status, StatusCode::CONFLICT);
+    assert_eq!(
+        denied.code(),
+        "outbox_binding_changed",
+        "fence wins over key reuse"
+    );
+    let reused = fenced(&harness, "PUT", &id, "outbox-write-1", &different, &good).await?;
+    assert_eq!(reused.code(), "request_key_reused");
+    let replay = fenced(&harness, "PUT", &id, "outbox-write-1", &body, &good).await?;
+    assert_eq!(replay.json()?["replayed"], true);
+    assert_eq!(harness.at(&id, "item").await?["value"], 1);
+    let missing = format!("art_{}", "0".repeat(32));
+    for target in [&missing, &id] {
+        if target == &id {
+            let removed = harness
+                .owner(
+                    "PATCH",
+                    &format!("/v1/artifacts/{id}"),
+                    Some("trash-outbox"),
+                    Some(&json!({"base_metadata_revision":1,"deleted":true})),
+                )
+                .await?;
+            assert_eq!(removed.status, StatusCode::OK, "{}", removed.text);
+        }
+        let denied = fenced(&harness, "PUT", target, "outbox-write-1", &body, &stale).await?;
+        assert_eq!(denied.status, StatusCode::NOT_FOUND, "{}", denied.text);
+        assert_eq!(denied.json()?["error"]["code"], "not_found");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_header_grammar_is_all_or_none_and_rejects_duplicates() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("syntax").await?;
+    let body = json!({"path":"item","base_data_version":0,"value":1});
+    let epoch = "0123456789abcdef0123456789abcdef";
+    let good = [
+        ("artifree-outbox-actor", "local"),
+        ("artifree-outbox-epoch", epoch),
+        ("artifree-outbox-actor-generation", "1"),
+    ];
+    let mut cases = vec![good[..1].to_vec(), good[..2].to_vec()];
+    for (index, bad) in [
+        (0, "owner"),
+        (0, "u-ABC"),
+        (1, "ABCDEF0123456789abcdef0123456789"),
+        (1, "short"),
+        (2, "0"),
+        (2, "01"),
+        (2, "+1"),
+        (2, "-1"),
+        (2, "9223372036854775808"),
+    ] {
+        let mut headers = good.to_vec();
+        headers[index].1 = bad;
+        cases.push(headers);
+    }
+    for duplicate in good {
+        let mut headers = good.to_vec();
+        headers.push(duplicate);
+        cases.push(headers);
+    }
+    for (index, headers) in cases.iter().enumerate() {
+        let rejected = fenced(
+            &harness,
+            "PUT",
+            &id,
+            &format!("outbox-syntax-{index}"),
+            &body,
+            headers,
+        )
+        .await?;
+        assert_eq!(
+            rejected.status,
+            StatusCode::BAD_REQUEST,
+            "{headers:?}: {}",
+            rejected.text
+        );
+        assert_eq!(rejected.json()?["error"]["code"], "invalid_request");
+    }
+    assert_eq!(harness.at(&id, "").await?["data_version"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_guards_patch_and_delete_without_changing_direct_write_semantics() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("verbs").await?;
+    let binding = harness
+        .owner("GET", "/v1/data-outbox/binding", None, None)
+        .await?
+        .json()?;
+    let epoch = binding["storage_epoch"].as_str().ok_or("epoch")?;
+    let headers = [
+        ("artifree-outbox-actor", "local"),
+        ("artifree-outbox-epoch", epoch),
+        ("artifree-outbox-actor-generation", "1"),
+    ];
+    for (index, method, body) in [
+        (
+            0,
+            "PATCH",
+            json!({"path":"", "base_data_version":0,"patch":{"item":1}}),
+        ),
+        (1, "DELETE", json!({"path":"item", "base_data_version":1})),
+    ] {
+        let mut stale = headers;
+        stale[2].1 = "9223372036854775807";
+        let name = format!("outbox-verbs-{index}");
+        let denied = fenced(&harness, method, &id, &name, &body, &stale).await?;
+        assert_eq!(denied.status, StatusCode::CONFLICT, "{}", denied.text);
+        assert_eq!(denied.code(), "outbox_binding_changed");
+        let written = fenced(&harness, method, &id, &name, &body, &headers).await?;
+        assert_eq!(written.status, StatusCode::OK, "{}", written.text);
+        assert_eq!(written.json()?["data_version"], index + 1);
+        let replay = fenced(&harness, method, &id, &name, &body, &[]).await?;
+        assert_eq!(replay.status, StatusCode::OK, "{}", replay.text);
+        assert_eq!(replay.json()?["replayed"], true);
+    }
+    assert_eq!(harness.at(&id, "").await?["value"], json!({}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_preflight_allows_the_three_fence_headers() -> TestResult {
+    let harness = Harness::new()?;
+    let response = harness
+        .api
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/data-outbox/binding")
+                .header(header::ORIGIN, "http://127.0.0.1:5173")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let allowed = response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()?
+        .to_ascii_lowercase();
+    for name in [
+        "artifree-outbox-actor",
+        "artifree-outbox-epoch",
+        "artifree-outbox-actor-generation",
+    ] {
+        assert!(
+            allowed.split(',').any(|value| value.trim() == name),
+            "missing {name}: {allowed}"
+        );
+    }
+    Ok(())
+}

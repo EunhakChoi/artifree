@@ -952,6 +952,24 @@ pub struct DeleteDataRequest {
     pub base_data_version: u64,
 }
 
+/// Authenticated server binding for opt-in browser data writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataOutboxBinding {
+    /// Registered actor: local or u- followed by 32 lowercase hex digits.
+    #[schemars(regex(pattern = r"^(local|u-[0-9a-f]{32})$"))]
+    pub actor_id: String,
+    /// Canonical positive `SQLite` integer, encoded as decimal text.
+    /// The 19-digit alternatives bound the string to 9223372036854775807.
+    #[schemars(regex(
+        pattern = r"^([1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$"
+    ))]
+    pub actor_generation: String,
+    /// Existing feed identity, renewed by supported restore.
+    #[schemars(regex(pattern = r"^[0-9a-f]{32}$"))]
+    pub storage_epoch: String,
+}
+
 /// Response of the three writes of application data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1836,6 +1854,8 @@ pub enum ErrorCode {
     /// too when its `at_data_version` is not the space's version, older or
     /// newer; start the listing again.
     DataConflict,
+    /// The opt-in write authority changed; no key or mutation was recorded.
+    OutboxBindingChanged,
     /// The path crosses a value that is not an object, so a write cannot make
     /// room below it. Nothing was written; set the value at a shorter path
     /// first, or write somewhere else. A listing of member names answers it

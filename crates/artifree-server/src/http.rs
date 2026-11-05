@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
-    DeleteDataRequest, DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest,
-    EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest, Job, JobList,
-    ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataOutboxBinding,
+    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, EditFilesRequest,
+    EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
+    Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
     ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
@@ -34,7 +34,9 @@ use artifree_contracts::api::{
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
+use artifree_domain::change::ChangeCursor;
 use artifree_domain::identity::{ActorId, RequestKey, StateGeneration};
+use artifree_ports::data_store::{OutboxBinding, OutboxFence};
 use artifree_ports::token_store::TokenStore;
 use artifree_ports::user_store::UserStore;
 use artifree_providers::storage::SqliteStore;
@@ -154,6 +156,14 @@ impl DatabaseUsers {
     }
 }
 
+/// Test-only boundary between the completed binding snapshot and confirmation.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct OutboxBindingGate {
+    snapshot: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
 /// Shared request state for the API and content routers.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -162,6 +172,8 @@ pub struct AppState {
 
 #[derive(Debug)]
 struct Shared {
+    #[cfg(test)]
+    outbox_binding_gate: Option<Arc<OutboxBindingGate>>,
     artifacts: ArtifactService<SqliteStore>,
     token_store: Arc<SqliteTokenStore>,
     token: AccessToken,
@@ -230,6 +242,8 @@ impl AppState {
         let started_at = crate::tokens::iso_now();
         Ok(Self {
             shared: Arc::new(Shared {
+                #[cfg(test)]
+                outbox_binding_gate: None,
                 artifacts: ArtifactService::new(store),
                 token_store: Arc::new(token_store),
                 token,
@@ -487,6 +501,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(MAX_DATA_BODY_BYTES)),
         )
         .route("/v1/artifacts/{id}/data/members", get(read_data_members))
+        .route("/v1/data-outbox/binding", get(read_outbox_binding))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(show_job))
         .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))
@@ -692,7 +707,16 @@ async fn healthz_head() -> impl IntoResponse {
 /// refused request never reaches the application, so this attempt commits
 /// nothing; its idempotency key is free unless an earlier attempt used it.
 async fn admit(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    admit_under(&state.shared.limiter, state.clone(), request, next).await
+    let binding = request.uri().path() == "/v1/data-outbox/binding";
+    let head = request.method() == Method::HEAD;
+    let mut response = admit_under(&state.shared.limiter, state.clone(), request, next).await;
+    if binding {
+        response = no_store(response).await;
+        if head {
+            *response.body_mut() = Body::empty();
+        }
+    }
+    response
 }
 
 /// As [`admit`] for the requests a runtime frame causes, under the frame
@@ -987,7 +1011,7 @@ async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Respon
             )
             .header(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                "Authorization, Content-Type, If-Match, Idempotency-Key, Last-Event-ID",
+                "Authorization, Content-Type, If-Match, Idempotency-Key, Last-Event-ID, Artifree-Outbox-Actor, Artifree-Outbox-Epoch, Artifree-Outbox-Actor-Generation",
             )
             .header(header::ACCESS_CONTROL_MAX_AGE, "86400")
             .header(
@@ -1363,53 +1387,157 @@ async fn read_data_members(
     ))
 }
 
+/// GET and implicit HEAD share validation, snapshot and current-user confirmation.
+async fn read_outbox_binding(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    request: Request,
+) -> Result<Json<DataOutboxBinding>, ApiError> {
+    if request.uri().query().is_some() {
+        return Err(ApiError::invalid("outbox binding takes no query"));
+    }
+    let body = axum::body::to_bytes(request.into_body(), 1)
+        .await
+        .map_err(|_| ApiError::invalid("outbox binding takes no body"))?;
+    if !body.is_empty() {
+        return Err(ApiError::invalid("outbox binding takes no body"));
+    }
+    let actor = auth.actor.clone();
+    let result = state
+        .run(move |artifacts| artifacts.outbox_binding(&actor, auth.generation))
+        .await;
+    let binding = match result {
+        Err(ArtifactError::OutboxBindingChanged) => {
+            state.revoke_actor(&auth.actor);
+            return Err(ApiError::unauthenticated());
+        }
+        other => other?,
+    };
+    #[cfg(test)]
+    if let Some(gate) = &state.shared.outbox_binding_gate {
+        gate.snapshot.notify_one();
+        gate.resume.notified().await;
+    }
+    state.ensure_current(&auth.actor, auth.generation).await?;
+    Ok(Json(DataOutboxBinding {
+        actor_id: binding.actor.to_string(),
+        actor_generation: binding.generation.get().to_string(),
+        storage_epoch: binding.epoch.to_string(),
+    }))
+}
+
+/// Syntax is checked before target access; semantics belong to the core/store.
+fn outbox_fence(
+    headers: &HeaderMap,
+    authenticated_generation: StateGeneration,
+) -> Result<Option<OutboxFence>, ApiError> {
+    let invalid = || ApiError::invalid("invalid outbox fence headers");
+    let names = [
+        "artifree-outbox-actor",
+        "artifree-outbox-epoch",
+        "artifree-outbox-actor-generation",
+    ];
+    let present = names
+        .iter()
+        .filter(|name| headers.contains_key(**name))
+        .count();
+    if present == 0 {
+        return Ok(None);
+    }
+    if present != 3 {
+        return Err(invalid());
+    }
+    let mut values = Vec::with_capacity(3);
+    for name in names {
+        let mut all = headers.get_all(name).iter();
+        let value = all
+            .next()
+            .ok_or_else(invalid)?
+            .to_str()
+            .map_err(|_| invalid())?;
+        if all.next().is_some() {
+            return Err(invalid());
+        }
+        values.push(value);
+    }
+    let actor: ActorId = values[0].parse().map_err(|_| invalid())?;
+    if !actor.is_registrable() {
+        return Err(invalid());
+    }
+    // The existing cursor parser enforces the FeedId display grammar.
+    let cursor: ChangeCursor = format!("{}.0", values[1]).parse().map_err(|_| invalid())?;
+    let text = values[2];
+    if text.starts_with('0') || text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let number: i64 = text.parse().map_err(|_| invalid())?;
+    let generation = u64::try_from(number)
+        .ok()
+        .and_then(StateGeneration::new)
+        .ok_or_else(invalid)?;
+    Ok(Some(OutboxFence {
+        expected: OutboxBinding {
+            actor,
+            generation,
+            epoch: cursor.feed,
+        },
+        authenticated_generation,
+    }))
+}
+
 /// Replaces a value of application data. An agent token may write data: it
 /// is bounded, conditional on the version, and keyed, but nothing keeps the
 /// value it replaces (decision 0031).
 async fn set_data(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
+    headers: HeaderMap,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<SetDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
+    let fence = outbox_fence(&headers, auth.generation)?;
     let Path(id) = path?;
     operations::artifact_id(&id)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::set_data(&state, actor, key, &id, request).await?,
+        operations::set_data(&state, auth.actor, key, &id, request, fence).await?,
     ))
 }
 
 /// Applies a JSON Merge Patch to application data.
 async fn update_data(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
+    headers: HeaderMap,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<UpdateDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
+    let fence = outbox_fence(&headers, auth.generation)?;
     let Path(id) = path?;
     operations::artifact_id(&id)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::update_data(&state, actor, key, &id, request).await?,
+        operations::update_data(&state, auth.actor, key, &id, request, fence).await?,
     ))
 }
 
 /// Removes a value of application data.
 async fn delete_data(
     State(state): State<AppState>,
-    Authenticated(actor): Authenticated,
+    auth: AuthContext,
+    headers: HeaderMap,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<DeleteDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
+    let fence = outbox_fence(&headers, auth.generation)?;
     let Path(id) = path?;
     operations::artifact_id(&id)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::delete_data(&state, actor, key, &id, request).await?,
+        operations::delete_data(&state, auth.actor, key, &id, request, fence).await?,
     ))
 }
 
@@ -2023,4 +2151,124 @@ fn created(location: &str, body: impl IntoResponse) -> Response {
         response.headers_mut().insert(header::LOCATION, value);
     }
     response
+}
+
+#[cfg(test)]
+mod outbox_binding_tests {
+    use std::path::PathBuf;
+
+    use artifree_domain::identity::TokenId;
+    use artifree_ports::token_store::NewTokenRecord;
+    use artifree_ports::user_store::NewUser;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    const USER_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    struct Fixture {
+        directory: PathBuf,
+        state: AppState,
+        actor: ActorId,
+        gate: Arc<OutboxBindingGate>,
+    }
+
+    impl Fixture {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "artifree-binding-confirm-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&directory)?;
+            let database = directory.join("db.sqlite3");
+            let mut state = AppState::new(
+                SqliteStore::open(&database)?,
+                SqliteTokenStore::open(&database)?,
+                AccessToken::parse(&"0".repeat(64)).ok_or("fixture token")?,
+                Settings::default(),
+            )?;
+            let gate = Arc::new(OutboxBindingGate::default());
+            Arc::get_mut(&mut state.shared)
+                .ok_or("unique fixture state")?
+                .outbox_binding_gate = Some(Arc::clone(&gate));
+            let actor = ActorId::user([4; 16]);
+            state.token_store().register(&NewUser {
+                id: actor.clone(),
+                label: "Example".parse()?,
+                created_at: "2026-11-06T00:00:00Z".to_owned(),
+            })?;
+            state.token_store().create(&NewTokenRecord {
+                id: TokenId::from_random([5; 16]),
+                actor: actor.clone(),
+                name: "Example".to_owned(),
+                secret_hash: hash_token_secret(USER_TOKEN),
+                prefix: "aaaa".to_owned(),
+                created_at: "2026-11-06T00:00:00Z".to_owned(),
+            })?;
+            Ok(Self {
+                directory,
+                state,
+                actor,
+                gate,
+            })
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _removed = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[tokio::test]
+    async fn outbox_confirmation_after_snapshot_rejects_disable_enable_and_cleans_actor()
+    -> TestResult {
+        let fixture = Fixture::new()?;
+        let request = Request::get("/v1/data-outbox/binding")
+            .header(header::AUTHORIZATION, format!("Bearer {USER_TOKEN}"))
+            .body(Body::empty())?;
+        let response = tokio::spawn(router(fixture.state.clone()).oneshot(request));
+        // The real GET handler has authenticated and completed its SQLite
+        // snapshot. No timing guess or replacement binding read is involved.
+        tokio::time::timeout(Duration::from_secs(5), fixture.gate.snapshot.notified()).await?;
+        fixture
+            .state
+            .token_store()
+            .set_disabled(&fixture.actor, Some("2026-11-06T01:00:00Z"))?;
+        let enabled = fixture
+            .state
+            .token_store()
+            .set_disabled(&fixture.actor, None)?;
+        assert_eq!(enabled.state_generation.get(), 3);
+        // As in 0036, a late stale confirmation cleans even a connection
+        // opened under the newer generation, whose caller can open it again.
+        operations::open_confirmed_runtime_session(
+            &fixture.state,
+            &fixture.actor,
+            None,
+            enabled.state_generation,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        assert_eq!(fixture.state.runtime_sessions().held_by(&fixture.actor), 1);
+        fixture.gate.resume.notify_one();
+        let response = tokio::time::timeout(Duration::from_secs(5), response).await???;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(
+            body,
+            serde_json::json!({"error":{"code":"unauthenticated","message":"a valid bearer access token is required"}})
+        );
+        assert_eq!(
+            fixture.state.runtime_sessions().held_by(&fixture.actor),
+            0,
+            "stale read must run the existing actor cleanup"
+        );
+        Ok(())
+    }
 }

@@ -70,6 +70,7 @@ impl Fixture {
     ) -> Result<DataReceipt, DataStoreError> {
         let request_key = key(name);
         self.store.write_data(DataWrite {
+            fence: None,
             request: RequestIdentity {
                 actor: who,
                 key: &request_key,

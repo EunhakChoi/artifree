@@ -24,6 +24,7 @@ use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSes
 use artifree_core::artifacts::{
     ArtifactError, ArtifactService, MetadataChange, Missing, RevisionExport,
 };
+use artifree_core::data::DataMutation;
 use artifree_core::jobs::JobPageSize;
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberToken};
@@ -41,6 +42,7 @@ use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
     ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
+use artifree_ports::data_store::OutboxFence;
 use artifree_ports::job_store::JobRecord;
 use artifree_providers::archive::{self, ArchiveEntry};
 use axum::http::StatusCode;
@@ -187,6 +189,11 @@ impl From<ArtifactError> for ApiError {
             ArtifactError::TooManyJobs => {
                 Self::new(StatusCode::CONFLICT, ErrorCode::TooManyJobs, message)
             }
+            ArtifactError::OutboxBindingChanged => Self::new(
+                StatusCode::CONFLICT,
+                ErrorCode::OutboxBindingChanged,
+                message,
+            ),
             ArtifactError::DataConflict { current } => {
                 let mut conflict =
                     Self::new(StatusCode::CONFLICT, ErrorCode::DataConflict, message);
@@ -1606,6 +1613,7 @@ pub(crate) async fn set_data(
     key: RequestKey,
     id: &str,
     request: SetDataRequest,
+    fence: Option<OutboxFence>,
 ) -> Result<DataWriteResponse, ApiError> {
     let id = artifact_id(id)?;
     let path = data_path("path", &request.path)?;
@@ -1617,6 +1625,7 @@ pub(crate) async fn set_data(
         id,
         request.base_data_version,
         DataChange::Set { path, value },
+        fence,
     )
     .await
 }
@@ -1627,6 +1636,7 @@ pub(crate) async fn update_data(
     key: RequestKey,
     id: &str,
     request: UpdateDataRequest,
+    fence: Option<OutboxFence>,
 ) -> Result<DataWriteResponse, ApiError> {
     let id = artifact_id(id)?;
     let path = data_path("path", &request.path)?;
@@ -1638,6 +1648,7 @@ pub(crate) async fn update_data(
         id,
         request.base_data_version,
         DataChange::Merge { path, patch: merge },
+        fence,
     )
     .await
 }
@@ -1648,6 +1659,7 @@ pub(crate) async fn delete_data(
     key: RequestKey,
     id: &str,
     request: DeleteDataRequest,
+    fence: Option<OutboxFence>,
 ) -> Result<DataWriteResponse, ApiError> {
     let id = artifact_id(id)?;
     let path = data_path("path", &request.path)?;
@@ -1658,6 +1670,7 @@ pub(crate) async fn delete_data(
         id,
         request.base_data_version,
         DataChange::Remove { path },
+        fence,
     )
     .await
 }
@@ -1669,6 +1682,7 @@ async fn write_data(
     id: ArtifactId,
     base: u64,
     change: DataChange,
+    fence: Option<OutboxFence>,
 ) -> Result<DataWriteResponse, ApiError> {
     let now = state.clock().now();
     let artifact = id.to_string();
@@ -1679,7 +1693,17 @@ async fn write_data(
     };
     let outcome = state
         .run(move |artifacts| {
-            artifacts.write_data(&actor, &key, &id, AppDataVersion(base), &change, now)
+            artifacts.write_data_with_fence(
+                &actor,
+                &key,
+                &id,
+                DataMutation {
+                    base: AppDataVersion(base),
+                    change: &change,
+                    now,
+                    fence: fence.as_ref(),
+                },
+            )
         })
         .await?;
     // A write that changed the space appended a `data_changed` row to the

@@ -111,6 +111,7 @@ impl Fixture {
     ) -> Result<DataReceipt, DataStoreError> {
         let request_key = key(name);
         store.write_data(DataWrite {
+            fence: None,
             request: RequestIdentity {
                 actor: who,
                 key: &request_key,
@@ -987,5 +988,94 @@ fn the_database_refuses_rows_the_store_cannot_produce() -> TestResult {
     ] {
         assert!(sql.execute(statement, [id]).is_err(), "accepted {what}");
     }
+    Ok(())
+}
+
+/// A real `SQLite` write carrying an explicit authentication generation.
+fn outbox_write(
+    store: &SqliteStore,
+    actor: &ActorId,
+    artifact: &ArtifactId,
+    fence: &artifree_ports::data_store::OutboxFence,
+) -> Result<DataReceipt, DataStoreError> {
+    store.write_data(DataWrite {
+        request: RequestIdentity {
+            actor,
+            key: &key("outbox-fenced"),
+            fingerprint: RequestFingerprint(digest("outbox-fenced")),
+        },
+        artifact,
+        base: AppDataVersion(0),
+        change: &set("item", "1"),
+        now: at(1000),
+        fence: Some(fence),
+    })
+}
+
+#[test]
+fn outbox_transaction_rechecks_authentication_generation_before_replay() -> TestResult {
+    use artifree_domain::identity::StateGeneration;
+    use artifree_ports::data_store::OutboxFence;
+    use artifree_ports::user_store::{NewUser, UserStore};
+    use artifree_providers::tokens::SqliteTokenStore;
+
+    let dir = TempDir::new();
+    let database = database_in(dir.path());
+    let store = SqliteStore::open(&database)?;
+    let users = SqliteTokenStore::open(&database)?;
+    let actor = ActorId::user([9; 16]);
+    users.register(&NewUser {
+        id: actor.clone(),
+        label: parsed("Example"),
+        created_at: "2026-11-06T00:00:00Z".to_owned(),
+    })?;
+    let created = create_demo(&store, &actor, &key("outbox-create"), "Example", FIRST)?;
+    let binding = store.outbox_binding(&actor, StateGeneration::FIRST)?;
+    let original = OutboxFence {
+        expected: binding.clone(),
+        authenticated_generation: StateGeneration::FIRST,
+    };
+    assert_eq!(
+        outbox_write(&store, &actor, &created.artifact.id, &original)?.delivery,
+        Delivery::Committed
+    );
+    users.set_disabled(&actor, Some("2026-11-06T01:00:00Z"))?;
+    assert_eq!(
+        outbox_write(&store, &actor, &created.artifact.id, &original),
+        Err(DataStoreError::OutboxBindingChanged)
+    );
+    assert_eq!(
+        store.outbox_binding(&actor, StateGeneration::FIRST),
+        Err(DataStoreError::OutboxBindingChanged)
+    );
+    let enabled = users.set_disabled(&actor, None)?;
+    assert_eq!(enabled.state_generation.get(), 3);
+    assert_eq!(
+        store.outbox_binding(&actor, StateGeneration::FIRST),
+        Err(DataStoreError::OutboxBindingChanged)
+    );
+    let current = store.outbox_binding(&actor, enabled.state_generation)?;
+    // Even a fresh expected tuple cannot authorize an authentication snapshot
+    // captured before disable/re-enable. Both are checked within the write.
+    let stale_auth = OutboxFence {
+        expected: current.clone(),
+        authenticated_generation: StateGeneration::FIRST,
+    };
+    assert_eq!(
+        outbox_write(&store, &actor, &created.artifact.id, &stale_auth),
+        Err(DataStoreError::OutboxBindingChanged)
+    );
+    assert_eq!(
+        outbox_write(&store, &actor, &created.artifact.id, &original),
+        Err(DataStoreError::OutboxBindingChanged)
+    );
+    let admitted = OutboxFence {
+        expected: current,
+        authenticated_generation: enabled.state_generation,
+    };
+    assert_eq!(
+        outbox_write(&store, &actor, &created.artifact.id, &admitted)?.delivery,
+        Delivery::Replayed
+    );
     Ok(())
 }
