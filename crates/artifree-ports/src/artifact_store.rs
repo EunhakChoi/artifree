@@ -11,7 +11,7 @@ use std::fmt;
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
-use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+use artifree_domain::{AppDataVersion, ArtifactKind, MetadataRevision, SourceRevision};
 
 /// Stored metadata of an artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,6 +418,9 @@ pub enum ChangeKind {
     /// The artifact was removed from the trash for good. Reading it is not
     /// found, as in the trash, and it never returns.
     Purged,
+    /// A data write changed the space of the actor whose feed holds the row
+    /// (decision 0040). The artifact's own source and metadata did not change.
+    DataChanged,
 }
 
 /// One commit as recorded in the change feed.
@@ -430,10 +433,14 @@ pub struct ChangeRecord {
     /// What the commit did.
     pub kind: ChangeKind,
     /// The source revision the commit created, or that was current when the
-    /// metadata changed.
+    /// metadata or the data changed.
     pub revision: SourceRevision,
-    /// The metadata revision after the commit.
+    /// The metadata revision after the commit, or the one that was current
+    /// when the data changed.
     pub metadata_revision: MetadataRevision,
+    /// The version the write left the data space at: present exactly for
+    /// [`ChangeKind::DataChanged`], never in `revision`.
+    pub data_version: Option<AppDataVersion>,
     /// Commit time.
     pub committed_at: UnixMillis,
 }

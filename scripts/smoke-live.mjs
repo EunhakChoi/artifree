@@ -100,6 +100,44 @@ export async function checkLiveUpdates({ browser, origin, server }) {
       'An unknown kind reads the list and the open artifact once.',
     );
 
+    // Decisions 0007 and 0040: a write to the artifact's data is no news. It
+    // reads nothing, whether the artifact is open, ahead of what the page
+    // knows, or not listed at all.
+    await reads.quiet();
+    mark = reads.mark();
+    await writeData(server, id, { note: 'one' });
+    await main.page.waitForTimeout(1000);
+    assert.deepEqual(reads.counts(mark), {}, 'A data write elsewhere read.');
+    await restream(main, server, [
+      { ...change(id, 4), change: 'data_changed', data_version: 2 },
+      { ...change('art_unlisted', 1), change: 'data_changed', data_version: 1 },
+    ]);
+    await main.page.waitForTimeout(1000);
+    assert.deepEqual(
+      reads.counts(mark),
+      {},
+      'A data change of an open or unlisted artifact read.',
+    );
+
+    // The same while the page's first read is pending: it knows no artifact
+    // yet, and the notice must not ask for a second read of the list.
+    const fresh = await opened();
+    const firstList = fresh.routes.hold(read('list'));
+    await connect(fresh, server);
+    await within(firstList.arrived, 'Connecting must read the list');
+    await writeData(server, id, { note: 'two' });
+    await fresh.page.waitForTimeout(1000);
+    firstList.release();
+    await expect(
+      fresh.workspace.getByText('Revision 3', { exact: true }),
+    ).toBeVisible();
+    await fresh.reads.quiet();
+    assert.deepEqual(
+      fresh.reads.counts(0),
+      { list: 1, artifact: 1, revisions: 1, file: 1, preview: 1 },
+      'A data write during the first read must not read the list again.',
+    );
+
     // W4: a draft survives a newer revision and a failed refresh; only
     // "Load latest" replaces it.
     await workspace.getByRole('tab', { name: 'Source' }).click();
@@ -953,6 +991,20 @@ async function head(server) {
     clearTimeout(timer);
     controller.abort();
   }
+}
+
+/** Replaces the whole data space of artifact `id` with `value`, an object. */
+async function writeData(server, id, value) {
+  const { data_version: base } = await api(
+    server,
+    'GET',
+    `/v1/artifacts/${id}/data`,
+  );
+  await api(server, 'PUT', `/v1/artifacts/${id}/data`, {
+    path: '',
+    base_data_version: base,
+    value,
+  });
 }
 
 async function commit(server, id, text) {

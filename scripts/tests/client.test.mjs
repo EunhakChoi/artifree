@@ -2837,6 +2837,68 @@ test('A change kind this client does not know is delivered as unknown', async ()
   assert.deepEqual([broken.status, broken.code], [200, 'invalid_response']);
 });
 
+/** A change event whose data is `fields` laid over a valid `kind` change. */
+const changeWith = (kind, fields) =>
+  `event: change\ndata: ${JSON.stringify({
+    ...JSON.parse(changeData(3, kind)),
+    ...fields,
+  })}\n\n`;
+
+test('A data change carries the version the write left, and passes it on', async () => {
+  for (const version of [3, 2 ** 53 - 1]) {
+    const [event] = await eventsOf(
+      stream([changeWith('data_changed', { data_version: version })]),
+    );
+    assert.deepEqual(event, {
+      ...changeEvent(3, 'data_changed'),
+      change: { ...event.change, data_version: version },
+    });
+    assert.equal(event.change.data_version, version);
+  }
+});
+
+for (const [name, fields] of [
+  ['no data version', {}],
+  ['a data version of 0', { data_version: 0 }],
+  ['a negative data version', { data_version: -1 }],
+  ['a fractional data version', { data_version: 1.5 }],
+  ['an unsafe data version', { data_version: 2 ** 53 }],
+  ['a text data version', { data_version: '7' }],
+  ['a null data version', { data_version: null }],
+]) {
+  test(`A data change with ${name} is invalid`, async () => {
+    const broken = await failure(
+      eventsOf(stream([changeWith('data_changed', fields)])),
+    );
+    assert.deepEqual([broken.status, broken.code], [200, 'invalid_response']);
+  });
+}
+
+for (const kind of [
+  'created',
+  'revised',
+  'metadata_updated',
+  'deleted',
+  'recovered',
+  'purged',
+]) {
+  test(`A ${kind} change with a data version is invalid`, async () => {
+    const broken = await failure(
+      eventsOf(stream([changeWith(kind, { data_version: 1 })])),
+    );
+    assert.deepEqual([broken.status, broken.code], [200, 'invalid_response']);
+  });
+}
+
+test('A kind this client does not know is delivered as unknown, whatever else it carries', async () => {
+  assert.deepEqual(
+    await eventsOf(
+      stream([changeWith('renamed', { data_version: 4, surprise: true })]),
+    ),
+    [changeEvent(3, 'unknown')],
+  );
+});
+
 /**
  * Follows a feed whose successive connections are answered by `answers`;
  * the last answer repeats. Stops after `events` events, or rejects.

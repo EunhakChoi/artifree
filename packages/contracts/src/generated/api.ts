@@ -177,7 +177,8 @@ export type ErrorCode =
  * What a commit did to an artifact. A kind that a client does not know
  * still means the artifact changed: read it again.
  */
-export type ChangeKind = 'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered' | 'purged';
+export type ChangeKind =
+  'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered' | 'purged' | 'data_changed';
 /**
  * Version of a source export manifest.
  */
@@ -1273,9 +1274,14 @@ export interface ConflictingFile {
 }
 /**
  * Data of a `change` event of `GET /v1/changes`: one commit that wrote a
- * revision or changed metadata. Retries that replay a commit, failed
- * commits, and updates that changed nothing have none.
- * It names what to read again and carries no content.
+ * revision or changed metadata, or one data write that changed the actor's
+ * data space. Retries that replay a commit, failed commits, and updates that
+ * changed nothing have none. It names what to read again and carries no
+ * content, path, or value.
+ *
+ * `data_version` is present exactly when `change` is `data_changed`: the
+ * published schema requires it for that kind and forbids it for every other
+ * kind, and deserializing refuses both violations (decision 0040).
  */
 export interface ArtifactChange {
   /**
@@ -1292,12 +1298,19 @@ export interface ArtifactChange {
    */
   cursor: string;
   /**
-   * The metadata revision after the commit.
+   * The version the write left the data space at, a positive number.
+   * Present exactly for `data_changed`.
+   */
+  data_version?: number | null;
+  /**
+   * The metadata revision after the commit, or the current one for a data
+   * change.
    */
   metadata_revision: number;
   /**
    * The revision the commit created, or the current one for a metadata
-   * change (`metadata_updated`, `deleted`, `recovered`, or `purged`).
+   * change (`metadata_updated`, `deleted`, `recovered`, or `purged`) or a
+   * data change (`data_changed`). Never a data version.
    */
   revision: number;
 }

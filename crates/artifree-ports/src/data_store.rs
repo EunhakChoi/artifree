@@ -129,6 +129,13 @@ pub trait DataStore {
     /// alters nothing writes no new version, but its key is recorded. The key
     /// shares its space with the keys of artifact requests, cleanups, and jobs.
     ///
+    /// A change that altered the space also appends one
+    /// [`ChangeKind::DataChanged`](crate::artifact_store::ChangeKind::DataChanged)
+    /// to the change feed of the actor of the request, whose space changed,
+    /// as the last part of the same step (decision 0040). A replay, a change
+    /// that altered nothing, and a refusal append nothing, and a failure to
+    /// append undoes the whole write.
+    ///
     /// # Errors
     ///
     /// [`DataStoreError::NotFound`], [`DataStoreError::RequestKeyReused`],

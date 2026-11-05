@@ -170,6 +170,11 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
         revision,
         metadata_revision,
       } = event.change;
+      // A write to an app's data changed no source and no metadata, and the
+      // workspace shows neither the data nor its version. It is not news for
+      // any artifact, listed, open, or not yet listed, and it is not a revision
+      // (decisions 0007 and 0040).
+      if (change === 'data_changed') return state;
       // A kind added after this client may change anything about it.
       if (change === 'unknown')
         return {
