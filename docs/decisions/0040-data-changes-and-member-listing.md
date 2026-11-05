@@ -442,7 +442,7 @@ slice list above was planned as two pull requests; #87 carries both slices.
 | R07c-1 | client transport bounds and retry policy        | implemented     | #91          |
 | R07c-2 | `listDataMembers` (rules 20-22 for the listing) | implemented     | #94          |
 | R07c-3 | `followData` (rules 13-16, 20, 22)              | implemented     | this change  |
-| R07d   | user guides                                     | not implemented | -            |
+| R07d   | user guides                                     | implemented     | this change  |
 | R07e   | web data panel (rule 23)                        | not implemented | -            |
 
 R07a-1 and R07a-2 both landed in #87. The client's record of known kinds gained
