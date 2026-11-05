@@ -124,6 +124,19 @@ acquiring a lock or acknowledging a prompt does not establish physical origin.
    A changed actor generation also pauses delivery, invalidates prior recovery
    choices and requires rule 18's explicit reauthorization; never silently copy
    the newly observed generation into a retained request's authority.
+   Every request initiated by outbox machinery must set Fetch
+   `redirect: 'error'` at the final dispatch boundary: initial binding,
+   revalidation/access reads, any canonical reads it initiates, mutations and
+   every retry/replay. Reject all redirects, including same-origin/path-only,
+   HTTP-to-HTTPS and `301`/`302`/`303`/`307`/`308`; no automatic follow, manual
+   `Location` request, fallback to `follow`/`manual`, or rewriting the stored
+   URL/method/body/key/fence from a redirect. Caller options and internal helper
+   retries cannot override this mode; a transport adapter must honor it or be
+   refused for outbox use. Checking `Response.redirected`/the final URL after
+   following is not a substitute: sensitive bytes could already have reached
+   another path/origin. Direct-client calls outside this opt-in machinery keep
+   their existing behavior. The policy prevents following a redirect, not the
+   original configured destination from receiving or committing its request.
 4. A handshake alone leaves a race with restore or a different actor's token.
    Outbox writes therefore include the all-or-none optional header triple
    `Artifree-Outbox-Actor`, `Artifree-Outbox-Epoch` and
@@ -458,6 +471,31 @@ false`, and an opaque `PreparationRetrySelection`. Block the head and
     There is no permanent unactionable invalid-response state or unbounded
     replay loop. ACK persistence failure is different: rule 12 pauses it
     immediately without automatic retry, even when budget remains.
+    A redirect rejected by Fetch `redirect: 'error'` normally exposes no HTTP
+    status or `Location`; do not inspect exception text to invent a redirect
+    code or destination. For a dispatched mutation this is the existing
+    `network_error`/unknown-outcome path: count one failure, preserve the exact
+    request and use the same 8/32 epoch/backoff limits and explicit exhaustion
+    resume. The original destination may have committed before returning a
+    redirect; no ACK or non-delivery claim is inferred. Every allowed retry
+    addresses only the original bound URL with redirect rejection still set.
+    If a conforming test/transport exposes a non-followed `3xx`, classify it as
+    `unclassified_error_response` below and pause; never use its `Location`.
+    Binding and revalidation reads are not mutation attempts. Each explicit
+    open/recovery/revalidation action permits one such read; redirect rejection
+    or another read failure establishes no new binding/authority and schedules
+    no automatic binding retry. A redirect-induced initial binding failure
+    rejects initialization with `network_error` and accepts no intent; other
+    read failures retain their actual status/error classification. Existing work remains paused
+    on revalidation failure, with the applicable recovery/delivery selection
+    refreshed for a deliberate retry of the same bound read. Failure neither
+    consumes nor refills the mutation budget, opens a new delivery epoch, nor
+    authorizes a mutation. A deliberate delivery-resume/recovery action renews
+    its epoch only after required binding/authority checks succeed. Paging,
+    preparation retry, timers and callbacks cannot turn metadata-read failures
+    into an automatic binding retry or bypass existing pauses. No redirected
+    response can authorize local cleanup; rule 17's existing locally fenced
+    offline-cleanup conditions remain unchanged.
     Classify non-success responses from retained HTTP metadata, not just the
     transport exception's `invalid_response`/`network_error` label. Capture
     status and parsed `Retry-After` before reading the bounded error body, and
@@ -680,6 +718,7 @@ false`, and an opaque `PreparationRetrySelection`. Block the head and
 | B18 | Under one free inherited owner, enqueue actorA’s work, then open after logout/reload as actorB at the same URL: current-binding lookup is empty but owner-wide presence is not. Assert owner_binding_quarantined, unchanged active/saved owner IDs, zero new enqueue/HTTP/trim/delete/fresh-owner allocation and a generic diagnostic with no actorA identity, URL, count, path, value or selection. Restore authenticated actorA’s original binding: same owner yields recovery_required, no send before explicit confirmation, then exact original operation replay. Repeat with another URL, saved candidate, occupied candidate slot and storage-probe failure; no reference is overwritten or treated as empty. Mixed matching/foreign bindings may recover and trim only the matching subset; empty-case owner rotation/candidate clearing must fail while any other binding’s intent/receipt/retained checkpoint remains. Same-actor/URL epoch mismatch permits only guarded explicit local abandonment; full owner emptiness is required for empty-case fresh-owner allocation or explicit saved-reference clear; the busy-owner branch still must save its reference before replacing the active ID. Break owner-wide existence or reference-preservation guard and prove these cases fail.                                                                                                                                                   |
 | B19 | Durably enqueue, expose IDB request success but abort preparation transaction: original unprepared intent/key/sequence/dependency and counters remain, preparation_paused reports durablyEnqueued true/prepared false, no HTTP or automatic local retry. One valid retryPreparation permits one local attempt; repeated abort requires a new deliberate action, stale/duplicate/wrong-phase tokens cannot retry an ACK or prepared record, and late callbacks cannot dispatch or downgrade state. Successful preparation uses the original numeric base/durable predecessor receipt, sends only after commit and only if existing delivery/authority gates allow. Neither local retry nor recovery paging refills 8/32 budget or clears retry/auth/conflict pauses. Crash with unprepared versus committed-prepared storage follows its respective explicit recovery path; unsent discard remains local. Break commit-before-dispatch, pause or no-budget-reset guards and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | B20 | Supply malformed, oversized and stalled 409 bodies and unexpected 4xx responses, including incompatible status/error-code pairs: exactly one failed mutation attempt, immediate unclassified_error_response pause, no automatic mutation retry, guessed conflict/version, authority update or raw-body leak. Only fresh binding plus valid explicit resumeDelivery permits the same frozen-request probe; another unclassified response pauses again after one. A changed actor/URL/epoch/generation cannot be silently adopted, and classified conflict/access responses use their existing gates. Invalid-body 401/403/404 still access-pause; 401 invalidates offline identity proof. Invalid-body 429/5xx retain status/bounded Retry-After and use 8/32 backoff despite body timeout/cancellation; no headers uses network policy. Assert one count per attempt, successor blocked, exact key/body/base preserved, and abandonment/offline authority rules unchanged. Break status retention or unclassified-response no-autoretry guard and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                              |
+| B21 | Use real browser Fetch and owned HTTP redirect servers: binding/revalidation GET and mutation PUT/PATCH/DELETE endpoints induce 301/302/303/307/308 to both another path on the same origin and an allowed cross-origin collector. Every outbox dispatch, retry and probe carries redirect:error; target receives no followed HTTP request, body marker, idempotency key, outbox fence or credential, and no binding/ACK is accepted. Configure target/CORS to accept follow attempts, then weaken the guard to follow and prove 307/308 deliver the actual body/key/fence to that target so rejection is not a false CORS pass. Have original destination commit then 307/308: rejected Fetch counts one network-error unknown failure per mutation, retries only original bound URL within 8/32 budget, pauses on exhaustion and never duplicates commit; after explicit resume and redirect removal, exact same-key replay can ACK. Binding/revalidation redirect failure makes no mutation-budget change/authority update, permits no mutation or automatic read retry, and a fresh explicit action still uses redirect:error on the original URL. Exposed non-followed 3xx pauses without consuming Location. Break final-dispatch or retry-helper redirect mode and prove these cases fail.                                                                                                                                                      |
 
 Use independently authored fixtures and the repository's isolated verification
 workflow. Unit fault seams prove state transitions; real-browser IndexedDB,
@@ -694,8 +733,8 @@ This documentation change has not executed these future acceptance cases.
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                                                   |
 | R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit retry/recovery, durable admission, caps, strict recovery decoder and explicit disposal of unsent work. No sender enabled. | R08a contract; B2/B3/B8/B13 and B12 legacy-generation storage cases; B15 paging cases; B18 owner-binding cases; B19 preparation cases. |
-| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                       | R08a–b, R07c follower semantics; B4–B12 and B15–B17 and B19–B20 including fail-first rejection proofs.                                 |
-| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                          | R08c; B2–B20, full gates and both browser engines where supported.                                                                     |
+| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                       | R08a–b, R07c follower semantics; B4–B12 and B15–B17 and B19–B21 including fail-first rejection proofs.                                 |
+| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                          | R08c; B2–B21, full gates and both browser engines where supported.                                                                     |
 
 No slice may advertise R08 complete before the end-to-end recovery acceptance
 has passed. Runtime-frame data access, UI adoption, orphan transfer, automatic
