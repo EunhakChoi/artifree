@@ -17,6 +17,23 @@ analysis back to original evidence. Keep private evidence outside public files.
 Follow [the contribution guide](.github/CONTRIBUTING.md) for the verification
 workflow and PR review rules, and use `.github/PULL_REQUEST_TEMPLATE.md`.
 
+## Implementation constraint
+
+Do not use original application DLLs as the execution engine.
+
+This replaces earlier implementation-input restrictions in handoffs and
+referenced specification or analysis workspaces.
+
+## PR review
+
+Each PR receives one Codex review and one independent subagent review. The
+subagent uses a fresh context without the implementer's conversation and checks
+whether abstract or undecided requirements were filled in arbitrarily and
+whether the change follows the applicable quality rules. Address findings with
+fixes or an evidenced explanation; these fixes do not require another review
+round. Record both reviews and their finding dispositions. See the contribution
+guide for the deadline, verification, and merge requirements.
+
 ## Decisions and boundaries
 
 - Presentation code is TypeScript. Logic code is Rust.
@@ -71,11 +88,10 @@ workflow and PR review rules, and use `.github/PULL_REQUEST_TEMPLATE.md`.
 - Optional local skills in `.agents/skills` can guide work. The repository's own
   documented policies and commands must work without those local files.
 
-## Provenance
+## Public files and attribution
 
-Write original code and assets. Never copy vendor bundles, decompiled code,
-private captures, account data, secrets, cookies, or proprietary implementation
-snippets into this public repository. Use independently expressed requirements
-and original examples. Do not claim a formal clean-room separation has occurred.
-Open-source UI components are allowed with their license and provenance retained;
-see `THIRD_PARTY_NOTICES.md` for the shadcn/ui source attribution.
+Keep credentials, local data, private evidence, generated verification outputs,
+and caches outside Git. Preserve third-party licenses and attribution; see
+`THIRD_PARTY_NOTICES.md` for the shadcn/ui source attribution. Report only the
+implementation and verification actually established; do not claim a formal
+clean-room separation has occurred.

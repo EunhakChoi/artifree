@@ -8,7 +8,8 @@ Link the issue/roadmap item where relevant. Describe the final implementation. -
 <!-- Explain the choices a reviewer needs: boundaries, API/data compatibility,
 dependencies, migrations, UI variants/tokens, or justified exceptions. Link ADRs.
 For reconstruction, label observations, source-only evidence, inference, and
-Artifree decisions. Do not include private evidence paths or vendor code. -->
+Artifree decisions. Do not include credentials, local data, or private evidence
+and its paths. -->
 
 ## Verification
 
@@ -28,16 +29,32 @@ assertion and restored baseline. Explain missing/inapplicable checks below. -->
 <!-- Material risks, untested integrations, unrun checks, and bounded follow-up.
 Use "None" if there are none. Keep credentials and private data out of evidence. -->
 
+## Review record
+
+<!-- One Codex review (automatic on creation) and one independent subagent review.
+The subagent uses a fresh context to check arbitrary interpretations of abstract
+or undecided requirements and applicable quality rules; for docs, check policy
+consistency. Address findings without another review round. Record subsequent
+fixes and their checks. The Codex deadline is 15 minutes including queue time;
+record errors/timeouts honestly, not as completed reviews. Evidence may be linked
+from a PR comment without another documentation commit. -->
+
+| Reviewer             | Trigger / request link   | Reviewed full head SHA / local diff | Requested / deadline / completed (UTC) | Result / findings / fixes / evidence |
+| -------------------- | ------------------------ | ----------------------------------- | -------------------------------------- | ------------------------------------ |
+| Codex                | Automatic on PR creation |                                     |                                        | Pending                              |
+| Independent subagent |                          |                                     |                                        | Pending                              |
+
 ## Author checks
 
 - [ ] The final scope, behavior, and relevant decisions are documented.
 - [ ] Required checks passed; actual results and omissions are reported.
 - [ ] Important guards have behavioral tests with verified failure detection.
 - [ ] Affected generated outputs, lockfiles, and roadmap entries are current.
-- [ ] Code and evidence contain no proprietary implementation or private data.
+- [ ] The change excludes credentials, local data, private evidence, generated verification outputs, caches, and unrelated changes.
+- [ ] One Codex review and one independent subagent review are completed, and their findings are addressed.
 
-<!-- Review policy: CONTRIBUTING.md. First Codex review is automatic; later
-rounds use @codex review. Deadline: 15 minutes per round. Maximum: three rounds
-including service failures/timeouts. After three unsuccessful rounds, close and
-independently rewrite from latest main on a new branch. Require current-HEAD
-finding-free review, required CI, and resolved conversations before merging. -->
+<!-- Review policy: CONTRIBUTING.md. Do not put bot mentions in this description.
+Do not request another review solely because findings were fixed or HEAD changed.
+Require both completed reviews, addressed findings, successful current-HEAD CI,
+resolved conversations, and no conflicts before merging. Verify the actual main
+merge commit's CI afterwards. Do not record pending work as complete. -->
