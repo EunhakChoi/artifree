@@ -46,6 +46,9 @@ and check that each response schema is published as the server writes it,
 with every field it always writes required.
 No domain test exists merely to repeat a field declaration.
 
+How a new test is shown to fail, and how heavy runs are isolated, is described
+in [testing practice](testing-practice.md).
+
 Artifact behavior is tested at the boundary that owns it:
 
 - `crates/artifree-domain`: path, identifier, and package validation.
