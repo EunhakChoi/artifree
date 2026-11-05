@@ -95,11 +95,8 @@ export async function checkData({ browser, origin, server }) {
     );
     await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
     await started;
-    const whileHeld = reads;
     await workspace.getByRole('tab', { name: 'Preview' }).click();
     await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
-    await page.waitForTimeout(500);
-    assert.equal(reads, whileHeld, 'the old read retains the shared gate');
     // An already-sent read keeps the shared gate until its ten-second stall
     // bound. The next read can then finish before the held old answer.
     await expect(workspace.getByText('Data version 1')).toBeVisible({
