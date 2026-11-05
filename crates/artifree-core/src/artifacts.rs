@@ -119,6 +119,8 @@ pub enum ArtifactError {
     /// The actor already has the largest number of jobs waiting or running
     /// (decision 0030).
     TooManyJobs,
+    /// An opt-in data write no longer matches its admitted authority.
+    OutboxBindingChanged,
     /// The application data was prepared against an older version; nothing
     /// was written (decision 0031).
     DataConflict {
@@ -176,6 +178,7 @@ impl fmt::Display for ArtifactError {
             }
             Self::TooManyJobs => formatter
                 .write_str("too many jobs are waiting or running; wait for one or cancel one"),
+            Self::OutboxBindingChanged => formatter.write_str("outbox binding changed"),
             Self::DataConflict { current } => write!(
                 formatter,
                 "the data changed; the current data version is {}",

@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.16.0",
+  "contract_version": "0.17.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -45,7 +45,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes, and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, and a sandboxed preview origin."
     },
     {
       "id": "domain",

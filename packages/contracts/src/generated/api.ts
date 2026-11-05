@@ -68,7 +68,8 @@ export type ApiBody =
   | SetDataRequest
   | UpdateDataRequest
   | DeleteDataRequest
-  | DataWriteResponse;
+  | DataWriteResponse
+  | DataOutboxBinding;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -164,6 +165,7 @@ export type ErrorCode =
   | 'not_in_trash'
   | 'content_conflict'
   | 'data_conflict'
+  | 'outbox_binding_changed'
   | 'data_path_conflict'
   | 'data_too_large'
   | 'job_ended'
@@ -1793,6 +1795,24 @@ export interface DataWriteResponse {
    * True when an earlier request with the same key already did it.
    */
   replayed: boolean;
+}
+/**
+ * Authenticated server binding for opt-in browser data writes.
+ */
+export interface DataOutboxBinding {
+  /**
+   * Canonical positive `SQLite` integer, encoded as decimal text.
+   * The 19-digit alternatives bound the string to 9223372036854775807.
+   */
+  actor_generation: string;
+  /**
+   * Registered actor: local or u- followed by 32 lowercase hex digits.
+   */
+  actor_id: string;
+  /**
+   * Existing feed identity, renewed by supported restore.
+   */
+  storage_epoch: string;
 }
 
 /**

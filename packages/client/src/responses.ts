@@ -90,6 +90,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   too_many_jobs: true,
   content_conflict: true,
   data_conflict: true,
+  outbox_binding_changed: true,
   data_path_conflict: true,
   data_too_large: true,
   request_key_reused: true,

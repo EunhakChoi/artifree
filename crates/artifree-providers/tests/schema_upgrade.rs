@@ -452,6 +452,7 @@ fn a_version_10_file_with_every_kind_keeps_its_feed_through_the_data_change_step
         value: DataValue::parse("1")?,
     };
     store.write_data(DataWrite {
+        fence: None,
         request: RequestIdentity {
             actor: &owner,
             key: &key("first-data-change"),
@@ -532,6 +533,7 @@ fn assert_data_works_beside_old_keys(store: &SqliteStore, version: i64) -> TestR
     let write = |name: &str, base: u64| {
         let request_key = parsed(&format!("test-key-{name}"));
         store.write_data(DataWrite {
+            fence: None,
             request: RequestIdentity {
                 actor: &owner,
                 key: &request_key,

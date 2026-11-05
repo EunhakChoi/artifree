@@ -2660,6 +2660,7 @@ test('A data conflict carries the current data version, and the data codes keep 
   for (const [status, code] of [
     [409, 'data_conflict'],
     [409, 'data_path_conflict'],
+    [409, 'outbox_binding_changed'],
     [422, 'data_too_large'],
   ]) {
     const client = clientWith(() =>

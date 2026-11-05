@@ -10,9 +10,11 @@
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue, MemberPage, Members};
-use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, UnixMillis};
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
-use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWrite};
+use artifree_ports::data_store::{
+    DataReceipt, DataStore, DataStoreError, DataWrite, OutboxBinding, OutboxFence,
+};
 
 use crate::artifacts::{ArtifactError, ArtifactService, Fingerprint, Missing};
 use crate::members::{DataMembersPage, MemberQuery, MemberToken};
@@ -38,7 +40,35 @@ pub struct DataWriteOutcome {
     pub delivery: Delivery,
 }
 
+/// A conditional change with optional browser authority.
+#[derive(Debug, Clone, Copy)]
+pub struct DataMutation<'a> {
+    /// Data version observed by the caller.
+    pub base: AppDataVersion,
+    /// Validated application-data change.
+    pub change: &'a DataChange,
+    /// Server time for the durable receipt.
+    pub now: UnixMillis,
+    /// Optional authority checked before replay in the write transaction.
+    pub fence: Option<&'a OutboxFence>,
+}
+
 impl<S: ArtifactStore + DataStore> ArtifactService<S> {
+    /// Establishes a browser outbox binding from one storage snapshot.
+    ///
+    /// # Errors
+    ///
+    /// `OutboxBindingChanged` for stale, missing or disabled users, or storage failure.
+    pub fn outbox_binding(
+        &self,
+        actor: &ActorId,
+        generation: StateGeneration,
+    ) -> Result<OutboxBinding, ArtifactError> {
+        self.store
+            .outbox_binding(actor, generation)
+            .map_err(data_error)
+    }
+
     /// The value at `path` in the actor's data space of an artifact, and the
     /// space's version. A path with nothing at it reads as `None`, as does a
     /// path through a value that is not an object; the root always exists.
@@ -160,6 +190,37 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         change: &DataChange,
         now: UnixMillis,
     ) -> Result<DataWriteOutcome, ArtifactError> {
+        self.write_data_with_fence(
+            actor,
+            key,
+            id,
+            DataMutation {
+                base,
+                change,
+                now,
+                fence: None,
+            },
+        )
+    }
+
+    /// Applies a conditional keyed change with an optional transactional outbox fence.
+    ///
+    /// # Errors
+    ///
+    /// The errors of `write_data`, plus `OutboxBindingChanged` before replay.
+    pub fn write_data_with_fence(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        mutation: DataMutation<'_>,
+    ) -> Result<DataWriteOutcome, ArtifactError> {
+        let DataMutation {
+            base,
+            change,
+            now,
+            fence,
+        } = mutation;
         self.authorized(actor, id)?;
         let mut hasher = match change {
             DataChange::Set { .. } => Fingerprint::new("set_data"),
@@ -186,6 +247,7 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         } = self
             .store
             .write_data(DataWrite {
+                fence,
                 request: RequestIdentity {
                     actor,
                     key,
@@ -207,6 +269,7 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
 
 fn data_error(error: DataStoreError) -> ArtifactError {
     match error {
+        DataStoreError::OutboxBindingChanged => ArtifactError::OutboxBindingChanged,
         DataStoreError::NotFound => ArtifactError::NotFound(Missing::Artifact),
         DataStoreError::RequestKeyReused => ArtifactError::RequestKeyReused,
         DataStoreError::VersionConflict { current } => ArtifactError::DataConflict { current },
@@ -270,6 +333,14 @@ mod tests {
     }
 
     impl DataStore for NewerEachRead {
+        fn outbox_binding(
+            &self,
+            _: &ActorId,
+            _: StateGeneration,
+        ) -> Result<OutboxBinding, DataStoreError> {
+            Err(DataStoreError::Unavailable("unused".into()))
+        }
+
         fn read_data(&self, _: &ArtifactId, _: &ActorId) -> Result<DataSnapshot, DataStoreError> {
             let read = self.reads.get() + 1;
             self.reads.set(read);

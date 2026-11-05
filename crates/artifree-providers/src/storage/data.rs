@@ -15,10 +15,13 @@
 //! the purge transaction and with `secure_delete` on.
 
 use artifree_domain::AppDataVersion;
+use artifree_domain::change::FeedId;
 use artifree_domain::data::DataSpace;
-use artifree_domain::identity::{ActorId, ArtifactId};
+use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
-use artifree_ports::data_store::{DataReceipt, DataSnapshot, DataStore, DataStoreError, DataWrite};
+use artifree_ports::data_store::{
+    DataReceipt, DataSnapshot, DataStore, DataStoreError, DataWrite, OutboxBinding,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::jobs::artifact_in_place;
@@ -47,6 +50,30 @@ fn read_space(
     Ok(DataSnapshot {
         version: AppDataVersion(u64::try_from(version).map_err(corrupt)?),
         space: DataSpace::from_canonical(&document).map_err(corrupt)?,
+    })
+}
+
+/// The feed and enabled user state belong to the caller's existing transaction.
+fn binding(connection: &Connection, actor: &ActorId) -> Result<OutboxBinding, DataStoreError> {
+    let generation: Option<i64> = connection
+        .query_row(
+            "SELECT state_generation FROM users WHERE id = ?1 AND disabled_at IS NULL",
+            [actor.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let generation = generation.ok_or(DataStoreError::OutboxBindingChanged)?;
+    let generation =
+        crate::users::stored_generation(generation).map_err(DataStoreError::Unavailable)?;
+    let feed: Vec<u8> = connection
+        .query_row("SELECT id FROM feed", [], |row| row.get(0))
+        .map_err(unavailable)?;
+    let epoch = FeedId::from_random(feed.try_into().map_err(|_| corrupt("feed id length"))?);
+    Ok(OutboxBinding {
+        actor: actor.clone(),
+        generation,
+        epoch,
     })
 }
 
@@ -97,6 +124,12 @@ fn write(
     // artifact in the trash or purged is not found, a retry included.
     if !artifact_in_place(transaction, request.artifact)? {
         return Err(DataStoreError::NotFound);
+    }
+    if let Some(fence) = request.fence {
+        let current = binding(transaction, request.request.actor)?;
+        if current != fence.expected || current.generation != fence.authenticated_generation {
+            return Err(DataStoreError::OutboxBindingChanged);
+        }
     }
     match key_of(transaction, request.request)? {
         Key::Same { version, changed } => {
@@ -223,6 +256,20 @@ pub(super) fn erase_for_purge(
 }
 
 impl DataStore for SqliteStore {
+    fn outbox_binding(
+        &self,
+        actor: &ActorId,
+        generation: StateGeneration,
+    ) -> Result<OutboxBinding, DataStoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        let current = binding(&snapshot, actor)?;
+        if current.generation != generation {
+            return Err(DataStoreError::OutboxBindingChanged);
+        }
+        Ok(current)
+    }
+
     fn read_data(
         &self,
         artifact: &ArtifactId,
