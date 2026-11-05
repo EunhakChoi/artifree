@@ -171,7 +171,9 @@ Open a ready PR after local verification. Each PR receives exactly two reviews:
    and ordinary progress comments. Keep the 15-minute deadline, including queue
    time, measured from PR creation or the actual manual request. Record service
    errors or timeouts honestly; a reaction, silence, or a pending job is not a
-   completed review.
+   completed review. If the single review fails or remains incomplete at the
+   deadline, record the outcome and leave the PR blocked from merging. Do not
+   request a replacement review or count the incomplete review as completed.
 2. **One independent subagent review.** Use a fresh context without the
    implementer's conversation. Give the reviewer the user request, applicable
    rules, relevant requirements and decisions, and the diff. Focus on abstract or
