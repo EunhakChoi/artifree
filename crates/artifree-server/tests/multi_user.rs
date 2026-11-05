@@ -847,6 +847,13 @@ fn http_cases() -> Vec<Case> {
             Succeeds,
         ),
         case(
+            "data members",
+            "GET",
+            "/v1/artifacts/{artifact}/data/members",
+            None,
+            Succeeds,
+        ),
+        case(
             "agent sessions",
             "GET",
             "/v1/agent-sessions?workspace_session_id={session}",

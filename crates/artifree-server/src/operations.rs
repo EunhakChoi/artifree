@@ -7,18 +7,18 @@
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
     CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
-    CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
-    ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
-    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
-    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
-    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
-    PurgeArtifactResponse, RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse,
-    RestoreRevisionRequest, Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant,
-    RuntimeMetadata, RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
-    SourceExportFormat, SourceExportManifest, StageHandoffRequest,
-    UnreferencedContent as WireContent, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest,
+    CreateRuntimeViewRequest, DataMembers, DataWriteResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorBody, ErrorCode, ExportRuntime, FileChange as WireChange,
+    FileEdit as WireEdit, FileUpload, Handoff, HandoffState, Job as WireJob,
+    JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult,
+    JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
+    Preview, PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
+    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
@@ -26,6 +26,7 @@ use artifree_core::artifacts::{
 };
 use artifree_core::jobs::JobPageSize;
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
+use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberToken};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
@@ -44,7 +45,7 @@ use artifree_ports::job_store::JobRecord;
 use artifree_providers::archive::{self, ArchiveEntry};
 use axum::http::StatusCode;
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 
 use crate::auth::hex;
 use crate::changes::Feed;
@@ -192,7 +193,7 @@ impl From<ArtifactError> for ApiError {
                 conflict.body.current_data_version = Some(current.0);
                 conflict
             }
-            ArtifactError::Data(DataError::PathConflict) => {
+            ArtifactError::Data(DataError::PathConflict | DataError::NotObject) => {
                 Self::new(StatusCode::CONFLICT, ErrorCode::DataPathConflict, message)
             }
             ArtifactError::Data(DataError::TooLarge(_)) => Self::new(
@@ -1526,6 +1527,79 @@ pub(crate) async fn read_data(
     })
 }
 
+/// Most characters of a page token of a member listing: the longest token
+/// in base64 without padding, which writes every 3 bytes as 4 characters and
+/// the rest as 2 or 3, that is ceil(4n / 3) for n bytes (decision 0040, rule
+/// 10; 107 for the 80 bytes of today's layout).
+const MAX_MEMBER_TOKEN_CHARS: usize = (MAX_TOKEN_BYTES * 4).div_ceil(3);
+
+/// Reads the page token of a member listing. A token that is too long, not
+/// base64url without padding, or not the layout of rule 10 is refused with
+/// the rule, never with the token. Whether it was issued for this artifact
+/// and path is checked by the core.
+fn member_token(text: &str) -> Result<MemberToken, ApiError> {
+    let refused = || ApiError::invalid("page_token: not a token issued by this listing");
+    if text.len() > MAX_MEMBER_TOKEN_CHARS {
+        return Err(refused());
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(text).map_err(|_| refused())?;
+    MemberToken::from_bytes(&bytes).ok_or_else(refused)
+}
+
+/// One page of the member names of an object in the actor's data space.
+pub(crate) async fn read_data_members(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    query: ReadDataMembersQuery,
+) -> Result<DataMembers, ApiError> {
+    let id = artifact_id(id)?;
+    let ReadDataMembersQuery {
+        path,
+        limit,
+        page_token,
+        at_data_version,
+    } = query;
+    let limit = limit
+        .map(MemberLimit::try_from)
+        .transpose()
+        .map_err(|error| ApiError::invalid(format!("limit: {error}")))?
+        .unwrap_or_default();
+    let path = data_path("path", path.as_deref().unwrap_or_default())?;
+    let after = page_token.as_deref().map(member_token).transpose()?;
+    let query = MemberQuery {
+        path,
+        after,
+        limit,
+        at_data_version: at_data_version.map(AppDataVersion),
+    };
+    let artifact = id.to_string();
+    let wire_path = query.path.to_string();
+    let page = state
+        .run(move |artifacts| artifacts.data_members(&actor, &id, &query))
+        .await
+        .map_err(|error| match error {
+            ArtifactError::InvalidPageToken => {
+                ApiError::invalid("page_token: not a token issued for this artifact and path")
+            }
+            other => other.into(),
+        })?;
+    Ok(DataMembers {
+        artifact_id: artifact,
+        path: wire_path,
+        data_version: page.version.0,
+        exists: page.exists,
+        names: page
+            .names
+            .iter()
+            .map(|name| name.as_str().to_owned())
+            .collect(),
+        next_page_token: page
+            .next
+            .map(|token| URL_SAFE_NO_PAD.encode(token.to_bytes())),
+    })
+}
+
 pub(crate) async fn set_data(
     state: &AppState,
     actor: ActorId,
@@ -1729,6 +1803,17 @@ pub(crate) fn revision_dto(record: RevisionRecord) -> Revision {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+
+    #[test]
+    fn the_token_character_bound_follows_the_token_layout() {
+        assert_eq!(MAX_TOKEN_BYTES, 80, "16 tag bytes and a 64-byte name");
+        assert_eq!(MAX_MEMBER_TOKEN_CHARS, 107);
+        // The bound is the length of the longest token as it is issued.
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(vec![0_u8; MAX_TOKEN_BYTES]).len(),
+            MAX_MEMBER_TOKEN_CHARS
+        );
+    }
 
     use artifree_domain::identity::UnixMillis;
     use artifree_ports::artifact_store::FileEntry;

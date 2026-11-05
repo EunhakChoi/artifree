@@ -399,7 +399,7 @@ slice list above was planned as two pull requests; #87 carries both slices.
 | ------ | ----------------------------------------------- | --------------- | ------------ |
 | R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87          |
 | R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
-| R07b   | member listing (rules 7-11)                     | not implemented | -            |
+| R07b   | member listing (rules 7-11)                     | implemented     | #86          |
 | R07c   | TypeScript client (rules 12-22)                 | not implemented | -            |
 | R07d   | user guides                                     | not implemented | -            |
 | R07e   | web data panel (rule 23)                        | not implemented | -            |
@@ -413,6 +413,13 @@ for `data_changed` only, and an event that breaks that is `invalid_response`.
 The published schema and Rust deserialization state the same rule. Rules 13-22
 of R07c (`followData`, `listDataMembers`, the size and silence limits, the retry
 rules) are not implemented. What R07 excludes is listed under Scope.
+
+R07b landed in #86 (contract 0.16.0): `GET /v1/artifacts/{id}/data/members`
+with the query, response, check order, page token, and consistency of rules
+7-11, over HTTP only (no MCP tool, no client method). Where rule 9 lists
+`at_data_version` and the value at the path together, a stale version is
+reported first, then a value that is not an object. The listing's worst-case
+page measured 7,987 bytes against the 7,991 of rule 19.
 
 ## Alternatives
 

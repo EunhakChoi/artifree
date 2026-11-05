@@ -524,6 +524,52 @@
       ],
       "type": "object"
     },
+    "DataMembers": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/data/members`: one page of the member\nnames of the object at a path of the caller's data space, read from one\nversion of the space. Values, sizes, and types are not listed.",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space this page was read at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exists": {
+          "description": "Whether an object is at the path. False when nothing is there or the\npath passes through a value that is not an object, as for\n`GET /v1/artifacts/{id}/data`; `names` is then empty. The root always\nexists.",
+          "type": "boolean"
+        },
+        "names": {
+          "description": "Member names after the page token's name, ascending by their UTF-8\nbytes, at most `limit`. Only names that a path can address are listed\n(`[A-Za-z0-9_-]{1,64}`); other names are skipped, do not count toward\n`limit`, and do not make `next_page_token` present.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "next_page_token": {
+          "description": "Present exactly when more listed names follow at `data_version`. Pass\nit as `page_token` for the next page.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path that was listed, as parsed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "data_version",
+        "exists",
+        "names"
+      ],
+      "type": "object"
+    },
     "DataWriteResponse": {
       "additionalProperties": false,
       "description": "Response of the three writes of application data.",
@@ -728,7 +774,7 @@
           ]
         },
         "current_data_version": {
-          "description": "The current data version, present for `data_conflict`.",
+          "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -820,12 +866,12 @@
         },
         {
           "const": "data_conflict",
-          "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written.",
+          "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
           "type": "string"
         },
         {
           "const": "data_path_conflict",
-          "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else.",
+          "description": "The path crosses a value that is not an object, so a write cannot make\nroom below it. Nothing was written; set the value at a shorter path\nfirst, or write somewhere else. A listing of member names answers it\ntoo when the value at the path is not an object (a string, number,\nboolean, `null`, or array).",
           "type": "string"
         },
         {
@@ -1695,6 +1741,47 @@
         "purged_at_ms",
         "replayed"
       ],
+      "type": "object"
+    },
+    "ReadDataMembersQuery": {
+      "additionalProperties": false,
+      "description": "Query of `GET /v1/artifacts/{id}/data/members`. A parameter that is\nunknown or repeated is refused.",
+      "properties": {
+        "at_data_version": {
+          "description": "Answer only if the data space is at this version; any other version,\nolder or newer, is `data_conflict` with `current_data_version`. 0\nmatches a space nobody wrote. Digits only, without sign or leading\nzero, at most 2^53 - 1. Send the same value with every page to get\npages that agree with each other.",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Page size, 1-100; 50 when absent. Digits only, without sign or leading\nzero.",
+          "format": "uint64",
+          "maximum": 100,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "page_token": {
+          "description": "`next_page_token` of the previous page of the same artifact and path.\nOpaque: send it back as it was received.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The object whose member names are listed, written as for\n`GET /v1/artifacts/{id}/data`. Absent or empty is the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "ReadDataQuery": {
@@ -3215,6 +3302,9 @@
     },
     {
       "$ref": "#/$defs/AppData"
+    },
+    {
+      "$ref": "#/$defs/DataMembers"
     },
     {
       "$ref": "#/$defs/SetDataRequest"

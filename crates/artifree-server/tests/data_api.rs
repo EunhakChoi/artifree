@@ -11,6 +11,8 @@ use artifree_server::http::{self, AppState, Settings};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
+use base64::Engine;
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -1522,5 +1524,791 @@ async fn a_duplicate_receives_a_copy_of_the_data_only_when_asked() -> TestResult
         .ok_or("id")?
         .to_owned();
     assert_eq!(harness.at(&none_id, "").await?["data_version"], 0);
+    Ok(())
+}
+
+// --- listing the members of an object (decision 0040, rules 7-11) -------------
+
+impl Harness {
+    /// Lists members; `query` is sent as written, so a test can pass
+    /// percent-encoded text, unknown parameters, or repeated ones.
+    async fn members(&self, id: &str, query: &str) -> Result<Reply, Box<dyn std::error::Error>> {
+        self.owner(
+            "GET",
+            &format!("/v1/artifacts/{id}/data/members{query}"),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Writes `value` at the root, counting on `base` being the version.
+    async fn fill(&self, id: &str, key: &str, base: u64, value: &Value) -> TestResult {
+        accepted(&self.set(id, key, base, "", value).await?)?;
+        Ok(())
+    }
+}
+
+/// The names of a page that must have succeeded, and its token.
+fn listed(reply: &Reply) -> Result<(Vec<String>, Option<String>), Box<dyn std::error::Error>> {
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    let body = reply.json()?;
+    let names = body["names"]
+        .as_array()
+        .ok_or("names")?
+        .iter()
+        .map(|name| name.as_str().map(str::to_owned).ok_or("a name"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let token = match body.get("next_page_token") {
+        None => None,
+        Some(token) => Some(token.as_str().ok_or("a token is text")?.to_owned()),
+    };
+    Ok((names, token))
+}
+
+fn strings(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+#[tokio::test]
+async fn names_are_ordered_by_utf8_bytes_not_case_or_locale() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    harness
+        .fill(
+            &id,
+            "order-1",
+            0,
+            &json!({ "a": 1, "_x": 1, "B": 1, "0": 1, "-y": 1 }),
+        )
+        .await?;
+    let reply = harness.members(&id, "").await?;
+    assert_eq!(
+        listed(&reply)?,
+        (strings(&["-y", "0", "B", "_x", "a"]), None)
+    );
+    assert_eq!(
+        reply.json()?,
+        json!({
+            "artifact_id": id, "path": "", "data_version": 1, "exists": true,
+            "names": ["-y", "0", "B", "_x", "a"]
+        }),
+        "no token member when nothing follows, and no values"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pages_follow_each_other_and_a_full_last_page_has_no_token() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let seven: Value = (1..=7).map(|n| (format!("n{n}"), json!(n))).collect();
+    harness.fill(&id, "seven-1", 0, &seven).await?;
+    let mut token = None;
+    let mut pages = Vec::new();
+    loop {
+        let query = match &token {
+            Some(token) => format!("?limit=3&page_token={token}"),
+            None => "?limit=3".to_owned(),
+        };
+        let (names, next) = listed(&harness.members(&id, &query).await?)?;
+        pages.push(names);
+        token = next;
+        if token.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        pages,
+        vec![
+            strings(&["n1", "n2", "n3"]),
+            strings(&["n4", "n5", "n6"]),
+            strings(&["n7"])
+        ]
+    );
+    // Six names: the second page is full, and nothing follows it.
+    harness
+        .fill(
+            &id,
+            "six-1",
+            1,
+            &json!({ "a": 1, "b": 1, "c": 1, "d": 1, "e": 1, "f": 1 }),
+        )
+        .await?;
+    let (first, token) = listed(&harness.members(&id, "?limit=3").await?)?;
+    assert_eq!(first, strings(&["a", "b", "c"]));
+    let token = token.ok_or("a token after the first page")?;
+    let second = harness
+        .members(&id, &format!("?limit=3&page_token={token}"))
+        .await?;
+    assert_eq!(listed(&second)?, (strings(&["d", "e", "f"]), None));
+    assert!(
+        second.json()?.get("next_page_token").is_none(),
+        "{}",
+        second.text
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn names_outside_the_path_grammar_are_skipped_and_never_counted() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let long = "y".repeat(65);
+    harness
+        .fill(
+            &id,
+            "skip-1",
+            0,
+            &json!({ "a": 1, "a b": 1, "b": 1, "\u{e9}": 1, long: 1 }),
+        )
+        .await?;
+    // `GET data` still returns the skipped names.
+    let read = harness.at(&id, "").await?;
+    assert!(read["value"].get("a b").is_some(), "{read}");
+    assert_eq!(
+        listed(&harness.members(&id, "?limit=2").await?)?,
+        (strings(&["a", "b"]), None),
+        "two listable names fill the page; the names after `b` are not listable"
+    );
+    let (first, token) = listed(&harness.members(&id, "?limit=1").await?)?;
+    assert_eq!(first, strings(&["a"]));
+    let token = token.ok_or("`b` follows `a`, past the skipped `a b`")?;
+    assert_eq!(
+        listed(
+            &harness
+                .members(&id, &format!("?limit=1&page_token={token}"))
+                .await?
+        )?,
+        (strings(&["b"]), None),
+        "paging passes the skipped name, and nothing listable follows `b`"
+    );
+    // Only skipped names: an empty page, no token.
+    harness
+        .fill(&id, "skip-2", 1, &json!({ "a b": 1, "\u{e9}": 1 }))
+        .await?;
+    assert_eq!(
+        listed(&harness.members(&id, "").await?)?,
+        (Vec::new(), None)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_default_page_is_fifty_names_and_a_token() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let sixty: Value = (0..60).map(|n| (format!("n{n:02}"), json!(n))).collect();
+    harness.fill(&id, "sixty-1", 0, &sixty).await?;
+    let (names, token) = listed(&harness.members(&id, "").await?)?;
+    assert_eq!(names.len(), 50);
+    assert_eq!(names.last().map(String::as_str), Some("n49"));
+    let token = token.ok_or("a token: ten names follow")?;
+    let (rest, token) = listed(
+        &harness
+            .members(&id, &format!("?page_token={token}"))
+            .await?,
+    )?;
+    assert_eq!((rest.len(), token), (10, None));
+    // The largest page.
+    let (hundred, _) = listed(&harness.members(&id, "?limit=100").await?)?;
+    assert_eq!(hundred.len(), 60);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_path_lists_the_object_there_and_a_missing_one_does_not_exist() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    harness
+        .fill(
+            &id,
+            "paths-1",
+            0,
+            &json!({ "o": { "k": 1, "j": { "x": 1 } }, "s": "text", "l": [1], "n": null, "e": {} }),
+        )
+        .await?;
+    let at = |path: &str| format!("?path={}", path.replace('/', "%2F"));
+    let listed_at = async |path: &str| -> Result<Value, Box<dyn std::error::Error>> {
+        let reply = harness.members(&id, &at(path)).await?;
+        assert_eq!(reply.status, StatusCode::OK, "{path}: {}", reply.text);
+        Ok(reply.json()?)
+    };
+    assert_eq!(
+        listed_at("o").await?,
+        json!({ "artifact_id": id, "path": "o", "data_version": 1, "exists": true,
+                "names": ["j", "k"] })
+    );
+    assert_eq!(listed_at("o/j").await?["names"], json!(["x"]));
+    assert_eq!(listed_at("e").await?["names"], json!([]));
+    assert_eq!(
+        listed_at("e").await?["exists"],
+        true,
+        "an empty object exists"
+    );
+    for missing in ["nothing", "nothing/deeper", "s/deeper", "l/0", "n/x"] {
+        assert_eq!(
+            listed_at(missing).await?,
+            json!({ "artifact_id": id, "path": missing, "data_version": 1,
+                    "exists": false, "names": [] }),
+            "{missing}"
+        );
+    }
+    for blocked in ["s", "l", "n"] {
+        let reply = harness.members(&id, &at(blocked)).await?;
+        assert!(
+            reply.is(StatusCode::CONFLICT, "data_path_conflict"),
+            "{blocked}: {}",
+            reply.text
+        );
+        // The listing changes nothing, so its message must not describe a write.
+        assert_eq!(
+            reply.json()?["error"]["message"],
+            "the value at this path is not an object, so it has no members",
+            "{blocked}"
+        );
+    }
+    // A write through the same value keeps its own message, and `GET data`
+    // reads a path through it as nothing.
+    let write = harness
+        .set(&id, "paths-2", 1, "s/deeper", &json!(1))
+        .await?;
+    assert!(
+        write.is(StatusCode::CONFLICT, "data_path_conflict"),
+        "{}",
+        write.text
+    );
+    assert_eq!(
+        write.json()?["error"]["message"],
+        "the path crosses a value that is not an object, which a write cannot make room in"
+    );
+    assert_eq!(harness.at(&id, "s/deeper").await?["exists"], false);
+    // An empty `path` is the root, as for `GET data`.
+    assert_eq!(listed_at("").await?["path"], "");
+    let explicit = harness.members(&id, "?path=").await?;
+    assert_eq!(listed(&explicit)?.0, strings(&["e", "l", "n", "o", "s"]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_path_that_breaks_the_grammar_is_refused_without_being_echoed() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    for path in [
+        "a%2F%2Fb",
+        "%2Fa",
+        "a%2F",
+        "a%20b",
+        "%C3%A9",
+        ".",
+        "a%2F..%2Fb",
+    ] {
+        let reply = harness.members(&id, &format!("?path={path}")).await?;
+        assert!(
+            reply.is(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request"),
+            "{path}: {}",
+            reply.text
+        );
+    }
+    let deep = vec!["a"; 17].join("%2F");
+    let reply = harness.members(&id, &format!("?path={deep}")).await?;
+    assert_eq!(
+        reply.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "17 segments"
+    );
+    let reply = harness.members(&id, "?path=a%20b").await?;
+    assert!(!reply.text.contains("a b"), "{}", reply.text);
+    Ok(())
+}
+
+#[tokio::test]
+async fn at_data_version_names_the_version_the_page_is_read_at() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    // A space nobody wrote is at 0.
+    let unwritten = harness.members(&id, "?at_data_version=0").await?;
+    assert_eq!(listed(&unwritten)?, (Vec::new(), None));
+    assert_eq!(unwritten.json()?["data_version"], 0);
+    let stale = harness.members(&id, "?at_data_version=1").await?;
+    assert!(
+        stale.is(StatusCode::CONFLICT, "data_conflict"),
+        "{}",
+        stale.text
+    );
+    assert_eq!(stale.json()?["error"]["current_data_version"], 0);
+
+    harness
+        .fill(&id, "ver-1", 0, &json!({ "a": 1, "b": 1, "c": 1 }))
+        .await?;
+    let (first, token) = listed(&harness.members(&id, "?limit=1&at_data_version=1").await?)?;
+    assert_eq!(first, strings(&["a"]));
+    let token = token.ok_or("a token")?;
+    let next = |version: u64| format!("?limit=1&page_token={token}&at_data_version={version}");
+    assert_eq!(
+        listed(&harness.members(&id, &next(1)).await?)?.0,
+        strings(&["b"]),
+        "equal"
+    );
+    // Newer: the reader names a version the space has not reached.
+    let newer = harness.members(&id, &next(2)).await?;
+    assert!(
+        newer.is(StatusCode::CONFLICT, "data_conflict"),
+        "{}",
+        newer.text
+    );
+    assert_eq!(newer.json()?["error"]["current_data_version"], 1);
+    // Older: a write moved the space on; the earlier token with the earlier
+    // version is a conflict that names where the space is now.
+    accepted(&harness.set(&id, "ver-2", 1, "d", &json!(1)).await?)?;
+    let older = harness.members(&id, &next(1)).await?;
+    assert!(
+        older.is(StatusCode::CONFLICT, "data_conflict"),
+        "{}",
+        older.text
+    );
+    assert_eq!(older.json()?["error"]["current_data_version"], 2);
+    // Without it the page is read at the version the space has now.
+    let without = harness
+        .members(&id, &format!("?limit=1&page_token={token}"))
+        .await?;
+    assert_eq!(listed(&without)?.0, strings(&["b"]));
+    assert_eq!(without.json()?["data_version"], 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_query_that_breaks_the_rules_is_refused() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let token = {
+        harness
+            .fill(&id, "q-1", 0, &json!({ "a": 1, "b": 1 }))
+            .await?;
+        listed(&harness.members(&id, "?limit=1").await?)?
+            .1
+            .ok_or("a token")?
+    };
+    for query in [
+        "?limit=0".to_owned(),
+        "?limit=101".to_owned(),
+        "?limit=05".to_owned(),
+        "?limit=%2B5".to_owned(),
+        "?limit=-1".to_owned(),
+        "?limit=".to_owned(),
+        "?limit=1.0".to_owned(),
+        "?limit=1e1".to_owned(),
+        "?limit=%205".to_owned(),
+        "?limit=five".to_owned(),
+        "?limit=99999999999999999999".to_owned(),
+        "?at_data_version=05".to_owned(),
+        "?at_data_version=%2B1".to_owned(),
+        "?at_data_version=-1".to_owned(),
+        "?at_data_version=".to_owned(),
+        "?at_data_version=9007199254740992".to_owned(),
+        "?at_data_version=99999999999999999999".to_owned(),
+        "?sort=name".to_owned(),
+        "?prefix=a".to_owned(),
+        "?Limit=5".to_owned(),
+        "?limit=1&limit=1".to_owned(),
+        "?path=&path=".to_owned(),
+        format!("?page_token={token}&page_token={token}"),
+        "?at_data_version=1&at_data_version=1".to_owned(),
+    ] {
+        let reply = harness.members(&id, &query).await?;
+        assert!(
+            reply.is(StatusCode::BAD_REQUEST, "invalid_request"),
+            "{query}: {} {}",
+            reply.status,
+            reply.text
+        );
+    }
+    // The bounds themselves, and the largest version, are accepted (the
+    // version is stale, which is a conflict and not a malformed query).
+    for query in ["?limit=1", "?limit=100", "?at_data_version=1"] {
+        let reply = harness.members(&id, query).await?;
+        assert_eq!(reply.status, StatusCode::OK, "{query}: {}", reply.text);
+    }
+    let largest = harness
+        .members(&id, "?at_data_version=9007199254740991")
+        .await?;
+    assert!(
+        largest.is(StatusCode::CONFLICT, "data_conflict"),
+        "{}",
+        largest.text
+    );
+    let zero = harness.members(&id, "?at_data_version=0").await?;
+    assert!(
+        zero.is(StatusCode::CONFLICT, "data_conflict"),
+        "0 is a version: {}",
+        zero.text
+    );
+    Ok(())
+}
+
+/// The bytes of a page token as the server issued it.
+fn token_bytes(token: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    Ok(URL_SAFE_NO_PAD.decode(token)?)
+}
+
+#[tokio::test]
+async fn a_token_is_a_tag_and_the_last_name_in_clear() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    // The deepest path (16 segments of 64 bytes) with a 64-byte name.
+    let segments: Vec<String> = (0..16).map(|n| format!("{n:x}").repeat(64)).collect();
+    let deepest = segments.join("/");
+    let last = "y".repeat(64);
+    let other = "x".repeat(64);
+    accepted(
+        &harness
+            .set(
+                &id,
+                "deep-1",
+                0,
+                &deepest,
+                &json!({ last.clone(): 1, other.clone(): 1, "z": 1 }),
+            )
+            .await?,
+    )?;
+    let query = format!("?limit=2&path={}", deepest.replace('/', "%2F"));
+    let reply = harness.members(&id, &query).await?;
+    let (names, token) = listed(&reply)?;
+    assert_eq!(names, vec![other.clone(), last.clone()]);
+    let token = token.ok_or("`z` follows the 64-byte names")?;
+    assert_eq!(token.len(), 107, "80 bytes in base64 without padding");
+    let bytes = token_bytes(&token)?;
+    assert_eq!(bytes.len(), 80);
+    assert_eq!(
+        &bytes[16..],
+        last.as_bytes(),
+        "the name in clear after the tag"
+    );
+    // The token continues the listing after its name.
+    let after = harness
+        .members(&id, &format!("{query}&page_token={token}"))
+        .await?;
+    assert_eq!(listed(&after)?, (strings(&["z"]), None));
+    // The tag depends on the artifact and the path, and not on the name.
+    let (_, shorter) = listed(
+        &harness
+            .members(
+                &id,
+                &format!("?limit=1&path={}", deepest.replace('/', "%2F")),
+            )
+            .await?,
+    )?;
+    let shorter = token_bytes(&shorter.ok_or("a token")?)?;
+    assert_eq!(&shorter[16..], other.as_bytes());
+    assert_eq!(
+        shorter[..16],
+        bytes[..16],
+        "one tag for one artifact and path"
+    );
+    // The same names under the root and under another artifact: other tags.
+    let root_token = {
+        harness
+            .fill(&id, "deep-2", 1, &json!({ "a": 1, "b": 1 }))
+            .await?;
+        token_bytes(
+            &listed(&harness.members(&id, "?limit=1").await?)?
+                .1
+                .ok_or("a token")?,
+        )?
+    };
+    assert_eq!(
+        root_token.len(),
+        17,
+        "a one-byte name makes the shortest token"
+    );
+    assert_ne!(root_token[..16], bytes[..16], "other path");
+    let second = harness.artifact("B").await?;
+    harness
+        .fill(&second, "deep-3", 0, &json!({ "a": 1, "b": 1 }))
+        .await?;
+    let foreign = token_bytes(
+        &listed(&harness.members(&second, "?limit=1").await?)?
+            .1
+            .ok_or("a token")?,
+    )?;
+    assert_ne!(foreign[..16], root_token[..16], "other artifact, same path");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_page_token_that_was_not_issued_for_the_request_is_refused() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let second = harness.artifact("B").await?;
+    let space = json!({ "a": 1, "b": 1, "c": 1, "d": { "a": 1, "b": 1 } });
+    harness.fill(&id, "tok-1", 0, &space).await?;
+    harness.fill(&second, "tok-2", 0, &space).await?;
+    let issued = |artifact: &str, path: &str| {
+        let query = format!("?limit=1&path={}", path.replace('/', "%2F"));
+        let harness = &harness;
+        let artifact = artifact.to_owned();
+        async move {
+            listed(&harness.members(&artifact, &query).await?)?
+                .1
+                .ok_or_else(|| Box::<dyn std::error::Error>::from("a token"))
+        }
+    };
+    let root_token = issued(&id, "").await?;
+    let bytes = token_bytes(&root_token)?;
+    let valid_tag = &bytes[..16];
+    let with_name = |name: &[u8]| URL_SAFE_NO_PAD.encode([valid_tag, name].concat());
+    let refusals = [
+        ("empty", String::new()),
+        ("not base64", "!!!!".to_owned()),
+        ("standard alphabet", "+/+/+/+/+/+/+/+/+/+/+/+/".to_owned()),
+        ("whitespace", format!("{root_token}%20")),
+        ("padded", URL_SAFE.encode(&bytes).replace('=', "%3D")),
+        ("too short", URL_SAFE_NO_PAD.encode(valid_tag)),
+        ("bad name", with_name(b"a b")),
+        ("oversized", "A".repeat(2_000)),
+        ("108 characters", with_name(&[b'a'; 65])),
+        ("non-ASCII name", with_name("\u{e9}".as_bytes())),
+        ("another path", issued(&id, "d").await?),
+        ("another artifact", issued(&second, "").await?),
+        ("root token under a path", root_token.clone()),
+    ];
+    for (case, token) in refusals {
+        let path = if case == "root token under a path" {
+            "?path=d&"
+        } else {
+            "?"
+        };
+        let reply = harness
+            .members(&id, &format!("{path}page_token={token}"))
+            .await?;
+        assert!(
+            reply.is(StatusCode::BAD_REQUEST, "invalid_request"),
+            "{case}: {} {}",
+            reply.status,
+            reply.text
+        );
+        assert!(
+            !reply.text.contains(&token) || token.is_empty(),
+            "{case}: echoed"
+        );
+    }
+    assert_eq!(with_name(&[b'a'; 65]).len(), 108, "the 108-character case");
+    // The same token on its own artifact and path still works.
+    let ok = harness
+        .members(&id, &format!("?limit=1&page_token={root_token}"))
+        .await?;
+    assert_eq!(listed(&ok)?.0, strings(&["b"]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checks_run_in_the_order_of_the_rule() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let unknown = "art_00000000000000000000000000000000";
+    harness
+        .fill(&id, "order-1", 0, &json!({ "s": "text", "a": 1, "b": 1 }))
+        .await?;
+    let token = listed(&harness.members(&id, "?limit=1").await?)?
+        .1
+        .ok_or("a token")?;
+    let bad_token = "page_token=!!!!";
+    let cases: [(&str, String, String, StatusCode, &str); 8] = [
+        (
+            "identifier before query",
+            "art_nonsense".to_owned(),
+            "?limit=0".to_owned(),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            "query before path",
+            id.clone(),
+            "?limit=0&path=a%20b".to_owned(),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        ),
+        (
+            "path before token",
+            id.clone(),
+            format!("?path=a%20b&{bad_token}"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        ),
+        (
+            "token before access",
+            unknown.to_owned(),
+            format!("?{bad_token}"),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        ),
+        (
+            "foreign token before access",
+            unknown.to_owned(),
+            format!("?page_token={token}"),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        ),
+        (
+            "access before the version",
+            unknown.to_owned(),
+            "?at_data_version=99".to_owned(),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            "the version before the value at the path",
+            id.clone(),
+            "?path=s&at_data_version=99".to_owned(),
+            StatusCode::CONFLICT,
+            "data_conflict",
+        ),
+        (
+            "the value at the path last",
+            id.clone(),
+            "?path=s&at_data_version=1".to_owned(),
+            StatusCode::CONFLICT,
+            "data_path_conflict",
+        ),
+    ];
+    for (case, artifact, query, status, code) in cases {
+        let reply = harness.members(&artifact, &query).await?;
+        assert!(
+            reply.is(status, code),
+            "{case}: {} {}",
+            reply.status,
+            reply.text
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn listing_needs_the_token_and_works_with_an_agent_token() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    harness.fill(&id, "auth-1", 0, &json!({ "a": 1 })).await?;
+    let path = format!("/v1/artifacts/{id}/data/members");
+    let wrong = "f".repeat(64);
+    for token in [None, Some(wrong.as_str())] {
+        let reply = harness.send("GET", &path, token, None, None).await?;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{token:?}");
+    }
+    let agent = harness.agent_token().await?;
+    let reply = harness.send("GET", &path, Some(&agent), None, None).await?;
+    assert_eq!(listed(&reply)?.0, strings(&["a"]));
+    // Reading only: the route accepts no write.
+    let post = harness
+        .send(
+            "POST",
+            &path,
+            Some(OWNER),
+            Some("auth-key-1"),
+            Some(&json!({})),
+        )
+        .await?;
+    assert_eq!(post.status, StatusCode::METHOD_NOT_ALLOWED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_members_of_an_artifact_in_the_trash_or_purged_are_not_found() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    harness
+        .fill(&id, "trash-m1", 0, &json!({ "a": 1, "b": 1 }))
+        .await?;
+    let token = listed(&harness.members(&id, "?limit=1").await?)?
+        .1
+        .ok_or("a token")?;
+    harness.trash(&id, "trash-m2", 1, true).await?;
+    let gone = |reply: &Reply| reply.is(StatusCode::NOT_FOUND, "not_found");
+    assert!(gone(&harness.members(&id, "").await?));
+    assert!(
+        gone(
+            &harness
+                .members(&id, &format!("?page_token={token}"))
+                .await?
+        ),
+        "a token is a position and not a permission"
+    );
+    harness.trash(&id, "trash-m3", 2, false).await?;
+    assert_eq!(
+        listed(
+            &harness
+                .members(&id, &format!("?page_token={token}"))
+                .await?
+        )?
+        .0,
+        strings(&["b"])
+    );
+    harness.trash(&id, "trash-m4", 3, true).await?;
+    let purged = harness
+        .owner(
+            "POST",
+            &format!("/v1/artifacts/{id}/purge"),
+            Some("purge-m1"),
+            Some(&json!({ "base_metadata_revision": 4 })),
+        )
+        .await?;
+    assert_eq!(purged.status, StatusCode::OK, "{}", purged.text);
+    assert!(gone(&harness.members(&id, "").await?));
+    Ok(())
+}
+
+/// Rule 19 of decision 0040 bounds a page at 7,991 bytes. The largest page
+/// that exists: 100 names of 64 bytes at the deepest path, a token because
+/// more follow, and the largest version a space can be at.
+#[tokio::test]
+async fn the_largest_page_is_within_the_published_bound() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("A").await?;
+    let deepest = (0..16)
+        .map(|n| format!("{n:x}").repeat(64))
+        .collect::<Vec<_>>()
+        .join("/");
+    let members: Value = (0..101)
+        .map(|n| (format!("{n:03}{}", "n".repeat(61)), json!(n)))
+        .collect();
+    accepted(&harness.set(&id, "big-1", 0, &deepest, &members).await?)?;
+    // The version is raised in the file, because 2^53 - 1 writes do not fit
+    // in a test.
+    let connection = rusqlite::Connection::open(harness.directory.join("db.sqlite3"))?;
+    let changed = connection.execute("UPDATE app_data SET data_version = 9007199254740991", [])?;
+    assert_eq!(changed, 1);
+    let reply = harness
+        .members(
+            &id,
+            &format!("?limit=100&path={}", deepest.replace('/', "%2F")),
+        )
+        .await?;
+    let (names, token) = listed(&reply)?;
+    assert_eq!(names.len(), 100);
+    assert!(names.iter().all(|name| name.len() == 64));
+    assert_eq!(token.map(|token| token.len()), Some(107));
+    assert_eq!(reply.json()?["data_version"], 9_007_199_254_740_991_u64);
+    // The parts of the bound: 6,699 bytes of quoted names with commas, a
+    // quoted path of 1,041, and a quoted token of 109.
+    assert_eq!(reply.text.len(), 7_987, "{}", reply.text.len());
+    assert!(reply.text.len() <= 7_991);
+    Ok(())
+}
+
+/// The page size the schema publishes is the one the core enforces (decision
+/// 0040, rule 8); the contract crate cannot read the core's constant, so the
+/// generated schema is compared with it here.
+#[test]
+fn the_published_page_size_bounds_are_the_cores() -> TestResult {
+    use artifree_core::members::MemberLimit;
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/generated/api-v1.schema.json"
+    ))?;
+    let schema: Value = serde_json::from_str(&text)?;
+    let limit = &schema["$defs"]["ReadDataMembersQuery"]["properties"]["limit"];
+    assert_eq!(limit["minimum"], 1);
+    assert_eq!(limit["maximum"], MemberLimit::MAX.get());
+    assert!(MemberLimit::try_from(1).is_ok());
+    assert!(MemberLimit::try_from(u64::try_from(MemberLimit::MAX.get())? + 1).is_err());
     Ok(())
 }

@@ -2,13 +2,14 @@
 use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, ErrorBody, ErrorResponse, FeedPosition,
-    MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64,
-    MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview, PurgeArtifactResponse,
-    RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeConnection,
-    RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
-    RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView,
-    SaveRevisionRequest, SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
+    DataMembers, DuplicateArtifactResponse, EditFilesRequest, ErrorBody, ErrorResponse,
+    FeedPosition, MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES,
+    MAX_RUNTIME_SOURCE_WRITE_BASE64, MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview,
+    PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentResponse, Revision,
+    RevisionList, RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList,
+    RuntimeSourcePart, RuntimeSourceReadRequest, RuntimeSourceWriteReceipt,
+    RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest, SourceExportManifest,
+    UnreferencedContent, UpdateArtifactResponse,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -365,6 +366,48 @@ fn edit_bounds_and_conditions_are_the_published_ones() {
     let delete = &request["$defs"]["FileEdit"]["oneOf"][1]["properties"]["expect"];
     assert_eq!(put["pattern"], "^(absent|[0-9a-f]{64})$");
     assert_eq!(delete["pattern"], "^[0-9a-f]{64}$");
+}
+
+/// A listing page omits the token when nothing follows, and the query reads
+/// the whole numbers its schema bounds (decision 0040, rules 8 and 9).
+#[test]
+fn data_members_omit_an_absent_token_and_the_query_bounds_are_published() {
+    let page = DataMembers {
+        artifact_id: "art_1".into(),
+        path: "a".into(),
+        data_version: 2,
+        exists: true,
+        names: vec!["x".into()],
+        next_page_token: None,
+    };
+    let text = serde_json::to_string(&page).unwrap_or_default();
+    assert!(!text.contains("next_page_token"), "{text}");
+    let with_token = DataMembers {
+        next_page_token: Some("t".into()),
+        ..page
+    };
+    assert!(
+        serde_json::to_string(&with_token)
+            .unwrap_or_default()
+            .ends_with(r#""next_page_token":"t"}"#)
+    );
+
+    let query = |text: &str| serde_json::from_str::<ReadDataMembersQuery>(text);
+    assert!(query(r#"{"limit":100,"at_data_version":9007199254740991}"#).is_ok());
+    assert!(query(r#"{"at_data_version":9007199254740992}"#).is_err());
+    assert!(query(r#"{"unknown":1}"#).is_err());
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<ReadDataMembersQuery>(),
+    )
+    .unwrap_or_default();
+    assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+    assert_eq!(schema["properties"]["limit"]["maximum"], 100);
+    assert_eq!(
+        schema["properties"]["at_data_version"]["maximum"],
+        9_007_199_254_740_991_u64
+    );
 }
 
 /// A change event names a data version of at least 1: a space nobody wrote is

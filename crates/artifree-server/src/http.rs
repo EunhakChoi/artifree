@@ -18,10 +18,11 @@ use std::time::Duration;
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataWriteResponse, DeleteDataRequest,
-    DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode,
-    ErrorResponse, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
-    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataQuery, RemoveUnreferencedContentRequest,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
+    DeleteDataRequest, DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest, Job, JobList,
+    ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
+    ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
     RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
@@ -485,6 +486,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
                 // Inside the API-wide limit, so this one applies.
                 .layer(DefaultBodyLimit::max(MAX_DATA_BODY_BYTES)),
         )
+        .route("/v1/artifacts/{id}/data/members", get(read_data_members))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(show_job))
         .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))
@@ -1342,6 +1344,22 @@ async fn read_data(
     let Query(ReadDataQuery { path: at }) = query?;
     Ok(Json(
         operations::read_data(&state, actor, &id, at.as_deref()).await?,
+    ))
+}
+
+/// Lists a page of the member names of an object in the caller's application
+/// data (decision 0040). An agent token may: it reads what the owner reads.
+async fn read_data_members(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<ReadDataMembersQuery>, QueryRejection>,
+) -> Result<Json<DataMembers>, ApiError> {
+    let Path(id) = path?;
+    operations::artifact_id(&id)?;
+    let Query(query) = query?;
+    Ok(Json(
+        operations::read_data_members(&state, actor, &id, query).await?,
     ))
 }
 

@@ -244,8 +244,9 @@ WITHOUT ROWID`. Fixtures of versions 1 to 8 upgrade, a failed step rolls
 
 - **Frames and previews cannot read or write data.** There is no runtime
   bridge, no capability, and no data panel in the web workspace.
-- No client subscription or member listing yet (R07; the feed records
-  `data_changed`, decision 14), no query (T11), no uploaded
+- No client subscription and no client, CLI, or MCP member listing yet (R07;
+  the feed records `data_changed`, decision 14, and `GET data/members` lists
+  names over HTTP, 0040 R07b), no query (T11), no uploaded
   assets (R09), no sharing between actors, and no per-collection or array
   operations. A path never enters an array, so an app that needs to change one
   element sets the array whole or keeps its items as members.

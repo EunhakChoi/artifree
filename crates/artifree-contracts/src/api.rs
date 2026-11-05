@@ -789,6 +789,114 @@ pub struct AppData {
     pub value: Option<JsonValue>,
 }
 
+/// Query of `GET /v1/artifacts/{id}/data/members`. A parameter that is
+/// unknown or repeated is refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadDataMembersQuery {
+    /// The object whose member names are listed, written as for
+    /// `GET /v1/artifacts/{id}/data`. Absent or empty is the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Page size, 1-100; 50 when absent. Digits only, without sign or leading
+    /// zero.
+    #[serde(
+        default,
+        deserialize_with = "whole_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<u64>,
+    /// `next_page_token` of the previous page of the same artifact and path.
+    /// Opaque: send it back as it was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+    /// Answer only if the data space is at this version; any other version,
+    /// older or newer, is `data_conflict` with `current_data_version`. 0
+    /// matches a space nobody wrote. Digits only, without sign or leading
+    /// zero, at most 2^53 - 1. Send the same value with every page to get
+    /// pages that agree with each other.
+    #[serde(
+        default,
+        deserialize_with = "whole_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(max = 9_007_199_254_740_991_u64))]
+    pub at_data_version: Option<u64>,
+}
+
+/// Response of `GET /v1/artifacts/{id}/data/members`: one page of the member
+/// names of the object at a path of the caller's data space, read from one
+/// version of the space. Values, sizes, and types are not listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataMembers {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The path that was listed, as parsed.
+    pub path: String,
+    /// The version of the data space this page was read at.
+    pub data_version: u64,
+    /// Whether an object is at the path. False when nothing is there or the
+    /// path passes through a value that is not an object, as for
+    /// `GET /v1/artifacts/{id}/data`; `names` is then empty. The root always
+    /// exists.
+    pub exists: bool,
+    /// Member names after the page token's name, ascending by their UTF-8
+    /// bytes, at most `limit`. Only names that a path can address are listed
+    /// (`[A-Za-z0-9_-]{1,64}`); other names are skipped, do not count toward
+    /// `limit`, and do not make `next_page_token` present.
+    pub names: Vec<String>,
+    /// Present exactly when more listed names follow at `data_version`. Pass
+    /// it as `page_token` for the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+/// Reads a whole number written as digits only, without sign or leading
+/// zero, of at most 2^53 - 1: a query parameter, which Serde would otherwise
+/// read as `05` or `+5`. A JSON number is read as it is.
+fn whole_number<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    use serde::de::{Error, Visitor};
+
+    /// The largest integer a double holds exactly.
+    const LARGEST: u64 = 9_007_199_254_740_991;
+
+    struct Digits;
+
+    impl Visitor<'_> for Digits {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("digits without sign or leading zero, at most 2^53 - 1")
+        }
+
+        fn visit_u64<E: Error>(self, value: u64) -> Result<u64, E> {
+            if value > LARGEST {
+                return Err(E::invalid_value(
+                    serde::de::Unexpected::Unsigned(value),
+                    &self,
+                ));
+            }
+            Ok(value)
+        }
+
+        fn visit_str<E: Error>(self, text: &str) -> Result<u64, E> {
+            let plain = !text.is_empty()
+                && text.bytes().all(|byte| byte.is_ascii_digit())
+                && (text == "0" || !text.starts_with('0'));
+            match text.parse::<u64>() {
+                Ok(value) if plain => self.visit_u64(value),
+                _ => Err(E::invalid_value(serde::de::Unexpected::Str(text), &self)),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(Digits).map(Some)
+}
+
 /// Reads a member that is there, `null` included, as `Some`. Without it,
 /// serde reads `"value": null` as `None`, the same as a member that is absent.
 fn present<'de, D: serde::Deserializer<'de>>(
@@ -1724,11 +1832,15 @@ pub enum ErrorCode {
     /// nothing was deleted. Run the dry run again.
     ContentConflict,
     /// The base data version is not current; read the data again and reapply
-    /// the change. Nothing was written.
+    /// the change. Nothing was written. A listing of member names answers it
+    /// too when its `at_data_version` is not the space's version, older or
+    /// newer; start the listing again.
     DataConflict,
     /// The path crosses a value that is not an object, so a write cannot make
     /// room below it. Nothing was written; set the value at a shorter path
-    /// first, or write somewhere else.
+    /// first, or write somewhere else. A listing of member names answers it
+    /// too when the value at the path is not an object (a string, number,
+    /// boolean, `null`, or array).
     DataPathConflict,
     /// The change would exceed a limit of application data: the value, the
     /// data space, the number of values in it, or how deeply they nest.
@@ -1774,7 +1886,8 @@ pub struct ErrorBody {
     /// The current metadata revision, present for `metadata_conflict`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_metadata_revision: Option<u64>,
-    /// The current data version, present for `data_conflict`.
+    /// The current data version, present for `data_conflict` (of a write, or
+    /// of a listing whose `at_data_version` is not current).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_data_version: Option<u64>,
     /// The first files, in path order, whose edits did not hold; present for

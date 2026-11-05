@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Bound;
 use std::str::FromStr;
 
 /// Most segments in a path.
@@ -89,6 +90,10 @@ pub enum DataError {
     /// A change has to make room on a path that crosses a value that is not an
     /// object (a string, number, boolean, null, or array).
     PathConflict,
+    /// A listing of member names meets a value that is not an object (a
+    /// string, number, boolean, null, or array) at its path. Nothing is
+    /// being changed; the value simply has no members.
+    NotObject,
     /// The root of a space is an object: a change cannot make it anything
     /// else.
     RootNotObject,
@@ -105,6 +110,9 @@ impl fmt::Display for DataError {
             Self::PathConflict => formatter.write_str(
                 "the path crosses a value that is not an object, which a write cannot make room in",
             ),
+            Self::NotObject => {
+                formatter.write_str("the value at this path is not an object, so it has no members")
+            }
             Self::RootNotObject => formatter.write_str("the root of a data space is an object"),
         }
     }
@@ -179,6 +187,64 @@ impl fmt::Display for DataPath {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0.join("/"))
     }
+}
+
+/// The name of an object member that a path can address: one segment of a
+/// [`DataPath`], 1 to 64 ASCII letters, digits, `_`, or `-`. Members whose
+/// names are valid but longer or outside this grammar (up to 256 bytes, see
+/// [`MAX_MEMBER_NAME_BYTES`]) exist in a space, but no path reaches them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemberName(String);
+
+impl MemberName {
+    /// The name as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for MemberName {
+    type Err = DataError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if valid_segment(value) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(DataError::InvalidPath(
+                "a member name is 1-64 ASCII letters, digits, '_' or '-'",
+            ))
+        }
+    }
+}
+
+impl fmt::Display for MemberName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// The member names of the object at a path, as [`DataSpace::members`] reads
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Members {
+    /// Nothing is at the path, or the path passes through a value that is not
+    /// an object.
+    Missing,
+    /// A value that is not an object is at the path (`null` and arrays
+    /// included).
+    NotObject,
+    /// An object is at the path.
+    Page(MemberPage),
+}
+
+/// Up to one page of member names, in ascending order of their UTF-8 bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberPage {
+    /// The names after the requested position, at most the requested count.
+    pub names: Vec<MemberName>,
+    /// Whether further listable names follow the last of `names`.
+    pub more: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -760,6 +826,28 @@ impl DataSpace {
                 DataValue::Object(members) => members.get(segment),
                 _ => None,
             })
+    }
+
+    /// The names of the members of the object at `path`: those after `after`
+    /// in ascending order of their UTF-8 bytes, at most `limit`. Only names a
+    /// path can address ([`MemberName`]) are listed; others are skipped, do
+    /// not count toward `limit`, and do not make `more` true. A `limit` of 0
+    /// lists nothing.
+    #[must_use]
+    pub fn members(&self, path: &DataPath, after: Option<&MemberName>, limit: usize) -> Members {
+        let members = match self.get(path) {
+            None => return Members::Missing,
+            Some(DataValue::Object(members)) => members,
+            Some(_) => return Members::NotObject,
+        };
+        let lower = after.map_or(Bound::Unbounded, |name| Bound::Excluded(name.as_str()));
+        // `BTreeMap` orders `String` keys by their bytes.
+        let mut listable = members
+            .range::<str, _>((lower, Bound::Unbounded))
+            .filter_map(|(name, _)| name.parse::<MemberName>().ok());
+        let names: Vec<MemberName> = listable.by_ref().take(limit).collect();
+        let more = listable.next().is_some();
+        Members::Page(MemberPage { names, more })
     }
 
     /// The space after `change`, and whether it differs from this one.
@@ -1510,5 +1598,109 @@ mod tests {
         let shrink = DataChange::Remove { path: path("a") };
         assert!(grown.apply(&shrink)?.changed);
         Ok(())
+    }
+
+    fn name(text: &str) -> MemberName {
+        text.parse()
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+    }
+
+    fn page(listing: Members) -> (Vec<String>, bool) {
+        match listing {
+            Members::Page(MemberPage { names, more }) => (
+                names.iter().map(|name| name.as_str().to_owned()).collect(),
+                more,
+            ),
+            other => panic!("expected a page, got {other:?}"),
+        }
+    }
+
+    fn names(strings: &[&str]) -> Vec<String> {
+        strings.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn member_names_follow_the_segment_grammar() {
+        for good in ["a", "A", "0", "_", "-", &"x".repeat(64)] {
+            assert!(good.parse::<MemberName>().is_ok(), "{good}");
+        }
+        for bad in ["", "a b", "a/b", "\u{e9}", ".", "a.b", &"x".repeat(65)] {
+            assert!(bad.parse::<MemberName>().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn members_are_ordered_by_bytes_not_by_case_or_locale() {
+        // By byte: `-` (0x2d) < `0` (0x30) < `B` (0x42) < `_` (0x5f) < `a`.
+        let space = space(r#"{"a":1,"_x":1,"B":1,"0":1,"-y":1}"#);
+        assert_eq!(
+            page(space.members(&DataPath::root(), None, 100)),
+            (names(&["-y", "0", "B", "_x", "a"]), false)
+        );
+    }
+
+    #[test]
+    fn members_continue_after_a_name_that_need_not_exist() {
+        let space = space(r#"{"a":1,"c":1,"e":1}"#);
+        let after = |text: &str| page(space.members(&DataPath::root(), Some(&name(text)), 100));
+        assert_eq!(after("a"), (names(&["c", "e"]), false));
+        assert_eq!(after("b"), (names(&["c", "e"]), false), "removed name");
+        assert_eq!(after("e"), (Vec::new(), false));
+        assert_eq!(after("f"), (Vec::new(), false));
+    }
+
+    #[test]
+    fn names_outside_the_grammar_are_skipped_without_counting() {
+        // `a b` sorts between `a` and `b`; `\u{e9}` is after every ASCII name.
+        let listed = space(r#"{"a":1,"a b":1,"b":1,"\u00e9":1}"#);
+        let root = DataPath::root();
+        assert_eq!(
+            page(listed.members(&root, None, 2)),
+            (names(&["a", "b"]), false),
+            "two listable names fill the page and nothing listable follows"
+        );
+        assert_eq!(page(listed.members(&root, None, 1)), (names(&["a"]), true));
+        assert_eq!(
+            page(listed.members(&root, Some(&name("a")), 1)),
+            (names(&["b"]), false)
+        );
+        // A name of 65 bytes is a valid member name that no path reaches.
+        let long = format!(r#"{{"x":1,"{}":1}}"#, "y".repeat(65));
+        assert_eq!(
+            page(space(&long).members(&root, None, 1)),
+            (names(&["x"]), false)
+        );
+    }
+
+    #[test]
+    fn a_missing_path_lists_nothing_and_a_value_that_is_not_an_object_conflicts() {
+        let space = space(r#"{"s":"text","n":null,"l":[1],"o":{"k":1},"e":{}}"#);
+        for missing in ["nothing", "nothing/deeper", "s/deeper", "l/0", "n/x"] {
+            assert_eq!(
+                space.members(&path(missing), None, 10),
+                Members::Missing,
+                "{missing}"
+            );
+        }
+        for blocked in ["s", "n", "l"] {
+            assert_eq!(
+                space.members(&path(blocked), None, 10),
+                Members::NotObject,
+                "{blocked}"
+            );
+        }
+        assert_eq!(
+            page(space.members(&path("o"), None, 10)),
+            (names(&["k"]), false)
+        );
+        assert_eq!(
+            page(space.members(&path("e"), None, 10)),
+            (Vec::new(), false)
+        );
+        assert_eq!(
+            page(DataSpace::empty().members(&DataPath::root(), None, 10)),
+            (Vec::new(), false),
+            "the root always exists"
+        );
     }
 }
