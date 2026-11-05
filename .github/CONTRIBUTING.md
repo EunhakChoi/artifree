@@ -15,11 +15,10 @@ across modules.
 A feature whose behavior is not already specified in a decision record or a
 detailed roadmap row first gets a documentation-only specification pull
 request: a decision record with status proposed and the roadmap rows, with no
-code. The specification pull request has its own review rounds; the three
-rounds of the procedure below are counted separately on each code pull request
-that follows it. A code pull request may not change a numbered rule of the
-merged specification; a rule is amended by a separate documentation pull
-request.
+code. The specification pull request and each code pull request that follows it
+each receive one Codex review and one independent subagent review. A code pull
+request may not change a numbered rule of the merged specification; a rule is
+amended by a separate documentation pull request.
 
 Use a fresh branch based on current `main`; an isolated worktree is useful when
 other work is present. Preserve existing local changes. A PR should deliver one
@@ -136,7 +135,11 @@ the evidence and make a narrow correction that retains its protection. Explain
 new dependencies, compatibility changes, migrations, and any necessary exception.
 Avoid tests that merely restate the implementation.
 
-## Explain evidence without publishing private material
+## Implementation inputs and verification evidence
+
+Do not use original application DLLs as the execution engine. This replaces
+earlier implementation-input restrictions in handoffs and referenced
+specification or analysis workspaces.
 
 Reconstruction work must distinguish observations, source-only findings,
 inferences, and Artifree design decisions. Public decisions and synthetic
@@ -144,10 +147,10 @@ examples should explain the behavior to contributors. Maintainers with private
 investigation evidence keep their original-to-requirement-to-code/test mapping
 outside the repository; access to that material is not required to contribute.
 
-Submit independently written code and assets. Exclude proprietary bundles,
-decompiled snippets, private captures, account data, secrets, and private evidence
-paths from commits and PRs. Preserve third-party licenses and attribution in
-[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Do not claim formal clean-room
+Keep credentials, local data, private evidence and its paths, generated
+verification outputs, and caches out of commits and PRs. Preserve third-party
+licenses and attribution in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+Do not claim formal clean-room
 separation or successful execution of an untested integration. Local data and
 verification artifacts belong under the ignored `.artifree/` directory.
 
@@ -159,30 +162,48 @@ Report actual commands, outcomes, relevant regression evidence, and limitations.
 Identify checks that were unrun or inapplicable. Update the description when the
 implementation changes; session transcripts are not a PR description.
 
-The maintainer's Codex review procedure is:
+Open a ready PR after local verification. Each PR receives exactly two reviews:
 
-1. Open a ready PR after local verification. Its automatic review is round one;
-   do not duplicate it with a comment. Further rounds are requested with the
-   exact comment `@codex review`.
-2. Allow 15 minutes per round, measured from PR creation or the subsequent
-   request comment. Errors and reviews unfinished at the deadline consume a
-   failed round. A later result does not undo that failure.
-3. Permit at most three rounds on a PR, including the initial review and service
-   errors or timeouts. Track its HEAD, trigger/completion timestamps, outcome,
-   and findings. Moving the work between agents does not reset the count.
-4. Evaluate findings and address the shared cause across affected paths. Settle
-   design choices before another review. Local or subagent review is additional
-   evidence and cannot substitute for the Codex PR review.
-5. After three rounds without a pass, close the PR and explain the cause and
-   revised approach. Create a new branch from latest `main` and independently
-   reimplement the change with the findings and regression requirements
-   incorporated. Do not reopen the failed branch or merge, cherry-pick, or copy
-   its implementation into the replacement. The replacement PR starts at one.
-6. Merge only when the current HEAD has a completed, finding-free Codex review,
-   all required CI passes, review conversations are resolved, and conflicts are
-   cleared. A status label, silence, old-HEAD review, or CI alone is insufficient.
-   Changes after review require checks and review of the new HEAD within the
-   remaining rounds. Branch protection must not be bypassed.
+1. **One Codex review.** The automatic review on PR creation counts; do not send
+   another request while it is pending or after it completes. If no automatic
+   review was triggered, request the one review with a standalone PR comment
+   containing exactly `@codex review`. Avoid the bot mention in PR descriptions
+   and ordinary progress comments. Keep the 15-minute deadline, including queue
+   time, measured from PR creation or the actual manual request. Record service
+   errors or timeouts honestly; a reaction, silence, or a pending job is not a
+   completed review. If the single review fails or remains incomplete at the
+   deadline, record the outcome and leave the PR blocked from merging. Do not
+   request a replacement review or count the incomplete review as completed.
+2. **One independent subagent review.** Use a fresh context without the
+   implementer's conversation. Give the reviewer the user request, applicable
+   rules, relevant requirements and decisions, and the diff. Focus on abstract or
+   undecided requirements that the implementation may have filled in arbitrarily,
+   unsupported assumptions, and compliance with applicable code-quality skills.
+   For documentation changes, check that the policy matches the user request and
+   is consistent across the affected documents.
+
+Evaluate findings and address the shared cause across affected paths with fixes
+or an evidenced explanation. Settle design choices consistently across code,
+tests, and documentation, and run the checks appropriate to those fixes. Do not
+request another review solely because findings were fixed or the head changed.
+The former three-round workflow, forced PR closure, and requirement to discard
+and reimplement a reviewed change no longer apply.
+
+Record the reviewer, reviewed full head SHA (or local diff for the subagent),
+request/completion times, result, and finding disposition in the PR. Record the
+Codex deadline and any failure without claiming a completed review. Review fixes
+may follow the recorded reviewed SHA; identify those fixes and their verification
+in the same record. A final PR comment can hold this evidence without a recursive
+documentation commit just to describe its own review. Earlier review histories
+describe the policy in force at the time, not the current workflow.
+
+Merge after the one Codex review and one independent subagent review are
+completed, their findings are addressed, and the current head has successful
+required CI. Resolve review conversations and clear conflicts before merging.
+Review fixes do not need a further review. Branch protection must not be bypassed;
+a status label, silence, a pending review, or CI alone is insufficient. After
+merging, verify CI for the actual main merge commit and address any failure
+before dependent merges.
 
 The required aggregate is **Quality gate**. Include every added verification job
 in its `needs`; dependency updates use the same gates. Keep decisions and roadmap

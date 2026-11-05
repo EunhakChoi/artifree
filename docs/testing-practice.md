@@ -76,6 +76,9 @@ changes and that no test server or browser from your run is still alive.
 
 ## Review
 
-The Codex review procedure, including how a specified feature's rules are
-amended, is in [CONTRIBUTING](../.github/CONTRIBUTING.md). Local or agent review
-is additional evidence and does not replace it.
+Each PR receives one Codex review and one independent subagent review. Address
+their findings with fixes or an evidenced explanation and run the relevant
+checks; fixes and head changes do not require another review round. The review
+procedure, including its deadline, merge requirements, and how a specified
+feature's rules are amended, is in
+[CONTRIBUTING](../.github/CONTRIBUTING.md).
