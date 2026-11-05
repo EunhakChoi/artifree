@@ -9,9 +9,10 @@ without private notes. Nothing here is checked by a script.
 ## Tests must be able to fail
 
 - A test belongs in a change only if it fails when the behavior it guards is
-  broken. Prove it: break the guard in a throwaway copy (a mutation), run the
-  one test, and watch it fail. List each mutation and the test that caught it
-  in the pull request.
+  broken. Prove it: break the guard (a mutation), run the one test, and watch it
+  fail. [quality.md](quality.md) requires every mutation to be restored; doing
+  the edit in a throwaway copy makes that automatic. Listing each mutation and
+  the test that caught it in the pull request is practice, not a requirement.
 - If a mutation does not fail any test, say so in the pull request. A guard
   that nothing can observe is redundant or untested; do not claim coverage for
   it.
@@ -33,18 +34,23 @@ without private notes. Nothing here is checked by a script.
 - A timing-dependent failure is a finding. Do not widen a timeout, add a silent
   retry, or skip the test to make a run pass. Re-run once to see whether it
   repeats, then record the test name and the symptom in an issue or a roadmap
-  row.
+  row. A re-run that passes does not clear it: the required checks must pass
+  on CI for the pull request, and a flake is not a reason to merge on the
+  strength of a local re-run.
 
 ## Run heavy commands in isolation
 
 - Heavy commands are `cargo` builds and tests, `npm run check`, `build`, and the
   test suites, browser smoke runs, servers, mutation experiments, and container
   builds.
-- Run them in an environment that caps memory and CPU, has no network (install
-  dependencies first, outside it), has a private temporary directory and home,
-  and works on a copy of the worktree. A mutation then never reaches the
-  working tree, and only files declared up front (generated contracts, formatter
-  output) are copied back.
+- Run them in an environment that caps memory and CPU, has no network, has a
+  private temporary directory and home, and works on a copy of the worktree. A
+  mutation then never reaches the working tree, and only files declared up
+  front (generated contracts, formatter output) are copied back.
+- Without a network and with a private home, make available (read-only) what
+  the checks need: the Rust toolchains, the cargo and npm packages, and the
+  browser binaries. Install them first, outside the environment. A step that
+  needs the network, such as downloads or advisory data, is confirmed on CI.
 - State the cap you used, and report the peak memory of the heaviest run in the
   pull request, so growth shows. A process killed for memory under a cap
   smaller than the hosted CI runner's is a statement about the cap, not yet a
@@ -56,19 +62,20 @@ without private notes. Nothing here is checked by a script.
 - The repository's commands work without any wrapper. The isolation tool is
   not part of the repository; use any equivalent (a container, a virtual
   machine, a cgroup scope) that gives the properties above.
-- Use one worktree per change, and bound how many heavy runs go at once so that
-  they cannot exhaust the machine.
+- A separate worktree per change is useful when other work is present
+  ([CONTRIBUTING](../.github/CONTRIBUTING.md)). Bound how many heavy runs go at
+  once so that they cannot exhaust the machine.
 
 ## Leave nothing behind
 
-After testing, remove scratch copies, logs, `node_modules` and `target`
-directories, caches, and processes you started, before the worktree itself is
-removed. Check that `git status --short` shows only the intended changes and
-that no test server or browser from your run is still alive.
+After testing, remove what your run created: scratch copies, logs, and
+processes you started, and the `node_modules` and `target` directories of a
+disposable worktree before that worktree is removed. Do not delete caches that
+other checkouts share. Check that `git status --short` shows only the intended
+changes and that no test server or browser from your run is still alive.
 
 ## Review
 
-The Codex review procedure is in [CONTRIBUTING](../.github/CONTRIBUTING.md).
-Local or agent review is additional evidence and does not replace it. A code
-pull request does not change a numbered rule of a merged decision; a defect in
-a rule is reported, and a documentation pull request amends it.
+The Codex review procedure, including how a specified feature's rules are
+amended, is in [CONTRIBUTING](../.github/CONTRIBUTING.md). Local or agent review
+is additional evidence and does not replace it.
