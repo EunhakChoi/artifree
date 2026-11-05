@@ -4,6 +4,7 @@ import {
   ArtifreeApiError,
   ArtifreeClient,
 } from '../../packages/client/dist/index.js';
+import { wait } from '../../packages/client/dist/retry.js';
 import {
   readBoundedErrorJson,
   readBoundedJson,
@@ -440,6 +441,40 @@ test('A comment every 15 seconds keeps a stream open; silence after it does not'
   assert.equal(outcome.ended, undefined);
   await clock.advance(1);
   assert.equal(outcome.ended.code, 'network_error');
+});
+
+test('Empty chunks are no bytes: a stream that sends only them still stalls', async () => {
+  const clock = new FakeClock();
+  const body = pushed();
+  const events = await clientWith(() => body.response, {
+    clock,
+  }).openChanges();
+  const outcome = reading(events);
+  // An empty chunk every 15 seconds, like a comment but with no byte.
+  for (let tick = 0; tick < 2; tick += 1) {
+    await clock.advance(15_000);
+    body.push(new Uint8Array(0));
+  }
+  assert.equal(outcome.ended, undefined);
+  await clock.advance(15_000);
+  assert.equal(outcome.ended?.code, 'network_error');
+  assert.equal(body.state.cancelled, true);
+});
+
+test('Empty chunks are no bytes: an error body that sends only them still stalls', async () => {
+  const clock = new FakeClock();
+  const body = pushed({ status: 502 });
+  const pending = rejection(
+    clientWith(() => body.response, { clock }).openChanges(),
+  );
+  for (let tick = 0; tick < 2; tick += 1) {
+    await clock.advance(15_000);
+    body.push(new Uint8Array(0));
+  }
+  await clock.advance(15_000);
+  const error = await pending;
+  assert.deepEqual([error.status, error.code], [0, 'network_error']);
+  assert.equal(body.state.cancelled, true);
 });
 
 test('A stream that ends cleanly leaves no timer running', async () => {
@@ -912,4 +947,37 @@ test('A revoked token ends following even after reconnects', async () => {
   assert.equal(follow.state.settled.code, 'unauthenticated');
   assert.equal(follow.requests.length, 3);
   assert.equal(clock.active, 0);
+});
+
+// ---- The retry wait, whatever the clock does ----
+
+test('A wait ends when its clock runs the callback before returning', async () => {
+  const immediate = {
+    after: (milliseconds, run) => {
+      run();
+      return () => {};
+    },
+  };
+  const controller = new AbortController();
+  await wait(immediate, 1000, controller.signal);
+});
+
+test('A wait cancels its timer once, also when the clock fires after an abort', async () => {
+  let fire;
+  let cancels = 0;
+  const late = {
+    after: (milliseconds, run) => {
+      fire = run;
+      return () => {
+        cancels += 1;
+      };
+    },
+  };
+  const controller = new AbortController();
+  const waiting = wait(late, 1000, controller.signal);
+  controller.abort();
+  await waiting;
+  // A clock that ignores its cancel still runs the callback.
+  fire();
+  assert.equal(cancels, 1);
 });

@@ -50,12 +50,19 @@ export function wait(
       resolve();
       return;
     }
+    // A clock may run `done` before `after` returns, or after the abort.
+    let cancel: (() => void) | undefined;
+    let finished = false;
     const done = (): void => {
-      cancel();
+      if (finished) return;
+      finished = true;
+      cancel?.();
       signal.removeEventListener('abort', done);
       resolve();
     };
-    const cancel = clock.after(milliseconds, done);
     signal.addEventListener('abort', done);
+    cancel = clock.after(milliseconds, done);
+    // The clock ran `done` before it returned what cancels it.
+    if (finished) cancel();
   });
 }

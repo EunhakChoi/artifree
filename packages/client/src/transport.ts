@@ -127,7 +127,13 @@ export function watchBody(
         (result) => {
           pending = undefined;
           if (result.done) stopWatching();
-          else if (failure === undefined && signal?.aborted !== true) arm();
+          // An empty chunk is no byte: it must not keep a silent body alive.
+          else if (
+            result.value.byteLength > 0 &&
+            failure === undefined &&
+            signal?.aborted !== true
+          )
+            arm();
           resolve(result);
         },
         (error: unknown) => {

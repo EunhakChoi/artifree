@@ -262,8 +262,9 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     once.
     - Event streams (the parser both functions share): 65,536 UTF-16 code
       units for the unfinished line, and for one event's data and type
-      together; past either, `invalid_response`. A change event today is
-      under 400.
+      together; past either, `invalid_response`. A line is measured as the
+      raw line, field name included, and one event's size is its type plus its
+      data lines joined with LF. A change event today is under 400.
     - Success bodies of reads by `followData` and `listDataMembers`: 1,064,960
       bytes (1 MiB + 16 KiB); past it, `invalid_response`. A `GET data` body is
       a space of at most 1,048,576 bytes and under 1,200 more. A page is at
