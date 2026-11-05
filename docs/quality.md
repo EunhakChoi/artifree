@@ -578,11 +578,11 @@ schema rejection tests do not assume whether an enum is emitted as `enum` or
 ## Client trust rules (proposed, not enforced)
 
 Proposed by [decision 0040](decisions/0040-data-changes-and-member-listing.md)
-rule 22 for the TypeScript client of slice R07c. Nothing checks rules 1 to 3
-yet. Rule 4 holds, with tests, only for the change stream and the error body of
-its open (R07c-1, `scripts/tests/client-transport.test.mjs`); the success-body
-reads wait for `listDataMembers` and `followData`, and every other client call
-keeps its current read.
+rule 22 for the TypeScript client of slice R07c. `listDataMembers` applies
+rules 1 to 4 to one listing page (`scripts/tests/data-members.test.mjs`); the
+change stream and the error body of its open have the R07c-1 transport bounds
+(`scripts/tests/client-transport.test.mjs`). `followData` remains unimplemented,
+and every other client call keeps its current read.
 
 1. The server owns the data-domain rules. The client does not re-check
    storability (surrogates, duplicate names, value count, nesting, name

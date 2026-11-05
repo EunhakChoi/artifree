@@ -7,6 +7,7 @@ import type {
   ChangeKind,
   CommitResponse,
   CopiedPart,
+  DataMembers,
   DataWriteResponse,
   DuplicateArtifactResponse,
   ErrorBody,
@@ -304,6 +305,29 @@ export function parseAppData(value: unknown): AppData | undefined {
   if (!isJsonValue(found) || (path === '' && !isRecord(found)))
     return undefined;
   return { ...base, value: found };
+}
+
+/** Parses one page of application-data member names. */
+export function parseDataMembers(value: unknown): DataMembers | undefined {
+  if (!isRecord(value)) return undefined;
+  const { artifact_id, path, data_version, exists, names, next_page_token } =
+    value;
+  if (
+    typeof artifact_id !== 'string' ||
+    typeof path !== 'string' ||
+    typeof data_version !== 'number' ||
+    !Number.isSafeInteger(data_version) ||
+    typeof exists !== 'boolean' ||
+    !Array.isArray(names) ||
+    !names.every((name: unknown) => typeof name === 'string') ||
+    (Object.hasOwn(value, 'next_page_token') &&
+      (typeof next_page_token !== 'string' || next_page_token.length === 0))
+  )
+    return undefined;
+  const base = { artifact_id, path, data_version, exists, names };
+  return typeof next_page_token === 'string'
+    ? { ...base, next_page_token }
+    : base;
 }
 
 /** Parses the response of a write to application data. */

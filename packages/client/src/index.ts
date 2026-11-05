@@ -10,6 +10,7 @@ export {
 } from './client.js';
 export type {
   ClientConfiguration,
+  DataMembersOptions,
   DataInput,
   SetDataInput,
   UpdateDataInput,

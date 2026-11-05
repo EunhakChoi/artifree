@@ -10,6 +10,7 @@ import type {
   CancelJobResponse,
   CreateTokenResponse,
   DataWriteResponse,
+  DataMembers,
   DeleteDataRequest,
   DuplicateArtifactRequest,
   DuplicateArtifactResponse,
@@ -56,6 +57,7 @@ import {
   cancelQuietly,
   decodeText,
   readErrorJson,
+  readSuccessJson,
   systemClock,
 } from './transport.js';
 import { toBase64 } from './base64.js';
@@ -75,6 +77,7 @@ import {
   parseCreateToken,
   parseCancelJob,
   parseDataWrite,
+  parseDataMembers,
   parseDuplicate,
   parseEnqueueJob,
   parseError,
@@ -117,6 +120,14 @@ export interface ClientConfiguration {
 export interface ReadOptions {
   /** Cancels the request, also while a `fetch` wrapper holds it back. */
   readonly signal?: AbortSignal;
+}
+
+/** Options for listing one page of application-data member names. */
+export interface DataMembersOptions extends ReadOptions {
+  readonly path?: string;
+  readonly limit?: number;
+  readonly pageToken?: string;
+  readonly atDataVersion?: number;
 }
 
 /** Options for a runtime view request managed by a cooperating scheduler. */
@@ -829,6 +840,51 @@ export class ArtifreeClient {
       parseAppData,
       { signal: options.signal },
     );
+  }
+
+  /** Lists one page of names at a data path (decision 0040). */
+  async listDataMembers(
+    artifactId: string,
+    options: DataMembersOptions = {},
+  ): Promise<DataMembers> {
+    const { signal } = options;
+    signal?.throwIfAborted();
+    const query = new URLSearchParams();
+    if (options.path !== undefined) query.set('path', options.path);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.pageToken !== undefined)
+      query.set('page_token', options.pageToken);
+    if (options.atDataVersion !== undefined)
+      query.set('at_data_version', String(options.atDataVersion));
+    const suffix = query.size === 0 ? '' : `?${query.toString()}`;
+    const path = `/v1/artifacts/${encodeURIComponent(artifactId)}/data/members${suffix}`;
+    try {
+      const response = await this.send('GET', path, {
+        signal,
+        boundedErrorBody: true,
+      });
+      const body = await readSuccessJson(response, {
+        clock: this.clock,
+        signal,
+        status: response.status,
+        what: 'data members response',
+        keepCause: this.address.plain,
+      });
+      signal?.throwIfAborted();
+      const result = parseDataMembers(body);
+      if (result === undefined || result.artifact_id !== artifactId)
+        throw new ArtifreeApiError(
+          'Data members response does not match the contract.',
+          {
+            status: response.status,
+            code: 'invalid_response',
+          },
+        );
+      return result;
+    } catch (error: unknown) {
+      signal?.throwIfAborted();
+      throw error;
+    }
   }
 
   /**
