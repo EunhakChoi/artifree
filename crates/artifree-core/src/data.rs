@@ -77,7 +77,7 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
     /// artifact or path, [`ArtifactError::NotFound`] as for [`Self::data`],
     /// [`ArtifactError::DataConflict`] when the space is not at
     /// `at_data_version`, [`ArtifactError::Data`] with
-    /// [`DataError::PathConflict`] when a value that is not an object is at
+    /// [`DataError::NotObject`] when a value that is not an object is at
     /// the path, or [`ArtifactError::Unavailable`].
     pub fn data_members(
         &self,
@@ -115,7 +115,7 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
                     next: None,
                 });
             }
-            Members::NotObject => return Err(ArtifactError::Data(DataError::PathConflict)),
+            Members::NotObject => return Err(ArtifactError::Data(DataError::NotObject)),
             Members::Page(page) => page,
         };
         let MemberPage { names, more } = page;
@@ -486,7 +486,7 @@ mod tests {
         };
         assert_eq!(
             service.data_members(&owner, &id, &current),
-            Err(ArtifactError::Data(DataError::PathConflict))
+            Err(ArtifactError::Data(DataError::NotObject))
         );
         let missing = service.data_members(&owner, &id, &query("nothing/here"))?;
         assert!(!missing.exists, "{missing:?}");

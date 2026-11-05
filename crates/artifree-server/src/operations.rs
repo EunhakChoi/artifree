@@ -26,7 +26,7 @@ use artifree_core::artifacts::{
 };
 use artifree_core::jobs::JobPageSize;
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
-use artifree_core::members::{MemberLimit, MemberQuery, MemberToken};
+use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberToken};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
@@ -193,7 +193,7 @@ impl From<ArtifactError> for ApiError {
                 conflict.body.current_data_version = Some(current.0);
                 conflict
             }
-            ArtifactError::Data(DataError::PathConflict) => {
+            ArtifactError::Data(DataError::PathConflict | DataError::NotObject) => {
                 Self::new(StatusCode::CONFLICT, ErrorCode::DataPathConflict, message)
             }
             ArtifactError::Data(DataError::TooLarge(_)) => Self::new(
@@ -1527,9 +1527,11 @@ pub(crate) async fn read_data(
     })
 }
 
-/// Most characters of a page token of a member listing: 80 bytes in base64
-/// without padding (decision 0040, rule 10).
-const MAX_MEMBER_TOKEN_CHARS: usize = 107;
+/// Most characters of a page token of a member listing: the longest token
+/// in base64 without padding, which writes every 3 bytes as 4 characters and
+/// the rest as 2 or 3, that is ceil(4n / 3) for n bytes (decision 0040, rule
+/// 10; 107 for the 80 bytes of today's layout).
+const MAX_MEMBER_TOKEN_CHARS: usize = (MAX_TOKEN_BYTES * 4).div_ceil(3);
 
 /// Reads the page token of a member listing. A token that is too long, not
 /// base64url without padding, or not the layout of rule 10 is refused with
@@ -1801,6 +1803,17 @@ pub(crate) fn revision_dto(record: RevisionRecord) -> Revision {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+
+    #[test]
+    fn the_token_character_bound_follows_the_token_layout() {
+        assert_eq!(MAX_TOKEN_BYTES, 80, "16 tag bytes and a 64-byte name");
+        assert_eq!(MAX_MEMBER_TOKEN_CHARS, 107);
+        // The bound is the length of the longest token as it is issued.
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(vec![0_u8; MAX_TOKEN_BYTES]).len(),
+            MAX_MEMBER_TOKEN_CHARS
+        );
+    }
 
     use artifree_domain::identity::UnixMillis;
     use artifree_ports::artifact_store::FileEntry;

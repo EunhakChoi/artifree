@@ -90,6 +90,10 @@ pub enum DataError {
     /// A change has to make room on a path that crosses a value that is not an
     /// object (a string, number, boolean, null, or array).
     PathConflict,
+    /// A listing of member names meets a value that is not an object (a
+    /// string, number, boolean, null, or array) at its path. Nothing is
+    /// being changed; the value simply has no members.
+    NotObject,
     /// The root of a space is an object: a change cannot make it anything
     /// else.
     RootNotObject,
@@ -106,6 +110,9 @@ impl fmt::Display for DataError {
             Self::PathConflict => formatter.write_str(
                 "the path crosses a value that is not an object, which a write cannot make room in",
             ),
+            Self::NotObject => {
+                formatter.write_str("the value at this path is not an object, so it has no members")
+            }
             Self::RootNotObject => formatter.write_str("the root of a data space is an object"),
         }
     }

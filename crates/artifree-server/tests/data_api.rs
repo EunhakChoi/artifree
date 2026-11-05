@@ -1761,7 +1761,28 @@ async fn a_path_lists_the_object_there_and_a_missing_one_does_not_exist() -> Tes
             "{blocked}: {}",
             reply.text
         );
+        // The listing changes nothing, so its message must not describe a write.
+        assert_eq!(
+            reply.json()?["error"]["message"],
+            "the value at this path is not an object, so it has no members",
+            "{blocked}"
+        );
     }
+    // A write through the same value keeps its own message, and `GET data`
+    // reads a path through it as nothing.
+    let write = harness
+        .set(&id, "paths-2", 1, "s/deeper", &json!(1))
+        .await?;
+    assert!(
+        write.is(StatusCode::CONFLICT, "data_path_conflict"),
+        "{}",
+        write.text
+    );
+    assert_eq!(
+        write.json()?["error"]["message"],
+        "the path crosses a value that is not an object, which a write cannot make room in"
+    );
+    assert_eq!(harness.at(&id, "s/deeper").await?["exists"], false);
     // An empty `path` is the root, as for `GET data`.
     assert_eq!(listed_at("").await?["path"], "");
     let explicit = harness.members(&id, "?path=").await?;
@@ -2270,5 +2291,24 @@ async fn the_largest_page_is_within_the_published_bound() -> TestResult {
     // quoted path of 1,041, and a quoted token of 109.
     assert_eq!(reply.text.len(), 7_987, "{}", reply.text.len());
     assert!(reply.text.len() <= 7_991);
+    Ok(())
+}
+
+/// The page size the schema publishes is the one the core enforces (decision
+/// 0040, rule 8); the contract crate cannot read the core's constant, so the
+/// generated schema is compared with it here.
+#[test]
+fn the_published_page_size_bounds_are_the_cores() -> TestResult {
+    use artifree_core::members::MemberLimit;
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/generated/api-v1.schema.json"
+    ))?;
+    let schema: Value = serde_json::from_str(&text)?;
+    let limit = &schema["$defs"]["ReadDataMembersQuery"]["properties"]["limit"];
+    assert_eq!(limit["minimum"], 1);
+    assert_eq!(limit["maximum"], MemberLimit::MAX.get());
+    assert!(MemberLimit::try_from(1).is_ok());
+    assert!(MemberLimit::try_from(u64::try_from(MemberLimit::MAX.get())? + 1).is_err());
     Ok(())
 }
