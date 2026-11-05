@@ -346,6 +346,10 @@ fn a_terminated_worker_gives_its_job_back_without_using_an_attempt() -> TestResu
     assert_eq!(holder, None);
     assert_eq!(data.findings()?, 0);
 
+    // A wall-clock step backwards can leave a released job not yet due
+    // (decision 0030). Pin its due time for this process handoff; the store
+    // tests cover the exact release-time boundary with explicit timestamps.
+    data.sql()?.execute("UPDATE jobs SET run_after = 0", [])?;
     // The next worker runs it, with a new token.
     let mut next = Worker::spawn(&data, "next", &["--once".as_ref()])?;
     assert!(next.wait_exit()?.success(), "{}", next.diagnostics());
