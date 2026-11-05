@@ -400,7 +400,7 @@ slice list above was planned as two pull requests; #87 carries both slices.
 | R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87          |
 | R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
 | R07b   | member listing (rules 7-11)                     | implemented     | #86          |
-| R07c-1 | client transport bounds and retry (17-19)       | implemented     | this PR      |
+| R07c-1 | client transport bounds and retry (17-19)       | implemented     | #89          |
 | R07c-2 | `listDataMembers` (rules 20, 21, 22)            | not implemented | -            |
 | R07c-3 | `followData` (rules 13-16, 20)                  | not implemented | -            |
 | R07d   | user guides                                     | not implemented | -            |
