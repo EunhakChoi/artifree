@@ -51,11 +51,15 @@ acquiring a lock or acknowledging a prompt does not establish physical origin.
    frame bridge, optimistic canonical value, or required user-facing UI.
    Callers receive typed state/receipt callbacks and explicit recovery
    commands, including `recovery_required`, `retryRecoveryCandidate()`,
-   `confirmRecovery(selection)`, `abandonUnresolved(selection)`,
+   `confirmRecovery(selection)`,
+   `discardUnsent(selection: UnsentDiscardSelection)`,
+   `discardRejected(selection: RejectedDiscardSelection)`,
+   `abandonUnresolved(selection: UnresolvedAbandonSelection)`,
    `continueRecovery(continuation: RecoveryContinuation)` and
    `resumeDelivery(selection: DeliveryResumeSelection)`, plus
    `retryPreparation(selection: PreparationRetrySelection)`. `RecoveryContinuation`,
-   `DeliveryResumeSelection` and `PreparationRetrySelection` are distinct opaque action types with runtime
+   `DeliveryResumeSelection`, `PreparationRetrySelection`, `UnsentDiscardSelection`,
+   `RejectedDiscardSelection` and `UnresolvedAbandonSelection` are distinct opaque action types with runtime
    kind/context validation, not interchangeable strings or a generic `resume`.
    Confirmation must represent an explicit recovery choice by the caller/user,
    never a default startup, reconnect or online-event action. A consumer that
@@ -294,18 +298,27 @@ feed identity`, **after target-access/in-place checks
    and is recovered by its saved key. Lock release is not cancellation proof.
 7. Enqueue is asynchronous and resolves only after the IndexedDB transaction's
    `complete` event. It validates the operation/path/value using the existing
-   client input rules, snapshots caller data so later mutation cannot change
+   client serialization/input rules, snapshots caller data so later mutation cannot change
    it, allocates a sequence and unique request key, stores the full immutable
    intent and updates counters in one transaction. Failure/abort rejects with
    `not_enqueued` and sends nothing. A callback before transaction completion,
    a local overlay or an `IDBRequest` success is not durable acceptance.
    Enqueue acknowledgement and server acknowledgement are distinct results.
-8. Persist operation, canonical path, immutable value/patch text (none for
+   Preserve the existing direct client's `DataInput`/`JsonText` contract:
+   ordinary values use its existing serialization checks; `JsonText.text` is
+   retained verbatim without parsing/reformatting, and supplied path text is
+   not normalized or newly domain-validated in TypeScript. Local admission adds
+   only outbox envelope/ownership/dependency/capacity checks. Rust remains the
+   authority for path grammar and application-data JSON/domain rejection; a
+   deliberately invalid `JsonText` or path is not storage corruption merely
+   because the server will reject it. Do not duplicate all Rust validation or
+   change existing direct-client rejection behavior to implement the outbox.
+8. Persist operation, original supplied path text, immutable value/patch text (none for
    delete), sequence, key, caller-observed base, admitted actor generation,
    authorized-generation checkpoint, state and record version.
    Records are strictly decoded at recovery: wrong version, invalid enums,
    invalid sizes, duplicate sequence/key, inconsistent counters or malformed
-   request data pause that lane with `storage_corrupt`; do not skip or delete
+   storage-envelope data pause that lane with `storage_corrupt`; do not skip or delete
    the bad head and send its successors. Read at most one bounded page at a
    time. A database schema newer than the client fails closed without writes.
    No released R08 store exists; its first schema must require generation
@@ -314,6 +327,9 @@ feed identity`, **after target-access/in-place checks
    recovery before setting delivery authority. Never infer generation 1 or the
    current generation, discard rows, or regenerate operation keys during an
    upgrade. Unrecognized formats remain a closed storage error.
+   Validate stored field types, frozen-request identity/serialization and
+   size/structural invariants, not the semantic validity of raw `JsonText` or
+   the server's path/domain rules. Preserve those payload bytes for the server.
 
 ### Serialized intent and request identity
 
@@ -577,13 +593,60 @@ false`, and an opaque `PreparationRetrySelection`. Block the head and
     original key/request and reporting the server's current version.
     `data_path_conflict`, invalid input, size rejection and key reuse are also
     blocked failures, not infinite retries. Resolution is explicit: inspect
-    retained intent and canonical data, then discard the never-acknowledged
-    head plus its dependency suffix, or enqueue an independently chosen new
+    retained intent and canonical data, then deliberately dispose through the
+    phase-specific actions below, or enqueue an independently chosen new
     intent with a new key/base. No automatic merge or mutation of prepared
-    payloads. Independent lanes continue. For an unknown outcome, replay is the
+    payloads. Independent lanes continue.
+    `discardUnsent(UnsentDiscardSelection)` accepts only a never-prepared head
+    and its never-dispatched dependent suffix, including a confirmed preparation
+    abort. It reports `discarded_unsent`; a prepared row, durable ACK or
+    uncertain/in-flight mutation is ineligible, even if a caller believes the
+    prepared request probably was not sent. `discardRejected(RejectedDiscardSelection)`
+    accepts only a blocked head with a validated, definitive known-rejection
+    observation bound to this request/current attempt, and its eligible unsent
+    dependent suffix; it reports `discarded_rejected`, never an ACK. A network,
+    invalid/unclassified response, access pause, ACK-storage failure or any
+    unresolved earlier delivery is not that proof. Do not downgrade an unknown
+    head just because a later attempt was refused; its exact-key resume/recovery
+    path remains available via `retry_paused` reason `unresolved_after_rejection`
+    and a `DeliveryResumeSelection`, without automatic retry. Choosing local removal instead requires
+    `abandonUnresolved`. A rejection describes that attempt, not global key
+    non-use or rollback. Do not reconstruct missing rejection evidence from a
+    local payload/snapshot or caller-provided error; after a crash a prepared
+    row without durable resolution is unknown under rule 11.
+    Both discard selections are distinct, opaque, one-action choices identifying
+    the owner, original binding, page/profile/authority context, exact head,
+    complete transitive dependent set and observed record versions/phases.
+    Use rule 6's owner lock and the same authenticated actor/URL and locally
+    fenced online/offline cleanup safeguards as the local-only rule 17 path
+    below; neither selection grants delivery or permits another actor's rows
+    to be inspected/deleted. For recovered candidates a deliberate disposal
+    choice authorizes only local cleanup, not implicit delivery confirmation.
+    This is the corresponding local-only exception to rule 6's confirmed-queue
+    disposal restriction, with the same cleanup identity limitations below.
+    Serialize disposal with enqueue/preparation/receipt transitions, fence the
+    lane's callbacks and cancel its timers/pending local preparation before
+    committing. Inside one bounded IDB transaction (at most 64 rows/2 MiB),
+    revalidate kind/context, head, full dependency closure, versions and phase
+    eligibility, then remove exactly the selected rows and unneeded checkpoints
+    and update current lane/origin row/byte/reserved accounting atomically.
+    A new dependent, changed phase/version, lost lock or stale/wrong-kind token
+    rejects the whole selection; never silently expand it or partially delete.
+    A transaction abort leaves all rows/counters intact and the lane paused;
+    another deliberate fresh choice is needed. Success is reported only on
+    transaction completion. Late callbacks cannot resurrect rows, ACK, prepare
+    or dispatch successors. Independent surviving intents remain intact and
+    paused until the appropriate existing explicit action; no budget/authority
+    is renewed by disposal. Discard has no HTTP/cancellation/key-release side
+    effect, never rewrites retained requests or makes an old key reusable; any
+    replacement intent has a fresh key and caller-chosen base. Durable ACKs use
+    trim, not either discard or unknown abandonment. Owner-reference cleanup
+    still requires rule 6's all-binding emptiness; removing one subset does not
+    orphan another binding's records.
+    For an unknown outcome, replay is the
     way to resolve the receipt, but is not a prerequisite for explicit local
     abandonment: purge makes replay permanently unavailable under 0031.
-    `abandonUnresolved(selection)` requires a deliberate caller/user choice
+    `abandonUnresolved(UnresolvedAbandonSelection)` requires a deliberate caller/user choice
     identifying the unresolved head and its entire dependent suffix, with rule
     6's owner-lock, binding and version-selection safeguards. For a recovered
     candidate, this command itself is the explicit local-cleanup choice;
@@ -700,7 +763,7 @@ false`, and an opaque `PreparationRetrySelection`. Block the head and
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | B1  | Binding read returns only the caller’s actor, actor_generation string and existing epoch; disabled/revoked credentials fail. Reject partial header triples, malformed or overflow generation strings and inconsistent binding responses. With well-formed headers, foreign/missing/trash/purged target remains identical404 before semantic fence checks, including a replayable key or wrong expected actor; an accessible target with stale actor/epoch/generation gives409 before key replay/base checks and consumes no key. Malformed fence input still follows ordinary input-error precedence. Swap actor or supported-restore epoch between handshake and mutation: no write/key/replay. Generation cases are B12. Remove transaction fence and show rejection tests fail. Unfenced direct writes remain compatible.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | B2  | Real IndexedDB enqueue transaction complete survives reload. Hold request-success before transaction abort: enqueue rejects and zero HTTP writes. Quota/transaction exceptions preserve older rows and counters. Mutate caller objects after enqueue: transmitted request stays fixed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| B3  | Real tabs with copied session storage: original holds lock, clone wins before original starts, clone wins after crash, and reload overlaps held old page. Busy candidate preserves rows and one bounded separate candidate reference before allocating a fresh owner. Hold old page alive, then release its lock: no automatic probe or send; explicit retry validates lock/binding/versions and returns a new recovery_required selection, and only separate confirmation permits replay. Full candidate slot or persistence failure preserves both identifiers and queues without accepting new work; stale candidate/wrong binding cannot recover; free inherited candidate always returns recovery_required with zero HTTP writes, preparation, trim or deletion. Explicit current selection plus matching binding allows exact replay; decline, stale selection, retry resumeDelivery, boot or online event cannot bypass the gate. Reopening reloads the choice; no persistent auto-resume flag. No test attributes physical origin to confirmation. Missing storage/locks refuses initialization; same-document handles cannot send twice.                                                                                                                                                                                                                                                                                                      |
+| B3  | Real tabs with copied session storage: original holds lock, clone wins before original starts, clone wins after crash, and reload overlaps an old live page. Busy candidate is preserved in the bounded saved slot before a fresh owner; explicit retry after lock release revalidates but never automatically sends. Classify each free inherited owner: globally empty across all bindings permits fresh-owner allocation; matching retained URL/actor/epoch records yield recovery_required with no mutation/preparation/trim/delete before an explicit valid choice; retained records without a matching delivery binding yield owner_binding_quarantined and preserve IDs. A saved globally empty candidate returns recovery_empty and requires explicit reference clear. Cover slot full, persistence/existence-probe failure and stale/wrong-binding selection; no false-empty or overwritten anchor. Only current matching confirmation can authorize replay, while disposal uses its separate typed choice. No persisted auto-resume flag, physical-origin proof, boot/online/resumeDelivery bypass or second same-document sender; unsupported locks/storage fail closed.                                                                                                                                                                                                                                                                    |
 | B4  | Two writes at different paths serialize across one data version; dependency uses predecessor receipt including no-op/replay. Another tab or direct write in the same actor space produces a blocked conflict without automatic rebase. Another actor is rejected by binding/access checks without changing either actor’s data or the retained queue; shared-writer permission is not implemented before S02. Head conflict leaves dependent suffix untouched and other lane progresses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | B5  | Kill/reload at enqueue completion, preparation completion, server commit before response, validated response before receipt commit, receipt commit before trim, and trim abort. Recovery first pauses with preserved records and no automatic HTTP; after explicit recovery assert original key/body/base replay, exactly one server mutation/change record, and no duplicate dependent write. Remove each relevant guard and observe its test fail.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | B6  | ACK persistence abort is server success observed but no durable ACK: count once, immediately retry_paused with reason ack_storage_failed, no automatic resend or local-persistence retry; only valid explicit resumeDelivery or post-crash recovery performs exact same-key replay and persists its fresh validated receipt; ACK success plus trim failure is retained acknowledgement. The latter is not retransmitted after reload and can advance dependencies. Malformed/oversize/stalled/mismatched success responses never advance.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -719,6 +782,8 @@ false`, and an opaque `PreparationRetrySelection`. Block the head and
 | B19 | Durably enqueue, expose IDB request success but abort preparation transaction: original unprepared intent/key/sequence/dependency and counters remain, preparation_paused reports durablyEnqueued true/prepared false, no HTTP or automatic local retry. One valid retryPreparation permits one local attempt; repeated abort requires a new deliberate action, stale/duplicate/wrong-phase tokens cannot retry an ACK or prepared record, and late callbacks cannot dispatch or downgrade state. Successful preparation uses the original numeric base/durable predecessor receipt, sends only after commit and only if existing delivery/authority gates allow. Neither local retry nor recovery paging refills 8/32 budget or clears retry/auth/conflict pauses. Crash with unprepared versus committed-prepared storage follows its respective explicit recovery path; unsent discard remains local. Break commit-before-dispatch, pause or no-budget-reset guards and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | B20 | Supply malformed, oversized and stalled 409 bodies and unexpected 4xx responses, including incompatible status/error-code pairs: exactly one failed mutation attempt, immediate unclassified_error_response pause, no automatic mutation retry, guessed conflict/version, authority update or raw-body leak. Only fresh binding plus valid explicit resumeDelivery permits the same frozen-request probe; another unclassified response pauses again after one. A changed actor/URL/epoch/generation cannot be silently adopted, and classified conflict/access responses use their existing gates. Invalid-body 401/403/404 still access-pause; 401 invalidates offline identity proof. Invalid-body 429/5xx retain status/bounded Retry-After and use 8/32 backoff despite body timeout/cancellation; no headers uses network policy. Assert one count per attempt, successor blocked, exact key/body/base preserved, and abandonment/offline authority rules unchanged. Break status retention or unclassified-response no-autoretry guard and prove these cases fail.                                                                                                                                                                                                                                                                                                                                                                              |
 | B21 | Use real browser Fetch and owned HTTP redirect servers: binding/revalidation GET and mutation PUT/PATCH/DELETE endpoints induce 301/302/303/307/308 to both another path on the same origin and an allowed cross-origin collector. Every outbox dispatch, retry and probe carries redirect:error; target receives no followed HTTP request, body marker, idempotency key, outbox fence or credential, and no binding/ACK is accepted. Configure target/CORS to accept follow attempts, then weaken the guard to follow and prove 307/308 deliver the actual body/key/fence to that target so rejection is not a false CORS pass. Have original destination commit then 307/308: rejected Fetch counts one network-error unknown failure per mutation, retries only original bound URL within 8/32 budget, pauses on exhaustion and never duplicates commit; after explicit resume and redirect removal, exact same-key replay can ACK. Binding/revalidation redirect failure makes no mutation-budget change/authority update, permits no mutation or automatic read retry, and a fresh explicit action still uses redirect:error on the original URL. Exposed non-followed 3xx pauses without consuming Location. Break final-dispatch or retry-helper redirect mode and prove these cases fail.                                                                                                                                                      |
+| B22 | For a never-prepared accepted head, discardUnsent removes only the selected head and complete unsent dependent closure and reports discarded_unsent. For a validated definitive known-rejection head (data_conflict/path conflict/input/size/key-reuse cases), discardRejected reports discarded_rejected; unknown prior delivery, prepared-uncertain, ACK-storage-failed, invalid/unclassified response or access pause cannot obtain/use that selection and retains exact-key resume/recovery or explicit abandonUnresolved. Verify wrong-kind/stale/consumed/wrong-owner/actor/binding/phase tokens, a newly added dependent and a concurrent preparation/ACK transition reject atomically without row/quota change. Inject IDB abort after deletes but before counters: all rows/checkpoints/reserved accounting remain, lane pauses, no HTTP. On success count actual deleted rows/bytes/reserves once, preserve independent rows/foreign binding anchors and paused survivors, block late callback resurrection/ACK/dispatch, never release server keys or reset delivery budgets. Break closure, fencing, eligibility or atomic-accounting guard and prove rejection/fault tests fail.                                                                                                                                                                                                                                                          |
+| B23 | Enqueue ordinary values through existing direct-client serialization and preserve raw JsonText.text plus supplied path exactly across reload/preparation/retry. Include malformed JSON, duplicate-member or unsafe-number JsonText and invalid path strings that fit local caps: outbox must not parse/round/reformat/normalize or call these storage_corrupt; the real Rust server supplies its existing rejection. Ordinary getter/class/unsupported-value serialization failures stay the existing client behavior; local envelope corruption is still rejected. A first definitive rejection can expose a RejectedDiscardSelection, while unresolved prior delivery retains unknown cleanup semantics. Prove newly added TS domain validation or payload normalization breaks compatibility tests.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 Use independently authored fixtures and the repository's isolated verification
 workflow. Unit fault seams prove state transitions; real-browser IndexedDB,
@@ -729,12 +794,12 @@ This documentation change has not executed these future acceptance cases.
 
 ## Proposed PR slices
 
-| Slice | Deliverable                                                                                                                                                                                                                                                     | Dependencies and acceptance                                                                                                                                 |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                                             | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                                                                        |
-| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit local owner recovery, durable admission, caps, strict recovery decoder and unsent disposal. No sender or delivery/preparation-retry lifecycle enabled. | R08a; only the local-storage/owner/metadata-read subcases listed below. B15 and B19 are excluded.                                                           |
-| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                                                    | R08a–b, R07c; sender/fault portions of B2–B9, B11–B13 and B15–B21, including B15 and B19 in full and fail-first proofs. Native-process B10 belongs to R08d. |
-| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                                                       | R08c; B10 native-process restoration, end-to-end B2–B21, full gates and both browser engines where supported.                                               |
+| Slice | Deliverable                                                                                                                                                                                                                                                                   | Dependencies and acceptance                                                                                                                                 |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                                                           | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                                                                        |
+| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit local owner recovery, durable admission, caps, strict recovery decoder and typed never-prepared disposal. No sender or delivery/preparation-retry lifecycle enabled. | R08a; only the local-storage/owner/metadata-read subcases listed below. B15 and B19 are excluded.                                                           |
+| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, typed rejection disposal, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                                        | R08a–b, R07c; sender/fault portions of B2–B9, B11–B13 and B15–B23, including B15 and B19 in full and fail-first proofs. Native-process B10 belongs to R08d. |
+| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                                                                     | R08c; B10 native-process restoration, end-to-end B2–B23, full gates and both browser engines where supported.                                               |
 
 R08b's referenced cases are explicitly limited to behavior it implements:
 
@@ -751,6 +816,11 @@ R08b's referenced cases are explicitly limited to behavior it implements:
   transport, including redirect rejection before establishing identity or
   accepting an intent. Mutation redirect, retry-budget and receipt checks
   start in R08c.
+
+- **B22/B23:** typed never-prepared disposal, local dependency-closure/atomic
+  accounting faults, existing-client admission and verbatim local snapshots.
+  Prepared/rejected-head disposal, actual server rejection, transmitted bytes
+  and sender/callback interleavings start in R08c.
 
 These are named local/metadata subcases, not a claim that the whole composite
 case passes in R08b. **B15 and B19 belong to R08c in full**, including their
