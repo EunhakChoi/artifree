@@ -393,24 +393,26 @@ implementation it fails.
 ## Implementation status
 
 One row per slice, updated by the pull request that implements it. R07a of the
-slice list above is two pull requests.
+slice list above was planned as two pull requests; #87 carries both slices.
 
 | Slice  | What                                            | Status          | Pull request |
 | ------ | ----------------------------------------------- | --------------- | ------------ |
 | R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87          |
-| R07a-2 | TypeScript kind record and web reducer (rule 6) | not implemented | -            |
+| R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
 | R07b   | member listing (rules 7-11)                     | not implemented | -            |
 | R07c   | TypeScript client (rules 12-22)                 | not implemented | -            |
 | R07d   | user guides                                     | not implemented | -            |
 | R07e   | web data panel (rule 23)                        | not implemented | -            |
 
-R07a-1 also added `data_changed` to the client's record of known kinds, which
-its type requires, and implements rule 12 in the client: `FeedChange` carries
-`data_version` for `data_changed` only, and an event that breaks that is
-`invalid_response`. The published schema and Rust deserialization state the same
-rule. Rules 13-22 of R07c (`followData`, `listDataMembers`, the size and
-silence limits, the retry rules) are not implemented, and the web workspace does
-not yet ignore `data_changed` (R07a-2). What R07 excludes is listed under Scope.
+R07a-1 and R07a-2 both landed in #87. The client's record of known kinds gained
+`data_changed`, which its type requires, and the web workspace's reducer ignores
+it: it changes nothing the page knows and reads nothing, for an open artifact, an
+unlisted one, and while the first read is pending (rule 6; 0007 decision 4).
+#87 also implements rule 12 in the client: `FeedChange` carries `data_version`
+for `data_changed` only, and an event that breaks that is `invalid_response`.
+The published schema and Rust deserialization state the same rule. Rules 13-22
+of R07c (`followData`, `listDataMembers`, the size and silence limits, the retry
+rules) are not implemented. What R07 excludes is listed under Scope.
 
 ## Alternatives
 

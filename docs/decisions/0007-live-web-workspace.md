@@ -3,9 +3,9 @@
 Date: 2026-10-28. Status: accepted. Builds on
 [0005](0005-request-limits.md) and [0006](0006-change-feed.md).
 
-> Amended by [0040](0040-data-changes-and-member-listing.md) (proposed; takes
-> effect when the slice merges): decision 4, as the workspace ignores
-> `data_changed` instead of reading again as for an unknown kind (R07a).
+> Amended by [0040](0040-data-changes-and-member-listing.md), in effect since
+> R07a: decision 4, as the workspace ignores `data_changed` instead of reading
+> again as for an unknown kind.
 
 ## Context
 
@@ -88,7 +88,10 @@ unpublished trace maps each to its evidence.
    and what it read in an earlier epoch is behind whatever the new one
    knows, also when its first read after a reset failed.
    A change of a kind the client does not know counts whatever its
-   revision: the list and, if it is open, the artifact are read again.
+   revision: the list and, if it is open, the artifact are read again. A
+   `data_changed` change (decision 0040) is not news: it changes nothing the
+   page knows and reads nothing, also for an artifact the page has not listed
+   yet or while its first read is pending.
 5. **Content follows its metadata.** A revision number read before a reset
    may name other content afterwards, for example in a restored database.
    File content and preview links are keyed by the epoch of the metadata
