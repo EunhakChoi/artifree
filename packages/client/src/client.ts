@@ -438,6 +438,7 @@ interface SendOptions {
     { body: unknown; idempotencyKey: string; text?: string } | undefined;
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
+  readonly cache?: RequestCache;
   readonly signal?: AbortSignal | undefined;
   readonly onDispatch?: (() => void) | undefined;
   /**
@@ -1262,6 +1263,9 @@ export class ArtifreeClient {
     if (options.after !== undefined) headers['last-event-id'] = options.after;
     const response = await this.send('GET', '/v1/changes', {
       headers,
+      // Firefox serializes concurrent default-cache fetches of the same SSE
+      // URL until the first response ends, which a live stream need not do.
+      cache: 'no-store',
       signal: options.signal,
       boundedErrorBody: true,
     });
@@ -1884,6 +1888,7 @@ export class ArtifreeClient {
       mutation,
       body,
       headers: extraHeaders,
+      cache,
       signal,
       onDispatch,
       boundedErrorBody,
@@ -1894,6 +1899,7 @@ export class ArtifreeClient {
       authorization: `Bearer ${this.accessToken}`,
     };
     const init: DispatchRequestInit = { method, headers };
+    if (cache !== undefined) init.cache = cache;
     if (signal !== undefined) init.signal = signal;
     if (onDispatch !== undefined) init[REQUEST_DISPATCH] = onDispatch;
     if (mutation !== undefined) {

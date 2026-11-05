@@ -19,6 +19,33 @@ const encoder = new TextEncoder();
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const hang = () => new Promise(() => {});
 
+test('change streams bypass the browser cache so concurrent feeds can open', async () => {
+  const requests = [];
+  const controller = new AbortController();
+  const client = new ArtifreeClient({
+    baseUrl: 'http://localhost',
+    accessToken: 'token',
+    fetch: async (_url, init) => {
+      requests.push(init);
+      return new Response('', {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+  });
+  const first = await client.openChanges({ signal: controller.signal });
+  const second = await client.openChanges({ signal: controller.signal });
+  try {
+    assert.deepEqual(
+      requests.map((request) => request.cache),
+      ['no-store', 'no-store'],
+    );
+  } finally {
+    controller.abort();
+    await first.return();
+    await second.return();
+  }
+});
+
 /** A clock that only moves when a test says so. */
 class FakeClock {
   now = 0;
