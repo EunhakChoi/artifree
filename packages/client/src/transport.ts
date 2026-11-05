@@ -232,10 +232,12 @@ export class BodyReader {
       default:
         return assertNever(this.state);
     }
-    this.arm();
     return new Promise((resolve, reject) => {
+      // The waiter comes first: a clock that calls back before `after()`
+      // returns stalls the body inside `arm()`, which must find it to reject.
       this.waiter = { resolve, reject };
-      this.pull();
+      this.arm();
+      if (this.state === 'open') this.pull();
     });
   }
 
@@ -353,7 +355,8 @@ type BoundedRead = Uint8Array | 'over' | ArtifreeApiError;
  * The whole body, if it is at most `limit` bytes: the limit is checked as
  * each chunk arrives, and a body past it is cancelled at once, not read
  * on. A lost or stalled connection is returned as its network failure; an
- * abort throws `signal.reason`, since the caller asked for it.
+ * abort throws a network failure too, as an abort before the headers is
+ * one. A caller that must reject with `signal.reason` does so itself.
  */
 async function readBounded(
   body: ReadableStream<Uint8Array>,
@@ -373,11 +376,12 @@ async function readBounded(
         throw error;
       }
       if (chunk === 'end') break;
-      if (chunk === 'aborted') {
-        options.signal?.throwIfAborted();
-        // Closed by someone else: nothing more will come.
-        return bodyFailure(options, `The ${options.what} could not be read.`);
-      }
+      if (chunk === 'aborted')
+        throw bodyFailure(
+          options,
+          `The request was aborted while reading the ${options.what}.`,
+          options.signal?.reason,
+        );
       total += chunk.byteLength;
       if (total > limit) return 'over';
       chunks.push(chunk);
@@ -409,7 +413,8 @@ function parseJson(bytes: Uint8Array): unknown {
  * {@link ERROR_BODY_LIMIT} bytes. A body past the limit, one that stalls
  * or is lost after the headers arrived, and one that is not JSON are all
  * `undefined`: the response has no API body and its status decides, as for
- * a proxy's page. Aborting `options.signal` rejects with its reason.
+ * a proxy's page. Aborting `options.signal` is not that: it rejects with a
+ * network failure.
  */
 export async function readErrorJson(
   response: Response,
@@ -425,7 +430,7 @@ export async function readErrorJson(
  * {@link SUCCESS_BODY_LIMIT} bytes. A body past the limit rejects with
  * `invalid_response`; one that is not JSON is `undefined`, for the
  * caller's contract check. A lost or stalled body rejects with a network
- * failure; aborting `options.signal` rejects with its reason.
+ * failure, and so does aborting `options.signal`.
  */
 export async function readSuccessJson(
   response: Response,

@@ -25,14 +25,22 @@ class FakeClock {
   #timers = new Map();
   #next = 0;
 
-  /** `immediate` calls back before `after` returns; `late` ignores cancels. */
-  constructor({ immediate = false, late = false } = {}) {
+  #calls = 0;
+
+  /**
+   * `immediate` calls back before `after` returns, on every call;
+   * `immediateAt` does so only on the listed calls (counted from 1); `late`
+   * ignores cancels.
+   */
+  constructor({ immediate = false, immediateAt = [], late = false } = {}) {
     this.immediate = immediate;
+    this.immediateAt = immediateAt;
     this.late = late;
   }
 
   after(callback, milliseconds) {
-    if (this.immediate) {
+    this.#calls += 1;
+    if (this.immediate || this.immediateAt.includes(this.#calls)) {
       callback();
       return () => {};
     }
@@ -549,7 +557,7 @@ test('A success body that stalls or is lost is a network failure; an error body 
   assert.equal(clock.pending, 0);
 });
 
-test('Aborting a bounded read rejects with the signal reason and leaves nothing behind', async () => {
+test('Aborting a bounded read is a network failure and leaves nothing behind', async () => {
   for (const read of [readErrorJson, readSuccessJson]) {
     const clock = new FakeClock();
     const controller = new AbortController();
@@ -559,9 +567,9 @@ test('Aborting a bounded read rejects with the signal reason and leaves nothing 
       read(new Response(slow.body), readOptions(clock, controller.signal)),
     );
     await flush();
-    const reason = new Error('stop');
-    controller.abort(reason);
-    assert.equal(await reading, reason);
+    controller.abort(new Error('stop'));
+    const failure = await reading;
+    assert.deepEqual([failure.status, failure.code], [200, 'network_error']);
     assert.equal(slow.cancelled.count, 1);
     noLeftovers(clock, controller);
   }
@@ -576,7 +584,7 @@ test('Aborting a bounded read rejects with the signal reason and leaves nothing 
       readOptions(clock, controller.signal),
     ),
   );
-  assert.equal(error.name, 'AbortError');
+  assert.equal(error.code, 'network_error');
   assert.equal(unread.cancelled.count, 1);
   noLeftovers(clock, controller);
 });
@@ -617,7 +625,7 @@ test('A bounded read is not held back by a body whose read and cancel never sett
   );
   await flush();
   controller.abort();
-  assert.equal((await aborted).name, 'AbortError');
+  assert.equal((await aborted).code, 'network_error');
 });
 
 test('An empty chunk is not a byte: it does not restart the stall limit of a bounded read', async () => {
@@ -925,7 +933,7 @@ test('An empty chunk is not a byte: an error body stalls 45 seconds after its la
   await run.done;
 });
 
-test('Aborting during an error-body read ends following at once and rejects a direct open with the reason', async () => {
+test('Aborting during an error-body read ends following at once and rejects a direct open with a network failure', async () => {
   const clock = new FakeClock();
   const body = pipe();
   const run = drive({
@@ -952,9 +960,9 @@ test('Aborting during an error-body read ends following at once and rejects a di
     ),
   );
   await flush();
-  const reason = new Error('give up');
-  direct.abort(reason);
-  assert.equal(await opening, reason);
+  direct.abort(new Error('give up'));
+  const failure = await opening;
+  assert.deepEqual([failure.status, failure.code], [502, 'network_error']);
   noLeftovers(clock, direct);
 });
 
@@ -1339,6 +1347,80 @@ test('A clock that calls back at once stalls a body without reading an unset tim
     clock,
   ).openChanges({ signal: controller.signal });
   assert.equal((await rejection(events.next())).code, 'network_error');
+});
+
+/** The result of `promise` if it settles without time passing, else 'hung'. */
+const settled = (promise) =>
+  Promise.race([
+    promise.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    ),
+    flush().then(() => 'hung'),
+  ]);
+
+test('A clock that calls back at once at the initial arm or at a re-arm in a read stalls the stream and settles the read', async () => {
+  for (const call of [1, 2, 3]) {
+    const clock = new FakeClock({ immediateAt: [call] });
+    const stream = pipe();
+    stream.push(changeEvent(1));
+    stream.push(changeEvent(2));
+    const controller = new AbortController();
+    const events = await clientOn(
+      () => eventsResponse(stream),
+      clock,
+    ).openChanges({ signal: controller.signal });
+    // Call 1 is the arm at the headers; calls 2 and 3 are the arms of the
+    // second and third read, each after a chunk.
+    const seen = [];
+    for (let read = 0; read < 3; read += 1) {
+      const result = await settled(events.next());
+      if (result === 'hung') {
+        seen.push('hung');
+        break;
+      }
+      if (result.error !== undefined) {
+        seen.push(result.error.code);
+        break;
+      }
+      seen.push(result.value.value.change.revision);
+    }
+    const expected = [
+      ['network_error'],
+      [1, 'network_error'],
+      [1, 2, 'network_error'],
+    ][call - 1];
+    assert.deepEqual(seen, expected, `the clock called back at call ${call}`);
+    assert.equal(clock.pending, 0);
+    controller.abort();
+  }
+});
+
+test('A clock that calls back at once at an arm of a bounded read settles it as a stall', async () => {
+  const twoChunks = () => {
+    const body = pipe();
+    body.push('"a');
+    body.push('b"');
+    return new Response(body.body);
+  };
+  for (const [call, success, error] of [
+    [1, 'network_error', undefined],
+    [2, 'network_error', undefined],
+  ]) {
+    const clock = new FakeClock({ immediateAt: [call] });
+    const reading = await settled(
+      readSuccessJson(twoChunks(), readOptions(clock)),
+    );
+    assert.equal(reading.error?.code, success, `success, call ${call}`);
+    const dropped = await settled(
+      readErrorJson(
+        twoChunks(),
+        readOptions(new FakeClock({ immediateAt: [call] })),
+      ),
+    );
+    assert.deepEqual(dropped, { value: error }, `error, call ${call}`);
+    assert.equal(clock.pending, 0);
+  }
 });
 
 test('A body that was already used is a network failure for a success read and no API body for an error read', async () => {
