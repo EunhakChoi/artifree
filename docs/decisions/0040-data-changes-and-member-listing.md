@@ -10,6 +10,11 @@ and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
 > retry reset threshold is its own 30-second constant instead of `max`, and
 > findings outside the trust rules are recorded as issues.
 
+> Amended 2026-11-05 (second documentation pull request): rule 18 says that an
+> error response whose body stalls or is lost is decided by its status, which
+> keeps its `Retry-After`, and rule 19 says how a line and an event are
+> measured.
+
 > **Implementation is tracked per slice** in "Implementation status" at the
 > end. This record fixed the design of R07 before any code. The Context
 > describes `main` before R07a-1; every other statement is a rule, or what a
@@ -239,7 +244,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     rejects. Revocation across processes stays X04.
 18. **Waits and stalls.** Once a response's headers have arrived, 45 seconds
     without a byte of its body (after the headers or the previous byte) is a
-    stall: the body is cancelled and the request fails as a network failure.
+    stall: the body is cancelled and the request fails as a network failure,
+    except for the body of an error response, which its status decides (below).
     Stream comments count; the server sends one every 15 idle seconds. **No
     timer runs on a request before its headers**: the page's request gate and
     the browser may hold a request without failing it (0007 decisions 1 and
@@ -252,18 +258,29 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     | stream body, after headers                 | 45 s between bytes; then a drop (retry), in both functions |
     | `GET data` body, after headers             | 45 s between bytes; then a failed read (abandon; retry)    |
     | listing body, after headers                | 45 s between bytes; then `listDataMembers` rejects         |
+    | error body, after headers                  | 45 s between bytes; then its status decides (rule 19)      |
     | retry wait (rule 17)                       | at most 3,600 s; an abort ends it at once                  |
     | `onData` (rule 13)                         | not awaited; a synchronous call the application owns       |
 
     A body that trickles a byte at least every 45 s is bounded only by its
     size (rule 19) and the caller's `signal`.
 
+    An error response whose body stalls or is lost after its headers arrived
+    counts as one without an API body, as for a body past its bound (rule 19):
+    its status decides, and its `Retry-After` is kept. So a stalled `429` or
+    `5xx` is retried with the floor of rule 17 (at least `Retry-After`, clamped
+    to 3,600 s), and a stalled `404` or `401` is not retried. An abort is not a
+    failure (rule 20).
+
 19. **Transport bounds**, checked as data arrives; the body is cancelled at
     once.
     - Event streams (the parser both functions share): 65,536 UTF-16 code
       units for the unfinished line, and for one event's data and type
-      together; past either, `invalid_response`. A change event today is
-      under 400.
+      together (at most 65,536 is within the bound; a line is counted without
+      its line end and with its field name; an event is the length of its
+      `event` value, the last one when repeated, plus the lengths of its `data`
+      values and one unit for each LF between two of them); past either,
+      `invalid_response`. A change event today is under 400.
     - Success bodies of reads by `followData` and `listDataMembers`: 1,064,960
       bytes (1 MiB + 16 KiB); past it, `invalid_response`. A `GET data` body is
       a space of at most 1,048,576 bytes and under 1,200 more. A page is at
@@ -282,11 +299,11 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     | abort before headers, in a body or stream | cancels; resolves; delivers no more | cancels; rejects        |
     | abort while waiting to reconnect          | resolves at once                    | never waits             |
     | no headers, however long                  | waits; no timer (rule 18)           | waits; no timer         |
-    | 45 s without a body byte after headers    | retry (stream or read)              | rejects `network_error` |
+    | 45 s silent success or stream body        | retry (stream or read)              | rejects `network_error` |
     | `onData` aborts                           | delivers no more; resolves          | —                       |
     | `onData` throws                           | rejects with it; never retried      | —                       |
     | `onData` aborts and throws                | resolves (abort wins)               | —                       |
-    | error body over its bound                 | its status decides                  | rejects; status decides |
+    | error body past bound, stalled, lost      | its status decides                  | rejects; status decides |
     | network failure, `429`, `5xx`             | retry, then a new snapshot          | rejects; no retry       |
     | `404`                                     | read: end; stream open: rejects     | rejects                 |
     | other `4xx`; body breaking rules 19, 22   | rejects                             | rejects                 |
@@ -375,6 +392,17 @@ implementation it fails.
     above and below the delay (fails no jitter, or `Retry-After` replacing
     it); `Retry-After: 999999` waits 3,600 s (fails an unclamped floor). 45 s
     of silence reconnects; a comment every 15 s prevents it.
+  - Rule 19 boundaries of the event stream: a `data:` line of 65,536 units in
+    total passes and one of 65,537 fails with `invalid_response` and a
+    cancelled body; an event whose `event` value, `data` values and joining
+    LFs total 65,536 passes and 65,537 fails (fails counting the field name in
+    an event, leaving out the joining LFs, or waiting for the end of an
+    unfinished line before checking it).
+  - A `429` with `Retry-After: 120` whose body then sends nothing for 45 s is
+    retried no earlier than 120 s after, a `404` or `401` with a stalled body
+    is not retried, and `listDataMembers` rejects with that status instead of
+    `network_error` (fails treating a stalled error body as `network_error`, or
+    dropping `Retry-After`).
   - A `GET data` whose headers arrived and whose body then sends nothing for
     45 s (fake clock) is abandoned and followed by a new connection and
     snapshot, while the stream keeps its comments (fails a stall timer on the
