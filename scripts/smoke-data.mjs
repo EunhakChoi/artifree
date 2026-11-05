@@ -62,11 +62,17 @@ export async function checkData({ browser, origin, server }) {
     await workspace.getByRole('tab', { name: 'Preview' }).click();
     let release;
     let arrived;
+    let delivered;
+    let deliveryFailed;
     const held = new Promise((resolve) => {
       release = resolve;
     });
     const started = new Promise((resolve) => {
       arrived = resolve;
+    });
+    const delivery = new Promise((resolve, reject) => {
+      delivered = resolve;
+      deliveryFailed = reject;
     });
     await page.route(
       `**${path}`,
@@ -83,7 +89,7 @@ export async function checkData({ browser, origin, server }) {
               value: { text: 'late stale response' },
             },
           })
-          .catch(() => undefined);
+          .then(delivered, deliveryFailed);
       },
       { times: 1 },
     );
@@ -100,7 +106,13 @@ export async function checkData({ browser, origin, server }) {
       timeout: 15_000,
     });
     release();
-    await page.waitForTimeout(200);
+    await delivery;
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }),
+    );
     await expect(panel.locator('pre')).toContainText('<b>safe</b>');
     await workspace.getByRole('tab', { name: 'Preview' }).click();
     await page.route(
