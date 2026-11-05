@@ -729,12 +729,37 @@ This documentation change has not executed these future acceptance cases.
 
 ## Proposed PR slices
 
-| Slice | Deliverable                                                                                                                                                                                                                        | Dependencies and acceptance                                                                                                            |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                                                   |
-| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit retry/recovery, durable admission, caps, strict recovery decoder and explicit disposal of unsent work. No sender enabled. | R08a contract; B2/B3/B8/B13 and B12 legacy-generation storage cases; B15 paging cases; B18 owner-binding cases; B19 preparation cases. |
-| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                       | R08a–b, R07c follower semantics; B4–B12 and B15–B17 and B19–B21 including fail-first rejection proofs.                                 |
-| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                          | R08c; B2–B21, full gates and both browser engines where supported.                                                                     |
+| Slice | Deliverable                                                                                                                                                                                                                                                     | Dependencies and acceptance                                                                                                                                 |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R08a  | Authenticated binding read and optional transactional actor/epoch/state-generation fence, generated contracts and route/authorization coverage. No automatic queue.                                                                                             | R07 server basis, 0031/0036/0027; B1/B12/B14 server cases, direct-write regressions.                                                                        |
+| R08b  | Dedicated browser store, page owner coordinator, ambiguity gate, bounded retained candidate and explicit local owner recovery, durable admission, caps, strict recovery decoder and unsent disposal. No sender or delivery/preparation-retry lifecycle enabled. | R08a; only the local-storage/owner/metadata-read subcases listed below. B15 and B19 are excluded.                                                           |
+| R08c  | Opt-in serialized sender, immutable preparation, ACK/checkpoint/trim, explicit conflicts, abandonment and access-generation pauses, bounded retries and typed lifecycle API.                                                                                    | R08a–b, R07c; sender/fault portions of B2–B9, B11–B13 and B15–B21, including B15 and B19 in full and fail-first proofs. Native-process B10 belongs to R08d. |
+| R08d  | Real-browser explicit crash recovery and interleaving/fault verification, public API guide and precise supported-browser/recovery limits.                                                                                                                       | R08c; B10 native-process restoration, end-to-end B2–B21, full gates and both browser engines where supported.                                               |
+
+R08b's referenced cases are explicitly limited to behavior it implements:
+
+- **B2:** durable enqueue completion/abort, reload retention and immutable local
+  intent snapshots. Transmitted-request checks start in R08c.
+- **B3/B18:** owner locks, duplicate/inherited owner selection, binding
+  quarantine, candidate/reference preservation and local recovery choices.
+  Actual mutation dispatch, same-key replay and ACK advancement start in R08c.
+- **B8/B12:** local row/byte quotas, accounting, strict storage decoding,
+  bounded local reads/transitions and legacy generation-unbound retention.
+  HTTP failure budgets, backoff, response validation and generation-fenced
+  delivery are not R08b acceptance requirements.
+- **B13/B21:** URL admission/normalization and authenticated binding-read-only
+  transport, including redirect rejection before establishing identity or
+  accepting an intent. Mutation redirect, retry-budget and receipt checks
+  start in R08c.
+
+These are named local/metadata subcases, not a claim that the whole composite
+case passes in R08b. **B15 and B19 belong to R08c in full**, including their
+paging-versus-delivery-budget, preparation/dispatch and typed-action checks.
+Every actual sender/replay/ACK clause of a mixed case also belongs to R08c.
+R08d supplies B10's actual native-process evidence and the complete browser/
+server recovery matrix; earlier local or injected-fault tests cannot be reported
+as native-process restoration. Each slice still runs its full required quality
+gates and applicable smoke checks; this scope assignment does not weaken them.
 
 No slice may advertise R08 complete before the end-to-end recovery acceptance
 has passed. Runtime-frame data access, UI adoption, orphan transfer, automatic
