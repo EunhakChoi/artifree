@@ -63,6 +63,7 @@ import {
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 import type * as RuntimeSource from './runtime-source.js';
+import type { FollowDataOptions } from './follow-data.js';
 import type {
   RuntimeDownloadTarget,
   RuntimeSourcePartBytes,
@@ -78,6 +79,7 @@ import {
   parseCancelJob,
   parseDataWrite,
   parseDataMembers,
+  parseFollowedAppData,
   parseDuplicate,
   parseEnqueueJob,
   parseError,
@@ -883,6 +885,65 @@ export class ArtifreeClient {
       return result;
     } catch (error: unknown) {
       signal?.throwIfAborted();
+      throw error;
+    }
+  }
+
+  /** Follows an application-data path until aborted or unavailable. */
+  async followData(
+    artifactId: string,
+    options: FollowDataOptions,
+  ): Promise<void> {
+    if (options.signal.aborted) return;
+    const { followData } = await import('./follow-data.js');
+    return followData(
+      {
+        clock: this.clock,
+        open: (signal) => this.openChanges({ signal }),
+        read: (signal) =>
+          this.readFollowedData(artifactId, options.path, signal),
+      },
+      artifactId,
+      options,
+    );
+  }
+
+  private async readFollowedData(
+    artifactId: string,
+    dataPath: string | undefined,
+    signal: AbortSignal,
+  ): Promise<AppData> {
+    signal.throwIfAborted();
+    const query =
+      dataPath === undefined || dataPath === ''
+        ? ''
+        : `?path=${encodeURIComponent(dataPath)}`;
+    const path = `/v1/artifacts/${encodeURIComponent(artifactId)}/data${query}`;
+    try {
+      const response = await this.send('GET', path, {
+        signal,
+        boundedErrorBody: true,
+      });
+      const body = await readSuccessJson(response, {
+        clock: this.clock,
+        signal,
+        status: response.status,
+        what: 'data response',
+        keepCause: this.address.plain,
+      });
+      signal.throwIfAborted();
+      const result = parseFollowedAppData(body);
+      if (result === undefined || result.artifact_id !== artifactId)
+        throw new ArtifreeApiError(
+          'Data response does not match the contract.',
+          {
+            status: response.status,
+            code: 'invalid_response',
+          },
+        );
+      return result;
+    } catch (error: unknown) {
+      signal.throwIfAborted();
       throw error;
     }
   }

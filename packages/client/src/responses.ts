@@ -307,6 +307,33 @@ export function parseAppData(value: unknown): AppData | undefined {
   return { ...base, value: found };
 }
 
+/** Parses a follower snapshot without applying the server's data rules. */
+export function parseFollowedAppData(value: unknown): AppData | undefined {
+  if (!isRecord(value)) return undefined;
+  const { artifact_id, path, data_version, exists } = value;
+  if (
+    typeof artifact_id !== 'string' ||
+    typeof path !== 'string' ||
+    typeof data_version !== 'number' ||
+    !Number.isSafeInteger(data_version) ||
+    typeof exists !== 'boolean'
+  )
+    return undefined;
+  const base = { artifact_id, path, data_version, exists };
+  if (!Object.hasOwn(value, 'value')) return base;
+  const found: unknown = value.value;
+  if (
+    found !== null &&
+    typeof found !== 'string' &&
+    typeof found !== 'number' &&
+    typeof found !== 'boolean' &&
+    !Array.isArray(found) &&
+    !isRecord(found)
+  )
+    return undefined;
+  return { ...base, value: found };
+}
+
 /** Parses one page of application-data member names. */
 export function parseDataMembers(value: unknown): DataMembers | undefined {
   if (!isRecord(value)) return undefined;
