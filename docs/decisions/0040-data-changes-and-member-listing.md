@@ -110,7 +110,7 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
      `data_version`. `data_path_conflict`'s contract description gains this
      read case.
    - Checks: identifier (`404`), query (`400`), path (`422`), token (`400`),
-     access (`404`), then `at_data_version` and the value at the path (`409`).
+     access (`404`), then `at_data_version` and the value at the path (`409`). The `at_data_version` check comes first, then the value at the path.
 10. **Page token.** Opaque to clients, issued by the server: base64url
     without padding of a 16-byte tag followed by the last listed name in
     clear (1 to 64 bytes, so 17 to 80 bytes, 23 to 107 characters). The tag
@@ -184,11 +184,13 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     | stream fails, ends, or stalls (rule 18)                 | retry   | abandon; retry   | retry                          | abandon; retry   |
     | read fails: network, `429`, `5xx`, body stall (rule 18) | —       | abandon; retry   | —                              | abandon; retry   |
     | other `4xx`, `invalid_response`                         | reject  | reject           | reject                         | reject           |
-    | open `max` after its start (rule 17)                    | —       | reset `n`        | reset `n`                      | reset `n`        |
+    | open 30 s after its start (rule 17)                     | —       | reset `n`        | reset `n`                      | reset `n`        |
     | `signal` aborts                                         | resolve | resolve          | resolve                        | resolve          |
     | `onData` throws                                         | —       | reject           | reject                         | reject           |
 
     An abort wins over everything, an error `onData` throws included.
+
+    `reset` and a second `ready` on one connection cannot come from a server that follows 0006 decision 4 (the stream is opened without a cursor, so the server sends one `ready` and never `reset`). Their cells exist so that a client handles them like a new connection; tests may drive them with a scripted server.
 
 16. **Guarantees**, about which reads happen, not how soon:
     - a. A change of the space committed while the follower runs is not dropped.
@@ -219,7 +221,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     `Retry-After`, parsed as today, is a floor clamped to one hour:
     `max(min(Retry-After, 3600 s), delay)`. Today it is not clamped (up to
     999,999 s) and replaces the delay. **`n` resets to 0 only when a connection
-    stays open for `max` after its start**: the stream's acceptance for
+    stays open for 30 seconds after its start**, a threshold of its own that
+    does not depend on the configurable `max`: the stream's acceptance for
     `followChanges`, the connection's first read answered `200` for
     `followData`; the timer stops when the stream ends, fails, or stalls. A
     connection dropped sooner never resets `n`, so one accepted and dropped
@@ -298,7 +301,9 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     bounds (rule 19). (5) A violation of 2 to 4 is `invalid_response`, decided
     once per message and never retried. (6) Wire shapes come from the
     generated contract; no rule lives only in TypeScript. (7) A review finding
-    asking for a check outside 1 to 6 is a follow-up, not a blocker.
+    asking for a check outside 1 to 6 is a follow-up, not a blocker. Such a
+    finding is recorded (in the pull request thread or the project backlog)
+    with a one-line reproduction and is never dropped, so no finding is hidden.
 
 ### Web data panel (R07e)
 
