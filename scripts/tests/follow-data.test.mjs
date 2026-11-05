@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHook } from 'node:async_hooks';
+import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import {
   ArtifreeApiError,
   ArtifreeClient,
@@ -10,6 +14,60 @@ import { followData } from '../../packages/client/dist/follow-data.js';
 const artifact = `art_${'0'.repeat(32)}`;
 const cursor = (sequence) => `${'f'.repeat(32)}.${sequence}`;
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+for (const loadFails of [false, true])
+  test(`abort settles while the follower module loads, even if loading ${loadFails ? 'fails' : 'succeeds'}`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'artifree-follower-'));
+    try {
+      await cp(new URL('../../packages/client/dist/', import.meta.url), dir, {
+        recursive: true,
+      });
+      await writeFile(join(dir, 'package.json'), '{"type":"module"}');
+      await writeFile(
+        join(dir, 'gate.mjs'),
+        `export let release, fail;
+       export const gate = new Promise((resolve, reject) => { release = resolve; fail = reject; });
+       export let entered;
+       export const started = new Promise((resolve) => { entered = resolve; });
+       export let calls = 0;
+       export function called() { calls++; }`,
+      );
+      await writeFile(
+        join(dir, 'follow-data.js'),
+        `import { gate, entered, called } from './gate.mjs';
+       entered();
+       await gate;
+       export function followData() { called(); }`,
+      );
+      const gate = await import(pathToFileURL(join(dir, 'gate.mjs')).href);
+      const { ArtifreeClient: Client } = await import(
+        pathToFileURL(join(dir, 'client.js')).href
+      );
+      const controller = new AbortController();
+      const api = new Client({
+        baseUrl: 'http://localhost',
+        accessToken: 'token',
+      });
+      let settled = false;
+      const finished = api
+        .followData(artifact, { signal: controller.signal, onData() {} })
+        .then(() => {
+          settled = true;
+        });
+      await gate.started;
+      controller.abort();
+      await flush();
+      const promptly = settled;
+      if (loadFails) gate.fail(new Error('chunk unavailable'));
+      else gate.release();
+      await finished;
+      await flush();
+      assert.equal(promptly, true, 'abort settles before the module loads');
+      assert.equal(gate.calls, 0, 'the loaded follower is never started');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
 function feed() {
   let controller;
