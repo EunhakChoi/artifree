@@ -4,7 +4,12 @@ import {
   validGeneration,
   validId,
 } from './binding.js';
-import { OutboxError, type Binding, type IntentBase } from './types.js';
+import {
+  OutboxError,
+  type Binding,
+  type IntentBase,
+  type UnsentCleanupTarget,
+} from './types.js';
 
 const DATABASE = 'artifree-data-outbox';
 const VERSION = 1;
@@ -59,6 +64,18 @@ export function bindingKey(
   owner: string,
 ): BindingKey {
   return [owner, base, binding.actor_id, binding.storage_epoch];
+}
+
+export function cleanupTarget(row: IntentRow): UnsentCleanupTarget {
+  return Object.freeze({
+    apiBaseUrl: row.binding[1],
+    actorId: row.binding[2],
+    artifactId: row.artifactId,
+    storageEpoch: row.binding[3],
+    admittedGeneration: row.admittedGeneration,
+    headSequence: row.sequence,
+    recordVersion: row.version,
+  });
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -264,20 +281,43 @@ async function transaction<T>(
   database: IDBDatabase,
   mode: IDBTransactionMode,
   action: (tx: IDBTransaction) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
+  if (signal?.aborted) throw new OutboxError('owner_not_ready');
   let tx: IDBTransaction;
   try {
     tx = database.transaction([...STORES], mode);
   } catch {
     throw new OutboxError('storage_failed');
   }
+  let finished = false;
+  let invalidated = false;
+  const invalidate = (): void => {
+    if (finished) return;
+    try {
+      tx.abort();
+      invalidated = true;
+    } catch {
+      // A transaction already committing settles through its terminal event.
+    }
+  };
   const terminal = new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onabort = () => reject(new OutboxError('storage_failed'));
+    tx.oncomplete = () => {
+      finished = true;
+      resolve();
+    };
+    tx.onabort = () => {
+      finished = true;
+      reject(
+        new OutboxError(invalidated ? 'owner_not_ready' : 'storage_failed'),
+      );
+    };
     tx.onerror = () => {
       /* Abort's terminal event supplies the failure. */
     };
   });
+  signal?.addEventListener('abort', invalidate, { once: true });
+  if (signal?.aborted) invalidate();
   try {
     const value = await action(tx);
     await terminal;
@@ -289,9 +329,12 @@ async function transaction<T>(
       /* It may already have terminated. */
     }
     await terminal.catch(() => undefined);
+    if (invalidated) throw new OutboxError('owner_not_ready');
     throw error instanceof OutboxError
       ? error
       : new OutboxError('storage_failed');
+  } finally {
+    signal?.removeEventListener('abort', invalidate);
   }
 }
 
@@ -520,14 +563,35 @@ export class LocalStore {
   }
 
   recover(binding: BindingKey): Promise<IntentRow[]> {
+    return this.readRange(IDBKeyRange.only(binding));
+  }
+
+  async cleanupTargets(
+    owner: string,
+    base: string,
+    actor: string,
+  ): Promise<UnsentCleanupTarget[]> {
+    const prefix = [owner, base, actor];
+    const rows = await this.readRange(
+      IDBKeyRange.bound(prefix, [...prefix, []], false, true),
+    );
+    const targets = new Map<string, UnsentCleanupTarget>();
+    for (const row of rows) {
+      if (!same(row.binding.slice(0, 3), prefix))
+        throw new OutboxError('storage_corrupt');
+      const lane = JSON.stringify(row.lane);
+      if (!targets.has(lane)) targets.set(lane, cleanupTarget(row));
+    }
+    return [...targets.values()];
+  }
+
+  private readRange(range: IDBKeyRange): Promise<IntentRow[]> {
     return transaction(this.database, 'readonly', async (tx) => {
       await usage(tx);
       const index = tx.objectStore('intents').index('binding');
       const rows: IntentRow[] = [];
       // The key cursor enumerates only this binding; each payload page is bounded.
-      let cursor = await request(
-        index.openKeyCursor(IDBKeyRange.only(binding)),
-      );
+      let cursor = await request(index.openKeyCursor(range));
       const lanes = new Map<string, LaneKey>();
       while (cursor !== null) {
         const value: unknown = await request(
@@ -610,45 +674,56 @@ export class LocalStore {
     });
   }
 
-  discard(expected: IntentRow[]): Promise<void> {
-    return transaction(this.database, 'readwrite', async (tx) => {
-      const head = expected[0];
-      if (head === undefined) throw new OutboxError('invalid_selection');
-      const global = await usage(tx);
-      const current = await laneRows(tx, head.lane);
-      if (!same(current, expected)) throw new OutboxError('invalid_selection');
-      const removed = new Set([head.sequence]);
-      for (const row of current.slice(1)) {
-        if ('after' in row.base && removed.has(row.base.after))
-          removed.add(row.sequence);
-      }
-      let bytes = 0;
-      for (const row of current) {
-        if (removed.has(row.sequence)) {
-          await request(tx.objectStore('intents').delete(row.sequence));
-          bytes += row.bytes;
+  discard(
+    expected: IntentRow[],
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        const head = expected[0];
+        if (head === undefined) throw new OutboxError('invalid_selection');
+        const global = await usage(tx);
+        const current = await laneRows(tx, head.lane);
+        if (!same(current, expected))
+          throw new OutboxError('invalid_selection');
+        authorize();
+        const removed = new Set([head.sequence]);
+        for (const row of current.slice(1)) {
+          if ('after' in row.base && removed.has(row.base.after))
+            removed.add(row.sequence);
         }
-      }
-      const survivors = current.filter((row) => !removed.has(row.sequence));
-      if (survivors.length === 0)
-        await request(tx.objectStore('checkpoints').delete(head.lane));
-      else
+        let bytes = 0;
+        for (const row of current) {
+          if (removed.has(row.sequence)) {
+            await request(tx.objectStore('intents').delete(row.sequence));
+            bytes += row.bytes;
+          }
+        }
+        const survivors = current.filter((row) => !removed.has(row.sequence));
+        if (survivors.length === 0)
+          await request(tx.objectStore('checkpoints').delete(head.lane));
+        else
+          await request(
+            tx.objectStore('checkpoints').put({
+              lane: head.lane,
+              owner: head.owner,
+              generation: head.admittedGeneration,
+              rows: survivors.length,
+              bytes: survivors.reduce((sum, row) => sum + row.bytes, 0),
+            }),
+          );
         await request(
-          tx.objectStore('checkpoints').put({
-            lane: head.lane,
-            owner: head.owner,
-            generation: head.admittedGeneration,
-            rows: survivors.length,
-            bytes: survivors.reduce((sum, row) => sum + row.bytes, 0),
+          tx.objectStore('usage').put({
+            ...global,
+            rows: global.rows - removed.size,
+            bytes: global.bytes - bytes,
           }),
         );
-      await request(
-        tx.objectStore('usage').put({
-          ...global,
-          rows: global.rows - removed.size,
-          bytes: global.bytes - bytes,
-        }),
-      );
-    });
+      },
+      signal,
+    );
   }
 }

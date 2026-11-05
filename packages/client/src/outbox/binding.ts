@@ -50,8 +50,12 @@ export function normalizeBase(raw: string, origin: string): string {
 export async function readBinding(
   base: string,
   accessToken: string,
+  signal?: AbortSignal,
 ): Promise<Binding> {
   const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) controller.abort();
   const timeout = setTimeout(() => controller.abort(), 45_000);
   try {
     const response = await globalThis.fetch(`${base}/v1/data-outbox/binding`, {
@@ -120,5 +124,6 @@ export async function readBinding(
     throw new OutboxError('binding_failed');
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
   }
 }

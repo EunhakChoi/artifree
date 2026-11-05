@@ -14,7 +14,7 @@ const binding = {
 };
 
 /** Real origin storage and Web Locks, with an owned HTTP metadata-only fixture. */
-export async function checkOutbox(browser) {
+export async function checkOutbox(browser, live) {
   const bundle = await build({
     stdin: {
       contents: `import {openBrowserOutbox} from './packages/client/src/outbox/index.ts';
@@ -28,12 +28,16 @@ export async function checkOutbox(browser) {
     write: false,
     platform: 'browser',
   });
+  if (live !== undefined)
+    await checkLiveBinding(browser, live, bundle.outputFiles[0].text);
   let currentBinding = binding;
   let mode = 'normal';
   let redirectStatus = 307;
   let redirectTarget = '/collect';
   let bindingStatus = 200;
   let bindingBody;
+  const heldBindings = [];
+  let onBindingHeld;
   let requests = [];
   let collector = 0;
   const target = createServer((request, response) => {
@@ -77,6 +81,12 @@ export async function checkOutbox(browser) {
         return;
       }
       if (mode === 'headers_stall') return;
+      if (mode === 'binding_hold') {
+        heldBindings.push(response);
+        onBindingHeld?.();
+        onBindingHeld = undefined;
+        return;
+      }
       if (mode === 'network_failure') {
         request.destroy();
         return;
@@ -526,6 +536,23 @@ export async function checkOutbox(browser) {
     // No current binding rows does not mean an empty owner.
     currentBinding = { ...binding, actor_id: `u-${'c'.repeat(32)}` };
     assert.equal(await open(clone), 'owner_binding_quarantined');
+    assert.deepEqual(
+      await clone.evaluate(() =>
+        box.listUnsentTargets(false, { mode: 'offline' }),
+      ),
+      [],
+    );
+    await assert.rejects(
+      clone.evaluate(
+        (artifactId) =>
+          box.selectUnsent(artifactId, false, {
+            mode: 'offline',
+            storageEpoch: '1'.repeat(32),
+          }),
+        ARTIFACT,
+      ),
+      /invalid_selection/,
+    );
     assert.deepEqual(await clone.evaluate(() => box.state), {
       kind: 'owner_binding_quarantined',
     });
@@ -713,6 +740,12 @@ export async function checkOutbox(browser) {
       await open(clone, '/other-base/'),
       'owner_binding_quarantined',
     );
+    assert.deepEqual(
+      await clone.evaluate(() =>
+        box.listUnsentTargets(false, { mode: 'offline' }),
+      ),
+      [],
+    );
     assert.equal(
       await clone.evaluate((key) => sessionStorage.getItem(key), OWNER),
       anchored,
@@ -772,6 +805,36 @@ export async function checkOutbox(browser) {
         1,
       );
       assert.equal((await rows(owners[0])).length, 256);
+      await owners[0].evaluate(() => box.close());
+      await owners[0].evaluate(() => {
+        globalThis.recoveryReadLimits = [];
+        const objectGet = IDBObjectStore.prototype.getAll;
+        const indexGet = IDBIndex.prototype.getAll;
+        IDBObjectStore.prototype.getAll = function (...args) {
+          recoveryReadLimits.push(args[1]);
+          return Reflect.apply(objectGet, this, args);
+        };
+        IDBIndex.prototype.getAll = function (...args) {
+          recoveryReadLimits.push(args[1]);
+          return Reflect.apply(indexGet, this, args);
+        };
+        globalThis.restoreRecoveryReads = () => {
+          IDBObjectStore.prototype.getAll = objectGet;
+          IDBIndex.prototype.getAll = indexGet;
+        };
+      });
+      assert.equal(await open(owners[0]), 'recovery_required');
+      const readLimits = await owners[0].evaluate(() => {
+        restoreRecoveryReads();
+        return recoveryReadLimits;
+      });
+      assert.ok(readLimits.length > 0);
+      assert.ok(
+        readLimits.every(
+          (count) => Number.isInteger(count) && count > 0 && count <= 32,
+        ),
+        'recovery must bound every materialized IDB page to32 rows',
+      );
     } finally {
       await quotaContext.close();
     }
@@ -1325,6 +1388,11 @@ export async function checkOutbox(browser) {
         await failurePage.evaluate(async (artifactId) => {
           globalThis.firstDiscard = await box.selectUnsent(artifactId);
           globalThis.nextDiscard = await box.selectUnsent(artifactId);
+          globalThis.offlineDiscard = await box.selectUnsent(
+            artifactId,
+            false,
+            { mode: 'offline' },
+          );
         }, ARTIFACT);
         await controlBinding(failurePage);
         mode = failure === 'unauthenticated' ? 'normal' : failure;
@@ -1385,6 +1453,60 @@ export async function checkOutbox(browser) {
         });
         assert.equal(collector, collectorBefore);
         assert.deepEqual(await rows(failurePage), retained);
+        await assert.rejects(enqueue(failurePage), /owner_not_ready/);
+        await assert.rejects(
+          failurePage.evaluate(
+            (artifactId) =>
+              box.selectUnsent(artifactId, false, { mode: 'offline' }),
+            ARTIFACT,
+          ),
+          /owner_not_ready/,
+        );
+        await assert.rejects(
+          failurePage.evaluate(() =>
+            box.listUnsentTargets(false, { mode: 'offline' }),
+          ),
+          /owner_not_ready/,
+        );
+        await assert.rejects(
+          failurePage.evaluate(() => box.discardUnsent(offlineDiscard)),
+          /invalid_selection/,
+        );
+        mode = 'normal';
+        bindingStatus = 200;
+        await assert.rejects(
+          failurePage.evaluate(() => box.discardUnsent(nextDiscard)),
+          /invalid_selection/,
+        );
+        const pausedOwner = await failurePage.evaluate(
+          (key) => sessionStorage.getItem(key),
+          OWNER,
+        );
+        const overlapping = await page(failureContext);
+        await overlapping.evaluate(
+          ({ key, owner }) => sessionStorage.setItem(key, owner),
+          { key: OWNER, owner: pausedOwner },
+        );
+        assert.equal(
+          await open(overlapping),
+          'owner_busy',
+          'disconnect/auth pause must retain the live coordinator lock',
+        );
+        assert.equal(
+          await overlapping.evaluate(
+            async () => (await box.retryRecoveryCandidate()).kind,
+          ),
+          'owner_busy',
+        );
+        await failurePage.evaluate(() => box.close());
+        assert.equal(
+          await overlapping.evaluate(
+            async () => (await box.retryRecoveryCandidate()).kind,
+          ),
+          'recovery_required',
+          'explicit coordinator disposal releases the lock without automatic adoption',
+        );
+        assert.deepEqual(await rows(overlapping), retained);
       } finally {
         mode = 'normal';
         bindingStatus = 200;
@@ -1398,6 +1520,626 @@ export async function checkOutbox(browser) {
     );
     await assert.rejects(open(unavailable), /outbox_unavailable/);
     assert.equal(await unavailable.evaluate(() => sessionStorage.length), 0);
+    for (const feature of ['indexedDB', 'sessionStorage']) {
+      const blocked = await page();
+      const refused = await blocked.evaluate(async (feature) => {
+        const session = window.sessionStorage;
+        let fetches = 0;
+        const original = window.fetch;
+        window.fetch = (...args) => {
+          fetches += 1;
+          return Reflect.apply(original, window, args);
+        };
+        if (feature === 'indexedDB')
+          Object.defineProperty(window, 'indexedDB', { value: undefined });
+        else
+          Object.defineProperty(window, 'sessionStorage', {
+            get() {
+              throw new DOMException('injected', 'SecurityError');
+            },
+          });
+        let result;
+        try {
+          await outboxApi.openBrowserOutbox({
+            baseUrl: '',
+            accessToken: 'test-token',
+          });
+          result = 'accepted';
+        } catch (error) {
+          result = error.code;
+        }
+        return { result, fetches, references: session.length };
+      }, feature);
+      assert.deepEqual(refused, {
+        result: 'outbox_unavailable',
+        fetches: 0,
+        references: 0,
+      });
+    }
+
+    // Offline and original-epoch choices are deliberate local cleanup only.
+    const localChoices = {};
+    for (const choice of ['offline', 'pastEpoch', 'offlinePastEpoch']) {
+      const choiceContext = await browser.newContext();
+      try {
+        const choicePage = await page(choiceContext);
+        assert.equal(await open(choicePage), 'ready');
+        await enqueue(choicePage);
+        await choicePage.evaluate(() => box.close());
+        if (choice !== 'offline')
+          currentBinding = { ...binding, storage_epoch: '2'.repeat(32) };
+        assert.equal(
+          await open(choicePage),
+          choice === 'offline'
+            ? 'recovery_required'
+            : 'owner_binding_quarantined',
+        );
+        await choicePage.evaluate(() => {
+          const original = window.fetch;
+          globalThis.cleanupFetches = 0;
+          window.fetch = (...args) => {
+            cleanupFetches += 1;
+            return Reflect.apply(original, window, args);
+          };
+        });
+        const offline = choice !== 'pastEpoch';
+        if (offline) await choiceContext.setOffline(true);
+        const cleanup = await choicePage.evaluate(
+          async ({ artifactId, mode, storageEpoch }) => {
+            try {
+              const targets = await box.listUnsentTargets(false, { mode });
+              const selected = await box.selectUnsent(artifactId, false, {
+                mode,
+                storageEpoch,
+              });
+              return {
+                kind: (await box.discardUnsent(selected)).kind,
+                targets,
+                target: selected.target,
+                mode: selected.mode,
+                fetches: cleanupFetches,
+              };
+            } catch (error) {
+              return { kind: error.code };
+            }
+          },
+          {
+            artifactId: ARTIFACT,
+            mode: offline ? 'offline' : 'online',
+            storageEpoch: binding.storage_epoch,
+          },
+        );
+        localChoices[choice] = cleanup.kind;
+        assert.deepEqual(cleanup, {
+          kind: 'discarded_unsent',
+          targets: [
+            {
+              apiBaseUrl: origin,
+              actorId: 'local',
+              artifactId: ARTIFACT,
+              storageEpoch: binding.storage_epoch,
+              admittedGeneration: '1',
+              headSequence: 1,
+              recordVersion: 1,
+            },
+          ],
+          target: {
+            apiBaseUrl: origin,
+            actorId: 'local',
+            artifactId: ARTIFACT,
+            storageEpoch: binding.storage_epoch,
+            admittedGeneration: '1',
+            headSequence: 1,
+            recordVersion: 1,
+          },
+          mode: offline ? 'offline' : 'online',
+          fetches: offline ? 0 : 3,
+        });
+        assert.equal((await rows(choicePage)).length, 0);
+        await assert.rejects(enqueue(choicePage), /owner_not_ready/);
+      } finally {
+        currentBinding = binding;
+        await choiceContext.close();
+      }
+    }
+    assert.deepEqual(
+      localChoices,
+      {
+        offline: 'discarded_unsent',
+        pastEpoch: 'discarded_unsent',
+        offlinePastEpoch: 'discarded_unsent',
+      },
+      'explicit cleanup must support retained page proof and the original same-actor/URL epoch',
+    );
+
+    // An external logout/profile switch terminally detaches the old proof.
+    const detachedContext = await browser.newContext();
+    try {
+      const detachedPage = await page(detachedContext);
+      assert.equal(await open(detachedPage), 'ready');
+      await enqueue(detachedPage);
+      const retained = await rows(detachedPage);
+      const detached = await detachedPage.evaluate(async (artifactId) => {
+        const selected = await box.selectUnsent(artifactId, false, {
+          mode: 'offline',
+        });
+        const original = window.fetch;
+        let fetches = 0;
+        window.fetch = (...args) => {
+          fetches += 1;
+          return Reflect.apply(original, window, args);
+        };
+        box.invalidateAuthentication();
+        const outcome = async (pending) => {
+          try {
+            await pending;
+            return 'accepted';
+          } catch (error) {
+            return error.code;
+          }
+        };
+        const results = await Promise.all([
+          outcome(box.listUnsentTargets(false, { mode: 'offline' })),
+          outcome(box.selectUnsent(artifactId, false, { mode: 'offline' })),
+          outcome(box.discardUnsent(selected)),
+          outcome(box.listUnsentTargets()),
+          outcome(
+            box.enqueue({
+              artifactId,
+              path: '',
+              base: { version: 0 },
+              operation: 'delete',
+            }),
+          ),
+        ]);
+        return { results, fetches, state: box.state };
+      }, ARTIFACT);
+      assert.deepEqual(detached, {
+        results: Array(5).fill('owner_not_ready'),
+        fetches: 0,
+        state: { kind: 'binding_paused' },
+      });
+      assert.deepEqual(await rows(detachedPage), retained);
+      const owner = await detachedPage.evaluate(
+        (key) => sessionStorage.getItem(key),
+        OWNER,
+      );
+      const duplicate = await page(detachedContext);
+      await duplicate.evaluate(
+        ({ key, owner }) => sessionStorage.setItem(key, owner),
+        { key: OWNER, owner },
+      );
+      assert.equal(await open(duplicate), 'owner_busy');
+      await detachedPage.evaluate(() => box.close());
+      assert.equal(
+        await duplicate.evaluate(
+          async () => (await box.retryRecoveryCandidate()).kind,
+        ),
+        'recovery_required',
+      );
+    } finally {
+      await detachedContext.close();
+    }
+
+    // Revoking authentication aborts even a delete whose first request succeeded.
+    const deletionLifecycle = {};
+    for (const action of ['logout', 'close']) {
+      const lifecycleContext = await browser.newContext();
+      try {
+        const lifecyclePage = await page(lifecycleContext);
+        assert.equal(await open(lifecyclePage), 'ready');
+        const first = await enqueue(lifecyclePage);
+        const second = await enqueue(lifecyclePage, ARTIFACT, {
+          after: first.sequence,
+        });
+        await enqueue(lifecyclePage, ARTIFACT, { after: second.sequence });
+        await enqueue(lifecyclePage, OTHER);
+        await lifecyclePage.evaluate(() => {
+          globalThis.inspectLifecycle = async () => {
+            const db = await new Promise((resolve) => {
+              const pending = indexedDB.open('artifree-data-outbox');
+              pending.onsuccess = () => resolve(pending.result);
+            });
+            try {
+              const result = {};
+              for (const name of [
+                'intents',
+                'receipts',
+                'checkpoints',
+                'usage',
+              ])
+                result[name] = await new Promise((resolve) => {
+                  const request = db
+                    .transaction(name)
+                    .objectStore(name)
+                    .getAll();
+                  request.onsuccess = () => resolve(request.result);
+                });
+              return result;
+            } finally {
+              db.close();
+            }
+          };
+        });
+        const before = await lifecyclePage.evaluate(() => inspectLifecycle());
+        const result = await lifecyclePage.evaluate(
+          async ({ artifactId, action }) => {
+            const selection = await box.selectUnsent(artifactId, false, {
+              mode: 'offline',
+            });
+            const original = IDBObjectStore.prototype.delete;
+            IDBObjectStore.prototype.delete = function (...args) {
+              const pending = Reflect.apply(original, this, args);
+              if (this.name === 'intents') {
+                IDBObjectStore.prototype.delete = original;
+                pending.addEventListener(
+                  'success',
+                  () => {
+                    if (action === 'logout') box.invalidateAuthentication();
+                    else globalThis.lifecycleClose = box.close();
+                  },
+                  { once: true },
+                );
+              }
+              return pending;
+            };
+            let result;
+            try {
+              result = (await box.discardUnsent(selection)).kind;
+            } catch (error) {
+              result = error.code;
+            }
+            if (action === 'close') await lifecycleClose;
+            return result;
+          },
+          { artifactId: ARTIFACT, action },
+        );
+        const after = await lifecyclePage.evaluate(() => inspectLifecycle());
+        deletionLifecycle[action] = {
+          result,
+          unchanged: JSON.stringify(after) === JSON.stringify(before),
+          rows: after.intents.length,
+          usageRows: after.usage[0].rows,
+        };
+      } finally {
+        await lifecycleContext.close();
+      }
+    }
+    assert.deepEqual(
+      deletionLifecycle,
+      {
+        logout: {
+          result: 'owner_not_ready',
+          unchanged: true,
+          rows: 4,
+          usageRows: 4,
+        },
+        close: {
+          result: 'discarded_unsent',
+          unchanged: false,
+          rows: 1,
+          usageRows: 1,
+        },
+      },
+      'auth invalidation must abort the whole deleting transaction; close settles an already-started transaction',
+    );
+
+    // Close may run after revalidate's own check, before its caller resumes.
+    for (const depth of [2, 3]) {
+      const microtaskContext = await browser.newContext();
+      try {
+        const microtaskPage = await page(microtaskContext);
+        assert.equal(await open(microtaskPage), 'ready');
+        await enqueue(microtaskPage);
+        const retained = await rows(microtaskPage);
+        const outcome = await microtaskPage.evaluate(
+          async ({ artifactId, depth }) => {
+            const selection = await box.selectUnsent(artifactId);
+            globalThis.microtaskClosing = false;
+            let writes = 0;
+            const transaction = IDBDatabase.prototype.transaction;
+            IDBDatabase.prototype.transaction = function (...args) {
+              if (microtaskClosing && args[1] === 'readwrite') writes += 1;
+              return Reflect.apply(transaction, this, args);
+            };
+            const parse = JSON.parse;
+            JSON.parse = function (text, ...args) {
+              const value = Reflect.apply(parse, JSON, [text, ...args]);
+              if (text.includes('"actor_generation"')) {
+                JSON.parse = parse;
+                const schedule = (remaining) =>
+                  queueMicrotask(() => {
+                    if (remaining > 1) schedule(remaining - 1);
+                    else {
+                      microtaskClosing = true;
+                      globalThis.microtaskClose = box.close();
+                    }
+                  });
+                schedule(depth);
+              }
+              return value;
+            };
+            let result;
+            try {
+              result = (await box.discardUnsent(selection)).kind;
+            } catch (error) {
+              result = error.code;
+            }
+            await microtaskClose;
+            return { result, writes };
+          },
+          { artifactId: ARTIFACT, depth },
+        );
+        assert.deepEqual(
+          outcome,
+          { result: 'outbox_closed', writes: 0 },
+          'the final transaction boundary must recheck close after revalidate resolves',
+        );
+        assert.deepEqual(await rows(microtaskPage), retained);
+      } finally {
+        await microtaskContext.close();
+      }
+    }
+
+    // close() fences actions not yet in a local transaction, including late GETs.
+    const closingContext = await browser.newContext();
+    try {
+      const closingPage = await page(closingContext);
+      assert.equal(await open(closingPage), 'ready');
+      await enqueue(closingPage);
+      const retained = await rows(closingPage);
+      await closingPage.evaluate(async (artifactId) => {
+        globalThis.otherHandle = await outboxApi.openBrowserOutbox({
+          baseUrl: '',
+          accessToken: 'test-token',
+        });
+        globalThis.closingSelection = await box.selectUnsent(artifactId);
+        globalThis.closingMarker = false;
+        globalThis.postCloseWrites = 0;
+        const original = IDBDatabase.prototype.transaction;
+        IDBDatabase.prototype.transaction = function (...args) {
+          if (closingMarker && args[1] === 'readwrite') postCloseWrites += 1;
+          return Reflect.apply(original, this, args);
+        };
+        globalThis.closingOutcome = async (pending) => {
+          try {
+            const result = await pending;
+            return result?.kind ?? 'accepted';
+          } catch (error) {
+            return error.code;
+          }
+        };
+      }, ARTIFACT);
+      assert.equal(await closingPage.evaluate(() => otherHandle === box), true);
+      mode = 'binding_hold';
+      const entered = new Promise((resolve) => {
+        onBindingHeld = resolve;
+      });
+      await closingPage.evaluate(() => {
+        globalThis.pendingDiscard = closingOutcome(
+          box.discardUnsent(closingSelection),
+        );
+      });
+      await entered;
+      await closingPage.evaluate((artifactId) => {
+        globalThis.pendingEnqueue = closingOutcome(
+          box.enqueue({
+            artifactId,
+            path: '',
+            base: { version: 0 },
+            operation: 'set',
+            value: 1,
+          }),
+        );
+        globalThis.pendingSelection = closingOutcome(
+          box.selectUnsent(artifactId),
+        );
+        closingMarker = true;
+        globalThis.pendingClose = otherHandle.close();
+      }, ARTIFACT);
+      mode = 'normal';
+      for (const response of heldBindings.splice(0))
+        response.end(JSON.stringify(currentBinding));
+      const closed = await closingPage.evaluate(async () => {
+        const outcomes = await Promise.all([
+          pendingDiscard,
+          pendingEnqueue,
+          pendingSelection,
+        ]);
+        await pendingClose;
+        return {
+          outcomes,
+          writes: postCloseWrites,
+          state: box.state,
+          other: await closingOutcome(
+            otherHandle.enqueue({
+              artifactId: 'art_' + 'a'.repeat(32),
+              path: '',
+              base: { version: 0 },
+              operation: 'delete',
+            }),
+          ),
+        };
+      });
+      assert.equal(
+        closed.writes,
+        0,
+        'close must fence newly started write transactions after a held binding GET',
+      );
+      assert.deepEqual(closed, {
+        outcomes: ['outbox_closed', 'outbox_closed', 'outbox_closed'],
+        writes: 0,
+        state: { kind: 'closed' },
+        other: 'outbox_closed',
+      });
+      assert.deepEqual(await rows(closingPage), retained);
+    } finally {
+      mode = 'normal';
+      onBindingHeld = undefined;
+      await closingContext.close();
+    }
+
+    // An IDB transaction already in progress settles before explicit close.
+    const settlingContext = await browser.newContext();
+    try {
+      const settlingPage = await page(settlingContext);
+      assert.equal(await open(settlingPage), 'ready');
+      const settled = await settlingPage.evaluate(async (artifactId) => {
+        const original = IDBObjectStore.prototype.add;
+        IDBObjectStore.prototype.add = function (...args) {
+          const pending = Reflect.apply(original, this, args);
+          if (this.name === 'intents') {
+            IDBObjectStore.prototype.add = original;
+            pending.addEventListener(
+              'success',
+              () => {
+                globalThis.settlingClose = box.close();
+              },
+              { once: true },
+            );
+          }
+          return pending;
+        };
+        const result = await box.enqueue({
+          artifactId,
+          path: '',
+          base: { version: 0 },
+          operation: 'set',
+          value: 1,
+        });
+        await settlingClose;
+        return { result, state: box.state };
+      }, ARTIFACT);
+      assert.equal(settled.result.kind, 'durably_enqueued');
+      assert.deepEqual(settled.state, { kind: 'closed' });
+      assert.equal((await rows(settlingPage)).length, 1);
+      assert.equal(
+        (await rows(settlingPage))[0].key,
+        settled.result.idempotencyKey,
+      );
+    } finally {
+      await settlingContext.close();
+    }
+
+    // Explicit unsent cleanup is independent of confirming a recovered queue.
+    const cleanupContext = await browser.newContext();
+    try {
+      const cleanupPage = await page(cleanupContext);
+      assert.equal(await open(cleanupPage), 'ready');
+      const head = await enqueue(cleanupPage);
+      await enqueue(cleanupPage, ARTIFACT, { after: head.sequence });
+      await enqueue(cleanupPage, ARTIFACT, { version: 7 });
+      const owner = await cleanupPage.evaluate(
+        (key) => sessionStorage.getItem(key),
+        OWNER,
+      );
+      await cleanupPage.evaluate(() => box.close());
+      assert.equal(await open(cleanupPage), 'recovery_required');
+      await cleanupPage.evaluate(() => {
+        globalThis.priorRecovery = box.state.selection;
+      });
+      await assert.rejects(enqueue(cleanupPage), /owner_not_ready/);
+      assert.deepEqual(
+        await cleanupPage.evaluate(
+          async (artifactId) =>
+            box.discardUnsent(await box.selectUnsent(artifactId)),
+          ARTIFACT,
+        ),
+        { kind: 'discarded_unsent' },
+      );
+      assert.equal((await rows(cleanupPage)).length, 1);
+      assert.deepEqual((await rows(cleanupPage))[0].base, { version: 7 });
+      assert.equal(
+        await cleanupPage.evaluate((key) => sessionStorage.getItem(key), OWNER),
+        owner,
+      );
+      await assert.rejects(enqueue(cleanupPage), /owner_not_ready/);
+      await assert.rejects(
+        cleanupPage.evaluate(() => box.confirmRecovery(priorRecovery)),
+        /invalid_selection/,
+      );
+      const savedCleanup = await page(cleanupContext);
+      await savedCleanup.evaluate(
+        ({ key, owner }) => sessionStorage.setItem(key, owner),
+        { key: OWNER, owner },
+      );
+      assert.equal(await open(savedCleanup), 'owner_busy');
+      await cleanupPage.evaluate(() => box.close());
+      assert.equal(
+        await savedCleanup.evaluate(
+          async () => (await box.retryRecoveryCandidate()).kind,
+        ),
+        'recovery_required',
+      );
+      assert.deepEqual(
+        await savedCleanup.evaluate(
+          async (artifactId) =>
+            box.discardUnsent(await box.selectUnsent(artifactId, true)),
+          ARTIFACT,
+        ),
+        { kind: 'discarded_unsent' },
+      );
+      assert.equal((await rows(savedCleanup)).length, 0);
+      assert.equal(
+        await savedCleanup.evaluate(
+          (key) => sessionStorage.getItem(key),
+          CANDIDATE,
+        ),
+        owner,
+      );
+      await savedCleanup.evaluate(() => {
+        const original = Storage.prototype.removeItem;
+        Storage.prototype.removeItem = function () {
+          Storage.prototype.removeItem = original;
+          throw new DOMException('injected', 'SecurityError');
+        };
+      });
+      await assert.rejects(
+        savedCleanup.evaluate(() => box.clearRecoveryCandidate()),
+        /storage_failed/,
+      );
+      assert.equal(
+        await savedCleanup.evaluate(
+          (key) => sessionStorage.getItem(key),
+          CANDIDATE,
+        ),
+        owner,
+      );
+      await savedCleanup.evaluate(() => box.clearRecoveryCandidate());
+      assert.equal(
+        (await enqueue(savedCleanup)).kind,
+        'durably_enqueued',
+        'saved-queue disposal does not adopt it; independent fresh-owner admission remains available',
+      );
+    } finally {
+      await cleanupContext.close();
+    }
+
+    const generationCleanupContext = await browser.newContext();
+    try {
+      const generationCleanup = await page(generationCleanupContext);
+      currentBinding = { ...binding, actor_id: `u-${'e'.repeat(32)}` };
+      assert.equal(await open(generationCleanup), 'ready');
+      await enqueue(generationCleanup);
+      await generationCleanup.evaluate(() => box.close());
+      currentBinding = { ...currentBinding, actor_generation: '2' };
+      assert.equal(await open(generationCleanup), 'generation_changed');
+      assert.equal((await rows(generationCleanup))[0].admittedGeneration, '1');
+      await assert.rejects(enqueue(generationCleanup), /owner_not_ready/);
+      assert.deepEqual(
+        await generationCleanup.evaluate(
+          async (artifactId) =>
+            box.discardUnsent(await box.selectUnsent(artifactId)),
+          ARTIFACT,
+        ),
+        { kind: 'discarded_unsent' },
+      );
+      assert.equal((await rows(generationCleanup)).length, 0);
+      await assert.rejects(enqueue(generationCleanup), /owner_not_ready/);
+    } finally {
+      currentBinding = binding;
+      await generationCleanupContext.close();
+    }
 
     const aliasContext = await browser.newContext();
     try {
@@ -1439,5 +2181,103 @@ export async function checkOutbox(browser) {
     await context.close();
     await new Promise((resolve) => server.close(resolve));
     await new Promise((resolve) => target.close(resolve));
+  }
+}
+
+/** Real R08a server binding plus browser-local admission; no data HTTP mutation. */
+async function checkLiveBinding(browser, { origin, token }, module) {
+  const context = await browser.newContext();
+  try {
+    await context.route(`${origin}/__outbox-entry.js`, (route) =>
+      route.fulfill({ contentType: 'text/javascript', body: module }),
+    );
+    await context.route(`${origin}/__outbox-entry.html`, (route) =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: '<!doctype html><script type="module" src="/__outbox-entry.js"></script>',
+      }),
+    );
+    const page = await context.newPage();
+    const apiRequests = [];
+    page.on('request', (request) => {
+      if (request.url().startsWith(`${origin}/v1/`))
+        apiRequests.push({ method: request.method(), url: request.url() });
+    });
+    await page.goto(`${origin}/__outbox-entry.html`);
+    await page.waitForFunction(() => globalThis.outboxApi !== undefined);
+    assert.equal(
+      await page.evaluate(async () => {
+        try {
+          await outboxApi.openBrowserOutbox({
+            baseUrl: '',
+            accessToken: 'deliberately-invalid',
+          });
+          return 'accepted';
+        } catch (error) {
+          return error.code;
+        }
+      }),
+      'binding_failed',
+    );
+    assert.equal(await page.evaluate(() => sessionStorage.length), 0);
+    assert.equal(
+      await page.evaluate(async (token) => {
+        globalThis.box = await outboxApi.openBrowserOutbox({
+          baseUrl: '',
+          accessToken: token,
+        });
+        return box.state.kind;
+      }, token),
+      'ready',
+    );
+    const accepted = await page.evaluate(
+      async (artifactId) =>
+        box.enqueue({
+          artifactId,
+          path: 'raw//path',
+          base: { version: 0 },
+          operation: 'set',
+          value: new outboxApi.JsonText('{"n":9007199254740993}'),
+        }),
+      ARTIFACT,
+    );
+    assert.equal(accepted.kind, 'durably_enqueued');
+    const owner = await page.evaluate(
+      (key) => sessionStorage.getItem(key),
+      OWNER,
+    );
+    await page.reload();
+    await page.waitForFunction(() => globalThis.outboxApi !== undefined);
+    assert.equal(
+      await page.evaluate(async (token) => {
+        globalThis.box = await outboxApi.openBrowserOutbox({
+          baseUrl: '',
+          accessToken: token,
+        });
+        return box.state.kind;
+      }, token),
+      'recovery_required',
+    );
+    assert.equal(
+      await page.evaluate((key) => sessionStorage.getItem(key), OWNER),
+      owner,
+    );
+    assert.deepEqual(
+      await page.evaluate(
+        async (artifactId) =>
+          box.discardUnsent(await box.selectUnsent(artifactId)),
+        ARTIFACT,
+      ),
+      { kind: 'discarded_unsent' },
+    );
+    assert.deepEqual(
+      apiRequests,
+      Array(5).fill({ method: 'GET', url: `${origin}/v1/data-outbox/binding` }),
+    );
+    console.log(
+      'outbox: real server binding/auth, browser durable admission, reload and cleanup-only recovery passed',
+    );
+  } finally {
+    await context.close();
   }
 }

@@ -1,6 +1,7 @@
 # Browser-local application-data outbox
 
-Status: R08b local-storage implementation. R08 as a whole remains proposed.
+Status: R08b local-storage implementation ([0044](decisions/0044-browser-outbox-local.md)).
+R08 as a whole remains partially implemented; delivery and native-process recovery remain proposed.
 The browser entry point `@artifree/client/outbox` is opt-in. It does not prepare,
 transmit, replay, acknowledge, trim, retry delivery, or activate management UI
 or runtime-frame access. Existing direct clients are unchanged. R08a supplies
@@ -52,9 +53,23 @@ emptiness clears the reference. Existence probes include intents, receipt
 anchors and retained checkpoints across every binding, without reading foreign
 payloads. There is no orphan adoption.
 
-`selectUnsent(artifactId, recoveredCandidate?)` creates an opaque, page-local
-`UnsentDiscardSelection` for a never-prepared head. `discardUnsent(selection)`
-revalidates the authenticated binding, rejects stale/consumed/wrong-kind
+`listUnsentTargets(recoveredCandidate?, options?)` lists bounded original-target
+metadata only for the held owner's rows at this handle's authenticated actor and
+normalized API URL. It includes artifact ID, original storage epoch/admission
+generation and head sequence/version, never payloads or paths. Another actor or
+URL yields no targets. A saved candidate must first be deliberately locked by
+`retryRecoveryCandidate()`; this list never discovers/adopts orphans.
+
+`selectUnsent(artifactId, recoveredCandidate?, options?)` creates an opaque,
+page-local `UnsentDiscardSelection` for a never-prepared head. Options are
+`{mode?: 'online' | 'offline', storageEpoch?: string}`. The default mode is online;
+the default epoch is the current binding. To clean a retained same-actor/URL
+queue after restore, deliberately choose its original `storageEpoch` from the
+target list. `selection.target` presents that original target and
+`selection.mode` records the chosen mode; both are immutable. Neither can be
+copied/edited into a valid action for another profile or epoch.
+
+`discardUnsent(selection)` rejects stale/consumed/wrong-kind
 selections, and atomically removes that head and its complete unsent dependent
 closure while preserving independent rows. It reports `discarded_unsent` only
 after commit. A failed deletion transaction leaves rows and accounting intact,
@@ -63,8 +78,41 @@ closed/recovered; a new explicit disposal choice remains possible. No server
 key is released and no server receipt or rollback is claimed. Recovery tokens
 cannot authorize disposal.
 
-`close()` fences new actions, settles local transactions, and releases locks.
+An inherited or saved queue does not need `confirmRecovery` before this explicit
+local cleanup. Online selection and deletion each revalidate the binding and
+require the owner's lock. A changed epoch/generation permits only local removal
+of the selected original rows, without rewriting them, adopting their binding,
+or granting enqueue/recovery/delivery authority.
+
+Offline cleanup requires an explicit `{mode: 'offline'}` caller action, never an
+automatic fallback after a failed read. Selection and deletion make no HTTP
+request and require this still-open page's successful server binding proof,
+unchanged immutable profile/action authority and held owner lock. A new page
+must authenticate first; a remembered actor label/session ID is insufficient.
+Every outbox binding failure, including401, redirects, network or malformed-body
+failures, conservatively revokes that proof and all earlier/queued choices.
+Offline work then fails closed until a deliberate successful online action
+reestablishes the same binding, or a new authenticated handle is opened. No old
+selection is revived, and enqueue/recovery authority is not silently restored.
+
+Integrators **must call `invalidateAuthentication()` before logout or replacing
+the profile/credentials, and when a related401 or unresolved authentication
+invalidation is observed outside this outbox**. It terminally detaches that
+handle, invalidates its proof/selections, aborts its binding requests and active
+cleanup transaction, and retains its owner locks and rows. An old detached
+handle cannot reauthenticate itself or clean up offline. To use a new profile,
+explicitly close it and open a new authenticated handle. This opt-in library
+cannot observe another client's logout/401 unless the integrator forwards it.
+
+`close()` deliberately disposes the coordinator. It fences queued actions and
+late helper continuations before they can start a new transaction, settles
+already-started local transactions, and releases locks. Disconnect, network
+failure or logout does not automatically call it or release the owner lock.
 Closing the shared handle closes that document coordinator for all its callers.
+Unlike authentication revocation, close permits an already-started cleanup
+transaction to settle. Call `invalidateAuthentication()` first when disposing
+because of logout/profile replacement; close alone is not authentication
+revocation. No later response can start a new transaction after either fence.
 Declining recovery means leaving the retained rows untouched. Missing Web Locks,
 session storage, or IndexedDB refuses initialization; there is no volatile
 fallback. Losing session references leaves retained rows dormant.

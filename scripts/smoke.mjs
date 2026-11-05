@@ -155,7 +155,7 @@ async function checkAccessibility(label, target = page) {
 }
 try {
   browser = await engines[browserName].launch();
-  await checkOutbox(browser);
+  await checkOutbox(browser, { origin, token: api.token });
   context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
     reducedMotion: 'reduce',

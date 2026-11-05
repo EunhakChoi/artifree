@@ -52,6 +52,25 @@ export interface RecoverySelection {
 /** Opaque single-use choice for a never-prepared head and its dependent closure. */
 export interface UnsentDiscardSelection {
   readonly [discardBrand]: true;
+  readonly target: UnsentCleanupTarget;
+  readonly mode: 'online' | 'offline';
+}
+
+/** Original target metadata, restricted to this handle's authenticated actor/URL. */
+export interface UnsentCleanupTarget {
+  readonly apiBaseUrl: string;
+  readonly actorId: string;
+  readonly artifactId: string;
+  readonly storageEpoch: string;
+  readonly admittedGeneration: string;
+  readonly headSequence: number;
+  readonly recordVersion: number;
+}
+
+/** Offline is a deliberate choice, never a failed-network fallback. */
+export interface UnsentCleanupOptions {
+  readonly mode?: 'online' | 'offline';
+  readonly storageEpoch?: string;
 }
 
 /** No state in this local-only entry point authorizes network mutation. */

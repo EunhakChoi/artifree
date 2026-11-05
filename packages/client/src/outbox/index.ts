@@ -3,6 +3,7 @@ import { dataValueText, newRandomId } from '../client.js';
 import { normalizeBase, readBinding, validId } from './binding.js';
 import {
   bindingKey,
+  cleanupTarget,
   openStore,
   type BindingKey,
   type IntentRow,
@@ -17,6 +18,8 @@ import {
   type OutboxIntent,
   type RecoverySelection,
   type UnsentDiscardSelection,
+  type UnsentCleanupOptions,
+  type UnsentCleanupTarget,
 } from './types.js';
 
 export { OutboxError } from './types.js';
@@ -30,6 +33,8 @@ export type {
   OutboxIntent,
   RecoverySelection,
   UnsentDiscardSelection,
+  UnsentCleanupOptions,
+  UnsentCleanupTarget,
 } from './types.js';
 
 const ACTIVE = 'artifree-data-outbox-owner-v1';
@@ -41,10 +46,13 @@ interface HeldOwner {
 interface RecoveryContext {
   readonly owner: string;
   readonly rows: IntentRow[];
+  readonly authority: symbol;
 }
 interface DiscardContext {
   readonly owner: string;
   readonly rows: IntentRow[];
+  readonly authority: symbol;
+  readonly mode: 'online' | 'offline';
 }
 const PAGE_REGISTRY = Symbol.for('artifree.data-outbox.page-coordinator.v1');
 interface PageRegistry {
@@ -68,6 +76,8 @@ export type BrowserOutbox = Pick<
   | 'confirmRecovery'
   | 'clearRecoveryCandidate'
   | 'selectUnsent'
+  | 'listUnsentTargets'
+  | 'invalidateAuthentication'
   | 'discardUnsent'
   | 'close'
 >;
@@ -77,6 +87,39 @@ function saved(storage: Storage, key: string): string | null {
   if (value !== null && !validId(value))
     throw new OutboxError('storage_failed');
   return value;
+}
+
+function persistReference(
+  storage: Storage,
+  key: string,
+  value: string | null,
+): void {
+  try {
+    if (value === null) storage.removeItem(key);
+    else storage.setItem(key, value);
+  } catch {
+    throw new OutboxError('storage_failed');
+  }
+}
+
+function cleanupOptions(options: UnsentCleanupOptions): {
+  mode: 'online' | 'offline';
+  storageEpoch?: string;
+} {
+  if (
+    typeof options !== 'object' ||
+    options === null ||
+    Array.isArray(options) ||
+    Object.keys(options).some((key) => key !== 'mode' && key !== 'storageEpoch')
+  )
+    throw new OutboxError('invalid_selection');
+  const mode = options.mode ?? 'online';
+  if (mode !== 'online' && mode !== 'offline')
+    throw new OutboxError('invalid_selection');
+  const storageEpoch = options.storageEpoch;
+  if (storageEpoch === undefined) return { mode };
+  if (!validId(storageEpoch)) throw new OutboxError('invalid_selection');
+  return { mode, storageEpoch };
 }
 
 /** Nonblocking exclusive lock; rejection cannot escape as an unhandled promise. */
@@ -193,6 +236,11 @@ class LocalCoordinator {
   private candidate: string | null = null;
   private current: LocalOutboxState = { kind: 'closed' };
   private closing = false;
+  private detached = false;
+  private locallyAuthenticated = true;
+  private readonly stop = new AbortController();
+  private cleanupAuthorization = new AbortController();
+  private authority = Symbol();
   private tail: Promise<void> = Promise.resolve();
 
   /** Open through openBrowserOutbox to preserve the page registry/owner gate. */
@@ -214,9 +262,47 @@ class LocalCoordinator {
     return this.current;
   }
 
-  private serialize<T>(action: () => Promise<T>): Promise<T> {
+  private ensureOpen(): void {
+    if (this.closing) throw new OutboxError('outbox_closed');
+    if (this.detached) throw new OutboxError('owner_not_ready');
+  }
+
+  /** Revoke a logged-out/replaced profile without releasing its owner locks. */
+  invalidateAuthentication(): void {
+    this.detached = true;
+    this.revokeCleanupProof();
+    if (!this.closing) this.current = { kind: 'binding_paused' };
+    this.stop.abort();
+  }
+
+  private revokeCleanupProof(): void {
+    this.locallyAuthenticated = false;
+    this.authority = Symbol();
+    this.recovered.clear();
+    const pending = this.cleanupAuthorization;
+    this.cleanupAuthorization = new AbortController();
+    pending.abort();
+  }
+
+  private requireCleanupProof(): void {
+    this.ensureOpen();
+    if (!this.locallyAuthenticated) throw new OutboxError('owner_not_ready');
+  }
+
+  private async authorizeCleanup(mode: 'online' | 'offline'): Promise<void> {
+    if (mode === 'online') await this.revalidate();
+    this.requireCleanupProof();
+  }
+
+  private serialize<T>(
+    action: () => Promise<T>,
+    staleCode: 'owner_not_ready' | 'invalid_selection' = 'owner_not_ready',
+  ): Promise<T> {
     if (this.closing) return Promise.reject(new OutboxError('outbox_closed'));
+    const authority = this.authority;
     const result = this.tail.then(async () => {
+      this.ensureOpen();
+      if (authority !== this.authority) throw new OutboxError(staleCode);
       try {
         if (
           saved(this.storage, ACTIVE) !== this.owner ||
@@ -236,10 +322,19 @@ class LocalCoordinator {
   }
 
   private async hold(owner: string): Promise<boolean> {
+    this.ensureOpen();
     if (this.locks.has(owner)) return true;
     if (this.locks.size === 2) throw new OutboxError('recovery_reference_full');
     const held = await lockOwner(owner);
-    if (held === undefined) return false;
+    if (held === undefined) {
+      this.ensureOpen();
+      return false;
+    }
+    if (this.closing) {
+      held.release();
+      await held.settled;
+      throw new OutboxError('outbox_closed');
+    }
     this.locks.set(owner, held);
     return true;
   }
@@ -249,9 +344,11 @@ class LocalCoordinator {
     if (owner === this.owner || owner === this.candidate)
       throw new OutboxError('storage_failed');
     if (!(await this.hold(owner))) throw new OutboxError('owner_not_ready');
+    this.ensureOpen();
     if (await this.store.occupied(owner))
       throw new OutboxError('storage_failed');
-    this.storage.setItem(ACTIVE, owner);
+    this.ensureOpen();
+    persistReference(this.storage, ACTIVE, owner);
     this.owner = owner;
     this.recovered.add(owner);
     this.current = { kind: 'ready' };
@@ -271,7 +368,7 @@ class LocalCoordinator {
     if (!(await this.hold(active))) {
       if (candidate !== null && candidate !== active)
         throw new OutboxError('recovery_reference_full');
-      this.storage.setItem(CANDIDATE, active);
+      persistReference(this.storage, CANDIDATE, active);
       this.candidate = active;
       await this.fresh();
       this.current = { kind: 'owner_busy' };
@@ -289,15 +386,22 @@ class LocalCoordinator {
     this.current = await this.classify(active);
   }
 
-  private key(owner: string): BindingKey {
-    return bindingKey(this.base, this.binding, owner);
+  private key(owner: string, epoch = this.binding.storage_epoch): BindingKey {
+    const key = bindingKey(this.base, this.binding, owner);
+    key[3] = epoch;
+    return key;
   }
 
   private async classify(owner: string): Promise<LocalOutboxState> {
-    if (!(await this.store.occupied(owner))) return { kind: 'recovery_empty' };
-    if (!(await this.store.matches(this.key(owner))))
-      return { kind: 'owner_binding_quarantined' };
+    this.ensureOpen();
+    const occupied = await this.store.occupied(owner);
+    this.ensureOpen();
+    if (!occupied) return { kind: 'recovery_empty' };
+    const matches = await this.store.matches(this.key(owner));
+    this.ensureOpen();
+    if (!matches) return { kind: 'owner_binding_quarantined' };
     const rows = await this.store.recover(this.key(owner));
+    this.ensureOpen();
     if (rows.length === 0) return { kind: 'owner_binding_quarantined' };
     if (
       rows.some(
@@ -307,21 +411,27 @@ class LocalCoordinator {
       return { kind: 'generation_changed' };
     // The private type brand prevents TS interchange; WeakMap identity enforces it at runtime.
     const selection = Object.freeze({}) as RecoverySelection;
-    this.recoverySelections.set(selection, { owner, rows });
+    this.recoverySelections.set(selection, {
+      owner,
+      rows,
+      authority: this.authority,
+    });
     return { kind: 'recovery_required', selection };
   }
 
   private async revalidate(): Promise<void> {
     let fresh: Binding;
     try {
-      fresh = await readBinding(this.base, this.token);
+      fresh = await readBinding(this.base, this.token, this.stop.signal);
     } catch (error: unknown) {
-      this.recovered.clear();
+      this.ensureOpen();
+      this.revokeCleanupProof();
       this.current = { kind: 'binding_paused' };
       throw error;
     }
+    this.ensureOpen();
     if (JSON.stringify(fresh) !== JSON.stringify(this.binding)) {
-      this.recovered.clear();
+      this.revokeCleanupProof();
       this.current =
         fresh.actor_id === this.binding.actor_id &&
         fresh.storage_epoch === this.binding.storage_epoch
@@ -329,6 +439,7 @@ class LocalCoordinator {
           : { kind: 'owner_binding_quarantined' };
       throw new OutboxError('owner_not_ready');
     }
+    this.locallyAuthenticated = true;
   }
 
   /** Explicit retry only; saved candidates are never automatically inspected. */
@@ -338,7 +449,9 @@ class LocalCoordinator {
       if (candidate === null || saved(this.storage, CANDIDATE) !== candidate)
         throw new OutboxError('invalid_selection');
       await this.revalidate();
-      if (!(await this.hold(candidate))) return { kind: 'owner_busy' };
+      const held = await this.hold(candidate);
+      this.ensureOpen();
+      if (!held) return { kind: 'owner_busy' };
       return this.classify(candidate);
     });
   }
@@ -347,16 +460,22 @@ class LocalCoordinator {
   confirmRecovery(selection: RecoverySelection): Promise<void> {
     return this.serialize(async () => {
       const context = this.recoverySelections.get(selection);
-      if (context === undefined || !this.locks.has(context.owner))
+      if (
+        context === undefined ||
+        context.authority !== this.authority ||
+        !this.locks.has(context.owner)
+      )
         throw new OutboxError('invalid_selection');
       this.recoverySelections.delete(selection);
       await this.revalidate();
+      this.ensureOpen();
       const rows = await this.store.recover(this.key(context.owner));
+      this.ensureOpen();
       if (JSON.stringify(rows) !== JSON.stringify(context.rows))
         throw new OutboxError('invalid_selection');
       this.recovered.add(context.owner);
       if (context.owner === this.owner) this.current = { kind: 'ready' };
-    });
+    }, 'invalid_selection');
   }
 
   /** A saved reference can be cleared only explicitly under its lock and global emptiness. */
@@ -370,9 +489,11 @@ class LocalCoordinator {
       )
         throw new OutboxError('invalid_selection');
       await this.revalidate();
-      if (await this.store.occupied(candidate))
-        throw new OutboxError('owner_not_ready');
-      this.storage.removeItem(CANDIDATE);
+      this.ensureOpen();
+      const occupied = await this.store.occupied(candidate);
+      this.ensureOpen();
+      if (occupied) throw new OutboxError('owner_not_ready');
+      persistReference(this.storage, CANDIDATE, null);
       this.candidate = null;
       if (candidate === this.owner) return;
       const held = this.locks.get(candidate);
@@ -422,6 +543,7 @@ class LocalCoordinator {
         this.pausedLanes.has(JSON.stringify([...binding, snapshot.artifactId]))
       )
         throw new OutboxError('owner_not_ready');
+      this.ensureOpen();
       try {
         const row = await this.store.enqueue({
           format: 1,
@@ -453,24 +575,70 @@ class LocalCoordinator {
     });
   }
 
-  /** Select the head plus its unsent dependency closure, binding all lane versions. */
-  selectUnsent(
+  /** List bounded original targets for this authenticated actor/URL, without payloads. */
+  async listUnsentTargets(
+    recoveredCandidate = false,
+    options: UnsentCleanupOptions = {},
+  ): Promise<UnsentCleanupTarget[]> {
+    const { mode, storageEpoch } = cleanupOptions(options);
+    if (typeof recoveredCandidate !== 'boolean')
+      throw new OutboxError('invalid_selection');
+    return this.serialize(async () => {
+      const owner = recoveredCandidate ? this.candidate : this.owner;
+      if (owner === null || !this.locks.has(owner))
+        throw new OutboxError('owner_not_ready');
+      await this.authorizeCleanup(mode);
+      this.requireCleanupProof();
+      const targets = await this.store.cleanupTargets(
+        owner,
+        this.base,
+        this.binding.actor_id,
+      );
+      this.requireCleanupProof();
+      return storageEpoch === undefined
+        ? targets
+        : targets.filter((target) => target.storageEpoch === storageEpoch);
+    });
+  }
+
+  /** Select one original head/closure for explicit cleanup, never delivery authority. */
+  async selectUnsent(
     artifactId: string,
     recoveredCandidate = false,
+    options: UnsentCleanupOptions = {},
   ): Promise<UnsentDiscardSelection> {
+    const { mode, storageEpoch = this.binding.storage_epoch } =
+      cleanupOptions(options);
+    if (typeof recoveredCandidate !== 'boolean')
+      throw new OutboxError('invalid_selection');
     return this.serialize(async () => {
       const owner = recoveredCandidate ? this.candidate : this.owner;
       if (
         owner === null ||
-        !this.recovered.has(owner) ||
         !this.locks.has(owner) ||
         !/^art_[0-9a-f]{32}$/.test(artifactId)
       )
         throw new OutboxError('owner_not_ready');
-      const rows = await this.store.lane([...this.key(owner), artifactId]);
+      await this.authorizeCleanup(mode);
+      this.requireCleanupProof();
+      const rows = await this.store.lane([
+        ...this.key(owner, storageEpoch),
+        artifactId,
+      ]);
+      this.requireCleanupProof();
       if (rows.length === 0) throw new OutboxError('invalid_selection');
-      const selection = Object.freeze({}) as UnsentDiscardSelection;
-      this.discardSelections.set(selection, { owner, rows });
+      const head = rows[0];
+      if (head === undefined) throw new OutboxError('invalid_selection');
+      const selection = Object.freeze({
+        target: cleanupTarget(head),
+        mode,
+      }) as UnsentDiscardSelection;
+      this.discardSelections.set(selection, {
+        owner,
+        rows,
+        authority: this.authority,
+        mode,
+      });
       return selection;
     });
   }
@@ -483,14 +651,30 @@ class LocalCoordinator {
       const context = this.discardSelections.get(selection);
       if (
         context === undefined ||
-        !this.recovered.has(context.owner) ||
+        context.authority !== this.authority ||
         !this.locks.has(context.owner)
       )
         throw new OutboxError('invalid_selection');
       this.discardSelections.delete(selection);
-      await this.revalidate();
+      await this.authorizeCleanup(context.mode);
+      this.requireCleanupProof();
+      const authorization = this.cleanupAuthorization.signal;
       try {
-        await this.store.discard(context.rows);
+        await this.store.discard(
+          context.rows,
+          () => {
+            if (authorization.aborted || this.detached)
+              throw new OutboxError('owner_not_ready');
+            // Deliberate close settles an existing transaction; auth revocation aborts it.
+            if (!this.closing) this.requireCleanupProof();
+            if (
+              (!this.closing && context.authority !== this.authority) ||
+              !this.locks.has(context.owner)
+            )
+              throw new OutboxError('invalid_selection');
+          },
+          authorization,
+        );
       } catch (error: unknown) {
         if (error instanceof OutboxError && error.code === 'storage_failed') {
           const head = context.rows[0];
@@ -501,12 +685,15 @@ class LocalCoordinator {
         throw error;
       }
       return { kind: 'discarded_unsent' };
-    });
+    }, 'invalid_selection');
   }
 
   /** Fence new actions, settle accepted local operations, then release lifetime locks. */
   async close(): Promise<void> {
     this.closing = true;
+    this.authority = Symbol();
+    this.locallyAuthenticated = false;
+    this.stop.abort();
     await this.tail;
     this.current = { kind: 'closed' };
     this.store.close();
