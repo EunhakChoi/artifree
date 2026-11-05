@@ -45,6 +45,8 @@ filtering and usable delegated CPU, memory and process controllers. A release
 number or the existence of `/sys/fs/cgroup` is insufficient. At worker startup
 and before launch, verify actual namespace creation, controller writes/readback,
 kill/empty observation, immutable tool identity and policy installation. A
+supported host must also satisfy rule 5's core-dump admission policy; process
+namespaces do not make a host crash collector private. A
 distribution's LSM, container policy, WSL configuration or delegation may deny
 them. Report the missing facility without launching any untrusted code. WSL and
 container execution are unverified until their complete acceptance matrix passes.
@@ -81,12 +83,20 @@ against every kernel vulnerability. Existing iframe limits remain unchanged.
 ### 3. Immutable inputs and tools
 
 An attempt pins actor, artifact, source revision, job ID, attempt/fence, operation
-profile version and tool/dependency digest. Read input through existing access
+profile version, tool/dependency digest and the actor's enabled-state generation.
+For a registered non-owner user, read `users.state_generation` and enabled state
+in the same transaction that claims the attempt. Compare that pinned generation
+at launch readiness, every store heartbeat/guardian renewal, and durable-result
+publication, together with the current job fence and authority. A disable and
+re-enable between checkpoints must invalidate the old attempt even though the
+user is enabled again. Do not replace its pinned generation with the new one or
+continue it through a retry. The owner uses decision 0036's immutable owner
+identity; do not invent a disable operation for it. Read input through existing access
 and revision checks, verify every listed file's length/digest, and stage a fresh
 bounded copy. Never follow a workspace symlink or read the mutable source head
-as execution input. Deny execution after purge or revoked authority; a new kind
-must explicitly define trash and disabled-user handling instead of inheriting
-trusted verification's permission to finish.
+as execution input. Deny execution after purge or revoked authority. Rule 6
+defines untrusted attempts' trash/disabled-user transitions; trusted verification
+keeps its existing continue-and-hide behavior.
 
 Use an operator-installed, versioned tool root with a complete digest manifest
 and licenses. It includes the launcher policy identity, runtime executable,
@@ -156,6 +166,42 @@ promise. A later workload that needs different bounds first amends this record.
 | Captured stdout plus stderr  | 1 MiB combined; exceeding it terminates the attempt               |
 | Descriptor count / core dump | 256 per process / zero core dump bytes                            |
 
+Zero core bytes requires more than a soft resource limit. The first backend
+admits only a reviewed kernel's ordinary file-mode `kernel.core_pattern`, with
+both soft and hard `RLIMIT_CORE` set to zero before the launcher can execute
+payload code. Keep those limits through `fork` and every `exec`, and deny
+payload resource-limit setters (including `setrlimit`, `prlimit64` mutation and
+ABI aliases) from altering them. A profile may permit read-only queries. Check
+the effective limits at the final trusted bootstrap boundary, not only in the
+worker's parent. No supported profile relies on an ELF constructor, injected
+preload, language startup hook or pre-exec `PR_SET_DUMPABLE=0`: execution can
+reset dumpability, and a crash can precede language startup.
+
+Read the real host's routing policy using the trusted supervisor, outside the
+payload's proc/mount view. Reject `|` pipe mode, `@` socket/request modes,
+unreadable or unknown routing, unreviewed kernel behavior, and hosts whose
+administrator cannot keep file-mode routing fixed for the entire admitted
+attempt and cleanup. Do not interpret an inaccessible collector as disabled.
+Kernel file-mode suppression must be verified for each admitted executable
+format; arbitrary binary formats are not added by a fixture. Piped and socket
+collectors run outside the payload's containment, and may receive memory even
+when its core limit is zero. Do not use the kernel's internal pipe-recursion
+sentinel as a portable security contract.
+
+`core_pattern` is a trusted host-global configuration condition, not a setting
+isolated by the namespaces used here. Artifree never writes it, stops a crash
+service, installs a collector or requests privileged global changes. A host
+already meeting the condition can qualify; another host gets the normal
+nonretryable unsupported-execution failure, with trusted features unaffected.
+The administrator must coordinate crash-policy changes by draining/stopping
+untrusted execution first. Recheck routing before each launch and heartbeat;
+on any change, stop admission and publication, kill/quarantine active attempts
+under rule 6 and require operator reconciliation. Polling cannot close the
+interval between a global policy change and a simultaneous crash or retract
+data already delivered to a collector. An uncoordinated change violates the
+trusted-host condition; do not claim its detection provides race-free
+containment. If that invariant cannot be established, refuse untrusted work.
+
 Apply cgroup `memory.max`, `memory.swap.max`, `memory.oom.group`, `cpu.max`
 and `pids.max` before payload execution. A CPU quota controls bandwidth, not
 total lifetime; the independent wall deadline is mandatory. Threads and
@@ -195,15 +241,17 @@ remain able to terminate the group when the payload hangs. The guardian watches
 supervisor liveness and a bounded renewal interval no longer than one third of
 the job lease; a lost supervisor or expired renewal kills the group. Renew the
 guardian only after a successful store heartbeat confirms the current fence,
-uncancelled state and continuing authority; local liveness messages alone
+uncancelled state, pinned actor state generation and continuing authority; a
+disable/re-enable epoch mismatch is a permanent stop for that attempt, not an
+opportunity to repin it. Local liveness messages alone
 cannot keep untrusted work alive. The guardian is outside the payload group,
 receives only attempt control handles,
 and never receives database credentials or source content.
 The guardian independently enforces the absolute monotonic wall deadline set
 at launch; no renewal, successful heartbeat or live supervisor extends it.
 
-On cancel, timeout, output/log limit, OOM, policy failure, lease loss, purge,
-disabled owner or graceful worker shutdown: stop publication, kill the entire
+On cancel, timeout, output/log limit, OOM, policy failure, lease loss, trash, purge,
+disabled actor or graceful worker shutdown: stop publication, kill the entire
 cgroup and wait for `cgroup.events` to report `populated=0`; reap owned children
 and unmount/release attempt resources. Cancellation acknowledgment remains
 distinct from completed cleanup. For untrusted kinds, record terminal
@@ -242,6 +290,35 @@ cleanup-before-terminal-transition in R02b. At-least-once execution remains;
 only the current fence may record a result. Do not weaken trusted verification's
 current state machine while adding this policy.
 
+For untrusted kinds, trash pauses queued/retry-scheduled jobs that have no live
+attempt, as decision 0030 does: they are hidden and unclaimable, and recovery
+can make them due again. Trash cancels a claimed/running untrusted attempt.
+In the same metadata transaction that moves the artifact to the trash, revoke
+that attempt's publication fence and retain its cleanup obligation; do not wait
+synchronously for process termination. Claim and trash transactions serialize,
+so either trash prevents claim or it revokes the already claimed attempt before
+further publication. Recovering the artifact never restores that fence, revives
+the payload or automatically retries the cancelled attempt. The old attempt
+reaches terminal `cancelled` only after confirmed cleanup; when recovered,
+clients can see its eventual cancelled outcome and may explicitly request a
+fresh keyed job. A background attempt's old result is never published after
+recovery. Source content stays in trash until normal purge; no source is copied
+into the cleanup record. Cleanup can run while the artifact is hidden, the user
+is disabled or the artifact has already been purged. This kind-specific policy
+does not change trusted verification's existing continue-and-hide behavior.
+
+Disabling a user invalidates every running untrusted attempt's pinned enabled
+epoch, even if re-enabled before a checkpoint. The next authoritative checkpoint
+refuses renewal/publication and starts or confirms cleanup; the independently
+bounded guardian ensures a stalled worker cannot retain its payload forever.
+No claim is allowed while disabled. Jobs that have never started may remain
+queued and first claim under the new enabled generation after re-enable, as
+decision 0036 allows. A previously invalidated attempt cannot do so: after
+cleanup it is cancelled, and a new keyed request is required. Persist the pinned
+generation with trusted execution control state so restart/restore cannot
+forget the mismatch. Recovery does not adopt a newer generation for an old
+attempt. Current trusted jobs retain decisions 0030/0036 behavior unchanged.
+
 In particular, decision 0030 rule 15 currently makes purge immediately cancel
 open jobs. For new untrusted kinds, purge must instead revoke publication and
 raise the fence in its normal transaction, erase source/results as before, and
@@ -253,7 +330,7 @@ former owner. Only after emptiness is confirmed does it mark execution settled
 and the untrusted job terminal. A failed cleanup keeps the tombstone and
 quarantine; it cannot be erased by purge or by an actor's disablement. The
 tombstone contains only trusted control identities and state, no source, logs,
-output, credentials or digests that retain content. Disabled owners and restore
+output, credentials or digests that retain content. Disabled users and restore
 retain the same cleanup obligation; they cannot turn a pending marker into
 proof of settlement. R02b must update the kind-specific storage transitions,
 backup/restore invariants and these ADR cross-references together. Existing
@@ -275,10 +352,11 @@ copying is part of collection. Test same-size replacement and symlink races;
 re-reading bytes by an unchecked pathname is forbidden.
 
 Calculate digests over admitted bytes, and bind the manifest to the pinned
-actor, artifact, source revision, profile/tool digest, job and fence. Nonzero
+actor, actor state generation, artifact, source revision, profile/tool digest,
+job and fence. Nonzero
 exit, violated limits, failed cleanup or invalid output produces no usable
 result. Tool exit zero alone is insufficient. Check authority, artifact state,
-cancel status and fence again in the transaction that publishes a durable
+cancel status, pinned enabled-state generation and fence again in the transaction that publishes a durable
 receipt. If a newer revision is head, an older result may describe only its
 pinned revision; it must never replace the newer revision's running preview.
 
@@ -327,6 +405,45 @@ attempt or usable output appears before confirmed group emptiness. A stuck
 cleanup retains quarantine; completed cleanup permits one later fresh attempt
 on an accessible artifact. Test these assertions after forced worker death too.
 
+R02b must hold an attempt before a heartbeat and before result publication,
+disable and re-enable its non-owner user, and prove that both paths reject the
+old pinned `users.state_generation`, stop the guardian and discard output.
+Re-enabling before the next poll must not conceal the transition. Show that a
+never-started queued job can first claim under the new generation, while a
+cancelled running attempt requires a new keyed request after cleanup. Repeat
+the stale-generation case across worker restart/restore. Separately race
+claim/launch, heartbeat and publication with trash followed immediately by
+recovery; the old attempt cannot renew or publish, cleanup remains reachable,
+and the recovered artifact requires a fresh job for that cancelled attempt.
+Verify queued/retry waiting resumes and existing trusted continue-and-hide
+behavior remains intact.
+
+R02a's real crash acceptance runs only on a dedicated, safely isolated test host
+with an operator-controlled crash policy, not on a contributor's ordinary host
+or inside a namespace assumed to isolate global sysctls. In admitted file mode,
+execute a fixture that holds only synthetic memory, forks, execs a second
+fixture and then crashes through SIGSEGV and SIGABRT paths. Exercise attempts
+to alter core limits and dumpability before the crash, including mutations
+that remove limit enforcement. Assert effective soft/hard limits, expected
+post-exec fixture execution, zero core files in scratch/output and host collector
+locations, zero collector invocations/connections and completed descendant
+cleanup. A reported signal or clean application log alone is not evidence of
+suppression. A deliberately broken limit guard must make the test fail for the
+unexpected core artifact; arrange a bounded nonzero parent core limit and a
+controlled scratch-relative file pattern on that dedicated host so the mutation
+cannot pass merely because its parent already disabled dumps. Restore it
+afterwards.
+
+On that dedicated host, use controlled pipe and socket policies with independent
+collector counters to prove admission refuses before any payload runs and no
+collector is contacted. Also test unreadable/unknown routing and changed policy
+causing stop/quarantine. The contributor's actual host gets read-only routing
+inspection and refusal tests only when its policy is unsafe; never install a
+handler, rewrite sysctls or crash a payload there to obtain evidence. R02a must
+document the test host's privileged preparation separately from the product's
+rootless runtime requirements; missing safe-host crash evidence blocks the
+supported-host claim rather than silently skipping that acceptance case.
+
 No mocked kernel result establishes Linux enforcement. Kernel capability tests
 must report the exact environment and fail the supported-host acceptance job
 when required facilities are missing; ordinary unsupported-host tests separately
@@ -359,6 +476,16 @@ These are mechanism references, not evidence that Artifree enforces this policy.
 - [Linux Landlock documentation](https://docs.kernel.org/userspace-api/landlock.html)
   describes ABI-dependent access restrictions. Landlock is not required by this
   first backend and is not used as a substitute for namespace/network isolation.
+- [Linux 6.18 coredump implementation](https://github.com/torvalds/linux/blob/v6.18/fs/coredump.c)
+  distinguishes file, pipe and socket routes: file mode checks the core limit,
+  while pipe/socket routes can disregard it. This is kernel source evidence,
+  not an Artifree crash experiment or a guarantee for an unreviewed kernel.
+- [Linux 6.18 exec implementation](https://github.com/torvalds/linux/blob/v6.18/fs/exec.c)
+  resets dumpability during execution. A pre-exec nondumpable flag is not the
+  proposed cross-exec suppression boundary.
+- [Linux core routing documentation](https://docs.kernel.org/admin-guide/sysctl/kernel.html#core-pattern)
+  describes the host routing setting and pipe collector behavior. Product
+  namespaces do not authorize changing that host policy.
 
 No implementation quality score is raised by a proposed document. The existing
 design assessment remains 8.75/10, seven of eight diagnostics: placeholder
