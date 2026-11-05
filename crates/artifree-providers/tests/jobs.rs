@@ -974,12 +974,13 @@ fn only_the_job_owner_can_cancel_and_other_requests_are_not_found() -> TestResul
 fn a_released_job_goes_back_to_the_queue_without_using_an_attempt() -> TestResult {
     let fixture = Fixture::new()?;
     let job = fixture.queued("one", 0)?;
-    let held = fixture.claimed("a", 0)?;
+    let held = fixture.claimed("a", 1)?;
 
     let released = fixture.store.release_job(&held.lease, at(50))?;
 
     assert_eq!(released.state, JobState::Queued);
     assert_eq!(released.attempts, 0, "the attempt is given back");
+    assert_eq!(released.run_after, at(50));
     assert!(released.worker.is_none() && released.lease_expires_at.is_none());
     // The run that was released cannot write anything any more.
     assert_eq!(
@@ -989,7 +990,12 @@ fn a_released_job_goes_back_to_the_queue_without_using_an_attempt() -> TestResul
             .err(),
         Some(JobStoreError::LeaseLost)
     );
-    let next = fixture.claimed("b", 60)?;
+    assert!(
+        fixture.try_claim("b", 49)?.is_none(),
+        "a clock before the release time must leave the job queued"
+    );
+    assert_eq!(fixture.job(&job.id)?, released);
+    let next = fixture.claimed("b", 50)?;
     assert_eq!(next.job.id, job.id);
     assert_eq!((next.job.attempts, next.lease.fence), (1, 2));
     Ok(())

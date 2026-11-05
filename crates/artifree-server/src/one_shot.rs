@@ -10,7 +10,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use artifree_providers::data_dir;
@@ -18,7 +17,6 @@ use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
-use tokio::sync::watch;
 
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, DatabaseUsers};
@@ -26,6 +24,8 @@ use crate::preview;
 use crate::serve::{self, Ready, ServeOptions};
 use crate::session_sweep::{self, MARKER_FILE, SweepReport};
 use crate::web::WebAssets;
+
+pub use crate::shutdown::StopLatch;
 
 /// Name prefix of a session directory.
 pub const SESSION_PREFIX: &str = "artifree-session-";
@@ -77,47 +77,6 @@ pub struct OneShotOptions {
     pub session_root: Option<PathBuf>,
     /// Session lifetime, counted from the process start.
     pub ttl: Duration,
-}
-
-/// A request to end the session. Set by a signal, by the TTL timer, or by a
-/// test; once set it stays set.
-#[derive(Debug, Clone)]
-pub struct StopLatch {
-    flag: Arc<watch::Sender<bool>>,
-}
-
-impl Default for StopLatch {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StopLatch {
-    /// A latch that is not set.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            flag: Arc::new(watch::channel(false).0),
-        }
-    }
-
-    /// Requests a stop.
-    pub fn set(&self) {
-        self.flag.send_replace(true);
-    }
-
-    /// Whether a stop was requested.
-    #[must_use]
-    pub fn is_set(&self) -> bool {
-        *self.flag.borrow()
-    }
-
-    /// Completes once a stop was requested.
-    pub async fn wait(&self) {
-        let mut receiver = self.flag.subscribe();
-        // The sender lives in this latch, so the channel cannot close.
-        drop(receiver.wait_for(|set| *set).await);
-    }
 }
 
 /// Makes signals and the lifetime set `stop`. Must run before the session
@@ -770,6 +729,7 @@ where
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::sync::Arc;
 
     #[test]
     fn ttl_accepts_digits_in_range_only() {

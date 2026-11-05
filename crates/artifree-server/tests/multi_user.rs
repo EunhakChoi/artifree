@@ -16,7 +16,8 @@ use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
@@ -27,6 +28,7 @@ use artifree_providers::tokens::SqliteTokenStore;
 use artifree_server::auth::AccessToken;
 use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
+use artifree_server::rooms::RoomClock;
 use artifree_server::{changes, preview};
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -52,10 +54,28 @@ const CAPABILITIES: [&str; 4] = [
     "source.write",
 ];
 
+/// Room leases move only when a test advances time, independent of `SQLite` or
+/// scheduler delays while the isolation tables walk the routes.
+#[derive(Debug, Default)]
+struct ManualRoomClock(AtomicU64);
+
+impl ManualRoomClock {
+    fn advance(&self, millis: u64) {
+        self.0.fetch_add(millis, Ordering::SeqCst);
+    }
+}
+
+impl RoomClock for ManualRoomClock {
+    fn elapsed(&self) -> Duration {
+        Duration::from_millis(self.0.load(Ordering::SeqCst))
+    }
+}
+
 struct Harness {
     directory: PathBuf,
     api: Router,
     content: Router,
+    room_clock: Arc<ManualRoomClock>,
 }
 
 impl Harness {
@@ -74,7 +94,9 @@ impl Harness {
         std::fs::create_dir_all(&directory)
             .unwrap_or_else(|error| panic!("cannot create test directory: {error}"));
         let database = directory.join("db.sqlite3");
+        let room_clock = Arc::new(ManualRoomClock::default());
         let mut settings = Settings {
+            room_clock: room_clock.clone(),
             content_origin: CONTENT_ORIGIN.into(),
             preview_ttl: Duration::from_secs(60),
             frame_ancestors: "http://127.0.0.1:*".into(),
@@ -103,6 +125,7 @@ impl Harness {
                 ([127, 0, 0, 1], 40_000),
             )))),
             content: preview::router(state),
+            room_clock,
         }
     }
 
@@ -1344,6 +1367,43 @@ async fn nobody_else_can_reach_what_a_user_holds_over_http() -> TestResult {
     .await?;
     state_is_untouched(&harness, &alice, &ids).await?;
     the_holder_is_not_refused(&harness, &alice, &ids).await
+}
+
+#[tokio::test]
+async fn a_users_room_participant_expires_at_its_lease_boundary() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let ids = fixture(&harness, &alice, "alice").await?;
+    let heartbeat = ids.fill(
+        "/v1/runtime-sessions/{session}/artifacts/{artifact}/room/participants/{participant}/{epoch}/heartbeat",
+    );
+
+    harness.room_clock.advance(14_999);
+    let renewed: Value = harness
+        .expect(
+            200,
+            "POST",
+            &heartbeat,
+            &alice.secret,
+            None,
+            Some(json!({ "after": 0 })),
+        )
+        .await?;
+    assert_eq!(renewed["participant"], ids.participant);
+
+    harness.room_clock.advance(15_000);
+    let expired: Value = harness
+        .expect(
+            404,
+            "POST",
+            &heartbeat,
+            &alice.secret,
+            None,
+            Some(json!({ "after": 0 })),
+        )
+        .await?;
+    assert_eq!(expired["error"]["code"], "not_found");
+    Ok(())
 }
 
 /// Creates an artifact for `token` and moves it to the trash; returns its id

@@ -14,6 +14,7 @@ use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
 use crate::preview;
+use crate::shutdown::StopLatch;
 use crate::web::WebAssets;
 
 /// Default API address; loopback only.
@@ -88,7 +89,7 @@ pub struct Ready {
 ///
 /// When the data directory, database, token, runtime, or a listener cannot be
 /// set up, when the data directory is accessible to other users (Unix), or
-/// when a listener fails while serving.
+/// when stop signals cannot be registered, or when a listener fails while serving.
 pub fn run(options: ServeOptions, on_ready: impl FnOnce(&Ready)) -> Result<(), String> {
     data_dir::prepare_data_dir(&options.data_dir)?;
     let db_path = options.data_dir.join(DATABASE_FILE);
@@ -147,6 +148,10 @@ async fn serve_listeners(
     } else {
         None
     };
+    // Register signals before publishing readiness. All listeners retain the
+    // same stop request even when their shutdown futures start after it.
+    let stop = StopLatch::new();
+    install_stop_sources(&stop)?;
     on_ready(&Ready {
         api_url,
         web_url,
@@ -156,13 +161,18 @@ async fn serve_listeners(
         data_dir: options.data_dir.clone(),
     });
     let streams = state.clone();
+    let on_stop = |stop: &StopLatch| {
+        let stop = stop.clone();
+        async move { stop.wait().await }
+    };
+    let api_stop = on_stop(&stop);
     let api_server = axum::serve(
         api,
         http::router_with_web(state.clone(), web_assets.clone())
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        api_stop.await;
         // Open change streams would otherwise keep the server running.
         streams.close_streams();
     });
@@ -172,13 +182,13 @@ async fn serve_listeners(
             http::router_with_web(state.clone(), web_assets)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(on_stop(&stop))
     });
     let content_server = axum::serve(
         content,
         preview::router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal());
+    .with_graceful_shutdown(on_stop(&stop));
     tokio::try_join!(
         async {
             api_server
@@ -264,28 +274,29 @@ pub(crate) fn local_address(listener: &TcpListener) -> Result<SocketAddr, String
         .map_err(|error| format!("cannot read the bound address: {error}"))
 }
 
-/// Completes when the process receives Ctrl-C (SIGINT) or, on Unix, SIGTERM.
-/// If a handler cannot be installed, that signal is never delivered here.
-pub(crate) async fn shutdown_signal() {
-    let interrupt = async {
-        // If the handler cannot be installed, keep serving rather than exit.
-        if tokio::signal::ctrl_c().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    };
+/// Registers the server signals synchronously so readiness cannot precede them.
+fn install_stop_sources(stop: &StopLatch) -> Result<(), String> {
+    let cannot = |error: std::io::Error| format!("cannot listen for server stop signals: {error}");
     #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        for kind in [SignalKind::interrupt(), SignalKind::terminate()] {
+            let mut stream = signal(kind).map_err(cannot)?;
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                stream.recv().await;
+                stop.set();
+            });
         }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = interrupt => {}
-        () = terminate => {}
     }
+    #[cfg(not(unix))]
+    {
+        let mut ctrl_c = tokio::signal::windows::ctrl_c().map_err(cannot)?;
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            ctrl_c.recv().await;
+            stop.set();
+        });
+    }
+    Ok(())
 }
