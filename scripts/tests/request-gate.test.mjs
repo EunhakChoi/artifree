@@ -253,6 +253,80 @@ test('Reads are sent one at a time, in order; writes are not held', async () => 
   assert.equal((await second).status, 200);
 });
 
+test('A data follower queues its snapshot behind a running page read', async () => {
+  const view = page();
+  const api = server();
+  const artifact = `art_${'0'.repeat(32)}`;
+  const path = `/v1/artifacts/${artifact}/data`;
+  const asked = Promise.withResolvers();
+  const dispatched = Promise.withResolvers();
+  const stream = new ReadableStream({
+    start(controller) {
+      const ready = JSON.stringify({ cursor: `${'f'.repeat(32)}.0` });
+      controller.enqueue(
+        new TextEncoder().encode(`event: ready\ndata: ${ready}\n\n`),
+      );
+    },
+  });
+  const gate = new RequestGate(view.visibility, (input, init) => {
+    const pathname = new URL(input, 'http://x').pathname;
+    if (pathname === '/v1/changes')
+      return Promise.resolve(
+        new Response(stream, {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      );
+    const pending = api.send(input, init);
+    if (pathname === path) dispatched.resolve();
+    return pending;
+  });
+  const blocked = gate.fetch('http://x/v1/artifacts/blocker');
+  await settle();
+  const controller = new AbortController();
+  const delivered = [];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://x',
+    accessToken: 'token',
+    fetch(input, init) {
+      const pending = gate.fetch(input, init);
+      if (new URL(input, 'http://x').pathname === path) asked.resolve();
+      return pending;
+    },
+  });
+  const following = client.followData(artifact, {
+    signal: controller.signal,
+    onData(event) {
+      delivered.push(event);
+      controller.abort();
+    },
+  });
+  try {
+    await asked.promise;
+    await advance(STALL_MS - 1);
+    assert.deepEqual(api.paths(), ['GET /v1/artifacts/blocker']);
+    api.answer(0);
+    await (await blocked).text();
+    await dispatched.promise;
+    assert.deepEqual(api.paths(), ['GET /v1/artifacts/blocker', `GET ${path}`]);
+    api.answer(
+      1,
+      Response.json({
+        artifact_id: artifact,
+        path: '',
+        data_version: 0,
+        exists: true,
+        value: {},
+      }),
+    );
+    await following;
+    assert.equal(delivered[0]?.type, 'snapshot');
+    assert.equal(delivered[0]?.data.data_version, 0);
+  } finally {
+    controller.abort();
+    await following;
+  }
+});
+
 test('A frame call is sent at once, and a refusal of it holds no owner read', async () => {
   const { api, gate } = setup();
   const frame = '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/read';
