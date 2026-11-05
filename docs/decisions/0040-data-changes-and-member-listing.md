@@ -5,6 +5,11 @@ Date: 2026-11-04. Status: **proposed**. Builds on [0006](0006-change-feed.md),
 [0027](0027-backup-restore-and-schema-upgrade.md), [0031](0031-app-data.md),
 and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
 
+> Amended 2026-11-05 (documentation pull request): rules 9, 15, 17, and 22
+> (item 7) are clarified - check order of the listing, a note on `reset`, the
+> retry reset threshold is its own 30-second constant instead of `max`, and
+> findings outside the trust rules are recorded as issues.
+
 > **Implementation is tracked per slice** in "Implementation status" at the
 > end. This record fixed the design of R07 before any code. The Context
 > describes `main` before R07a-1; every other statement is a rule, or what a
@@ -110,7 +115,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
      `data_version`. `data_path_conflict`'s contract description gains this
      read case.
    - Checks: identifier (`404`), query (`400`), path (`422`), token (`400`),
-     access (`404`), then `at_data_version` and the value at the path (`409`). The `at_data_version` check comes first, then the value at the path.
+     access (`404`), then `at_data_version` (`409 data_conflict`), then the
+     value at the path (`409 data_path_conflict`).
 10. **Page token.** Opaque to clients, issued by the server: base64url
     without padding of a 16-byte tag followed by the last listed name in
     clear (1 to 64 bytes, so 17 to 80 bytes, 23 to 107 characters). The tag
@@ -302,8 +308,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     once per message and never retried. (6) Wire shapes come from the
     generated contract; no rule lives only in TypeScript. (7) A review finding
     asking for a check outside 1 to 6 is a follow-up, not a blocker. Such a
-    finding is recorded (in the pull request thread or the project backlog)
-    with a one-line reproduction and is never dropped, so no finding is hidden.
+    finding is recorded (as a GitHub issue or a roadmap row) with a one-line
+    reproduction and is never dropped, so no finding is hidden.
 
 ### Web data panel (R07e)
 
