@@ -1144,7 +1144,9 @@ export class ArtifreeClient {
       ?.trim()
       .toLowerCase();
     if (mediaType !== 'text/event-stream' || response.body === null) {
-      await response.body?.cancel().catch(() => undefined);
+      // Not awaited: a body that never settles its cancel must not hold the
+      // rejection back.
+      response.body?.cancel().catch(() => undefined);
       throw new ArtifreeApiError(
         `GET /v1/changes answered HTTP ${response.status} with ${mediaType ?? 'no content type'}, not an event stream.`,
         { status: response.status, code: 'invalid_response' },
@@ -1855,7 +1857,7 @@ function decodeText(
         yield decoder.decode(chunk.value, { stream: true });
       }
     } finally {
-      await watch.cancel();
+      watch.cancel();
     }
   }
   return chunks();

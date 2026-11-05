@@ -46,8 +46,12 @@ export interface BodyWatch {
    * sent no byte for {@link STALL_MS}.
    */
   readonly read: () => Promise<ReadableStreamReadResult<Uint8Array>>;
-  /** Cancels the body, which closes its connection, and stops the timer. */
-  readonly cancel: () => Promise<void>;
+  /**
+   * Stops the timer and the abort listener, and starts cancelling the body,
+   * which closes its connection. It does not wait for the body: a source may
+   * never settle its cancel, and no result may depend on it.
+   */
+  readonly cancel: () => void;
 }
 
 const DONE: ReadableStreamReadResult<Uint8Array> = {
@@ -89,12 +93,13 @@ export function watchBody(
     stopTimer = undefined;
     signal?.removeEventListener('abort', onAbort);
   };
-  const cancel = async (): Promise<void> => {
+  const cancel = (): void => {
     stopWatching();
-    await reader.cancel().catch(() => undefined);
+    // A failure to cancel leaves nothing to report: the read is over.
+    reader.cancel().catch(() => undefined);
   };
   const onAbort = (): void => {
-    void cancel();
+    cancel();
     pending?.resolve(DONE);
   };
   const arm = (): void => {
@@ -105,7 +110,7 @@ export function watchBody(
         `${subject} sent nothing for ${STALL_MS / 1000} seconds.`,
         undefined,
       );
-      void cancel();
+      cancel();
       pending?.reject(failure);
     });
   };
@@ -167,7 +172,7 @@ async function readBounded(
       chunks.push(chunk.value);
     }
   } finally {
-    await watch.cancel();
+    watch.cancel();
   }
   if (context.signal?.aborted === true)
     throw new ArtifreeApiError(`${context.subject} was lost.`, {

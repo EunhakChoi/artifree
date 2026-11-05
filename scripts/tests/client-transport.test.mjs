@@ -77,7 +77,7 @@ class FakeClock {
 }
 
 /** A response body fed by the test; `state` records what the client did. */
-function pushed({ status = 200, headers = {} } = {}) {
+function pushed({ status = 200, headers = {}, hangingCancel = false } = {}) {
   const state = { cancelled: false };
   let controller;
   const body = new ReadableStream({
@@ -86,6 +86,9 @@ function pushed({ status = 200, headers = {} } = {}) {
     },
     cancel() {
       state.cancelled = true;
+      // A source whose cancel never settles.
+      if (hangingCancel) return new Promise(() => {});
+      return undefined;
     },
   });
   return {
@@ -109,7 +112,10 @@ function pushed({ status = 200, headers = {} } = {}) {
  * A body that makes a chunk for each read and ends after `limit` reads, so a
  * client that does not stop at its bound reads all of them.
  */
-function pulled(chunk, { limit = 100, status = 200, headers = {} } = {}) {
+function pulled(
+  chunk,
+  { limit = 100, status = 200, headers = {}, hangingCancel = false } = {},
+) {
   const state = { cancelled: false, pulls: 0 };
   const body = new ReadableStream(
     {
@@ -120,6 +126,8 @@ function pulled(chunk, { limit = 100, status = 200, headers = {} } = {}) {
       },
       cancel() {
         state.cancelled = true;
+        if (hangingCancel) return new Promise(() => {});
+        return undefined;
       },
     },
     { highWaterMark: 0 },
@@ -980,4 +988,155 @@ test('A wait cancels its timer once, also when the clock fires after an abort', 
   // A clock that ignores its cancel still runs the callback.
   fire();
   assert.equal(cancels, 1);
+});
+
+// ---- A body whose cancel never settles must not hold a result back ----
+
+/** Records how `promise` ends, so that a hang is a failed assertion. */
+function track(promise) {
+  const tracked = { state: 'pending', value: undefined, error: undefined };
+  promise.then(
+    (value) => {
+      tracked.state = 'resolved';
+      tracked.value = value;
+    },
+    (error) => {
+      tracked.state = 'rejected';
+      tracked.error = error;
+    },
+  );
+  return tracked;
+}
+
+const bodyContext = (clock, signal) => ({
+  clock,
+  signal,
+  subject: 'The test connection',
+  keepCause: true,
+});
+
+test('A success body over the bound is refused although its cancel never settles', async () => {
+  const body = pulled('a'.repeat(100_000), { limit: 30, hangingCancel: true });
+  const read = track(
+    readBoundedJson(body.response, bodyContext(new FakeClock())),
+  );
+  await settle();
+  assert.equal(read.state, 'rejected');
+  assert.deepEqual(
+    [read.error.status, read.error.code],
+    [200, 'invalid_response'],
+  );
+  assert.equal(body.state.cancelled, true);
+});
+
+test('An error body over the bound lets its status decide although its cancel never settles', async () => {
+  const body = pulled(' '.repeat(10_000), {
+    status: 502,
+    hangingCancel: true,
+  });
+  const opening = track(
+    clientWith(() => body.response, { clock: new FakeClock() }).openChanges(),
+  );
+  await settle();
+  assert.equal(opening.state, 'rejected');
+  assert.deepEqual(
+    [opening.error.status, opening.error.code],
+    [502, 'invalid_response'],
+  );
+  assert.equal(body.state.cancelled, true);
+});
+
+test('An event-stream line over the bound is refused although the cancel never settles', async () => {
+  const body = pushed({ hangingCancel: true });
+  body.push(`:${'x'.repeat(65_536)}`);
+  const outcome = await readOpen(body);
+  assert.equal(outcome.ended?.code, 'invalid_response');
+  assert.equal(body.state.cancelled, true);
+});
+
+test('An abort ends a stream and a bounded read although the cancel never settles', async () => {
+  const clock = new FakeClock();
+  const streaming = pushed({ hangingCancel: true });
+  const controller = new AbortController();
+  const events = await clientWith(() => streaming.response, {
+    clock,
+  }).openChanges({ signal: controller.signal });
+  const outcome = reading(events);
+  await settle();
+  controller.abort();
+  await settle();
+  assert.equal(outcome.ended, 'ended');
+
+  const bounded = pushed({ status: 502, hangingCancel: true });
+  const second = new AbortController();
+  const read = track(
+    readBoundedErrorJson(bounded.response, bodyContext(clock, second.signal)),
+  );
+  await settle();
+  second.abort();
+  await settle();
+  assert.equal(read.state, 'rejected');
+  assert.equal(read.error.code, 'network_error');
+});
+
+test('A stall fails a stream and a bounded read although the cancel never settles', async () => {
+  const clock = new FakeClock();
+  const streaming = pushed({ hangingCancel: true });
+  const events = await clientWith(() => streaming.response, {
+    clock,
+  }).openChanges();
+  const outcome = reading(events);
+  const bounded = pushed({ hangingCancel: true });
+  const read = track(readBoundedJson(bounded.response, bodyContext(clock)));
+  await clock.advance(45_000);
+  assert.equal(outcome.ended?.code, 'network_error');
+  assert.equal(read.state, 'rejected');
+  assert.equal(read.error.code, 'network_error');
+});
+
+test('A response that is not an event stream is refused although its cancel never settles', async () => {
+  const body = pushed({
+    hangingCancel: true,
+    headers: { 'content-type': 'text/html' },
+  });
+  const opening = track(
+    clientWith(() => body.response, { clock: new FakeClock() }).openChanges(),
+  );
+  await settle();
+  assert.equal(opening.state, 'rejected');
+  assert.equal(opening.error.code, 'invalid_response');
+  assert.equal(body.state.cancelled, true);
+});
+
+/** A body whose reads and cancel never settle, even once cancelled. */
+const deadBody = () => ({
+  getReader: () => ({
+    read: () => new Promise(() => {}),
+    cancel: () => new Promise(() => {}),
+  }),
+});
+
+test('An abort ends a bounded read whose body settles neither read nor cancel', async () => {
+  const controller = new AbortController();
+  const read = track(
+    readBoundedErrorJson(
+      { body: deadBody(), status: 502 },
+      bodyContext(new FakeClock(), controller.signal),
+    ),
+  );
+  await settle();
+  controller.abort();
+  await settle();
+  assert.equal(read.state, 'rejected');
+  assert.equal(read.error.code, 'network_error');
+});
+
+test('A stall fails a bounded read whose body settles neither read nor cancel', async () => {
+  const clock = new FakeClock();
+  const read = track(
+    readBoundedJson({ body: deadBody(), status: 200 }, bodyContext(clock)),
+  );
+  await clock.advance(45_000);
+  assert.equal(read.state, 'rejected');
+  assert.equal(read.error.code, 'network_error');
 });
