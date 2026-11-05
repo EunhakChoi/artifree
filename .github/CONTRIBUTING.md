@@ -42,7 +42,9 @@ npm run build
 
 `check` and `build` are required for every PR, including documentation changes.
 Run focused tests while developing, then the applicable full checks. See the
-[README](../README.md#quick-start) for starting the local workspace.
+[README](../README.md#quick-start) for starting the local workspace. How tests
+are written and how heavy commands are isolated is in
+[testing practice](../docs/testing-practice.md).
 
 For web UI or standalone HTML changes, run the real-server smoke suite in both
 engines. If browser binaries are absent, install them through the locked local
