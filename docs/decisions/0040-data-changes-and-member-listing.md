@@ -244,7 +244,8 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     rejects. Revocation across processes stays X04.
 18. **Waits and stalls.** Once a response's headers have arrived, 45 seconds
     without a byte of its body (after the headers or the previous byte) is a
-    stall: the body is cancelled and the request fails as a network failure.
+    stall: the body is cancelled and the request fails as a network failure,
+    except for the body of an error response, which its status decides (below).
     Stream comments count; the server sends one every 15 idle seconds. **No
     timer runs on a request before its headers**: the page's request gate and
     the browser may hold a request without failing it (0007 decisions 1 and
@@ -298,7 +299,7 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     | abort before headers, in a body or stream | cancels; resolves; delivers no more | cancels; rejects        |
     | abort while waiting to reconnect          | resolves at once                    | never waits             |
     | no headers, however long                  | waits; no timer (rule 18)           | waits; no timer         |
-    | 45 s without a body byte after headers    | retry (stream or read)              | rejects `network_error` |
+    | 45 s silent success or stream body        | retry (stream or read)              | rejects `network_error` |
     | `onData` aborts                           | delivers no more; resolves          | —                       |
     | `onData` throws                           | rejects with it; never retried      | —                       |
     | `onData` aborts and throws                | resolves (abort wins)               | —                       |
