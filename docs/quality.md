@@ -595,7 +595,9 @@ calls keep reading whole bodies. The other rules are not checked.
 6. Wire shapes come from the generated contracts; no rule exists only in
    TypeScript.
 7. A review finding that asks for a check outside rules 1 to 6 is a follow-up,
-   not a blocker.
+   not a blocker. Such a finding is recorded (as a GitHub issue or a roadmap
+   row) with a one-line reproduction and is never dropped, so no finding is
+   hidden.
 
 ## CI and local use
 
