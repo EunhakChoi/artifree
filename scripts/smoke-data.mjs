@@ -3,7 +3,7 @@ import { expect } from '@playwright/test';
 import { setVisible } from './smoke-list.mjs';
 import { api } from './smoke-workspace.mjs';
 
-/** Reads application data only while its tab and the page are visible. */
+/** Follows application data only while its tab and the page are visible. */
 export async function checkData({ browser, origin, server }) {
   const { artifact } = await api(server, 'POST', '/v1/artifacts', {
     title: 'Data snapshot',
@@ -34,9 +34,6 @@ export async function checkData({ browser, origin, server }) {
     assert.equal(reads, 0, 'the data tab does not read before it is opened');
     await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
     await expect(workspace.getByText('Data version 0')).toBeVisible();
-    await expect(
-      workspace.getByText('Snapshot', { exact: true }),
-    ).toBeVisible();
     const panel = workspace.getByRole('tabpanel', { name: 'Data' });
     await expect(panel.locator('pre')).toHaveText('{}');
     await api(server, 'PUT', path, {
@@ -44,18 +41,19 @@ export async function checkData({ browser, origin, server }) {
       base_data_version: 0,
       value: { text: '<b>safe</b>' },
     });
-    await page.waitForTimeout(400);
-    await expect(panel.locator('pre')).toHaveText('{}');
-    await workspace.getByRole('tab', { name: 'Preview' }).click();
-    await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
     await expect(workspace.getByText('Data version 1')).toBeVisible();
     await expect(panel.locator('pre')).toContainText('<b>safe</b>');
     await expect(panel.locator('pre b')).toHaveCount(0);
+    const beforeIdle = reads;
+    await page.waitForTimeout(20_000);
+    assert.equal(reads, beforeIdle, 'an unchanged follower does not poll');
     const beforeHidden = reads;
     await setVisible(page, false);
     await expect(panel.locator('pre')).toHaveCount(0);
     await setVisible(page, true);
-    await expect(workspace.getByText('Data version 1')).toBeVisible();
+    await expect(workspace.getByText('Data version 1')).toBeVisible({
+      timeout: 20_000,
+    });
     assert.equal(
       reads,
       beforeHidden + 1,
@@ -91,8 +89,11 @@ export async function checkData({ browser, origin, server }) {
     );
     await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
     await started;
+    const whileHeld = reads;
     await workspace.getByRole('tab', { name: 'Preview' }).click();
     await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
+    await page.waitForTimeout(500);
+    assert.equal(reads, whileHeld, 'the old read retains the shared gate');
     // An already-sent read keeps the shared gate until its ten-second stall
     // bound. The next read can then finish before the held old answer.
     await expect(workspace.getByText('Data version 1')).toBeVisible({
@@ -106,13 +107,41 @@ export async function checkData({ browser, origin, server }) {
       `**${path}`,
       (route) =>
         route.fulfill({
-          status: 503,
-          json: { error: { code: 'unavailable', message: 'Storage is busy.' } },
+          status: 401,
+          json: {
+            error: { code: 'unauthenticated', message: 'Token rejected.' },
+          },
         }),
       { times: 1 },
     );
     await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
-    await expect(panel.getByRole('alert')).toContainText('Storage is busy.');
+    await expect(panel.getByRole('alert')).toContainText(
+      'access token was rejected',
+    );
+    await expect(panel.locator('pre')).toHaveCount(0);
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    await page.route(
+      `**${path}`,
+      (route) =>
+        route.fulfill({
+          status: 404,
+          json: { error: { code: 'not_found', message: 'Not found.' } },
+        }),
+      { times: 1 },
+    );
+    await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
+    await expect(panel.getByRole('alert')).toContainText('Data unavailable');
+    await expect(panel.locator('pre')).toHaveCount(0);
+    await workspace.getByRole('tab', { name: 'Preview' }).click();
+    await workspace.getByRole('tab', { name: 'Data', exact: true }).click();
+    await expect(workspace.getByText('Data version 1')).toBeVisible();
+    await api(server, 'PATCH', `/v1/artifacts/${artifact.id}`, {
+      base_metadata_revision: artifact.metadata_revision,
+      deleted: true,
+    });
+    await expect(
+      workspace.getByText('The open artifact was moved to the trash.'),
+    ).toBeVisible();
     await expect(panel.locator('pre')).toHaveCount(0);
   } finally {
     await context.close();
