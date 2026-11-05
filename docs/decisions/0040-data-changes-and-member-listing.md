@@ -1,6 +1,6 @@
 # 0040: Data changes in the feed and a member listing
 
-Date: 2026-11-04. Status: **proposed**. Builds on [0006](0006-change-feed.md),
+Date: 2026-11-04. Status: accepted. Builds on [0006](0006-change-feed.md),
 [0007](0007-live-web-workspace.md),
 [0027](0027-backup-restore-and-schema-upgrade.md), [0031](0031-app-data.md),
 and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
@@ -434,16 +434,16 @@ implementation it fails.
 One row per slice, updated by the pull request that implements it. R07a of the
 slice list above was planned as two pull requests; #87 carries both slices.
 
-| Slice  | What                                            | Status          | Pull request |
-| ------ | ----------------------------------------------- | --------------- | ------------ |
-| R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87          |
-| R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
-| R07b   | member listing (rules 7-11)                     | implemented     | #86          |
-| R07c-1 | client transport bounds and retry policy        | implemented     | #91          |
-| R07c-2 | `listDataMembers` (rules 20-22 for the listing) | implemented     | #94          |
-| R07c-3 | `followData` (rules 13-16, 20, 22)              | implemented     | #95          |
-| R07d   | user guides                                     | not implemented | -            |
-| R07e   | web data panel (rule 23)                        | implemented     | this change  |
+| Slice  | What                                            | Status      | Pull request |
+| ------ | ----------------------------------------------- | ----------- | ------------ |
+| R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented | #87          |
+| R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented | #87          |
+| R07b   | member listing (rules 7-11)                     | implemented | #86          |
+| R07c-1 | client transport bounds and retry policy        | implemented | #91          |
+| R07c-2 | `listDataMembers` (rules 20-22 for the listing) | implemented | #94          |
+| R07c-3 | `followData` (rules 13-16, 20, 22)              | implemented | #95          |
+| R07d   | user guides                                     | implemented | this change  |
+| R07e   | web data panel (rule 23)                        | implemented | #98          |
 
 R07a-1 and R07a-2 both landed in #87. The client's record of known kinds gained
 `data_changed`, which its type requires, and the web workspace's reducer ignores
