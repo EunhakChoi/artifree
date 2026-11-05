@@ -1,6 +1,8 @@
 # Transactional binding for browser application-data writes
 
-Status: implemented in this branch, pending the R08 specification in PR #100.
+Status: implemented. The R08 specification was merged in PR #100; this record
+implements the server portion of [0041](0041-browser-data-outbox.md), rules 2
+and 4 and the server cases of B1, B12 and B14.
 This is R08a only. Browser ownership, IndexedDB admission, delivery, crash
 recovery and management UI integration remain proposed (R08b–d).
 
