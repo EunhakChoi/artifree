@@ -10,6 +10,10 @@ and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
 > retry reset threshold is its own 30-second constant instead of `max`, and
 > findings outside the trust rules are recorded as issues.
 
+> Amended 2026-11-05 (second documentation pull request): rule 18 says that the
+> body of an error response keeps its `Retry-After` when it stalls, and rule 19
+> says how a line and an event are measured.
+
 > **Implementation is tracked per slice** in "Implementation status" at the
 > end. This record fixed the design of R07 before any code. The Context
 > describes `main` before R07a-1; every other statement is a rule, or what a
@@ -258,12 +262,18 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
     A body that trickles a byte at least every 45 s is bounded only by its
     size (rule 19) and the caller's `signal`.
 
+    A body that stalls, is lost, or is aborted after its headers arrived is a
+    network failure also when the response was an error: it keeps that
+    response's `Retry-After`, so a retry never waits less than the server asked
+    (rule 17).
+
 19. **Transport bounds**, checked as data arrives; the body is cancelled at
     once.
     - Event streams (the parser both functions share): 65,536 UTF-16 code
       units for the unfinished line, and for one event's data and type
-      together; past either, `invalid_response`. A change event today is
-      under 400.
+      together (a line is measured raw, field name included; an event is its
+      type plus its data lines joined with LF); past either, `invalid_response`.
+      A change event today is under 400.
     - Success bodies of reads by `followData` and `listDataMembers`: 1,064,960
       bytes (1 MiB + 16 KiB); past it, `invalid_response`. A `GET data` body is
       a space of at most 1,048,576 bytes and under 1,200 more. A page is at
