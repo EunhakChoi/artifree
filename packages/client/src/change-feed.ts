@@ -5,9 +5,12 @@ import { parseFeedChange, parseFeedPosition } from './responses.js';
 /**
  * A committed change. `change` is `'unknown'` for a kind added to the
  * contract after this client; the artifact changed either way.
+ * `data_version` is the version a data write left the space at, a safe
+ * integer of at least 1: present exactly when `change` is `'data_changed'`.
  */
-export type FeedChange = Omit<ArtifactChange, 'change'> & {
+export type FeedChange = Omit<ArtifactChange, 'change' | 'data_version'> & {
   readonly change: ChangeKind | 'unknown';
+  readonly data_version?: number;
 };
 
 /**

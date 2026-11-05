@@ -5,26 +5,28 @@ Date: 2026-11-04. Status: **proposed**. Builds on [0006](0006-change-feed.md),
 [0027](0027-backup-restore-and-schema-upgrade.md), [0031](0031-app-data.md),
 and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
 
-> **Nothing in this record is implemented.** It fixes the design of R07 before
-> any code. "Today" describes `main` as checked when this was written; every
-> other statement is what a slice will build. A code pull request may not
-> change a numbered rule; an amendment is a separate documentation pull request.
+> **Implementation is tracked per slice** in "Implementation status" at the
+> end. This record fixed the design of R07 before any code. The Context
+> describes `main` before R07a-1; every other statement is a rule, or what a
+> slice builds until its row there says it is implemented. A code pull request
+> may not change a numbered rule; an amendment is a separate documentation pull
+> request.
 
 Independent Artifree design: no private evidence was consulted, and nothing
 below is presented as an observation of the original product.
 
-## Context: what exists today
+## Context: what existed before R07a-1
 
-- Data writes (0031) record no change and wake no stream; clients poll
-  `GET data` (0031 decision 14). The store's `record_change` puts a row in the
+- Before R07a-1, data writes (0031) recorded no change and woke no stream;
+  clients poll `GET data` (0031 decision 14). The store's `record_change` puts a row in the
   feed of the artifact's owner (0036 decision 8). Data ownership is checked in
   the core (`ArtifactService::authorized`); the store's data write checks only
   that the artifact is neither in the trash nor purged.
-- `changes` (schema 10, current) admits six kinds by a `CHECK` and refers to
-  the revision and metadata revision by foreign keys. Contract: 0.14.0. API
+- `changes` (schema 10, then current) admits six kinds by a `CHECK` and refers to
+  the revision and metadata revision by foreign keys. Contract: 0.14.0 (0.15.0 with R07a-1). API
   responses carry `Cache-Control: no-store`.
-- The TypeScript client reports an unknown kind as `unknown` and ignores
-  unknown fields; the web workspace then reads its list again (0007 decision
+- Before R07a-1, the TypeScript client reports an unknown kind as `unknown`
+  and ignores unknown fields; the web workspace then reads its list again (0007 decision
   4). The event-stream parser and the JSON and error body reads have no size
   bound. `parseRetryAfter` takes 1 to 6 digits as seconds (no date, no other
   clamp, so up to 999,999 s); reconnecting waits that instead of its doubling
@@ -388,9 +390,36 @@ implementation it fails.
   for 20 s, longer than the 15-second reread of 0006 (fails polling), and
   trashing shows the notice.
 
-## Not implemented
+## Implementation status
 
-Everything above. What R07 excludes is listed under Scope.
+One row per slice, updated by the pull request that implements it. R07a of the
+slice list above was planned as two pull requests; #87 carries both slices.
+
+| Slice  | What                                            | Status          | Pull request |
+| ------ | ----------------------------------------------- | --------------- | ------------ |
+| R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87          |
+| R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
+| R07b   | member listing (rules 7-11)                     | implemented     | #86          |
+| R07c   | TypeScript client (rules 12-22)                 | not implemented | -            |
+| R07d   | user guides                                     | not implemented | -            |
+| R07e   | web data panel (rule 23)                        | not implemented | -            |
+
+R07a-1 and R07a-2 both landed in #87. The client's record of known kinds gained
+`data_changed`, which its type requires, and the web workspace's reducer ignores
+it: it changes nothing the page knows and reads nothing, for an open artifact, an
+unlisted one, and while the first read is pending (rule 6; 0007 decision 4).
+#87 also implements rule 12 in the client: `FeedChange` carries `data_version`
+for `data_changed` only, and an event that breaks that is `invalid_response`.
+The published schema and Rust deserialization state the same rule. Rules 13-22
+of R07c (`followData`, `listDataMembers`, the size and silence limits, the retry
+rules) are not implemented. What R07 excludes is listed under Scope.
+
+R07b landed in #86 (contract 0.16.0): `GET /v1/artifacts/{id}/data/members`
+with the query, response, check order, page token, and consistency of rules
+7-11, over HTTP only (no MCP tool, no client method). Where rule 9 lists
+`at_data_version` and the value at the path together, a stale version is
+reported first, then a value that is not an object. The listing's worst-case
+page measured 7,987 bytes against the 7,991 of rule 19.
 
 ## Alternatives
 

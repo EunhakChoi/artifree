@@ -135,6 +135,76 @@ test('API error bodies carry a known code and optional current revision', () => 
   );
 });
 
+test('A change event carries a data version of at least 1, only for a data change', () => {
+  const check = body('ArtifactChange');
+  const change = {
+    cursor: 'f'.repeat(32) + '.3',
+    artifact_id: 'art_0',
+    change: 'data_changed',
+    revision: 2,
+    metadata_revision: 1,
+    committed_at_ms: 1,
+  };
+  assert.equal(check({ ...change, data_version: 1 }), true);
+  assert.equal(check({ ...change, data_version: 9_007_199_254_740_991 }), true);
+  assert.equal(
+    check({ ...change, data_version: 0 }),
+    false,
+    'A data version of 0 is a space nobody wrote and is never announced.',
+  );
+  assert.equal(check({ ...change, data_version: -1 }), false);
+  const revised = { ...change, change: 'revised' };
+  assert.equal(check(revised), true, 'Other kinds omit the data version.');
+});
+
+test('A change event states its data version exactly when it is a data change', () => {
+  const check = body('ArtifactChange');
+  const change = {
+    cursor: 'f'.repeat(32) + '.3',
+    artifact_id: 'art_0',
+    revision: 2,
+    metadata_revision: 1,
+    committed_at_ms: 1,
+  };
+  const dataChanged = { ...change, change: 'data_changed' };
+  assert.equal(
+    check({ ...dataChanged, data_version: 4 }),
+    true,
+    JSON.stringify(check.errors),
+  );
+  assert.equal(
+    check(dataChanged),
+    false,
+    'A data change must name the version it left.',
+  );
+  assert.equal(
+    check({ ...dataChanged, data_version: null }),
+    false,
+    'Null is no version.',
+  );
+  for (const kind of [
+    'created',
+    'revised',
+    'metadata_updated',
+    'deleted',
+    'recovered',
+    'purged',
+  ]) {
+    const other = { ...change, change: kind };
+    assert.equal(check(other), true, `${kind} omits the data version.`);
+    assert.equal(
+      check({ ...other, data_version: 1 }),
+      false,
+      `${kind} must not carry a data version.`,
+    );
+    assert.equal(
+      check({ ...other, data_version: null }),
+      false,
+      `${kind} must not carry null.`,
+    );
+  }
+});
+
 test('A runtime view always states its SDK pin, including null for ordinary previews', () => {
   const check = body('RuntimeView');
   const view = {

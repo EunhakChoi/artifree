@@ -135,6 +135,9 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
     /// space is still at `base`. A change that alters nothing leaves the
     /// version and writes only the key.
     ///
+    /// A change that altered the space is also recorded in the actor's change
+    /// feed by the store (decision 0040).
+    ///
     /// Retrying with the same key and request returns the original outcome,
     /// the version it produced included, even after later writes. The same key
     /// for another request, or one of another kind, is

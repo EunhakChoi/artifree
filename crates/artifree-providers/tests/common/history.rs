@@ -285,3 +285,71 @@ CREATE TABLE data_requests (
     PRIMARY KEY (actor, request_key)
 ) STRICT, WITHOUT ROWID;
 ";
+
+/// Added in schema version 10 (decision 0036): the user registry, tokens that
+/// name their user, and a change table with a feed of each actor's own. The
+/// fixture puts the global head back after this rebuild, then runs
+/// [`STEP_10_HEADS`].
+pub const STEP_10: &str = "
+CREATE TABLE users (
+    id TEXT PRIMARY KEY CHECK (id = 'local' OR (length(id) = 34 AND substr(id, 1, 2) = 'u-'
+        AND NOT substr(id, 3) GLOB '*[^0-9a-f]*')),
+    label TEXT NOT NULL UNIQUE CHECK (length(label) BETWEEN 1 AND 64),
+    created_at TEXT NOT NULL,
+    disabled_at TEXT,
+    state_generation INTEGER NOT NULL DEFAULT 1 CHECK (state_generation >= 1),
+    CHECK (id <> 'local' OR disabled_at IS NULL)
+) STRICT, WITHOUT ROWID;
+INSERT INTO users (id, label, created_at)
+    VALUES ('local', 'Local owner', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+CREATE TABLE tokens_v10 (
+    id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL REFERENCES users (id),
+    name TEXT NOT NULL,
+    secret_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at TEXT
+) STRICT;
+INSERT INTO tokens_v10 (id, actor, name, secret_hash, prefix, created_at, last_used_at, revoked_at)
+    SELECT id, 'local', name, secret_hash, prefix, created_at, last_used_at, revoked_at FROM tokens;
+DROP TABLE tokens;
+ALTER TABLE tokens_v10 RENAME TO tokens;
+CREATE INDEX idx_tokens_secret_hash ON tokens (secret_hash);
+CREATE INDEX tokens_by_actor ON tokens (actor);
+CREATE TABLE actor_feeds (
+    actor TEXT PRIMARY KEY,
+    head INTEGER NOT NULL CHECK (head >= 0)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE changes_v10 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision)
+) STRICT;
+INSERT INTO changes_v10 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, committed_at)
+    SELECT c.sequence, coalesce(a.owner, 'local'), c.sequence, c.artifact_id, c.kind,
+        c.revision, c.metadata_revision, c.committed_at
+    FROM changes c LEFT JOIN artifacts a ON a.id = c.artifact_id;
+DROP TABLE changes;
+ALTER TABLE changes_v10 RENAME TO changes;
+";
+
+/// The heads every actor that has changes starts at in schema version 10: the
+/// global head, restored after the rebuild.
+pub const STEP_10_HEADS: &str = "
+INSERT INTO actor_feeds (actor, head)
+    SELECT DISTINCT c.actor, coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'changes'), 0)
+    FROM changes c;
+";

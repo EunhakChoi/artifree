@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 const SCHEMA: &str = "
 CREATE TABLE artifacts (
@@ -404,6 +404,40 @@ INSERT INTO actor_feeds (actor, head)
     FROM changes c;
 ";
 
+/// Added in schema version 11 (decision 0040): the change kind `data_changed`
+/// and the data version it carries. The change table is rebuilt for its
+/// checked kinds; every row keeps its global sequence, its actor and position
+/// in that actor's feed, and its other columns, and gets no data version.
+/// `data_version` is present exactly for the new kind and is at least 1.
+const DATA_CHANGE_SCHEMA: &str = "
+CREATE TABLE changes_v11 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged',
+         'data_changed')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    data_version INTEGER,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision),
+    CHECK ((kind = 'data_changed') = (data_version IS NOT NULL)),
+    CHECK (data_version IS NULL OR data_version >= 1)
+) STRICT;
+INSERT INTO changes_v11 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, committed_at)
+    SELECT sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+        committed_at
+    FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v11 RENAME TO changes;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -496,6 +530,9 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
                 "the upgrade to schema 10 would lose change rows ({before} before, {after} after)"
             )));
         }
+    }
+    if version < 11 {
+        rebuild_changes(&transaction, DATA_CHANGE_SCHEMA, 11)?;
     }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -838,6 +875,26 @@ fn change_rows(transaction: &Transaction<'_>) -> Result<i64, StoreError> {
         .map_err(unavailable)
 }
 
+/// Rebuilds the `changes` table with `schema` for the step to `version`, which
+/// keeps every row. The rebuilt feed holds as many rows as the old one, or the
+/// step fails and the caller's transaction, rolled back, changes nothing: a
+/// cursor a client holds must not point at a position that is gone.
+fn rebuild_changes(
+    transaction: &Transaction<'_>,
+    schema: &str,
+    version: i64,
+) -> Result<(), StoreError> {
+    let before = change_rows(transaction)?;
+    keeping_feed_head(transaction, schema)?;
+    let after = change_rows(transaction)?;
+    if before != after {
+        return Err(StoreError::Unavailable(format!(
+            "the upgrade to schema {version} would lose change rows ({before} before, {after} after)"
+        )));
+    }
+    Ok(())
+}
+
 /// Applies `schema`, which rebuilds the `changes` table, and keeps the change
 /// feed's head, which the rebuilt table would otherwise take from its largest
 /// row.
@@ -873,6 +930,40 @@ fn keeping_feed_head(transaction: &Transaction<'_>, schema: &str) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rebuild that would drop a row fails and, rolled back with its
+    /// transaction, leaves the table as it was; one that keeps every row does
+    /// not fail.
+    #[test]
+    fn a_rebuild_that_loses_a_change_row_fails_and_rolls_back() -> Result<(), rusqlite::Error> {
+        let mut connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE changes (sequence INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL);
+             INSERT INTO changes (kind) VALUES ('created'), ('revised'), ('purged');",
+        )?;
+        let lossy = "CREATE TABLE changes_next
+                (sequence INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL);
+             INSERT INTO changes_next SELECT sequence, kind FROM changes WHERE kind <> 'revised';
+             DROP TABLE changes;
+             ALTER TABLE changes_next RENAME TO changes;";
+        let faithful = lossy.replace(" WHERE kind <> 'revised'", "");
+
+        let transaction = connection.transaction()?;
+        let error = rebuild_changes(&transaction, lossy, 11).err();
+        drop(transaction);
+        assert!(
+            matches!(&error, Some(StoreError::Unavailable(reason))
+                if reason.contains("schema 11") && reason.contains("3 before, 2 after")),
+            "{error:?}"
+        );
+        let kept: i64 =
+            connection.query_row("SELECT count(*) FROM changes", [], |row| row.get(0))?;
+        assert_eq!(kept, 3, "the dropped transaction rolled the rebuild back");
+
+        let transaction = connection.transaction()?;
+        assert_eq!(rebuild_changes(&transaction, &faithful, 11).err(), None);
+        Ok(())
+    }
 
     #[test]
     fn clauses_are_read_from_tokens_not_from_substrings() {

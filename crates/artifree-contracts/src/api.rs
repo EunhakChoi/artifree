@@ -1531,6 +1531,11 @@ pub enum ChangeKind {
     /// The artifact was removed from the trash for good; reading it is
     /// `not_found` and it never returns.
     Purged,
+    /// A write changed the data space of the actor whose stream carries this
+    /// change. The event names the space's new `data_version`, and no path or
+    /// value; read the data again. The artifact's source and metadata did not
+    /// change.
+    DataChanged,
 }
 
 /// Summary information for an access token.
@@ -1643,11 +1648,17 @@ pub struct UserList {
 }
 
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
-/// revision or changed metadata. Retries that replay a commit, failed
-/// commits, and updates that changed nothing have none.
-/// It names what to read again and carries no content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// revision or changed metadata, or one data write that changed the actor's
+/// data space. Retries that replay a commit, failed commits, and updates that
+/// changed nothing have none. It names what to read again and carries no
+/// content, path, or value.
+///
+/// `data_version` is present exactly when `change` is `data_changed`: the
+/// published schema requires it for that kind and forbids it for every other
+/// kind, and deserializing refuses both violations (decision 0040).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = data_version_only_for_data_changes)]
 pub struct ArtifactChange {
     /// Opaque feed position of this change, also the event's `id`.
     pub cursor: String,
@@ -1656,12 +1667,125 @@ pub struct ArtifactChange {
     /// What the commit did.
     pub change: ChangeKind,
     /// The revision the commit created, or the current one for a metadata
-    /// change (`metadata_updated`, `deleted`, `recovered`, or `purged`).
+    /// change (`metadata_updated`, `deleted`, `recovered`, or `purged`) or a
+    /// data change (`data_changed`). Never a data version.
     pub revision: u64,
-    /// The metadata revision after the commit.
+    /// The metadata revision after the commit, or the current one for a data
+    /// change.
     pub metadata_revision: u64,
+    /// The version the write left the data space at, a positive number.
+    /// Present exactly for `data_changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 9_007_199_254_740_991_u64))]
+    pub data_version: Option<u64>,
     /// Commit time in Unix milliseconds.
     pub committed_at_ms: i64,
+}
+
+/// The largest whole number a JSON number states exactly.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Adds the kind-dependent rule to the schema of [`ArtifactChange`]: a data
+/// version for `data_changed`, none for any other kind. `null` is no data
+/// version in either branch.
+fn data_version_only_for_data_changes(schema: &mut schemars::Schema) {
+    schema.insert(
+        "if".to_owned(),
+        serde_json::json!({
+            "properties": { "change": { "const": "data_changed" } },
+            "required": ["change"]
+        }),
+    );
+    schema.insert(
+        "then".to_owned(),
+        serde_json::json!({
+            "properties": { "data_version": { "type": "integer" } },
+            "required": ["data_version"]
+        }),
+    );
+    schema.insert(
+        "else".to_owned(),
+        serde_json::json!({ "not": { "required": ["data_version"] } }),
+    );
+}
+
+/// The fields of an [`ArtifactChange`] as they arrive, before the rule that
+/// ties `data_version` to the kind is checked. The data version keeps the
+/// difference between absent and `null`, and `null` is refused like any other
+/// value that is no data version.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactChangeFields {
+    cursor: String,
+    artifact_id: String,
+    change: ChangeKind,
+    revision: u64,
+    metadata_revision: u64,
+    #[serde(default)]
+    data_version: DataVersionMember,
+    committed_at_ms: i64,
+}
+
+/// A `data_version` member as it arrived: not there, `null`, or a number.
+#[derive(Debug, Default, Clone, Copy)]
+enum DataVersionMember {
+    #[default]
+    Absent,
+    Null,
+    Number(u64),
+}
+
+impl<'de> Deserialize<'de> for DataVersionMember {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<u64>::deserialize(deserializer)
+            .map(|number| number.map_or(Self::Null, Self::Number))
+    }
+}
+
+// Written by hand because the derive would publish the schema of the fields
+// type, which has none of the documentation or the kind-dependent rule.
+impl<'de> Deserialize<'de> for ArtifactChange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        ArtifactChangeFields::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<ArtifactChangeFields> for ArtifactChange {
+    type Error = &'static str;
+
+    fn try_from(fields: ArtifactChangeFields) -> Result<Self, Self::Error> {
+        let data_version = match (fields.change, fields.data_version) {
+            (ChangeKind::DataChanged, DataVersionMember::Number(version))
+                if (1..=MAX_SAFE_INTEGER).contains(&version) =>
+            {
+                Some(version)
+            }
+            (ChangeKind::DataChanged, _) => {
+                return Err("a data_changed change needs a data_version from 1 to 2^53 - 1");
+            }
+            (_, DataVersionMember::Absent) => None,
+            (_, _) => {
+                return Err("only a data_changed change carries a data_version");
+            }
+        };
+        Ok(Self {
+            cursor: fields.cursor,
+            artifact_id: fields.artifact_id,
+            change: fields.change,
+            revision: fields.revision,
+            metadata_revision: fields.metadata_revision,
+            data_version,
+            committed_at_ms: fields.committed_at_ms,
+        })
+    }
 }
 
 /// Data of the `ready` and `reset` events of `GET /v1/changes`. `ready`

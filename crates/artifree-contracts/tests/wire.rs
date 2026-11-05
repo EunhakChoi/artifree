@@ -409,3 +409,118 @@ fn data_members_omit_an_absent_token_and_the_query_bounds_are_published() {
         9_007_199_254_740_991_u64
     );
 }
+
+/// A change event names a data version of at least 1: a space nobody wrote is
+/// at version 0 and no write leaves it there, so the published schema must not
+/// admit 0. Other kinds serialize without the field (decision 0040).
+#[test]
+fn a_change_event_publishes_its_data_version_bounds() -> Result<(), serde_json::Error> {
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<ArtifactChange>(),
+    )?;
+    assert_eq!(schema["properties"]["data_version"]["minimum"], 1);
+    assert_eq!(
+        schema["properties"]["data_version"]["maximum"],
+        9_007_199_254_740_991_u64
+    );
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        !required.contains(&"data_version"),
+        "the field is optional: {required:?}"
+    );
+
+    let revised: ArtifactChange = serde_json::from_value(serde_json::json!({
+        "cursor": "c.1", "artifact_id": "art_0", "change": "revised",
+        "revision": 1, "metadata_revision": 1, "committed_at_ms": 1
+    }))?;
+    assert!(
+        serde_json::to_value(&revised)?
+            .get("data_version")
+            .is_none(),
+        "a kind without a data version serializes without the field"
+    );
+    Ok(())
+}
+
+fn change_with(kind: &str, extra: &serde_json::Value) -> Result<ArtifactChange, serde_json::Error> {
+    let mut body = serde_json::json!({
+        "cursor": "c.1", "artifact_id": "art_0", "change": kind,
+        "revision": 1, "metadata_revision": 1, "committed_at_ms": 1
+    });
+    if let (Some(fields), Some(more)) = (body.as_object_mut(), extra.as_object()) {
+        fields.extend(
+            more.iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+    }
+    serde_json::from_value(body)
+}
+
+/// A change event states a data version exactly when it is a data change
+/// (decision 0040 rule 12), and a body that breaks the rule is not read at
+/// all: neither a data change without a version, nor another kind with one.
+#[test]
+fn a_change_event_reads_a_data_version_only_for_a_data_change() -> Result<(), serde_json::Error> {
+    let data = change_with("data_changed", &serde_json::json!({ "data_version": 3 }))?;
+    assert_eq!(data.data_version, Some(3));
+    let largest = change_with(
+        "data_changed",
+        &serde_json::json!({ "data_version": 9_007_199_254_740_991_u64 }),
+    )?;
+    assert_eq!(largest.data_version, Some(9_007_199_254_740_991));
+    assert_eq!(
+        change_with("revised", &serde_json::json!({}))?.data_version,
+        None
+    );
+
+    for refused in [
+        change_with("data_changed", &serde_json::json!({})),
+        change_with("data_changed", &serde_json::json!({ "data_version": null })),
+        change_with("data_changed", &serde_json::json!({ "data_version": 0 })),
+        change_with(
+            "data_changed",
+            &serde_json::json!({ "data_version": 9_007_199_254_740_992_u64 }),
+        ),
+        change_with("revised", &serde_json::json!({ "data_version": 1 })),
+        change_with("purged", &serde_json::json!({ "data_version": 1 })),
+        change_with("revised", &serde_json::json!({ "data_version": null })),
+    ] {
+        assert!(refused.is_err(), "a change breaking the rule was read");
+    }
+    Ok(())
+}
+
+/// The published schema says what deserializing does: a data version is
+/// required for `data_changed` and forbidden otherwise, and the schema keeps
+/// its name and body so generated types do not change.
+#[test]
+fn a_change_event_publishes_the_kind_dependent_data_version() -> Result<(), serde_json::Error> {
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<ArtifactChange>(),
+    )?;
+    assert_eq!(
+        schema["if"],
+        serde_json::json!({
+            "properties": { "change": { "const": "data_changed" } },
+            "required": ["change"]
+        })
+    );
+    assert_eq!(
+        schema["then"]["required"],
+        serde_json::json!(["data_version"])
+    );
+    assert_eq!(
+        schema["else"],
+        serde_json::json!({ "not": { "required": ["data_version"] } })
+    );
+    assert_eq!(schema["title"], "ArtifactChange");
+    assert_eq!(schema["additionalProperties"], false);
+    Ok(())
+}

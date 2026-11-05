@@ -15,9 +15,9 @@ its own, and names the path grammar, the patch rules, the limits, and every
 error as Artifree's own decisions. Nothing below is an observation of the
 original product.
 
-> Amended by [0040](0040-data-changes-and-member-listing.md) (proposed; takes
-> effect when the slice merges): decision 14, as a data write that changes the
-> space records a `data_changed` change in the feed (R07a).
+> Amended by [0040](0040-data-changes-and-member-listing.md), in effect since
+> R07a: decision 14, as a data write that changes the space records a
+> `data_changed` change in the feed.
 
 ## Context
 
@@ -205,9 +205,13 @@ WITHOUT ROWID`. Fixtures of versions 1 to 8 upgrade, a failed step rolls
     back, and an older backup restores and upgrades (0027). The binary-column
     guard of the store tests lists `data_requests.fingerprint` and nothing else
     new.
-14. **Not in the change feed.** A data change adds no change kind to
-    `/v1/changes`, and the web reducer is unchanged. A client polls `GET data`
-    and compares `data_version`. Subscriptions belong to R07. Data is not in a
+14. **In the change feed as `data_changed` only (amended by 0040).** A write
+    that changed the space appends one `data_changed` change to the feed of the
+    actor whose space it is (schema 11, contract 0.15.0); it names the artifact,
+    the new `data_version`, and the artifact's current revisions, never a path or
+    a value, and a replay or a write that changed nothing adds none. Following
+    it with a client routine belongs to R07; until then a client reads `GET data`
+    and compares `data_version`. Data is not in a
     revision, an export (A07), the `package`, or the content-cleanup
     references (0029): it holds no content digest.
 15. **Surface.** Contract version 0.9.0: `AppData`, `JsonValue`, `ReadDataQuery`,
@@ -240,7 +244,9 @@ WITHOUT ROWID`. Fixtures of versions 1 to 8 upgrade, a failed step rolls
 
 - **Frames and previews cannot read or write data.** There is no runtime
   bridge, no capability, and no data panel in the web workspace.
-- No subscription or change notification (R07), no query (R07), no uploaded
+- No client subscription and no client, CLI, or MCP member listing yet (R07;
+  the feed records `data_changed`, decision 14, and `GET data/members` lists
+  names over HTTP, 0040 R07b), no query (T11), no uploaded
   assets (R09), no sharing between actors, and no per-collection or array
   operations. A path never enters an array, so an app that needs to change one
   element sets the array whole or keeps its items as members.

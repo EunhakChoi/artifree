@@ -314,13 +314,14 @@ body; a proxy that strips it gets `400`, never a deletion (below the root,
 of `{}`). The client refuses a JavaScript value that `JSON.stringify` would
 change silently (`NaN`, holes, getters, a `Date`, a `toJSON` function) and sends a
 checked copy; `JsonText` sends exact text. A duplicate copies the
-data only with `copy_data`. Data is not in the change feed, a revision, or an
+data only with `copy_data`. A write that changes it appends a `data_changed` change (version and
+positions, no path or value) to the writer's change feed (0040); data is not in a revision or an
 export, a purge erases it, and **no page can read or write it: the runtime
 bridge has no data capability** (it grants `metadata.read`, `source.read`, and
 `source.download`). A paged listing of the member names of one object exists
 over HTTP only, `GET /v1/artifacts/{id}/data/members` (decision 0040, R07b); the
-client, the CLI, and MCP have no listing yet. Subscriptions (R07a, R07c),
-queries (T11), and assets (R09) are not implemented.
+client, the CLI, and MCP have no listing yet. A client routine that follows data
+(R07c) and assets (R09) are not implemented.
 
 The roadmap separately covers artifact management, local/server deployment,
 isolated builds, the runtime SDK and app data, optional providers, structured
