@@ -1,6 +1,6 @@
 # 0040: Data changes in the feed and a member listing
 
-Date: 2026-11-04. Status: **proposed**. Builds on [0006](0006-change-feed.md),
+Date: 2026-11-04. Status: accepted. Builds on [0006](0006-change-feed.md),
 [0007](0007-live-web-workspace.md),
 [0027](0027-backup-restore-and-schema-upgrade.md), [0031](0031-app-data.md),
 and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
