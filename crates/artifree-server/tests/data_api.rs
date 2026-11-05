@@ -2384,19 +2384,32 @@ async fn fenced(
     body: &Value,
     headers: &[(&str, &str)],
 ) -> Result<Reply, Box<dyn std::error::Error>> {
+    raw_data_request(harness, method, id, Some(key), &body.to_string(), headers).await
+}
+
+async fn raw_data_request(
+    harness: &Harness,
+    method: &str,
+    id: &str,
+    key: Option<&str>,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> Result<Reply, Box<dyn std::error::Error>> {
     let mut request = Request::builder()
         .method(method)
         .uri(format!("/v1/artifacts/{id}/data"))
         .header(header::AUTHORIZATION, format!("Bearer {OWNER}"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .header("idempotency-key", key);
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(key) = key {
+        request = request.header("idempotency-key", key);
+    }
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
     let response = harness
         .api
         .clone()
-        .oneshot(request.body(Body::from(body.to_string()))?)
+        .oneshot(request.body(Body::from(body.to_owned()))?)
         .await?;
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 4096).await?;
@@ -2588,5 +2601,210 @@ async fn outbox_preflight_allows_the_three_fence_headers() -> TestResult {
             "missing {name}: {allowed}"
         );
     }
+    Ok(())
+}
+
+fn invalid_fences() -> [Vec<(&'static str, &'static str)>; 2] {
+    [
+        vec![("artifree-outbox-actor", "local")],
+        vec![
+            ("artifree-outbox-actor", "local"),
+            ("artifree-outbox-epoch", "0123456789abcdef0123456789abcdef"),
+            ("artifree-outbox-actor-generation", "01"),
+        ],
+    ]
+}
+
+#[tokio::test]
+async fn outbox_ordinary_body_limit_wins_over_partial_or_malformed_fence() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("body-limit").await?;
+    let oversized = " ".repeat(300_000);
+    for method in ["PUT", "PATCH", "DELETE"] {
+        let direct = raw_data_request(
+            &harness,
+            method,
+            &id,
+            Some("outbox-limit-key"),
+            &oversized,
+            &[],
+        )
+        .await?;
+        assert_eq!(
+            direct.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{method}: {}",
+            direct.text
+        );
+        assert_eq!(direct.code(), "payload_too_large");
+        for headers in invalid_fences() {
+            let rejected = raw_data_request(
+                &harness,
+                method,
+                &id,
+                Some("outbox-limit-key"),
+                &oversized,
+                &headers,
+            )
+            .await?;
+            assert_eq!(
+                rejected.status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{method}: {}",
+                rejected.text
+            );
+            assert_eq!(
+                rejected.json()?,
+                direct.json()?,
+                "ordinary body-limit response must be preserved"
+            );
+        }
+    }
+    assert_eq!(harness.at(&id, "").await?["data_version"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_ordinary_path_body_and_key_errors_win_over_invalid_fence() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("validation-order").await?;
+    for method in ["PUT", "PATCH", "DELETE"] {
+        for (target, key, body, status, code) in [
+            (
+                id.as_str(),
+                Some("outbox-validation"),
+                "{",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "bad-id",
+                Some("outbox-validation"),
+                "{",
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                "%FF",
+                Some("outbox-validation"),
+                "{",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                id.as_str(),
+                None,
+                "{",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                id.as_str(),
+                Some("short"),
+                "{",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+        ] {
+            let direct = raw_data_request(&harness, method, target, key, body, &[]).await?;
+            assert_eq!(direct.status, status, "{method} {target}: {}", direct.text);
+            assert_eq!(direct.code(), code);
+            for headers in invalid_fences() {
+                let rejected =
+                    raw_data_request(&harness, method, target, key, body, &headers).await?;
+                assert_eq!(
+                    rejected.status, status,
+                    "{method} {target}: {}",
+                    rejected.text
+                );
+                assert_eq!(
+                    rejected.json()?,
+                    direct.json()?,
+                    "ordinary input error must be preserved"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_validated_data_path_and_value_win_over_invalid_fence() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("data-validation-order").await?;
+    for (method, invalid_path) in [
+        (
+            "PUT",
+            json!({"path":"a//b","base_data_version":0,"value":1}),
+        ),
+        (
+            "PATCH",
+            json!({"path":"a//b","base_data_version":0,"patch":{}}),
+        ),
+        ("DELETE", json!({"path":"a//b","base_data_version":0})),
+    ] {
+        let body = invalid_path.to_string();
+        let direct =
+            raw_data_request(&harness, method, &id, Some("outbox-validation"), &body, &[]).await?;
+        assert_eq!(
+            direct.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            direct.text
+        );
+        assert_eq!(direct.code(), "invalid_request");
+        for headers in invalid_fences() {
+            let rejected = raw_data_request(
+                &harness,
+                method,
+                &id,
+                Some("outbox-validation"),
+                &body,
+                &headers,
+            )
+            .await?;
+            assert_eq!(
+                rejected.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{method}: {}",
+                rejected.text
+            );
+            assert_eq!(rejected.json()?, direct.json()?);
+        }
+    }
+    for method in ["PUT", "PATCH"] {
+        let field = if method == "PUT" { "value" } else { "patch" };
+        let mut body = json!({"path":"a","base_data_version":0});
+        body[field] = json!("x".repeat(265_000));
+        let body = body.to_string();
+        let direct =
+            raw_data_request(&harness, method, &id, Some("outbox-validation"), &body, &[]).await?;
+        assert_eq!(
+            direct.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            direct.text
+        );
+        assert_eq!(direct.code(), "data_too_large");
+        for headers in invalid_fences() {
+            let rejected = raw_data_request(
+                &harness,
+                method,
+                &id,
+                Some("outbox-validation"),
+                &body,
+                &headers,
+            )
+            .await?;
+            assert_eq!(
+                rejected.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{method}: {}",
+                rejected.text
+            );
+            assert_eq!(rejected.json()?, direct.json()?);
+        }
+    }
+    assert_eq!(harness.at(&id, "").await?["data_version"], 0);
     Ok(())
 }

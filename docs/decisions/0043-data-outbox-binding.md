@@ -25,7 +25,10 @@ on authentication failure. Only GET returns a usable binding.
 Data PUT/PATCH/DELETE accept the all-or-none optional headers
 `Artifree-Outbox-Actor`, `Artifree-Outbox-Epoch` and
 `Artifree-Outbox-Actor-Generation`. A partial triple, duplicates or noncanonical
-syntax is `400 invalid_request`. CORS allows the three headers. The authenticated
+syntax is `400 invalid_request`, after ordinary idempotency-header, route/path,
+JSON body and data-path/value validation. In particular, an oversized body
+retains `413 payload_too_large` even with a partial or malformed fence. CORS
+allows the three headers. The authenticated
 actor remains the actor used to authorize the artifact and its data space.
 An inaccessible, missing, trashed or purged artifact returns the ordinary
 indistinguishable `404 not_found` before any semantic binding comparison.

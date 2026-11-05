@@ -294,7 +294,7 @@ async fn dispatch_data(
                     base_data_version,
                     value,
                 };
-                operations::set_data(state, actor, key, &artifact_id, request, None).await
+                operations::set_data(state, actor, key, &artifact_id, request, || Ok(None)).await
             })
             .await
         }
@@ -314,7 +314,7 @@ async fn dispatch_data(
                     base_data_version,
                     patch,
                 };
-                operations::update_data(state, actor, key, &artifact_id, request, None).await
+                operations::update_data(state, actor, key, &artifact_id, request, || Ok(None)).await
             })
             .await
         }
@@ -331,7 +331,7 @@ async fn dispatch_data(
                     path,
                     base_data_version,
                 };
-                operations::delete_data(state, actor, key, &artifact_id, request, None).await
+                operations::delete_data(state, actor, key, &artifact_id, request, || Ok(None)).await
             })
             .await
         }

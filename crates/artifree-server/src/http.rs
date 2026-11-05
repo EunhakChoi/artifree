@@ -1496,12 +1496,14 @@ async fn set_data(
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<SetDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
-    let fence = outbox_fence(&headers, auth.generation)?;
     let Path(id) = path?;
     operations::artifact_id(&id)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::set_data(&state, auth.actor, key, &id, request, fence).await?,
+        operations::set_data(&state, auth.actor, key, &id, request, || {
+            outbox_fence(&headers, auth.generation)
+        })
+        .await?,
     ))
 }
 
@@ -1514,12 +1516,14 @@ async fn update_data(
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<UpdateDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
-    let fence = outbox_fence(&headers, auth.generation)?;
     let Path(id) = path?;
     operations::artifact_id(&id)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::update_data(&state, auth.actor, key, &id, request, fence).await?,
+        operations::update_data(&state, auth.actor, key, &id, request, || {
+            outbox_fence(&headers, auth.generation)
+        })
+        .await?,
     ))
 }
 
@@ -1532,12 +1536,14 @@ async fn delete_data(
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<DeleteDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
-    let fence = outbox_fence(&headers, auth.generation)?;
     let Path(id) = path?;
     operations::artifact_id(&id)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::delete_data(&state, auth.actor, key, &id, request, fence).await?,
+        operations::delete_data(&state, auth.actor, key, &id, request, || {
+            outbox_fence(&headers, auth.generation)
+        })
+        .await?,
     ))
 }
 

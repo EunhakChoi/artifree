@@ -1613,11 +1613,13 @@ pub(crate) async fn set_data(
     key: RequestKey,
     id: &str,
     request: SetDataRequest,
-    fence: Option<OutboxFence>,
+    parse_fence: impl FnOnce() -> Result<Option<OutboxFence>, ApiError>,
 ) -> Result<DataWriteResponse, ApiError> {
     let id = artifact_id(id)?;
     let path = data_path("path", &request.path)?;
     let value = data_value("value", &request.value)?;
+    // Ordinary input validation retains its existing refusal before fence syntax.
+    let fence = parse_fence()?;
     write_data(
         state,
         actor,
@@ -1636,11 +1638,13 @@ pub(crate) async fn update_data(
     key: RequestKey,
     id: &str,
     request: UpdateDataRequest,
-    fence: Option<OutboxFence>,
+    parse_fence: impl FnOnce() -> Result<Option<OutboxFence>, ApiError>,
 ) -> Result<DataWriteResponse, ApiError> {
     let id = artifact_id(id)?;
     let path = data_path("path", &request.path)?;
     let merge = data_value("patch", &request.patch)?;
+    // Ordinary input validation retains its existing refusal before fence syntax.
+    let fence = parse_fence()?;
     write_data(
         state,
         actor,
@@ -1659,10 +1663,12 @@ pub(crate) async fn delete_data(
     key: RequestKey,
     id: &str,
     request: DeleteDataRequest,
-    fence: Option<OutboxFence>,
+    parse_fence: impl FnOnce() -> Result<Option<OutboxFence>, ApiError>,
 ) -> Result<DataWriteResponse, ApiError> {
     let id = artifact_id(id)?;
     let path = data_path("path", &request.path)?;
+    // Ordinary input validation retains its existing refusal before fence syntax.
+    let fence = parse_fence()?;
     write_data(
         state,
         actor,
