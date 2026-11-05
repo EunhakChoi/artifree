@@ -11,9 +11,11 @@ Date: 2026-10-28. Status: accepted. Builds on
 > Amended by [0040](0040-data-changes-and-member-listing.md), in effect since
 > R07a: decision 6, as the feed also carries the `data_changed` rows of the
 > actor whose data space changed, and decision 5, as a data write that recorded
-> such a row wakes this process's streams as a commit does. Proposed, taking
-> effect when R07c merges: decision 10, with jitter, a clamped `Retry-After`
-> floor, a stall timer, and a counter reset only after a connection stays open.
+> such a row wakes this process's streams as a commit does. In effect since
+> R07c-1: decision 10, with jitter, a clamped `Retry-After` floor, a stall
+> timer, and a counter reset only after a connection stays open; and decision
+> 9, as the event-stream parser and the error body of the stream open are
+> bounded.
 
 ## Context
 
@@ -106,7 +108,10 @@ delivery guarantees; everything below about them is an Artifree decision.
    lines joined with LF; an event dispatched at a blank line only when it
    has data; and an event the body ends before its blank line discarded.
    `id` and `retry` are not used: the data carries the cursor, and delays
-   follow decision 10. Unknown event types are skipped. A known event whose
+   follow decision 10. Unknown event types are skipped. (Amended by
+   [0040](0040-data-changes-and-member-listing.md) rule 19: a line or an event
+   of more than 65,536 UTF-16 code units is `invalid_response` and cancels the
+   body.) A known event whose
    data breaks the contract is `invalid_response`. A change kind added after
    the client was built arrives as `unknown`, so an older client still reads
    the artifact again. Aborting cancels the body.
@@ -116,13 +121,16 @@ delivery guarantees; everything below about them is an Artifree decision.
     the body. It waits `Retry-After` when given, also on a proxy's error
     page, otherwise from 0.5 seconds
     doubling to 30 seconds after each failed attempt, and starts again after
-    a stream is accepted. Every other failure, including a `4xx` and a
+    a stream is accepted. (Amended by 0040 rule 17: each delay is scaled by a
+    random factor from 0.5 up to 1, a `Retry-After` is only a floor of at most
+    one hour, and the attempts start again only after a stream has stayed open
+    for 30 seconds.) Every other failure, including a `4xx` and a
     successful response that is not the feed, rejects: retrying cannot fix
     it, and so does an error thrown by the event handler. Aborting resolves
     at once, also during a wait, and no event is delivered after it, also
     from a chunk that held several. The analyzed client
     adds random jitter to its delays; one local owner gains nothing from it,
-    and several instances (X04) should revisit it.
+    and several instances (X04) should revisit it. (0040 added the jitter.)
 11. **Retention.** Change rows are kept indefinitely, like request keys. The
     head comes from SQLite's record of the largest sequence issued, so
     pruning old rows will not move it back. Pruning belongs to the retention

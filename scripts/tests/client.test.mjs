@@ -2920,6 +2920,8 @@ async function followed(answers, { events: wanted = 1, after } = {}) {
   await client.followChanges({
     signal: controller.signal,
     retryDelayMs: { min: 1, max: 2 },
+    // u = 0: each delay is half its base.
+    random: () => 0,
     ...(after === undefined ? {} : { after }),
     onEvent(event) {
       events.push(event);
@@ -2957,13 +2959,14 @@ test('Following retries lost connections, 429, and any 5xx from the last cursor'
   );
   assert.deepEqual(result.events, [changeEvent(1), changeEvent(2)]);
   assert.deepEqual(result.requests, [cursor(0), ...Array(6).fill(cursor(1))]);
+  // Half of the base 1, 2, 2, ...; a Retry-After of 0 is only a floor.
   assert.deepEqual(result.disconnects, [
-    [undefined, undefined, 1],
-    [0, 'network_error', 2],
-    [502, 'invalid_response', 2],
-    [504, 'invalid_response', 2],
-    [503, 'unavailable', 0],
-    [429, 'rate_limited', 0],
+    [undefined, undefined, 0.5],
+    [0, 'network_error', 1],
+    [502, 'invalid_response', 1],
+    [504, 'invalid_response', 1],
+    [503, 'unavailable', 1],
+    [429, 'rate_limited', 1],
   ]);
 });
 

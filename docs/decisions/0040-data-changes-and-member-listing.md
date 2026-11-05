@@ -406,14 +406,16 @@ implementation it fails.
 One row per slice, updated by the pull request that implements it. R07a of the
 slice list above was planned as two pull requests; #87 carries both slices.
 
-| Slice  | What                                            | Status          | Pull request |
-| ------ | ----------------------------------------------- | --------------- | ------------ |
-| R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87          |
-| R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87          |
-| R07b   | member listing (rules 7-11)                     | implemented     | #86          |
-| R07c   | TypeScript client (rules 12-22)                 | not implemented | -            |
-| R07d   | user guides                                     | not implemented | -            |
-| R07e   | web data panel (rule 23)                        | not implemented | -            |
+| Slice  | What                                            | Status          | Pull request      |
+| ------ | ----------------------------------------------- | --------------- | ----------------- |
+| R07a-1 | Rust: store, feed, contract, schema (rules 1-5) | implemented     | #87               |
+| R07a-2 | TypeScript kind record and web reducer (rule 6) | implemented     | #87               |
+| R07b   | member listing (rules 7-11)                     | implemented     | #86               |
+| R07c-1 | client transport bounds and retry policy        | implemented     | this pull request |
+| R07c-2 | `listDataMembers` (rules 20-22 for the listing) | not implemented | -                 |
+| R07c-3 | `followData` (rules 13-16, 20, 22)              | not implemented | -                 |
+| R07d   | user guides                                     | not implemented | -                 |
+| R07e   | web data panel (rule 23)                        | not implemented | -                 |
 
 R07a-1 and R07a-2 both landed in #87. The client's record of known kinds gained
 `data_changed`, which its type requires, and the web workspace's reducer ignores
@@ -421,9 +423,22 @@ it: it changes nothing the page knows and reads nothing, for an open artifact, a
 unlisted one, and while the first read is pending (rule 6; 0007 decision 4).
 #87 also implements rule 12 in the client: `FeedChange` carries `data_version`
 for `data_changed` only, and an event that breaks that is `invalid_response`.
-The published schema and Rust deserialization state the same rule. Rules 13-22
-of R07c (`followData`, `listDataMembers`, the size and silence limits, the retry
-rules) are not implemented. What R07 excludes is listed under Scope.
+The published schema and Rust deserialization state the same rule. Rules 13-16
+of R07c (`followData`) and `listDataMembers` (rules 20-22 for it) are not
+implemented. What R07 excludes is listed under Scope.
+
+R07c-1 is the transport that `followChanges` uses now and the next two slices
+will use: the event-stream parser with the bounds of rule 19 (an unfinished
+line, and one event's type and data), reusable bounded reads of a success body
+(1,064,960 bytes) and an error body (65,536 bytes) that cancel the body at
+once, the 45-second stall limit of rule 18 (no timer before the headers), and
+the retry policy of rule 17 (jitter, the clamped `Retry-After` floor, a count
+that resets only after 30 seconds open). `followChanges` and the error body of
+its stream open use them; every other client call keeps its current read. The
+helpers for a success body have no caller until `listDataMembers` and
+`followData`. The client takes an optional `clock` (stall limit and waits) and
+`followChanges` an optional `random`, for tests; production uses the system
+clock and `Math.random`.
 
 R07b landed in #86 (contract 0.16.0): `GET /v1/artifacts/{id}/data/members`
 with the query, response, check order, page token, and consistency of rules

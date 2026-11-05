@@ -194,8 +194,8 @@ every commit it missed, also after a restart; a cursor of another database
 gets `reset`. Events name the artifact and revision to read again and carry
 no content. An open stream takes one of the actor's `--change-streams` slots
 instead of a request slot. The TypeScript client's `followChanges`
-reconnects after lost connections, `429`, and `5xx`, and stops on other
-failures.
+reconnects after lost connections, `429`, and `5xx` with jittered, growing
+delays, and stops on other failures.
 
 ## MCP
 

@@ -50,6 +50,14 @@ import {
   changeFeedEvents,
   follow,
 } from './change-feed.js';
+import {
+  BodyReader,
+  type Clock,
+  cancelQuietly,
+  decodeText,
+  readErrorJson,
+  systemClock,
+} from './transport.js';
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 import type * as RuntimeSource from './runtime-source.js';
@@ -98,6 +106,11 @@ export interface ClientConfiguration {
   readonly accessToken: string;
   /** Fetch implementation; defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
+  /**
+   * Time for the stall limit of streams and the waits of
+   * {@link ArtifreeClient.followChanges}; the system clock by default.
+   */
+  readonly clock?: Clock;
 }
 
 /** Options for requests that only read. */
@@ -414,6 +427,11 @@ interface SendOptions {
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal | undefined;
   readonly onDispatch?: (() => void) | undefined;
+  /**
+   * Reads the body of a failed response within the transport's bounds (a
+   * size limit, a stall limit, the signal) instead of whole.
+   */
+  readonly boundedErrorBody?: boolean;
 }
 
 type GrantState = 'settled' | 'pending' | 'unknown';
@@ -588,6 +606,7 @@ export class ArtifreeClient {
   private readonly address: Address;
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly clock: Clock;
 
   constructor(configuration: ClientConfiguration) {
     this.baseUrl = configuration.baseUrl.replace(/\/+$/, '');
@@ -595,6 +614,7 @@ export class ArtifreeClient {
     this.accessToken = configuration.accessToken;
     this.fetchImpl =
       configuration.fetch ?? ((input, init) => fetch(input, init));
+    this.clock = configuration.clock ?? systemClock;
   }
 
   /** The active server-issued runtime identity. */
@@ -1112,6 +1132,7 @@ export class ArtifreeClient {
     const response = await this.send('GET', '/v1/changes', {
       headers,
       signal: options.signal,
+      boundedErrorBody: true,
     });
     const mediaType = response.headers
       .get('content-type')
@@ -1119,16 +1140,22 @@ export class ArtifreeClient {
       ?.trim()
       .toLowerCase();
     if (mediaType !== 'text/event-stream' || response.body === null) {
-      await response.body?.cancel().catch(() => undefined);
+      if (response.body !== null) cancelQuietly(response.body);
       throw new ArtifreeApiError(
         `GET /v1/changes answered HTTP ${response.status} with ${mediaType ?? 'no content type'}, not an event stream.`,
         { status: response.status, code: 'invalid_response' },
       );
     }
-    return changeFeedEvents(
-      decodeText(response.body, options.signal, this.address.plain),
-      options.signal,
-    );
+    // The stall limit runs from the headers, whether or not the caller
+    // reads soon; it and the abort listener are released when it passes.
+    const body = new BodyReader(response.body, {
+      clock: this.clock,
+      signal: options.signal,
+      status: 0,
+      what: 'change feed',
+      keepCause: this.address.plain,
+    });
+    return changeFeedEvents(decodeText(body), options.signal);
   }
 
   /**
@@ -1143,6 +1170,7 @@ export class ArtifreeClient {
       (after, signal) =>
         this.openChanges(after === undefined ? { signal } : { after, signal }),
       options,
+      this.clock,
     );
   }
 
@@ -1727,6 +1755,7 @@ export class ArtifreeClient {
       headers: extraHeaders,
       signal,
       onDispatch,
+      boundedErrorBody,
     }: SendOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
@@ -1760,7 +1789,16 @@ export class ArtifreeClient {
     if (response.ok) return response;
     // Also a proxy's error page may say when to retry.
     const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
-    const answer = await readJson(response, this.address.plain);
+    const answer =
+      boundedErrorBody === true
+        ? await readErrorJson(response, {
+            clock: this.clock,
+            signal,
+            status: response.status,
+            what: 'error response',
+            keepCause: this.address.plain,
+          })
+        : await readJson(response, this.address.plain);
     const failure = parseError(answer);
     // HTTP 429 means too many requests whoever answered it, so a proxy's
     // refusal without an API body is a rate limit too.
@@ -1785,50 +1823,6 @@ export class ArtifreeClient {
       currentDataVersion: failure.current_data_version ?? undefined,
       ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });
-  }
-}
-
-/**
- * The text of a streamed body. A failure while reading, such as a lost
- * connection, is a `network_error`. Stopping early or aborting `signal`
- * cancels the body, which closes its connection, also with a `fetch` that
- * ignores the signal once the response has arrived.
- */
-async function* decodeText(
-  body: ReadableStream<Uint8Array>,
-  signal: AbortSignal | undefined,
-  keepCause: boolean,
-): AsyncGenerator<string> {
-  const reader = body.getReader();
-  const cancel = (): void => {
-    reader.cancel().catch(() => undefined);
-  };
-  signal?.addEventListener('abort', cancel);
-  // Reading starts on the first iteration, possibly after an abort.
-  if (signal?.aborted === true) cancel();
-  // Removes a leading byte order mark, as event streams require.
-  const decoder = new TextDecoder();
-  try {
-    for (;;) {
-      let chunk: ReadableStreamReadResult<Uint8Array>;
-      try {
-        chunk = await reader.read();
-      } catch (error: unknown) {
-        throw new ArtifreeApiError('The change feed connection was lost.', {
-          status: 0,
-          code: 'network_error',
-          ...causeOf(keepCause, error),
-        });
-      }
-      if (chunk.done) {
-        yield decoder.decode();
-        return;
-      }
-      yield decoder.decode(chunk.value, { stream: true });
-    }
-  } finally {
-    signal?.removeEventListener('abort', cancel);
-    await reader.cancel().catch(() => undefined);
   }
 }
 

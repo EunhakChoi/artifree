@@ -219,6 +219,22 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   cancels an open stream, and stops events already received in the same
   chunk. A proxy's `429` without an API body is still `rate_limited`, and a
   read's signal reaches `fetch`.
+- `scripts/tests/client-transport.test.mjs`: the client's transport against a
+  fake server, clock, and random source (decision 0040 rules 17 to 19). The
+  event-stream parser at its bounds (a line of 65,536 units passes and 65,537
+  fails, an event likewise, an endless line, a chunk refused before it is
+  split, one-unit chunks in linear time); reads of a success and an error body
+  at their limits, cancelled as the data arrives; the 45-second stall limit (a
+  comment every 15 seconds prevents it, an empty chunk does not count, no timer
+  before the headers for an hour, a consumer that holds a chunk is not a stall,
+  an unread stream releases its timer); an error body that stalls or is lost
+  counts as no API body, so a `429` keeps its `Retry-After` and a `401` or
+  `404` stops; the delays with the random source at 0 and near 1, the cap, the
+  `Retry-After` floor and its one-hour clamp; the count reset only after 30
+  seconds open, apart from the configured maximum; abort at every point with no
+  timer or listener left; and a body whose cancel or read never settles, a
+  clock that calls back at once, and one that calls back late. Each guard was
+  checked by breaking it.
 - `scripts/tests/request-gate.test.mjs`: bundles the web workspace's request
   gate with esbuild and drives it with mock timers, a fake visibility source,
   and a server the test answers by hand: reads go one at a time in order
@@ -559,8 +575,11 @@ schema rejection tests do not assume whether an enum is emitted as `enum` or
 ## Client trust rules (proposed, not enforced)
 
 Proposed by [decision 0040](decisions/0040-data-changes-and-member-listing.md)
-rule 22 for the TypeScript client of slice R07c. Nothing checks them yet, and
-the client today does not follow rule 4.
+rule 22 for the TypeScript client of slice R07c. Nothing checks rules 1 to 3
+yet. Rule 4 holds, with tests, only for the change stream and the error body of
+its open (R07c-1, `scripts/tests/client-transport.test.mjs`); the success-body
+reads wait for `listDataMembers` and `followData`, and every other client call
+keeps its current read.
 
 1. The server owns the data-domain rules. The client does not re-check
    storability (surrogates, duplicate names, value count, nesting, name
