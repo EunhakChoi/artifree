@@ -45,9 +45,12 @@ without private notes. Nothing here is checked by a script.
   and works on a copy of the worktree. A mutation then never reaches the
   working tree, and only files declared up front (generated contracts, formatter
   output) are copied back.
-- Do not raise a cap to make a run pass. A process killed for memory is a
-  finding; report it. Report the peak memory of the heaviest run in the pull
-  request.
+- State the cap you used, and report the peak memory of the heaviest run in the
+  pull request, so growth shows. A process killed for memory under a cap
+  smaller than the hosted CI runner's is a statement about the cap, not yet a
+  defect: report the cap and the peak, and confirm on the CI runner, which is
+  the baseline for the required checks. Do not widen a cap quietly to make a
+  run pass; say what you changed.
 - Do not build container images locally; rely on the pull request's CI and say
   so.
 - The repository's commands work without any wrapper. The isolation tool is
