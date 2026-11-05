@@ -895,7 +895,21 @@ export class ArtifreeClient {
     options: FollowDataOptions,
   ): Promise<void> {
     if (options.signal.aborted) return;
-    const { followData } = await import('./follow-data.js');
+    // Loading the optional follower may itself take time (for example while
+    // the browser fetches its chunk). Cancellation must not wait for it.
+    let onAbort = () => {};
+    const aborted = new Promise<undefined>((resolve) => {
+      onAbort = () => resolve(undefined);
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    });
+    let module: typeof import('./follow-data.js') | undefined;
+    try {
+      module = await Promise.race([import('./follow-data.js'), aborted]);
+    } finally {
+      options.signal.removeEventListener('abort', onAbort);
+    }
+    if (module === undefined || options.signal.aborted) return;
+    const { followData } = module;
     return followData(
       {
         clock: this.clock,
