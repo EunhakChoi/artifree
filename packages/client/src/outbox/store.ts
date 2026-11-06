@@ -1,3 +1,4 @@
+import type { DataWriteResponse } from '@artifree/contracts';
 import {
   normalizeBase,
   validActor,
@@ -12,7 +13,7 @@ import {
 } from './types.js';
 
 const DATABASE = 'artifree-data-outbox';
-const VERSION = 1;
+const VERSION = 2;
 const STORES = ['intents', 'receipts', 'checkpoints', 'usage'] as const;
 const MAX_ROWS = 256;
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -25,10 +26,9 @@ const encoder = new TextEncoder();
 export type BindingKey = [string, string, string, string];
 export type LaneKey = [...BindingKey, string];
 
-export interface IntentRow {
-  readonly format: 1;
-  readonly state: 'unprepared';
-  readonly version: 1;
+interface RowIdentity {
+  readonly format: 2;
+  readonly version: number;
   readonly sequence: number;
   readonly key: string;
   readonly owner: string;
@@ -36,17 +36,44 @@ export interface IntentRow {
   readonly lane: LaneKey;
   readonly artifactId: string;
   readonly admittedGeneration: string;
+  readonly authorizedGeneration: string;
   readonly operation: 'set' | 'update' | 'delete';
   readonly path: string;
-  readonly text: string | null;
   readonly base: IntentBase;
   readonly bytes: number;
 }
 
+/** Accepted intent, with no frozen request and no delivery observation. */
+export interface UnpreparedRow extends RowIdentity {
+  readonly state: 'unprepared';
+  readonly text: string | null;
+}
+/** Exact original request. A missing durable ACK always leaves delivery unknown. */
+export interface PreparedRequest {
+  readonly method: 'PUT' | 'PATCH' | 'DELETE';
+  readonly body: string;
+  readonly base: number;
+}
+export interface PreparedRow extends RowIdentity {
+  readonly state: 'prepared';
+  readonly request: PreparedRequest;
+}
+export interface AcknowledgedRow extends RowIdentity {
+  readonly state: 'acknowledged';
+  readonly request: PreparedRequest;
+  readonly receipt: Readonly<DataWriteResponse>;
+}
+export type IntentRow = UnpreparedRow | PreparedRow | AcknowledgedRow;
+interface Predecessor {
+  readonly sequence: number;
+  readonly dataVersion: number;
+}
 interface Checkpoint {
+  readonly format: 2;
   readonly lane: LaneKey;
   readonly owner: string;
   readonly generation: string;
+  readonly predecessor: Predecessor | null;
   readonly rows: number;
   readonly bytes: number;
 }
@@ -129,8 +156,12 @@ function validBase(value: unknown): value is IntentBase {
   );
 }
 
-function account(row: Omit<IntentRow, 'bytes'>): number {
-  const { text, ...metadata } = row;
+function account(row: Omit<UnpreparedRow, 'bytes'>): number {
+  const { text, authorizedGeneration, ...fields } = row;
+  // v1 already reserved generation/checkpoint metadata. Preserve that allocation
+  // through migration and phase transitions rather than charging the payload twice.
+  void authorizedGeneration;
+  const metadata = { ...fields, format: 1, version: 1 };
   // IndexedDB stores the payload string directly. Counting a JSON-escaped second
   // copy would reject valid maximum-size raw text. Preparation and a full
   // receipt each repeat the path; receipt/checkpoint each repeat lane identity.
@@ -149,7 +180,20 @@ function account(row: Omit<IntentRow, 'bytes'>): number {
   );
 }
 
-function decodeRow(value: unknown): IntentRow {
+function decodeUnprepared(value: unknown): UnpreparedRow {
+  if (
+    record(value) &&
+    value.format === 1 &&
+    !Object.hasOwn(value, 'authorizedGeneration')
+  ) {
+    // Called only by owner-held binding/lane reads, never while opening storage.
+    // Exact validation below rejects every unrecognized legacy field or phase.
+    return decodeUnprepared({
+      ...value,
+      format: 2,
+      authorizedGeneration: value.admittedGeneration,
+    });
+  }
   if (
     !record(value) ||
     !exact(value, [
@@ -163,13 +207,14 @@ function decodeRow(value: unknown): IntentRow {
       'lane',
       'artifactId',
       'admittedGeneration',
+      'authorizedGeneration',
       'operation',
       'path',
       'text',
       'base',
       'bytes',
     ]) ||
-    value.format !== 1 ||
+    value.format !== 2 ||
     value.state !== 'unprepared' ||
     value.version !== 1 ||
     !natural(value.sequence) ||
@@ -182,11 +227,15 @@ function decodeRow(value: unknown): IntentRow {
     !same(value.binding, value.lane.slice(0, 4)) ||
     value.owner !== value.binding[0] ||
     !validGeneration(value.admittedGeneration) ||
+    !validGeneration(value.authorizedGeneration) ||
     typeof value.operation !== 'string' ||
     !['set', 'update', 'delete'].includes(value.operation) ||
-    (value.binding[2] === 'local' && value.admittedGeneration !== '1') ||
+    (value.binding[2] === 'local' &&
+      (value.admittedGeneration !== '1' ||
+        value.authorizedGeneration !== '1')) ||
     typeof value.path !== 'string' ||
     !validBase(value.base) ||
+    ('after' in value.base && value.base.after >= value.sequence) ||
     !natural(value.bytes) ||
     value.bytes > ROW_BYTES ||
     (value.operation === 'delete'
@@ -197,8 +246,8 @@ function decodeRow(value: unknown): IntentRow {
   )
     throw new OutboxError('storage_corrupt');
   // All fields have runtime checks above; payload text is intentionally not JSON-decoded.
-  const row: IntentRow = {
-    format: 1,
+  const row: UnpreparedRow = {
+    format: 2,
     state: 'unprepared',
     version: 1,
     sequence: value.sequence,
@@ -208,6 +257,7 @@ function decodeRow(value: unknown): IntentRow {
     lane: value.lane,
     artifactId: value.lane[4],
     admittedGeneration: value.admittedGeneration,
+    authorizedGeneration: value.authorizedGeneration,
     operation:
       value.operation === 'delete'
         ? 'delete'
@@ -222,6 +272,113 @@ function decodeRow(value: unknown): IntentRow {
   const { bytes, ...body } = row;
   if (account(body) !== bytes) throw new OutboxError('storage_corrupt');
   return row;
+}
+
+function method(
+  operation: RowIdentity['operation'],
+): PreparedRequest['method'] {
+  return operation === 'set'
+    ? 'PUT'
+    : operation === 'update'
+      ? 'PATCH'
+      : 'DELETE';
+}
+function bodyPrefix(path: string, base: number): string {
+  return `{"base_data_version":${base},"path":${JSON.stringify(path)}`;
+}
+function frozenRequest(row: UnpreparedRow, base: number): PreparedRequest {
+  const prefix = bodyPrefix(row.path, base);
+  const body =
+    row.operation === 'delete'
+      ? `${prefix}}`
+      : `${prefix},"${row.operation === 'set' ? 'value' : 'patch'}":${row.text}}`;
+  return { method: method(row.operation), body, base };
+}
+function decodeReceipt(value: unknown, row: PreparedRow): DataWriteResponse {
+  if (
+    !record(value) ||
+    !exact(value, [
+      'artifact_id',
+      'path',
+      'data_version',
+      'changed',
+      'replayed',
+    ]) ||
+    value.artifact_id !== row.artifactId ||
+    value.path !== row.path ||
+    !natural(value.data_version) ||
+    typeof value.changed !== 'boolean' ||
+    typeof value.replayed !== 'boolean' ||
+    value.data_version !== row.request.base + (value.changed ? 1 : 0)
+  ) {
+    throw new OutboxError('storage_corrupt');
+  }
+  return {
+    artifact_id: row.artifactId,
+    path: row.path,
+    data_version: value.data_version,
+    changed: value.changed,
+    replayed: value.replayed,
+  };
+}
+function decodeRow(value: unknown): IntentRow {
+  if (!record(value)) throw new OutboxError('storage_corrupt');
+  if (value.state === 'unprepared') return decodeUnprepared(value);
+  if (
+    (value.state !== 'prepared' && value.state !== 'acknowledged') ||
+    value.format !== 2 ||
+    !validGeneration(value.authorizedGeneration) ||
+    !natural(value.version) ||
+    value.version !== (value.state === 'prepared' ? 2 : 3) ||
+    !record(value.request) ||
+    !exact(value.request, ['method', 'body', 'base']) ||
+    !natural(value.request.base) ||
+    typeof value.request.body !== 'string' ||
+    typeof value.path !== 'string' ||
+    (value.state === 'prepared' && Object.hasOwn(value, 'receipt')) ||
+    Object.hasOwn(value, 'text')
+  )
+    throw new OutboxError('storage_corrupt');
+  const { request: storedRequest, receipt, ...identity } = value;
+  const prefix = bodyPrefix(value.path, value.request.base);
+  let text: string | null = null;
+  if (value.operation !== 'delete') {
+    const opening = `${prefix},"${value.operation === 'set' ? 'value' : 'patch'}":`;
+    if (
+      !value.request.body.startsWith(opening) ||
+      !value.request.body.endsWith('}')
+    )
+      throw new OutboxError('storage_corrupt');
+    text = value.request.body.slice(opening.length, -1);
+  }
+  const original = decodeUnprepared({
+    ...identity,
+    state: 'unprepared',
+    version: 1,
+    text,
+  });
+  const requestValue = frozenRequest(original, value.request.base);
+  if (
+    !same(requestValue, storedRequest) ||
+    ('version' in original.base && original.base.version !== requestValue.base)
+  )
+    throw new OutboxError('storage_corrupt');
+  const { text: ignoredText, ...common } = original;
+  // Destructuring removes the full enqueue payload; only the frozen body survives.
+  void ignoredText;
+  const prepared: PreparedRow = {
+    ...common,
+    state: 'prepared',
+    version: value.version,
+    request: requestValue,
+  };
+  return value.state === 'prepared'
+    ? prepared
+    : {
+        ...prepared,
+        state: 'acknowledged',
+        receipt: decodeReceipt(receipt, prepared),
+      };
 }
 
 function decodeUsage(value: unknown): Usage {
@@ -247,11 +404,35 @@ function decodeUsage(value: unknown): Usage {
 
 function decodeCheckpoint(value: unknown): Checkpoint {
   if (
+    record(value) &&
+    !Object.hasOwn(value, 'format') &&
+    !Object.hasOwn(value, 'predecessor')
+  ) {
+    return decodeCheckpoint({ ...value, format: 2, predecessor: null });
+  }
+  if (
     !record(value) ||
-    !exact(value, ['lane', 'owner', 'generation', 'rows', 'bytes']) ||
+    !exact(value, [
+      'format',
+      'lane',
+      'owner',
+      'generation',
+      'predecessor',
+      'rows',
+      'bytes',
+    ]) ||
+    value.format !== 2 ||
     !validLane(value.lane) ||
     value.owner !== value.lane[0] ||
     !validGeneration(value.generation) ||
+    !(
+      value.predecessor === null ||
+      (record(value.predecessor) &&
+        exact(value.predecessor, ['sequence', 'dataVersion']) &&
+        natural(value.predecessor.sequence) &&
+        value.predecessor.sequence > 0 &&
+        natural(value.predecessor.dataVersion))
+    ) ||
     (value.lane[2] === 'local' && value.generation !== '1') ||
     !natural(value.rows) ||
     value.rows === 0 ||
@@ -261,9 +442,17 @@ function decodeCheckpoint(value: unknown): Checkpoint {
   )
     throw new OutboxError('storage_corrupt');
   return {
+    format: 2,
     lane: value.lane,
     owner: value.lane[0],
     generation: value.generation,
+    predecessor:
+      value.predecessor === null
+        ? null
+        : {
+            sequence: Number(value.predecessor.sequence),
+            dataVersion: Number(value.predecessor.dataVersion),
+          },
     rows: value.rows,
     bytes: value.bytes,
   };
@@ -303,10 +492,12 @@ async function transaction<T>(
   };
   const terminal = new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => {
+      if (finished) return;
       finished = true;
       resolve();
     };
     tx.onabort = () => {
+      if (finished) return;
       finished = true;
       reject(
         new OutboxError(invalidated ? 'owner_not_ready' : 'storage_failed'),
@@ -401,7 +592,6 @@ async function laneRows(
       if (
         !same(row.lane, lane) ||
         row.sequence <= after ||
-        ('after' in row.base && values.at(-1)?.sequence !== row.base.after) ||
         values.some((previous) => previous.key === row.key)
       )
         throw new OutboxError('storage_corrupt');
@@ -419,21 +609,128 @@ async function laneRows(
     return values;
   }
   const checkpoint = decodeCheckpoint(stored);
+  let pending = false;
+  let lastAck: AcknowledgedRow | undefined;
+  for (const row of values) {
+    if (row.state === 'acknowledged') {
+      if (pending) throw new OutboxError('storage_corrupt');
+      lastAck = row;
+    } else {
+      if (pending && row.state === 'prepared')
+        throw new OutboxError('storage_corrupt');
+      pending = true;
+    }
+  }
+  if (
+    lastAck !== undefined
+      ? !same(checkpoint.predecessor, {
+          sequence: lastAck.sequence,
+          dataVersion: lastAck.receipt.data_version,
+        })
+      : checkpoint.predecessor !== null &&
+        checkpoint.predecessor.sequence >= (values[0]?.sequence ?? 0)
+  )
+    throw new OutboxError('storage_corrupt');
   if (
     checkpoint.rows !== values.length ||
     checkpoint.bytes !== values.reduce((sum, row) => sum + row.bytes, 0) ||
-    values.some((row) => row.admittedGeneration !== checkpoint.generation)
+    values.some((row) => row.authorizedGeneration !== checkpoint.generation) ||
+    values.some((row, index) => {
+      if (!('after' in row.base)) return false;
+      const previous = values[index - 1];
+      if (previous !== undefined) {
+        return (
+          previous.sequence !== row.base.after ||
+          (row.state !== 'unprepared' &&
+            (previous.state !== 'acknowledged' ||
+              row.request.base !== previous.receipt.data_version))
+        );
+      }
+      if (
+        row.state === 'acknowledged' &&
+        checkpoint.predecessor !== null &&
+        checkpoint.predecessor.sequence >= row.sequence
+      )
+        return false;
+      return (
+        checkpoint.predecessor?.sequence !== row.base.after ||
+        (row.state !== 'unprepared' &&
+          row.request.base !== checkpoint.predecessor.dataVersion)
+      );
+    })
   )
     throw new OutboxError('storage_corrupt');
   return values;
 }
 
-/** Dedicated first released schema; unknown/experimental formats stay untouched. */
+function validateLayout(database: IDBDatabase, tx: IDBTransaction): void {
+  if (!same(Array.from(database.objectStoreNames).sort(), [...STORES].sort()))
+    throw new OutboxError('storage_corrupt');
+  for (const name of STORES) {
+    const store = tx.objectStore(name);
+    if (
+      store.keyPath !==
+        (name === 'intents' ? 'sequence' : name === 'usage' ? 'id' : 'lane') ||
+      store.autoIncrement
+    )
+      throw new OutboxError('storage_corrupt');
+    const indexes: Array<[string, string | string[], boolean]> =
+      name === 'intents'
+        ? [
+            ['owner', 'owner', false],
+            ['binding', 'binding', false],
+            ['laneSequence', ['lane', 'sequence'], false],
+            ['key', 'key', true],
+            ['artifact', 'artifactId', false],
+          ]
+        : name === 'usage'
+          ? []
+          : [['owner', 'owner', false]];
+    if (
+      !same(
+        Array.from(store.indexNames).sort(),
+        indexes.map(([index]) => index).sort(),
+      )
+    )
+      throw new OutboxError('storage_corrupt');
+    for (const [name, keyPath, unique] of indexes) {
+      const index = store.index(name);
+      if (
+        !same(index.keyPath, keyPath) ||
+        index.unique !== unique ||
+        index.multiEntry
+      )
+        throw new OutboxError('storage_corrupt');
+    }
+  }
+}
+
+/** Dedicated versioned schema. Failed upgrades leave the complete old database intact. */
 export async function openStore(): Promise<LocalStore> {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
     const opening = indexedDB.open(DATABASE, VERSION);
     let refused = false;
+    let migrationFailure: OutboxError | undefined;
     opening.onupgradeneeded = (event) => {
+      if (refused) {
+        opening.transaction?.abort();
+        return;
+      }
+      if (event.oldVersion === 1 && opening.transaction !== null) {
+        const tx = opening.transaction;
+        try {
+          // Versionchange checks layout metadata only. Busy/foreign owner payloads
+          // remain untouched; exact v1 rows normalize lazily under their owner lock.
+          validateLayout(tx.db, tx);
+        } catch (error: unknown) {
+          migrationFailure =
+            error instanceof OutboxError
+              ? error
+              : new OutboxError('storage_failed');
+          tx.abort();
+        }
+        return;
+      }
       if (event.oldVersion !== 0) {
         opening.transaction?.abort();
         return;
@@ -462,62 +759,15 @@ export async function openStore(): Promise<LocalStore> {
         return;
       }
       try {
-        if (
-          !same(
-            Array.from(database.objectStoreNames).sort(),
-            [...STORES].sort(),
-          )
-        )
-          throw new OutboxError('storage_corrupt');
-        const tx = database.transaction([...STORES], 'readonly');
-        for (const name of STORES) {
-          const store = tx.objectStore(name);
-          if (
-            store.keyPath !==
-              (name === 'intents'
-                ? 'sequence'
-                : name === 'usage'
-                  ? 'id'
-                  : 'lane') ||
-            store.autoIncrement
-          )
-            throw new OutboxError('storage_corrupt');
-          const indexes: Array<[string, string | string[], boolean]> =
-            name === 'intents'
-              ? [
-                  ['owner', 'owner', false],
-                  ['binding', 'binding', false],
-                  ['laneSequence', ['lane', 'sequence'], false],
-                  ['key', 'key', true],
-                  ['artifact', 'artifactId', false],
-                ]
-              : name === 'usage'
-                ? []
-                : [['owner', 'owner', false]];
-          if (
-            !same(
-              Array.from(store.indexNames).sort(),
-              indexes.map(([index]) => index).sort(),
-            )
-          )
-            throw new OutboxError('storage_corrupt');
-          for (const [name, keyPath, unique] of indexes) {
-            const index = store.index(name);
-            if (
-              !same(index.keyPath, keyPath) ||
-              index.unique !== unique ||
-              index.multiEntry
-            )
-              throw new OutboxError('storage_corrupt');
-          }
-        }
+        validateLayout(database, database.transaction([...STORES], 'readonly'));
         resolve(database);
       } catch {
         database.close();
         reject(new OutboxError('storage_corrupt'));
       }
     };
-    opening.onerror = () => reject(new OutboxError('storage_failed'));
+    opening.onerror = () =>
+      reject(migrationFailure ?? new OutboxError('storage_failed'));
     opening.onblocked = () => {
       refused = true;
       reject(new OutboxError('storage_failed'));
@@ -576,11 +826,14 @@ export class LocalStore {
       IDBKeyRange.bound(prefix, [...prefix, []], false, true),
     );
     const targets = new Map<string, UnsentCleanupTarget>();
+    const visited = new Set<string>();
     for (const row of rows) {
       if (!same(row.binding.slice(0, 3), prefix))
         throw new OutboxError('storage_corrupt');
       const lane = JSON.stringify(row.lane);
-      if (!targets.has(lane)) targets.set(lane, cleanupTarget(row));
+      if (!visited.has(lane) && row.state === 'unprepared')
+        targets.set(lane, cleanupTarget(row));
+      visited.add(lane);
     }
     return [...targets.values()];
   }
@@ -619,7 +872,9 @@ export class LocalStore {
     });
   }
 
-  enqueue(input: Omit<IntentRow, 'sequence' | 'bytes'>): Promise<IntentRow> {
+  enqueue(
+    input: Omit<UnpreparedRow, 'sequence' | 'bytes'>,
+  ): Promise<UnpreparedRow> {
     return transaction(this.database, 'readwrite', async (tx) => {
       if (!validBase(input.base)) throw new OutboxError('not_enqueued');
       const global = await usage(tx);
@@ -644,13 +899,20 @@ export class LocalStore {
         laneBytes > LANE_BYTES
       )
         throw new OutboxError('capacity_exceeded');
-      const row = decodeRow({ ...body, bytes });
+      const row = decodeUnprepared({ ...body, bytes });
       await request(tx.objectStore('intents').add(row));
       await request(
         tx.objectStore('checkpoints').put({
+          format: 2,
           lane: row.lane,
           owner: row.owner,
-          generation: row.admittedGeneration,
+          generation: row.authorizedGeneration,
+          predecessor:
+            rows.length === 0
+              ? null
+              : decodeCheckpoint(
+                  await request(tx.objectStore('checkpoints').get(row.lane)),
+                ).predecessor,
           rows: rows.length + 1,
           bytes: laneBytes,
         }),
@@ -674,6 +936,147 @@ export class LocalStore {
     });
   }
 
+  /** Commit the frozen request before any caller may dispatch it. */
+  prepare(
+    expected: UnpreparedRow,
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<PreparedRow> {
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        await usage(tx);
+        const rows = await laneRows(tx, expected.lane);
+        const head = rows.find((row) => row.state !== 'acknowledged');
+        if (!same(head, expected) || head?.state !== 'unprepared')
+          throw new OutboxError('invalid_selection');
+        const checkpoint = decodeCheckpoint(
+          await request(tx.objectStore('checkpoints').get(expected.lane)),
+        );
+        const predecessor = rows.find(
+          (row) => 'after' in head.base && row.sequence === head.base.after,
+        );
+        const base =
+          'version' in head.base
+            ? head.base.version
+            : predecessor?.state === 'acknowledged'
+              ? predecessor.receipt.data_version
+              : checkpoint.predecessor?.sequence === head.base.after
+                ? checkpoint.predecessor.dataVersion
+                : undefined;
+        if (base === undefined) throw new OutboxError('invalid_selection');
+        authorize();
+        const { text, ...identity } = head;
+        void text;
+        const prepared: PreparedRow = {
+          ...identity,
+          state: 'prepared',
+          version: head.version + 1,
+          request: frozenRequest(head, base),
+        };
+        const checked = decodeRow(prepared);
+        if (checked.state !== 'prepared')
+          throw new OutboxError('storage_corrupt');
+        await request(tx.objectStore('intents').put(checked));
+        // Persist legacy checkpoint normalization in the same owner-held transition.
+        await request(tx.objectStore('checkpoints').put(checkpoint));
+        return checked;
+      },
+      signal,
+    );
+  }
+
+  /** Receipt and predecessor checkpoint share one terminal commit event. */
+  acknowledge(
+    expected: PreparedRow,
+    receipt: DataWriteResponse,
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<AcknowledgedRow> {
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        await usage(tx);
+        const rows = await laneRows(tx, expected.lane);
+        const head = rows.find((row) => row.state !== 'acknowledged');
+        if (!same(head, expected) || head?.state !== 'prepared')
+          throw new OutboxError('invalid_selection');
+        const validated = decodeReceipt(receipt, head);
+        authorize();
+        const acknowledged: AcknowledgedRow = {
+          ...head,
+          state: 'acknowledged',
+          version: head.version + 1,
+          receipt: validated,
+        };
+        const checkpoint = decodeCheckpoint(
+          await request(tx.objectStore('checkpoints').get(head.lane)),
+        );
+        await request(tx.objectStore('intents').put(acknowledged));
+        await request(
+          tx.objectStore('checkpoints').put({
+            ...checkpoint,
+            predecessor: {
+              sequence: head.sequence,
+              dataVersion: validated.data_version,
+            },
+          }),
+        );
+        return acknowledged;
+      },
+      signal,
+    );
+  }
+
+  /** Local cleanup only: remove the complete durable-ACK prefix, preserving its checkpoint. */
+  trim(
+    expected: IntentRow[],
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        const first = expected[0];
+        if (first === undefined) throw new OutboxError('invalid_selection');
+        const global = await usage(tx);
+        const rows = await laneRows(tx, first.lane);
+        if (!same(rows, expected)) throw new OutboxError('invalid_selection');
+        const count = rows.findIndex((row) => row.state !== 'acknowledged');
+        const removed = rows.slice(0, count === -1 ? rows.length : count);
+        if (removed.length === 0) throw new OutboxError('invalid_selection');
+        authorize();
+        const bytes = removed.reduce((sum, row) => sum + row.bytes, 0);
+        for (const row of removed)
+          await request(tx.objectStore('intents').delete(row.sequence));
+        const checkpoint = decodeCheckpoint(
+          await request(tx.objectStore('checkpoints').get(first.lane)),
+        );
+        if (removed.length === rows.length)
+          await request(tx.objectStore('checkpoints').delete(first.lane));
+        else
+          await request(
+            tx.objectStore('checkpoints').put({
+              ...checkpoint,
+              rows: rows.length - removed.length,
+              bytes: checkpoint.bytes - bytes,
+            }),
+          );
+        await request(
+          tx.objectStore('usage').put({
+            ...global,
+            rows: global.rows - removed.length,
+            bytes: global.bytes - bytes,
+          }),
+        );
+      },
+      signal,
+    );
+  }
+
   discard(
     expected: IntentRow[],
     authorize: () => void,
@@ -687,7 +1090,7 @@ export class LocalStore {
         if (head === undefined) throw new OutboxError('invalid_selection');
         const global = await usage(tx);
         const current = await laneRows(tx, head.lane);
-        if (!same(current, expected))
+        if (!same(current, expected) || current[0]?.state !== 'unprepared')
           throw new OutboxError('invalid_selection');
         authorize();
         const removed = new Set([head.sequence]);
@@ -708,9 +1111,13 @@ export class LocalStore {
         else
           await request(
             tx.objectStore('checkpoints').put({
+              format: 2,
               lane: head.lane,
               owner: head.owner,
-              generation: head.admittedGeneration,
+              generation: head.authorizedGeneration,
+              predecessor: decodeCheckpoint(
+                await request(tx.objectStore('checkpoints').get(head.lane)),
+              ).predecessor,
               rows: survivors.length,
               bytes: survivors.reduce((sum, row) => sum + row.bytes, 0),
             }),
