@@ -981,7 +981,13 @@ successful check, a transient failed read and proven authority loss. A failed
 read retires its selection and synchronously publishes a fresh selection with
 bounded code/status/Retry-After metadata; budgets, epoch and retained snapshot
 stay unchanged. A further read requires that new explicit choice. Pending calls
-of the same kind still share the original promise until settlement. Proven
+of the same kind still share the original promise until settlement. A successful
+binding read does not commit an epoch: the choice is consumed before that
+read, and a later failed local renewal capture with no replacement gate closes
+this internal scheduler. Its epoch, budgets, retained gates and durable rows
+remain unchanged; neither the old choice nor another retained choice can read
+again on that closed scheduler. It does not automatically reconstruct or
+authorize recovery. Proven
 binding/generation loss, 401, contract-compatible
 409/outbox_binding_changed or an invalid host result permanently fences this
 fixed scheduler. Hosts synchronously revoke captured authority at loss/401

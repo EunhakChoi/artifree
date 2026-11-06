@@ -50,6 +50,186 @@ export async function checkOutboxScheduler(harness) {
   const selected = process.env.ARTIFREE_SCHEDULER_CASE;
   if (
     createArtifact === undefined &&
+    (selected === undefined || selected === 'renew-read-once')
+  ) {
+    for (const mode of [
+      'selected-initial',
+      'other',
+      'selected-final',
+      'late-authority',
+    ].filter(
+      (value) =>
+        process.env.ARTIFREE_RENEW_MODE === undefined ||
+        value === process.env.ARTIFREE_RENEW_MODE,
+    )) {
+      const page = await fresh();
+      await page.evaluate(async () => {
+        globalThis.otherLane = [...lane.slice(0, 4), 'art_' + 'c'.repeat(32)];
+        await enqueueLikeHead({
+          key: '2'.repeat(32),
+          lane: otherLane,
+          artifactId: otherLane[4],
+          base: { version: 0 },
+        });
+        faultPut('intents', 'acknowledged');
+        scheduler.wake(lane);
+        scheduler.wake(otherLane);
+      });
+      await page.waitForFunction(
+        () => events.filter((event) => event.kind === 'paused').length === 2,
+      );
+      const retained = await page.evaluate(() => storageSnapshot());
+      await page.evaluate((mode) => {
+        restorePut();
+        globalThis.firstSelection = events.find(
+          (event) => event.kind === 'paused' && event.lane[4] === lane[4],
+        ).pause.selection;
+        globalThis.otherSelection = events.find(
+          (event) => event.kind === 'paused' && event.lane[4] === otherLane[4],
+        ).pause.selection;
+        // Internal diagnostic only: no public state/debug API is introduced.
+        // Closing makes further probes unable to observe a partial budget reset.
+        globalThis.renewState = () => ({
+          epoch: scheduler.epoch,
+          aggregateFailures: scheduler.aggregateFailures,
+          lanes: [...scheduler.lanes.values()].map((entry) => ({
+            key: [...entry.key],
+            failures: entry.failures,
+            pause: entry.pause.kind,
+            reason: entry.pause.reason,
+            scope: entry.pause.scope,
+          })),
+        });
+        globalThis.renewBefore = renewState();
+        globalThis.renewUnhandled = 0;
+        addEventListener('unhandledrejection', (event) => {
+          event.preventDefault();
+          renewUnhandled += 1;
+        });
+        globalThis.renewCaptureStarted = false;
+        globalThis.renewCaptureGate = new Promise((resolve) => {
+          globalThis.releaseRenewCapture = resolve;
+        });
+        globalThis.renewNativeLane = store.lane.bind(store);
+        let selectedReads = 0;
+        store.lane = (key) => {
+          const own = key[4] === lane[4];
+          if (own) selectedReads += 1;
+          const fault =
+            mode === 'selected-initial'
+              ? own && selectedReads === 1
+              : mode === 'selected-final'
+                ? own && selectedReads === 2
+                : !own;
+          if (!fault) return renewNativeLane(key);
+          renewCaptureStarted = true;
+          return renewCaptureGate.then(() => {
+            const transact = IDBDatabase.prototype.transaction;
+            IDBDatabase.prototype.transaction = function (...args) {
+              const tx = transact.apply(this, args);
+              if (args[1] === 'readonly' && mode !== 'late-authority')
+                tx.abort();
+              return tx;
+            };
+            try {
+              const pending = renewNativeLane(key);
+              if (mode === 'late-authority')
+                return pending.then((rows) => {
+                  currentAuthority = Symbol();
+                  stop.abort();
+                  return rows;
+                });
+              return pending;
+            } finally {
+              IDBDatabase.prototype.transaction = transact;
+            }
+          });
+        };
+        globalThis.renewPending = scheduler.resumeDelivery(firstSelection);
+        globalThis.renewOutcome = renewPending.then(
+          () => 'unexpected',
+          (error) => error.code,
+        );
+      }, mode);
+      await page.waitForFunction(() => renewCaptureStarted);
+      assert.equal(await page.evaluate(() => revalidationCalls), 1);
+      assert.equal(
+        await page.evaluate(
+          () => scheduler.resumeDelivery(firstSelection) === renewPending,
+        ),
+        true,
+      );
+      assert.deepEqual(
+        await page.evaluate(() =>
+          Promise.all(
+            ['retryPreparation', 'retryCleanup'].map((method) =>
+              scheduler[method](firstSelection).then(
+                () => 'unexpected',
+                (error) => error.code,
+              ),
+            ),
+          ),
+        ),
+        ['invalid_selection', 'invalid_selection'],
+      );
+      await page.evaluate(() => releaseRenewCapture());
+      assert.equal(
+        await page.evaluate(() => renewOutcome),
+        mode === 'late-authority' ? 'owner_not_ready' : 'storage_failed',
+      );
+      assert.deepEqual(
+        await page.evaluate(() => renewState()),
+        await page.evaluate(() => renewBefore),
+      );
+      assert.deepEqual(await page.evaluate(() => storageSnapshot()), retained);
+      await page.evaluate(() => {
+        store.lane = renewNativeLane;
+      });
+      assert.deepEqual(
+        await page.evaluate(async () => ({
+          code: await scheduler.resumeDelivery(firstSelection).then(
+            () => 'resumed',
+            (error) => error.code,
+          ),
+          reads: revalidationCalls,
+        })),
+        { code: 'invalid_selection', reads: 1 },
+        'one consumed delivery choice permits only one binding read, even when staged IDB renewal fails',
+      );
+      assert.equal(
+        await page.evaluate(() =>
+          scheduler.resumeDelivery(otherSelection).then(
+            () => 'unexpected',
+            (error) => error.code,
+          ),
+        ),
+        'owner_not_ready',
+      );
+      assert.equal(
+        await page.evaluate(() => {
+          try {
+            scheduler.wake(otherLane);
+            return 'unexpected';
+          } catch (error) {
+            return error.code;
+          }
+        }),
+        'owner_not_ready',
+      );
+      assert.equal(requests().length, 2);
+      assert.equal(await page.evaluate(() => revalidationCalls), 1);
+      assert.equal(await page.evaluate(() => renewUnhandled), 0);
+      assert.equal(
+        await page.evaluate(
+          () => timers.filter((timer) => timer.active).length,
+        ),
+        0,
+      );
+      await close(page);
+    }
+  }
+  if (
+    createArtifact === undefined &&
     (selected === undefined || selected === 'local-action-snapshot')
   ) {
     for (const kind of ['preparation', 'cleanup'].filter(
@@ -1842,7 +2022,7 @@ export async function checkOutboxScheduler(harness) {
               (error) => error.code,
             ),
           ),
-          'owner_not_ready',
+          'invalid_selection',
         );
         assert.equal(await page.evaluate(() => revalidationCalls), 1);
         if (test.startsWith('401') || test === 'override_auth')
@@ -2215,15 +2395,19 @@ export async function checkOutboxScheduler(harness) {
                 (error) => error.code,
               ),
             ),
-            'resumed',
-            'failed staged renewal must preserve the original epoch and selection',
+            'invalid_selection',
+            'failed staged renewal preserves the epoch, but consumes the one-read selection',
           );
-          await page.waitForFunction(() =>
-            events.some(
-              (event) =>
-                event.kind === 'attempt' &&
-                event.result.kind === 'server_acknowledged',
+          assert.equal(await page.evaluate(() => revalidationCalls), 1);
+          assert.equal(requests().length, 2);
+          assert.equal(
+            await page.evaluate(() =>
+              scheduler.resumeDelivery(otherSelection).then(
+                () => 'unexpected',
+                (error) => error.code,
+              ),
             ),
+            'owner_not_ready',
           );
         } else {
           assert.equal(

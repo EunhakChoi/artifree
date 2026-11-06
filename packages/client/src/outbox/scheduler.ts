@@ -881,11 +881,17 @@ export class DeliveryScheduler {
       (kind === 'delivery' && action.epoch !== this.epoch)
     )
       throw new OutboxError('invalid_selection');
+    const initialPause = action.lane.pause;
+    let bindingReadStarted = false;
     this.acting = true;
     try {
       await this.activeTask;
       this.check();
       if (kind === 'delivery') {
+        // One choice permits one binding read, even when later local staging
+        // fails before an epoch can be renewed. Pending calls still coalesce.
+        tokens.delete(selection);
+        bindingReadStarted = true;
         let result: RevalidationResult;
         try {
           result = revalidationResult(
@@ -965,7 +971,8 @@ export class DeliveryScheduler {
             action: { ...captured, epoch: nextEpoch },
           });
         }
-        // All fallible reads finish before changing any token, gate or counter.
+        // All fallible reads finish before changing epoch/gates/counters or
+        // other-lane tokens. The selected one-read choice is already consumed.
         // The selected lane is checked last; callbacks see the complete epoch.
         await this.validateSnapshot(action);
         this.check();
@@ -1029,6 +1036,12 @@ export class DeliveryScheduler {
           throw error;
         }
       }
+    } catch (error: unknown) {
+      // A consumed binding choice with no replacement pause must never leave
+      // the old gate live after failed local renewal staging.
+      if (bindingReadStarted && action.lane.pause === initialPause)
+        this.close();
+      throw error;
     } finally {
       this.acting = false;
       this.kick();
