@@ -1,11 +1,13 @@
 # 0045: Uploaded assets scoped to a user and artifact
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete, R09b–R09d remain proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete, R09b1 supplies read-only client calls; the remainder of R09b–R09d is proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
-The four-type target below remains unchanged. There is no asset client, CLI,
-MCP tool, copy extension, management panel, grant or frame access yet. Builds on [0003](0003-local-html-artifact-slice.md),
+The four-type target below remains unchanged. The read-only TypeScript client
+lists assets, reads metadata and verifies bounded content. There is no
+upload/delete client, CLI, MCP tool, copy extension,
+management panel, grant or frame access yet. Builds on [0003](0003-local-html-artifact-slice.md),
 [0012](0012-duplicate-artifacts.md), [0020](0020-runtime-grants.md),
 [0027](0027-backup-restore-and-schema-upgrade.md),
 [0029](0029-retention-and-cleanup.md), [0031](0031-app-data.md),
@@ -56,9 +58,26 @@ Stable MIME envelope parsing and historical metadata/receipt decoding still
 accept image type spellings. A currently authorized matching historical upload
 replays before the current text-only admission policy, including after deletion,
 and never recreates the bytes. A fresh image key is refused without a receipt.
-Generated request/response DTOs exist for HTTP; generated client operations
-and their bounded response validation belong to R09b. Direct callers must
-freeze the identical envelope and key themselves after an unknown outcome.
+Generated request/response DTOs exist for HTTP. R09b1 supplies read-only
+`listAssets`, `getAsset` and `readAsset` functions using those DTOs, strict
+runtime metadata validation and bounded streaming responses (64 KiB JSON,
+4 KiB errors, content no larger than its validated metadata and 5 MiB).
+Received chunks are copied immediately into one owned growable buffer bounded
+by that byte limit; retained buffers do not grow with the number of chunks.
+Calls refuse redirects and bypass caches; content must match its metadata
+MIME, size and SHA-256. Web Crypto is required for digest verification;
+its absence or failure rejects the read. These are authenticated management
+client calls, not URLs or frame capabilities. A content read first fetches
+metadata, then bytes: deletion or authority loss between them refuses the
+read, while unrelated changes may advance the asset space. The returned
+`asset_version` belongs to the metadata snapshot, not a combined snapshot.
+No automatic retry, pixel decoding or content execution is introduced.
+R09b1 depends only on the already verified text HTTP/storage behavior and
+adds no new admission or authority semantics. Full R09a image validation and
+the remainder of R09b remain incomplete.
+Upload/delete client operations and their unknown-outcome handling remain R09b.
+Direct callers must freeze the identical envelope and key themselves after an
+unknown outcome.
 No asset change subscription is emitted. Asset copying remains absent and
 existing duplicate requests retain their files/data behavior.
 

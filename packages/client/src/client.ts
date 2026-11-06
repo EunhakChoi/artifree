@@ -58,6 +58,7 @@ import {
   decodeText,
   readErrorJson,
   readSuccessJson,
+  readSuccessBytes,
   systemClock,
 } from './transport.js';
 import { toBase64 } from './base64.js';
@@ -452,6 +453,10 @@ interface SendOptions {
    * size limit, a stall limit, the signal) instead of whole.
    */
   readonly boundedErrorBody?: boolean;
+  /** Per-operation streaming body limits; omitted limits retain existing policy. */
+  readonly successBodyLimit?: number;
+  readonly errorBodyLimit?: number;
+  readonly redirect?: 'error';
 }
 
 type GrantState = 'settled' | 'pending' | 'unknown';
@@ -1878,13 +1883,59 @@ export class ArtifreeClient {
     request: Omit<SendOptions, 'headers'> = {},
   ): Promise<T> {
     const response = await this.send(method, path, request);
-    const parsed = parse(await readJson(response, this.address.plain));
+    const value =
+      request.successBodyLimit !== undefined
+        ? await readSuccessJson(
+            response,
+            {
+              clock: this.clock,
+              signal: request.signal,
+              status: response.status,
+              what: 'API response',
+              keepCause: this.address.plain,
+            },
+            request.successBodyLimit,
+          )
+        : await readJson(response, this.address.plain);
+    const parsed = parse(value);
     if (parsed === undefined)
       throw new ArtifreeApiError(
         `${method} ${path} returned a body that does not match the contract.`,
         { status: response.status, code: 'invalid_response' },
       );
     return parsed;
+  }
+
+  /**
+   * Reads an authenticated resource within `limit` bytes without redirects or
+   * caching. Used by the separate asset adapter, which checks MIME and digest.
+   * A lost, stalled or aborted body is a network failure; overflow is an
+   * invalid response. Neither case is retried automatically.
+   */
+  async boundedBytes(
+    path: string,
+    limit: number,
+    options: ReadOptions = {},
+  ): Promise<{ bytes: Uint8Array<ArrayBuffer>; contentType: string | null }> {
+    if (!Number.isSafeInteger(limit) || limit < 0)
+      throw new RangeError(
+        'The byte limit must be a safe nonnegative integer.',
+      );
+    const response = await this.send('GET', path, {
+      cache: 'no-store',
+      redirect: 'error',
+      boundedErrorBody: true,
+      errorBodyLimit: 4096,
+      signal: options.signal,
+    });
+    const bytes = await readSuccessBytes(response, limit, {
+      clock: this.clock,
+      signal: options.signal,
+      status: response.status,
+      what: 'resource content',
+      keepCause: this.address.plain,
+    });
+    return { bytes, contentType: response.headers.get('content-type') };
   }
 
   private async send(
@@ -1898,6 +1949,8 @@ export class ArtifreeClient {
       signal,
       onDispatch,
       boundedErrorBody,
+      errorBodyLimit,
+      redirect,
     }: SendOptions = {},
   ): Promise<Response> {
     const headers: Record<string, string> = {
@@ -1905,6 +1958,7 @@ export class ArtifreeClient {
       authorization: `Bearer ${this.accessToken}`,
     };
     const init: DispatchRequestInit = { method, headers };
+    if (redirect !== undefined) init.redirect = redirect;
     if (cache !== undefined) init.cache = cache;
     if (signal !== undefined) init.signal = signal;
     if (onDispatch !== undefined) init[REQUEST_DISPATCH] = onDispatch;
@@ -1934,13 +1988,17 @@ export class ArtifreeClient {
     const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
     const answer =
       boundedErrorBody === true
-        ? await readErrorJson(response, {
-            clock: this.clock,
-            signal,
-            status: response.status,
-            what: 'error response',
-            keepCause: this.address.plain,
-          })
+        ? await readErrorJson(
+            response,
+            {
+              clock: this.clock,
+              signal,
+              status: response.status,
+              what: 'error response',
+              keepCause: this.address.plain,
+            },
+            errorBodyLimit,
+          )
         : await readJson(response, this.address.plain);
     const failure = parseError(answer);
     // HTTP 429 means too many requests whoever answered it, so a proxy's
