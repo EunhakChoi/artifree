@@ -647,7 +647,7 @@
           "type": "boolean"
         },
         "names": {
-          "description": "Member names after the page token's name, ascending by their UTF-8\nbytes, at most `limit`. Only names that a path can address are listed\n(`[A-Za-z0-9_-]{1,64}`); other names are skipped, do not count toward\n`limit`, and do not make `next_page_token` present.",
+          "description": "Member names after the page token's name, ascending by their UTF-8\nbytes, at most `limit`. Only names addressable by the Unicode 16.0.0\nsegment grammar of decision 0046 are listed (1-64 UTF-8 bytes, exact\nscalar identity without normalization). Other names are skipped, do\nnot count toward `limit`, and do not make `next_page_token` present.",
           "items": {
             "type": "string"
           },
@@ -2001,7 +2001,7 @@
       "description": "Query of `GET /v1/artifacts/{id}/data`.",
       "properties": {
         "path": {
-          "description": "The path to read: `/`-separated segments of 1-64 ASCII letters,\ndigits, `_`, or `-`, at most 16. Absent or empty is the root, which is\nalways an object. This is the decoded value of the query parameter.",
+          "description": "The path to read: at most 16 `/`-separated segments of 1-64 UTF-8\nbytes. ASCII letters, digits, `_`, `-` and non-ASCII Unicode 16.0.0\nletters, marks, numbers and symbols are allowed, excluding whitespace,\ndefault ignorables, noncharacters and slash lookalikes (0046).\nExact scalar identity; no normalization. Absent or empty is the root,\nalways an object. The query parameter is strictly decoded once.",
           "type": [
             "string",
             "null"

@@ -946,6 +946,54 @@ async fn the_data_tools_say_what_they_change() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn data_tools_preserve_unicode_identity_without_url_decoding() -> TestResult {
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Unicode data", "idempotency_key": "unicode-create",
+                "files": [{"path": "index.html", "encoding": "utf8", "content": "<p>Unicode</p>"}]
+            }),
+        )
+        .await?;
+    let id = created["structuredContent"]["artifact"]["id"]
+        .as_str()
+        .ok_or("artifact id")?;
+    let written = harness
+        .call(
+            "set_data",
+            json!({
+                "artifact_id": id, "path": "한글/e\u{301}", "base_data_version": 0,
+                "value": "7", "idempotency_key": "unicode-set"
+            }),
+        )
+        .await?;
+    assert_eq!(
+        written["structuredContent"]["path"], "한글/e\u{301}",
+        "{written}"
+    );
+    let read = harness
+        .call(
+            "get_data",
+            json!({"artifact_id": id, "path": "한글/e\u{301}"}),
+        )
+        .await?;
+    assert_eq!(read["structuredContent"]["value"], 7, "{read}");
+    let distinct = harness
+        .call("get_data", json!({"artifact_id": id, "path": "한글/é"}))
+        .await?;
+    assert_eq!(distinct["structuredContent"]["exists"], false, "{distinct}");
+    for bad in ["한글%2Fe\u{301}", "bad\u{200d}name", "𝄞\u{fe0f}"] {
+        let rejected = harness
+            .call("get_data", json!({"artifact_id": id, "path": bad}))
+            .await?;
+        assert_eq!(error_code(&rejected), "invalid_request", "{rejected}");
+    }
+    Ok(())
+}
+
 /// Duplicating with `copy_data` copies the data in the same call, as over HTTP.
 #[tokio::test]
 async fn duplicate_artifact_copies_data_only_when_asked() -> TestResult {

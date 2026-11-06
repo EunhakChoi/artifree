@@ -1569,7 +1569,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       'invalid_committed_receipt',
     ]) {
       const artifact = await createRealArtifact();
-      let page = await setup({ artifact });
+      let page = await setup({ artifact, path: '한글/e\u0301/𝄞' });
       requests = [];
       collected = [];
       mode = loss;
@@ -1585,6 +1585,10 @@ export async function checkOutboxDelivery(browser, serverApi) {
         { headers: { Authorization: 'Bearer ' + live.token } },
       ).then((response) => response.json());
       assert.equal(state.data_version, 1);
+      assert.deepEqual(state.value, {
+        한글: { 'e\u0301': { '𝄞': { original: 1 } } },
+      });
+      assert.equal(frozen.path, '한글/e\u0301/𝄞');
       assert.equal(collected.length, 0);
       const external = await fetch(
         live.origin + '/v1/artifacts/' + artifact + '/data',
@@ -1662,7 +1666,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
     artifact = await createRealArtifact();
     page = await setup({
       artifact,
-      path: 'raw//invalid',
+      path: 'bad\u200dname',
       text: '{"n":9007199254740993}',
     });
     requests = [];
@@ -1674,7 +1678,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
     });
     assert.equal(
       requests[0].body,
-      '{"base_data_version":0,"path":"raw//invalid","value":{"n":9007199254740993}}',
+      '{"base_data_version":0,"path":"bad\u200dname","value":{"n":9007199254740993}}',
     );
     assert.equal((await page.evaluate(() => snapshot()))[0].state, 'prepared');
     await close(page);

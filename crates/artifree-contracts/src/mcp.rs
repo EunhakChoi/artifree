@@ -177,8 +177,9 @@ pub struct UpdateArtifactArguments {
 pub struct GetDataArguments {
     /// Artifact identifier.
     pub artifact_id: String,
-    /// The path to read: `/`-separated segments of 1-64 ASCII letters, digits,
-    /// `_`, or `-`, at most 16. By default or when empty, the root.
+    /// The path to read: at most 16 `/`-separated segments of 1-64 UTF-8
+    /// bytes, using the exact Unicode 16.0.0 grammar of decision 0046.
+    /// No normalization or URL decoding. By default or when empty, the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
@@ -706,8 +707,10 @@ fn data_tools() -> [ToolDefinition; 4] {
             "Read the value at a path of your application data for an artifact, with data_version: \
              the version of the data, which is unrelated to the artifact's revisions and is the \
              base_data_version of the next write. The data is one JSON object per artifact \
-             (version 0 and {} until written). A path is up to 16 segments of 1-64 letters, digits, \
-             '_' or '-' separated by '/', such as todos/first; the empty path is the root. A path \
+             (version 0 and {} until written). A path is up to 16 segments of 1-64 UTF-8 bytes: \
+             ASCII letters, digits, '_' or '-', or allowed Unicode 16.0.0 letters, marks, numbers \
+             and symbols (0046), separated by '/', such as todos/first or 한글/값. No normalization \
+             or URL decoding; the empty path is the root. A path \
              with nothing at it succeeds with exists false. A path never enters an array. The \
              artifact's files, previews, and exports do not contain this data, and a page \
              running in a preview cannot read it."

@@ -10,6 +10,7 @@
 //! behind the same token.
 
 mod assets;
+mod data_query;
 
 use std::future::poll_fn;
 use std::net::SocketAddr;
@@ -48,7 +49,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -1407,11 +1408,11 @@ async fn read_data(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
     path: Result<Path<String>, PathRejection>,
-    query: Result<Query<ReadDataQuery>, QueryRejection>,
+    uri: Uri,
 ) -> Result<Json<AppData>, ApiError> {
     let Path(id) = path?;
     operations::artifact_id(&id)?;
-    let Query(ReadDataQuery { path: at }) = query?;
+    let ReadDataQuery { path: at } = data_query::parse(&uri)?;
     Ok(Json(
         operations::read_data(&state, actor, &id, at.as_deref()).await?,
     ))
@@ -1423,11 +1424,11 @@ async fn read_data_members(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
     path: Result<Path<String>, PathRejection>,
-    query: Result<Query<ReadDataMembersQuery>, QueryRejection>,
+    uri: Uri,
 ) -> Result<Json<DataMembers>, ApiError> {
     let Path(id) = path?;
     operations::artifact_id(&id)?;
-    let Query(query) = query?;
+    let query: ReadDataMembersQuery = data_query::parse(&uri)?;
     Ok(Json(
         operations::read_data_members(&state, actor, &id, query).await?,
     ))

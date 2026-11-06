@@ -7195,7 +7195,7 @@
       "title": "Cancel job"
     },
     {
-      "description": "Read the value at a path of your application data for an artifact, with data_version: the version of the data, which is unrelated to the artifact's revisions and is the base_data_version of the next write. The data is one JSON object per artifact (version 0 and {} until written). A path is up to 16 segments of 1-64 letters, digits, '_' or '-' separated by '/', such as todos/first; the empty path is the root. A path with nothing at it succeeds with exists false. A path never enters an array. The artifact's files, previews, and exports do not contain this data, and a page running in a preview cannot read it.",
+      "description": "Read the value at a path of your application data for an artifact, with data_version: the version of the data, which is unrelated to the artifact's revisions and is the base_data_version of the next write. The data is one JSON object per artifact (version 0 and {} until written). A path is up to 16 segments of 1-64 UTF-8 bytes: ASCII letters, digits, '_' or '-', or allowed Unicode 16.0.0 letters, marks, numbers and symbols (0046), separated by '/', such as todos/first or 한글/값. No normalization or URL decoding; the empty path is the root. A path with nothing at it succeeds with exists false. A path never enters an array. The artifact's files, previews, and exports do not contain this data, and a page running in a preview cannot read it.",
       "effect": "read",
       "inputSchema": {
         "additionalProperties": false,
@@ -7206,7 +7206,7 @@
             "type": "string"
           },
           "path": {
-            "description": "The path to read: `/`-separated segments of 1-64 ASCII letters, digits,\n`_`, or `-`, at most 16. By default or when empty, the root.",
+            "description": "The path to read: at most 16 `/`-separated segments of 1-64 UTF-8\nbytes, using the exact Unicode 16.0.0 grammar of decision 0046.\nNo normalization or URL decoding. By default or when empty, the root.",
             "type": [
               "string",
               "null"
