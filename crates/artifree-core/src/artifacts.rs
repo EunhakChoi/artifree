@@ -10,7 +10,8 @@
 //! Commit success means durable acceptance. Source history is kept
 //! separate from application data (decision 0031, [`crate::data`]) and access
 //! policy. A duplicate copies files, and the data space only when asked;
-//! artifacts have no uploaded assets yet. Publishing is not implemented.
+//! uploaded assets are separate private state and are not copied yet (0045).
+//! Publishing is not implemented.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

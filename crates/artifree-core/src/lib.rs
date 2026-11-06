@@ -3,6 +3,8 @@
 
 pub mod agent_handoff;
 pub mod artifacts;
+pub mod asset_validation;
+pub mod assets;
 pub mod data;
 pub mod documents;
 pub mod jobs;

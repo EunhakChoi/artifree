@@ -12,10 +12,18 @@ import { parseSync } from 'oxc-parser';
 // tool arguments into contract DTOs (decision 0004). futures-core provides
 // only the Stream trait that Axum's server-sent events response consumes; it
 // is already in the dependency tree through Axum (decision 0006).
+// png decodes upload pixels; flate2 enforces complete bounded PNG zlib streams
+// that png deliberately tolerates when truncated (decision 0045).
 const rustEdges = {
   'artifree-domain': [],
   'artifree-ports': ['artifree-domain'],
-  'artifree-core': ['artifree-domain', 'artifree-ports', 'sha2'],
+  'artifree-core': [
+    'artifree-domain',
+    'artifree-ports',
+    'sha2',
+    'png',
+    'flate2',
+  ],
   'artifree-providers': [
     'artifree-ports',
     'artifree-domain',
@@ -46,6 +54,8 @@ const rustEdges = {
 // leftover content that a healthy server never produces, to prove the
 // cleanup route removes it (decision 0029).
 const rustDevEdges = {
+  // Recompute PNG fixture CRCs so malformed-content tests reach the decoder.
+  'artifree-core': ['crc32fast'],
   'artifree-server': ['http-body', 'rusqlite', 'tower'],
 };
 

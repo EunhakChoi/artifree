@@ -19,7 +19,36 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
+
+// Asset associations and receipts deliberately retain no bytes outside `blobs`.
+const ASSET_SCHEMA: &str = "
+CREATE TABLE asset_ids (id TEXT PRIMARY KEY CHECK (length(id) = 64)) STRICT;
+CREATE TABLE asset_spaces (
+ artifact_id TEXT NOT NULL REFERENCES artifacts(id), actor TEXT NOT NULL,
+ asset_version INTEGER NOT NULL CHECK (asset_version >= 1),
+ PRIMARY KEY (artifact_id, actor)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE assets (
+ artifact_id TEXT NOT NULL REFERENCES artifacts(id), actor TEXT NOT NULL,
+ id TEXT NOT NULL REFERENCES asset_ids(id), content_type TEXT NOT NULL,
+ size INTEGER NOT NULL CHECK (size >= 1 AND size <= 5242880),
+ digest BLOB NOT NULL REFERENCES blobs(digest), created_at INTEGER NOT NULL,
+ PRIMARY KEY (artifact_id, actor, id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX assets_by_actor ON assets(actor, artifact_id);
+CREATE INDEX assets_by_digest ON assets(digest);
+CREATE TABLE asset_requests (
+ actor TEXT NOT NULL, request_key TEXT NOT NULL,
+ fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+ artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+ asset_version INTEGER NOT NULL CHECK (asset_version >= 0),
+ asset_id TEXT, content_type TEXT, size INTEGER, digest BLOB, uploaded_at INTEGER,
+ deleted INTEGER NOT NULL CHECK (deleted IN (0,1)), created_at INTEGER NOT NULL,
+ PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX asset_requests_by_artifact ON asset_requests(artifact_id);
+";
 
 const SCHEMA: &str = "
 CREATE TABLE artifacts (
@@ -533,6 +562,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if version < 11 {
         rebuild_changes(&transaction, DATA_CHANGE_SCHEMA, 11)?;
+    }
+    if version < 12 {
+        transaction
+            .execute_batch(ASSET_SCHEMA)
+            .map_err(unavailable)?;
     }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)

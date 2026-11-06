@@ -431,6 +431,7 @@ impl Stream {
 /// The names of what a user holds, which another user guesses or learns.
 #[derive(Clone)]
 struct Ids {
+    asset: String,
     artifact: String,
     trashed: String,
     trashed_base: u64,
@@ -450,6 +451,7 @@ impl Ids {
     /// Names with the right spelling that no one holds.
     fn absent() -> Self {
         Self {
+            asset: "0".repeat(64),
             artifact: format!("art_{}", "0".repeat(32)),
             trashed: format!("art_{}", "1".repeat(32)),
             trashed_base: 2,
@@ -468,6 +470,7 @@ impl Ids {
 
     fn fill(&self, template: &str) -> String {
         [
+            ("asset", self.asset.clone()),
             ("artifact", self.artifact.clone()),
             ("trashed", self.trashed.clone()),
             ("trashed_base", self.trashed_base.to_string()),
@@ -492,6 +495,7 @@ impl Ids {
     /// Hides the names in an answer, so two answers can be compared.
     fn scrub(&self, text: &str) -> String {
         [
+            &self.asset,
             &self.artifact,
             &self.trashed,
             &self.job,
@@ -513,6 +517,7 @@ impl Ids {
 /// What a user stores: two revisions, application data, a job, and an
 /// artifact in the trash.
 struct Stored {
+    asset: String,
     artifact: String,
     job: String,
     trashed: String,
@@ -562,6 +567,8 @@ async fn stored_things(harness: &Harness, token: &str, tag: &str) -> Result<Stor
                          "value": { "private": format!("{tag}-data") } })),
         )
         .await?;
+    let asset: Value = harness.expect(201, "POST", &format!("/v1/artifacts/{artifact}/assets"), token, Some(format!("{tag}-asset-00001").as_str()), Some(json!({"base_asset_version":0,"content_type":"text/plain","content_base64":"cHJpdmF0ZQ=="}))).await?;
+    let asset = asset["asset"]["id"].as_str().ok_or("asset id")?.to_owned();
     let job: Value = harness
         .expect(
             201,
@@ -602,6 +609,7 @@ async fn stored_things(harness: &Harness, token: &str, tag: &str) -> Result<Stor
         .as_u64()
         .ok_or("revision")?;
     Ok(Stored {
+        asset,
         job: job["job"]["id"].as_str().ok_or("job id")?.to_owned(),
         artifact,
         trashed,
@@ -683,6 +691,7 @@ async fn connected_things(
 async fn fixture(harness: &Harness, who: &Person, tag: &str) -> Result<Ids, TestError> {
     let token = who.secret.as_str();
     let Stored {
+        asset,
         artifact,
         job,
         trashed,
@@ -741,6 +750,7 @@ async fn fixture(harness: &Harness, who: &Person, tag: &str) -> Result<Ids, Test
         )
         .await?;
     Ok(Ids {
+        asset,
         job,
         artifact,
         trashed,
@@ -862,6 +872,27 @@ fn http_cases() -> Vec<Case> {
             Succeeds,
         ),
         case("job", "GET", "/v1/jobs/{job}", None, Succeeds),
+        case(
+            "assets",
+            "GET",
+            "/v1/artifacts/{artifact}/assets",
+            None,
+            Succeeds,
+        ),
+        case(
+            "asset metadata",
+            "GET",
+            "/v1/artifacts/{artifact}/assets/{asset}",
+            None,
+            Succeeds,
+        ),
+        case(
+            "asset content",
+            "GET",
+            "/v1/artifacts/{artifact}/assets/{asset}/content",
+            None,
+            Reaches,
+        ),
         case(
             "data",
             "GET",
@@ -1014,6 +1045,20 @@ fn http_cases() -> Vec<Case> {
             Succeeds,
         ),
         case(
+            "upload asset",
+            "POST",
+            "/v1/artifacts/{artifact}/assets",
+            Some(r#"{"base_asset_version":1,"content_type":"text/plain","content_base64":"YQ=="}"#),
+            Succeeds,
+        ),
+        case(
+            "delete asset",
+            "DELETE",
+            "/v1/artifacts/{artifact}/assets/{asset}",
+            Some(r#"{"base_asset_version":2}"#),
+            Succeeds,
+        ),
+        case(
             "set data",
             "PUT",
             "/v1/artifacts/{artifact}/data",
@@ -1145,6 +1190,7 @@ fn declared_routes() -> BTreeSet<String> {
     let mut prefixes = std::collections::BTreeMap::new();
     for source in [
         include_str!("../src/http.rs"),
+        include_str!("../src/http/assets.rs"),
         include_str!("../src/tokens.rs"),
         include_str!("../src/users.rs"),
     ] {

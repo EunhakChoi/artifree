@@ -39,6 +39,7 @@
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
+mod assets;
 mod data;
 mod jobs;
 
@@ -485,6 +486,7 @@ impl ArtifactStore for SqliteStore {
             let now = commit_time(transaction)?;
             let next = MetadataRevision(current.metadata_revision.0 + 1);
             remove_files(transaction, request.artifact)?;
+            assets::erase_for_purge(transaction, request.artifact)?;
             // Application data is erased with the files (decision 0031).
             data::erase_for_purge(transaction, request.artifact)?;
             // Jobs pinned to the revisions that were just removed end, and
@@ -594,7 +596,8 @@ impl ArtifactStore for SqliteStore {
             transaction
                 .execute(
                     "DELETE FROM blobs WHERE NOT EXISTS
-                         (SELECT 1 FROM revision_files f WHERE f.digest = blobs.digest)",
+                         (SELECT 1 FROM revision_files f WHERE f.digest = blobs.digest)
+                       AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = blobs.digest)",
                     [],
                 )
                 .map_err(unavailable)?;
@@ -844,11 +847,12 @@ fn key_use(
 /// them: a key any of them holds cannot start a request of another kind. A test
 /// compares this list with the tables that have a `request_key` column, so a
 /// later table cannot be left out.
-pub(crate) const KEY_TABLES: [&str; 4] = [
+pub(crate) const KEY_TABLES: [&str; 5] = [
     "request_keys",
     "cleanup_runs",
     "job_requests",
     "data_requests",
+    "asset_requests",
 ];
 
 /// Whether the actor's key is held by a table other than `own` (one of
@@ -950,7 +954,8 @@ fn remove_files(transaction: &Transaction<'_>, id: &ArtifactId) -> Result<(), St
     let mut remove = transaction
         .prepare_cached(
             "DELETE FROM blobs WHERE digest = ?1
-               AND NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = ?1)",
+               AND NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = ?1)
+               AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = ?1)",
         )
         .map_err(unavailable)?;
     for digest in digests {
@@ -966,6 +971,7 @@ fn count_unreferenced(connection: &Connection) -> Result<UnreferencedContent, St
         .prepare(
             "SELECT digest, length(content) FROM blobs b
              WHERE NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = b.digest)
+               AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = b.digest)
              ORDER BY digest",
         )
         .map_err(unavailable)?;

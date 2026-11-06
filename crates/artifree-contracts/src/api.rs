@@ -1854,6 +1854,14 @@ pub enum ErrorCode {
     /// too when its `at_data_version` is not the space's version, older or
     /// newer; start the listing again.
     DataConflict,
+    /// The independent upload state changed.
+    AssetConflict,
+    /// The declared type is not currently accepted for new uploads.
+    AssetTypeUnsupported,
+    /// Empty or invalid asset content.
+    InvalidAsset,
+    /// Upload byte, count or logical quota exceeded.
+    AssetLimitExceeded,
     /// The opt-in write authority changed; no key or mutation was recorded.
     OutboxBindingChanged,
     /// The path crosses a value that is not an object, so a write cannot make
@@ -1910,6 +1918,9 @@ pub struct ErrorBody {
     /// of a listing whose `at_data_version` is not current).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_data_version: Option<u64>,
+    /// Current independent state for `asset_conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_asset_version: Option<u64>,
     /// The first files, in path order, whose edits did not hold; present for
     /// `file_conflict`, together with `current_revision`. At most 32.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1927,4 +1938,87 @@ pub struct ErrorBody {
 pub struct ErrorResponse {
     /// Error details.
     pub error: ErrorBody,
+}
+
+/// Immutable private upload metadata (0045).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Asset {
+    /// Opaque identifier interpreted within its actor/artifact space.
+    pub id: String,
+    /// Validated type. Current admission accepts plain text, CSV and a restricted RGB/RGBA8 noninterlaced PNG subset; JPEG is refused pending complete validation.
+    pub content_type: String,
+    /// Exact immutable byte count.
+    pub size_bytes: u64,
+    /// SHA-256 as lowercase hexadecimal.
+    pub sha256: String,
+    /// Server creation time.
+    pub created_at_ms: i64,
+}
+/// Bounded current metadata and usage from one snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssetList {
+    /// Current independent asset version.
+    pub asset_version: u64,
+    /// At most 64 entries ordered by ID.
+    #[schemars(length(max = 64))]
+    pub assets: Vec<Asset>,
+    /// Logical byte usage in this space.
+    pub bytes: u64,
+    /// Maximum associations per space.
+    pub max_assets: u64,
+    /// Maximum bytes per space.
+    pub max_bytes: u64,
+}
+/// Current immutable metadata and space version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssetResponse {
+    /// Current version.
+    pub asset_version: u64,
+    /// Scoped immutable metadata.
+    pub asset: Asset,
+}
+/// Stable bounded upload envelope. MIME syntax is separate from mutable admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UploadAssetRequest {
+    /// Observed independent state version.
+    pub base_asset_version: u64,
+    /// Original lowercase, parameter-free MIME declaration.
+    pub content_type: String,
+    /// Strict standard base64, at most 5 MiB decoded bytes.
+    pub content_base64: String,
+}
+/// Original metadata-only upload receipt; replay does not recreate deleted bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UploadAssetResponse {
+    /// Original resulting version.
+    pub asset_version: u64,
+    /// Original metadata.
+    pub asset: Asset,
+    /// Whether this returns a prior committed result.
+    pub replayed: bool,
+}
+/// Conditional association deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteAssetRequest {
+    /// Observed independent state version.
+    pub base_asset_version: u64,
+}
+/// Original association deletion receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteAssetResponse {
+    /// Requested opaque identifier.
+    pub asset_id: String,
+    /// Original resulting version.
+    pub asset_version: u64,
+    /// Whether the original operation removed an association.
+    pub deleted: bool,
+    /// Whether this returns a prior committed result.
+    pub replayed: bool,
 }
