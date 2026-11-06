@@ -32,5 +32,8 @@ Content validation still runs after read-only authority/key/base preflight and
 outside all database transactions. Final immediate settlement rechecks authority,
 key and base before using the saved success or rejection. The persistence,
 quota, retry and lifecycle tests remain part of this text-only partial slice.
-Generated HTTP DTOs exist; asset client calls, CLI, MCP, copying, management UI
-and frame capabilities remain R09b–R09d work.
+Generated HTTP DTOs and read-only TypeScript client calls (`listAssets`,
+`getAsset`, `readAsset`) exist. The client checks bounded metadata and content
+responses, MIME, size and digest; it does not decode images or broaden upload
+admission. Upload/delete client calls, CLI, MCP, copying, management UI and
+frame capabilities remain R09b–R09d work.
