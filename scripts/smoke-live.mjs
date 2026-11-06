@@ -131,6 +131,12 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await expect(
       fresh.workspace.getByText('Revision 3', { exact: true }),
     ).toBeVisible();
+    // Looking for a kept draft can outlast the metadata reads. Wait for
+    // both content views before counting the requests that loaded them.
+    await expect(fresh.workspace.getByLabel('index.html')).toHaveValue(
+      html('Live 3'),
+    );
+    await expect(preview(fresh).locator('#label')).toHaveText('Live 3');
     await fresh.reads.quiet();
     assert.deepEqual(
       fresh.reads.counts(0),
