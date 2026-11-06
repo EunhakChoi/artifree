@@ -675,46 +675,66 @@ export class DeliveryScheduler {
     throw new OutboxError('invalid_selection');
   }
 
-  private async retryLocalPreparation(lane: Lane): Promise<boolean> {
+  private async retryLocalPreparation(
+    action: Action,
+    beginMutation: () => void,
+  ): Promise<boolean> {
+    const { lane } = action;
     this.check(lane.key);
     const first = (await this.store.lane(lane.key))[0];
     this.check(lane.key);
     if (first?.state !== 'unprepared')
       throw new OutboxError('invalid_selection');
+    beginMutation();
     try {
       await this.store.prepare(
         first,
         () => this.check(lane.key),
         this.fence.signal,
+        action.snapshot,
       );
     } catch (error: unknown) {
       this.check();
-      if (!(error instanceof OutboxError) || error.code !== 'storage_failed')
+      if (
+        !(error instanceof OutboxError) ||
+        (error.code !== 'storage_failed' && error.code !== 'invalid_selection')
+      )
         throw error;
       await this.pausePreparation(lane);
+      if (error.code === 'invalid_selection') throw error;
       return false;
     }
     this.check();
     return true;
   }
 
-  private async retryLocalCleanup(lane: Lane): Promise<boolean> {
+  private async retryLocalCleanup(
+    action: Action,
+    beginMutation: () => void,
+  ): Promise<boolean> {
+    const { lane } = action;
     this.check(lane.key);
     const rows = await this.store.lane(lane.key);
     this.check(lane.key);
     if (rows[0]?.state !== 'acknowledged')
       throw new OutboxError('invalid_selection');
+    beginMutation();
     try {
       await this.store.trim(
         rows,
         () => this.check(lane.key),
         this.fence.signal,
+        action.snapshot,
       );
     } catch (error: unknown) {
       this.check(lane.key);
-      if (!(error instanceof OutboxError) || error.code !== 'storage_failed')
+      if (
+        !(error instanceof OutboxError) ||
+        (error.code !== 'storage_failed' && error.code !== 'invalid_selection')
+      )
         throw error;
       await this.pauseCleanup(lane);
+      if (error.code === 'invalid_selection') throw error;
       return false;
     }
     this.check(lane.key);
@@ -984,14 +1004,29 @@ export class DeliveryScheduler {
       } else {
         // Preserve the old gate through preliminary reads and until a terminal
         // preparation outcome. A failed read cannot silently enable wake().
-        const prepared =
-          kind === 'preparation'
-            ? await this.retryLocalPreparation(action.lane)
-            : await this.retryLocalCleanup(action.lane);
-        tokens.delete(selection);
-        if (prepared) {
-          delete action.lane.pause;
-          this.queue(action.lane);
+        const priorPause = action.lane.pause;
+        let started = false;
+        const beginMutation = (): void => {
+          // One deliberate choice permits one transaction, even if capturing
+          // its replacement pause subsequently fails. Pending calls still
+          // coalesce through their separate per-kind promise registry.
+          tokens.delete(selection);
+          started = true;
+        };
+        try {
+          const prepared =
+            kind === 'preparation'
+              ? await this.retryLocalPreparation(action, beginMutation)
+              : await this.retryLocalCleanup(action, beginMutation);
+          if (prepared) {
+            delete action.lane.pause;
+            this.queue(action.lane);
+          }
+        } catch (error: unknown) {
+          // A spent choice without a successfully captured replacement gate
+          // cannot leave a live scheduler with an unactionable/stale pause.
+          if (started && action.lane.pause === priorPause) this.close();
+          throw error;
         }
       }
     } finally {

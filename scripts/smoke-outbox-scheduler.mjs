@@ -50,6 +50,251 @@ export async function checkOutboxScheduler(harness) {
   const selected = process.env.ARTIFREE_SCHEDULER_CASE;
   if (
     createArtifact === undefined &&
+    (selected === undefined || selected === 'local-action-snapshot')
+  ) {
+    for (const kind of ['preparation', 'cleanup'].filter(
+      (value) =>
+        process.env.ARTIFREE_LOCAL_KIND === undefined ||
+        value === process.env.ARTIFREE_LOCAL_KIND,
+    )) {
+      for (const boundary of ['second-read', 'before-transaction']) {
+        const page = await fresh();
+        await page.evaluate((kind) => {
+          faultPut(
+            kind === 'preparation' ? 'intents' : 'usage',
+            kind === 'preparation' ? 'prepared' : undefined,
+          );
+          scheduler.wake(lane);
+        }, kind);
+        await waitPause(page, `${kind}_paused`);
+        const result = await page.evaluate(
+          async ({ kind, boundary }) => {
+            restorePut();
+            globalThis.localOldSelection = selection;
+            globalThis.localMethod =
+              kind === 'preparation' ? 'retryPreparation' : 'retryCleanup';
+            const nativeLane = store.lane.bind(store);
+            const storeMethod = kind === 'preparation' ? 'prepare' : 'trim';
+            const nativeMutation = store[storeMethod].bind(store);
+            let reads = 0;
+            let admitted = false;
+            const admit = async () => {
+              if (admitted) return;
+              admitted = true;
+              await enqueueLikeHead({
+                key: crypto.randomUUID().replaceAll('-', ''),
+                base: { after: head.sequence },
+                text: '{"concurrent":true}',
+              });
+              globalThis.localBeforeMutation = await storageSnapshot();
+            };
+            store.lane = async (key) => {
+              reads += 1;
+              if (boundary === 'second-read' && reads === 2) await admit();
+              return nativeLane(key);
+            };
+            store[storeMethod] = async (...args) => {
+              if (boundary === 'before-transaction') await admit();
+              return nativeMutation(...args);
+            };
+            try {
+              await scheduler[localMethod](localOldSelection);
+              return 'unexpected';
+            } catch (error) {
+              return error.code;
+            } finally {
+              store.lane = nativeLane;
+              store[storeMethod] = nativeMutation;
+            }
+          },
+          { kind, boundary },
+        );
+        assert.equal(
+          result,
+          'invalid_selection',
+          `${kind} selection must reject concurrent enqueue at ${boundary}`,
+        );
+        assert.deepEqual(
+          await page.evaluate(() => storageSnapshot()),
+          await page.evaluate(() => localBeforeMutation),
+          'selection failure changes no accepted row, checkpoint or quota counter',
+        );
+        assert.equal(requests().length, kind === 'preparation' ? 0 : 1);
+        assert.equal(await page.evaluate(() => revalidationCalls), 0);
+        assert.equal(
+          await page.evaluate(() => {
+            const pause = events.findLast((event) => event.kind === 'paused');
+            globalThis.localFreshSelection = pause.pause.selection;
+            return localFreshSelection !== localOldSelection;
+          }),
+          true,
+          'a failed mutation retires the old choice and publishes a fresh gate',
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler[localMethod](localOldSelection).then(
+              () => 'unexpected',
+              (error) => error.code,
+            ),
+          ),
+          'invalid_selection',
+        );
+        await page.evaluate(() => scheduler[localMethod](localFreshSelection));
+        await page.waitForFunction(
+          (count) =>
+            events.filter(
+              (event) =>
+                event.kind === 'attempt' &&
+                event.result.kind === 'server_acknowledged',
+            ).length === count,
+          kind === 'preparation' ? 2 : 1,
+        );
+        assert.equal(requests().length, 2);
+        assert.notEqual(
+          requests()[0].headers['idempotency-key'],
+          requests()[1].headers['idempotency-key'],
+          'fresh local retry preserves the durable ACK and only sends the new successor',
+        );
+        assert.deepEqual(
+          (await page.evaluate(() => storageSnapshot())).rows,
+          [],
+        );
+        await page.evaluate(() => scheduler.close());
+        await close(page);
+      }
+    }
+  }
+
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'local-action-capture-failure')
+  ) {
+    for (const kind of ['preparation', 'cleanup'].filter(
+      (value) =>
+        process.env.ARTIFREE_LOCAL_KIND === undefined ||
+        value === process.env.ARTIFREE_LOCAL_KIND,
+    )) {
+      const page = await fresh();
+      await page.evaluate((kind) => {
+        faultPut(
+          kind === 'preparation' ? 'intents' : 'usage',
+          kind === 'preparation' ? 'prepared' : undefined,
+        );
+        scheduler.wake(lane);
+      }, kind);
+      await waitPause(page, `${kind}_paused`);
+      const retained = await page.evaluate(() => storageSnapshot());
+      await page.evaluate((kind) => {
+        globalThis.localOldSelection = selection;
+        globalThis.localMethod =
+          kind === 'preparation' ? 'retryPreparation' : 'retryCleanup';
+        globalThis.localAttempts = 0;
+        globalThis.localCaptureStarted = false;
+        globalThis.localUnhandled = 0;
+        addEventListener('unhandledrejection', (event) => {
+          event.preventDefault();
+          localUnhandled += 1;
+        });
+        const storeMethod = kind === 'preparation' ? 'prepare' : 'trim';
+        const mutation = store[storeMethod].bind(store);
+        store[storeMethod] = (...args) => {
+          localAttempts += 1;
+          return mutation(...args);
+        };
+        globalThis.localNativeLane = store.lane.bind(store);
+        let reads = 0;
+        globalThis.localCaptureGate = new Promise((resolve) => {
+          globalThis.releaseLocalCapture = resolve;
+        });
+        store.lane = (key) => {
+          reads += 1;
+          if (reads !== 3) return localNativeLane(key);
+          localCaptureStarted = true;
+          return localCaptureGate.then(() => {
+            const transact = IDBDatabase.prototype.transaction;
+            IDBDatabase.prototype.transaction = function (...args) {
+              const tx = transact.apply(this, args);
+              if (args[1] === 'readonly') tx.abort();
+              return tx;
+            };
+            try {
+              return localNativeLane(key);
+            } finally {
+              IDBDatabase.prototype.transaction = transact;
+            }
+          });
+        };
+        globalThis.localPending = scheduler[localMethod](localOldSelection);
+        globalThis.localOutcome = localPending.then(
+          () => 'unexpected',
+          (error) => error.code,
+        );
+      }, kind);
+      await page.waitForFunction(() => localCaptureStarted);
+      assert.equal(
+        await page.evaluate(
+          () => scheduler[localMethod](localOldSelection) === localPending,
+        ),
+        true,
+      );
+      assert.deepEqual(
+        await page.evaluate(() =>
+          Promise.all(
+            ['retryPreparation', 'retryCleanup', 'resumeDelivery']
+              .filter((method) => method !== localMethod)
+              .map((method) =>
+                scheduler[method](localOldSelection).then(
+                  () => 'unexpected',
+                  (error) => error.code,
+                ),
+              ),
+          ),
+        ),
+        ['invalid_selection', 'invalid_selection'],
+      );
+      await page.evaluate(() => releaseLocalCapture());
+      assert.equal(await page.evaluate(() => localOutcome), 'storage_failed');
+      await page.evaluate(() => {
+        store.lane = localNativeLane;
+      });
+      assert.equal(
+        await page.evaluate(() =>
+          scheduler[localMethod](localOldSelection).then(
+            () => 'unexpected',
+            (error) => error.code,
+          ),
+        ),
+        'invalid_selection',
+        'a spent local choice cannot retry after replacement capture fails',
+      );
+      assert.equal(await page.evaluate(() => localAttempts), 1);
+      assert.equal(
+        await page.evaluate(() => {
+          try {
+            scheduler.wake([...lane.slice(0, 4), 'art_' + 'f'.repeat(32)]);
+            return 'unexpected';
+          } catch (error) {
+            return error.code;
+          }
+        }),
+        'owner_not_ready',
+        'failed replacement capture fences independent lanes too',
+      );
+      assert.deepEqual(await page.evaluate(() => storageSnapshot()), retained);
+      assert.equal(requests().length, kind === 'preparation' ? 0 : 1);
+      assert.equal(await page.evaluate(() => revalidationCalls), 0);
+      assert.equal(await page.evaluate(() => localUnhandled), 0);
+      assert.equal(
+        await page.evaluate(
+          () => timers.filter((timer) => timer.active).length,
+        ),
+        0,
+      );
+      await close(page);
+    }
+  }
+  if (
+    createArtifact === undefined &&
     (selected === undefined || selected === 'capacity-retained-gates')
   ) {
     const page = await fresh();

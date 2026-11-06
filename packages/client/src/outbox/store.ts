@@ -950,6 +950,7 @@ export class LocalStore {
     expected: UnpreparedRow,
     authorize: () => void,
     signal: AbortSignal,
+    selectionSnapshot?: string,
   ): Promise<PreparedRow> {
     return transaction(
       this.database,
@@ -960,6 +961,11 @@ export class LocalStore {
         authorize();
         const rows = await laneRows(tx, expected.lane);
         authorize();
+        if (
+          selectionSnapshot !== undefined &&
+          JSON.stringify(rows) !== selectionSnapshot
+        )
+          throw new OutboxError('invalid_selection');
         const head = rows.find((row) => row.state !== 'acknowledged');
         if (!same(head, expected) || head?.state !== 'unprepared')
           throw new OutboxError('invalid_selection');
@@ -1055,6 +1061,7 @@ export class LocalStore {
     expected: IntentRow[],
     authorize: () => void,
     signal: AbortSignal,
+    selectionSnapshot?: string,
   ): Promise<void> {
     return transaction(
       this.database,
@@ -1067,6 +1074,11 @@ export class LocalStore {
         authorize();
         const rows = await laneRows(tx, first.lane);
         authorize();
+        if (
+          selectionSnapshot !== undefined &&
+          JSON.stringify(rows) !== selectionSnapshot
+        )
+          throw new OutboxError('invalid_selection');
         if (!same(rows, expected)) throw new OutboxError('invalid_selection');
         const count = rows.findIndex((row) => row.state !== 'acknowledged');
         const removed = rows.slice(0, count === -1 ? rows.length : count);

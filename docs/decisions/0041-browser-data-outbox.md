@@ -968,7 +968,14 @@ succeeds; rule 14 permits a future public coordinator to advance from the durabl
 checkpoint while retained capacity allows. No cleanup failure erases that ACK.
 A preparation retry performs one local transaction even when the HTTP budget
 is exhausted, preserves its gate through preliminary read failures and never
-renews the delivery epoch. A delivery resume requires a fresh host binding/access
+renews the delivery epoch. Preparation and trim retries compare their original
+complete selected lane snapshot inside the actual readwrite transaction; later
+reads cannot silently widen that selection after a concurrent enqueue. The
+selection is consumed at mutation entry. A failed attempt captures a fresh
+pause, and failure to capture that replacement permanently fences the scheduler
+without changing committed rows or allowing the spent choice another attempt.
+Same-kind calls still share the exact pending promise until settlement, while
+wrong-kind calls reject independently. A delivery resume requires a fresh host binding/access
 check and unchanged retained snapshot. Its typed host result distinguishes a
 successful check, a transient failed read and proven authority loss. A failed
 read retires its selection and synchronously publishes a fresh selection with
