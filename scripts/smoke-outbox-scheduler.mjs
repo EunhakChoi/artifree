@@ -122,6 +122,29 @@ export async function checkOutboxScheduler(harness) {
     assert.equal(requests().length, 283);
     const accepted = await page.evaluate(async () => {
       globalThis.freshLane = [...lane.slice(0, 4), 'art_' + '9'.repeat(32)];
+      globalThis.pausePublicationOrder = [];
+      globalThis.captureLane = store.lane.bind(store);
+      let started;
+      globalThis.freshCaptureStarted = new Promise((resolve) => {
+        started = resolve;
+      });
+      globalThis.freshPausePublished = new Promise((resolve) => {
+        globalThis.onSchedulerEvent = (event) => {
+          if (event.kind === 'paused' && event.lane[4] === freshLane[4]) {
+            pausePublicationOrder.push('pause-published');
+            resolve(event.pause);
+          }
+        };
+      });
+      store.lane = (key) => {
+        const pending = captureLane(key);
+        if (key[4] === freshLane[4]) started();
+        return pending.then((rows) => {
+          if (key[4] === freshLane[4])
+            pausePublicationOrder.push('capture-complete');
+          return rows;
+        });
+      };
       await enqueueLikeHead({
         key: crypto.randomUUID().replaceAll('-', ''),
         lane: freshLane,
@@ -146,23 +169,9 @@ export async function checkOutboxScheduler(harness) {
       'accepted',
       'trimmed healthy empty lanes cannot consume retained lane capacity',
     );
-    await page.evaluate(() => storageSnapshot());
-    assert.equal(
-      await page.evaluate(
-        () =>
-          events.findLast(
-            (event) =>
-              event.kind === 'paused' && event.lane[4] === freshLane[4],
-          )?.pause.reason,
-      ),
-      'aggregate_exhausted',
-      'actual pending work remains budget paused',
-    );
-    assert.equal(
-      (await page.evaluate(() => store.lane(freshLane)))[0].state,
-      'unprepared',
-    );
-    assert.equal(requests().length, 283);
+    // Start the real capture before queuing the overlapping readwrite action.
+    // Parallel readonly snapshots cannot establish this publication ordering.
+    await page.evaluate(() => freshCaptureStarted);
     await page.evaluate(async () => {
       globalThis.failedCaptureLane = [
         ...lane.slice(0, 4),
@@ -174,6 +183,29 @@ export async function checkOutboxScheduler(harness) {
         artifactId: failedCaptureLane[4],
         base: { version: 0 },
       });
+      pausePublicationOrder.push('write-complete');
+      store.lane = captureLane;
+    });
+    assert.deepEqual(await page.evaluate(() => pausePublicationOrder), [
+      'capture-complete',
+      'pause-published',
+      'write-complete',
+    ]);
+    assert.equal(
+      (await page.evaluate(() => freshPausePublished)).reason,
+      'aggregate_exhausted',
+      'actual pending work remains budget paused',
+    );
+    assert.equal(
+      (await page.evaluate(() => store.lane(freshLane)))[0].state,
+      'unprepared',
+    );
+    assert.equal(requests().length, 283);
+    console.log(
+      'outbox scheduler: capture-complete, pause-published, write-complete observed',
+    );
+    await page.evaluate(async () => {
+      globalThis.onSchedulerEvent = undefined;
       globalThis.beforeFailedCapture = await storageSnapshot();
       globalThis.readLane = store.lane.bind(store);
       store.lane = (key) =>
