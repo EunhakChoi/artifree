@@ -896,6 +896,9 @@ this invocation called Fetch. A failed authority check permanently fences the
 captured kernel and its pending transactions. Observed401 permanently fences the
 kernel and asks the host to invalidate its local authentication proof; no response
 adopts new binding or actor authority.
+Exceptions from either synchronous host authority callback produce fixed
+`owner_not_ready` diagnostics without the host message or cause. The failed
+invocation retains its actual dispatch state and permanently fences its context.
 
 The native-browser checks use independently owned HTTP redirect/status fixtures
 and real Rust endpoints. They verify committed preparation at request arrival,

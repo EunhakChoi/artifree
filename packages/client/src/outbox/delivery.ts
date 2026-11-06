@@ -34,9 +34,12 @@ export interface DeliveryContext {
   readonly binding: Binding;
   /** Abort synchronously before releasing the lock or invalidating captured authority. */
   readonly signal: AbortSignal;
-  /** Throws unless the captured page/owner/binding/credentials and held lock remain current. */
+  /**
+   * Throws unless captured page/owner/binding/credentials and the held lock remain
+   * current. Exceptions become owner_not_ready without host diagnostics.
+   */
   readonly authorize: () => void;
-  /** Revokes the host identity proof and fences this context after an observed 401. */
+  /** Revokes host proof after 401; exceptions remain fenced and become owner_not_ready. */
   readonly invalidateAuthentication: () => void;
   readonly clock?: Clock;
 }
@@ -436,6 +439,12 @@ export class DeliveryKernel {
     if (context.signal.aborted) throw new OutboxError('owner_not_ready');
     try {
       context.authorize();
+    } catch {
+      // Host exception data may contain credentials or captured payloads.
+      this.fence.abort();
+      throw new OutboxError('owner_not_ready');
+    }
+    try {
       if (
         normalizeBase(
           context.base,
@@ -538,7 +547,11 @@ export class DeliveryKernel {
         outcome.failure.status === 401
       ) {
         this.fence.abort();
-        this.context.invalidateAuthentication();
+        try {
+          this.context.invalidateAuthentication();
+        } catch {
+          throw new OutboxError('owner_not_ready');
+        }
       }
       return {
         kind: 'delivery_failed',

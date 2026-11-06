@@ -601,6 +601,10 @@ actor even after a failure, always closes owned listeners, and reports the first
 scenario or cleanup error as the cause of any combined failures. Native HTTP
 cleanup tests inject multiple failures and verify the remaining requests and closed
 listeners; each cleanup guard was checked by mutation.
+Native callback-fault checks throw host errors before and after mutation dispatch
+and during 401 authentication invalidation. They verify fixed diagnostics without
+the host message or cause, the actual dispatch flag, retained rows, and a permanent
+fence even after the host callback is repaired.
 
 ## Client trust rules
 

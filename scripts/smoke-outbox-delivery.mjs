@@ -313,7 +313,14 @@ export async function checkOutboxDelivery(browser, serverApi) {
             };
           },
         };
+        globalThis.authorityException = undefined;
+        globalThis.authenticationInvalidationException = undefined;
+        globalThis.makeAuthorityException = () =>
+          new Error('private-authority-exception-message', {
+            cause: new Error('private-authority-exception-cause'),
+          });
         globalThis.authorize = () => {
+          if (authorityException !== undefined) throw authorityException;
           if (
             !lockHeld ||
             authority !== currentAuthority ||
@@ -324,6 +331,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
         globalThis.locallyAuthenticated = true;
         globalThis.authInvalidationAborts = true;
         const invalidateAuthentication = () => {
+          if (authenticationInvalidationException !== undefined)
+            throw authenticationInvalidationException;
           locallyAuthenticated = false;
           currentAuthority = Symbol();
           if (authInvalidationAborts) stop.abort();
@@ -362,6 +371,24 @@ export async function checkOutboxDelivery(browser, serverApi) {
               dispatched: error.dispatched,
             }),
           );
+        };
+        globalThis.captureAttempt = async () => {
+          try {
+            return { value: await kernel.run(lane) };
+          } catch (error) {
+            return {
+              name: error.name,
+              code: error.code ?? null,
+              message: error.message,
+              dispatched: error.dispatched ?? null,
+              hasCause: Object.hasOwn(error, 'cause'),
+              diagnostics: [
+                String(error),
+                error.stack,
+                JSON.stringify(error, Object.getOwnPropertyNames(error)),
+              ].join('\n'),
+            };
+          }
         };
         globalThis.fire = (milliseconds) => {
           const timer = timers.find(
@@ -901,6 +928,25 @@ export async function checkOutboxDelivery(browser, serverApi) {
     assert.equal(requests.length, 1);
     await close(page);
 
+    await checkAuthorityException({
+      phase: 'before_dispatch',
+      dispatched: false,
+      state: 'unprepared',
+      expectedRequests: 0,
+    });
+    await checkAuthorityException({
+      phase: 'after_dispatch',
+      dispatched: true,
+      state: 'prepared',
+      expectedRequests: 1,
+    });
+    await checkAuthorityException({
+      phase: 'authentication_invalidation',
+      dispatched: true,
+      state: 'prepared',
+      expectedRequests: 1,
+    });
+
     // All native redirect variants reject before reaching either collector.
     for (const targetUrl of ['/collect', crossOrigin])
       for (const code of [301, 302, 303, 307, 308]) {
@@ -1034,6 +1080,73 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       scenarioFailure,
     );
+  }
+  async function checkAuthorityException({
+    phase,
+    dispatched,
+    state,
+    expectedRequests,
+  }) {
+    const page = await setup();
+    requests = [];
+    mode =
+      phase === 'after_dispatch'
+        ? 'headers_hold'
+        : phase === 'authentication_invalidation'
+          ? 'status'
+          : 'normal';
+    status = 401;
+    errorBody = '{';
+    const arrival = phase === 'after_dispatch' ? waiting() : undefined;
+    await page.evaluate((phase) => {
+      if (phase === 'before_dispatch')
+        authorityException = makeAuthorityException();
+      if (phase === 'authentication_invalidation')
+        authenticationInvalidationException = makeAuthorityException();
+      globalThis.capturedPending = captureAttempt();
+    }, phase);
+    if (phase === 'after_dispatch') {
+      await arrival;
+      await page.evaluate(() => {
+        authorityException = makeAuthorityException();
+        fire(15000);
+      });
+    }
+    const { diagnostics, ...failure } = await page.evaluate(
+      () => capturedPending,
+    );
+    assert.equal(typeof diagnostics, 'string', `${phase}: attempt must fail`);
+    assert.equal(
+      diagnostics.includes('private-authority-exception-message'),
+      false,
+      `${phase}: callback message must stay private`,
+    );
+    assert.equal(
+      diagnostics.includes('private-authority-exception-cause'),
+      false,
+      `${phase}: callback cause must stay private`,
+    );
+    assert.deepEqual(
+      failure,
+      {
+        name: 'DeliveryAttemptError',
+        code: 'owner_not_ready',
+        message: 'owner_not_ready',
+        dispatched,
+        hasCause: false,
+      },
+      phase,
+    );
+    assert.equal((await page.evaluate(() => snapshot()))[0].state, state);
+    assert.equal(requests.length, expectedRequests);
+    await page.evaluate(() => {
+      authorityException = undefined;
+      authenticationInvalidationException = undefined;
+    });
+    mode = 'normal';
+    await assert.rejects(run(page), /owner_not_ready/);
+    assert.equal(requests.length, expectedRequests);
+    await close(page);
   }
   async function checkHeldRequest() {
     // Inspect real committed IDB while the owned server holds the request before handling it.
