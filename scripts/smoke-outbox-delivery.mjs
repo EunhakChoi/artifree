@@ -3,6 +3,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { build } from 'esbuild';
 import { cleanupOutboxDelivery } from './lib/outbox-delivery-cleanup.mjs';
+import { checkOutboxScheduler } from './smoke-outbox-scheduler.mjs';
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
 const EPOCH = 'b'.repeat(32);
@@ -19,7 +20,9 @@ export async function checkOutboxDelivery(browser, serverApi) {
       import {openStore} from './packages/client/src/outbox/store.ts';
       import {readBinding} from './packages/client/src/outbox/binding.ts';
       import {OutboxError} from './packages/client/src/outbox/types.ts';
-      globalThis.deliveryApi = {DeliveryKernel, openStore, readBinding, OutboxError};`,
+      import {ArtifreeApiError} from './packages/client/src/errors.ts';
+      import {DeliveryScheduler} from './packages/client/src/outbox/scheduler.ts';
+      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, openStore, readBinding, OutboxError, ArtifreeApiError};`,
       resolveDir: process.cwd(),
       loader: 'ts',
     },
@@ -30,6 +33,11 @@ export async function checkOutboxDelivery(browser, serverApi) {
   });
   let mode = 'normal';
   let status = 409;
+  let bindingMode = 'normal';
+  let bindingReads = 0;
+  let bindingClosures = [];
+  let heldBinding;
+  let onBindingArrived;
   let errorBody = {
     error: {
       code: 'data_conflict',
@@ -82,6 +90,66 @@ export async function checkOutboxDelivery(browser, serverApi) {
       return;
     }
     if (request.url === '/v1/data-outbox/binding') {
+      if (bindingMode !== 'normal') {
+        bindingReads += 1;
+        bindingClosures.push(
+          new Promise((resolve) => response.once('close', resolve)),
+        );
+        const respond = () => {
+          if (bindingMode === 'network') {
+            response.destroy();
+            return;
+          }
+          if (bindingMode === 'redirect') {
+            response.writeHead(302, { Location: crossOrigin });
+            response.end();
+            return;
+          }
+          const faultStatus = Number.parseInt(bindingMode, 10);
+          if (Number.isFinite(faultStatus)) {
+            response.writeHead(faultStatus, {
+              'Content-Type': 'application/json',
+              'Retry-After': '999999',
+            });
+            response.write(
+              bindingMode.endsWith('malformed') ||
+                bindingMode.endsWith('stalled')
+                ? '{'
+                : JSON.stringify({
+                    error: {
+                      code: bindingMode.endsWith('binding')
+                        ? 'outbox_binding_changed'
+                        : faultStatus === 401
+                          ? 'unauthenticated'
+                          : faultStatus === 403
+                            ? 'forbidden'
+                            : faultStatus === 404
+                              ? 'not_found'
+                              : faultStatus === 429
+                                ? 'rate_limited'
+                                : 'unavailable',
+                      message: 'private metadata fault',
+                    },
+                  }),
+            );
+            if (!bindingMode.endsWith('stalled')) response.end();
+            return;
+          }
+          response.setHeader('Content-Type', 'application/json');
+          response.end(
+            JSON.stringify({
+              actor_id: 'u-' + 'c'.repeat(32),
+              actor_generation: '2',
+              storage_epoch: EPOCH,
+            }),
+          );
+        };
+        if (bindingMode === 'held_mismatch') heldBinding = respond;
+        else respond();
+        onBindingArrived?.();
+        onBindingArrived = undefined;
+        return;
+      }
       if (live !== undefined) {
         forward(request, response, '');
         return;
@@ -117,6 +185,25 @@ export async function checkOutboxDelivery(browser, serverApi) {
       return;
     }
     if (mode === 'headers_hold') return;
+    if (mode === 'binding_changed') {
+      response.writeHead(409, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          error: {
+            code: 'outbox_binding_changed',
+            message: 'fixed binding refusal',
+          },
+        }),
+      );
+      return;
+    }
+    if (mode === 'headers_hold_status') {
+      held = () => {
+        response.writeHead(429, { 'Retry-After': '999999' });
+        response.end('{}');
+      };
+      return;
+    }
     if (mode === 'redirect') {
       response.writeHead(redirectStatus, { Location: redirectTarget });
       response.end();
@@ -266,8 +353,13 @@ export async function checkOutboxDelivery(browser, serverApi) {
         key,
         immediateClock,
       }) => {
-        const { openStore, readBinding, DeliveryKernel, OutboxError } =
-          deliveryApi;
+        const {
+          openStore,
+          readBinding,
+          DeliveryKernel,
+          OutboxError,
+          ArtifreeApiError,
+        } = deliveryApi;
         globalThis.owner = 'a'.repeat(32);
         globalThis.auth = await readBinding(location.origin, token);
         globalThis.store = await openStore();
@@ -337,7 +429,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
           currentAuthority = Symbol();
           if (authInvalidationAborts) stop.abort();
         };
-        globalThis.kernel = new DeliveryKernel(store, {
+        globalThis.deliveryContext = {
           base: location.origin,
           owner,
           accessToken: token,
@@ -346,7 +438,75 @@ export async function checkOutboxDelivery(browser, serverApi) {
           authorize,
           invalidateAuthentication,
           clock,
-        });
+        };
+        globalThis.kernel = new DeliveryKernel(store, deliveryContext);
+        globalThis.installScheduler = () => {
+          globalThis.events = [];
+          globalThis.revalidationCalls = 0;
+          globalThis.failRevalidation = false;
+          globalThis.observedBindingStatuses = [];
+          globalThis.scheduler = new deliveryApi.DeliveryScheduler(store, {
+            context: deliveryContext,
+            random: () => 0,
+            observe: (event) => {
+              events.push(event);
+              globalThis.onSchedulerEvent?.(event);
+            },
+            revalidate: async (lane, signal) => {
+              revalidationCalls += 1;
+              if (globalThis.revalidationOverride !== undefined)
+                return revalidationOverride;
+              if (failRevalidation)
+                return {
+                  kind: 'read_failed',
+                  failure: { code: 'network_error', status: 0 },
+                };
+              try {
+                const current = await readBinding(
+                  location.origin,
+                  token,
+                  signal,
+                  (status) => {
+                    observedBindingStatuses.push(status);
+                    if (status === 401) invalidateAuthentication();
+                  },
+                );
+                if (JSON.stringify(current) !== JSON.stringify(auth)) {
+                  currentAuthority = Symbol();
+                  stop.abort();
+                  return {
+                    kind: 'authority_lost',
+                    reason:
+                      current.actor_generation !== auth.actor_generation &&
+                      current.actor_id === auth.actor_id
+                        ? 'actor_generation_changed'
+                        : 'binding_changed',
+                  };
+                }
+                return { kind: 'authorized' };
+              } catch (error) {
+                if (error instanceof ArtifreeApiError) {
+                  if (
+                    error.status === 409 &&
+                    error.code === 'outbox_binding_changed'
+                  ) {
+                    currentAuthority = Symbol();
+                    stop.abort();
+                  }
+                  return {
+                    kind: 'read_failed',
+                    failure: {
+                      code: error.code,
+                      status: error.status,
+                      retryAfterSeconds: error.retryAfterSeconds,
+                    },
+                  };
+                }
+                throw error;
+              }
+            },
+          });
+        };
         globalThis.head = await store.enqueue({
           format: 2,
           state: 'unprepared',
@@ -363,6 +523,12 @@ export async function checkOutboxDelivery(browser, serverApi) {
           text: operation === 'delete' ? null : text,
           base: { version: base },
         });
+        globalThis.enqueueLikeHead = (changes) => {
+          const intent = { ...head, ...changes };
+          delete intent.sequence;
+          delete intent.bytes;
+          return store.enqueue(intent);
+        };
         globalThis.start = () => {
           globalThis.pending = kernel.run(lane).then(
             (value) => ({ value }),
@@ -533,6 +699,39 @@ export async function checkOutboxDelivery(browser, serverApi) {
   }
   let scenarioFailure;
   try {
+    await checkOutboxScheduler({
+      setup,
+      close,
+      configureBinding(nextMode) {
+        bindingMode = nextMode;
+        bindingReads = 0;
+        bindingClosures = [];
+      },
+      waitBindingClosed: () => Promise.all(bindingClosures),
+      bindingReadCount: () => bindingReads,
+      waitBinding() {
+        return new Promise((resolve) => {
+          onBindingArrived = resolve;
+        });
+      },
+      releaseBinding() {
+        heldBinding();
+      },
+      waitRequest: waiting,
+      releaseHeld() {
+        held();
+      },
+      setMode(nextMode) {
+        mode = nextMode;
+      },
+      configure(nextMode, nextStatus) {
+        mode = nextMode;
+        if (nextStatus !== undefined) status = nextStatus;
+        requests = [];
+        receipts.clear();
+      },
+      requests: () => requests,
+    });
     // Failure to prepare never dispatches. The same accepted row remains available.
     let page = await setup();
     requests = [];
@@ -1059,6 +1258,17 @@ export async function checkOutboxDelivery(browser, serverApi) {
       }
       await selectActor('Outbox replay');
       await checkRealServer();
+      await selectActor('Outbox scheduler');
+      await checkOutboxScheduler({
+        setup,
+        close,
+        configure(nextMode) {
+          mode = nextMode;
+          requests = [];
+        },
+        requests: () => requests,
+        createArtifact: createRealArtifact,
+      });
     }
     console.log(
       'outbox delivery: native exact request, bounded status/receipt, redirect and authority fences passed; public sender disabled',

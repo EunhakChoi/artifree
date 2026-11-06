@@ -3,8 +3,9 @@
 Status: **Partially implemented.** R08a provides the server binding fence;
 R08b provides local browser admission and owner recovery. R08c-1 adds internal
 prepared/ACK/checkpoint/trim persistence. R08c-2a adds an internal single-attempt
-native transport/storage kernel. Public delivery coordination and the remaining
-numbered sender/lifecycle contract are proposed.
+native transport/storage kernel. R08c-2b adds a host-only bounded scheduler
+sub-slice. Public delivery coordination and the remaining numbered
+sender/lifecycle contract are proposed.
 
 Scope: R08, an opt-in browser TypeScript client for R06 application-data
 writes. This specification does not enable it in the management UI or runtime
@@ -917,3 +918,113 @@ bounded recovery continuation. This kernel does not implement those lifecycle
 choices, runtime-frame access, management UI adoption or native-process recovery.
 The existing public browser handle continues to provide local admission and
 recovery/disposal only.
+
+## R08c-2b: internal bounded scheduler sub-slice
+
+`DeliveryScheduler` is an internal host of the single-attempt kernel for one
+already authorized fresh owner and fixed binding. Construction is inert; only
+a host wake after durable admission schedules work. A single pump serializes
+mutations and requeues successful lanes behind waiting lanes. Every wake and
+local pause read checks its captured owner and binding before storage, including
+when delivery budget is exhausted. Lane failures stop at eight and aggregate
+failures at 32 per explicit epoch. The dispatched failure retains its actual
+classification; other ready lanes report `aggregate_exhausted` as a coordinator
+budget gate, without inventing a network failure. Durable ACKs
+reset only the lane counter. Retry timers use the specified injected clock,
+jitter and bounded Retry-After floor; wakes and new admissions cannot clear
+timers, pauses or counters. Healthy empty lanes are reclaimed without imposing
+a lifetime artifact limit, including a successfully trimmed lane under exhausted
+HTTP budget. At the transient 256-lane metadata limit, wake retains one coalesced
+FIFO reconciliation marker instead of rejecting a durably admitted lane or
+retaining caller-supplied keys. Wakes are scheduling hints within this already
+authorized fresh owner; only its bounded durable owner/binding snapshot can
+supply additional lane heads, ordered by durable admission sequence at the
+marker position. Nonexistent/stale key hints cannot exhaust a separate queue.
+Existing pauses/history remain intact; a wake during snapshot reading protects
+its existing lane and requests another scan for newly admitted lanes. Scan
+failure or authority invalidation closes without partial metadata publication.
+This is not an automatic-progress guarantee when all 256 metadata slots retain
+pauses/history. In particular, directly discarding 256 preparation-paused lanes
+through the low-level store can leave no durable rows but 256 retained gates;
+a subsequently admitted different lane remains pending without automatic HTTP.
+The internal scheduler does not yet integrate rule 17's typed disposal action
+with callback fencing and committed metadata retirement. It must not infer
+disposal from an empty snapshot, discard the gates, or reinterpret preparation
+retry as successful cleanup. That disposal integration and an explicit,
+actionable treatment of retained empty gates are blockers for public sender
+activation; the current internal slice preserves the gates and bounded waiting.
+The readonly transaction is abortable. Scans do not consume or renew delivery
+budget/epochs, revalidate online identity, or authorize inherited recovery. Only a successful bounded capture proving no rows and no retained
+failure/pause permits reclamation; a failed capture closes without deleting work.
+
+Preparation aborts and ACK-storage aborts have separate opaque internal actions.
+A durable ACK whose trim fails exposes a separate `cleanup_paused` selection
+with `ackDurable: true`. Its deliberate retry performs one local trim transaction,
+never retransmits the ACK, revalidates online authority or refills delivery budgets.
+Repeated failure supplies a fresh selection without an automatic retry loop.
+Retained ACKs use this same trim-only path after scheduler reconstruction.
+This internal slice conservatively holds the successor until explicit cleanup
+succeeds; rule 14 permits a future public coordinator to advance from the durable
+checkpoint while retained capacity allows. No cleanup failure erases that ACK.
+A preparation retry performs one local transaction even when the HTTP budget
+is exhausted, preserves its gate through preliminary read failures and never
+renews the delivery epoch. Preparation and trim retries compare their original
+complete selected lane snapshot inside the actual readwrite transaction; later
+reads cannot silently widen that selection after a concurrent enqueue. The
+selection is consumed at mutation entry. A failed attempt captures a fresh
+pause, and failure to capture that replacement permanently fences the scheduler
+without changing committed rows or allowing the spent choice another attempt.
+Same-kind calls still share the exact pending promise until settlement, while
+wrong-kind calls reject independently. A delivery resume requires a fresh host binding/access
+check and unchanged retained snapshot. Its typed host result distinguishes a
+successful check, a transient failed read and proven authority loss. A failed
+read retires its selection and synchronously publishes a fresh selection with
+bounded code/status/Retry-After metadata; budgets, epoch and retained snapshot
+stay unchanged. A further read requires that new explicit choice. Pending calls
+of the same kind still share the original promise until settlement. A successful
+binding read does not commit an epoch: the choice is consumed before that
+read, and a later failed local renewal capture with no replacement gate closes
+this internal scheduler. Its epoch, budgets, retained gates and durable rows
+remain unchanged; neither the old choice nor another retained choice can read
+again on that closed scheduler. It does not automatically reconstruct or
+authorize recovery. Proven
+binding/generation loss, 401, contract-compatible
+409/outbox_binding_changed or an invalid host result permanently fences this
+fixed scheduler. Hosts synchronously revoke captured authority at loss/401
+headers, before any body wait; the internal bound-read status observer makes
+this possible for malformed/stalled bodies. Neither read errors nor host
+exceptions expose body, message, cause, URL or credentials. Full generation
+reauthorization and public access recovery remain proposed.
+Other lane-pause selections are staged
+before renewal; a failed read leaves the old tokens, counters and gates intact.
+Successful renewal commits the complete epoch without asynchronous gaps,
+invalidates old delivery selections and supplies current selections for still
+paused lanes. A stale snapshot refreshes pause metadata only and rejects the old
+choice. Each action kind retains its pending promise until settlement, including
+when its live selection is retired; other kinds reject that selection.
+Runtime kind validation precedes pending-action coalescing. Observations
+cannot mutate pump state. Closing or host authority abort synchronously fences
+the kernel, native transactions, callback work and retry timers.
+
+Native-browser checks cover inert construction, dependent healthy drain beyond
+eight writes, lane ordering, exact-key replay, 8/32 exhaustion with interleaved
+ACKs, distinct preparation/ACK pauses, token rejection, failed renewal staging,
+stale metadata and close fencing. The real Rust cases cover dependent drain and
+same-key replay under the scheduler. These are scheduling subcases, not full
+B8/B15/B19 or R08c acceptance, and do not prove native-process restoration.
+
+The host still must own the native lock and synchronously abort captured
+authority before invalidation or lock release. No public registry creates this
+scheduler. Access and conflict responses stop the affected lane without offering
+a bypass action. A binding-change refusal fences the entire captured scheduler
+before another lane can dispatch; it cannot authorize a new binding or generation.
+Delivery stops before either binding-refusal callback. Only that current bounded
+refusal is reported synchronously under still-current host authority, using
+independent snapshots. External close, authentication abort or an observer
+exception cancels any remaining publication.
+Page-global public integration, bounded recovery
+continuation, generation reauthorization, access recovery, rejected disposal
+and unresolved abandonment remain proposed. The public browser handle remains
+local-only; management UI, runtime frames and direct-write behavior are unchanged.
+Numeric limits, host contracts and action policy are Artifree choices, separate
+from the limited original observations described above.

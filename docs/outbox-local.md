@@ -1,12 +1,15 @@
 # Browser-local application-data outbox
 
 Status: R08b local-storage implementation ([0044](decisions/0044-browser-outbox-local.md)).
-R08 as a whole remains partially implemented; delivery and native-process recovery remain proposed.
+R08 as a whole remains partially implemented; public delivery and native-process recovery remain proposed.
 The browser entry point `@artifree/client/outbox` is opt-in. It does not prepare,
 transmit, replay, acknowledge, trim, retry delivery, or activate management UI
 or runtime-frame access. Existing direct clients are unchanged. R08a supplies
-the authenticated binding endpoint; R08c/R08d retain delivery and native-process
+the authenticated binding endpoint; R08c/R08d retain public delivery and native-process
 recovery work from decision 0041.
+Internal preparation/ACK persistence, a single-attempt native kernel and a bounded
+fixed-authority scheduler are described in [0041](decisions/0041-browser-data-outbox.md).
+They are not connected to this entry point or its page registry.
 
 ## Local API
 
@@ -153,21 +156,26 @@ The accounting bound is `P + M + 2E + 2L + 4096`: `P` is raw UTF-8 payload,
 `M` is the UTF-8 JSON envelope without payload or the accounting field, `E` is
 the UTF-8 JSON string of the supplied path, and `L` is the UTF-8 JSON envelope
 `{lane, owner}`. This conservatively charges both shared lane anchors per row.
-The future prepared record replaces payload text with one exact body; its
+The internal prepared record replaces payload text with one exact body; its
 numeric-base wrapper outside `P`/`E` is under 128 bytes. The unchanged identity
 metadata, a full receipt (including its path), and the lane checkpoint use the
 reserved variable copies. Their bounded keys, decimal generations/versions,
 flags and field names fit the remaining 4 KiB. The browser suite constructs
-these planned envelopes with maximum integer/generation spellings and measures
+these envelopes with maximum integer/generation spellings and measures
 their complete UTF-8 footprint against admitted accounting. These are reservation
-proof fixtures, not an implemented preparation/ACK format or sender. R08c must
-stay within this bound or change admission before accepting its requests.
+proof fixtures; the internal preparation/ACK store and transport checks separately
+exercise their actual formats within this bound. They do not activate public delivery.
 
 `npm run test:outbox` exercises real browser Fetch, IndexedDB and Web Locks with
-an independently authored owned HTTP metadata fixture. `ARTIFREE_BROWSER=firefox`
+independently authored owned HTTP fixtures. `ARTIFREE_BROWSER=firefox`
 selects Firefox; Chromium is the default. The same local suite runs inside the
-existing browser smoke command. It covers local portions of B2, B3/B18,
-B8/B12, B13/B21 and B22/B23 only. Its injected transaction aborts and page-local
-reopen checks are not native-process crash restoration. B15/B19, actual mutation
-redirects, preparation, server rejection, replay, ACK, delivery retry budgets and
-the end-to-end browser/server matrix remain R08c/R08d work.
+existing browser smoke command. The local public-API checks cover local portions
+of B2, B3/B18, B8/B12, B13/B21 and B22/B23. Internal suites also exercise
+preparation/ACK/trim, native mutation redirects and receipt rejection, bounded
+retry scheduling and distinct preparation/delivery actions. The full smoke and
+`scripts/test-outbox-delivery-live.mjs` add real Rust replay/dependency cases.
+These do not establish complete B8/B15/B19, public lifecycle integration or the
+end-to-end R08 matrix. Injected transaction aborts and page-local reopen checks
+are not native-process crash restoration. Public recovery continuation,
+reauthorization, access recovery, rejected disposal, unresolved abandonment and
+native-process recovery remain R08c/R08d work.
