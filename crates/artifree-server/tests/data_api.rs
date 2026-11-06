@@ -1,6 +1,8 @@
 //! The application data routes (decision 0031) through the real router, core,
 //! and `SQLite` store.
 
+use std::fmt;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -19,6 +21,24 @@ use tower::ServiceExt;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const OWNER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// Encodes every fixture byte so query transport cannot normalize its text.
+fn encode_query_path(text: &str) -> Result<String, fmt::Error> {
+    let mut encoded = String::with_capacity(text.len() * 3);
+    for byte in text.bytes() {
+        write!(encoded, "%{byte:02X}")?;
+    }
+    Ok(encoded)
+}
+
+#[test]
+fn query_fixture_encoding_preserves_each_utf8_byte() -> Result<(), fmt::Error> {
+    assert_eq!(encode_query_path("")?, "");
+    assert_eq!(encode_query_path("a%/+")?, "%61%25%2F%2B");
+    assert_eq!(encode_query_path("한/𝄞")?, "%ED%95%9C%2F%F0%9D%84%9E");
+    assert_eq!(encode_query_path("e\u{301}/é")?, "%65%CC%81%2F%C3%A9");
+    Ok(())
+}
 
 struct Harness {
     directory: PathBuf,
@@ -153,7 +173,7 @@ impl Harness {
 
     /// Reads a well-formed path of the data space.
     async fn at(&self, id: &str, path: &str) -> Result<Value, Box<dyn std::error::Error>> {
-        let encoded: String = path.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        let encoded = encode_query_path(path)?;
         let reply = self.read(id, &format!("?path={encoded}")).await?;
         assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
         reply.json().map_err(Into::into)
@@ -2433,7 +2453,7 @@ async fn the_largest_page_is_within_the_published_bound() -> TestResult {
     let connection = rusqlite::Connection::open(harness.directory.join("db.sqlite3"))?;
     let changed = connection.execute("UPDATE app_data SET data_version = 9007199254740991", [])?;
     assert_eq!(changed, 1);
-    let encoded: String = deepest.bytes().map(|byte| format!("%{byte:02X}")).collect();
+    let encoded = encode_query_path(&deepest)?;
     assert_eq!(encoded.len(), 3_117);
     let reply = harness
         .members(&id, &format!("?limit=100&path={encoded}"))
