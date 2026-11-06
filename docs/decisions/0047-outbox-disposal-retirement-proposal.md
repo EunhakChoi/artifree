@@ -1,10 +1,18 @@
-# Proposed outbox disposal and empty preparation-gate retirement
+# Outbox disposal and empty preparation-gate retirement
 
-Status: **Proposed, documentation only.** This document neither amends the
-accepted numbered rules of [0041](0041-browser-data-outbox.md) nor authorizes an
-implementation against an unapproved contract. Merge and review this specification
-before a separate implementation PR. R08 remains partially implemented; the
-public browser handle remains local-only and public delivery remains disabled.
+Status: **Accepted contract; implementation pending.** Acceptance takes effect
+when this separate documentation-only approval change is reviewed and merged.
+It accepts the additive contract below for a subsequent implementation PR;
+it introduces no executable behavior and does not claim the implementation is
+complete. The numbered rules of [0041](0041-browser-data-outbox.md) and rules 1–7
+below remain unchanged. R08 remains partially implemented; the public browser
+handle remains local-only and public delivery remains disabled.
+
+The earlier proposal PR merged the specification with status Proposed. That
+merge did not record this explicit contract acceptance. This approval must merge
+before the implementation PR can merge; an implementation PR cannot supply its
+own specification approval or treat passing tests as approval. Separate review
+and required gates remain mandatory for both changes.
 
 ## Problem and evidence
 
@@ -26,13 +34,15 @@ establish this proposed disposal integration or the complete R08 matrix.
 
 The original observations cited by 0041 distinguish durable rows, logical tab
 ownership and explicit recovery. They do not specify scheduler metadata disposal.
-All actions and limits below are Artifree design proposals. Private evidence and
-its paths remain outside this repository; implementation must maintain the
+The actions and limits below are Artifree-designed contract decisions accepted
+by this documentation-only change, not facts observed in the original product.
+Private evidence and its paths remain outside this repository; implementation
+must maintain the
 private requirement-to-original-to-test trace required by the roadmap.
 
-## Proposed amendment scope
+## Accepted additive contract
 
-On acceptance, the following additive rules supplement rule 17 and its R08c-2b
+The following additive rules supplement rule 17 and its R08c-2b
 note. Rules 5–6, 11, 15–18 and their existing authority, recovery and budget
 constraints retain their force. This is not generation reauthorization, access
 recovery, orphan adoption, rejected disposal or unknown-outcome abandonment.
