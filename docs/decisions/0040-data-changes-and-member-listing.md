@@ -25,6 +25,10 @@ and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
 Independent Artifree design: no private evidence was consulted, and nothing
 below is presented as an observation of the original product.
 
+> Follow-up proposal: [0046](0046-utf8-data-paths.md) specifies R06b Unicode
+> paths. It is not implemented and does not yet amend the accepted ASCII
+> grammar, listing rules, or transport bounds in this record.
+
 ## Context: what existed before R07a-1
 
 - Before R07a-1, data writes (0031) recorded no change and woke no stream;
