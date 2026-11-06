@@ -1,4 +1,11 @@
-import { BodyReader, systemClock } from '../transport.js';
+import { parseRetryAfter } from '../client.js';
+import { ArtifreeApiError, type FailureCode } from '../errors.js';
+import { parseError } from '../responses.js';
+import {
+  BodyReader,
+  RETRY_AFTER_CAP_SECONDS,
+  systemClock,
+} from '../transport.js';
 import { OutboxError, type Binding } from './types.js';
 
 const GENERATION_MAX = '9223372036854775807';
@@ -56,7 +63,16 @@ export async function readBinding(
   const abort = (): void => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) controller.abort();
-  const timeout = setTimeout(() => controller.abort(), 45_000);
+  const headersTimeout = setTimeout(() => controller.abort(), 15_000);
+  const wholeTimeout = setTimeout(() => controller.abort(), 60_000);
+  let status = 0;
+  let retryAfterSeconds: number | undefined;
+  const failure = (code: FailureCode): ArtifreeApiError =>
+    new ArtifreeApiError(status === 429 ? 'rate_limited' : code, {
+      status,
+      code: status === 429 ? 'rate_limited' : code,
+      retryAfterSeconds,
+    });
   try {
     const response = await globalThis.fetch(`${base}/v1/data-outbox/binding`, {
       method: 'GET',
@@ -65,16 +81,18 @@ export async function readBinding(
       redirect: 'error',
       signal: controller.signal,
     });
-    if (response.status !== 200 || response.body === null) {
-      if (response.body !== null) {
-        void response.body.cancel().catch(() => undefined);
-      }
-      throw new OutboxError('binding_failed');
-    }
+    clearTimeout(headersTimeout);
+    status = response.status;
+    const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+    retryAfterSeconds =
+      retryAfter === undefined
+        ? undefined
+        : Math.min(retryAfter, RETRY_AFTER_CAP_SECONDS);
+    if (response.body === null) throw failure('invalid_response');
     const reader = new BodyReader(response.body, {
       clock: systemClock,
       signal: controller.signal,
-      status: 200,
+      status,
       what: 'outbox binding',
       keepCause: false,
     });
@@ -84,9 +102,9 @@ export async function readBinding(
       for (;;) {
         const chunk = await reader.read();
         if (chunk === 'end') break;
-        if (chunk === 'aborted') throw new OutboxError('binding_failed');
+        if (chunk === 'aborted') throw failure('network_error');
         size += chunk.byteLength;
-        if (size > 4096) throw new OutboxError('binding_failed');
+        if (size > 4096) throw failure('invalid_response');
         chunks.push(chunk);
       }
     } finally {
@@ -101,6 +119,12 @@ export async function readBinding(
     const value: unknown = JSON.parse(
       new TextDecoder('utf-8', { fatal: true }).decode(bytes),
     );
+    if (status !== 200) {
+      const error = parseError(value);
+      throw failure(
+        status === 429 ? 'rate_limited' : (error?.code ?? 'invalid_response'),
+      );
+    }
     if (
       typeof value !== 'object' ||
       value === null ||
@@ -114,16 +138,18 @@ export async function readBinding(
       !validId(value.storage_epoch) ||
       (value.actor_id === 'local' && value.actor_generation !== '1')
     )
-      throw new OutboxError('binding_failed');
+      throw failure('invalid_response');
     return {
       actor_id: value.actor_id,
       actor_generation: value.actor_generation,
       storage_epoch: value.storage_epoch,
     };
-  } catch {
-    throw new OutboxError('binding_failed');
+  } catch (error: unknown) {
+    if (error instanceof ArtifreeApiError) throw failure(error.code);
+    throw failure(status === 0 ? 'network_error' : 'invalid_response');
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(headersTimeout);
+    clearTimeout(wholeTimeout);
     signal?.removeEventListener('abort', abort);
   }
 }

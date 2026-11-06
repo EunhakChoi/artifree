@@ -13,9 +13,24 @@ recovery work from decision 0041.
 `openBrowserOutbox({baseUrl, accessToken})` normalizes the URL before accessing
 storage or transport, performs one authenticated binding GET, then opens a
 page-lifetime coordinator. It uses browser Fetch with `redirect: 'error'` and
-accepts no Fetch adapter. Binding reads have a 4 KiB bound and a 45 second
-request deadline. Repeated opens for the same immutable connection share one
+accepts no Fetch adapter. Binding reads have a 4 KiB bound, a 15 second pre-header deadline, a 60 second
+whole-read deadline and the shared 45 second body-stall bound. The header timer
+is cancelled when headers arrive; the whole-read timer covers the body too. Repeated opens for the same immutable connection share one
 coordinator; close it before opening a changed URL or credential.
+
+Binding failures reject with the existing `ArtifreeApiError` (`status`, `code`,
+`retryAfterSeconds`), rather than a generic local storage error. Fetch network,
+redirect rejection and absent-header timeout report `network_error` with status
+0; malformed/oversized successful tuples report `invalid_response` with status 200. After headers, the actual HTTP status survives body cancellation, timeout,
+malformed JSON and size rejection. Bounded recognized API errors keep their code;
+429 keeps `rate_limited`, and a numeric `Retry-After` is clamped to 3600 seconds.
+Diagnostics contain no response body, server message or redirect destination.
+These reads never retry automatically. Every revalidation failure revokes local
+cleanup proof and retains rows; 401 also terminally invalidates the handle,
+even with a malformed or stalled body. A later valid response cannot reopen
+that handle: close it and explicitly open a newly authenticated coordinator.
+Other failures require deliberate revalidation before any fresh local authority;
+offline cleanup never falls back from a failed read.
 
 `enqueue({artifactId, path, base, operation, ...})` accepts `set` with `value`,
 `update` with `patch`, or `delete`. A base is `{version: number}` from a

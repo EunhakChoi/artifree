@@ -43,6 +43,18 @@ cannot start another transaction. Already-started IDB transactions settle before
 the database and locks are released. Closing never deletes retained rows or
 session references; a later opener repeats the applicable recovery gate.
 
+Binding GETs use independent 15-second pre-header and 60-second whole-read
+deadlines, alongside the shared 45-second body-stall limit and 4 KiB body cap.
+Headers cancel only the pre-header timer. Completion, failure and close release
+all timer/listener resources. Native Fetch redirect rejection is `network_error`
+with status 0; other binding failures preserve `ArtifreeApiError` status and
+classification, including HTTP metadata after an invalid or timed-out body.
+Recognized bounded error bodies retain their code without exposing server text;
+429 retains `rate_limited` and bounded `Retry-After`. No read failure retries,
+consumes a mutation budget or authorizes storage mutation. Every revalidation
+failure fences local cleanup proof and stale selections; observed 401 terminally
+invalidates the page handle, including when its body is invalid or stalls.
+
 ## Durable local admission and cleanup
 
 Schema 1 uses the dedicated `artifree-data-outbox` IndexedDB database. Admission

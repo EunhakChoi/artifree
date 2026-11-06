@@ -97,6 +97,7 @@ export async function checkOutbox(browser, live) {
         return;
       }
       response.setHeader('Cache-Control', 'no-store');
+      response.setHeader('Retry-After', '999999');
       response.setHeader('Content-Type', 'application/json');
       response.statusCode = bindingStatus;
       if (mode === 'body_stall') {
@@ -146,8 +147,23 @@ export async function checkOutbox(browser, live) {
       globalThis.bindingHeaders = false;
       window.setTimeout = (callback, milliseconds, ...args) => {
         const id = originalSet(() => undefined, 60000);
-        bindingTimers.push({ callback, milliseconds, id, args });
+        bindingTimers.push({
+          callback: (...invocation) => {
+            const timer = bindingTimers.find((entry) => entry.id === id);
+            timer.active = false;
+            callback(...invocation);
+          },
+          milliseconds,
+          id,
+          args,
+          active: true,
+        });
         return id;
+      };
+      window.clearTimeout = (id) => {
+        const timer = bindingTimers.find((entry) => entry.id === id);
+        if (timer) timer.active = false;
+        originalClear(id);
       };
       window.fetch = async (...args) => {
         bindingFetches += 1;
@@ -162,6 +178,33 @@ export async function checkOutbox(browser, live) {
         window.fetch = originalFetch;
       };
     });
+  }
+  async function bindingFailure(target) {
+    const before = requests.length;
+    const result = await target.evaluate(async () => {
+      try {
+        await outboxApi.openBrowserOutbox({
+          baseUrl: '',
+          accessToken: 'test-token',
+        });
+        return 'accepted';
+      } catch (error) {
+        if (
+          error.message !== error.code ||
+          error.body !== undefined ||
+          error.cause !== undefined
+        )
+          throw new Error('binding diagnostic leaked response details');
+        return { name: error.name, code: error.code, status: error.status };
+      }
+    });
+    if (mode !== 'network_failure')
+      assert.equal(
+        requests.length,
+        before + 1,
+        'binding read must dispatch once without retry',
+      );
+    return result;
   }
   async function enqueue(target, artifactId = ARTIFACT, base = { version: 0 }) {
     return target.evaluate(
@@ -232,22 +275,40 @@ export async function checkOutbox(browser, live) {
     for (const status of [301, 302, 303, 307, 308]) {
       redirectStatus = status;
       redirectTarget = '/collect';
-      await assert.rejects(open(original), /binding_failed/);
+      assert.deepEqual(await bindingFailure(original), {
+        name: 'ArtifreeApiError',
+        code: 'network_error',
+        status: 0,
+      });
       redirectTarget = crossOriginTarget;
-      await assert.rejects(open(original), /binding_failed/);
+      assert.deepEqual(await bindingFailure(original), {
+        name: 'ArtifreeApiError',
+        code: 'network_error',
+        status: 0,
+      });
     }
     assert.equal(
       collector,
       0,
       'native Fetch must not follow metadata redirects',
     );
+    mode = 'network_failure';
+    assert.deepEqual(await bindingFailure(original), {
+      name: 'ArtifreeApiError',
+      code: 'network_error',
+      status: 0,
+    });
     mode = 'oversize';
-    await assert.rejects(open(original), /binding_failed/);
+    await assert.rejects(open(original), /invalid_response/);
     mode = 'normal';
-    for (const status of [401, 403, 500]) {
+    for (const status of [401, 403, 404, 429, 500, 503]) {
       bindingStatus = status;
       const before = requests.length;
-      await assert.rejects(open(original), /binding_failed/);
+      assert.deepEqual(await bindingFailure(original), {
+        name: 'ArtifreeApiError',
+        code: status === 429 ? 'rate_limited' : 'invalid_response',
+        status,
+      });
       assert.equal(
         requests.length,
         before + 1,
@@ -255,6 +316,82 @@ export async function checkOutbox(browser, live) {
       );
       assert.equal(await original.evaluate(() => sessionStorage.length), 0);
     }
+    for (const [status, code] of [
+      [401, 'unauthenticated'],
+      [403, 'forbidden'],
+      [404, 'not_found'],
+      [429, 'rate_limited'],
+      [500, 'internal'],
+      [503, 'unavailable'],
+    ]) {
+      bindingStatus = status;
+      bindingBody = JSON.stringify({
+        error: { code, message: 'PRIVATE server diagnostic' },
+      });
+      assert.deepEqual(await bindingFailure(original), {
+        name: 'ArtifreeApiError',
+        code,
+        status,
+      });
+      bindingBody = '{invalid';
+      assert.deepEqual(await bindingFailure(original), {
+        name: 'ArtifreeApiError',
+        code: status === 429 ? 'rate_limited' : 'invalid_response',
+        status,
+      });
+      mode = 'oversize';
+      assert.deepEqual(await bindingFailure(original), {
+        name: 'ArtifreeApiError',
+        code: status === 429 ? 'rate_limited' : 'invalid_response',
+        status,
+      });
+      mode = 'body_stall';
+      await controlBinding(original);
+      await original.evaluate(() => {
+        globalThis.bindingAttempt = outboxApi
+          .openBrowserOutbox({ baseUrl: '', accessToken: 'test-token' })
+          .then(
+            () => 'accepted',
+            (error) => ({
+              name: error.name,
+              code: error.code,
+              status: error.status,
+              retryAfterSeconds: error.retryAfterSeconds,
+            }),
+          );
+      });
+      await original.waitForFunction(
+        () => bindingHeaders && bindingTimers.length >= 3,
+      );
+      assert.deepEqual(
+        await original.evaluate(() =>
+          bindingTimers.slice(0, 2).map((timer) => timer.milliseconds),
+        ),
+        [15000, 60000],
+      );
+      const retainedStatus = await original.evaluate(async () => {
+        const timer = bindingTimers.find(
+          (entry) => entry.active && entry.milliseconds === 60000,
+        );
+        timer.callback(...timer.args);
+        const result = await bindingAttempt;
+        const fetches = bindingFetches;
+        restoreBinding();
+        return { result, fetches };
+      });
+      assert.deepEqual(retainedStatus, {
+        result: {
+          name: 'ArtifreeApiError',
+          code: status === 429 ? 'rate_limited' : 'network_error',
+          status,
+          retryAfterSeconds: 3600,
+        },
+        fetches: 1,
+      });
+      assert.equal(await original.evaluate(() => sessionStorage.length), 0);
+      mode = 'normal';
+    }
+    bindingBody = undefined;
     bindingStatus = 200;
     for (const body of [
       '{invalid',
@@ -271,23 +408,27 @@ export async function checkOutbox(browser, live) {
     ]) {
       bindingBody = body;
       const before = requests.length;
-      await assert.rejects(open(original), /binding_failed/);
+      assert.deepEqual(await bindingFailure(original), {
+        name: 'ArtifreeApiError',
+        code: 'invalid_response',
+        status: 200,
+      });
       assert.equal(requests.length, before + 1);
       assert.equal(await original.evaluate(() => sessionStorage.length), 0);
     }
     bindingBody = undefined;
-    for (const stalled of ['headers_stall', 'body_stall']) {
-      mode = stalled;
+    for (const stalled of ['headers_stall', 'whole_body', 'body_stall']) {
+      mode = stalled === 'whole_body' ? 'body_stall' : stalled;
       await controlBinding(original);
       await original.evaluate(() => {
         globalThis.bindingAttempt = outboxApi
           .openBrowserOutbox({ baseUrl: '', accessToken: 'test-token' })
           .then(
             () => 'accepted',
-            (error) => error.code,
+            (error) => ({ code: error.code, status: error.status }),
           );
       });
-      if (stalled === 'body_stall')
+      if (stalled !== 'headers_stall')
         await original.waitForFunction(
           () => bindingHeaders && bindingTimers.length >= 2,
         );
@@ -295,10 +436,26 @@ export async function checkOutbox(browser, live) {
         await original.waitForFunction(
           () => bindingFetches === 1 && bindingTimers.length >= 1,
         );
+      assert.deepEqual(
+        await original.evaluate(() =>
+          bindingTimers.slice(0, 2).map((timer) => timer.milliseconds),
+        ),
+        [15000, 60000],
+      );
       const deadline = await original.evaluate(async (stalled) => {
         const delays = bindingTimers.map((timer) => timer.milliseconds);
-        const timer =
-          stalled === 'body_stall' ? bindingTimers.at(-1) : bindingTimers[0];
+        const timer = bindingTimers.findLast(
+          (entry) =>
+            entry.active &&
+            entry.milliseconds ===
+              (stalled === 'headers_stall'
+                ? 15000
+                : stalled === 'whole_body'
+                  ? 60000
+                  : 45000),
+        );
+        if (stalled !== 'headers_stall' && bindingTimers[0].active)
+          throw new Error('header deadline was not cancelled');
         timer.callback(...timer.args);
         const result = await bindingAttempt;
         for (const timer of bindingTimers) timer.callback(...timer.args);
@@ -307,17 +464,20 @@ export async function checkOutbox(browser, live) {
           delays,
           fetches: bindingFetches,
           entries: sessionStorage.length,
+          activeTimers: bindingTimers.filter((timer) => timer.active).length,
         };
         restoreBinding();
         return answer;
       }, stalled);
-      assert.equal(deadline.result, 'binding_failed');
-      assert.deepEqual(
-        deadline.delays,
-        Array(deadline.delays.length).fill(45000),
-      );
+      assert.deepEqual(deadline.result, {
+        code: 'network_error',
+        status: stalled === 'headers_stall' ? 0 : 200,
+      });
+      assert.deepEqual(deadline.delays.slice(0, 2), [15000, 60000]);
+      assert.ok(deadline.delays.slice(2).every((delay) => delay === 45000));
       assert.equal(deadline.fetches, 1);
       assert.equal(deadline.entries, 0);
+      assert.equal(deadline.activeTimers, 0);
     }
     mode = 'normal';
     assert.equal(await open(original), 'ready');
@@ -1375,6 +1535,10 @@ export async function checkOutbox(browser, live) {
     // Failed revalidation revokes an already-open handle before queued actions run.
     for (const failure of [
       'unauthenticated',
+      'unauthenticated_stall',
+      'forbidden',
+      'missing',
+      'server_error',
       'redirect',
       'network_failure',
       'body_stall',
@@ -1395,8 +1559,25 @@ export async function checkOutbox(browser, live) {
           );
         }, ARTIFACT);
         await controlBinding(failurePage);
-        mode = failure === 'unauthenticated' ? 'normal' : failure;
-        bindingStatus = failure === 'unauthenticated' ? 401 : 200;
+        const unauthorized = failure.startsWith('unauthenticated');
+        mode = [
+          'unauthenticated',
+          'forbidden',
+          'missing',
+          'server_error',
+        ].includes(failure)
+          ? 'normal'
+          : failure === 'unauthenticated_stall'
+            ? 'body_stall'
+            : failure;
+        bindingStatus =
+          {
+            unauthenticated: 401,
+            unauthenticated_stall: 401,
+            forbidden: 403,
+            missing: 404,
+            server_error: 500,
+          }[failure] ?? 200;
         const collectorBefore = collector;
         await failurePage.evaluate((artifactId) => {
           const outcome = async (pending) => {
@@ -1422,7 +1603,7 @@ export async function checkOutbox(browser, live) {
             outcome(box.discardUnsent(nextDiscard)),
           ]);
         }, ARTIFACT);
-        if (failure === 'body_stall') {
+        if (failure === 'body_stall' || failure === 'unauthenticated_stall') {
           await failurePage.waitForFunction(
             () => bindingHeaders && bindingTimers.length >= 2,
           );
@@ -1443,10 +1624,17 @@ export async function checkOutbox(browser, live) {
         });
         assert.deepEqual(outcomes, {
           results: [
-            'binding_failed',
+            [
+              'unauthenticated',
+              'forbidden',
+              'missing',
+              'server_error',
+            ].includes(failure)
+              ? 'invalid_response'
+              : 'network_error',
             'owner_not_ready',
             'owner_not_ready',
-            'invalid_selection',
+            unauthorized ? 'owner_not_ready' : 'invalid_selection',
           ],
           state: { kind: 'binding_paused' },
           fetches: 1,
@@ -1470,14 +1658,29 @@ export async function checkOutbox(browser, live) {
         );
         await assert.rejects(
           failurePage.evaluate(() => box.discardUnsent(offlineDiscard)),
-          /invalid_selection/,
+          unauthorized ? /owner_not_ready/ : /invalid_selection/,
         );
         mode = 'normal';
         bindingStatus = 200;
         await assert.rejects(
           failurePage.evaluate(() => box.discardUnsent(nextDiscard)),
-          /invalid_selection/,
+          unauthorized ? /owner_not_ready/ : /invalid_selection/,
         );
+        if (unauthorized) {
+          const before = requests.length;
+          await assert.rejects(
+            failurePage.evaluate(
+              (artifactId) => box.selectUnsent(artifactId),
+              ARTIFACT,
+            ),
+            /owner_not_ready/,
+          );
+          assert.equal(
+            requests.length,
+            before,
+            '401 terminal handle must not reauthenticate',
+          );
+        }
         const pausedOwner = await failurePage.evaluate(
           (key) => sessionStorage.getItem(key),
           OWNER,
@@ -2217,7 +2420,7 @@ async function checkLiveBinding(browser, { origin, token }, module) {
           return error.code;
         }
       }),
-      'binding_failed',
+      'unauthenticated',
     );
     assert.equal(await page.evaluate(() => sessionStorage.length), 0);
     assert.equal(

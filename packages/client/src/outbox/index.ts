@@ -1,4 +1,5 @@
 /** Opt-in browser-local outbox. Delivery/preparation/ACK are not implemented. */
+import { ArtifreeApiError } from '../errors.js';
 import { dataValueText, newRandomId } from '../client.js';
 import { normalizeBase, readBinding, validId } from './binding.js';
 import {
@@ -425,8 +426,12 @@ class LocalCoordinator {
       fresh = await readBinding(this.base, this.token, this.stop.signal);
     } catch (error: unknown) {
       this.ensureOpen();
-      this.revokeCleanupProof();
-      this.current = { kind: 'binding_paused' };
+      if (error instanceof ArtifreeApiError && error.status === 401) {
+        this.invalidateAuthentication();
+      } else {
+        this.revokeCleanupProof();
+        this.current = { kind: 'binding_paused' };
+      }
       throw error;
     }
     this.ensureOpen();

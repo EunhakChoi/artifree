@@ -5,7 +5,6 @@ import type { DataInput } from '../client.js';
 export type OutboxFailure =
   | 'invalid_outbox_configuration'
   | 'outbox_unavailable'
-  | 'binding_failed'
   | 'storage_failed'
   | 'storage_corrupt'
   | 'not_enqueued'
