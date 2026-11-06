@@ -9,6 +9,8 @@
 //! the MCP endpoint (`crate::mcp`) and the change feed (`crate::changes`)
 //! behind the same token.
 
+mod assets;
+
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -451,6 +453,28 @@ impl AppState {
     }
 
     /// Runs a synchronous application command off the async executor.
+    pub(crate) async fn run_assets<T, F>(
+        &self,
+        command: F,
+    ) -> Result<T, artifree_ports::asset_store::AssetStoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(
+                &ArtifactService<SqliteStore>,
+            ) -> Result<T, artifree_ports::asset_store::AssetStoreError>
+            + Send
+            + 'static,
+    {
+        let shared = Arc::clone(&self.shared);
+        tokio::task::spawn_blocking(move || command(&shared.artifacts))
+            .await
+            .unwrap_or_else(|_| {
+                Err(artifree_ports::asset_store::AssetStoreError::Unavailable(
+                    "worker task failed".into(),
+                ))
+            })
+    }
+
     pub(crate) async fn run<T, F>(&self, command: F) -> Result<T, ArtifactError>
     where
         T: Send + 'static,
@@ -500,6 +524,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
                 // Inside the API-wide limit, so this one applies.
                 .layer(DefaultBodyLimit::max(MAX_DATA_BODY_BYTES)),
         )
+        .merge(assets::routes())
         .route("/v1/artifacts/{id}/data/members", get(read_data_members))
         .route("/v1/data-outbox/binding", get(read_outbox_binding))
         .route("/v1/jobs", get(list_jobs))
@@ -686,7 +711,28 @@ pub fn router_with_web(state: AppState, web_assets: Option<WebAssets>) -> Router
             state.clone(),
             proxy_inspection,
         ))
+        .layer(middleware::from_fn(asset_headers))
         .with_state(state)
+}
+
+// Outermost so authentication, admission, proxy and CORS refusals carry the
+// same non-cacheable asset policy as successful content responses.
+async fn asset_headers(request: Request, next: Next) -> Response {
+    let asset = request.uri().path().starts_with("/v1/artifacts/")
+        && request.uri().path().split('/').nth(4) == Some("assets");
+    let mut response = next.run(request).await;
+    if asset {
+        response.headers_mut().insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        response.headers_mut().insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
+        response = no_store(response).await;
+    }
+    response
 }
 
 /// GET /healthz handler: returns 200 OK "ok\n" without authentication or admission limits.

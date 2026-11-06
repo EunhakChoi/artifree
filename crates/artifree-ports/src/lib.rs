@@ -4,6 +4,7 @@
 //! tokens, users, jobs, and application data have one so far.
 
 pub mod artifact_store;
+pub mod asset_store;
 pub mod data_store;
 pub mod job_store;
 pub mod token_store;

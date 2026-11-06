@@ -282,6 +282,110 @@
       ],
       "type": "object"
     },
+    "Asset": {
+      "additionalProperties": false,
+      "description": "Immutable private upload metadata (0045).",
+      "properties": {
+        "content_type": {
+          "description": "Stored MIME type, including historical image spellings. New uploads admit only UTF-8 plain text/CSV; PNG and JPEG are unsupported pending complete validation.",
+          "type": "string"
+        },
+        "created_at_ms": {
+          "description": "Server creation time.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "description": "Opaque identifier interpreted within its actor/artifact space.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 as lowercase hexadecimal.",
+          "type": "string"
+        },
+        "size_bytes": {
+          "description": "Exact immutable byte count.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "content_type",
+        "size_bytes",
+        "sha256",
+        "created_at_ms"
+      ],
+      "type": "object"
+    },
+    "AssetList": {
+      "additionalProperties": false,
+      "description": "Bounded current metadata and usage from one snapshot.",
+      "properties": {
+        "asset_version": {
+          "description": "Current independent asset version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "assets": {
+          "description": "At most 64 entries ordered by ID.",
+          "items": {
+            "$ref": "#/$defs/Asset"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "bytes": {
+          "description": "Logical byte usage in this space.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_assets": {
+          "description": "Maximum associations per space.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_bytes": {
+          "description": "Maximum bytes per space.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset_version",
+        "assets",
+        "bytes",
+        "max_assets",
+        "max_bytes"
+      ],
+      "type": "object"
+    },
+    "AssetResponse": {
+      "additionalProperties": false,
+      "description": "Current immutable metadata and space version.",
+      "properties": {
+        "asset": {
+          "$ref": "#/$defs/Asset",
+          "description": "Scoped immutable metadata."
+        },
+        "asset_version": {
+          "description": "Current version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset_version",
+        "asset"
+      ],
+      "type": "object"
+    },
     "CancelJobRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/jobs/{id}/cancel`, with an `Idempotency-Key` header. It\nhas no fields.",
@@ -633,6 +737,53 @@
       ],
       "type": "object"
     },
+    "DeleteAssetRequest": {
+      "additionalProperties": false,
+      "description": "Conditional association deletion.",
+      "properties": {
+        "base_asset_version": {
+          "description": "Observed independent state version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "base_asset_version"
+      ],
+      "type": "object"
+    },
+    "DeleteAssetResponse": {
+      "additionalProperties": false,
+      "description": "Original association deletion receipt.",
+      "properties": {
+        "asset_id": {
+          "description": "Requested opaque identifier.",
+          "type": "string"
+        },
+        "asset_version": {
+          "description": "Original resulting version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deleted": {
+          "description": "Whether the original operation removed an association.",
+          "type": "boolean"
+        },
+        "replayed": {
+          "description": "Whether this returns a prior committed result.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "asset_id",
+        "asset_version",
+        "deleted",
+        "replayed"
+      ],
+      "type": "object"
+    },
     "DeleteDataRequest": {
       "additionalProperties": false,
       "description": "Body of `DELETE /v1/artifacts/{id}/data`, with an `Idempotency-Key`\nheader: removes the value at a path.",
@@ -800,6 +951,15 @@
             "null"
           ]
         },
+        "current_asset_version": {
+          "description": "Current independent state for `asset_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "current_data_version": {
           "description": "The current data version, present for `data_conflict` (of a write, or\nof a listing whose `at_data_version` is not current).",
           "format": "uint64",
@@ -894,6 +1054,26 @@
         {
           "const": "data_conflict",
           "description": "The base data version is not current; read the data again and reapply\nthe change. Nothing was written. A listing of member names answers it\ntoo when its `at_data_version` is not the space's version, older or\nnewer; start the listing again.",
+          "type": "string"
+        },
+        {
+          "const": "asset_conflict",
+          "description": "The independent upload state changed.",
+          "type": "string"
+        },
+        {
+          "const": "asset_type_unsupported",
+          "description": "The declared type is not currently accepted for new uploads.",
+          "type": "string"
+        },
+        {
+          "const": "invalid_asset",
+          "description": "Empty or invalid asset content.",
+          "type": "string"
+        },
+        {
+          "const": "asset_limit_exceeded",
+          "description": "Upload byte, count or logical quota exceeded.",
           "type": "string"
         },
         {
@@ -3098,6 +3278,58 @@
       ],
       "type": "object"
     },
+    "UploadAssetRequest": {
+      "additionalProperties": false,
+      "description": "Stable bounded upload envelope. MIME syntax is separate from mutable admission.",
+      "properties": {
+        "base_asset_version": {
+          "description": "Observed independent state version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content_base64": {
+          "description": "Strict standard base64, at most 5 MiB decoded bytes.",
+          "type": "string"
+        },
+        "content_type": {
+          "description": "Original lowercase, parameter-free MIME declaration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_asset_version",
+        "content_type",
+        "content_base64"
+      ],
+      "type": "object"
+    },
+    "UploadAssetResponse": {
+      "additionalProperties": false,
+      "description": "Original metadata-only upload receipt; replay does not recreate deleted bytes.",
+      "properties": {
+        "asset": {
+          "$ref": "#/$defs/Asset",
+          "description": "Original metadata."
+        },
+        "asset_version": {
+          "description": "Original resulting version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replayed": {
+          "description": "Whether this returns a prior committed result.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "asset_version",
+        "asset",
+        "replayed"
+      ],
+      "type": "object"
+    },
     "UserInfo": {
       "additionalProperties": false,
       "description": "A registered user (decision 0036). It names an actor that owns artifacts;\nit carries no credential and no role.",
@@ -3155,6 +3387,24 @@
   "$id": "https://artifree.invalid/schemas/api-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "anyOf": [
+    {
+      "$ref": "#/$defs/AssetList"
+    },
+    {
+      "$ref": "#/$defs/AssetResponse"
+    },
+    {
+      "$ref": "#/$defs/UploadAssetRequest"
+    },
+    {
+      "$ref": "#/$defs/UploadAssetResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteAssetRequest"
+    },
+    {
+      "$ref": "#/$defs/DeleteAssetResponse"
+    },
     {
       "$ref": "#/$defs/CreateArtifactRequest"
     },

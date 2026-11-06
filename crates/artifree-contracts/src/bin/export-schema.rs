@@ -15,11 +15,12 @@
 )]
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactChange, ArtifactList, CancelJobRequest,
-    CancelJobResponse, CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
-    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataMembers, DataOutboxBinding,
-    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse,
-    EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff,
+    AgentSessionList, AppData, Artifact, ArtifactChange, ArtifactList, AssetList, AssetResponse,
+    CancelJobRequest, CancelJobResponse, CommitResponse, CreateArtifactRequest,
+    CreateRuntimeViewRequest, CreateTokenRequest, CreateTokenResponse, CreateUserRequest,
+    DataMembers, DataOutboxBinding, DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse,
+    DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
+    EnqueueJobRequest, EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff,
     HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, Preview,
     PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
@@ -30,7 +31,7 @@ use artifree_contracts::api::{
     RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest,
     SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo,
     TokenList, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest, UserInfo, UserList,
+    UpdateDataRequest, UploadAssetRequest, UploadAssetResponse, UserInfo, UserList,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -39,6 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut generator = SchemaSettings::draft2020_12().into_generator();
     // A vector: Serde serializes arrays of up to 32 elements only.
     let bodies = vec![
+        generator.subschema_for::<AssetList>(),
+        generator.subschema_for::<AssetResponse>(),
+        generator.subschema_for::<UploadAssetRequest>(),
+        generator.subschema_for::<UploadAssetResponse>(),
+        generator.subschema_for::<DeleteAssetRequest>(),
+        generator.subschema_for::<DeleteAssetResponse>(),
         generator.subschema_for::<CreateArtifactRequest>(),
         generator.subschema_for::<SaveRevisionRequest>(),
         generator.subschema_for::<EditFilesRequest>(),

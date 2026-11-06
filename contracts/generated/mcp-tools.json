@@ -66,6 +66,26 @@
                 "type": "string"
               },
               {
+                "const": "asset_conflict",
+                "description": "The independent upload state changed.",
+                "type": "string"
+              },
+              {
+                "const": "asset_type_unsupported",
+                "description": "The declared type is not currently accepted for new uploads.",
+                "type": "string"
+              },
+              {
+                "const": "invalid_asset",
+                "description": "Empty or invalid asset content.",
+                "type": "string"
+              },
+              {
+                "const": "asset_limit_exceeded",
+                "description": "Upload byte, count or logical quota exceeded.",
+                "type": "string"
+              },
+              {
                 "const": "outbox_binding_changed",
                 "description": "The opt-in write authority changed; no key or mutation was recorded.",
                 "type": "string"
@@ -154,6 +174,14 @@
           },
           "conflicting_files_total": {
             "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "current_asset_version": {
+            "description": "Current independent state for `asset_conflict`.",
             "minimum": 0,
             "type": [
               "integer",
@@ -456,6 +484,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -544,6 +592,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -777,6 +833,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -865,6 +941,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -1219,6 +1303,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -1307,6 +1411,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -1696,6 +1808,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -1784,6 +1916,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -2186,6 +2326,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -2274,6 +2434,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -2600,6 +2768,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -2688,6 +2876,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -3042,6 +3238,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -3130,6 +3346,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -3410,6 +3634,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -3498,6 +3742,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -3715,6 +3967,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -3803,6 +4075,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -4012,6 +4292,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -4100,6 +4400,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -4341,6 +4649,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -4429,6 +4757,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -4603,6 +4939,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -4691,6 +5047,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -5110,6 +5474,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -5198,6 +5582,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -5580,6 +5972,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -5668,6 +6080,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -6086,6 +6506,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -6174,6 +6614,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -6576,6 +7024,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -6664,6 +7132,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -6875,6 +7351,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -6963,6 +7459,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7162,6 +7666,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -7250,6 +7774,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7449,6 +7981,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -7537,6 +8089,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7731,6 +8291,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -7819,6 +8399,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -7981,6 +8569,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -8069,6 +8677,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -8349,6 +8965,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -8437,6 +9073,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",
@@ -8645,6 +9289,26 @@
                         "type": "string"
                       },
                       {
+                        "const": "asset_conflict",
+                        "description": "The independent upload state changed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_type_unsupported",
+                        "description": "The declared type is not currently accepted for new uploads.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "invalid_asset",
+                        "description": "Empty or invalid asset content.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "asset_limit_exceeded",
+                        "description": "Upload byte, count or logical quota exceeded.",
+                        "type": "string"
+                      },
+                      {
                         "const": "outbox_binding_changed",
                         "description": "The opt-in write authority changed; no key or mutation was recorded.",
                         "type": "string"
@@ -8733,6 +9397,14 @@
                   },
                   "conflicting_files_total": {
                     "description": "How many edits did not hold, at least the length of `conflicting_files`;\npresent for `file_conflict`.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "current_asset_version": {
+                    "description": "Current independent state for `asset_conflict`.",
                     "minimum": 0,
                     "type": [
                       "integer",

@@ -1680,6 +1680,12 @@ fn no_unreviewed_binary_column_could_hide_a_content_digest() -> TestResult {
         "blobs.digest",
         "blobs.content",
         "revision_files.digest",
+        // Live asset associations are content roots, included in every purge
+        // and cleanup predicate (0045). Receipts contain metadata, not roots:
+        // replay never recreates bytes; purge scrubs digest and fingerprint.
+        "assets.digest",
+        "asset_requests.digest",
+        "asset_requests.fingerprint",
         // Request fingerprints hash a request, never file content.
         "request_keys.fingerprint",
         "cleanup_runs.fingerprint",
