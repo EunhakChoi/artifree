@@ -198,6 +198,12 @@ export async function checkOutboxScheduler(harness) {
           globalThis.trimGate = new Promise((resolve) => {
             globalThis.releaseTrim = resolve;
           });
+          globalThis.scanFaultGate = new Promise((resolve) => {
+            globalThis.releaseScanFault = resolve;
+          });
+          globalThis.scanFaultCompletion = new Promise((resolve) => {
+            globalThis.completeScanFault = resolve;
+          });
           globalThis.trimHeld = false;
           if (mode === 'fairness') {
             const trim = store.trim.bind(store);
@@ -215,9 +221,17 @@ export async function checkOutboxScheduler(harness) {
             const first = scanReads === 1;
             const readId = scanReads;
             if (first && (mode === 'scan-failure' || mode === 'scan-abort')) {
+              // Hold before the asynchronous snapshot so a test cannot mistake
+              // entry into recover() for the later native abort publication.
+              if (mode === 'scan-abort') await scanFaultGate;
               // Capture every row, checkpoint and quota counter before the
               // actual faulted native transaction; a failed scan is read-only.
-              globalThis.beforeScanFault = await storageSnapshot();
+              try {
+                globalThis.beforeScanFault = await storageSnapshot();
+              } catch (error) {
+                completeScanFault();
+                throw error;
+              }
               const transact = IDBDatabase.prototype.transaction;
               const abort = IDBTransaction.prototype.abort;
               IDBTransaction.prototype.abort = function (...values) {
@@ -238,6 +252,7 @@ export async function checkOutboxScheduler(harness) {
               } finally {
                 IDBDatabase.prototype.transaction = transact;
                 IDBTransaction.prototype.abort = abort;
+                completeScanFault();
               }
             }
             return nativeRecover(...args).then(async (rows) => {
@@ -361,7 +376,15 @@ export async function checkOutboxScheduler(harness) {
         );
       } else if (mode === 'scan-abort') {
         await page.waitForFunction(() => scanReads > 0);
-        assert.equal(await page.evaluate(() => scanSignal?.aborted), true);
+        assert.equal(
+          await page.evaluate(async () => {
+            releaseScanFault();
+            await scanFaultCompletion;
+            return globalThis.scanSignal?.aborted;
+          }),
+          true,
+          'observe the actual native abort publication, not entry into recover',
+        );
       }
       if (mode === 'scan-failure' || mode === 'scan-abort') {
         assert.deepEqual(
