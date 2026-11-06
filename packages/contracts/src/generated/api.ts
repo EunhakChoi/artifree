@@ -269,7 +269,7 @@ export interface AssetList {
  */
 export interface Asset {
   /**
-   * Validated type. Current admission accepts plain text, CSV and a restricted RGB/RGBA8 noninterlaced PNG subset; JPEG is refused pending complete validation.
+   * Stored MIME type, including historical image spellings. New uploads admit only UTF-8 plain text/CSV; PNG and JPEG are unsupported pending complete validation.
    */
   content_type: string;
   /**

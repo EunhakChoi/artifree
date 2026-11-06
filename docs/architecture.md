@@ -178,14 +178,13 @@ in the Rust core.
 Private upload HTTP routes (0045, partial R09a): `GET/POST
 /v1/artifacts/{id}/assets`, `GET/DELETE /v1/artifacts/{id}/assets/{asset_id}`,
 and `GET /v1/artifacts/{id}/assets/{asset_id}/content`. Upload and delete require
-an `Idempotency-Key` and `base_asset_version`. UTF-8 plain text/CSV and a restricted static
-PNG subset are admitted; JPEG full-format validation remains blocked and JPEG is
-refused. Reads are authenticated, scoped attachments with no-store/nosniff;
-there is no public URL, client/CLI/MCP operation, asset copy or frame access.
-PNG admission is limited to RGB/RGBA 8-bit, noninterlaced images containing only
-IHDR/IDAT/IEND; alpha is preserved, while ancillary metadata, grayscale, palettes,
-other depths and Adam7 are refused. Ordinary editor PNGs may require re-export.
-The [validator review](asset-validation.md) records these compatibility limits.
+an `Idempotency-Key` and `base_asset_version`. Only UTF-8 plain text/CSV are
+admitted. PNG and JPEG uploads are `asset_type_unsupported` until complete
+validation satisfies decision 0045, rule 3; no image decoder ships. Historical
+MIME metadata and matching receipts remain readable/replayable before current
+admission policy. Reads are authenticated scoped attachments with
+no-store/nosniff; there is no public URL, client/CLI/MCP operation, asset copy
+or frame access. The [content policy](asset-validation.md) records these limits.
 SQLite schema 12 keeps immutable bytes, independent versions, receipts and
 logical quotas in the same database as source files. Source and asset
 associations both protect shared blobs from purge and cleanup.

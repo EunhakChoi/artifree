@@ -220,7 +220,7 @@ async fn envelopes_and_content_errors_do_not_consume_a_key() -> TestResult {
             "png",
             upload(0, "image/png", b"not png"),
             422,
-            "invalid_asset",
+            "asset_type_unsupported",
         ),
         (
             "mime",
@@ -570,36 +570,48 @@ fn different_byte_concurrent_loser_gets_key_reused_despite_its_policy_rejection(
 }
 
 #[tokio::test]
-async fn restricted_rgba_png_preserves_transparent_pixel_bytes() -> TestResult {
+async fn valid_and_invalid_png_uploads_are_unsupported_and_leave_the_key_free() -> TestResult {
     let harness = Harness::new()?;
     let artifact = harness.artifact().await?;
     let path = format!("/v1/artifacts/{artifact}/assets");
-    // Original fixture: 1x1 RGBA8, pixel (0,128,255,0), filter 0; only
-    // IHDR, complete zlib IDAT and IEND, each with an independently computed CRC.
-    let bytes=STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==")?;
-    let uploaded = harness
+    // Independently authored valid 1x1 RGBA PNG. Validity never enables admission.
+    let valid_png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==")?;
+    for bytes in [valid_png.as_slice(), b"not PNG", b""] {
+        let refused = harness
+            .call(
+                "POST",
+                &path,
+                Some("image-policy"),
+                Some(upload(0, "image/png", bytes)),
+            )
+            .await?;
+        secure(&refused);
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.json()?["error"]["code"], "asset_type_unsupported");
+        let list = harness.call("GET", &path, None, None).await?;
+        assert_eq!(list.json()?["assets"], json!([]));
+        assert_eq!(list.json()?["asset_version"], 0);
+    }
+    let text = harness
         .call(
             "POST",
             &path,
-            Some("transparent-png"),
-            Some(upload(0, "image/png", &bytes)),
+            Some("image-policy"),
+            Some(upload(0, "text/plain", b"permitted text")),
         )
         .await?;
     assert_eq!(
-        uploaded.status,
+        text.status,
         StatusCode::CREATED,
-        "{:?}",
-        uploaded.json()
+        "image rejection must leave the key free"
     );
-    let receipt = uploaded.json()?;
+    let receipt = text.json()?;
     let id = receipt["asset"]["id"].as_str().ok_or("asset id")?;
     let content = harness
         .call("GET", &format!("{path}/{id}/content"), None, None)
         .await?;
-    secure(&content);
-    assert_eq!(content.status, StatusCode::OK);
-    assert_eq!(content.headers[header::CONTENT_TYPE], "image/png");
-    assert_eq!(content.bytes, bytes);
+    assert_eq!(content.headers[header::CONTENT_TYPE], "text/plain");
+    assert_eq!(content.bytes, b"permitted text");
     Ok(())
 }
 
@@ -648,5 +660,87 @@ async fn source_save_and_restore_never_rewind_current_assets_or_their_version() 
         .await?;
     assert_eq!(next.status, StatusCode::CREATED);
     assert_eq!(next.json()?["asset_version"], 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn historical_png_receipts_replay_before_current_policy_without_recreating_bytes()
+-> TestResult {
+    use artifree_core::artifacts::ArtifactService;
+    use artifree_core::assets::AssetUpload;
+    use artifree_domain::assets::AssetVersion;
+    use artifree_domain::identity::UnixMillis;
+    let harness = Harness::new()?;
+    let artifact = harness.artifact().await?;
+    let id = artifact.parse()?;
+    let actor = "local".parse()?;
+    let key = "asset-test-historical-png".parse()?;
+    let media = "image/png".parse()?;
+    let bytes = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==")?;
+    let service = ArtifactService::new(SqliteStore::open(&harness.dir.join("db.sqlite3"))?);
+    // Seed a receipt under an earlier trusted policy, not current HTTP admission.
+    let original = service.upload_asset_with_validator(
+        &actor,
+        &key,
+        &id,
+        AssetUpload {
+            base: AssetVersion(0),
+            content_type: &media,
+            bytes: &bytes,
+            now: UnixMillis(1),
+        },
+        |_, _| Ok(()),
+    )?;
+    let path = format!("/v1/artifacts/{artifact}/assets");
+    let request = upload(0, "image/png", &bytes);
+    let replay = harness
+        .call("POST", &path, Some("historical-png"), Some(request.clone()))
+        .await?;
+    assert_eq!(replay.status, StatusCode::CREATED);
+    assert_eq!(replay.json()?["asset"]["content_type"], "image/png");
+    assert_eq!(replay.json()?["asset"]["id"], original.id.as_str());
+    assert_eq!(replay.json()?["replayed"], true);
+    let asset_path = format!("{path}/{}", original.id.as_str());
+    let metadata = harness.call("GET", &asset_path, None, None).await?;
+    assert_eq!(metadata.status, StatusCode::OK);
+    assert_eq!(metadata.json()?["asset"]["content_type"], "image/png");
+    let stored = harness
+        .call("GET", &format!("{asset_path}/content"), None, None)
+        .await?;
+    assert_eq!(stored.status, StatusCode::OK);
+    assert_eq!(stored.headers[header::CONTENT_TYPE], "image/png");
+    assert_eq!(stored.bytes, bytes);
+    let fresh = harness
+        .call(
+            "POST",
+            &path,
+            Some("fresh-png"),
+            Some(upload(1, "image/png", &bytes)),
+        )
+        .await?;
+    assert_eq!(fresh.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(fresh.json()?["error"]["code"], "asset_type_unsupported");
+    let deleted = harness
+        .call(
+            "DELETE",
+            &asset_path,
+            Some("delete-historical"),
+            Some(json!({"base_asset_version":1})),
+        )
+        .await?;
+    assert_eq!(deleted.json()?["deleted"], true);
+    let deleted_replay = harness
+        .call("POST", &path, Some("historical-png"), Some(request))
+        .await?;
+    assert_eq!(deleted_replay.status, StatusCode::CREATED);
+    assert_eq!(deleted_replay.json()?["replayed"], true);
+    assert_eq!(deleted_replay.json()?["asset_version"], 1);
+    let content = harness
+        .call("GET", &format!("{asset_path}/content"), None, None)
+        .await?;
+    assert_eq!(content.status, StatusCode::NOT_FOUND);
+    let list = harness.call("GET", &path, None, None).await?;
+    assert_eq!(list.json()?["assets"], json!([]));
+    assert_eq!(list.json()?["asset_version"], 2);
     Ok(())
 }

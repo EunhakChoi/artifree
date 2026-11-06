@@ -708,7 +708,10 @@ shared source/asset blob retention, actor quotas including trash, schema-11
 upgrade and rejection, and backup/restore. HTTP tests cover stable envelopes,
 security headers, 1-byte and exact 5-MiB text, oversized/empty/invalid content,
 unknown outcomes and asset route isolation. Content policy validation happens
-outside database transactions and replay skips changed policy. PNG is restricted to RGB/RGBA 8-bit noninterlaced IHDR/IDAT/IEND, preserving alpha; other PNG features and all JPEG uploads are refused,
-and R09a is incomplete until strict full JPEG and general PNG validation are available. There
+outside database transactions and replay skips changed policy. Only UTF-8
+plain text/CSV uploads are admitted. Valid and invalid PNG/JPEG uploads are
+explicitly unsupported; historical image metadata and matching receipts remain
+decodable and replay before current policy without recreating deleted bytes.
+R09a is incomplete until full PNG and JPEG validation satisfy 0045 rule 3. There
 are no asset UI, client, MCP, CLI, copy or runtime tests because those adapters
 remain R09b–R09d work.

@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8/restricted PNG asset HTTP routes (JPEG blocked; no asset client or runtime yet), and a sandboxed preview origin.",
+        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV asset HTTP routes (PNG/JPEG unsupported; no asset client or runtime yet), and a sandboxed preview origin.",
     ),
     (
         "domain",
@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions, per-file edits, restores, duplicates (files, and data when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; separate private UTF-8/restricted PNG uploads with atomic quotas and replay; asset copying and publish planned.",
+        "Create, conditional revisions, per-file edits, restores, duplicates (files, and data when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; separate private UTF-8 text/CSV uploads with atomic quotas and replay; asset copying and publish planned.",
     ),
     (
         "policy",
