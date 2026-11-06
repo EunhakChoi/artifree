@@ -304,6 +304,10 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   archive) are compared by digest with the stored bytes; no grant, a decline's
   cooldown, and a page whose snapshot still says "granted" after the server
   revoked it open no prompt; an old generation and a moved head are refused.
+  The view recorder copies the real fetch response before the workspace receives
+  it and matches its URL to the shown frame; body-read failures retain their
+  request path and status. Its tests check ordering, preservation of the
+  application's body, and visible stream/JSON failures.
   Each guard was checked by breaking it and watching a test fail. These tests
   do not show that a preview cannot use the network, and no MCP tool is involved.
 - Runtime source writing (decision 0033): Rust tests read the new revision
