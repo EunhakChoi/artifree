@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect } from '@playwright/test';
 import { ArtifreeClient, newRandomId } from '../packages/client/dist/index.js';
+import { recordRuntimeViews } from './lib/runtime-view-recorder.mjs';
 import { api, bytes } from './smoke-workspace.mjs';
 
 /**
@@ -115,7 +116,7 @@ async function open(
   try {
     const page = await context.newPage();
     page.setDefaultTimeout(15_000);
-    const views = [];
+    const views = await recordRuntimeViews(page);
     const errors = [];
     const downloads = [];
     const answers = [];
@@ -127,15 +128,6 @@ async function open(
       if (line.startsWith('answer ')) answers.push(line.slice(7));
     });
     page.on('download', (download) => downloads.push(download));
-    page.on('response', (response) => {
-      const request = response.request();
-      if (
-        request.method() === 'POST' &&
-        new URL(response.url()).pathname.endsWith('/runtime-views') &&
-        response.ok()
-      )
-        views.push(response.json().catch(() => undefined));
-    });
     await page.goto(origin);
     const workspace = page.locator('#artifacts');
     await workspace.getByLabel('Access token').fill(server.token);
@@ -158,7 +150,7 @@ async function open(
       errors,
       answers,
       downloads,
-      views: async () => (await Promise.all(views)).filter(Boolean),
+      views,
       frame: workspace.frameLocator('iframe[title^="Preview of"]'),
       element: workspace.locator('iframe[title^="Preview of"]'),
     };
@@ -359,34 +351,19 @@ async function checkStaleSnapshot(browser, origin, server, artifact) {
   const opened = await open(browser, origin, server, artifact);
   try {
     await allow(opened, 'Allow download requests', 'source.download');
-    // The wait is for the view the frame now shows: the runtime-views answer
-    // whose url is the iframe's current src. That answer reaches the test
-    // through a separate channel from the page's own update of src, so it is
-    // awaited with the same budget as every other wait in this file. A failure
-    // says which urls were recorded and which src was shown, so that a repeat
-    // of the one unexplained CI timeout names its cause.
-    let view;
-    let shown;
-    let seen = [];
-    try {
-      await expect
-        .poll(
-          async () => {
-            shown = await opened.element.getAttribute('src');
-            const recorded = await opened.views();
-            seen = recorded.map((candidate) => candidate.url);
-            view = recorded.find((candidate) => candidate.url === shown);
-            return view !== undefined;
-          },
-          { timeout: 20_000 },
-        )
-        .toBe(true);
-    } catch (error) {
-      throw new Error(
-        `No runtime view was recorded for src ${shown}; recorded: ${JSON.stringify(seen)}`,
-        { cause: error },
-      );
-    }
+    // Revoke exactly the view the frame shows, using its real creation
+    // response. Recording precedes delivery to the application, so a shown
+    // frame cannot outrun its record. Keep the URL match: choosing the newest
+    // response could revoke another generation and weaken this test.
+    const shown = await opened.element.getAttribute('src');
+    const recorded = await opened.views();
+    const view = recorded.find((candidate) => candidate.url === shown);
+    assert.ok(
+      view,
+      `No runtime view was recorded for src ${shown}; recorded: ${JSON.stringify(recorded.map((candidate) => candidate.url))}`,
+    );
+    assert.equal(view.artifact_id, artifact.id);
+    assert.equal(view.revision, 1);
     await api(
       server,
       'PUT',
