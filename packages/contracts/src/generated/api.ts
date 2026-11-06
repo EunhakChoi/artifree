@@ -1837,9 +1837,10 @@ export interface DataMembers {
   exists: boolean;
   /**
    * Member names after the page token's name, ascending by their UTF-8
-   * bytes, at most `limit`. Only names that a path can address are listed
-   * (`[A-Za-z0-9_-]{1,64}`); other names are skipped, do not count toward
-   * `limit`, and do not make `next_page_token` present.
+   * bytes, at most `limit`. Only names addressable by the Unicode 16.0.0
+   * segment grammar of decision 0046 are listed (1-64 UTF-8 bytes, exact
+   * scalar identity without normalization). Other names are skipped, do
+   * not count toward `limit`, and do not make `next_page_token` present.
    */
   names: string[];
   /**
