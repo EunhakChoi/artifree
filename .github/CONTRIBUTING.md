@@ -205,6 +205,11 @@ a status label, silence, a pending review, or CI alone is insufficient. After
 merging, verify CI for the actual main merge commit and address any failure
 before dependent merges.
 
+Finish by deleting completed test environments and merged branches, including
+their worktrees. Follow [the cleanup policy](../docs/quality.md#cleanup-after-verification-and-merge)
+to preserve verification evidence and ongoing work, verify merge status, and
+report both removed resources and any resources whose cleanup is deferred.
+
 The required aggregate is **Quality gate**. Include every added verification job
 in its `needs`; dependency updates use the same gates. Keep decisions and roadmap
 status accurate after delivery. Passing checks establishes only what those
