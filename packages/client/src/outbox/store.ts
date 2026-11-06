@@ -946,8 +946,11 @@ export class LocalStore {
       this.database,
       'readwrite',
       async (tx) => {
+        authorize();
         await usage(tx);
+        authorize();
         const rows = await laneRows(tx, expected.lane);
+        authorize();
         const head = rows.find((row) => row.state !== 'acknowledged');
         if (!same(head, expected) || head?.state !== 'unprepared')
           throw new OutboxError('invalid_selection');
@@ -979,6 +982,10 @@ export class LocalStore {
         if (checked.state !== 'prepared')
           throw new OutboxError('storage_corrupt');
         await request(tx.objectStore('intents').put(checked));
+        authorize();
+        // Persist legacy checkpoint normalization with the prepared row.
+        await request(tx.objectStore('checkpoints').put(checkpoint));
+        authorize();
         return checked;
       },
       signal,
@@ -996,8 +1003,11 @@ export class LocalStore {
       this.database,
       'readwrite',
       async (tx) => {
+        authorize();
         await usage(tx);
+        authorize();
         const rows = await laneRows(tx, expected.lane);
+        authorize();
         const head = rows.find((row) => row.state !== 'acknowledged');
         if (!same(head, expected) || head?.state !== 'prepared')
           throw new OutboxError('invalid_selection');
@@ -1012,7 +1022,9 @@ export class LocalStore {
         const checkpoint = decodeCheckpoint(
           await request(tx.objectStore('checkpoints').get(head.lane)),
         );
+        authorize();
         await request(tx.objectStore('intents').put(acknowledged));
+        authorize();
         await request(
           tx.objectStore('checkpoints').put({
             ...checkpoint,
@@ -1022,6 +1034,7 @@ export class LocalStore {
             },
           }),
         );
+        authorize();
         return acknowledged;
       },
       signal,
@@ -1038,21 +1051,27 @@ export class LocalStore {
       this.database,
       'readwrite',
       async (tx) => {
+        authorize();
         const first = expected[0];
         if (first === undefined) throw new OutboxError('invalid_selection');
         const global = await usage(tx);
+        authorize();
         const rows = await laneRows(tx, first.lane);
+        authorize();
         if (!same(rows, expected)) throw new OutboxError('invalid_selection');
         const count = rows.findIndex((row) => row.state !== 'acknowledged');
         const removed = rows.slice(0, count === -1 ? rows.length : count);
         if (removed.length === 0) throw new OutboxError('invalid_selection');
         authorize();
         const bytes = removed.reduce((sum, row) => sum + row.bytes, 0);
-        for (const row of removed)
+        for (const row of removed) {
           await request(tx.objectStore('intents').delete(row.sequence));
+          authorize();
+        }
         const checkpoint = decodeCheckpoint(
           await request(tx.objectStore('checkpoints').get(first.lane)),
         );
+        authorize();
         if (removed.length === rows.length)
           await request(tx.objectStore('checkpoints').delete(first.lane));
         else
@@ -1063,6 +1082,7 @@ export class LocalStore {
               bytes: checkpoint.bytes - bytes,
             }),
           );
+        authorize();
         await request(
           tx.objectStore('usage').put({
             ...global,
@@ -1070,6 +1090,7 @@ export class LocalStore {
             bytes: global.bytes - bytes,
           }),
         );
+        authorize();
       },
       signal,
     );

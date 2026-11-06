@@ -1,3 +1,4 @@
+import { checkOutboxDelivery } from './smoke-outbox-delivery.mjs';
 import { checkOutboxStore } from './smoke-outbox-store.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -16,6 +17,7 @@ const binding = {
 
 /** Real origin storage and Web Locks, with an owned HTTP metadata-only fixture. */
 export async function checkOutbox(browser, live) {
+  await checkOutboxDelivery(browser, live);
   await checkOutboxStore(browser);
   const bundle = await build({
     stdin: {

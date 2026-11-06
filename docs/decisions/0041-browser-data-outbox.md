@@ -2,7 +2,8 @@
 
 Status: **Partially implemented.** R08a provides the server binding fence;
 R08b provides local browser admission and owner recovery. R08c-1 adds internal
-prepared/ACK/checkpoint/trim persistence. Network delivery and the remaining
+prepared/ACK/checkpoint/trim persistence. R08c-2a adds an internal single-attempt
+native transport/storage kernel. Public delivery coordination and the remaining
 numbered sender/lifecycle contract are proposed.
 
 Scope: R08, an opt-in browser TypeScript client for R06 application-data
@@ -872,3 +873,44 @@ they do not prove HTTP delivery, same-key server replay, native process crash
 restoration, selection actions or bounded retry budgets. R08c's remaining sender
 work must test those boundaries before activation. The public browser handle
 continues to expose local admission/recovery/disposal only, with no sender.
+
+## R08c-2a: internal single-attempt transport
+
+An internal DeliveryKernel runs one owner-authorized lane attempt. Its host must
+hold the native owner lock, establish the matching server binding, fence captured
+page/profile/credential authority and synchronously abort that authority signal
+before invalidation or lock release. The kernel checks that context before payload
+access and after asynchronous work, and rejects concurrent calls on one instance.
+It has no public browser entry-point export or automatic scheduling.
+
+Preparation must commit and the retained frozen row must match before native
+Fetch uses its exact method/body/key/base and authorized-generation fence. Every
+mutation rejects redirects, uses a 15-second header deadline and 60-second whole
+request deadline, and reads bounded bodies through the existing stall reader.
+HTTP status and bounded Retry-After are retained before body processing. Only a
+strict matching HTTP200 DataWriteResponse can enter the durable ACK transaction.
+A failed ACK retains the prepared request and reports its observed receipt as
+informational; durable ACK plus failed trim reports acknowledged cleanup pending.
+Retained ACK cleanup performs no HTTP. Fenced local errors distinguish whether
+this invocation called Fetch. A failed authority check permanently fences the
+captured kernel and its pending transactions. Observed401 permanently fences the
+kernel and asks the host to invalidate its local authentication proof; no response
+adopts new binding or actor authority.
+
+The native-browser checks use independently owned HTTP redirect/status fixtures
+and real Rust endpoints. They verify committed preparation at request arrival,
+response loss/redirect/invalid receipt after server commit followed by exact-key
+replay, historical receipts below a newer canonical version, ACK/trim aborts,
+unchanged/dependent bases, raw Rust rejections, and stale owner/authority callbacks.
+Preparation, ACK and trim checks distinguish request-success rollback from a
+terminal commit followed by invalidation, both with and without a host abort.
+A follow positive control proves the owned collector accepts actual frozen body,
+key and fence headers. Metadata hidden by native Fetch remains a network failure.
+
+Public sender activation remains proposed. It requires the page-global scheduler,
+8/32 delivery epochs, typed pauses/resume/preparation retry, explicit generation
+reauthorization and owner recovery, conflict/rejection disposal, abandonment and
+bounded recovery continuation. This kernel does not implement those lifecycle
+choices, runtime-frame access, management UI adoption or native-process recovery.
+The existing public browser handle continues to provide local admission and
+recovery/disposal only.
