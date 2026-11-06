@@ -19,6 +19,10 @@ original product.
 > R07a: decision 14, as a data write that changes the space records a
 > `data_changed` change in the feed.
 
+> Follow-up proposal: [0046](0046-utf8-data-paths.md) specifies R06b Unicode
+> paths. It is not implemented and does not yet amend the accepted ASCII
+> grammar, listing rules, or transport bounds in this record.
+
 ## Context
 
 An artifact is a package of files, and each revision of it is immutable. An app
