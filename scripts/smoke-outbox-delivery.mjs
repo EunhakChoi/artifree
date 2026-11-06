@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { build } from 'esbuild';
 import { cleanupOutboxDelivery } from './lib/outbox-delivery-cleanup.mjs';
 import { checkOutboxScheduler } from './smoke-outbox-scheduler.mjs';
+import { checkSchedulerDisposalLive } from './smoke-outbox-disposal.mjs';
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
 const EPOCH = 'b'.repeat(32);
@@ -36,6 +37,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
   let status = 409;
   let bindingMode = 'normal';
   let bindingReads = 0;
+  let liveBindingReads = 0;
   let bindingClosures = [];
   let heldBinding;
   let onBindingArrived;
@@ -152,6 +154,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         return;
       }
       if (live !== undefined) {
+        liveBindingReads += 1;
         forward(request, response, '');
         return;
       }
@@ -705,6 +708,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
   }
   let scenarioFailure;
   try {
+    if (process.env.ARTIFREE_SCHEDULER_CASE === 'disposal-live') {
+      assert.notEqual(
+        serverApi,
+        undefined,
+        'disposal-live requires the Rust server',
+      );
+      await checkLiveDisposal();
+      return;
+    }
     await checkOutboxScheduler({
       setup,
       close,
@@ -1264,6 +1276,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       }
       await selectActor('Outbox replay');
       await checkRealServer();
+      await checkLiveDisposal();
       await selectActor('Outbox scheduler');
       await checkOutboxScheduler({
         setup,
@@ -1296,6 +1309,20 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       scenarioFailure,
     );
+  }
+  async function checkLiveDisposal() {
+    await selectActor('Outbox explicit cleanup');
+    mode = 'normal';
+    bindingMode = 'normal';
+    requests = [];
+    await checkSchedulerDisposalLive({
+      setup,
+      close,
+      createArtifact: createRealArtifact,
+      requests: () => requests,
+      bindingReadCount: () => liveBindingReads,
+      expectedActorId: live.actorId,
+    });
   }
   async function checkAuthorityException({
     phase,
@@ -1431,7 +1458,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
     assert.equal(issued.token.user_id, user.id);
     assert.equal(typeof issued.secret, 'string');
     assert.notEqual(issued.secret, '');
-    live = { origin: serverApi.origin, token: issued.secret };
+    live = { origin: serverApi.origin, token: issued.secret, actorId: user.id };
   }
   async function adminPost(path, body, expectedStatus = 200) {
     const response = await fetch(serverApi.origin + path, {

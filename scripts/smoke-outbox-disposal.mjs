@@ -1813,3 +1813,224 @@ async function checkDisposalFault(harness, page, mode) {
   assert.equal(await page.evaluate(() => scheduler.epoch), 0);
   assert.equal(await page.evaluate(() => scheduler.aggregateFailures), 0);
 }
+
+/** Small real-Rust authority to native-IDB cleanup slice; public delivery stays off. */
+export async function checkSchedulerDisposalLive(harness) {
+  for (const empty of [false, true]) {
+    const artifact = await harness.createArtifact();
+    const page = await harness.setup({ artifact });
+    const readsBefore = harness.bindingReadCount();
+    await page.evaluate(() => {
+      globalThis.liveCleanupReads = 0;
+      globalThis.liveCleanupReadActors = [];
+      globalThis.liveCleanupUnhandled = 0;
+      addEventListener('unhandledrejection', (event) => {
+        event.preventDefault();
+        liveCleanupUnhandled += 1;
+      });
+      globalThis.liveCleanupGate = new deliveryApi.LocalOperationGate();
+      const proof = Object.freeze({
+        identity: {},
+        signal: stop.signal,
+        check() {
+          authorize();
+          if (!locallyAuthenticated)
+            throw new deliveryApi.OutboxError('owner_not_ready');
+        },
+      });
+      installScheduler({
+        gate: liveCleanupGate,
+        async authorize(mode, signal) {
+          proof.check();
+          if (mode !== 'online')
+            throw new Error('Expected explicit online proof');
+          liveCleanupReads += 1;
+          const current = await deliveryApi.readBinding(
+            location.origin,
+            deliveryContext.accessToken,
+            signal,
+            (status) => {
+              if (status === 401) deliveryContext.invalidateAuthentication();
+            },
+          );
+          liveCleanupReadActors.push(current.actor_id);
+          if (JSON.stringify(current) !== JSON.stringify(auth)) {
+            currentAuthority = Symbol();
+            stop.abort();
+            throw new deliveryApi.OutboxError('owner_not_ready');
+          }
+          proof.check();
+          return proof;
+        },
+      });
+      faultPut('intents', 'prepared');
+      scheduler.wake(lane);
+    });
+    await page.waitForFunction(() =>
+      events.some(
+        (event) =>
+          event.kind === 'paused' && event.pause.kind === 'preparation_paused',
+      ),
+    );
+    const result = await page.evaluate(async (empty) => {
+      restorePut();
+      const snapshot = async () => {
+        const opening = indexedDB.open('artifree-data-outbox');
+        const db = await new Promise((resolve, reject) => {
+          opening.onsuccess = () => resolve(opening.result);
+          opening.onerror = () => reject(opening.error);
+        });
+        try {
+          return await new Promise((resolve, reject) => {
+            const tx = db.transaction([
+              'intents',
+              'receipts',
+              'checkpoints',
+              'usage',
+            ]);
+            const rows = tx.objectStore('intents').getAll();
+            const receipts = tx.objectStore('receipts').getAll();
+            const checkpoints = tx.objectStore('checkpoints').getAll();
+            const usage = tx.objectStore('usage').get('global');
+            tx.oncomplete = () =>
+              resolve({
+                rows: rows.result,
+                receipts: receipts.result,
+                checkpoints: checkpoints.result,
+                usage: usage.result,
+              });
+            tx.onabort = () => reject(tx.error);
+          });
+        } finally {
+          db.close();
+        }
+      };
+      const initialStorage = await snapshot();
+      if (empty)
+        await liveCleanupGate.run(async () =>
+          store.discard(await store.lane(lane), authorize, stop.signal),
+        );
+      const beforeStorage = await snapshot();
+      const oldLane = scheduler.lanes.get(JSON.stringify(lane));
+      const originalGateWasPaused = oldLane.pause.kind === 'preparation_paused';
+      const epoch = scheduler.epoch;
+      const failures = scheduler.aggregateFailures;
+      const selection = empty
+        ? await scheduler.selectEmptyPreparationGate(lane, 'online')
+        : await scheduler.selectUnsent(lane, 'online');
+      const terminal = { complete: 0, abort: 0 };
+      const transaction = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (...args) {
+        const tx = Reflect.apply(transaction, this, args);
+        if (args[1] === 'readwrite') {
+          tx.addEventListener('complete', () => {
+            terminal.complete += 1;
+          });
+          tx.addEventListener('abort', () => {
+            terminal.abort += 1;
+          });
+        }
+        return tx;
+      };
+      const action = empty
+        ? scheduler.retireEmptyPreparationGate(selection)
+        : scheduler.discardUnsent(selection);
+      const duplicate = empty
+        ? scheduler.retireEmptyPreparationGate(selection)
+        : scheduler.discardUnsent(selection);
+      const samePending = action === duplicate;
+      let outcome;
+      try {
+        outcome = await action;
+      } finally {
+        IDBDatabase.prototype.transaction = transaction;
+      }
+      return {
+        initialStorage,
+        beforeStorage,
+        afterStorage: await snapshot(),
+        terminal,
+        outcome,
+        samePending,
+        reads: liveCleanupReads,
+        actor: auth.actor_id,
+        readActors: liveCleanupReadActors,
+        rows: await store.lane(lane),
+        snapshot: await store.captureCleanup(
+          lane,
+          () => authorize(),
+          stop.signal,
+        ),
+        originalGateWasPaused,
+        retired: !scheduler.lanes.has(JSON.stringify(lane)),
+        epochUnchanged: scheduler.epoch === epoch,
+        budgetUnchanged: scheduler.aggregateFailures === failures,
+        unhandled: liveCleanupUnhandled,
+      };
+    }, empty);
+    assert.equal(result.initialStorage.rows.length, 1);
+    assert.equal(result.initialStorage.rows[0].state, 'unprepared');
+    assert.equal(result.initialStorage.usage.rows, 1);
+    assert.equal(
+      result.initialStorage.usage.bytes,
+      result.initialStorage.rows[0].bytes,
+    );
+    assert.deepEqual(result.initialStorage.receipts, []);
+    assert.equal(result.initialStorage.checkpoints.length, 1);
+    const expectedEmptyStorage = {
+      rows: [],
+      receipts: [],
+      checkpoints: [],
+      usage: { ...result.initialStorage.usage, rows: 0, bytes: 0 },
+    };
+    assert.deepEqual(
+      result.beforeStorage,
+      empty ? expectedEmptyStorage : result.initialStorage,
+    );
+    assert.deepEqual(result.afterStorage, expectedEmptyStorage);
+    assert.deepEqual(
+      result.terminal,
+      { complete: 1, abort: 0 },
+      'the typed action resolves after one native readwrite terminal complete',
+    );
+    assert.equal(
+      result.actor,
+      harness.expectedActorId,
+      'initial binding matches the independently created user',
+    );
+    assert.deepEqual(
+      result.readActors,
+      [harness.expectedActorId, harness.expectedActorId],
+      'both cleanup binding reads match the independently created user',
+    );
+    assert.equal(
+      result.outcome.kind,
+      empty ? 'retired_empty_preparation_gate' : 'discarded_unsent',
+    );
+    assert.equal(result.samePending, true);
+    assert.equal(
+      result.reads,
+      2,
+      'selection and action each read the live binding once',
+    );
+    assert.equal(
+      harness.bindingReadCount() - readsBefore,
+      2,
+      'both proof reads reached the real Rust server',
+    );
+    assert.deepEqual(result.rows, []);
+    assert.deepEqual(result.snapshot, { kind: 'empty' });
+    assert.equal(result.originalGateWasPaused, true);
+    assert.equal(result.retired, true);
+    assert.equal(result.epochUnchanged, true);
+    assert.equal(result.budgetUnchanged, true);
+    assert.equal(result.unhandled, 0);
+    assert.deepEqual(
+      harness.requests(),
+      [],
+      'explicit local cleanup sends no mutation',
+    );
+    await harness.close(page);
+  }
+  console.log('outbox disposal: disposal-live passed');
+}

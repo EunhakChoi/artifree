@@ -192,8 +192,10 @@ public sender 활성화 완료를 뜻하지 않는다. `UnsentDiscardSelection`�
 `EmptyPreparationGateSelection`에 대응하는 서로 다른 명시적 내부 action만
 제공한다. 전자는 native 삭제 commit 결과를 반환하고, 후자는 완전히 빈
 gate의 native probe commit과 현재 context 확인 뒤 metadata를 해제한다.
-이 내부 host를 공개 handle에 연결하지 않았으며, 새 cleanup 선택의 실제
-서버 수직 검증과 전체 gate는 focused native 검증과 별도다.
+이 내부 host를 공개 handle에 연결하지 않았다. 새 cleanup 선택의 실제
+Rust binding 확인부터 native IDB commit·metadata retirement까지의 작은
+수직 case도 두 engine에서 검증했으나, 이는 전체 gate나 모든 권한 실패·
+crash 복원 경로의 완료를 뜻하지 않는다.
 
 ## P 선택 가능한 provider 기능
 
