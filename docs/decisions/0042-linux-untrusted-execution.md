@@ -1,6 +1,7 @@
 # 0042: Linux untrusted execution limits
 
-Date: 2026-11-06. Status: **proposed; no implementation**. Roadmap: R02.
+Date: 2026-11-06. Status: **proposed boundary; partial read-only inspection
+implemented, no untrusted execution**. Roadmap: R02.
 Builds on [0030](0030-persistent-jobs-and-worker.md),
 [0036](0036-multi-user-identity.md), and
 [0003](0003-local-html-artifact-slice.md).
@@ -10,8 +11,9 @@ Builds on [0030](0030-persistent-jobs-and-worker.md),
 The existing worker runs only trusted `verify_revision` code and opens SQLite
 directly. A separate process alone does not protect that database or the host.
 R02 must establish a real execution boundary before React builds (R03) or
-untrusted conversion work can run. This record changes no executable, contract,
-database schema, dependency, or current platform support.
+untrusted conversion work can run. The initial specification changed no executable, contract, database schema,
+dependency, or current platform support. The partial inspection below adds no
+execution or platform support.
 
 Original-product observations distinguish requesting cancellation, physical
 resource settlement, producing a file, and delivering it. They do not reveal a
@@ -19,6 +21,47 @@ server sandbox, queue, Linux backend, or universal resource limits. The policies
 below are independent Artifree design. The private requirement/evidence trace
 remains outside Git; public implementation and tests must be independently
 written. No formal clean-room separation is claimed.
+
+## Implemented inspection only (partial R02a)
+
+`artifree_providers::execution` reads the real Linux supervisor proc view's
+`/proc/sys/kernel/core_pattern` with a 4,096-byte bound. It refuses pipe and
+socket modes, unreadable values and unknown syntax. Its intentionally narrow
+file syntax is a literal ASCII basename using letters, digits, `.`, `_`, `-`,
+excluding `.` and `..`; one trailing proc newline is allowed. Directory paths
+and percent expansions remain unreviewed. Even a matching file value always
+ends in `IncompleteEnforcement`, never admission or supported-host status.
+Windows and other non-Linux hosts are refused before reading the proc path.
+Existing trusted worker/server paths do not call this module.
+
+An immutable in-process `InspectionProfile` pins exact policy identity and
+manifest bytes. That manifest explicitly says tools are unpackaged and
+enforcement is incomplete. It is **not** an installed tool/dependency digest
+manifest, kernel attestation or proof of immutable filesystem content. There is
+no caller command, path, environment or executable selector. Tool-root digest
+verification, holding a version against replacement, launcher packaging and
+fixed executable profiles remain unimplemented.
+
+An opaque routing observation records exact bytes and monotonic time. A
+recheck refuses changed bytes, unreadable routing, backwards supplied monotonic
+time and observations aged one second or more. One second is a conservative
+inspection freshness bound, **not** a guardian interval, execution lease or
+containment guarantee. Wall-clock changes do not participate. Production uses
+`Instant`; synthetic clock values are confined to private test helpers.
+These reads cannot detect change-and-revert or prevent an administrator changing
+routing immediately afterwards. No filesystem TOCTOU protection, coordinated
+host policy invariant, namespace identity attestation, launch recheck, guardian,
+kill or publication fence is implemented by these observations.
+
+Tests cover exact profile/manifest mismatch (including command/path-looking
+strings), routing grammar/refusal, bounded reads, exact-byte change and
+monotonic boundaries. A read-only unit test exercises the actual
+proc read as a wiring check without assuming its value or proving that the
+proc mount is genuine. Recheck freshness is measured after the read, including
+time spent reading. Synthetic readers prove inspection logic
+only, not kernel crash behavior. Dedicated-host execution, cgroup, core crash,
+collector and complete rule 4–8 acceptance remain pending. R02a and R02 are
+incomplete; no payload runs and no new job kind or API is exposed.
 
 ## Proposed rules
 
