@@ -22,7 +22,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
       import {OutboxError} from './packages/client/src/outbox/types.ts';
       import {ArtifreeApiError} from './packages/client/src/errors.ts';
       import {DeliveryScheduler} from './packages/client/src/outbox/scheduler.ts';
-      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, openStore, readBinding, OutboxError, ArtifreeApiError};`,
+      import {LocalOperationGate} from './packages/client/src/outbox/local-operation-gate.ts';
+      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError};`,
       resolveDir: process.cwd(),
       loader: 'ts',
     },
@@ -440,13 +441,14 @@ export async function checkOutboxDelivery(browser, serverApi) {
           clock,
         };
         globalThis.kernel = new DeliveryKernel(store, deliveryContext);
-        globalThis.installScheduler = () => {
+        globalThis.installScheduler = (cleanup) => {
           globalThis.events = [];
           globalThis.revalidationCalls = 0;
           globalThis.failRevalidation = false;
           globalThis.observedBindingStatuses = [];
           globalThis.scheduler = new deliveryApi.DeliveryScheduler(store, {
             context: deliveryContext,
+            ...(cleanup === undefined ? {} : { cleanup }),
             random: () => 0,
             observe: (event) => {
               events.push(event);
@@ -523,11 +525,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
           text: operation === 'delete' ? null : text,
           base: { version: base },
         });
-        globalThis.enqueueLikeHead = (changes) => {
+        globalThis.enqueueLikeHead = (changes, localAuthority) => {
           const intent = { ...head, ...changes };
           delete intent.sequence;
           delete intent.bytes;
-          return store.enqueue(intent);
+          return store.enqueue(
+            intent,
+            localAuthority?.check,
+            localAuthority?.signal,
+          );
         };
         globalThis.start = () => {
           globalThis.pending = kernel.run(lane).then(

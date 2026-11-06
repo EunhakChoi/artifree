@@ -8,12 +8,20 @@ import {
   type DeliveryContext,
   type DeliveryFailure,
 } from './delivery.js';
-import type { IntentRow, LaneKey, LocalStore } from './store.js';
+import type {
+  CleanupSnapshot,
+  IntentRow,
+  LaneKey,
+  LocalStore,
+} from './store.js';
 import { OutboxError } from './types.js';
+import { LocalOperationGate } from './local-operation-gate.js';
 
 const preparationAction = Symbol();
 const deliveryAction = Symbol();
 const cleanupAction = Symbol();
+const unsentAction = Symbol();
+const emptyGateAction = Symbol();
 const reconciliation = Symbol();
 const MAX_LANES = 256;
 
@@ -28,6 +36,48 @@ export interface DeliveryResume {
 /** Internal local-only retry for a retained durable ACK; never grants HTTP budget. */
 export interface CleanupRetry {
   readonly [cleanupAction]: true;
+}
+
+/** Internal explicit never-prepared disposal; distinct from the public local handle. */
+export interface SchedulerUnsentDiscardSelection {
+  readonly [unsentAction]: true;
+}
+
+/** Internal explicit choice to retire one proven-empty preparation gate. */
+export interface EmptyPreparationGateSelection {
+  readonly [emptyGateAction]: true;
+}
+
+export interface UnsentDiscardResult {
+  readonly kind: 'discarded_unsent';
+}
+
+export interface EmptyPreparationGateResult {
+  readonly kind: 'retired_empty_preparation_gate';
+}
+
+/** Captured local authentication/lock proof; a delivery read is not this proof. */
+export interface SchedulerCleanupAuthority {
+  /** Stable page/profile/credential generation identity, never a caller label. */
+  readonly identity: object;
+  /** Abort synchronously on auth/profile/credential/lock loss. */
+  readonly signal: AbortSignal;
+  /** Check the still-open locally authenticated handle and exclusive owner lock. */
+  readonly check: () => void;
+}
+
+/** Internal host contract; every durable admission must share this local gate. */
+export interface SchedulerCleanupHost {
+  readonly gate: LocalOperationGate;
+  /**
+   * Online uses one bound read with the existing deadline and cancellation.
+   * Revoke captured proof/context at 401 headers before any body wait.
+   * Offline must be explicit and makes no binding read or network fallback.
+   */
+  readonly authorize: (
+    mode: 'online' | 'offline',
+    signal: AbortSignal,
+  ) => Promise<SchedulerCleanupAuthority>;
 }
 
 type Pause =
@@ -69,6 +119,11 @@ export type SchedulerEvent =
     }
   | { readonly kind: 'paused'; readonly lane: LaneKey; readonly pause: Pause }
   | {
+      readonly kind: 'empty_preparation_gate';
+      readonly lane: LaneKey;
+      readonly selection: EmptyPreparationGateSelection;
+    }
+  | {
       readonly kind: 'reconciled';
       readonly queued: number;
       readonly pending: boolean;
@@ -82,6 +137,8 @@ interface Lane {
   wakeMark: object;
   pause?: Pause;
   cancelTimer?: () => void;
+  unsentSelection?: SchedulerUnsentDiscardSelection;
+  emptySelection?: EmptyPreparationGateSelection;
 }
 
 interface Action {
@@ -90,9 +147,59 @@ interface Action {
   readonly epoch: number;
 }
 
-interface Actions<T extends object> {
-  readonly tokens: WeakMap<T, Action>;
-  readonly pending: WeakMap<T, Promise<void>>;
+interface Actions<T extends object, Context = Action, Result = void> {
+  readonly tokens: WeakMap<T, Context>;
+  readonly pending: WeakMap<T, Promise<Result>>;
+}
+
+interface CleanupActionContext extends Action {
+  readonly mode: 'online' | 'offline';
+  readonly authority: SchedulerCleanupAuthority;
+  readonly snapshotState: CleanupSnapshot;
+  readonly gatePause: Pause | undefined;
+  readonly wakeMark: object;
+}
+
+function pendingChoice<T extends object, Context, Result>(
+  selection: T,
+  registry: Actions<T, Context, Result>,
+  brand: symbol,
+  operation: (selection: T) => Promise<Result>,
+): Promise<Result> {
+  if (typeof selection !== 'object' || selection === null)
+    return Promise.reject(new OutboxError('invalid_selection'));
+  try {
+    if (Object.getOwnPropertyDescriptor(selection, brand)?.value !== true)
+      return Promise.reject(new OutboxError('invalid_selection'));
+  } catch {
+    return Promise.reject(new OutboxError('invalid_selection'));
+  }
+  const pending = registry.pending.get(selection);
+  if (pending !== undefined) return pending;
+  if (!registry.tokens.has(selection))
+    return Promise.reject(new OutboxError('invalid_selection'));
+  const attempt = new Promise<Result>((resolve, reject) => {
+    queueMicrotask(() => {
+      void Promise.resolve()
+        .then(() => operation(selection))
+        .then(
+          (result) => {
+            resolve(result);
+            registry.pending.delete(selection);
+          },
+          (error: unknown) => {
+            reject(error);
+            registry.pending.delete(selection);
+          },
+        )
+        .catch((error: unknown) => {
+          reject(error);
+          registry.pending.delete(selection);
+        });
+    });
+  });
+  registry.pending.set(selection, attempt);
+  return attempt;
 }
 
 type ActionKind = 'preparation' | 'delivery' | 'cleanup';
@@ -187,11 +294,14 @@ export interface SchedulerHost {
   ) => Promise<RevalidationResult>;
   readonly observe: (event: SchedulerEvent) => void;
   readonly random?: () => number;
+  /** Optional internal-only cleanup integration; absence leaves cleanup unavailable. */
+  readonly cleanup?: SchedulerCleanupHost;
 }
 
 /**
- * Internal fresh-owner delivery scheduling only. Not a browser entry point or a
- * recovery/lifecycle API. Call wake only after durable admission under this host.
+ * Internal fresh-owner scheduling and explicitly configured local cleanup.
+ * Not a browser entry point or inherited-owner recovery API. Call wake only
+ * after durable admission under this host and its shared cleanup gate, if set.
  */
 export class DeliveryScheduler {
   private readonly store: LocalStore;
@@ -214,6 +324,16 @@ export class DeliveryScheduler {
     tokens: new WeakMap(),
     pending: new WeakMap(),
   };
+  private readonly discards: Actions<
+    SchedulerUnsentDiscardSelection,
+    CleanupActionContext,
+    UnsentDiscardResult
+  > = { tokens: new WeakMap(), pending: new WeakMap() };
+  private readonly emptyGates: Actions<
+    EmptyPreparationGateSelection,
+    CleanupActionContext,
+    EmptyPreparationGateResult
+  > = { tokens: new WeakMap(), pending: new WeakMap() };
   private aggregateFailures = 0;
   private epoch = 0;
   private pumping = false;
@@ -231,14 +351,27 @@ export class DeliveryScheduler {
     this.host = {
       ...host,
       context: { ...host.context, binding: { ...host.context.binding } },
+      ...(host.cleanup === undefined
+        ? {}
+        : {
+            cleanup: Object.freeze({
+              gate: host.cleanup.gate,
+              authorize: host.cleanup.authorize.bind(host.cleanup),
+            }),
+          }),
     };
-    this.clock = host.context.clock ?? systemClock;
+    this.clock = this.host.context.clock ?? systemClock;
     const abort = (): void => this.close();
-    host.context.signal.addEventListener('abort', abort, { once: true });
+    const signals = [this.host.context.signal];
+    if (this.host.cleanup !== undefined)
+      signals.push(this.host.cleanup.gate.signal);
+    for (const signal of signals)
+      signal.addEventListener('abort', abort, { once: true });
     this.fence.signal.addEventListener(
       'abort',
       () => {
-        host.context.signal.removeEventListener('abort', abort);
+        for (const signal of signals)
+          signal.removeEventListener('abort', abort);
       },
       { once: true },
     );
@@ -246,7 +379,7 @@ export class DeliveryScheduler {
       ...host.context,
       signal: this.fence.signal,
     });
-    if (host.context.signal.aborted) this.close();
+    if (signals.some((signal) => signal.aborted)) this.close();
   }
 
   /** Coalesces wakes. No wake clears a pause, timer or failure budget. */
@@ -264,6 +397,7 @@ export class DeliveryScheduler {
       lane = { key: [...key], failures: 0, queued: false, wakeMark: {} };
       this.lanes.set(id, lane);
     }
+    this.retireCleanupChoices(lane);
     lane.wakeMark = {};
     this.queue(lane);
   }
@@ -272,6 +406,7 @@ export class DeliveryScheduler {
   close(): void {
     this.publications.abort();
     this.stopDelivery();
+    this.host.cleanup?.gate.close();
   }
 
   private stopDelivery(): void {
@@ -297,6 +432,346 @@ export class DeliveryScheduler {
   /** One deliberate trim-only transaction; no HTTP, binding read or budget renewal. */
   retryCleanup(selection: CleanupRetry): Promise<void> {
     return this.action(selection, this.cleanups, 'cleanup');
+  }
+
+  /** Select a retained zero-failure preparation gate; never deletes or enables delivery. */
+  selectUnsent(
+    key: LaneKey,
+    mode: 'online' | 'offline' = 'online',
+  ): Promise<SchedulerUnsentDiscardSelection> {
+    return this.selectCleanup(key, mode, false).then((selection) => {
+      if (!(unsentAction in selection))
+        throw new OutboxError('invalid_selection');
+      return selection;
+    });
+  }
+
+  /** Select one retained empty preparation gate; never inferred from wake/scan. */
+  selectEmptyPreparationGate(
+    key: LaneKey,
+    mode: 'online' | 'offline' = 'online',
+  ): Promise<EmptyPreparationGateSelection> {
+    return this.selectCleanup(key, mode, true).then((selection) => {
+      if (!(emptyGateAction in selection))
+        throw new OutboxError('invalid_selection');
+      return selection;
+    });
+  }
+
+  /** Delete one selected never-prepared closure, preserving terminal commit meaning. */
+  discardUnsent(
+    selection: SchedulerUnsentDiscardSelection,
+  ): Promise<UnsentDiscardResult> {
+    return pendingChoice(
+      selection,
+      this.discards,
+      unsentAction,
+      async (chosen) => {
+        const context = this.discards.tokens.get(chosen);
+        this.discards.tokens.delete(chosen);
+        if (context === undefined) throw new OutboxError('invalid_selection');
+        return this.cleanupBoundary(async (host) => {
+          this.checkCleanupContext(context);
+          const authority = await this.cleanupAuthority(host, context.mode);
+          this.sameCleanupAuthority(context, authority);
+          this.checkCleanupContext(context);
+          const snapshot = context.snapshotState;
+          if (snapshot.kind !== 'intents')
+            throw new OutboxError('invalid_selection');
+          const empty = await this.cleanupSignal(authority, (signal) =>
+            this.store.discardSnapshot(
+              snapshot,
+              () => this.checkCleanupContext(context),
+              signal,
+            ),
+          );
+          const result: UnsentDiscardResult = { kind: 'discarded_unsent' };
+          // The native transaction has completed. Losing authority or a wake
+          // after that point suppresses publication, never the committed result.
+          try {
+            this.checkCleanupContext(context);
+          } catch {
+            return result;
+          }
+          if (empty) this.retireCleanupLane(context.lane);
+          else this.retireCleanupChoices(context.lane);
+          return result;
+        });
+      },
+    );
+  }
+
+  /** Explicit metadata retirement; a successful empty probe grants no delivery. */
+  retireEmptyPreparationGate(
+    selection: EmptyPreparationGateSelection,
+  ): Promise<EmptyPreparationGateResult> {
+    return pendingChoice(
+      selection,
+      this.emptyGates,
+      emptyGateAction,
+      async (chosen) => {
+        const context = this.emptyGates.tokens.get(chosen);
+        this.emptyGates.tokens.delete(chosen);
+        if (context === undefined) throw new OutboxError('invalid_selection');
+        return this.cleanupBoundary(async (host) => {
+          this.checkCleanupContext(context);
+          const authority = await this.cleanupAuthority(host, context.mode);
+          this.sameCleanupAuthority(context, authority);
+          this.checkCleanupContext(context);
+          if (context.snapshotState.kind !== 'empty')
+            throw new OutboxError('invalid_selection');
+          await this.cleanupSignal(authority, (signal) =>
+            this.store.checkEmptyCleanup(
+              context.lane.key,
+              () => this.checkCleanupContext(context),
+              signal,
+            ),
+          );
+          this.checkCleanupContext(context);
+          this.retireCleanupLane(context.lane);
+          const result: EmptyPreparationGateResult = {
+            kind: 'retired_empty_preparation_gate',
+          };
+          return result;
+        });
+      },
+    );
+  }
+
+  private sameCleanupAuthority(
+    context: CleanupActionContext,
+    authority: SchedulerCleanupAuthority,
+  ): void {
+    if (
+      authority.identity !== context.authority.identity ||
+      authority.signal !== context.authority.signal
+    )
+      throw new OutboxError('owner_not_ready');
+  }
+
+  private checkCleanupContext(context: CleanupActionContext): void {
+    const lane = context.lane;
+    this.checkCleanupProof(context.authority, lane.key);
+    if (
+      this.lanes.get(JSON.stringify(lane.key)) !== lane ||
+      this.epoch !== context.epoch ||
+      lane.pause !== context.gatePause ||
+      lane.wakeMark !== context.wakeMark ||
+      lane.pause?.kind !== 'preparation_paused' ||
+      lane.failures !== 0 ||
+      lane.cancelTimer !== undefined ||
+      this.activeLane === lane
+    )
+      throw new OutboxError('invalid_selection');
+  }
+
+  private retireCleanupLane(lane: Lane): void {
+    this.retirePause(lane);
+    this.retireCleanupChoices(lane);
+    lane.queued = false;
+    this.lanes.delete(JSON.stringify(lane.key));
+    if (this.capacityWaiting) this.requestReconciliation();
+  }
+
+  private cleanupBoundary<Result>(
+    operation: (host: SchedulerCleanupHost) => Promise<Result>,
+  ): Promise<Result> {
+    const host = this.host.cleanup;
+    if (host === undefined || !(host.gate instanceof LocalOperationGate))
+      return Promise.reject(new OutboxError('owner_not_ready'));
+    return host.gate.run(async () => {
+      this.check();
+      if (this.acting) throw new OutboxError('invalid_selection');
+      this.acting = true;
+      try {
+        await this.activeTask;
+        this.check();
+        return await operation(host);
+      } finally {
+        this.acting = false;
+        this.kick();
+      }
+    });
+  }
+
+  private async cleanupAuthority(
+    host: SchedulerCleanupHost,
+    mode: 'online' | 'offline',
+  ): Promise<SchedulerCleanupAuthority> {
+    if (mode !== 'online' && mode !== 'offline')
+      throw new OutboxError('invalid_selection');
+    try {
+      const proof = await host.authorize(mode, this.fence.signal);
+      if (
+        !isRecord(proof) ||
+        typeof proof.identity !== 'object' ||
+        proof.identity === null ||
+        !(proof.signal instanceof AbortSignal) ||
+        typeof proof.check !== 'function'
+      )
+        throw new OutboxError('owner_not_ready');
+      const captured = Object.freeze({
+        identity: proof.identity,
+        signal: proof.signal,
+        check: proof.check.bind(proof),
+      });
+      captured.check();
+      if (captured.signal.aborted) {
+        this.close();
+        throw new OutboxError('owner_not_ready');
+      }
+      this.check();
+      return captured;
+    } catch (error: unknown) {
+      if (error instanceof ArtifreeApiError) {
+        let failure: RevalidationFailure;
+        try {
+          const result = revalidationResult({
+            kind: 'read_failed',
+            failure: {
+              code: error.code,
+              status: error.status,
+              retryAfterSeconds: error.retryAfterSeconds,
+            },
+          });
+          if (result.kind !== 'read_failed')
+            throw new OutboxError('owner_not_ready');
+          failure = result.failure;
+        } catch {
+          throw new OutboxError('owner_not_ready');
+        }
+        if (
+          failure.status === 401 ||
+          (failure.status === 409 && failure.code === 'outbox_binding_changed')
+        ) {
+          this.close();
+          if (failure.status === 401) {
+            try {
+              this.host.context.invalidateAuthentication();
+            } catch {
+              throw new OutboxError('owner_not_ready');
+            }
+          }
+        }
+        throw new ArtifreeApiError(failure.code, failure);
+      }
+      throw new OutboxError('owner_not_ready');
+    }
+  }
+
+  private checkCleanupProof(
+    proof: SchedulerCleanupAuthority,
+    key: LaneKey,
+  ): void {
+    this.check(key);
+    try {
+      if (proof.signal.aborted) {
+        this.close();
+        throw new OutboxError('owner_not_ready');
+      }
+      proof.check();
+    } catch {
+      throw new OutboxError('owner_not_ready');
+    }
+  }
+
+  private async cleanupSignal<Result>(
+    proof: SchedulerCleanupAuthority,
+    operation: (signal: AbortSignal) => Promise<Result>,
+  ): Promise<Result> {
+    const linked = new AbortController();
+    const sources = [this.fence.signal, proof.signal];
+    const abort = (): void => {
+      if (proof.signal.aborted) this.close();
+      linked.abort();
+    };
+    for (const source of sources) {
+      if (source.aborted) abort();
+      else source.addEventListener('abort', abort, { once: true });
+    }
+    try {
+      return await operation(linked.signal);
+    } finally {
+      for (const source of sources) source.removeEventListener('abort', abort);
+    }
+  }
+
+  private retireCleanupChoices(lane: Lane): void {
+    if (lane.unsentSelection !== undefined)
+      this.discards.tokens.delete(lane.unsentSelection);
+    if (lane.emptySelection !== undefined)
+      this.emptyGates.tokens.delete(lane.emptySelection);
+    delete lane.unsentSelection;
+    delete lane.emptySelection;
+  }
+
+  private async selectCleanup(
+    key: LaneKey,
+    mode: 'online' | 'offline',
+    empty: boolean,
+  ): Promise<SchedulerUnsentDiscardSelection | EmptyPreparationGateSelection> {
+    let selectedKey: LaneKey;
+    try {
+      if (!Array.isArray(key) || key.length !== 5)
+        throw new OutboxError('owner_not_ready');
+      selectedKey = [key[0], key[1], key[2], key[3], key[4]];
+      this.check(selectedKey);
+    } catch {
+      throw new OutboxError('owner_not_ready');
+    }
+    return this.cleanupBoundary(async (host) => {
+      const authority = await this.cleanupAuthority(host, mode);
+      const state = await this.cleanupSignal(authority, (signal) =>
+        this.store.captureCleanup(
+          selectedKey,
+          () => this.checkCleanupProof(authority, selectedKey),
+          signal,
+        ),
+      );
+      this.checkCleanupProof(authority, selectedKey);
+      const id = JSON.stringify(selectedKey);
+      const lane = this.lanes.get(id);
+      if (
+        lane?.pause?.kind !== 'preparation_paused' ||
+        lane.failures !== 0 ||
+        lane.cancelTimer !== undefined ||
+        this.activeLane === lane ||
+        (empty
+          ? state.kind !== 'empty'
+          : state.kind !== 'intents' || state.rows[0]?.state !== 'unprepared')
+      )
+        throw new OutboxError('invalid_selection');
+      this.retireCleanupChoices(lane);
+      const context: CleanupActionContext = {
+        lane,
+        snapshot: state.kind === 'intents' ? state.signature : 'empty',
+        snapshotState: state,
+        epoch: this.epoch,
+        mode,
+        authority,
+        gatePause: lane.pause,
+        wakeMark: lane.wakeMark,
+      };
+      if (empty) {
+        const selection = Object.freeze<EmptyPreparationGateSelection>({
+          [emptyGateAction]: true,
+        });
+        this.emptyGates.tokens.set(selection, context);
+        lane.emptySelection = selection;
+        this.emit({
+          kind: 'empty_preparation_gate',
+          lane: [...selectedKey],
+          selection,
+        });
+        return selection;
+      }
+      const selection = Object.freeze<SchedulerUnsentDiscardSelection>({
+        [unsentAction]: true,
+      });
+      this.discards.tokens.set(selection, context);
+      lane.unsentSelection = selection;
+      return selection;
+    });
   }
 
   private check(lane?: LaneKey): void {
@@ -400,6 +875,7 @@ export class DeliveryScheduler {
   private retireIdle(lane: Lane): void {
     const id = JSON.stringify(lane.key);
     if (this.lanes.get(id) !== lane) return;
+    this.retireCleanupChoices(lane);
     this.lanes.delete(id);
     if (this.capacityWaiting) this.requestReconciliation();
   }
@@ -653,6 +1129,7 @@ export class DeliveryScheduler {
   }
 
   private retirePause(lane: Lane): void {
+    this.retireCleanupChoices(lane);
     if (lane.pause?.kind === 'preparation_paused')
       this.preparations.tokens.delete(lane.pause.selection);
     if (lane.pause?.kind === 'retry_paused')
@@ -833,36 +1310,15 @@ export class DeliveryScheduler {
     registry: Actions<T>,
     kind: ActionKind,
   ): Promise<void> {
-    if (typeof selection !== 'object' || selection === null)
-      return Promise.reject(new OutboxError('invalid_selection'));
-    // Pending maps are per kind. A retired token still owns its in-flight
-    // promise, but another action kind cannot borrow that promise.
-    const pending = registry.pending.get(selection);
-    if (pending !== undefined) return pending;
-    if (!registry.tokens.has(selection))
-      return Promise.reject(new OutboxError('invalid_selection'));
-    const attempt = new Promise<void>((resolve, reject) => {
-      // Install the promise before any host callback can reenter this action.
-      queueMicrotask(() => {
-        void this.applyAction(selection, registry.tokens, kind)
-          .then(
-            () => {
-              resolve();
-              registry.pending.delete(selection);
-            },
-            (error: unknown) => {
-              reject(error);
-              registry.pending.delete(selection);
-            },
-          )
-          .catch((error: unknown) => {
-            reject(error);
-            registry.pending.delete(selection);
-          });
-      });
-    });
-    registry.pending.set(selection, attempt);
-    return attempt;
+    const brand =
+      kind === 'preparation'
+        ? preparationAction
+        : kind === 'delivery'
+          ? deliveryAction
+          : cleanupAction;
+    return pendingChoice(selection, registry, brand, (chosen) =>
+      this.applyAction(chosen, registry.tokens, kind),
+    );
   }
 
   private async applyAction<T extends object>(
@@ -1018,6 +1474,7 @@ export class DeliveryScheduler {
           // its replacement pause subsequently fails. Pending calls still
           // coalesce through their separate per-kind promise registry.
           tokens.delete(selection);
+          this.retireCleanupChoices(action.lane);
           started = true;
         };
         try {
