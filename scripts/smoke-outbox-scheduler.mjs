@@ -293,6 +293,137 @@ export async function checkOutboxScheduler(harness) {
     }
   }
 
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'aggregate-diagnostic')
+  ) {
+    for (const cause of [
+      'invalid_response',
+      'rate_limited',
+      'server_error',
+      'ack_storage_failed',
+    ]) {
+      configure('normal', cause === 'rate_limited' ? 429 : 503);
+      const page = await fresh('invalid_json');
+      await page.evaluate(async () => {
+        globalThis.testLanes = [lane];
+        for (const character of ['b', 'c', 'd', 'e']) {
+          const key = [...lane.slice(0, 4), 'art_' + character.repeat(32)];
+          await enqueueLikeHead({
+            key: character.repeat(32),
+            lane: key,
+            artifactId: key[4],
+            base: { version: 0 },
+          });
+          testLanes.push(key);
+        }
+        testLanes.forEach((key) => scheduler.wake(key));
+      });
+      for (let count = 5; count <= 30; count += 5) {
+        await page.waitForFunction(
+          (count) =>
+            events.filter((event) => event.kind === 'delivery_retrying')
+              .length === count,
+          count,
+        );
+        if (count < 30) await fireRetries(page);
+      }
+      const fireOne = () =>
+        page.evaluate(() => {
+          const timer = timers.find(
+            (timer) => timer.active && timer.milliseconds < 15_000,
+          );
+          if (timer === undefined) throw new Error('missing eligible retry');
+          timer.active = false;
+          timer.callback();
+        });
+      await fireOne();
+      await page.waitForFunction(
+        () =>
+          events.filter((event) => event.kind === 'delivery_retrying')
+            .length === 31,
+      );
+      if (cause === 'ack_storage_failed') {
+        setMode('normal');
+        await page.evaluate(() => faultPut('intents', 'acknowledged'));
+      } else if (cause !== 'invalid_response') setMode('status');
+      await fireOne();
+      await page.waitForFunction(
+        () => events.filter((event) => event.kind === 'paused').length === 5,
+      );
+      const diagnosis = await page.evaluate(() => {
+        const last = events.findLast((event) => event.kind === 'attempt');
+        const pauses = events.filter((event) => event.kind === 'paused');
+        const matching = pauses.find(
+          (event) => JSON.stringify(event.lane) === JSON.stringify(last.lane),
+        );
+        const others = pauses.filter((event) => event !== matching);
+        globalThis.aggregateSelection = others[0].pause.selection;
+        return {
+          actual: matching.pause.reason,
+          scopes: others.map((event) => event.pause.scope),
+          otherReasons: others.map((event) => event.pause.reason),
+        };
+      });
+      assert.equal(
+        diagnosis.actual,
+        cause,
+        'the 32nd dispatched failure keeps its classification',
+      );
+      assert.deepEqual(
+        diagnosis.otherReasons,
+        Array(4).fill('aggregate_exhausted'),
+        'other lanes have a budget gate, not a fabricated network failure',
+      );
+      assert.deepEqual(diagnosis.scopes, Array(4).fill('coordinator'));
+      assert.equal(requests().length, 32);
+      await page.evaluate(() =>
+        testLanes.forEach((key) => scheduler.wake(key)),
+      );
+      await page.evaluate(() => storageSnapshot());
+      assert.equal(
+        requests().length,
+        32,
+        'wake cannot replenish exhausted delivery budget',
+      );
+      assert.equal(await page.evaluate(() => revalidationCalls), 0);
+      setMode('invalid_json');
+      await page.evaluate(async () => {
+        if (globalThis.restorePut !== undefined) restorePut();
+        const first = scheduler.resumeDelivery(aggregateSelection);
+        const duplicate = scheduler.resumeDelivery(aggregateSelection);
+        globalThis.sameAggregatePromise = first === duplicate;
+        await first;
+      });
+      assert.equal(await page.evaluate(() => sameAggregatePromise), true);
+      await page.waitForFunction(
+        () =>
+          events.filter((event) => event.kind === 'delivery_retrying').length >
+          31,
+      );
+      assert.equal(
+        await page.evaluate(
+          () =>
+            events.filter((event) => event.kind === 'delivery_retrying')[31]
+              .aggregateRemaining,
+        ),
+        31,
+        'explicit resume begins exactly one new bounded epoch',
+      );
+      assert.equal(await page.evaluate(() => revalidationCalls), 1);
+      assert.equal(
+        await page.evaluate(() =>
+          scheduler.resumeDelivery(aggregateSelection).then(
+            () => 'unexpected',
+            (error) => error.code,
+          ),
+        ),
+        'invalid_selection',
+      );
+      await close(page);
+    }
+  }
+
   if (createArtifact === undefined) {
     if (
       selected === undefined ||

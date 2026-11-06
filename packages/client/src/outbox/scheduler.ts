@@ -35,7 +35,10 @@ type Pause =
   | {
       readonly kind: 'retry_paused';
       readonly selection: DeliveryResume;
-      readonly reason: DeliveryFailure['reason'] | 'ack_storage_failed';
+      readonly reason:
+        | DeliveryFailure['reason']
+        | 'ack_storage_failed'
+        | 'aggregate_exhausted';
       readonly scope: 'lane' | 'coordinator';
     }
   | {
@@ -305,7 +308,7 @@ export class DeliveryScheduler {
       // Eligibility may have changed after that wake, before this dequeue.
       if (lane.pause !== undefined || lane.cancelTimer !== undefined) continue;
       if (this.aggregateFailures >= 32) {
-        await this.pause(lane, 'network_error', 'coordinator');
+        await this.pause(lane, 'aggregate_exhausted', 'coordinator');
         continue;
       }
       let result: DeliveryAttempt;
@@ -508,7 +511,8 @@ export class DeliveryScheduler {
 
   private async pause(
     lane: Lane,
-    reason: DeliveryFailure['reason'] | 'ack_storage_failed',
+    reason:
+      DeliveryFailure['reason'] | 'ack_storage_failed' | 'aggregate_exhausted',
     scope: 'lane' | 'coordinator',
   ): Promise<void> {
     const selection = Object.freeze<DeliveryResume>({ [deliveryAction]: true });

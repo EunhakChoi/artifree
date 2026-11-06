@@ -927,7 +927,9 @@ a host wake after durable admission schedules work. A single pump serializes
 mutations and requeues successful lanes behind waiting lanes. Every wake and
 local pause read checks its captured owner and binding before storage, including
 when delivery budget is exhausted. Lane failures stop at eight and aggregate
-failures at 32 per explicit epoch. Durable ACKs
+failures at 32 per explicit epoch. The dispatched failure retains its actual
+classification; other ready lanes report `aggregate_exhausted` as a coordinator
+budget gate, without inventing a network failure. Durable ACKs
 reset only the lane counter. Retry timers use the specified injected clock,
 jitter and bounded Retry-After floor; wakes and new admissions cannot clear
 timers, pauses or counters. Healthy empty lanes are reclaimed without imposing
