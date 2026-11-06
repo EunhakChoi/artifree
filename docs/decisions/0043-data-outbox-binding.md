@@ -3,8 +3,10 @@
 Status: implemented. The R08 specification was merged in PR #100; this record
 implements the server portion of [0041](0041-browser-data-outbox.md), rules 2
 and 4 and the server cases of B1, B12 and B14.
-This is R08a only. Browser ownership, IndexedDB admission, delivery, crash
-recovery and management UI integration remain proposed (R08b–d).
+This is R08a only. Browser ownership and IndexedDB admission are implemented
+separately in [0044](0044-browser-outbox-local.md), the R08b local-only slice.
+Delivery, native-process crash recovery and management UI integration remain
+proposed (R08c–d and separate UI work).
 
 ## Authority and transaction
 

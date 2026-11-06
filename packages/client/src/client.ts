@@ -425,12 +425,18 @@ function dataBodyText(
   input: DataInput,
 ): string {
   checkBase(request.base_data_version);
-  let text: string;
-  if (input instanceof JsonText) text = input.text;
-  else {
-    text = JSON.stringify(plainData(input, field, DATA_VALUE_LEVELS));
-  }
+  const text = dataValueText(input, field);
   return `{"base_data_version":${JSON.stringify(request.base_data_version)},"path":${JSON.stringify(request.path)},"${field}":${text}}`;
+}
+
+/** Internal shared serialization: raw JsonText is deliberately not parsed. */
+export function dataValueText(
+  input: DataInput,
+  field: 'value' | 'patch',
+): string {
+  return input instanceof JsonText
+    ? input.text
+    : JSON.stringify(plainData(input, field, DATA_VALUE_LEVELS));
 }
 
 interface SendOptions {
