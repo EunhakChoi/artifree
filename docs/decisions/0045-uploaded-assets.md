@@ -98,6 +98,8 @@ not_found`, including on a retry. No actor identifier is accepted from a body,
    about database/WAL/backup size follows from these limits.
    A JSON upload body is bounded at 8 MiB before parsing, with strict bounded
    base64 decoding and the decoded 5 MiB check before image validation.
+   An empty decoded payload passes this envelope step; a new upload rejects
+   it as `422 invalid_asset` at the content-validation step of rule 5.
    Overflow-safe counters and allocation bounds apply before allocation.
    Authentication, route identity and body bounds precede expensive decoding;
    shared request admission limits still apply. Rate rejection does not prove
@@ -110,22 +112,56 @@ not_found`, including on a retry. No actor identifier is accepted from a body,
    only asset-byte store. Reuse the `blobs` table for digest deduplication,
    adding indexed asset associations and state, opaque-ID reservations, and
    durable operation receipts through the schema upgrade owner.
-   In one `BEGIN IMMEDIATE` transaction: check live ownership, resolve the
-   actor-wide shared key space, replay a matching receipt, compare the base,
-   recompute resulting space and actor quota, insert/remove associations and
-   blobs, advance the version if changed, and save the receipt. The key space
-   includes artifact, cleanup, job and data operations. A rejected operation
-   reserves no key, changes no counter and leaves no blob. Concurrent requests
-   cannot both consume the last quota slot. Validation may precede this
-   transaction but ownership, base and quota decisions may not rely on that
-   earlier read. S01's existing authenticated-before-disable stored-write
-   semantics remain in force; no stronger mid-request cancellation is claimed.
+   Upload admission has three phases. First parse the stable, bounded v1
+   envelope: field/key/base types, syntactically valid lowercase parameter-free
+   MIME spelling, strict base64 and the 8 MiB body/5 MiB decoded bounds. Compute
+   the fingerprint from the original declared type and exact decoded bytes,
+   without invoking a content decoder, sanitizer or current admission allowlist.
+   These parsing rules and historical type spellings stay accepted for v1
+   replay if a later release tightens content policy; a policy rejection is
+   not an envelope parse failure. Malformed or transport-oversized requests
+   never reach replay lookup. Validator versions and validation outcomes are
+   not fingerprint inputs.
+   Retiring an upload type does not remove its historical spelling from the
+   generated request/receipt wire contract or stored-receipt decoding.
+
+   Next perform a short, read-only snapshot of live ownership, the optional
+   runtime source-head fence (rule 12), and the actor-wide persistent key space.
+   In that order, an authority refusal wins over replay, a matching key returns
+   its original receipt, a reused key is refused, and a new key with a stale
+   base is refused. A new admissible key reserves nothing. Close this snapshot
+   before checking the current type allowlist, nonempty content, UTF-8 or image
+   format/allocation policy. Do this potentially expensive validation outside
+   any database transaction or write lock, keeping its typed success candidate
+   or rejection in memory. A matching replay never invokes that validation,
+   even when the current decoder or allowlist would now refuse the bytes.
+
+   Finally settle that candidate **or rejection** in one `BEGIN IMMEDIATE`
+   transaction: recheck live ownership and any runtime head fence, resolve the
+   same shared key space again, replay a matching receipt or refuse a reused
+   key, then compare the base. Only for a still-new key at the matching base
+   report the saved validation rejection, or, for valid content, recompute
+   resulting space and actor quota, insert associations and blobs, advance the
+   version and save the receipt. Delete uses this same transactional authority,
+   key and base order without content validation. The key space includes
+   artifact, cleanup, job and data operations. Preflight is an optimization,
+   not a key reservation or proof of commit authority. If two first attempts
+   both saw an unused key, only the final transaction decides: the matching
+   loser replays the winner even if its validation outcome was rejection; a
+   different fingerprint loses with `request_key_reused`. No persistent pending
+   receipt, staging blob or quota reservation is written during validation.
+   Every rejection and transaction rollback leaves no new key, counter, blob
+   or association; concurrent distinct keys cannot both consume the last quota
+   slot. S01's existing authenticated-before-disable stored-write semantics
+   remain in force; no stronger mid-request cancellation is claimed. These
+   asset-specific phases do not change existing operations' validation order.
 
 6. **Retry and deletion.** Fingerprints cover operation, artifact, base,
    declared type and exact decoded bytes for upload, or asset ID for delete,
    using the existing unambiguous length-prefixed hashing scheme. A matching
-   key replays the original metadata-only receipt before the now-stale base
-   or changed quota is considered. It creates no extra association, charge or
+   key replays the original metadata-only receipt before the now-stale base,
+   changed quota or mutable content policy is considered, after the stable
+   envelope and current authority checks in rule 5. It creates no extra association, charge or
    version. The receipt reports its original `asset_version` and `replayed`;
    it is not a statement of current availability. After a later asset deletion,
    replaying its original upload returns that original receipt without
@@ -151,11 +187,20 @@ not_found`, including on a retry. No actor identifier is accepted from a body,
    | `DELETE /v1/artifacts/{id}/assets/{asset_id}`      | Body `{base_asset_version}` plus key; `200` with ID, version, `deleted`, replay flag.                                                                                       |
 
    No global digest/asset route or unauthenticated serving URL is added. Invalid
-   route identifiers are 404; unknown fields, malformed JSON/base64 or missing
-   key are 400; outer-body overflow is `413 payload_too_large`; unsupported
-   declared type is `422 asset_type_unsupported`; invalid content is
-   `422 invalid_asset`; decoded size, count, space or actor quota overflow is
-   `422 asset_limit_exceeded`. An authenticated foreign artifact with a
+   route identifiers are 404; unknown fields, malformed JSON/base64/MIME spelling or missing
+   key are 400; outer-body overflow is `413 payload_too_large`. For a new key,
+   current type/content policy is evaluated only after rule 5's preflight;
+   a concurrent committed receipt takes precedence at final settlement.
+
+   | New-upload rejection                                             | HTTP status and code         |
+   | ---------------------------------------------------------------- | ---------------------------- |
+   | Declared MIME type outside the current allowlist                 | `422 asset_type_unsupported` |
+   | Zero decoded bytes under a supported type                        | `422 invalid_asset`          |
+   | Invalid UTF-8, prohibited text controls or invalid image content | `422 invalid_asset`          |
+   | More than 5 MiB decoded, or count/space/actor quota overflow     | `422 asset_limit_exceeded`   |
+
+   Exactly 1 byte meets the byte-size minimum but must still pass its type's
+   content validator; exactly 5 MiB meets the per-asset byte maximum. An authenticated foreign artifact with a
    well-formed request is indistinguishable from a missing artifact. Syntactic
    validation need not conceal whether that request itself is malformed.
    Existing 401, 429/`Retry-After` and storage-unavailable errors keep their
@@ -303,7 +348,21 @@ no-store`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
     boundary and oversized input; false MIME, malformed/truncated and
     decompression-heavy images; dimension, animation, trailing-byte and text
     validation; quota races; base conflicts; same-key cross-operation reuse;
-    lost replies; upload replay after deletion; and no-op deletion. Inject a
+    lost replies; upload replay after deletion; and no-op deletion. Assert a
+    supported-type zero-byte upload returns `invalid_asset`, a valid 1-byte
+    text upload succeeds, valid text at exactly 5 MiB succeeds, and one byte
+    over returns `asset_limit_exceeded`, with no key or storage left by either
+    rejection. After committing an upload, change the validator/allowlist to
+    refuse that input: the same original envelope/key must replay its stored
+    receipt without invoking that validator, while a fresh key must receive
+    the new policy rejection. Cover a stale asset base on that replay, deleted
+    asset replay, purged/trashed/foreign artifact refusal and a stale runtime
+    head winning over a matching key. Hold two first attempts after both see
+    an unused key: after one commits, the identical loser replays even if its
+    validation failed, whereas a different-byte loser gets `request_key_reused`;
+    exactly one association, version increment, quota charge and receipt remain.
+    Hold content validation and show an unrelated database write can commit,
+    proving no transaction/write lock spans the decoder. Inject a
     failure before commit to prove no partial blob, association, counter or
     receipt survives. Cover trash/recover/purge, a purged asset operation's
     still-reserved key refused on another artifact and on another operation,
