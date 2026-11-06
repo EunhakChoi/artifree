@@ -298,6 +298,12 @@ The job runs trusted code in that process: it is not R02's isolated execution,
 and no builds, models, or untrusted code run. Job changes are not in the change
 feed, and the web workspace has no job view. Agent tokens may enqueue, read,
 list, and cancel jobs (the four MCP tools), at most 16 open jobs per actor.
+R02 has a **proposed specification only**
+([0042](decisions/0042-linux-untrusted-execution.md)): Linux-host untrusted
+execution with a trusted supervisor, enforced limits, descendant cleanup and
+fenced output admission. No such provider or untrusted job exists yet. The
+proposal preserves Windows server and trusted verification support; Linux is
+the proposed execution-host restriction, not a remote client restriction.
 R06 adds application data ([0031](decisions/0031-app-data.md)): one JSON
 object per actor and artifact with its own `data_version` (schema 9),
 unrelated to the source revision and untouched by saving or restoring one.
