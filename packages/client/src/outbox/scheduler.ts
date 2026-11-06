@@ -12,6 +12,7 @@ import { OutboxError } from './types.js';
 
 const preparationAction = Symbol();
 const deliveryAction = Symbol();
+const cleanupAction = Symbol();
 
 /** Internal one-action token; cannot authorize HTTP or renew a delivery epoch. */
 export interface PreparationRetry {
@@ -20,6 +21,10 @@ export interface PreparationRetry {
 /** Internal one-action token; only a successful host revalidation permits renewal. */
 export interface DeliveryResume {
   readonly [deliveryAction]: true;
+}
+/** Internal local-only retry for a retained durable ACK; never grants HTTP budget. */
+export interface CleanupRetry {
+  readonly [cleanupAction]: true;
 }
 
 type Pause =
@@ -32,6 +37,11 @@ type Pause =
       readonly selection: DeliveryResume;
       readonly reason: DeliveryFailure['reason'] | 'ack_storage_failed';
       readonly scope: 'lane' | 'coordinator';
+    }
+  | {
+      readonly kind: 'cleanup_paused';
+      readonly selection: CleanupRetry;
+      readonly ackDurable: true;
     }
   | { readonly kind: 'blocked'; readonly failure: DeliveryFailure };
 
@@ -67,6 +77,13 @@ interface Action {
   readonly epoch: number;
 }
 
+interface Actions<T extends object> {
+  readonly tokens: WeakMap<T, Action>;
+  readonly pending: WeakMap<T, Promise<void>>;
+}
+
+type ActionKind = 'preparation' | 'delivery' | 'cleanup';
+
 interface RefreshedPause {
   readonly lane: Lane;
   readonly pause: Extract<Pause, { kind: 'retry_paused' }>;
@@ -100,9 +117,18 @@ export class DeliveryScheduler {
   private readonly publications = new AbortController();
   private readonly lanes = new Map<string, Lane>();
   private readonly ready: Lane[] = [];
-  private readonly preparations = new WeakMap<PreparationRetry, Action>();
-  private readonly deliveries = new WeakMap<DeliveryResume, Action>();
-  private readonly pending = new WeakMap<object, Promise<void>>();
+  private readonly preparations: Actions<PreparationRetry> = {
+    tokens: new WeakMap(),
+    pending: new WeakMap(),
+  };
+  private readonly deliveries: Actions<DeliveryResume> = {
+    tokens: new WeakMap(),
+    pending: new WeakMap(),
+  };
+  private readonly cleanups: Actions<CleanupRetry> = {
+    tokens: new WeakMap(),
+    pending: new WeakMap(),
+  };
   private aggregateFailures = 0;
   private epoch = 0;
   private pumping = false;
@@ -163,12 +189,17 @@ export class DeliveryScheduler {
 
   /** One deliberate local preparation attempt; does not revalidate or refill budgets. */
   retryPreparation(selection: PreparationRetry): Promise<void> {
-    return this.action(selection, this.preparations, false);
+    return this.action(selection, this.preparations, 'preparation');
   }
 
   /** One deliberate epoch renewal after fresh host binding/access validation. */
   resumeDelivery(selection: DeliveryResume): Promise<void> {
-    return this.action(selection, this.deliveries, true);
+    return this.action(selection, this.deliveries, 'delivery');
+  }
+
+  /** One deliberate trim-only transaction; no HTTP, binding read or budget renewal. */
+  retryCleanup(selection: CleanupRetry): Promise<void> {
+    return this.action(selection, this.cleanups, 'cleanup');
   }
 
   private check(lane?: LaneKey): void {
@@ -340,10 +371,12 @@ export class DeliveryScheduler {
           this.queue(lane);
           break;
         case 'server_acknowledged':
+          lane.failures = 0;
+          this.queue(lane);
+          break;
         case 'acknowledged_cleanup_pending':
           lane.failures = 0;
-          // Cleanup-pending needs an explicit host wake, avoiding a storage loop.
-          if (result.kind === 'server_acknowledged' || woken) this.queue(lane);
+          await this.pauseCleanup(lane);
           break;
         case 'preparation_storage_failed': {
           await this.pausePreparation(lane);
@@ -390,16 +423,27 @@ export class DeliveryScheduler {
     });
     const captured = await this.capture(lane);
     this.retirePause(lane);
-    this.preparations.set(selection, captured);
+    this.preparations.tokens.set(selection, captured);
     lane.pause = { kind: 'preparation_paused', selection };
+    this.emit({ kind: 'paused', lane: lane.key, pause: lane.pause });
+  }
+
+  private async pauseCleanup(lane: Lane): Promise<void> {
+    const selection = Object.freeze<CleanupRetry>({ [cleanupAction]: true });
+    const captured = await this.capture(lane);
+    this.retirePause(lane);
+    this.cleanups.tokens.set(selection, captured);
+    lane.pause = { kind: 'cleanup_paused', selection, ackDurable: true };
     this.emit({ kind: 'paused', lane: lane.key, pause: lane.pause });
   }
 
   private retirePause(lane: Lane): void {
     if (lane.pause?.kind === 'preparation_paused')
-      this.preparations.delete(lane.pause.selection);
+      this.preparations.tokens.delete(lane.pause.selection);
     if (lane.pause?.kind === 'retry_paused')
-      this.deliveries.delete(lane.pause.selection);
+      this.deliveries.tokens.delete(lane.pause.selection);
+    if (lane.pause?.kind === 'cleanup_paused')
+      this.cleanups.tokens.delete(lane.pause.selection);
   }
 
   private async validateSnapshot(action: Action): Promise<void> {
@@ -412,6 +456,7 @@ export class DeliveryScheduler {
       await this.pausePreparation(action.lane);
     if (pause?.kind === 'retry_paused')
       await this.pause(action.lane, pause.reason, pause.scope);
+    if (pause?.kind === 'cleanup_paused') await this.pauseCleanup(action.lane);
     throw new OutboxError('invalid_selection');
   }
 
@@ -438,6 +483,29 @@ export class DeliveryScheduler {
     return true;
   }
 
+  private async retryLocalCleanup(lane: Lane): Promise<boolean> {
+    this.check(lane.key);
+    const rows = await this.store.lane(lane.key);
+    this.check(lane.key);
+    if (rows[0]?.state !== 'acknowledged')
+      throw new OutboxError('invalid_selection');
+    try {
+      await this.store.trim(
+        rows,
+        () => this.check(lane.key),
+        this.fence.signal,
+      );
+    } catch (error: unknown) {
+      this.check(lane.key);
+      if (!(error instanceof OutboxError) || error.code !== 'storage_failed')
+        throw error;
+      await this.pauseCleanup(lane);
+      return false;
+    }
+    this.check(lane.key);
+    return true;
+  }
+
   private async pause(
     lane: Lane,
     reason: DeliveryFailure['reason'] | 'ack_storage_failed',
@@ -446,7 +514,7 @@ export class DeliveryScheduler {
     const selection = Object.freeze<DeliveryResume>({ [deliveryAction]: true });
     const captured = await this.capture(lane);
     this.retirePause(lane);
-    this.deliveries.set(selection, captured);
+    this.deliveries.tokens.set(selection, captured);
     lane.pause = { kind: 'retry_paused', reason, scope, selection };
     this.emit({ kind: 'paused', lane: lane.key, pause: lane.pause });
   }
@@ -514,28 +582,45 @@ export class DeliveryScheduler {
 
   private action<T extends object>(
     selection: T,
-    tokens: WeakMap<T, Action>,
-    renew: boolean,
+    registry: Actions<T>,
+    kind: ActionKind,
   ): Promise<void> {
     if (typeof selection !== 'object' || selection === null)
       return Promise.reject(new OutboxError('invalid_selection'));
-    // Kind validation precedes coalescing: another action cannot borrow an
-    // already pending promise belonging to this same object.
-    if (!tokens.has(selection))
-      return Promise.reject(new OutboxError('invalid_selection'));
-    const pending = this.pending.get(selection);
+    // Pending maps are per kind. A retired token still owns its in-flight
+    // promise, but another action kind cannot borrow that promise.
+    const pending = registry.pending.get(selection);
     if (pending !== undefined) return pending;
-    const attempt = this.applyAction(selection, tokens, renew).finally(() => {
-      this.pending.delete(selection);
+    if (!registry.tokens.has(selection))
+      return Promise.reject(new OutboxError('invalid_selection'));
+    const attempt = new Promise<void>((resolve, reject) => {
+      // Install the promise before any host callback can reenter this action.
+      queueMicrotask(() => {
+        void this.applyAction(selection, registry.tokens, kind)
+          .then(
+            () => {
+              resolve();
+              registry.pending.delete(selection);
+            },
+            (error: unknown) => {
+              reject(error);
+              registry.pending.delete(selection);
+            },
+          )
+          .catch((error: unknown) => {
+            reject(error);
+            registry.pending.delete(selection);
+          });
+      });
     });
-    this.pending.set(selection, attempt);
+    registry.pending.set(selection, attempt);
     return attempt;
   }
 
   private async applyAction<T extends object>(
     selection: T,
     tokens: WeakMap<T, Action>,
-    renew: boolean,
+    kind: ActionKind,
   ): Promise<void> {
     this.check();
     const action = tokens.get(selection);
@@ -545,14 +630,14 @@ export class DeliveryScheduler {
       action.lane.pause === undefined ||
       action.lane.pause.kind === 'blocked' ||
       action.lane.pause.selection !== selection ||
-      (renew && action.epoch !== this.epoch)
+      (kind === 'delivery' && action.epoch !== this.epoch)
     )
       throw new OutboxError('invalid_selection');
     this.acting = true;
     try {
       await this.activeTask;
       this.check();
-      if (renew) {
+      if (kind === 'delivery') {
         try {
           await this.host.revalidate([...action.lane.key], this.fence.signal);
         } catch (error: unknown) {
@@ -570,7 +655,7 @@ export class DeliveryScheduler {
       }
       this.check();
       await this.validateSnapshot(action);
-      if (renew) {
+      if (kind === 'delivery') {
         const nextEpoch = this.epoch + 1;
         const refreshed: RefreshedPause[] = [];
         for (const lane of this.lanes.values()) {
@@ -609,8 +694,8 @@ export class DeliveryScheduler {
             delete lane.pause;
         }
         for (const current of refreshed) {
-          this.deliveries.delete(current.pause.selection);
-          this.deliveries.set(current.selection, current.action);
+          this.deliveries.tokens.delete(current.pause.selection);
+          this.deliveries.tokens.set(current.selection, current.action);
           current.lane.pause = {
             ...current.pause,
             selection: current.selection,
@@ -629,7 +714,10 @@ export class DeliveryScheduler {
       } else {
         // Preserve the old gate through preliminary reads and until a terminal
         // preparation outcome. A failed read cannot silently enable wake().
-        const prepared = await this.retryLocalPreparation(action.lane);
+        const prepared =
+          kind === 'preparation'
+            ? await this.retryLocalPreparation(action.lane)
+            : await this.retryLocalCleanup(action.lane);
         tokens.delete(selection);
         if (prepared) {
           delete action.lane.pause;

@@ -47,8 +47,253 @@ export async function checkOutboxScheduler(harness) {
     });
   }
 
+  const selected = process.env.ARTIFREE_SCHEDULER_CASE;
+  if (selected === undefined || selected === 'cleanup-progress') {
+    const page = await fresh();
+    await page.evaluate(async () => {
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        text: '{"next":true}',
+        base: { after: head.sequence },
+      });
+      const trim = store.trim.bind(store);
+      globalThis.trimAttempts = 0;
+      store.trim = (...args) => {
+        trimAttempts += 1;
+        return trim(...args);
+      };
+      faultPut('usage');
+      scheduler.wake(lane);
+    });
+    await page.waitForFunction(() =>
+      events.some(
+        (event) =>
+          event.kind === 'attempt' &&
+          event.result.kind === 'acknowledged_cleanup_pending',
+      ),
+    );
+    await page.evaluate(() => storageSnapshot());
+    assert.equal(
+      await page.evaluate(
+        () =>
+          events.filter(
+            (event) =>
+              event.kind === 'paused' && event.pause.kind === 'cleanup_paused',
+          ).length,
+      ),
+      1,
+      'durable ACK cleanup failure must expose a deliberate cleanup continuation',
+    );
+    await waitPause(page, 'cleanup_paused');
+    const retained = await page.evaluate(() => storageSnapshot());
+    assert.equal(retained.rows[0].state, 'acknowledged');
+    assert.equal(requests().length, 1);
+    await page.evaluate(() => {
+      scheduler.wake(lane);
+      scheduler.wake(lane);
+    });
+    assert.equal(await page.evaluate(() => trimAttempts), 1);
+    await page.evaluate(() => {
+      globalThis.retiredCleanup = selection;
+      scheduler.close();
+      installScheduler();
+      scheduler.wake(lane);
+    });
+    await page.waitForFunction(() => trimAttempts === 2);
+    await waitPause(page, 'cleanup_paused');
+    assert.equal(
+      requests().length,
+      1,
+      'retained durable ACK restart only trims',
+    );
+    for (let attempt = 3; attempt <= 4; attempt += 1) {
+      await page.evaluate(() => scheduler.retryCleanup(selection));
+      await waitPause(page, 'cleanup_paused');
+      assert.equal(await page.evaluate(() => trimAttempts), attempt);
+      assert.equal(
+        requests().length,
+        1,
+        'durable ACK must never be retransmitted',
+      );
+      assert.deepEqual(await page.evaluate(() => storageSnapshot()), retained);
+      assert.equal(
+        await page.evaluate(
+          () => timers.filter((timer) => timer.active).length,
+        ),
+        0,
+      );
+    }
+    assert.equal(
+      await page.evaluate(() =>
+        scheduler.resumeDelivery(selection).then(
+          () => 'unexpected',
+          (error) => error.code,
+        ),
+      ),
+      'invalid_selection',
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        scheduler.retryPreparation(selection).then(
+          () => 'unexpected',
+          (error) => error.code,
+        ),
+      ),
+      'invalid_selection',
+    );
+    await page.evaluate(() => {
+      restorePut();
+      return scheduler.retryCleanup(selection);
+    });
+    await page.waitForFunction(() =>
+      events.some(
+        (event) =>
+          event.kind === 'attempt' &&
+          event.result.kind === 'server_acknowledged',
+      ),
+    );
+    assert.equal(requests().length, 2);
+    assert.equal(JSON.parse(requests()[1].body).base_data_version, 1);
+    assert.notEqual(
+      requests()[0].headers['idempotency-key'],
+      requests()[1].headers['idempotency-key'],
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), []);
+    assert.equal(await page.evaluate(() => revalidationCalls), 0);
+    await close(page);
+  }
+
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'pending-retired')
+  ) {
+    const page = await fresh();
+    await page.evaluate(async () => {
+      globalThis.otherLane = [...lane.slice(0, 4), 'art_' + 'c'.repeat(32)];
+      await enqueueLikeHead({
+        key: '2'.repeat(32),
+        lane: otherLane,
+        artifactId: otherLane[4],
+        base: { version: 0 },
+      });
+      faultPut('intents', 'acknowledged');
+      scheduler.wake(lane);
+      scheduler.wake(otherLane);
+    });
+    await page.waitForFunction(
+      () => events.filter((event) => event.kind === 'paused').length === 2,
+    );
+    await page.evaluate(() => {
+      globalThis.oldSelection = events[1].pause.selection;
+      globalThis.pendingObservations = [];
+      globalThis.pendingUnhandled = 0;
+      addEventListener('unhandledrejection', (event) => {
+        event.preventDefault();
+        pendingUnhandled += 1;
+      });
+      globalThis.onSchedulerEvent = (event) => {
+        if (event.kind !== 'paused') return;
+        const duplicate = scheduler.resumeDelivery(oldSelection);
+        duplicate.catch(() => undefined);
+        pendingObservations.push(duplicate === resuming);
+        globalThis.crossKind = scheduler.retryPreparation(oldSelection).then(
+          () => 'unexpected',
+          (error) => error.code,
+        );
+      };
+      restorePut();
+      globalThis.resuming = scheduler.resumeDelivery(oldSelection);
+    });
+    await page.evaluate(() => resuming);
+    assert.deepEqual(
+      await page.evaluate(() => pendingObservations),
+      [true],
+      'same-kind duplicate must share the exact pending promise after token retirement',
+    );
+    assert.equal(await page.evaluate(() => crossKind), 'invalid_selection');
+    assert.equal(await page.evaluate(() => pendingUnhandled), 0);
+    assert.equal(await page.evaluate(() => revalidationCalls), 1);
+    assert.equal(
+      await page.evaluate(() =>
+        scheduler.resumeDelivery(oldSelection).then(
+          () => 'unexpected',
+          (error) => error.code,
+        ),
+      ),
+      'invalid_selection',
+    );
+    await close(page);
+  }
+
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'pending-local')
+  ) {
+    for (const kind of ['preparation', 'cleanup']) {
+      const page = await fresh();
+      await page.evaluate((kind) => {
+        faultPut(
+          kind === 'preparation' ? 'intents' : 'usage',
+          kind === 'preparation' ? 'prepared' : undefined,
+        );
+        scheduler.wake(lane);
+      }, kind);
+      await waitPause(page, `${kind}_paused`);
+      await page.evaluate((kind) => {
+        globalThis.oldSelection = selection;
+        globalThis.retryMethod =
+          kind === 'preparation' ? 'retryPreparation' : 'retryCleanup';
+        globalThis.pendingObservations = [];
+        globalThis.crossKinds = [];
+        globalThis.pendingUnhandled = 0;
+        addEventListener('unhandledrejection', (event) => {
+          event.preventDefault();
+          pendingUnhandled += 1;
+        });
+        globalThis.onSchedulerEvent = (event) => {
+          if (event.kind !== 'paused') return;
+          const duplicate = scheduler[retryMethod](oldSelection);
+          duplicate.catch(() => undefined);
+          pendingObservations.push(duplicate === retrying);
+          crossKinds = ['retryPreparation', 'retryCleanup', 'resumeDelivery']
+            .filter((method) => method !== retryMethod)
+            .map((method) =>
+              scheduler[method](oldSelection).then(
+                () => 'unexpected',
+                (error) => error.code,
+              ),
+            );
+        };
+        globalThis.retrying = scheduler[retryMethod](oldSelection);
+      }, kind);
+      await page.evaluate(() => retrying);
+      assert.deepEqual(await page.evaluate(() => pendingObservations), [true]);
+      assert.deepEqual(await page.evaluate(() => Promise.all(crossKinds)), [
+        'invalid_selection',
+        'invalid_selection',
+      ]);
+      assert.equal(await page.evaluate(() => pendingUnhandled), 0);
+      assert.equal(await page.evaluate(() => revalidationCalls), 0);
+      assert.equal(requests().length, kind === 'preparation' ? 0 : 1);
+      await page.evaluate(() => {
+        selection = events.findLast((event) => event.kind === 'paused').pause
+          .selection;
+        scheduler.close();
+      });
+      assert.equal(
+        await page.evaluate(() =>
+          scheduler[retryMethod](selection).then(
+            () => 'unexpected',
+            (error) => error.code,
+          ),
+        ),
+        'owner_not_ready',
+      );
+      await close(page);
+    }
+  }
+
   if (createArtifact === undefined) {
-    const selected = process.env.ARTIFREE_SCHEDULER_CASE;
     if (
       selected === undefined ||
       selected === 'binding-observer' ||
@@ -954,21 +1199,35 @@ export async function checkOutboxScheduler(harness) {
       setMode('normal');
       await page.evaluate(async () => {
         const healthy = [...lane.slice(0, 4), 'art_' + '1'.repeat(32)];
-        await enqueueLikeHead({
+        globalThis.healthy = healthy;
+        const healthyHead = await enqueueLikeHead({
           key: crypto.randomUUID().replaceAll('-', ''),
           lane: healthy,
           artifactId: healthy[4],
           base: { version: 0 },
         });
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: healthy,
+          artifactId: healthy[4],
+          text: '{"next":true}',
+          base: { after: healthyHead.sequence },
+        });
+        faultPut('usage');
         scheduler.wake(healthy);
       });
       await page.waitForFunction(() =>
         events.some(
           (event) =>
             event.kind === 'attempt' &&
-            event.result.kind === 'server_acknowledged',
+            event.result.kind === 'acknowledged_cleanup_pending',
         ),
       );
+      await waitPause(page, 'cleanup_paused');
+      await page.evaluate(() => {
+        globalThis.cleanupBudgetSelection = selection;
+        restorePut();
+      });
       setMode('invalid_json');
     }
     await fireRetries(page);
@@ -992,7 +1251,7 @@ export async function checkOutboxScheduler(harness) {
     0,
   );
   await page.waitForFunction(
-    () => events.filter((event) => event.kind === 'paused').length === 6,
+    () => events.filter((event) => event.kind === 'paused').length === 7,
   );
   assert.equal(requests().length, 33);
   assert.equal(
@@ -1001,9 +1260,27 @@ export async function checkOutboxScheduler(harness) {
   );
   await page.evaluate(() => allLanes.forEach((key) => scheduler.wake(key)));
   assert.equal(requests().length, 33);
+  await page.evaluate(() => scheduler.retryCleanup(cleanupBudgetSelection));
+  await page.waitForFunction(
+    () =>
+      events.filter((event) => event.kind === 'paused').length === 8 ||
+      events.filter(
+        (event) =>
+          event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+      ).length > 32,
+  );
+  assert.equal(
+    requests().length,
+    33,
+    'cleanup retry cannot refill exhausted HTTP budget',
+  );
+  assert.equal(
+    (await page.evaluate(() => store.lane(healthy)))[0].state,
+    'unprepared',
+  );
   await page.evaluate(() => scheduler.retryPreparation(preparationSelection));
   await page.waitForFunction(
-    () => events.filter((event) => event.kind === 'paused').length === 7,
+    () => events.filter((event) => event.kind === 'paused').length === 9,
   );
   assert.equal(
     (await page.evaluate(() => snapshot()))[0].state,

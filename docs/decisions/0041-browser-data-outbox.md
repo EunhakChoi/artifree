@@ -934,6 +934,14 @@ timers, pauses or counters. Healthy empty lanes are reclaimed without imposing
 a lifetime artifact limit.
 
 Preparation aborts and ACK-storage aborts have separate opaque internal actions.
+A durable ACK whose trim fails exposes a separate `cleanup_paused` selection
+with `ackDurable: true`. Its deliberate retry performs one local trim transaction,
+never retransmits the ACK, revalidates online authority or refills delivery budgets.
+Repeated failure supplies a fresh selection without an automatic retry loop.
+Retained ACKs use this same trim-only path after scheduler reconstruction.
+This internal slice conservatively holds the successor until explicit cleanup
+succeeds; rule 14 permits a future public coordinator to advance from the durable
+checkpoint while retained capacity allows. No cleanup failure erases that ACK.
 A preparation retry performs one local transaction even when the HTTP budget
 is exhausted, preserves its gate through preliminary read failures and never
 renews the delivery epoch. A delivery resume requires a fresh host binding/access
@@ -942,7 +950,9 @@ before renewal; a failed read leaves the old tokens, counters and gates intact.
 Successful renewal commits the complete epoch without asynchronous gaps,
 invalidates old delivery selections and supplies current selections for still
 paused lanes. A stale snapshot refreshes pause metadata only and rejects the old
-choice. Runtime kind validation precedes pending-action coalescing. Observations
+choice. Each action kind retains its pending promise until settlement, including
+when its live selection is retired; other kinds reject that selection.
+Runtime kind validation precedes pending-action coalescing. Observations
 cannot mutate pump state. Closing or host authority abort synchronously fences
 the kernel, native transactions, callback work and retry timers.
 
