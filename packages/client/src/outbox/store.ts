@@ -983,7 +983,7 @@ export class LocalStore {
           throw new OutboxError('storage_corrupt');
         await request(tx.objectStore('intents').put(checked));
         authorize();
-        // Persist legacy checkpoint normalization with the prepared row.
+        // Persist legacy checkpoint normalization in the same owner-held transition.
         await request(tx.objectStore('checkpoints').put(checkpoint));
         authorize();
         return checked;
