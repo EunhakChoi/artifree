@@ -979,6 +979,8 @@ export class LocalStore {
         if (checked.state !== 'prepared')
           throw new OutboxError('storage_corrupt');
         await request(tx.objectStore('intents').put(checked));
+        // Persist legacy checkpoint normalization in the same owner-held transition.
+        await request(tx.objectStore('checkpoints').put(checkpoint));
         return checked;
       },
       signal,

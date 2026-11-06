@@ -658,6 +658,21 @@ export async function checkOutboxStore(browser) {
     );
     await page.evaluate(() => restorePut());
     assert.deepEqual(await page.evaluate(() => snapshot()), beforeTransition);
+    // Checkpoint failure happens after the row put; both must still roll back.
+    for (const mode of ['abort', 'quota']) {
+      await page.evaluate((mode) => faultPut('checkpoints', mode), mode);
+      await assert.rejects(
+        page.evaluate(async () => {
+          const rows = await store.recover(legacyBinding);
+          return store.prepare(rows[0], authorize, signal);
+        }),
+        /storage_failed/,
+      );
+      await page.evaluate(() => restorePut());
+      assert.deepEqual(await page.evaluate(() => snapshot()), beforeTransition);
+      await page.evaluate(() => reopen());
+      assert.deepEqual(await page.evaluate(() => snapshot()), beforeTransition);
+    }
     await page.evaluate(() => faultPut('intents', 'quota'));
     await assert.rejects(
       page.evaluate(async () => {
@@ -668,9 +683,60 @@ export async function checkOutboxStore(browser) {
     );
     await page.evaluate(() => restorePut());
     assert.deepEqual(await page.evaluate(() => snapshot()), beforeTransition);
-    const migratedRequest = await page.evaluate(async () => {
+    const migratedHead = await page.evaluate(async () => {
       const recovered = await store.recover(legacyBinding);
-      const first = await store.prepare(recovered[0], authorize, signal);
+      return store.prepare(recovered[0], authorize, signal);
+    });
+    const afterPreparation = await page.evaluate(() => snapshot());
+    assert.deepEqual(afterPreparation.checkpoints, [
+      { ...beforeTransition.checkpoints[0], format: 2, predecessor: null },
+    ]);
+    assert.deepEqual(afterPreparation.rows, [
+      migratedHead,
+      beforeTransition.rows[1],
+    ]);
+    assert.deepEqual(afterPreparation.usage, beforeTransition.usage);
+    assert.equal(migratedHead.version, 2);
+    assert.equal(migratedHead.key, beforeTransition.rows[0].key);
+    assert.equal(migratedHead.bytes, beforeTransition.rows[0].bytes);
+    assert.deepEqual(migratedHead.request, {
+      method: 'PUT',
+      base: 7,
+      body: '{"base_data_version":7,"path":"raw//path","value":{}',
+    });
+    // No ACK has happened: reopening must retain the exact prepared request.
+    await page.evaluate(() => reopen());
+    assert.deepEqual(await page.evaluate(() => store.recover(legacyBinding)), [
+      migratedHead,
+      {
+        ...beforeTransition.rows[1],
+        format: 2,
+        authorizedGeneration: '1',
+      },
+    ]);
+    assert.deepEqual(await page.evaluate(() => snapshot()), afterPreparation);
+    // A migrated head does not make a corrupt retained legacy dependent safe.
+    const wrongGeneration = {
+      ...beforeTransition.rows[1],
+      admittedGeneration: '2',
+    };
+    await page.evaluate((row) => overwrite(row), wrongGeneration);
+    const corruptMixed = await page.evaluate(() => snapshot());
+    await assert.rejects(
+      page.evaluate(() => store.recover(legacyBinding)),
+      /storage_corrupt/,
+    );
+    await assert.rejects(
+      page.evaluate(
+        (row) => store.prepare(row, authorize, signal),
+        migratedHead,
+      ),
+      /storage_corrupt/,
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), corruptMixed);
+    await page.evaluate((row) => overwrite(row), beforeTransition.rows[1]);
+    const migratedRequest = await page.evaluate(async () => {
+      const [first] = await store.recover(legacyBinding);
       await store.acknowledge(
         first,
         receipt(first, false, true),
