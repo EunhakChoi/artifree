@@ -79,6 +79,7 @@ impl ApiError {
                 current_revision: None,
                 current_metadata_revision: None,
                 current_data_version: None,
+                current_asset_version: None,
                 conflicting_files: None,
                 conflicting_files_total: None,
             }),

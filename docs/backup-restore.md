@@ -3,7 +3,7 @@
 Status: O04, implemented ([decision 0027](decisions/0027-backup-restore-and-schema-upgrade.md)).
 Everything the server persists is in one SQLite file, `artifree.sqlite3`, in
 the `--data-dir`: artifacts, revisions and file bytes, request keys, the change
-feed, titles, pins and the trash, application data (decision 0031), and the access token records. `backup` copies
+feed, titles, pins and the trash, application data (decision 0031), private upload bytes/metadata/versions/receipts (partial R09a, decision 0045), and the access token records. `backup` copies
 that file consistently; `restore` builds a new data directory from the copy.
 
 A backup holds what the database held when it was taken. **A purge (decision 0029) does not reach earlier backups:** an artifact removed for good is still
@@ -163,7 +163,7 @@ artifree-server serve --data-dir /path/to/new-data ...
    go back to the previous binary only with a backup taken before the upgrade,
    restored into a new directory.
 
-Schema 9 adds the application data tables (decision 0031). Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, an index on
+Schema 12 adds private asset associations, independent versions, ID reservations and metadata-only operation receipts (0045). Schema 11 adds data change events and schema 10 adds multi-user identity. Schema 9 adds the application data tables (decision 0031). Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, an index on
 file content, and the `cleanup_runs` table (decision 0029). Schema 6 adds the token table to the versioned
 schema. A server of an older release that is started again on a directory this
 build upgraded will refuse it.

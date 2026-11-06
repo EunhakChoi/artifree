@@ -1,8 +1,11 @@
 # 0045: Uploaded assets scoped to a user and artifact
 
-Date: 2026-11-06. Status: proposed; **R09a–R09d are not implemented**.
-This documentation specifies future behavior and adds no endpoint, storage,
-grant, SDK implementation, or UI. Builds on [0003](0003-local-html-artifact-slice.md),
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete, R09b–R09d remain proposed**.
+The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
+PNG and JPEG are refused as `asset_type_unsupported` until complete image
+validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
+The four-type target below remains unchanged. There is no asset client, CLI,
+MCP tool, copy extension, management panel, grant or frame access yet. Builds on [0003](0003-local-html-artifact-slice.md),
 [0012](0012-duplicate-artifacts.md), [0020](0020-runtime-grants.md),
 [0027](0027-backup-restore-and-schema-upgrade.md),
 [0029](0029-retention-and-cleanup.md), [0031](0031-app-data.md),
@@ -33,7 +36,33 @@ implemented in Artifree or a specification to reproduce its internals.
 All numeric limits, errors, routes, state versions and implementation slices
 below are Artifree decisions. This is not a formal clean-room separation.
 
-## Proposed rules
+## Current implementation boundary
+
+The current slice provides the five authenticated HTTP operations in rule 7,
+through `ArtifactService`, synchronous ports and SQLite schema 12. Asset bytes
+share `blobs` with source files; both reference types protect reclamation.
+Asset versions, metadata-only receipts, actor-wide keys, atomic logical quotas,
+trash/recovery/purge and backup/restore implement the storage behavior of rules 1–9;
+image admission remains disabled under rule 3. Upload preflight closes
+its read snapshot before content validation, and final immediate settlement
+rechecks authority, key and base before using the saved validation result.
+
+Only `text/plain` and `text/csv` currently pass new-upload admission. All PNG
+and JPEG uploads, valid or malformed, are `asset_type_unsupported`. No image
+decoder is linked. R09a remains incomplete until PNG and JPEG full-format
+validation satisfies rule 3; the target allowlist and bounds below are unchanged.
+See the [content policy](../asset-validation.md).
+Stable MIME envelope parsing and historical metadata/receipt decoding still
+accept image type spellings. A currently authorized matching historical upload
+replays before the current text-only admission policy, including after deletion,
+and never recreates the bytes. A fresh image key is refused without a receipt.
+Generated request/response DTOs exist for HTTP; generated client operations
+and their bounded response validation belong to R09b. Direct callers must
+freeze the identical envelope and key themselves after an unknown outcome.
+No asset change subscription is emitted. Asset copying remains absent and
+existing duplicate requests retain their files/data behavior.
+
+## Target rules (partially implemented)
 
 1. **A space and its version.** Each `(actor, artifact)` has an asset space.
    It is readable or mutable only while that actor may access the live artifact

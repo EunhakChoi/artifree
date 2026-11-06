@@ -4,6 +4,12 @@
  * Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.
  */
 export type ApiBody =
+  | AssetList
+  | AssetResponse
+  | UploadAssetRequest
+  | UploadAssetResponse
+  | DeleteAssetRequest
+  | DeleteAssetResponse
   | CreateArtifactRequest
   | SaveRevisionRequest
   | EditFilesRequest
@@ -165,6 +171,10 @@ export type ErrorCode =
   | 'not_in_trash'
   | 'content_conflict'
   | 'data_conflict'
+  | 'asset_conflict'
+  | 'asset_type_unsupported'
+  | 'invalid_asset'
+  | 'asset_limit_exceeded'
   | 'outbox_binding_changed'
   | 'data_path_conflict'
   | 'data_too_large'
@@ -227,6 +237,129 @@ export type JsonValue =
   | boolean
   | null;
 
+/**
+ * Bounded current metadata and usage from one snapshot.
+ */
+export interface AssetList {
+  /**
+   * Current independent asset version.
+   */
+  asset_version: number;
+  /**
+   * At most 64 entries ordered by ID.
+   *
+   * @maxItems 64
+   */
+  assets: Asset[];
+  /**
+   * Logical byte usage in this space.
+   */
+  bytes: number;
+  /**
+   * Maximum associations per space.
+   */
+  max_assets: number;
+  /**
+   * Maximum bytes per space.
+   */
+  max_bytes: number;
+}
+/**
+ * Immutable private upload metadata (0045).
+ */
+export interface Asset {
+  /**
+   * Stored MIME type, including historical image spellings. New uploads admit only UTF-8 plain text/CSV; PNG and JPEG are unsupported pending complete validation.
+   */
+  content_type: string;
+  /**
+   * Server creation time.
+   */
+  created_at_ms: number;
+  /**
+   * Opaque identifier interpreted within its actor/artifact space.
+   */
+  id: string;
+  /**
+   * SHA-256 as lowercase hexadecimal.
+   */
+  sha256: string;
+  /**
+   * Exact immutable byte count.
+   */
+  size_bytes: number;
+}
+/**
+ * Current immutable metadata and space version.
+ */
+export interface AssetResponse {
+  asset: Asset;
+  /**
+   * Current version.
+   */
+  asset_version: number;
+}
+/**
+ * Stable bounded upload envelope. MIME syntax is separate from mutable admission.
+ */
+export interface UploadAssetRequest {
+  /**
+   * Observed independent state version.
+   */
+  base_asset_version: number;
+  /**
+   * Strict standard base64, at most 5 MiB decoded bytes.
+   */
+  content_base64: string;
+  /**
+   * Original lowercase, parameter-free MIME declaration.
+   */
+  content_type: string;
+}
+/**
+ * Original metadata-only upload receipt; replay does not recreate deleted bytes.
+ */
+export interface UploadAssetResponse {
+  asset: Asset;
+  /**
+   * Original resulting version.
+   */
+  asset_version: number;
+  /**
+   * Whether this returns a prior committed result.
+   */
+  replayed: boolean;
+}
+/**
+ * Conditional association deletion.
+ */
+export interface DeleteAssetRequest {
+  /**
+   * Observed independent state version.
+   */
+  base_asset_version: number;
+}
+/**
+ * Original association deletion receipt.
+ */
+export interface DeleteAssetResponse {
+  /**
+   * Requested opaque identifier.
+   */
+  asset_id: string;
+  /**
+   * Original resulting version.
+   */
+  asset_version: number;
+  /**
+   * Whether the original operation removed an association.
+   */
+  deleted: boolean;
+  /**
+   * Whether this returns a prior committed result.
+   */
+  replayed: boolean;
+}
 /**
  * Body of `POST /v1/artifacts`.
  */
@@ -1244,6 +1377,10 @@ export interface ErrorBody {
    * present for `file_conflict`.
    */
   conflicting_files_total?: number | null;
+  /**
+   * Current independent state for `asset_conflict`.
+   */
+  current_asset_version?: number | null;
   /**
    * The current data version, present for `data_conflict` (of a write, or
    * of a listing whose `at_data_version` is not current).

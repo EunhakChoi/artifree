@@ -699,3 +699,19 @@ fingerprints, because replay must commit atomically with the revision. Reach
 10/10 by giving each placeholder a narrow behavioral interface only when its
 first behavior is implemented. This score describes design, not production
 readiness.
+
+Private upload coverage (partial R09a, 0045): provider asset tests exercise
+exact-byte reopening, equal-byte logical charges, independent versions,
+authority/key/base precedence, concurrent last-slot admission, metadata-only
+replay after deletion, no-op deletion, late receipt rollback, trash/recover/purge,
+shared source/asset blob retention, actor quotas including trash, schema-11
+upgrade and rejection, and backup/restore. HTTP tests cover stable envelopes,
+security headers, 1-byte and exact 5-MiB text, oversized/empty/invalid content,
+unknown outcomes and asset route isolation. Content policy validation happens
+outside database transactions and replay skips changed policy. Only UTF-8
+plain text/CSV uploads are admitted. Valid and invalid PNG/JPEG uploads are
+explicitly unsupported; historical image metadata and matching receipts remain
+decodable and replay before current policy without recreating deleted bytes.
+R09a is incomplete until full PNG and JPEG validation satisfy 0045 rule 3. There
+are no asset UI, client, MCP, CLI, copy or runtime tests because those adapters
+remain R09b–R09d work.

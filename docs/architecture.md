@@ -84,6 +84,7 @@ web (proxy) ───┘                       └─ content listener /p/<ticke
 - A source revision versions an artifact's authoritative source.
 - A document sequence versions structured document operations.
 - An app-data version describes separately persisted runtime data.
+- An asset version describes one actor/artifact upload space independently.
 - Access policy, comments, and publication targets have their own lifecycles.
 
 Source rollback must not silently roll back app data or permissions. File
@@ -174,7 +175,21 @@ in the Rust core.
 | `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)     |
 | `GET /v1/artifacts/{id}/data/members`                                              | One page of an object's member names (`?path=`)   |
 
-Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"? } }` with
+Private upload HTTP routes (0045, partial R09a): `GET/POST
+/v1/artifacts/{id}/assets`, `GET/DELETE /v1/artifacts/{id}/assets/{asset_id}`,
+and `GET /v1/artifacts/{id}/assets/{asset_id}/content`. Upload and delete require
+an `Idempotency-Key` and `base_asset_version`. Only UTF-8 plain text/CSV are
+admitted. PNG and JPEG uploads are `asset_type_unsupported` until complete
+validation satisfies decision 0045, rule 3; no image decoder ships. Historical
+MIME metadata and matching receipts remain readable/replayable before current
+admission policy. Reads are authenticated scoped attachments with
+no-store/nosniff; there is no public URL, client/CLI/MCP operation, asset copy
+or frame access. The [content policy](asset-validation.md) records these limits.
+SQLite schema 12 keeps immutable bytes, independent versions, receipts and
+logical quotas in the same database as source files. Source and asset
+associations both protect shared blobs from purge and cleanup.
+
+Errors use `{ "error": { "code", "message", "current_revision"?, "current_metadata_revision"?, "current_data_version"?, "current_asset_version"? } }` with
 `invalid_request` (400/405/409/422; 405 carries `Allow`, and 409 can identify a stale runtime generation), `unauthenticated` (401), `forbidden` (403, a runtime frame call whose capability is not granted), `not_found` (404),
 `revision_conflict`, `metadata_conflict`, `data_conflict`, `data_path_conflict`, `job_ended`, and `too_many_jobs` (409), `request_key_reused` and `data_too_large` (422), `payload_too_large`
 (413), `range_not_satisfiable` (416 with `Content-Range: bytes */{size}`), `rate_limited` (429 with
