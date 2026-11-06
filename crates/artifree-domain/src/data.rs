@@ -1190,9 +1190,10 @@ mod tests {
             page(stored.members(&DataPath::root(), None, 100)),
             (names(&["e\u{301}", "é", "한글", "𝄞"]), false)
         );
+        // Escapes keep non-NFC expectations explicit under the source NFC lint.
         assert_eq!(
             stored.to_canonical(),
-            r#"{"a b":5,"é":2,"é":1,"한글":3,"️":6,"𝄞":4}"#
+            "{\"a b\":5,\"e\u{301}\":2,\"é\":1,\"한글\":3,\"\u{fe0f}\":6,\"𝄞\":4}"
         );
         assert_eq!(
             set(original, "한글/next", "1"),
@@ -1200,7 +1201,7 @@ mod tests {
         );
         assert_eq!(
             patch(original, "é", "7"),
-            Ok(r#"{"a b":5,"é":2,"é":7,"한글":3,"️":6,"𝄞":4}"#.into())
+            Ok("{\"a b\":5,\"e\u{301}\":2,\"é\":7,\"한글\":3,\"\u{fe0f}\":6,\"𝄞\":4}".into())
         );
     }
 
