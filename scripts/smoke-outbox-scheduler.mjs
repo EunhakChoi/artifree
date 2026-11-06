@@ -48,6 +48,164 @@ export async function checkOutboxScheduler(harness) {
   }
 
   const selected = process.env.ARTIFREE_SCHEDULER_CASE;
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'cleanup-empty-budget')
+  ) {
+    const page = await fresh();
+    await page.evaluate(async () => {
+      globalThis.healthyCleanupLanes = [lane];
+      for (let index = 1; index <= 250; index += 1) {
+        const key = [
+          ...lane.slice(0, 4),
+          'art_' + index.toString(16).padStart(32, '0'),
+        ];
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: key,
+          artifactId: key[4],
+          base: { version: 0 },
+        });
+        healthyCleanupLanes.push(key);
+      }
+      faultPut('usage');
+      healthyCleanupLanes.forEach((key) => scheduler.wake(key));
+    });
+    await page.waitForFunction(
+      () =>
+        events.filter(
+          (event) =>
+            event.kind === 'paused' && event.pause.kind === 'cleanup_paused',
+        ).length === 251,
+    );
+    await page.evaluate(() => {
+      globalThis.cleanupChoices = events
+        .filter(
+          (event) =>
+            event.kind === 'paused' && event.pause.kind === 'cleanup_paused',
+        )
+        .map((event) => event.pause.selection);
+      restorePut();
+    });
+    setMode('invalid_json');
+    await page.evaluate(async () => {
+      for (const character of ['b', 'c', 'd', 'e', 'f']) {
+        const key = [...lane.slice(0, 4), 'art_' + character.repeat(32)];
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: key,
+          artifactId: key[4],
+          base: { version: 0 },
+        });
+        scheduler.wake(key);
+      }
+    });
+    for (let round = 1; round <= 6; round += 1) {
+      await page.waitForFunction(
+        (count) =>
+          events.filter((event) => event.kind === 'delivery_retrying').length >=
+          count,
+        round * 5,
+      );
+      await fireRetries(page);
+    }
+    await page.waitForFunction(
+      () =>
+        events.filter(
+          (event) =>
+            event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+        ).length === 32,
+    );
+    await page.evaluate(async () => {
+      for (const choice of cleanupChoices) await scheduler.retryCleanup(choice);
+    });
+    assert.equal(requests().length, 283);
+    const accepted = await page.evaluate(async () => {
+      globalThis.freshLane = [...lane.slice(0, 4), 'art_' + '9'.repeat(32)];
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: freshLane,
+        artifactId: freshLane[4],
+        base: { version: 0 },
+      });
+      try {
+        scheduler.wake(freshLane);
+        return 'accepted';
+      } catch (error) {
+        return error.code;
+      }
+    });
+    assert.equal(
+      await page.evaluate(
+        () => events.filter((event) => event.kind === 'stopped').length,
+      ),
+      0,
+    );
+    assert.equal(
+      accepted,
+      'accepted',
+      'trimmed healthy empty lanes cannot consume retained lane capacity',
+    );
+    await page.evaluate(() => storageSnapshot());
+    assert.equal(
+      await page.evaluate(
+        () =>
+          events.findLast(
+            (event) =>
+              event.kind === 'paused' && event.lane[4] === freshLane[4],
+          )?.pause.reason,
+      ),
+      'aggregate_exhausted',
+      'actual pending work remains budget paused',
+    );
+    assert.equal(
+      (await page.evaluate(() => store.lane(freshLane)))[0].state,
+      'unprepared',
+    );
+    assert.equal(requests().length, 283);
+    await page.evaluate(async () => {
+      globalThis.failedCaptureLane = [
+        ...lane.slice(0, 4),
+        'art_' + '8'.repeat(32),
+      ];
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: failedCaptureLane,
+        artifactId: failedCaptureLane[4],
+        base: { version: 0 },
+      });
+      globalThis.beforeFailedCapture = await storageSnapshot();
+      globalThis.readLane = store.lane.bind(store);
+      store.lane = (key) =>
+        key[4] === failedCaptureLane[4]
+          ? Promise.reject(new deliveryApi.OutboxError('storage_failed'))
+          : readLane(key);
+      scheduler.wake(failedCaptureLane);
+    });
+    await page.evaluate(() => storageSnapshot());
+    assert.equal(
+      await page.evaluate(() => {
+        try {
+          scheduler.wake(freshLane);
+          return 'unexpected';
+        } catch (error) {
+          return error.code;
+        }
+      }),
+      'owner_not_ready',
+      'failed capture cannot be treated as empty work',
+    );
+    await page.evaluate(() => {
+      store.lane = readLane;
+    });
+    assert.deepEqual(
+      await page.evaluate(() => storageSnapshot()),
+      await page.evaluate(() => beforeFailedCapture),
+    );
+    assert.equal(requests().length, 283);
+    await close(page);
+  }
+
   if (selected === undefined || selected === 'cleanup-progress') {
     const page = await fresh();
     await page.evaluate(async () => {
@@ -491,6 +649,7 @@ export async function checkOutboxScheduler(harness) {
       '429',
       '503',
       'override_transient',
+      '503binding',
     ];
     const terminalCases = [
       'held_mismatch',
@@ -505,6 +664,8 @@ export async function checkOutboxScheduler(harness) {
       'override_bad_status',
       'override_bad_retry',
       'override_null',
+      'override_binding',
+      '409binding',
     ];
     for (const test of selected === 'revalidation-transient'
       ? transientCases
@@ -546,6 +707,11 @@ export async function checkOutboxScheduler(harness) {
           globalThis.revalidationOverride = {
             kind: 'authorized',
             failure: { status: 401 },
+          };
+        if (test === 'override_binding')
+          globalThis.revalidationOverride = {
+            kind: 'read_failed',
+            failure: { code: 'outbox_binding_changed', status: 409 },
           };
         if (test === 'override_transient')
           globalThis.revalidationOverride = {
@@ -642,8 +808,16 @@ export async function checkOutboxScheduler(harness) {
       assert.equal(await page.evaluate(() => revalidationCalls), 1);
       if (terminalCases.includes(test)) {
         assert.equal(
-          test.startsWith('401') ? result.status : result.code,
-          test.startsWith('401') ? 401 : 'owner_not_ready',
+          test.startsWith('401') ||
+            test === '409binding' ||
+            test === 'override_binding'
+            ? result.status
+            : result.code,
+          test.startsWith('401')
+            ? 401
+            : test === '409binding' || test === 'override_binding'
+              ? 409
+              : 'owner_not_ready',
         );
         assert.equal(
           requests().length,
@@ -667,19 +841,31 @@ export async function checkOutboxScheduler(harness) {
           ),
           0,
         );
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.resumeDelivery(oldReadSelection).then(
+              () => 'unexpected',
+              (error) => error.code,
+            ),
+          ),
+          'owner_not_ready',
+        );
+        assert.equal(await page.evaluate(() => revalidationCalls), 1);
         if (test.startsWith('401') || test === 'override_auth')
           assert.equal(await page.evaluate(() => locallyAuthenticated), false);
       } else {
         const expectedCode =
           test === 'network' || test === 'redirect'
             ? 'network_error'
-            : test === '403'
-              ? 'forbidden'
-              : test === '404'
-                ? 'not_found'
-                : test === '429' || test === 'override_transient'
-                  ? 'rate_limited'
-                  : 'unavailable';
+            : test === '503binding'
+              ? 'outbox_binding_changed'
+              : test === '403'
+                ? 'forbidden'
+                : test === '404'
+                  ? 'not_found'
+                  : test === '429' || test === 'override_transient'
+                    ? 'rate_limited'
+                    : 'unavailable';
         assert.equal(result.code, expectedCode);
         assert.equal(
           result.status,
@@ -687,7 +873,7 @@ export async function checkOutboxScheduler(harness) {
             ? 0
             : test === 'override_transient'
               ? 429
-              : Number(test),
+              : Number.parseInt(test, 10),
         );
         assert.deepEqual(
           await page.evaluate(() => storageSnapshot()),

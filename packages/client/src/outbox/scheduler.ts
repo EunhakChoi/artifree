@@ -170,8 +170,8 @@ export interface SchedulerHost {
   readonly context: DeliveryContext;
   /**
    * Exactly one bound read per explicit action; never follows redirects.
-   * Abort context authority synchronously on proven loss or 401 headers, before
-   * waiting for any response body. Unexpected results/exceptions fail closed.
+   * Abort context authority synchronously on proven loss, and at 401 headers
+   * before waiting for any response body. Unexpected results/exceptions fail closed.
    */
   readonly revalidate: (
     lane: LaneKey,
@@ -597,6 +597,18 @@ export class DeliveryScheduler {
   ): Promise<void> {
     const selection = Object.freeze<DeliveryResume>({ [deliveryAction]: true });
     const captured = await this.capture(lane);
+    if (
+      reason === 'aggregate_exhausted' &&
+      scope === 'coordinator' &&
+      lane.failures === 0 &&
+      lane.pause === undefined &&
+      captured.snapshot === '[]'
+    ) {
+      // A completed trim can leave no work despite a globally exhausted epoch.
+      // Reclaim only a proven healthy idle lane; a concurrent wake stays queued.
+      if (!lane.queued) this.lanes.delete(JSON.stringify(lane.key));
+      return;
+    }
     this.retirePause(lane);
     this.deliveries.tokens.set(selection, captured);
     lane.pause = { kind: 'retry_paused', reason, scope, selection };
@@ -733,14 +745,17 @@ export class DeliveryScheduler {
         }
         if (
           result.kind === 'authority_lost' ||
-          (result.kind === 'read_failed' && result.failure.status === 401)
+          (result.kind === 'read_failed' &&
+            (result.failure.status === 401 ||
+              (result.failure.status === 409 &&
+                result.failure.code === 'outbox_binding_changed')))
         ) {
           // Fence before any host callback, including a throwing invalidator.
           this.close();
           if (
             (result.kind === 'authority_lost' &&
               result.reason === 'authentication_invalid') ||
-            result.kind === 'read_failed'
+            (result.kind === 'read_failed' && result.failure.status === 401)
           ) {
             try {
               if (!this.host.context.signal.aborted)

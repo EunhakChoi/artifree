@@ -933,7 +933,9 @@ budget gate, without inventing a network failure. Durable ACKs
 reset only the lane counter. Retry timers use the specified injected clock,
 jitter and bounded Retry-After floor; wakes and new admissions cannot clear
 timers, pauses or counters. Healthy empty lanes are reclaimed without imposing
-a lifetime artifact limit.
+a lifetime artifact limit, including a successfully trimmed lane under exhausted
+HTTP budget. Only a successful bounded capture proving no rows and no retained
+failure/pause permits reclamation; a failed capture closes without deleting work.
 
 Preparation aborts and ACK-storage aborts have separate opaque internal actions.
 A durable ACK whose trim fails exposes a separate `cleanup_paused` selection
@@ -953,7 +955,8 @@ read retires its selection and synchronously publishes a fresh selection with
 bounded code/status/Retry-After metadata; budgets, epoch and retained snapshot
 stay unchanged. A further read requires that new explicit choice. Pending calls
 of the same kind still share the original promise until settlement. Proven
-binding/generation loss, 401 or an invalid host result permanently fences this
+binding/generation loss, 401, contract-compatible
+409/outbox_binding_changed or an invalid host result permanently fences this
 fixed scheduler. Hosts synchronously revoke captured authority at loss/401
 headers, before any body wait; the internal bound-read status observer makes
 this possible for malformed/stalled bodies. Neither read errors nor host

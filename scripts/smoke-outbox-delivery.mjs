@@ -113,8 +113,9 @@ export async function checkOutboxDelivery(browser, serverApi) {
                 ? '{'
                 : JSON.stringify({
                     error: {
-                      code:
-                        faultStatus === 401
+                      code: bindingMode.endsWith('binding')
+                        ? 'outbox_binding_changed'
+                        : faultStatus === 401
                           ? 'unauthenticated'
                           : faultStatus === 403
                             ? 'forbidden'
@@ -480,7 +481,14 @@ export async function checkOutboxDelivery(browser, serverApi) {
                 }
                 return { kind: 'authorized' };
               } catch (error) {
-                if (error instanceof ArtifreeApiError)
+                if (error instanceof ArtifreeApiError) {
+                  if (
+                    error.status === 409 &&
+                    error.code === 'outbox_binding_changed'
+                  ) {
+                    currentAuthority = Symbol();
+                    stop.abort();
+                  }
                   return {
                     kind: 'read_failed',
                     failure: {
@@ -489,6 +497,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
                       retryAfterSeconds: error.retryAfterSeconds,
                     },
                   };
+                }
                 throw error;
               }
             },
