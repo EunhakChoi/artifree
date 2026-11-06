@@ -669,6 +669,59 @@ supported runtime in `engines`; nothing else would catch code that uses APIs
 missing from Node 22. Rust needs no such rule: the Rust 1.88.0 job rejects
 crates that raise the minimum version.
 
+## Cleanup after verification and merge
+
+Delete test environments when their tests finish, and delete branches when their
+changes have merged, including their worktrees. Cleanup is part of completing
+the work, including failed or interrupted verification; a failed check is not a
+reason to leave an entire environment running or on disk.
+
+- Stop the test servers, workers, browsers, containers, and other processes owned
+  by the completed run. Remove its temporary source copies, data directories,
+  profiles, volumes, and disposable build outputs. When the task's checks finish,
+  remove its dependency installations and build caches, including worktree-local
+  `node_modules` and `target` directories and any external cache owned by that
+  worktree. Reusable test caches may remain between checks of an ongoing task,
+  but must be purged when that task finishes and before removing its worktree.
+- Before deleting evidence, record the checked commit or diff, commands, exit
+  results, relevant failures, and cleanup outcome. Retain only the logs, traces,
+  screenshots, or minimal reproductions needed to explain the result or resolve
+  a failure, outside tracked files. Before removing an environment or worktree,
+  move that retained evidence outside every directory scheduled for deletion
+  and verify it is readable at its retained location. Redact public reports and
+  keep private evidence and credentials private. A retained evidence file does not require
+  retaining the disposable environment that produced it.
+- Before deleting a branch, refresh the target branch and verify the intended
+  changes are merged. Check both local and remote branch heads; a merged PR does
+  not prove that commits pushed afterwards are merged. For squash or rebase
+  merges, use the PR's merged state and reviewed head plus the target's changes;
+  ancestry alone may not establish the result. Preserve unmerged branches and
+  any additional unmerged work. Delete the merged local and remote topic branch
+  once confirmed; preserve the repository's main and other maintained base
+  branches.
+- Inspect every associated worktree for tracked edits, untracked files, stashes,
+  and active use before removal. Preserve unrelated user changes and ongoing
+  work, even on a merged branch. Purge that worktree's completed test caches,
+  remove the worktree with Git, then remove its branch. Do not force-remove a
+  dirty or active worktree or force-delete a branch to bypass unresolved merge
+  or ownership checks.
+- Confirm exact ownership and paths before stopping processes or deleting files.
+  Never use broad process-name kills, wildcard deletion, or global cache pruning
+  that can affect another user, repository, or active run. Preserve shared tools,
+  system package stores, credentials, private source evidence, and persistent
+  application data; they are not disposable test environments. Committed build
+  artifacts and generated contracts remain part of the source tree.
+- Verify that the completed run's processes, temporary environments, caches, and
+  merged topic branches/worktrees are gone. Report what was removed. If cleanup
+  is blocked by active use, uncertain ownership or merge status, necessary
+  reproduction evidence, or an access failure, report the specific resource,
+  reason, and condition or next action for cleanup. Preserve the affected
+  resource until that condition is resolved and complete its cleanup afterwards;
+  do not silently treat deferred cleanup as complete.
+
+This is a contributor workflow requirement. It does not implement product data
+retention, automatic artifact cleanup, or a new sandbox capability.
+
 ## Limits and the next implementation
 
 There are no arbitrary coverage-percentage gates for empty modules. The

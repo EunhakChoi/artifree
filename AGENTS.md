@@ -71,6 +71,10 @@ guide for the deadline, verification, and merge requirements.
 - Run `npm run check`, `npm run build`, and relevant smoke checks. If a boundary
   legitimately changes, update the decision record and boundary checker together.
 - Commit lockfiles. Keep generated artifacts reproducible.
+- Delete completed test environments and merged branches, including their
+  worktrees, as part of finishing the work. Preserve ongoing work and necessary
+  verification evidence; follow the scope, safety checks, and reporting rules in
+  [the cleanup policy](docs/quality.md#cleanup-after-verification-and-merge).
 - Every change must pass `npm run check` and `npm run build`; UI or standalone
   HTML changes must also pass the browser smoke checks. `docs/quality.md` defines
   the gates and their scope. Do not skip checks, use fail-open CI steps, or hide
