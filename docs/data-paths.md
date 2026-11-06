@@ -1,8 +1,9 @@
 # Application-data paths
 
 R06b-1 implements the path and transport slice of [0046](decisions/0046-utf8-data-paths.md).
-Its verification and merge status is recorded in that decision; cross-process
-upgrade and backup/recovery evidence remains the separate R06b-2 slice.
+The implemented scope and proposed recovery follow-up are recorded in that
+decision. Cross-process upgrade and backup/recovery evidence remains the separate
+R06b-2 slice; the path implementation does not complete that follow-up.
 
 A path addresses object members, with `/` between segments and the empty string
 for the root. Each segment is 1–64 UTF-8 bytes; there are at most 16 segments.
