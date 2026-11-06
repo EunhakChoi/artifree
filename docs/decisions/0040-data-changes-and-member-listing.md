@@ -30,8 +30,8 @@ below is presented as an observation of the original product.
 > by rules 8–11 to its pinned Unicode 16.0.0 grammar. The numbered text below
 > records the earlier ASCII basis. Exact UTF-8 byte order, existing ASCII
 > tokens, the token layout and the verified transport bounds are preserved.
-> R06b-2's upgrade/recovery evidence remains proposed; acceptance of this
-> amendment takes effect when R06b-1 merges.
+> R06b-1 merged in #124. R06b-2 adds focused upgrade/recovery evidence;
+> its final gates and review remain pending in 0046.
 
 ## Context: what existed before R07a-1
 

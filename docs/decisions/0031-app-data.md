@@ -23,8 +23,8 @@ original product.
 > portion of [0046](0046-utf8-data-paths.md) expands decision 2's path grammar
 > to its pinned Unicode 16.0.0 rules. The numbered text below records the
 > original ASCII behavior. Existing data, versions, ASCII request identities
-> and schema remain unchanged. R06b-2's upgrade/recovery evidence is proposed;
-> acceptance of the R06b-1 amendment takes effect when that slice merges.
+> and schema remain unchanged. R06b-1 merged in #124. R06b-2 adds focused
+> upgrade/recovery evidence; its final gates and review remain pending in 0046.
 
 ## Context
 
