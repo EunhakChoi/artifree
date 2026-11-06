@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { expect } from '@playwright/test';
+import { holdAnswer } from './lib/held-answer.mjs';
 import { forgeReset } from './smoke-history.mjs';
 import { api, bytes, fileButton, loseResponse } from './smoke-workspace.mjs';
 
@@ -96,44 +97,6 @@ export async function checkEditor({
       await pathInput.fill(to);
       await dialog.getByRole('button', { name: 'Rename', exact: true }).click();
     };
-    /** Holds the answer to the next request `match` accepts until released. */
-    const holdAnswer = async (method, match) => {
-      let release;
-      const released = new Promise((resolve) => {
-        release = resolve;
-      });
-      let asked;
-      const seen = new Promise((resolve) => {
-        asked = resolve;
-      });
-      let taken = false;
-      const matches = (url) => match(url.pathname);
-      const handler = async (route) => {
-        if (taken || route.request().method() !== method)
-          return route.fallback();
-        taken = true;
-        asked();
-        // The server answers now; the page sees the answer only later.
-        const response = await route.fetch();
-        await released;
-        await route.fulfill({ response }).catch(() => {});
-        return undefined;
-      };
-      // Kept until the context closes: once taken, it lets requests pass.
-      await tab.route(matches, handler);
-      let timer;
-      const late = new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`No ${method} request was held within 10 s.`)),
-          10_000,
-        );
-      });
-      return {
-        seen: Promise.race([seen, late]).finally(() => clearTimeout(timer)),
-        release,
-      };
-    };
-
     // A draft spans files: each keeps its text while others are opened.
     // Choosing another artifact and disconnecting stay locked (0007).
     await expect(text('index.html')).toHaveValue('<p>home</p>\n<p>end</p>\n');
@@ -316,14 +279,15 @@ export async function checkEditor({
     /** Opens a rename of `from` whose read of the file is held. */
     const renameHeld = async (revision, from, to) => {
       const held = await holdAnswer(
+        tab,
         'GET',
         (pathname) => pathname === filePath(revision, from),
       );
       await renameButton.click();
       await pathInput.fill(to);
       await dialog.getByRole('button', { name: 'Rename', exact: true }).click();
-      await held.seen;
-      return held;
+      const response = await held.seen;
+      return { ...held, response };
     };
 
     // A newer revision saved elsewhere while there is no draft is followed.
@@ -346,6 +310,11 @@ export async function checkEditor({
     await text('index.html').fill('<p>kept</p>\n');
     await file('img/logo.png').click();
     const trashRead = await renameHeld(5, 'img/logo.png', 'logo.png');
+    assert.equal(
+      trashRead.response.status(),
+      200,
+      'The rename reads the file successfully before the artifact is trashed.',
+    );
     await setDeleted(true);
     await expect(inTrash).toBeVisible();
     await expect(
@@ -401,7 +370,7 @@ export async function checkEditor({
     // A save held across a forged reset: its answer belongs to data the
     // server may no longer hold, so the draft stays and saving stays off.
     // Paths cannot change then either; text still can.
-    const save = await holdAnswer('POST', (pathname) =>
+    const save = await holdAnswer(tab, 'POST', (pathname) =>
       pathname.endsWith('/revisions'),
     );
     await saveButton.click();
@@ -434,6 +403,7 @@ export async function checkEditor({
     // again: the number may now name other content.
     await text('style.css').fill('p { color: draft }');
     const shownRead = await holdAnswer(
+      tab,
       'GET',
       (pathname) => pathname === filePath(6, 'pages/about.html'),
     );
