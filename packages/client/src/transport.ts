@@ -349,7 +349,7 @@ export async function* decodeText(reader: BodyReader): AsyncGenerator<string> {
 }
 
 /** The bytes of a bounded read, or why there are none. */
-type BoundedRead = Uint8Array | 'over' | ArtifreeApiError;
+type BoundedRead = Uint8Array<ArrayBuffer> | 'over' | ArtifreeApiError;
 
 /**
  * The whole body, if it is at most `limit` bytes: the limit is checked as
@@ -364,7 +364,10 @@ async function readBounded(
   options: BodyReaderOptions,
 ): Promise<BoundedRead> {
   const reader = new BodyReader(body, options);
-  const chunks: Uint8Array[] = [];
+  // Copy immediately into one owned buffer. Retaining each received view
+  // makes memory depend on the number of chunks (or their backing buffers),
+  // and a source may reuse its view before the next read.
+  let bytes: Uint8Array<ArrayBuffer> = new Uint8Array(0);
   let total = 0;
   try {
     for (;;) {
@@ -382,20 +385,24 @@ async function readBounded(
           `The request was aborted while reading the ${options.what}.`,
           options.signal?.reason,
         );
+      const offset = total;
       total += chunk.byteLength;
       if (total > limit) return 'over';
-      chunks.push(chunk);
+      if (total > bytes.byteLength) {
+        const capacity = Math.min(
+          limit,
+          Math.max(16_384, bytes.byteLength * 2, total),
+        );
+        const grown = new Uint8Array(capacity);
+        grown.set(bytes.subarray(0, offset));
+        bytes = grown;
+      }
+      bytes.set(chunk, offset);
     }
   } finally {
     reader.close();
   }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
+  return total === bytes.byteLength ? bytes : bytes.slice(0, total);
 }
 
 function parseJson(bytes: Uint8Array): unknown {
@@ -419,9 +426,10 @@ function parseJson(bytes: Uint8Array): unknown {
 export async function readErrorJson(
   response: Response,
   options: BodyReaderOptions,
+  limit = ERROR_BODY_LIMIT,
 ): Promise<unknown> {
   if (response.body === null) return undefined;
-  const bytes = await readBounded(response.body, ERROR_BODY_LIMIT, options);
+  const bytes = await readBounded(response.body, limit, options);
   return bytes instanceof Uint8Array ? parseJson(bytes) : undefined;
 }
 
@@ -435,14 +443,32 @@ export async function readErrorJson(
 export async function readSuccessJson(
   response: Response,
   options: BodyReaderOptions,
+  limit = SUCCESS_BODY_LIMIT,
 ): Promise<unknown> {
   if (response.body === null) return undefined;
-  const bytes = await readBounded(response.body, SUCCESS_BODY_LIMIT, options);
+  const bytes = await readBounded(response.body, limit, options);
   if (bytes instanceof ArtifreeApiError) throw bytes;
   if (bytes === 'over')
     throw new ArtifreeApiError(
-      `The ${options.what} is larger than ${SUCCESS_BODY_LIMIT} bytes.`,
+      `The ${options.what} is larger than ${limit} bytes.`,
       { status: response.status, code: 'invalid_response' },
     );
   return parseJson(bytes);
+}
+
+/** Reads a success body's bytes with streaming size, stall and abort bounds. */
+export async function readSuccessBytes(
+  response: Response,
+  limit: number,
+  options: BodyReaderOptions,
+): Promise<Uint8Array<ArrayBuffer>> {
+  if (response.body === null) return new Uint8Array();
+  const bytes = await readBounded(response.body, limit, options);
+  if (bytes instanceof ArtifreeApiError) throw bytes;
+  if (bytes === 'over')
+    throw new ArtifreeApiError(
+      `The ${options.what} is larger than ${limit} bytes.`,
+      { status: response.status, code: 'invalid_response' },
+    );
+  return bytes;
 }
