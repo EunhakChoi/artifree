@@ -1,10 +1,13 @@
 # Browser application-data outbox
 
-Status: **Proposed. Nothing in this record is implemented by this change.**
+Status: **Partially implemented.** R08a provides the server binding fence;
+R08b provides local browser admission and owner recovery. R08c-1 adds internal
+prepared/ACK/checkpoint/trim persistence. Network delivery and the remaining
+numbered sender/lifecycle contract are proposed.
 
 Scope: R08, an opt-in browser TypeScript client for R06 application-data
 writes. This specification does not enable it in the management UI or runtime
-frames. Numbered rules are the proposed implementation contract; changes to
+frames. Numbered rules define the complete target contract; changes to
 them require a separate specification amendment before implementation.
 
 ## Existing behavior and evidence
@@ -321,8 +324,14 @@ feed identity`, **after target-access/in-place checks
    storage-envelope data pause that lane with `storage_corrupt`; do not skip or delete
    the bad head and send its successors. Read at most one bounded page at a
    time. A database schema newer than the client fails closed without writes.
-   No released R08 store exists; its first schema must require generation
-   metadata. If a recognized experimental older format lacks it, preserve the
+   The local-only v1 schema requires admission-generation metadata. The v2
+   schema upgrade checks layout metadata only, without reading or changing
+   retained payloads. Under the owner lock and matching binding, exact legacy
+   rows/checkpoints decode read-only with authorized generation from their original
+   admission generation and an empty ACK checkpoint. Owner-scoped transitions
+   persist format 2 atomically, preserving keys, payloads, bases and reservations.
+   Upgrading or reading grants no recovery confirmation or delivery authority. If a recognized experimental older
+   format lacks generation metadata, preserve the
    rows as `generation_unbound` and require a fresh binding plus explicit
    recovery before setting delivery authority. Never infer generation 1 or the
    current generation, discard rows, or regenerate operation keys during an
@@ -757,7 +766,7 @@ false`, and an opaque `PreparationRetrySelection`. Block the head and
     as their narrower tests. Neither test success nor confirmation proves a
     physical-tab identity guarantee unavailable from the browser primitives.
 
-## Acceptance and rejection tests (all future work)
+## Acceptance and rejection tests (sender portions remain proposed)
 
 | ID  | Required behavior and failure proof                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -835,3 +844,31 @@ No slice may advertise R08 complete before the end-to-end recovery acceptance
 has passed. Runtime-frame data access, UI adoption, orphan transfer, automatic
 merge, S02 roles and Docs staging remain separate proposed work. Implementation
 reports must identify which slices actually shipped and which tests actually ran.
+
+## R08c-1: internal storage lifecycle
+
+The dedicated store strictly decodes unprepared, prepared and acknowledged rows.
+Admission and authorized actor generations are distinct required fields. A
+versionchange transaction checks schema layout only; it never scans or updates
+retained payloads. Exact R08b v1 rows normalize read-only after the owner lock and
+matching binding are established. Owner-scoped transitions persist format 2 while
+retaining keys, payloads, bases, owner references and original reservations. Abort
+or quota failure preserves the original rows and accounting. Invalid old envelopes
+remain untouched and fail closed when their owner-held lane is read. A local
+preparation transaction replaces the enqueue payload with the exact method/body/
+base request, preserving supplied path and raw JSON text without interpreting it.
+Only its terminal completion returns a prepared row. A validated receipt and the
+bounded predecessor checkpoint commit atomically; a dependent request resolves
+its base from that durable receipt, including unchanged writes. A separate trim
+transaction removes the durable-ACK prefix and releases its row/byte reservation;
+failed trim retains the ACK and never changes its historical meaning.
+
+Native IndexedDB checks in `scripts/smoke-outbox-store.mjs` cover request success
+followed by preparation/ACK/trim abort, quota denial, stale identities/phases,
+strict corrupted envelopes, duplicate keys, dependency and numeric bases, raw
+payload compatibility, maximum payload reservations and close/reopen retention.
+These are storage-boundary tests with independently supplied receipt fixtures;
+they do not prove HTTP delivery, same-key server replay, native process crash
+restoration, selection actions or bounded retry budgets. R08c's remaining sender
+work must test those boundaries before activation. The public browser handle
+continues to expose local admission/recovery/disposal only, with no sender.
