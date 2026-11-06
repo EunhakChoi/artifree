@@ -64,6 +64,16 @@ export interface AcknowledgedRow extends RowIdentity {
   readonly receipt: Readonly<DataWriteResponse>;
 }
 export type IntentRow = UnpreparedRow | PreparedRow | AcknowledgedRow;
+
+/** Bounded local cleanup observation; anchors never imply an empty lane. */
+export type CleanupSnapshot =
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'anchors' }
+  | {
+      readonly kind: 'intents';
+      readonly rows: IntentRow[];
+      readonly signature: string;
+    };
 interface Predecessor {
   readonly sequence: number;
   readonly dataVersion: number;
@@ -663,6 +673,99 @@ async function laneRows(
   return values;
 }
 
+async function cleanupSnapshot(
+  tx: IDBTransaction,
+  lane: LaneKey,
+  authorize: () => void,
+): Promise<CleanupSnapshot> {
+  authorize();
+  const receipt = await request(tx.objectStore('receipts').getKey(lane));
+  authorize();
+  if (receipt !== undefined) return { kind: 'anchors' };
+  const first = await request(
+    tx
+      .objectStore('intents')
+      .index('laneSequence')
+      .getKey(IDBKeyRange.bound([lane, 0], [lane, Number.MAX_SAFE_INTEGER])),
+  );
+  authorize();
+  if (first === undefined) {
+    const checkpoint = await request(
+      tx.objectStore('checkpoints').getKey(lane),
+    );
+    authorize();
+    return { kind: checkpoint === undefined ? 'empty' : 'anchors' };
+  }
+  const rows = await laneRows(tx, lane);
+  authorize();
+  const checkpoint = decodeCheckpoint(
+    await request(tx.objectStore('checkpoints').get(lane)),
+  );
+  authorize();
+  return {
+    kind: 'intents',
+    rows,
+    signature: JSON.stringify({ rows, checkpoint }),
+  };
+}
+
+async function removeUnsent(
+  tx: IDBTransaction,
+  current: IntentRow[],
+  global: Usage,
+  authorize: () => void,
+): Promise<IntentRow[]> {
+  const head = current[0];
+  if (head?.state !== 'unprepared') throw new OutboxError('invalid_selection');
+  const removed = new Set([head.sequence]);
+  for (const row of current.slice(1)) {
+    if ('after' in row.base && removed.has(row.base.after)) {
+      if (row.state !== 'unprepared')
+        throw new OutboxError('invalid_selection');
+      removed.add(row.sequence);
+    }
+  }
+  const bytes = current.reduce(
+    (sum, row) => sum + (removed.has(row.sequence) ? row.bytes : 0),
+    0,
+  );
+  if (global.rows < removed.size || global.bytes < bytes)
+    throw new OutboxError('storage_corrupt');
+  for (const row of current) {
+    if (removed.has(row.sequence)) {
+      authorize();
+      await request(tx.objectStore('intents').delete(row.sequence));
+      authorize();
+    }
+  }
+  const survivors = current.filter((row) => !removed.has(row.sequence));
+  if (survivors.length === 0)
+    await request(tx.objectStore('checkpoints').delete(head.lane));
+  else {
+    const checkpoint = decodeCheckpoint(
+      await request(tx.objectStore('checkpoints').get(head.lane)),
+    );
+    authorize();
+    await request(
+      tx.objectStore('checkpoints').put({
+        ...checkpoint,
+        rows: survivors.length,
+        bytes: survivors.reduce((sum, row) => sum + row.bytes, 0),
+      }),
+    );
+  }
+  authorize();
+  await request(
+    tx.objectStore('usage').put({
+      ...global,
+      rows: global.rows - removed.size,
+      bytes: global.bytes - bytes,
+    }),
+  );
+  authorize();
+  return survivors;
+}
+
 function validateLayout(database: IDBDatabase, tx: IDBTransaction): void {
   if (!same(Array.from(database.objectStoreNames).sort(), [...STORES].sort()))
     throw new OutboxError('storage_corrupt');
@@ -881,61 +984,76 @@ export class LocalStore {
     );
   }
 
+  /** Internal hosts can opt into abort-on-close; omitted hooks preserve local-only policy. */
   enqueue(
     input: Omit<UnpreparedRow, 'sequence' | 'bytes'>,
+    authorize: () => void = () => undefined,
+    signal?: AbortSignal,
   ): Promise<UnpreparedRow> {
-    return transaction(this.database, 'readwrite', async (tx) => {
-      if (!validBase(input.base)) throw new OutboxError('not_enqueued');
-      const global = await usage(tx);
-      const rows = await laneRows(tx, input.lane);
-      if (
-        rows.some(
-          (row) => row.admittedGeneration !== input.admittedGeneration,
-        ) ||
-        ('after' in input.base && rows.at(-1)?.sequence !== input.base.after)
-      )
-        throw new OutboxError('not_enqueued');
-      if (!Number.isSafeInteger(global.next + 1))
-        throw new OutboxError('capacity_exceeded');
-      const body = { ...input, sequence: global.next };
-      const bytes = account(body);
-      const laneBytes = rows.reduce((sum, item) => sum + item.bytes, 0) + bytes;
-      if (
-        bytes > ROW_BYTES ||
-        global.rows + 1 > MAX_ROWS ||
-        global.bytes + bytes > MAX_BYTES ||
-        rows.length + 1 > LANE_ROWS ||
-        laneBytes > LANE_BYTES
-      )
-        throw new OutboxError('capacity_exceeded');
-      const row = decodeUnprepared({ ...body, bytes });
-      await request(tx.objectStore('intents').add(row));
-      await request(
-        tx.objectStore('checkpoints').put({
-          format: 2,
-          lane: row.lane,
-          owner: row.owner,
-          generation: row.authorizedGeneration,
-          predecessor:
-            rows.length === 0
-              ? null
-              : decodeCheckpoint(
-                  await request(tx.objectStore('checkpoints').get(row.lane)),
-                ).predecessor,
-          rows: rows.length + 1,
-          bytes: laneBytes,
-        }),
-      );
-      await request(
-        tx.objectStore('usage').put({
-          id: 'global',
-          next: global.next + 1,
-          rows: global.rows + 1,
-          bytes: global.bytes + bytes,
-        }),
-      );
-      return row;
-    });
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        authorize();
+        if (!validBase(input.base)) throw new OutboxError('not_enqueued');
+        const global = await usage(tx);
+        const rows = await laneRows(tx, input.lane);
+        authorize();
+        if (
+          rows.some(
+            (row) => row.admittedGeneration !== input.admittedGeneration,
+          ) ||
+          ('after' in input.base && rows.at(-1)?.sequence !== input.base.after)
+        )
+          throw new OutboxError('not_enqueued');
+        if (!Number.isSafeInteger(global.next + 1))
+          throw new OutboxError('capacity_exceeded');
+        const body = { ...input, sequence: global.next };
+        const bytes = account(body);
+        const laneBytes =
+          rows.reduce((sum, item) => sum + item.bytes, 0) + bytes;
+        if (
+          bytes > ROW_BYTES ||
+          global.rows + 1 > MAX_ROWS ||
+          global.bytes + bytes > MAX_BYTES ||
+          rows.length + 1 > LANE_ROWS ||
+          laneBytes > LANE_BYTES
+        )
+          throw new OutboxError('capacity_exceeded');
+        const row = decodeUnprepared({ ...body, bytes });
+        authorize();
+        await request(tx.objectStore('intents').add(row));
+        authorize();
+        await request(
+          tx.objectStore('checkpoints').put({
+            format: 2,
+            lane: row.lane,
+            owner: row.owner,
+            generation: row.authorizedGeneration,
+            predecessor:
+              rows.length === 0
+                ? null
+                : decodeCheckpoint(
+                    await request(tx.objectStore('checkpoints').get(row.lane)),
+                  ).predecessor,
+            rows: rows.length + 1,
+            bytes: laneBytes,
+          }),
+        );
+        authorize();
+        await request(
+          tx.objectStore('usage').put({
+            id: 'global',
+            next: global.next + 1,
+            rows: global.rows + 1,
+            bytes: global.bytes + bytes,
+          }),
+        );
+        authorize();
+        return row;
+      },
+      signal,
+    );
   }
 
   lane(lane: LaneKey): Promise<IntentRow[]> {
@@ -943,6 +1061,73 @@ export class LocalStore {
       await usage(tx);
       return laneRows(tx, lane);
     });
+  }
+
+  /** Capture exact owned cleanup records without treating retained anchors as empty. */
+  captureCleanup(
+    lane: LaneKey,
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<CleanupSnapshot> {
+    return transaction(
+      this.database,
+      'readonly',
+      async (tx) => {
+        authorize();
+        await usage(tx);
+        return cleanupSnapshot(tx, lane, authorize);
+      },
+      signal,
+    );
+  }
+
+  /** One exact selected closure; only terminal completion proves local removal. */
+  discardSnapshot(
+    expected: Extract<CleanupSnapshot, { kind: 'intents' }>,
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        const head = expected.rows[0];
+        if (head === undefined) throw new OutboxError('invalid_selection');
+        authorize();
+        const global = await usage(tx);
+        const current = await cleanupSnapshot(tx, head.lane, authorize);
+        if (
+          current.kind !== 'intents' ||
+          current.signature !== expected.signature
+        )
+          throw new OutboxError('invalid_selection');
+        return (
+          (await removeUnsent(tx, current.rows, global, authorize)).length === 0
+        );
+      },
+      signal,
+    );
+  }
+
+  /** Transactional emptiness includes receipts and checkpoints, without deleting them. */
+  checkEmptyCleanup(
+    lane: LaneKey,
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        authorize();
+        await usage(tx);
+        const current = await cleanupSnapshot(tx, lane, authorize);
+        if (current.kind !== 'empty')
+          throw new OutboxError('invalid_selection');
+        authorize();
+      },
+      signal,
+    );
   }
 
   /** Commit the frozen request before any caller may dispatch it. */
@@ -1133,42 +1318,7 @@ export class LocalStore {
         if (!same(current, expected) || current[0]?.state !== 'unprepared')
           throw new OutboxError('invalid_selection');
         authorize();
-        const removed = new Set([head.sequence]);
-        for (const row of current.slice(1)) {
-          if ('after' in row.base && removed.has(row.base.after))
-            removed.add(row.sequence);
-        }
-        let bytes = 0;
-        for (const row of current) {
-          if (removed.has(row.sequence)) {
-            await request(tx.objectStore('intents').delete(row.sequence));
-            bytes += row.bytes;
-          }
-        }
-        const survivors = current.filter((row) => !removed.has(row.sequence));
-        if (survivors.length === 0)
-          await request(tx.objectStore('checkpoints').delete(head.lane));
-        else
-          await request(
-            tx.objectStore('checkpoints').put({
-              format: 2,
-              lane: head.lane,
-              owner: head.owner,
-              generation: head.authorizedGeneration,
-              predecessor: decodeCheckpoint(
-                await request(tx.objectStore('checkpoints').get(head.lane)),
-              ).predecessor,
-              rows: survivors.length,
-              bytes: survivors.reduce((sum, row) => sum + row.bytes, 0),
-            }),
-          );
-        await request(
-          tx.objectStore('usage').put({
-            ...global,
-            rows: global.rows - removed.size,
-            bytes: global.bytes - bytes,
-          }),
-        );
+        await removeUnsent(tx, current, global, authorize);
       },
       signal,
     );

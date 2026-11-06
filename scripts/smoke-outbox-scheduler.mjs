@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { checkSchedulerDisposal } from './smoke-outbox-disposal.mjs';
 
 /** Native storage/Fetch scheduler checks; no public handle enables delivery. */
 export async function checkOutboxScheduler(harness) {
@@ -48,6 +49,7 @@ export async function checkOutboxScheduler(harness) {
   }
 
   const selected = process.env.ARTIFREE_SCHEDULER_CASE;
+  await checkSchedulerDisposal(harness, selected);
   if (
     createArtifact === undefined &&
     (selected === undefined || selected === 'renew-read-once')
