@@ -383,19 +383,74 @@ fixture profile; its tests run the real server binary and SQLite. R03 first adds
 the user-facing build job, immutable build output and preview contract. Do not
 mark R02 complete until both implementation slices pass their matrix.
 
-| Boundary                 | Required actual rejection or recovery checks                                                                                                                                                        |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Host admission           | Windows rejection; disabled namespaces, absent controller/delegation, missing kill support, modified launcher/tool/policy: no payload starts; trusted verification still succeeds                   |
-| Host files and processes | Host canary reads/writes, traversal, proc descriptors, mount changes, ptrace/signals, leaked FDs and executable configuration injection fail; host and another attempt remain intact                |
-| Network                  | IPv4, IPv6, DNS, host loopback, metadata targets, pathname/abstract Unix sockets and inherited sockets cannot reach host/external listeners; independent listener counters stay zero                |
-| Resources                | Fork/thread bomb, memory/OOM, scratch bytes/inodes, log flood, wall hang and CPU saturation stop or throttle under measured bounds; supervisor stays responsive                                     |
-| Cleanup                  | Double fork, `setsid`, ignored SIGTERM, held pipes and background writer leave no survivors after normal exit, cancel, timeout, OOM, supervisor SIGKILL or lease loss; cleanup failure quarantines  |
-| Recovery                 | Kill at registry/create/attach/readiness/execute/collect/commit phases; restart and concurrent workers cannot run an old and replacement attempt together; no partial output survives restore/purge |
-| Output and authority     | Symlink/hardlink/FIFO/device trees, directory bomb, file mutation, malformed paths, oversized output, zero exit with invalid output, changed authority and stale fence publish nothing              |
-| Success                  | Original synthetic bounded input produces expected bytes and manifest; a fresh operation succeeds after settled failure/cancellation; late revision result cannot replace the latest preview in R03 |
+| Boundary                 | Required actual rejection or recovery checks                                                                                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Host admission           | Windows rejection; disabled namespaces, absent controller/delegation, missing kill support, modified launcher/tool/policy: no payload starts; trusted verification still succeeds                             |
+| Host files and processes | Host canary reads/writes, traversal, proc descriptors, mount changes, ptrace/signals, leaked FDs and executable configuration injection fail; host and another attempt remain intact                          |
+| Network                  | IPv4, IPv6, DNS, host loopback, metadata targets, pathname/abstract Unix sockets and inherited sockets cannot reach host/external listeners; independent listener counters stay zero                          |
+| Resources                | Fork/thread bomb, memory/OOM, scratch bytes/inodes, descriptor ceiling/inheritance/setter denial, log flood, wall hang and CPU saturation stop or throttle under measured bounds; supervisor stays responsive |
+| Cleanup                  | Double fork, `setsid`, ignored SIGTERM, held pipes and background writer leave no survivors after normal exit, cancel, timeout, OOM, supervisor SIGKILL or lease loss; cleanup failure quarantines            |
+| Recovery                 | Kill at registry/create/attach/readiness/execute/collect/commit phases; restart and concurrent workers cannot run an old and replacement attempt together; no partial output survives restore/purge           |
+| Output and authority     | Symlink/hardlink/FIFO/device trees, directory bomb, file mutation, malformed paths, oversized output, zero exit with invalid output, changed authority and stale fence publish nothing                        |
+| Success                  | Original synthetic bounded input produces expected bytes and manifest; a fresh operation succeeds after settled failure/cancellation; late revision result cannot replace the latest preview in R03           |
 
-R02a must attempt `clone3` namespace creation, alternate ABI syscalls and
-host-clock changes from the payload. Exercise a live supervisor that sends
+R02a must verify the descriptor ceiling independently of the log and output
+limits. Observe effective soft and hard `RLIMIT_NOFILE=256` at the final trusted
+bootstrap, then in forked children and after each tested exec path. Account for
+stdio and any profile-owned descriptors: repeatedly open inert files and
+exercise descriptor duplication until the ceiling is reached; the next
+allocation must fail with the expected resource error, with no descriptor at
+or above 256 and no supervisor failure. Check inherited descriptors too;
+setting a limit does not close an already-open descriptor above it. Attempt
+soft/hard increases and resource-limit mutations through native setters,
+`prlimit64` for self and owned descendants, and alternate ABI entries. Assert
+the denied operation and unchanged effective limits, including after exec.
+Use a safe below-ceiling allocation as a positive control. Independently mutate
+the initial limit guard with a bounded parent limit above 256 and require the
+limit/ceiling assertion to fail. Mutate the setter guard separately and require
+a harmless lower-and-restore of the soft limit within the hard bound to break
+the setter-denial assertion. A kernel refusal to raise the hard limit alone
+cannot prove that the setter filter works. Restore each guard and rerun the
+normal inheritance and allocation checks.
+
+R02a must maintain a public, independently written acceptance mapping from
+every rule 4 syscall restriction to its fixed-profile policy entries, payload
+probes, expected denial, independent observations and guard mutations. Cover
+namespace and mount changes; privilege/credential/capability changes; tracing
+and process interference; module and BPF interfaces; host-global state changes
+including clocks; keyrings; and unreviewed multiplexed and asynchronous paths.
+Include `clone3`, namespace flags in permitted process/thread creation,
+unknown syscall architectures, and alternate ABIs (including x32 and compat
+entries on x86-64). Enumerate profile-relevant syscall aliases and argument
+forms rather than treating one representative syscall as proof for a class.
+Exercise inherited enforcement across fork, exec and every payload thread;
+verify the allowed thread-creation fallback and benign required syscalls still
+work. Independently observe `no_new_privs` and empty capability sets at those
+boundaries, and prove payload attempts cannot undo them. Verify default denial
+for syscalls outside the reviewed allowlist, not just named dangerous entries.
+Missing filters, unsupported policy installation and unknown architecture
+admission must refuse before payload execution.
+
+For each mapped class, establish that the fixture reached the intended syscall
+and assert the policy's actual denial using independent trusted observation of
+the installed filter and its enforcement. Include safe positive controls and
+individually remove the relevant filter entry, architecture check or argument
+guard in the disposable test copy; the corresponding enforcement assertion
+must fail. An unrelated namespace, capability, LSM or kernel rejection must not
+let a broken seccomp guard pass: distinguish that later rejection from the
+filter's decision. `ENOSYS`, an unavailable ABI or an operation that already
+fails without the filter is not positive enforcement evidence. A filter
+inspection or decision test alone also cannot replace the real payload probe.
+When safe controls or independent attribution cannot be provided, fail that
+host's supported-profile acceptance and retain refusal; do not silently skip
+the class or relax the policy. Probes and mutations that could affect global
+state run only on the dedicated disposable host with synthetic targets and
+operator preparation, never on the contributor host. No test may contact real
+host services or modify the contributor's credentials, keyrings, clock, module
+state or BPF state. Record the controls and observed assertion failures, then
+restore the policy and pass the complete normal matrix.
+
+Exercise a live supervisor that sends
 local renewals after its database fence is revoked, and one that successfully
 renews throughout the 120-second wall deadline: neither can keep the payload
 alive. R02b must race purge with a descendant that ignores termination: purge
