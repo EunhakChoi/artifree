@@ -2,12 +2,17 @@ import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { build } from 'esbuild';
+import { cleanupOutboxDelivery } from './lib/outbox-delivery-cleanup.mjs';
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
 const EPOCH = 'b'.repeat(32);
 
 /** Native Fetch/IDB one-attempt kernel. Public browser delivery stays disabled. */
-export async function checkOutboxDelivery(browser, live) {
+export async function checkOutboxDelivery(browser, serverApi) {
+  // Owned response/IDB fixtures do not consume real-server authentication or
+  // artifact budgets. Each real Rust slice below uses its own actor as well.
+  let live;
+  const isolatedUsers = [];
   const bundle = await build({
     stdin: {
       contents: `import {DeliveryKernel} from './packages/client/src/outbox/delivery.ts';
@@ -499,6 +504,7 @@ export async function checkOutboxDelivery(browser, live) {
     });
     return arrived;
   }
+  let scenarioFailure;
   try {
     // Failure to prepare never dispatches. The same accepted row remains available.
     let page = await setup();
@@ -515,50 +521,7 @@ export async function checkOutboxDelivery(browser, live) {
     await page.evaluate(() => restorePut());
     await close(page);
 
-    // Inspect real committed IDB while the owned server holds the request before handling it.
-    page = await setup({
-      artifact: live === undefined ? ARTIFACT : await createRealArtifact(),
-    });
-    requests = [];
-    mode = 'hold_forward';
-    if (live === undefined) mode = 'headers_hold';
-    await page.evaluate(() => {
-      head.text = '{"tampered":2}';
-    });
-    const atRequest = waiting();
-    await page.evaluate(() => start());
-    await atRequest;
-    const prepared = (await page.evaluate(() => snapshot()))[0];
-    assert.equal(prepared.state, 'prepared');
-    assert.equal(Object.hasOwn(prepared, 'text'), false);
-    assert.equal(requests[0].body, prepared.request.body);
-    assert.equal(
-      requests[0].body,
-      '{"base_data_version":0,"path":"marker","value":{"original":1}}',
-    );
-    assert.equal(requests[0].headers['idempotency-key'], prepared.key);
-    assert.equal(
-      requests[0].headers['artifree-outbox-actor-generation'],
-      prepared.authorizedGeneration,
-    );
-    await assert.rejects(run(page), /owner_not_ready/);
-    if (live !== undefined) {
-      mode = 'normal';
-      held();
-      assert.equal(
-        (await page.evaluate(() => pending)).value.kind,
-        'server_acknowledged',
-      );
-    } else {
-      await page.evaluate(() => fire(15000));
-      assert.deepEqual((await page.evaluate(() => pending)).value.failure, {
-        reason: 'network_error',
-        status: 0,
-      });
-    }
-    assert.equal(requests.length, 1);
-    await close(page);
-    mode = 'normal';
+    await checkHeldRequest();
 
     for (const failureMode of [
       'invalid_json',
@@ -1024,38 +987,134 @@ export async function checkOutboxDelivery(browser, live) {
         });
       }
     }
-    if (live !== undefined) await checkRealServer();
+    if (serverApi !== undefined) {
+      await selectActor('Outbox ACK');
+      await checkHeldRequest();
+      // Keep all ACK authority interleavings against actual Rust mutations.
+      // Preparation/seeded-ACK trim cases above never dispatch HTTP.
+      for (const abort of [false, true]) {
+        for (const [table, method, state, at, commit] of [
+          ['checkpoints', 'get', undefined, 1, false],
+          ['checkpoints', 'get', undefined, 2, false],
+          ['intents', 'put', 'acknowledged', 1, false],
+          ['checkpoints', 'put', undefined, 1, false],
+          ['intents', 'put', 'acknowledged', 1, true],
+        ]) {
+          await checkStorageFence({
+            stage: 'ack',
+            table,
+            method,
+            state,
+            at,
+            abort,
+            commit,
+          });
+        }
+      }
+      await selectActor('Outbox replay');
+      await checkRealServer();
+    }
     console.log(
       'outbox delivery: native exact request, bounded status/receipt, redirect and authority fences passed; public sender disabled',
     );
+  } catch (error) {
+    // Cleanup rethrows this first, after settling the other resources.
+    scenarioFailure =
+      error instanceof Error
+        ? error
+        : new Error('Outbox scenario failed', { cause: error });
   } finally {
-    await Promise.all(contexts.map((context) => context.close()));
-    for (const id of createdArtifacts) {
-      const headers = {
-        Authorization: 'Bearer ' + live.token,
-        'Content-Type': 'application/json',
-        'Idempotency-Key': crypto.randomUUID(),
-      };
-      const trashed = await fetch(live.origin + '/v1/artifacts/' + id, {
-        method: 'PATCH',
-        headers,
-        body: JSON.stringify({ base_metadata_revision: 1, deleted: true }),
-      });
-      assert.equal(trashed.status, 200);
-      const purged = await fetch(
-        live.origin + '/v1/artifacts/' + id + '/purge',
-        {
-          method: 'POST',
-          headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
-          body: JSON.stringify({ base_metadata_revision: 2 }),
-        },
+    await cleanupOutboxDelivery(
+      {
+        contexts,
+        artifacts: createdArtifacts,
+        users: isolatedUsers,
+        serverApi,
+        listeners: [server, target],
+      },
+      scenarioFailure,
+    );
+  }
+  async function checkHeldRequest() {
+    // Inspect real committed IDB while the owned server holds the request before handling it.
+    const page = await setup({
+      artifact: live === undefined ? ARTIFACT : await createRealArtifact(),
+    });
+    requests = [];
+    mode = 'hold_forward';
+    if (live === undefined) mode = 'headers_hold';
+    await page.evaluate(() => {
+      head.text = '{"tampered":2}';
+    });
+    const atRequest = waiting();
+    await page.evaluate(() => start());
+    await atRequest;
+    const prepared = (await page.evaluate(() => snapshot()))[0];
+    assert.equal(prepared.state, 'prepared');
+    assert.equal(Object.hasOwn(prepared, 'text'), false);
+    assert.equal(requests[0].body, prepared.request.body);
+    assert.equal(
+      requests[0].body,
+      '{"base_data_version":0,"path":"marker","value":{"original":1}}',
+    );
+    assert.equal(requests[0].headers['idempotency-key'], prepared.key);
+    assert.equal(
+      requests[0].headers['artifree-outbox-actor-generation'],
+      prepared.authorizedGeneration,
+    );
+    await assert.rejects(run(page), /owner_not_ready/);
+    if (live !== undefined) {
+      mode = 'normal';
+      held();
+      assert.equal(
+        (await page.evaluate(() => pending)).value.kind,
+        'server_acknowledged',
       );
-      assert.equal(purged.status, 200);
+    } else {
+      await page.evaluate(() => fire(15000));
+      assert.deepEqual((await page.evaluate(() => pending)).value.failure, {
+        reason: 'network_error',
+        status: 0,
+      });
     }
-    server.closeAllConnections();
-    target.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-    await new Promise((resolve) => target.close(resolve));
+    assert.equal(requests.length, 1);
+    await close(page);
+    mode = 'normal';
+  }
+  async function selectActor(label) {
+    const user = await adminPost(
+      '/v1/users',
+      {
+        label: `${label} ${crypto.randomUUID()}`,
+      },
+      201,
+    );
+    assert.match(user.id, /^u-[0-9a-f]{32}$/);
+    isolatedUsers.push(user.id);
+    const issued = await adminPost(
+      '/v1/tokens',
+      {
+        name: `${label} smoke`,
+        user_id: user.id,
+      },
+      201,
+    );
+    assert.equal(issued.token.user_id, user.id);
+    assert.equal(typeof issued.secret, 'string');
+    assert.notEqual(issued.secret, '');
+    live = { origin: serverApi.origin, token: issued.secret };
+  }
+  async function adminPost(path, body, expectedStatus = 200) {
+    const response = await fetch(serverApi.origin + path, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + serverApi.token,
+        'Content-Type': 'application/json',
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    assert.equal(response.status, expectedStatus);
+    return response.json();
   }
   async function checkStorageFence({
     stage,
@@ -1176,7 +1235,7 @@ export async function checkOutboxDelivery(browser, live) {
     });
     assert.equal(response.status, 201);
     const id = (await response.json()).artifact.id;
-    createdArtifacts.push(id);
+    createdArtifacts.push({ origin: live.origin, id, token: live.token });
     return id;
   }
 

@@ -585,6 +585,23 @@ schema rejection tests do not assume whether an enum is emitted as `enum` or
   there), secure erase and quotas (not implemented), and signal handling on
   Windows beyond the TTL path.
 
+The outbox delivery smoke keeps owned HTTP response and native IndexedDB fixtures
+separate from real-server requests. Its real Rust ACK authority interleavings and
+replay/conflict/receipt/rejection scenarios use two independently registered actors;
+each artifact is trashed and purged using its creating actor before both actors are
+disabled. This leaves the workspace smoke's actor budget independent. The standalone
+`scripts/test-outbox-delivery-live.mjs` additionally runs with an 80-request burst
+and one request per minute, below the production 120-request burst, so passing does
+not rely on browser execution time replenishing a shared fixture budget. It runs
+the same real-server assertions and cleanup as the full browser smoke. The held
+request check also runs against Rust: committed preparation and frozen bytes are
+observed before forwarding, a concurrent run is refused, and releasing that same
+request produces a durable ACK. Cleanup attempts every context, artifact step and
+actor even after a failure, always closes owned listeners, and reports the first
+scenario or cleanup error as the cause of any combined failures. Native HTTP
+cleanup tests inject multiple failures and verify the remaining requests and closed
+listeners; each cleanup guard was checked by mutation.
+
 ## Client trust rules
 
 Proposed by [decision 0040](decisions/0040-data-changes-and-member-listing.md)

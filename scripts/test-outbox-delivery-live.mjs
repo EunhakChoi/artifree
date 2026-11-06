@@ -17,7 +17,14 @@ const directory = await mkdtemp(join(tmpdir(), 'artifree-delivery-'));
 let server;
 let browser;
 try {
-  server = await startServer(binary, directory);
+  // Each semantic slice must fit below the production burst (120), without
+  // relying on browser speed to refill its actor's budget during the run.
+  server = await startServer(binary, directory, [
+    '--request-burst',
+    '80',
+    '--requests-per-minute',
+    '1',
+  ]);
   browser = await engines[name].launch();
   await checkOutboxDelivery(browser, {
     origin: server.api_url,
