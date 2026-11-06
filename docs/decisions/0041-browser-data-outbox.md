@@ -3,8 +3,9 @@
 Status: **Partially implemented.** R08a provides the server binding fence;
 R08b provides local browser admission and owner recovery. R08c-1 adds internal
 prepared/ACK/checkpoint/trim persistence. R08c-2a adds an internal single-attempt
-native transport/storage kernel. Public delivery coordination and the remaining
-numbered sender/lifecycle contract are proposed.
+native transport/storage kernel. R08c-2b adds a host-only bounded scheduler
+sub-slice. Public delivery coordination and the remaining numbered
+sender/lifecycle contract are proposed.
 
 Scope: R08, an opt-in browser TypeScript client for R06 application-data
 writes. This specification does not enable it in the management UI or runtime
@@ -917,3 +918,49 @@ bounded recovery continuation. This kernel does not implement those lifecycle
 choices, runtime-frame access, management UI adoption or native-process recovery.
 The existing public browser handle continues to provide local admission and
 recovery/disposal only.
+
+## R08c-2b: internal bounded scheduler sub-slice
+
+`DeliveryScheduler` is an internal host of the single-attempt kernel for one
+already authorized fresh owner and fixed binding. Construction is inert; only
+a host wake after durable admission schedules work. A single pump serializes
+mutations and requeues successful lanes behind waiting lanes. Every wake and
+local pause read checks its captured owner and binding before storage, including
+when delivery budget is exhausted. Lane failures stop at eight and aggregate
+failures at 32 per explicit epoch. Durable ACKs
+reset only the lane counter. Retry timers use the specified injected clock,
+jitter and bounded Retry-After floor; wakes and new admissions cannot clear
+timers, pauses or counters. Healthy empty lanes are reclaimed without imposing
+a lifetime artifact limit.
+
+Preparation aborts and ACK-storage aborts have separate opaque internal actions.
+A preparation retry performs one local transaction even when the HTTP budget
+is exhausted, preserves its gate through preliminary read failures and never
+renews the delivery epoch. A delivery resume requires a fresh host binding/access
+check and unchanged retained snapshot. Other lane-pause selections are staged
+before renewal; a failed read leaves the old tokens, counters and gates intact.
+Successful renewal commits the complete epoch without asynchronous gaps,
+invalidates old delivery selections and supplies current selections for still
+paused lanes. A stale snapshot refreshes pause metadata only and rejects the old
+choice. Runtime kind validation precedes pending-action coalescing. Observations
+cannot mutate pump state. Closing or host authority abort synchronously fences
+the kernel, native transactions, callback work and retry timers.
+
+Native-browser checks cover inert construction, dependent healthy drain beyond
+eight writes, lane ordering, exact-key replay, 8/32 exhaustion with interleaved
+ACKs, distinct preparation/ACK pauses, token rejection, failed renewal staging,
+stale metadata and close fencing. The real Rust cases cover dependent drain and
+same-key replay under the scheduler. These are scheduling subcases, not full
+B8/B15/B19 or R08c acceptance, and do not prove native-process restoration.
+
+The host still must own the native lock and synchronously abort captured
+authority before invalidation or lock release. No public registry creates this
+scheduler. Access and conflict responses stop the affected lane without offering
+a bypass action. A binding-change refusal fences the entire captured scheduler
+before another lane can dispatch; it cannot authorize a new binding or generation.
+Page-global public integration, bounded recovery
+continuation, generation reauthorization, access recovery, rejected disposal
+and unresolved abandonment remain proposed. The public browser handle remains
+local-only; management UI, runtime frames and direct-write behavior are unchanged.
+Numeric limits, host contracts and action policy are Artifree choices, separate
+from the limited original observations described above.

@@ -1,0 +1,594 @@
+import { startTimer, systemClock, type Clock } from '../transport.js';
+import { ArtifreeApiError } from '../errors.js';
+import {
+  DeliveryAttemptError,
+  DeliveryKernel,
+  type DeliveryAttempt,
+  type DeliveryContext,
+  type DeliveryFailure,
+} from './delivery.js';
+import type { LaneKey, LocalStore } from './store.js';
+import { OutboxError } from './types.js';
+
+const preparationAction = Symbol();
+const deliveryAction = Symbol();
+
+/** Internal one-action token; cannot authorize HTTP or renew a delivery epoch. */
+export interface PreparationRetry {
+  readonly [preparationAction]: true;
+}
+/** Internal one-action token; only a successful host revalidation permits renewal. */
+export interface DeliveryResume {
+  readonly [deliveryAction]: true;
+}
+
+type Pause =
+  | {
+      readonly kind: 'preparation_paused';
+      readonly selection: PreparationRetry;
+    }
+  | {
+      readonly kind: 'retry_paused';
+      readonly selection: DeliveryResume;
+      readonly reason: DeliveryFailure['reason'] | 'ack_storage_failed';
+      readonly scope: 'lane' | 'coordinator';
+    }
+  | { readonly kind: 'blocked'; readonly failure: DeliveryFailure };
+
+/** Scheduler observations never replace canonical application-data snapshots. */
+export type SchedulerEvent =
+  | {
+      readonly kind: 'attempt';
+      readonly lane: LaneKey;
+      readonly result: DeliveryAttempt;
+    }
+  | {
+      readonly kind: 'delivery_retrying';
+      readonly lane: LaneKey;
+      readonly failure: DeliveryFailure;
+      readonly delayMilliseconds: number;
+      readonly laneRemaining: number;
+      readonly aggregateRemaining: number;
+    }
+  | { readonly kind: 'paused'; readonly lane: LaneKey; readonly pause: Pause }
+  | { readonly kind: 'stopped'; readonly code: 'owner_not_ready' };
+
+interface Lane {
+  readonly key: LaneKey;
+  failures: number;
+  queued: boolean;
+  pause?: Pause;
+  cancelTimer?: () => void;
+}
+
+interface Action {
+  readonly lane: Lane;
+  readonly snapshot: string;
+  readonly epoch: number;
+}
+
+interface RefreshedPause {
+  readonly lane: Lane;
+  readonly pause: Extract<Pause, { kind: 'retry_paused' }>;
+  readonly selection: DeliveryResume;
+  readonly action: Action;
+}
+
+/**
+ * A host-only scheduler for a single fixed, already authorized owner/binding.
+ * It neither obtains locks nor authorizes recovery, access or actor-generation
+ * changes. The page registry must own its single instance before public use.
+ */
+export interface SchedulerHost {
+  readonly context: DeliveryContext;
+  /** One fresh binding/access check; throws unless the captured authority still matches. */
+  readonly revalidate: (lane: LaneKey, signal: AbortSignal) => Promise<void>;
+  readonly observe: (event: SchedulerEvent) => void;
+  readonly random?: () => number;
+}
+
+/**
+ * Internal fresh-owner delivery scheduling only. Not a browser entry point or a
+ * recovery/lifecycle API. Call wake only after durable admission under this host.
+ */
+export class DeliveryScheduler {
+  private readonly store: LocalStore;
+  private readonly host: SchedulerHost;
+  private readonly clock: Clock;
+  private readonly kernel: DeliveryKernel;
+  private readonly fence = new AbortController();
+  private readonly lanes = new Map<string, Lane>();
+  private readonly ready: Lane[] = [];
+  private readonly preparations = new WeakMap<PreparationRetry, Action>();
+  private readonly deliveries = new WeakMap<DeliveryResume, Action>();
+  private readonly pending = new WeakMap<object, Promise<void>>();
+  private aggregateFailures = 0;
+  private epoch = 0;
+  private pumping = false;
+  private activeTask?: Promise<void>;
+  private activeLane?: Lane;
+  private activeWake = false;
+  private acting = false;
+
+  constructor(store: LocalStore, host: SchedulerHost) {
+    this.store = store;
+    this.host = {
+      ...host,
+      context: { ...host.context, binding: { ...host.context.binding } },
+    };
+    this.clock = host.context.clock ?? systemClock;
+    const abort = (): void => this.close();
+    host.context.signal.addEventListener('abort', abort, { once: true });
+    this.fence.signal.addEventListener(
+      'abort',
+      () => {
+        host.context.signal.removeEventListener('abort', abort);
+      },
+      { once: true },
+    );
+    this.kernel = new DeliveryKernel(store, {
+      ...host.context,
+      signal: this.fence.signal,
+    });
+    if (host.context.signal.aborted) this.close();
+  }
+
+  /** Coalesces wakes. No wake clears a pause, timer or failure budget. */
+  wake(key: LaneKey): void {
+    this.check(key);
+    const id = JSON.stringify(key);
+    let lane = this.lanes.get(id);
+    if (lane === undefined) {
+      // The native store admits at most 256 rows across the entire origin.
+      if (this.lanes.size >= 256) throw new OutboxError('owner_not_ready');
+      lane = { key: [...key], failures: 0, queued: false };
+      this.lanes.set(id, lane);
+    }
+    this.queue(lane);
+  }
+
+  /** Synchronously aborts native requests/transactions and cancels retry timers. */
+  close(): void {
+    if (this.fence.signal.aborted) return;
+    this.fence.abort();
+    for (const lane of this.lanes.values()) lane.cancelTimer?.();
+    this.ready.length = 0;
+  }
+
+  /** One deliberate local preparation attempt; does not revalidate or refill budgets. */
+  retryPreparation(selection: PreparationRetry): Promise<void> {
+    return this.action(selection, this.preparations, false);
+  }
+
+  /** One deliberate epoch renewal after fresh host binding/access validation. */
+  resumeDelivery(selection: DeliveryResume): Promise<void> {
+    return this.action(selection, this.deliveries, true);
+  }
+
+  private check(lane?: LaneKey): void {
+    if (this.fence.signal.aborted) throw new OutboxError('owner_not_ready');
+    try {
+      this.host.context.authorize();
+      const context = this.host.context;
+      if (
+        lane !== undefined &&
+        (!Array.isArray(lane) ||
+          lane.length !== 5 ||
+          lane[0] !== context.owner ||
+          lane[1] !== context.base ||
+          lane[2] !== context.binding.actor_id ||
+          lane[3] !== context.binding.storage_epoch ||
+          typeof lane[4] !== 'string' ||
+          !/^art_[0-9a-f]{32}$/.test(lane[4]))
+      )
+        throw new OutboxError('owner_not_ready');
+    } catch {
+      this.close();
+      throw new OutboxError('owner_not_ready');
+    }
+  }
+
+  private emit(event: SchedulerEvent): void {
+    if (this.fence.signal.aborted) return;
+    try {
+      // Consumers may be JavaScript or deliberately mutate readonly objects.
+      // Never give a callback the state that the pump still needs to classify.
+      if (event.kind === 'attempt') {
+        this.host.observe({
+          ...event,
+          lane: [...event.lane],
+          result: structuredClone(event.result),
+        });
+      } else if (event.kind === 'paused') {
+        this.host.observe({
+          ...event,
+          lane: [...event.lane],
+          pause: { ...event.pause },
+        });
+      } else if (event.kind === 'delivery_retrying') {
+        this.host.observe({
+          ...event,
+          lane: [...event.lane],
+          failure: { ...event.failure },
+        });
+      } else this.host.observe(event);
+    } catch {
+      // A consumer exception must not escape into delivery or leak diagnostics.
+      this.close();
+    }
+  }
+
+  private queue(lane: Lane): void {
+    if (lane === this.activeLane) {
+      this.activeWake = true;
+      return;
+    }
+    if (
+      lane.queued ||
+      lane.pause !== undefined ||
+      lane.cancelTimer !== undefined
+    )
+      return;
+    lane.queued = true;
+    this.ready.push(lane);
+    this.kick();
+  }
+
+  private kick(): void {
+    if (this.pumping || this.acting || this.fence.signal.aborted) return;
+    this.pumping = true;
+    this.activeTask = this.pump()
+      .catch(() => {
+        this.emit({ kind: 'stopped', code: 'owner_not_ready' });
+        this.close();
+      })
+      .finally(() => {
+        this.pumping = false;
+        if (this.ready.length > 0 && !this.fence.signal.aborted) this.kick();
+      });
+  }
+
+  private async pump(): Promise<void> {
+    while (this.ready.length > 0 && !this.acting) {
+      this.check();
+      const lane = this.ready.shift();
+      if (lane === undefined) return;
+      lane.queued = false;
+      // wake() can have queued this lane while its previous HTTP was active.
+      // Eligibility may have changed after that wake, before this dequeue.
+      if (lane.pause !== undefined || lane.cancelTimer !== undefined) continue;
+      if (this.aggregateFailures >= 32) {
+        await this.pause(lane, 'network_error', 'coordinator');
+        continue;
+      }
+      let result: DeliveryAttempt;
+      let woken = false;
+      this.activeLane = lane;
+      this.activeWake = false;
+      try {
+        result = await this.kernel.run(lane.key);
+        woken = this.activeWake;
+      } catch (error: unknown) {
+        if (error instanceof DeliveryAttemptError && error.dispatched) {
+          lane.failures += 1;
+          this.aggregateFailures += 1;
+        }
+        throw error;
+      } finally {
+        delete this.activeLane;
+      }
+      if (this.fence.signal.aborted) return;
+      this.check();
+      this.emit({ kind: 'attempt', lane: lane.key, result });
+      this.check();
+      switch (result.kind) {
+        case 'idle':
+          // Reclaim only genuinely idle healthy lanes. Paused/failed lanes must
+          // retain their history until an explicit epoch renewal.
+          if (woken) this.queue(lane);
+          else if (lane.failures === 0 && !lane.queued)
+            this.lanes.delete(JSON.stringify(lane.key));
+          break;
+        case 'cleanup_complete':
+          this.queue(lane);
+          break;
+        case 'server_acknowledged':
+        case 'acknowledged_cleanup_pending':
+          lane.failures = 0;
+          // Cleanup-pending needs an explicit host wake, avoiding a storage loop.
+          if (result.kind === 'server_acknowledged' || woken) this.queue(lane);
+          break;
+        case 'preparation_storage_failed': {
+          await this.pausePreparation(lane);
+          break;
+        }
+        case 'ack_storage_failed':
+          this.failed(lane);
+          await this.pause(lane, 'ack_storage_failed', 'lane');
+          break;
+        case 'delivery_failed':
+          this.failed(lane);
+          await this.failure(lane, result.failure);
+          break;
+        default: {
+          const exhaustive: never = result;
+          return exhaustive;
+        }
+      }
+    }
+  }
+
+  private failed(lane: Lane): void {
+    lane.failures += 1;
+    this.aggregateFailures += 1;
+    if (this.aggregateFailures >= 32) {
+      for (const waiting of this.lanes.values()) {
+        waiting.cancelTimer?.();
+        delete waiting.cancelTimer;
+        if (waiting !== lane) this.queue(waiting);
+      }
+    }
+  }
+
+  private async capture(lane: Lane): Promise<Action> {
+    this.check(lane.key);
+    const rows = await this.store.lane(lane.key);
+    this.check(lane.key);
+    return { lane, snapshot: JSON.stringify(rows), epoch: this.epoch };
+  }
+
+  private async pausePreparation(lane: Lane): Promise<void> {
+    const selection = Object.freeze<PreparationRetry>({
+      [preparationAction]: true,
+    });
+    const captured = await this.capture(lane);
+    this.retirePause(lane);
+    this.preparations.set(selection, captured);
+    lane.pause = { kind: 'preparation_paused', selection };
+    this.emit({ kind: 'paused', lane: lane.key, pause: lane.pause });
+  }
+
+  private retirePause(lane: Lane): void {
+    if (lane.pause?.kind === 'preparation_paused')
+      this.preparations.delete(lane.pause.selection);
+    if (lane.pause?.kind === 'retry_paused')
+      this.deliveries.delete(lane.pause.selection);
+  }
+
+  private async validateSnapshot(action: Action): Promise<void> {
+    if ((await this.capture(action.lane)).snapshot === action.snapshot) return;
+    const pause = action.lane.pause;
+    // A new enqueue may legitimately stale a complete-lane snapshot. Refresh
+    // only the metadata, then require another deliberate action; no gate or
+    // budget is cleared by this failed selection.
+    if (pause?.kind === 'preparation_paused')
+      await this.pausePreparation(action.lane);
+    if (pause?.kind === 'retry_paused')
+      await this.pause(action.lane, pause.reason, pause.scope);
+    throw new OutboxError('invalid_selection');
+  }
+
+  private async retryLocalPreparation(lane: Lane): Promise<boolean> {
+    this.check(lane.key);
+    const first = (await this.store.lane(lane.key))[0];
+    this.check(lane.key);
+    if (first?.state !== 'unprepared')
+      throw new OutboxError('invalid_selection');
+    try {
+      await this.store.prepare(
+        first,
+        () => this.check(lane.key),
+        this.fence.signal,
+      );
+    } catch (error: unknown) {
+      this.check();
+      if (!(error instanceof OutboxError) || error.code !== 'storage_failed')
+        throw error;
+      await this.pausePreparation(lane);
+      return false;
+    }
+    this.check();
+    return true;
+  }
+
+  private async pause(
+    lane: Lane,
+    reason: DeliveryFailure['reason'] | 'ack_storage_failed',
+    scope: 'lane' | 'coordinator',
+  ): Promise<void> {
+    const selection = Object.freeze<DeliveryResume>({ [deliveryAction]: true });
+    const captured = await this.capture(lane);
+    this.retirePause(lane);
+    this.deliveries.set(selection, captured);
+    lane.pause = { kind: 'retry_paused', reason, scope, selection };
+    this.emit({ kind: 'paused', lane: lane.key, pause: lane.pause });
+  }
+
+  private async failure(lane: Lane, failure: DeliveryFailure): Promise<void> {
+    const retryable =
+      failure.reason === 'network_error' ||
+      failure.reason === 'invalid_response' ||
+      failure.reason === 'rate_limited' ||
+      failure.reason === 'server_error';
+    if (!retryable) {
+      // Access/generation recovery and definitive disposal are not implemented by
+      // this fixed-authority host. No token here may bypass those future gates.
+      if (failure.reason === 'unclassified_error_response') {
+        await this.pause(lane, failure.reason, 'lane');
+      } else {
+        lane.pause = { kind: 'blocked', failure };
+        this.emit({ kind: 'paused', lane: lane.key, pause: lane.pause });
+        if (failure.reason === 'binding_changed') this.close();
+      }
+      return;
+    }
+    if (lane.failures >= 8 || this.aggregateFailures >= 32) {
+      await this.pause(
+        lane,
+        failure.reason,
+        this.aggregateFailures >= 32 ? 'coordinator' : 'lane',
+      );
+      return;
+    }
+    const random = (this.host.random ?? Math.random)();
+    if (!Number.isFinite(random) || random < 0 || random >= 1)
+      throw new OutboxError('owner_not_ready');
+    const retryAfter =
+      'retryAfterSeconds' in failure
+        ? Math.min(failure.retryAfterSeconds ?? 0, 3600) * 1000
+        : 0;
+    const delayMilliseconds = Math.max(
+      retryAfter,
+      Math.min(500 * 2 ** (lane.failures - 1), 30_000) * (0.5 + random / 2),
+    );
+    this.emit({
+      kind: 'delivery_retrying',
+      lane: lane.key,
+      failure,
+      delayMilliseconds,
+      laneRemaining: 8 - lane.failures,
+      aggregateRemaining: 32 - this.aggregateFailures,
+    });
+    this.check();
+    // Install the sentinel first: injected clocks may invoke their callback
+    // synchronously, including while the previous attempt is still unwinding.
+    let fired = false;
+    lane.cancelTimer = () => undefined;
+    const cancel = startTimer(this.clock, delayMilliseconds, () => {
+      fired = true;
+      delete lane.cancelTimer;
+      if (!this.fence.signal.aborted) this.queue(lane);
+    });
+    if (!fired) lane.cancelTimer = cancel;
+  }
+
+  private action<T extends object>(
+    selection: T,
+    tokens: WeakMap<T, Action>,
+    renew: boolean,
+  ): Promise<void> {
+    if (typeof selection !== 'object' || selection === null)
+      return Promise.reject(new OutboxError('invalid_selection'));
+    // Kind validation precedes coalescing: another action cannot borrow an
+    // already pending promise belonging to this same object.
+    if (!tokens.has(selection))
+      return Promise.reject(new OutboxError('invalid_selection'));
+    const pending = this.pending.get(selection);
+    if (pending !== undefined) return pending;
+    const attempt = this.applyAction(selection, tokens, renew).finally(() => {
+      this.pending.delete(selection);
+    });
+    this.pending.set(selection, attempt);
+    return attempt;
+  }
+
+  private async applyAction<T extends object>(
+    selection: T,
+    tokens: WeakMap<T, Action>,
+    renew: boolean,
+  ): Promise<void> {
+    this.check();
+    const action = tokens.get(selection);
+    if (
+      action === undefined ||
+      this.acting ||
+      action.lane.pause === undefined ||
+      action.lane.pause.kind === 'blocked' ||
+      action.lane.pause.selection !== selection ||
+      (renew && action.epoch !== this.epoch)
+    )
+      throw new OutboxError('invalid_selection');
+    this.acting = true;
+    try {
+      await this.activeTask;
+      this.check();
+      if (renew) {
+        try {
+          await this.host.revalidate([...action.lane.key], this.fence.signal);
+        } catch (error: unknown) {
+          // Host exceptions never expose an arbitrary message/cause or body.
+          if (error instanceof ArtifreeApiError)
+            throw new ArtifreeApiError(error.code, {
+              code: error.code,
+              status: error.status,
+              retryAfterSeconds: error.retryAfterSeconds,
+            });
+          throw new OutboxError(
+            error instanceof OutboxError ? error.code : 'owner_not_ready',
+          );
+        }
+      }
+      this.check();
+      await this.validateSnapshot(action);
+      if (renew) {
+        const nextEpoch = this.epoch + 1;
+        const refreshed: RefreshedPause[] = [];
+        for (const lane of this.lanes.values()) {
+          if (
+            lane === action.lane ||
+            lane.pause?.kind !== 'retry_paused' ||
+            lane.pause.scope !== 'lane'
+          )
+            continue;
+          const captured = await this.capture(lane);
+          refreshed.push({
+            lane,
+            pause: lane.pause,
+            selection: Object.freeze<DeliveryResume>({
+              [deliveryAction]: true,
+            }),
+            action: { ...captured, epoch: nextEpoch },
+          });
+        }
+        // All fallible reads finish before changing any token, gate or counter.
+        // The selected lane is checked last; callbacks see the complete epoch.
+        await this.validateSnapshot(action);
+        this.check();
+        tokens.delete(selection);
+        delete action.lane.pause;
+        this.epoch = nextEpoch;
+        this.aggregateFailures = 0;
+        for (const lane of this.lanes.values()) {
+          lane.failures = 0;
+          lane.cancelTimer?.();
+          delete lane.cancelTimer;
+          if (
+            lane.pause?.kind === 'retry_paused' &&
+            lane.pause.scope === 'coordinator'
+          )
+            delete lane.pause;
+        }
+        for (const current of refreshed) {
+          this.deliveries.delete(current.pause.selection);
+          this.deliveries.set(current.selection, current.action);
+          current.lane.pause = {
+            ...current.pause,
+            selection: current.selection,
+          };
+        }
+        for (const lane of this.lanes.values()) {
+          this.queue(lane);
+        }
+        for (const current of refreshed) {
+          this.emit({
+            kind: 'paused',
+            lane: current.lane.key,
+            pause: { ...current.pause, selection: current.selection },
+          });
+        }
+      } else {
+        // Preserve the old gate through preliminary reads and until a terminal
+        // preparation outcome. A failed read cannot silently enable wake().
+        const prepared = await this.retryLocalPreparation(action.lane);
+        tokens.delete(selection);
+        if (prepared) {
+          delete action.lane.pause;
+          this.queue(action.lane);
+        }
+      }
+    } finally {
+      this.acting = false;
+      this.kick();
+    }
+  }
+}
