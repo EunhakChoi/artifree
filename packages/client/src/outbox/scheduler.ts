@@ -97,6 +97,7 @@ export class DeliveryScheduler {
   private readonly clock: Clock;
   private readonly kernel: DeliveryKernel;
   private readonly fence = new AbortController();
+  private readonly publications = new AbortController();
   private readonly lanes = new Map<string, Lane>();
   private readonly ready: Lane[] = [];
   private readonly preparations = new WeakMap<PreparationRetry, Action>();
@@ -149,6 +150,11 @@ export class DeliveryScheduler {
 
   /** Synchronously aborts native requests/transactions and cancels retry timers. */
   close(): void {
+    this.publications.abort();
+    this.stopDelivery();
+  }
+
+  private stopDelivery(): void {
     if (this.fence.signal.aborted) return;
     this.fence.abort();
     for (const lane of this.lanes.values()) lane.cancelTimer?.();
@@ -190,6 +196,11 @@ export class DeliveryScheduler {
 
   private emit(event: SchedulerEvent): void {
     if (this.fence.signal.aborted) return;
+    this.observe(event);
+  }
+
+  private observe(event: SchedulerEvent): boolean {
+    if (this.publications.signal.aborted) return false;
     try {
       // Consumers may be JavaScript or deliberately mutate readonly objects.
       // Never give a callback the state that the pump still needs to classify.
@@ -203,7 +214,10 @@ export class DeliveryScheduler {
         this.host.observe({
           ...event,
           lane: [...event.lane],
-          pause: { ...event.pause },
+          pause:
+            event.pause.kind === 'blocked'
+              ? { ...event.pause, failure: { ...event.pause.failure } }
+              : { ...event.pause },
         });
       } else if (event.kind === 'delivery_retrying') {
         this.host.observe({
@@ -212,9 +226,11 @@ export class DeliveryScheduler {
           failure: { ...event.failure },
         });
       } else this.host.observe(event);
+      return true;
     } catch {
       // A consumer exception must not escape into delivery or leak diagnostics.
       this.close();
+      return false;
     }
   }
 
@@ -279,6 +295,37 @@ export class DeliveryScheduler {
       }
       if (this.fence.signal.aborted) return;
       this.check();
+      if (
+        result.kind === 'delivery_failed' &&
+        result.failure.reason === 'binding_changed'
+      ) {
+        this.failed(lane);
+        const pause: Pause = { kind: 'blocked', failure: result.failure };
+        lane.pause = pause;
+        // Fence the whole captured binding before either external callback.
+        this.stopDelivery();
+        const observations: SchedulerEvent[] = [
+          { kind: 'attempt', lane: lane.key, result },
+          { kind: 'paused', lane: lane.key, pause },
+        ];
+        for (const event of observations) {
+          // This synchronous terminal refusal is the only publication after
+          // our own close. External auth/lock invalidation still suppresses it.
+          if (
+            this.publications.signal.aborted ||
+            this.host.context.signal.aborted
+          )
+            return;
+          try {
+            this.host.context.authorize();
+          } catch {
+            this.close();
+            return;
+          }
+          if (!this.observe(event)) return;
+        }
+        return;
+      }
       this.emit({ kind: 'attempt', lane: lane.key, result });
       this.check();
       switch (result.kind) {
@@ -405,6 +452,10 @@ export class DeliveryScheduler {
   }
 
   private async failure(lane: Lane, failure: DeliveryFailure): Promise<void> {
+    if (failure.reason === 'binding_changed') {
+      this.close();
+      return;
+    }
     const retryable =
       failure.reason === 'network_error' ||
       failure.reason === 'invalid_response' ||
@@ -418,7 +469,6 @@ export class DeliveryScheduler {
       } else {
         lane.pause = { kind: 'blocked', failure };
         this.emit({ kind: 'paused', lane: lane.key, pause: lane.pause });
-        if (failure.reason === 'binding_changed') this.close();
       }
       return;
     }

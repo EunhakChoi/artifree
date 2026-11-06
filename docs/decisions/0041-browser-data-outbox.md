@@ -958,6 +958,10 @@ authority before invalidation or lock release. No public registry creates this
 scheduler. Access and conflict responses stop the affected lane without offering
 a bypass action. A binding-change refusal fences the entire captured scheduler
 before another lane can dispatch; it cannot authorize a new binding or generation.
+Delivery stops before either binding-refusal callback. Only that current bounded
+refusal is reported synchronously under still-current host authority, using
+independent snapshots. External close, authentication abort or an observer
+exception cancels any remaining publication.
 Page-global public integration, bounded recovery
 continuation, generation reauthorization, access recovery, rejected disposal
 and unresolved abandonment remain proposed. The public browser handle remains

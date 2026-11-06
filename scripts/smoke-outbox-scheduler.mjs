@@ -49,6 +49,83 @@ export async function checkOutboxScheduler(harness) {
 
   if (createArtifact === undefined) {
     const selected = process.env.ARTIFREE_SCHEDULER_CASE;
+    if (
+      selected === undefined ||
+      selected === 'binding-observer' ||
+      selected === 'binding-observer-throw'
+    ) {
+      for (const behavior of selected === 'binding-observer-throw'
+        ? ['throw']
+        : ['mutate', 'throw', 'close']) {
+        const page = await fresh('binding_changed');
+        const callbackErrors = [];
+        page.on('pageerror', (error) => callbackErrors.push(error.message));
+        await page.evaluate(async (behavior) => {
+          globalThis.otherLane = [...lane.slice(0, 4), 'art_' + 'c'.repeat(32)];
+          await enqueueLikeHead({
+            key: '2'.repeat(32),
+            lane: otherLane,
+            artifactId: otherLane[4],
+            base: { version: 0 },
+          });
+          globalThis.callbackWakes = [];
+          globalThis.onSchedulerEvent = (event) => {
+            if (event.kind !== 'attempt' && event.kind !== 'paused') return;
+            if (behavior === 'close') scheduler.close();
+            try {
+              scheduler.wake(otherLane);
+              callbackWakes.push('unexpected');
+            } catch (error) {
+              callbackWakes.push(error.code);
+            }
+            if (behavior === 'throw')
+              throw new Error('private observer exception');
+            if (event.kind === 'paused' && event.pause.kind === 'blocked')
+              event.pause.failure.reason = 'network_error';
+          };
+          scheduler.wake(lane);
+          scheduler.wake(otherLane);
+        }, behavior);
+        await page.waitForFunction(() => callbackWakes.length > 0);
+        await page.evaluate(() => storageSnapshot());
+        assert.equal(
+          await page.evaluate(() => {
+            try {
+              scheduler.wake(otherLane);
+              return 'unexpected';
+            } catch (error) {
+              return error.code;
+            }
+          }),
+          'owner_not_ready',
+          'observer mutation or throwing cannot revive binding authority',
+        );
+        const wakes = await page.evaluate(() => callbackWakes);
+        assert(
+          wakes.every((code) => code === 'owner_not_ready'),
+          'binding loss must fence before any external observer can reenter wake',
+        );
+        assert.equal(requests().length, 1);
+        if (behavior === 'close')
+          assert.equal(
+            wakes.length,
+            1,
+            'explicit close in the first refusal callback must cancel later publication',
+          );
+        assert.equal(
+          (await page.evaluate(() => store.lane(otherLane)))[0].state,
+          'unprepared',
+        );
+        assert.equal(
+          await page.evaluate(
+            () => timers.filter((timer) => timer.active).length,
+          ),
+          0,
+        );
+        assert.deepEqual(callbackErrors, []);
+        await close(page);
+      }
+    }
     if (selected === undefined || selected === 'fairness') {
       const page = await fresh('body_hold');
       const arrival = waitRequest();
