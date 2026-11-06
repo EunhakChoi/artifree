@@ -1,5 +1,6 @@
 import { startTimer, systemClock, type Clock } from '../transport.js';
-import { ArtifreeApiError } from '../errors.js';
+import { ArtifreeApiError, type FailureCode } from '../errors.js';
+import { isErrorCode, isRecord } from '../responses.js';
 import {
   DeliveryAttemptError,
   DeliveryKernel,
@@ -40,6 +41,7 @@ type Pause =
         | 'ack_storage_failed'
         | 'aggregate_exhausted';
       readonly scope: 'lane' | 'coordinator';
+      readonly revalidation?: RevalidationFailure;
     }
   | {
       readonly kind: 'cleanup_paused';
@@ -94,6 +96,71 @@ interface RefreshedPause {
   readonly action: Action;
 }
 
+/** Bounded metadata only; excludes raw bodies, causes, messages and destinations. */
+export interface RevalidationFailure {
+  readonly code: FailureCode;
+  readonly status: number;
+  readonly retryAfterSeconds?: number | undefined;
+}
+
+/** A read failure grants no authority; proven identity/auth loss is terminal. */
+export type RevalidationResult =
+  | { readonly kind: 'authorized' }
+  | {
+      readonly kind: 'authority_lost';
+      readonly reason:
+        | 'binding_changed'
+        | 'actor_generation_changed'
+        | 'authentication_invalid';
+    }
+  | { readonly kind: 'read_failed'; readonly failure: RevalidationFailure };
+
+function revalidationResult(value: unknown): RevalidationResult {
+  if (!isRecord(value)) throw new OutboxError('owner_not_ready');
+  if (value.kind === 'authorized' && Object.keys(value).join(',') === 'kind')
+    return { kind: 'authorized' };
+  if (
+    value.kind === 'authority_lost' &&
+    Object.keys(value).sort().join(',') === 'kind,reason' &&
+    (value.reason === 'binding_changed' ||
+      value.reason === 'actor_generation_changed' ||
+      value.reason === 'authentication_invalid')
+  )
+    return { kind: 'authority_lost', reason: value.reason };
+  if (
+    value.kind !== 'read_failed' ||
+    Object.keys(value).sort().join(',') !== 'failure,kind' ||
+    !isRecord(value.failure)
+  )
+    throw new OutboxError('owner_not_ready');
+  const { code, status, retryAfterSeconds } = value.failure;
+  if (
+    typeof code !== 'string' ||
+    (code !== 'network_error' &&
+      code !== 'invalid_response' &&
+      !isErrorCode(code)) ||
+    typeof status !== 'number' ||
+    !Number.isInteger(status) ||
+    (status !== 0 && (status < 100 || status > 599)) ||
+    (retryAfterSeconds !== undefined &&
+      (typeof retryAfterSeconds !== 'number' ||
+        !Number.isFinite(retryAfterSeconds) ||
+        retryAfterSeconds < 0))
+  )
+    throw new OutboxError('owner_not_ready');
+  return {
+    kind: 'read_failed',
+    failure: {
+      code,
+      status,
+      retryAfterSeconds:
+        retryAfterSeconds === undefined
+          ? undefined
+          : Math.min(retryAfterSeconds, 3600),
+    },
+  };
+}
+
 /**
  * A host-only scheduler for a single fixed, already authorized owner/binding.
  * It neither obtains locks nor authorizes recovery, access or actor-generation
@@ -101,8 +168,15 @@ interface RefreshedPause {
  */
 export interface SchedulerHost {
   readonly context: DeliveryContext;
-  /** One fresh binding/access check; throws unless the captured authority still matches. */
-  readonly revalidate: (lane: LaneKey, signal: AbortSignal) => Promise<void>;
+  /**
+   * Exactly one bound read per explicit action; never follows redirects.
+   * Abort context authority synchronously on proven loss or 401 headers, before
+   * waiting for any response body. Unexpected results/exceptions fail closed.
+   */
+  readonly revalidate: (
+    lane: LaneKey,
+    signal: AbortSignal,
+  ) => Promise<RevalidationResult>;
   readonly observe: (event: SchedulerEvent) => void;
   readonly random?: () => number;
 }
@@ -251,7 +325,13 @@ export class DeliveryScheduler {
           pause:
             event.pause.kind === 'blocked'
               ? { ...event.pause, failure: { ...event.pause.failure } }
-              : { ...event.pause },
+              : event.pause.kind === 'retry_paused' &&
+                  event.pause.revalidation !== undefined
+                ? {
+                    ...event.pause,
+                    revalidation: { ...event.pause.revalidation },
+                  }
+                : { ...event.pause },
         });
       } else if (event.kind === 'delivery_retrying') {
         this.host.observe({
@@ -642,19 +722,58 @@ export class DeliveryScheduler {
       await this.activeTask;
       this.check();
       if (kind === 'delivery') {
+        let result: RevalidationResult;
         try {
-          await this.host.revalidate([...action.lane.key], this.fence.signal);
-        } catch (error: unknown) {
-          // Host exceptions never expose an arbitrary message/cause or body.
-          if (error instanceof ArtifreeApiError)
-            throw new ArtifreeApiError(error.code, {
-              code: error.code,
-              status: error.status,
-              retryAfterSeconds: error.retryAfterSeconds,
-            });
-          throw new OutboxError(
-            error instanceof OutboxError ? error.code : 'owner_not_ready',
+          result = revalidationResult(
+            await this.host.revalidate([...action.lane.key], this.fence.signal),
           );
+        } catch {
+          this.close();
+          throw new OutboxError('owner_not_ready');
+        }
+        if (
+          result.kind === 'authority_lost' ||
+          (result.kind === 'read_failed' && result.failure.status === 401)
+        ) {
+          // Fence before any host callback, including a throwing invalidator.
+          this.close();
+          if (
+            (result.kind === 'authority_lost' &&
+              result.reason === 'authentication_invalid') ||
+            result.kind === 'read_failed'
+          ) {
+            try {
+              if (!this.host.context.signal.aborted)
+                this.host.context.invalidateAuthentication();
+            } catch {
+              throw new OutboxError('owner_not_ready');
+            }
+          }
+          if (result.kind === 'authority_lost')
+            throw new OutboxError('owner_not_ready');
+          throw new ArtifreeApiError(result.failure.code, result.failure);
+        }
+        this.check();
+        if (result.kind === 'read_failed') {
+          const pause = action.lane.pause;
+          if (pause?.kind !== 'retry_paused')
+            throw new OutboxError('invalid_selection');
+          const replacement = Object.freeze<DeliveryResume>({
+            [deliveryAction]: true,
+          });
+          tokens.delete(selection);
+          this.deliveries.tokens.set(replacement, action);
+          action.lane.pause = {
+            ...pause,
+            selection: replacement,
+            revalidation: result.failure,
+          };
+          this.emit({
+            kind: 'paused',
+            lane: action.lane.key,
+            pause: action.lane.pause,
+          });
+          throw new ArtifreeApiError(result.failure.code, result.failure);
         }
       }
       this.check();

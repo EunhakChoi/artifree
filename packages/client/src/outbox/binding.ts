@@ -53,11 +53,16 @@ export function normalizeBase(raw: string, origin: string): string {
   }
 }
 
-/** Exactly one bounded authenticated GET. No automatic read retries. */
+/**
+ * One bounded authenticated Fetch invocation, without application read retries.
+ * An optional host observer sees status before any body read, so 401 headers
+ * can synchronously invalidate captured authority even if the body stalls.
+ */
 export async function readBinding(
   base: string,
   accessToken: string,
   signal?: AbortSignal,
+  observeStatus?: (status: number) => void,
 ): Promise<Binding> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
@@ -88,6 +93,7 @@ export async function readBinding(
       retryAfter === undefined
         ? undefined
         : Math.min(retryAfter, RETRY_AFTER_CAP_SECONDS);
+    observeStatus?.(status);
     if (response.body === null) throw failure('invalid_response');
     const reader = new BodyReader(response.body, {
       clock: systemClock,

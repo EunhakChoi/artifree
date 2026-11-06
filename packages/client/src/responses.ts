@@ -137,7 +137,8 @@ function artifactKind(value: unknown): ArtifactKind | undefined {
   return ARTIFACT_KINDS.find((kind) => kind === value);
 }
 
-function isErrorCode(value: string): value is ErrorCode {
+/** Checks a bounded API error-code diagnostic against the wire contract. */
+export function isErrorCode(value: string): value is ErrorCode {
   return Object.hasOwn(ERROR_CODES, value);
 }
 

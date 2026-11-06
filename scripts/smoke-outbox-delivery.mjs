@@ -33,6 +33,10 @@ export async function checkOutboxDelivery(browser, serverApi) {
   });
   let mode = 'normal';
   let status = 409;
+  let bindingMode = 'normal';
+  let bindingReads = 0;
+  let heldBinding;
+  let onBindingArrived;
   let errorBody = {
     error: {
       code: 'data_conflict',
@@ -85,6 +89,62 @@ export async function checkOutboxDelivery(browser, serverApi) {
       return;
     }
     if (request.url === '/v1/data-outbox/binding') {
+      if (bindingMode !== 'normal') {
+        bindingReads += 1;
+        const respond = () => {
+          if (bindingMode === 'network') {
+            response.destroy();
+            return;
+          }
+          if (bindingMode === 'redirect') {
+            response.writeHead(302, { Location: crossOrigin });
+            response.end();
+            return;
+          }
+          const faultStatus = Number.parseInt(bindingMode, 10);
+          if (Number.isFinite(faultStatus)) {
+            response.writeHead(faultStatus, {
+              'Content-Type': 'application/json',
+              'Retry-After': '999999',
+            });
+            response.write(
+              bindingMode.endsWith('malformed') ||
+                bindingMode.endsWith('stalled')
+                ? '{'
+                : JSON.stringify({
+                    error: {
+                      code:
+                        faultStatus === 401
+                          ? 'unauthenticated'
+                          : faultStatus === 403
+                            ? 'forbidden'
+                            : faultStatus === 404
+                              ? 'not_found'
+                              : faultStatus === 429
+                                ? 'rate_limited'
+                                : 'unavailable',
+                      message: 'private metadata fault',
+                    },
+                  }),
+            );
+            if (!bindingMode.endsWith('stalled')) response.end();
+            return;
+          }
+          response.setHeader('Content-Type', 'application/json');
+          response.end(
+            JSON.stringify({
+              actor_id: 'u-' + 'c'.repeat(32),
+              actor_generation: '2',
+              storage_epoch: EPOCH,
+            }),
+          );
+        };
+        if (bindingMode === 'held_mismatch') heldBinding = respond;
+        else respond();
+        onBindingArrived?.();
+        onBindingArrived = undefined;
+        return;
+      }
       if (live !== undefined) {
         forward(request, response, '');
         return;
@@ -379,6 +439,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
           globalThis.events = [];
           globalThis.revalidationCalls = 0;
           globalThis.failRevalidation = false;
+          globalThis.observedBindingStatuses = [];
           globalThis.scheduler = new deliveryApi.DeliveryScheduler(store, {
             context: deliveryContext,
             random: () => 0,
@@ -388,14 +449,48 @@ export async function checkOutboxDelivery(browser, serverApi) {
             },
             revalidate: async (lane, signal) => {
               revalidationCalls += 1;
+              if (globalThis.revalidationOverride !== undefined)
+                return revalidationOverride;
               if (failRevalidation)
-                throw new ArtifreeApiError('network_error', {
-                  code: 'network_error',
-                  status: 0,
-                });
-              const current = await readBinding(location.origin, token, signal);
-              if (JSON.stringify(current) !== JSON.stringify(auth))
-                throw new OutboxError('owner_not_ready');
+                return {
+                  kind: 'read_failed',
+                  failure: { code: 'network_error', status: 0 },
+                };
+              try {
+                const current = await readBinding(
+                  location.origin,
+                  token,
+                  signal,
+                  (status) => {
+                    observedBindingStatuses.push(status);
+                    if (status === 401) invalidateAuthentication();
+                  },
+                );
+                if (JSON.stringify(current) !== JSON.stringify(auth)) {
+                  currentAuthority = Symbol();
+                  stop.abort();
+                  return {
+                    kind: 'authority_lost',
+                    reason:
+                      current.actor_generation !== auth.actor_generation &&
+                      current.actor_id === auth.actor_id
+                        ? 'actor_generation_changed'
+                        : 'binding_changed',
+                  };
+                }
+                return { kind: 'authorized' };
+              } catch (error) {
+                if (error instanceof ArtifreeApiError)
+                  return {
+                    kind: 'read_failed',
+                    failure: {
+                      code: error.code,
+                      status: error.status,
+                      retryAfterSeconds: error.retryAfterSeconds,
+                    },
+                  };
+                throw error;
+              }
             },
           });
         };
@@ -594,6 +689,19 @@ export async function checkOutboxDelivery(browser, serverApi) {
     await checkOutboxScheduler({
       setup,
       close,
+      configureBinding(nextMode) {
+        bindingMode = nextMode;
+        bindingReads = 0;
+      },
+      bindingReadCount: () => bindingReads,
+      waitBinding() {
+        return new Promise((resolve) => {
+          onBindingArrived = resolve;
+        });
+      },
+      releaseBinding() {
+        heldBinding();
+      },
       waitRequest: waiting,
       releaseHeld() {
         held();

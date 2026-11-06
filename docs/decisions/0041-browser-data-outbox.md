@@ -947,7 +947,19 @@ checkpoint while retained capacity allows. No cleanup failure erases that ACK.
 A preparation retry performs one local transaction even when the HTTP budget
 is exhausted, preserves its gate through preliminary read failures and never
 renews the delivery epoch. A delivery resume requires a fresh host binding/access
-check and unchanged retained snapshot. Other lane-pause selections are staged
+check and unchanged retained snapshot. Its typed host result distinguishes a
+successful check, a transient failed read and proven authority loss. A failed
+read retires its selection and synchronously publishes a fresh selection with
+bounded code/status/Retry-After metadata; budgets, epoch and retained snapshot
+stay unchanged. A further read requires that new explicit choice. Pending calls
+of the same kind still share the original promise until settlement. Proven
+binding/generation loss, 401 or an invalid host result permanently fences this
+fixed scheduler. Hosts synchronously revoke captured authority at loss/401
+headers, before any body wait; the internal bound-read status observer makes
+this possible for malformed/stalled bodies. Neither read errors nor host
+exceptions expose body, message, cause, URL or credentials. Full generation
+reauthorization and public access recovery remain proposed.
+Other lane-pause selections are staged
 before renewal; a failed read leaves the old tokens, counters and gates intact.
 Successful renewal commits the complete epoch without asynchronous gaps,
 invalidates old delivery selections and supplies current selections for still

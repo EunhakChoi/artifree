@@ -387,6 +387,56 @@ export async function checkOutboxScheduler(harness) {
         'wake cannot replenish exhausted delivery budget',
       );
       assert.equal(await page.evaluate(() => revalidationCalls), 0);
+      if (cause === 'invalid_response') {
+        await page.evaluate(async () => {
+          failRevalidation = true;
+          globalThis.spentAggregateSelection = aggregateSelection;
+          await scheduler
+            .resumeDelivery(aggregateSelection)
+            .catch(() => undefined);
+          aggregateSelection = events.findLast(
+            (event) => event.kind === 'paused',
+          ).pause.selection;
+          testLanes.forEach((key) => scheduler.wake(key));
+        });
+        await page.evaluate(async () => {
+          globalThis.afterReadLane = [
+            ...lane.slice(0, 4),
+            'art_' + 'f'.repeat(32),
+          ];
+          await enqueueLikeHead({
+            key: 'f'.repeat(32),
+            lane: afterReadLane,
+            artifactId: afterReadLane[4],
+            base: { version: 0 },
+          });
+          scheduler.wake(afterReadLane);
+        });
+        await page.waitForFunction(
+          () =>
+            events.some(
+              (event) =>
+                event.kind === 'paused' && event.lane[4] === afterReadLane[4],
+            ) || events.filter((event) => event.kind === 'attempt').length > 32,
+        );
+        assert.equal(
+          requests().length,
+          32,
+          'failed bound read cannot refill budget for a newly admitted lane',
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.resumeDelivery(spentAggregateSelection).then(
+              () => 'unexpected',
+              (error) => error.code,
+            ),
+          ),
+          'invalid_selection',
+        );
+        await page.evaluate(() => {
+          failRevalidation = false;
+        });
+      }
       setMode('invalid_json');
       await page.evaluate(async () => {
         if (globalThis.restorePut !== undefined) restorePut();
@@ -410,7 +460,10 @@ export async function checkOutboxScheduler(harness) {
         31,
         'explicit resume begins exactly one new bounded epoch',
       );
-      assert.equal(await page.evaluate(() => revalidationCalls), 1);
+      assert.equal(
+        await page.evaluate(() => revalidationCalls),
+        cause === 'invalid_response' ? 2 : 1,
+      );
       assert.equal(
         await page.evaluate(() =>
           scheduler.resumeDelivery(aggregateSelection).then(
@@ -420,6 +473,275 @@ export async function checkOutboxScheduler(harness) {
         ),
         'invalid_selection',
       );
+      await close(page);
+    }
+  }
+
+  if (
+    createArtifact === undefined &&
+    (selected === undefined ||
+      selected === 'revalidation-mismatch' ||
+      selected === 'revalidation-transient')
+  ) {
+    const transientCases = [
+      'network',
+      'redirect',
+      '403',
+      '404',
+      '429',
+      '503',
+      'override_transient',
+    ];
+    const terminalCases = [
+      'held_mismatch',
+      '401',
+      '401malformed',
+      '401stalled',
+      'override_generation',
+      'override_auth',
+      'override_invalid',
+      'override_throw',
+      'override_bad_code',
+      'override_bad_status',
+      'override_bad_retry',
+      'override_null',
+    ];
+    for (const test of selected === 'revalidation-transient'
+      ? transientCases
+      : selected === 'revalidation-mismatch'
+        ? terminalCases
+        : [...terminalCases, ...transientCases]) {
+      harness.configureBinding('normal');
+      const page = await fresh();
+      await page.evaluate(() => {
+        faultPut('intents', 'acknowledged');
+        scheduler.wake(lane);
+      });
+      await waitPause(page);
+      const retained = await page.evaluate(() => storageSnapshot());
+      harness.configureBinding(test.startsWith('override_') ? 'normal' : test);
+      const arrived =
+        test === 'held_mismatch' ? harness.waitBinding() : undefined;
+      await page.evaluate((test) => {
+        restorePut();
+        globalThis.oldReadSelection = selection;
+        globalThis.readPromiseIdentity = [];
+        globalThis.readWrongKinds = [];
+        globalThis.readUnhandled = 0;
+        addEventListener('unhandledrejection', (event) => {
+          event.preventDefault();
+          readUnhandled += 1;
+        });
+        if (test === 'override_generation')
+          globalThis.revalidationOverride = {
+            kind: 'authority_lost',
+            reason: 'actor_generation_changed',
+          };
+        if (test === 'override_auth')
+          globalThis.revalidationOverride = {
+            kind: 'authority_lost',
+            reason: 'authentication_invalid',
+          };
+        if (test === 'override_invalid')
+          globalThis.revalidationOverride = {
+            kind: 'authorized',
+            failure: { status: 401 },
+          };
+        if (test === 'override_transient')
+          globalThis.revalidationOverride = {
+            kind: 'read_failed',
+            failure: {
+              code: 'rate_limited',
+              status: 429,
+              retryAfterSeconds: 999999,
+              body: 'private body',
+              cause: 'private cause',
+            },
+          };
+        if (test === 'override_bad_code')
+          globalThis.revalidationOverride = {
+            kind: 'read_failed',
+            failure: { code: 'private-unknown', status: 503 },
+          };
+        if (test === 'override_bad_status')
+          globalThis.revalidationOverride = {
+            kind: 'read_failed',
+            failure: { code: 'network_error', status: 999 },
+          };
+        if (test === 'override_bad_retry')
+          globalThis.revalidationOverride = {
+            kind: 'read_failed',
+            failure: {
+              code: 'rate_limited',
+              status: 429,
+              retryAfterSeconds: NaN,
+            },
+          };
+        if (test === 'override_null') globalThis.revalidationOverride = null;
+        if (test === 'override_throw')
+          globalThis.revalidationOverride = Object.defineProperty({}, 'kind', {
+            get() {
+              throw makeAuthorityException();
+            },
+          });
+        globalThis.onSchedulerEvent = (event) => {
+          if (event.kind !== 'paused' || event.pause.revalidation === undefined)
+            return;
+          const duplicate = scheduler.resumeDelivery(oldReadSelection);
+          duplicate.catch(() => undefined);
+          readPromiseIdentity.push(duplicate === readAction);
+          readWrongKinds = ['retryPreparation', 'retryCleanup'].map((method) =>
+            scheduler[method](oldReadSelection).then(
+              () => 'unexpected',
+              (error) => error.code,
+            ),
+          );
+        };
+        globalThis.readAction = scheduler.resumeDelivery(selection);
+        globalThis.revalidating = readAction.then(
+          () => ({ code: 'unexpected' }),
+          (error) => ({
+            code: error.code,
+            status: error.status,
+            message: error.message,
+            body: error.body,
+            cause: error.cause,
+          }),
+        );
+      }, test);
+      if (arrived !== undefined) {
+        await arrived;
+        await page.evaluate(async () => {
+          globalThis.otherLane = [...lane.slice(0, 4), 'art_' + 'c'.repeat(32)];
+          await enqueueLikeHead({
+            key: 'c'.repeat(32),
+            lane: otherLane,
+            artifactId: otherLane[4],
+            base: { version: 0 },
+          });
+          scheduler.wake(otherLane);
+        });
+        harness.releaseBinding();
+      }
+      if (test.startsWith('401')) {
+        await page.waitForFunction(() => observedBindingStatuses.includes(401));
+        assert.equal(
+          await page.evaluate(() => locallyAuthenticated),
+          false,
+          '401 headers revoke local auth before any body completion',
+        );
+      }
+      const result = await page.evaluate(() => revalidating);
+      assert.equal(result.body, undefined);
+      assert.equal(result.cause, undefined);
+      assert(
+        !(result.message ?? '').includes('private') &&
+          !(result.message ?? '').includes('http'),
+      );
+      await page.evaluate(() => storageSnapshot());
+      assert.equal(await page.evaluate(() => revalidationCalls), 1);
+      if (terminalCases.includes(test)) {
+        assert.equal(
+          test.startsWith('401') ? result.status : result.code,
+          test.startsWith('401') ? 401 : 'owner_not_ready',
+        );
+        assert.equal(
+          requests().length,
+          1,
+          'terminal revalidation cannot dispatch another mutation',
+        );
+        assert.equal(
+          await page.evaluate(() => {
+            try {
+              scheduler.wake(lane);
+              return 'unexpected';
+            } catch (error) {
+              return error.code;
+            }
+          }),
+          'owner_not_ready',
+        );
+        assert.equal(
+          await page.evaluate(
+            () => timers.filter((timer) => timer.active).length,
+          ),
+          0,
+        );
+        if (test.startsWith('401') || test === 'override_auth')
+          assert.equal(await page.evaluate(() => locallyAuthenticated), false);
+      } else {
+        const expectedCode =
+          test === 'network' || test === 'redirect'
+            ? 'network_error'
+            : test === '403'
+              ? 'forbidden'
+              : test === '404'
+                ? 'not_found'
+                : test === '429' || test === 'override_transient'
+                  ? 'rate_limited'
+                  : 'unavailable';
+        assert.equal(result.code, expectedCode);
+        assert.equal(
+          result.status,
+          test === 'network' || test === 'redirect'
+            ? 0
+            : test === 'override_transient'
+              ? 429
+              : Number(test),
+        );
+        assert.deepEqual(
+          await page.evaluate(() => storageSnapshot()),
+          retained,
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.resumeDelivery(oldReadSelection).then(
+              () => 'unexpected',
+              (error) => error.code,
+            ),
+          ),
+          'invalid_selection',
+        );
+        assert.equal(
+          await page.evaluate(() => revalidationCalls),
+          1,
+          'spent selection cannot issue another bound read',
+        );
+        if (test !== 'network' && !test.startsWith('override_'))
+          assert.equal(harness.bindingReadCount(), 1);
+        assert.deepEqual(await page.evaluate(() => readPromiseIdentity), [
+          true,
+        ]);
+        assert.deepEqual(
+          await page.evaluate(() => Promise.all(readWrongKinds)),
+          ['invalid_selection', 'invalid_selection'],
+        );
+        assert.equal(await page.evaluate(() => readUnhandled), 0);
+        await waitPause(page);
+        assert.equal(
+          await page.evaluate(
+            () =>
+              events.findLast((event) => event.kind === 'paused').pause
+                .revalidation.retryAfterSeconds,
+          ),
+          test === 'network' || test === 'redirect' ? undefined : 3600,
+        );
+        await page.evaluate(() => {
+          onSchedulerEvent = undefined;
+          scheduler.wake(lane);
+        });
+        assert.equal(requests().length, 1);
+        await page.evaluate(() =>
+          scheduler.resumeDelivery(selection).catch(() => undefined),
+        );
+        assert.equal(
+          await page.evaluate(() => revalidationCalls),
+          2,
+          'fresh explicit action permits one further read',
+        );
+        assert.equal(requests().length, 1);
+      }
+      harness.configureBinding('normal');
       await close(page);
     }
   }
@@ -1156,6 +1478,7 @@ export async function checkOutboxScheduler(harness) {
     'network_error',
   );
   assert.equal(requests().length, 8);
+  await waitPause(page);
   configure('normal');
   await page.evaluate(async () => {
     failRevalidation = false;
