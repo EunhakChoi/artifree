@@ -812,8 +812,9 @@ export class LocalStore {
     );
   }
 
-  recover(binding: BindingKey): Promise<IntentRow[]> {
-    return this.readRange(IDBKeyRange.only(binding));
+  /** Scan one bound owner; cancellation also aborts the native transaction. */
+  recover(binding: BindingKey, signal?: AbortSignal): Promise<IntentRow[]> {
+    return this.readRange(IDBKeyRange.only(binding), signal);
   }
 
   async cleanupTargets(
@@ -838,38 +839,46 @@ export class LocalStore {
     return [...targets.values()];
   }
 
-  private readRange(range: IDBKeyRange): Promise<IntentRow[]> {
-    return transaction(this.database, 'readonly', async (tx) => {
-      await usage(tx);
-      const index = tx.objectStore('intents').index('binding');
-      const rows: IntentRow[] = [];
-      // The key cursor enumerates only this binding; each payload page is bounded.
-      let cursor = await request(index.openKeyCursor(range));
-      const lanes = new Map<string, LaneKey>();
-      while (cursor !== null) {
-        const value: unknown = await request(
-          tx.objectStore('intents').get(cursor.primaryKey),
-        );
-        const row = decodeRow(value);
-        if (rows.some((previous) => previous.key === row.key))
-          throw new OutboxError('storage_corrupt');
-        lanes.set(JSON.stringify(row.lane), row.lane);
-        rows.push(row);
-        if (rows.length > MAX_ROWS) throw new OutboxError('storage_corrupt');
-        cursor = await new Promise((resolve, reject) => {
-          cursor?.continue();
-          const pending = cursor?.request;
-          if (pending === undefined) {
-            reject(new OutboxError('storage_failed'));
-            return;
-          }
-          pending.onsuccess = () => resolve(pending.result);
-          pending.onerror = () => reject(new OutboxError('storage_failed'));
-        });
-      }
-      for (const lane of lanes.values()) await laneRows(tx, lane);
-      return rows;
-    });
+  private readRange(
+    range: IDBKeyRange,
+    signal?: AbortSignal,
+  ): Promise<IntentRow[]> {
+    return transaction(
+      this.database,
+      'readonly',
+      async (tx) => {
+        await usage(tx);
+        const index = tx.objectStore('intents').index('binding');
+        const rows: IntentRow[] = [];
+        // The key cursor enumerates only this binding; each payload page is bounded.
+        let cursor = await request(index.openKeyCursor(range));
+        const lanes = new Map<string, LaneKey>();
+        while (cursor !== null) {
+          const value: unknown = await request(
+            tx.objectStore('intents').get(cursor.primaryKey),
+          );
+          const row = decodeRow(value);
+          if (rows.some((previous) => previous.key === row.key))
+            throw new OutboxError('storage_corrupt');
+          lanes.set(JSON.stringify(row.lane), row.lane);
+          rows.push(row);
+          if (rows.length > MAX_ROWS) throw new OutboxError('storage_corrupt');
+          cursor = await new Promise((resolve, reject) => {
+            cursor?.continue();
+            const pending = cursor?.request;
+            if (pending === undefined) {
+              reject(new OutboxError('storage_failed'));
+              return;
+            }
+            pending.onsuccess = () => resolve(pending.result);
+            pending.onerror = () => reject(new OutboxError('storage_failed'));
+          });
+        }
+        for (const lane of lanes.values()) await laneRows(tx, lane);
+        return rows;
+      },
+      signal,
+    );
   }
 
   enqueue(

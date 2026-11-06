@@ -8,12 +8,14 @@ import {
   type DeliveryContext,
   type DeliveryFailure,
 } from './delivery.js';
-import type { LaneKey, LocalStore } from './store.js';
+import type { IntentRow, LaneKey, LocalStore } from './store.js';
 import { OutboxError } from './types.js';
 
 const preparationAction = Symbol();
 const deliveryAction = Symbol();
 const cleanupAction = Symbol();
+const reconciliation = Symbol();
+const MAX_LANES = 256;
 
 /** Internal one-action token; cannot authorize HTTP or renew a delivery epoch. */
 export interface PreparationRetry {
@@ -66,12 +68,18 @@ export type SchedulerEvent =
       readonly aggregateRemaining: number;
     }
   | { readonly kind: 'paused'; readonly lane: LaneKey; readonly pause: Pause }
+  | {
+      readonly kind: 'reconciled';
+      readonly queued: number;
+      readonly pending: boolean;
+    }
   | { readonly kind: 'stopped'; readonly code: 'owner_not_ready' };
 
 interface Lane {
   readonly key: LaneKey;
   failures: number;
   queued: boolean;
+  wakeMark: object;
   pause?: Pause;
   cancelTimer?: () => void;
 }
@@ -193,7 +201,7 @@ export class DeliveryScheduler {
   private readonly fence = new AbortController();
   private readonly publications = new AbortController();
   private readonly lanes = new Map<string, Lane>();
-  private readonly ready: Lane[] = [];
+  private readonly ready: Array<Lane | typeof reconciliation> = [];
   private readonly preparations: Actions<PreparationRetry> = {
     tokens: new WeakMap(),
     pending: new WeakMap(),
@@ -213,6 +221,10 @@ export class DeliveryScheduler {
   private activeLane?: Lane;
   private activeWake = false;
   private acting = false;
+  private reconciliationQueued = false;
+  private reconciling = false;
+  private reconcileAgain = false;
+  private capacityWaiting = false;
 
   constructor(store: LocalStore, host: SchedulerHost) {
     this.store = store;
@@ -243,11 +255,16 @@ export class DeliveryScheduler {
     const id = JSON.stringify(key);
     let lane = this.lanes.get(id);
     if (lane === undefined) {
-      // The native store admits at most 256 rows across the entire origin.
-      if (this.lanes.size >= 256) throw new OutboxError('owner_not_ready');
-      lane = { key: [...key], failures: 0, queued: false };
+      if (this.lanes.size >= MAX_LANES) {
+        // Keys are hints, not proof of persistence. One marker cannot be filled
+        // by stale/nonexistent keys and will discover only scoped durable rows.
+        this.requestReconciliation();
+        return;
+      }
+      lane = { key: [...key], failures: 0, queued: false, wakeMark: {} };
       this.lanes.set(id, lane);
     }
+    lane.wakeMark = {};
     this.queue(lane);
   }
 
@@ -262,6 +279,9 @@ export class DeliveryScheduler {
     this.fence.abort();
     for (const lane of this.lanes.values()) lane.cancelTimer?.();
     this.ready.length = 0;
+    this.reconciliationQueued = false;
+    this.reconcileAgain = false;
+    this.capacityWaiting = false;
   }
 
   /** One deliberate local preparation attempt; does not revalidate or refill budgets. */
@@ -349,6 +369,7 @@ export class DeliveryScheduler {
   }
 
   private queue(lane: Lane): void {
+    if (this.lanes.get(JSON.stringify(lane.key)) !== lane) return;
     if (lane === this.activeLane) {
       this.activeWake = true;
       return;
@@ -362,6 +383,113 @@ export class DeliveryScheduler {
     lane.queued = true;
     this.ready.push(lane);
     this.kick();
+  }
+
+  private requestReconciliation(): void {
+    if (this.fence.signal.aborted) return;
+    if (this.reconciling) {
+      this.reconcileAgain = true;
+      return;
+    }
+    if (this.reconciliationQueued) return;
+    this.reconciliationQueued = true;
+    this.ready.push(reconciliation);
+    this.kick();
+  }
+
+  private retireIdle(lane: Lane): void {
+    const id = JSON.stringify(lane.key);
+    if (this.lanes.get(id) !== lane) return;
+    this.lanes.delete(id);
+    if (this.capacityWaiting) this.requestReconciliation();
+  }
+
+  private async reconcile(): Promise<void> {
+    this.reconciliationQueued = false;
+    this.reconciling = true;
+    this.reconcileAgain = false;
+    try {
+      this.check();
+      const eligible = [...this.lanes.values()]
+        .filter(
+          (lane) =>
+            lane.failures === 0 &&
+            lane.pause === undefined &&
+            lane.cancelTimer === undefined,
+        )
+        .map((lane) => ({ lane, mark: lane.wakeMark }));
+      const context = this.host.context;
+      const rows = await this.store.recover(
+        [
+          context.owner,
+          context.base,
+          context.binding.actor_id,
+          context.binding.storage_epoch,
+        ],
+        this.fence.signal,
+      );
+      this.check();
+      if (rows.length > MAX_LANES) throw new OutboxError('storage_corrupt');
+      const heads = new Map<string, IntentRow>();
+      for (const row of rows) {
+        this.check(row.lane);
+        if (row.authorizedGeneration !== context.binding.actor_generation)
+          throw new OutboxError('owner_not_ready');
+        const id = JSON.stringify(row.lane);
+        const prior = heads.get(id);
+        if (prior === undefined || prior.sequence > row.sequence)
+          heads.set(id, row);
+      }
+      const ordered = [...heads.values()].sort(
+        (left, right) => left.sequence - right.sequence,
+      );
+      this.check();
+      // No state changes precede fallible reads/validation. A wake during the
+      // snapshot protects its lane even if that snapshot still showed no row.
+      for (const { lane, mark } of eligible) {
+        const id = JSON.stringify(lane.key);
+        if (
+          !heads.has(id) &&
+          this.lanes.get(id) === lane &&
+          lane.wakeMark === mark &&
+          lane.failures === 0 &&
+          lane.pause === undefined &&
+          lane.cancelTimer === undefined
+        ) {
+          this.lanes.delete(id);
+          lane.queued = false;
+        }
+      }
+      const scheduled: Lane[] = [];
+      this.capacityWaiting = false;
+      for (const head of ordered) {
+        const id = JSON.stringify(head.lane);
+        if (this.lanes.has(id)) continue;
+        if (this.lanes.size >= MAX_LANES) {
+          this.capacityWaiting = true;
+          continue;
+        }
+        const lane: Lane = {
+          key: [...head.lane],
+          failures: 0,
+          queued: true,
+          wakeMark: {},
+        };
+        this.lanes.set(id, lane);
+        scheduled.push(lane);
+      }
+      // These heads occupy the first overflow hint's FIFO position. Existing
+      // queued work before the marker has already had its round-robin turn.
+      this.ready.unshift(...scheduled);
+      this.emit({
+        kind: 'reconciled',
+        queued: scheduled.length,
+        pending: this.capacityWaiting || this.reconcileAgain,
+      });
+    } finally {
+      this.reconciling = false;
+    }
+    if (this.reconcileAgain) this.requestReconciliation();
   }
 
   private kick(): void {
@@ -383,7 +511,12 @@ export class DeliveryScheduler {
       this.check();
       const lane = this.ready.shift();
       if (lane === undefined) return;
+      if (lane === reconciliation) {
+        await this.reconcile();
+        continue;
+      }
       lane.queued = false;
+      if (this.lanes.get(JSON.stringify(lane.key)) !== lane) continue;
       // wake() can have queued this lane while its previous HTTP was active.
       // Eligibility may have changed after that wake, before this dequeue.
       if (lane.pause !== undefined || lane.cancelTimer !== undefined) continue;
@@ -447,8 +580,7 @@ export class DeliveryScheduler {
           // Reclaim only genuinely idle healthy lanes. Paused/failed lanes must
           // retain their history until an explicit epoch renewal.
           if (woken) this.queue(lane);
-          else if (lane.failures === 0 && !lane.queued)
-            this.lanes.delete(JSON.stringify(lane.key));
+          else if (lane.failures === 0 && !lane.queued) this.retireIdle(lane);
           break;
         case 'cleanup_complete':
           this.queue(lane);
@@ -606,7 +738,7 @@ export class DeliveryScheduler {
     ) {
       // A completed trim can leave no work despite a globally exhausted epoch.
       // Reclaim only a proven healthy idle lane; a concurrent wake stays queued.
-      if (!lane.queued) this.lanes.delete(JSON.stringify(lane.key));
+      if (!lane.queued) this.retireIdle(lane);
       return;
     }
     this.retirePause(lane);

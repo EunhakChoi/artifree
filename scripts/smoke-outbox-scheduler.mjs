@@ -50,6 +50,622 @@ export async function checkOutboxScheduler(harness) {
   const selected = process.env.ARTIFREE_SCHEDULER_CASE;
   if (
     createArtifact === undefined &&
+    (selected === undefined || selected === 'capacity-retained-gates')
+  ) {
+    const page = await fresh();
+    await page.evaluate(async () => {
+      globalThis.retainedGates = [[...lane]];
+      for (let index = 1; index < 256; index += 1) {
+        const key = [
+          ...lane.slice(0, 4),
+          'art_' + index.toString(16).padStart(32, '0'),
+        ];
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: key,
+          artifactId: key[4],
+          base: { version: 0 },
+        });
+        retainedGates.push(key);
+      }
+      faultPut('intents', 'prepared');
+      retainedGates.forEach((key) => scheduler.wake(key));
+    });
+    await page.waitForFunction(
+      () => events.filter((event) => event.kind === 'paused').length === 256,
+    );
+    await page.evaluate(async () => {
+      restorePut();
+      for (const key of retainedGates)
+        await store.discard(await store.lane(key), authorize, stop.signal);
+      globalThis.emptyAfterDisposal = await storageSnapshot();
+      const key = [...lane.slice(0, 4), 'art_' + '9'.repeat(32)];
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: key,
+        artifactId: key[4],
+        base: { version: 0 },
+      });
+      globalThis.retainedBeforeScan = await storageSnapshot();
+      scheduler.wake(key);
+    });
+    await page.waitForFunction(() =>
+      events.some((event) => event.kind === 'reconciled'),
+    );
+    assert.equal(
+      (await page.evaluate(() => emptyAfterDisposal)).rows.length,
+      0,
+      'explicit low-level discard can remove all durable rows without retiring gates',
+    );
+    assert.deepEqual(
+      await page.evaluate(() => storageSnapshot()),
+      await page.evaluate(() => retainedBeforeScan),
+    );
+    assert.deepEqual(
+      await page.evaluate(() =>
+        events.findLast((event) => event.kind === 'reconciled'),
+      ),
+      { kind: 'reconciled', queued: 0, pending: true },
+      'retained gates require future explicit disposal integration; no automatic retirement',
+    );
+    assert.equal(requests().length, 0);
+    assert.equal(await page.evaluate(() => revalidationCalls), 0);
+    assert.equal(
+      await page.evaluate(() => timers.filter((timer) => timer.active).length),
+      0,
+      'capacity waiting must not create an automatic retry loop',
+    );
+    await close(page);
+  }
+  if (selected === undefined || selected === 'capacity-wake-race') {
+    const modes =
+      createArtifact === undefined
+        ? [
+            'plain',
+            'phantoms',
+            'during-scan',
+            'same-lane',
+            'empty-pause',
+            'fairness',
+            'scan-failure',
+            'scan-abort',
+          ]
+        : ['plain'];
+    for (const mode of process.env.ARTIFREE_CAPACITY_MODE === undefined
+      ? modes
+      : modes.filter((value) => value === process.env.ARTIFREE_CAPACITY_MODE)) {
+      configure('normal');
+      const afterArtifact = createArtifact
+        ? await createArtifact()
+        : 'art_' + '9'.repeat(32);
+      const page = await fresh();
+      const prepCount = mode === 'fairness' ? 254 : 255;
+      await page.evaluate(async (prepCount) => {
+        globalThis.retainedPrepLanes = [];
+        if (prepCount === 254)
+          await enqueueLikeHead({
+            key: crypto.randomUUID().replaceAll('-', ''),
+            text: '{"successor":true}',
+            base: { after: head.sequence },
+          });
+        for (let index = 1; index <= prepCount; index += 1) {
+          const key = [
+            ...lane.slice(0, 4),
+            'art_' + index.toString(16).padStart(32, '0'),
+          ];
+          await enqueueLikeHead({
+            key: crypto.randomUUID().replaceAll('-', ''),
+            lane: key,
+            artifactId: key[4],
+            base: { version: 0 },
+          });
+          retainedPrepLanes.push(key);
+        }
+        faultPut('intents', 'prepared');
+        retainedPrepLanes.forEach((key) => scheduler.wake(key));
+      }, prepCount);
+      await page.waitForFunction(
+        (count) =>
+          events.filter(
+            (event) =>
+              event.kind === 'paused' &&
+              event.pause.kind === 'preparation_paused',
+          ).length === count,
+        prepCount,
+      );
+      await page.evaluate(
+        async ({ mode, afterArtifact }) => {
+          restorePut();
+          if (mode === 'empty-pause')
+            await store.discard(
+              await store.lane(retainedPrepLanes[0]),
+              authorize,
+              stop.signal,
+            );
+          globalThis.afterAckLane =
+            mode === 'same-lane'
+              ? [...lane]
+              : [...lane.slice(0, 4), afterArtifact];
+          globalThis.scanReads = 0;
+          globalThis.capacityTrace = [];
+          globalThis.publishedScans = 0;
+          globalThis.scanAborts = 0;
+          globalThis.snapshotHeld = false;
+          globalThis.nativeRecover = store.recover.bind(store);
+          globalThis.snapshotGate = new Promise((resolve) => {
+            globalThis.releaseSnapshot = resolve;
+          });
+          globalThis.trimGate = new Promise((resolve) => {
+            globalThis.releaseTrim = resolve;
+          });
+          globalThis.trimHeld = false;
+          if (mode === 'fairness') {
+            const trim = store.trim.bind(store);
+            store.trim = async (...args) => {
+              const result = await trim(...args);
+              if (!trimHeld && args[0][0].lane[4] === lane[4]) {
+                trimHeld = true;
+                await trimGate;
+              }
+              return result;
+            };
+          }
+          store.recover = async (...args) => {
+            scanReads += 1;
+            const first = scanReads === 1;
+            const readId = scanReads;
+            if (first && (mode === 'scan-failure' || mode === 'scan-abort')) {
+              // Capture every row, checkpoint and quota counter before the
+              // actual faulted native transaction; a failed scan is read-only.
+              globalThis.beforeScanFault = await storageSnapshot();
+              const transact = IDBDatabase.prototype.transaction;
+              const abort = IDBTransaction.prototype.abort;
+              IDBTransaction.prototype.abort = function (...values) {
+                if (this.mode === 'readonly') scanAborts += 1;
+                return abort.apply(this, values);
+              };
+              if (mode === 'scan-failure')
+                IDBDatabase.prototype.transaction = function (...values) {
+                  const tx = transact.apply(this, values);
+                  if (values[1] === 'readonly') tx.abort();
+                  return tx;
+                };
+              try {
+                globalThis.scanSignal = args[1];
+                const pending = nativeRecover(...args);
+                if (mode === 'scan-abort') stop.abort();
+                return pending;
+              } finally {
+                IDBDatabase.prototype.transaction = transact;
+                IDBTransaction.prototype.abort = abort;
+              }
+            }
+            return nativeRecover(...args).then(async (rows) => {
+              if (mode === 'empty-pause')
+                capacityTrace.push('capture-' + readId);
+              if (first && (mode === 'during-scan' || mode === 'same-lane')) {
+                snapshotHeld = true;
+                await snapshotGate;
+              }
+              return rows;
+            });
+          };
+          let triggered = false;
+          globalThis.onSchedulerEvent = (event) => {
+            if (mode === 'empty-pause') {
+              if (event.kind === 'reconciled') {
+                publishedScans += 1;
+                capacityTrace.push('publish-' + publishedScans);
+              }
+              if (
+                event.kind === 'attempt' &&
+                event.result.kind === 'server_acknowledged'
+              ) {
+                if (event.lane[4] === afterAckLane[4])
+                  capacityTrace.push('ack-target');
+                if (event.lane[4] === globalThis.pauseProbeLane?.[4])
+                  capacityTrace.push('probe-ack');
+              }
+            }
+            if (
+              triggered ||
+              event.kind !== 'attempt' ||
+              event.result.kind !== 'server_acknowledged' ||
+              event.lane[4] !== lane[4]
+            )
+              return;
+            triggered = true;
+            if (mode === 'fairness') return;
+            if (mode === 'during-scan' || mode === 'same-lane') {
+              scheduler.wake([...lane.slice(0, 4), 'art_' + '8'.repeat(32)]);
+              return;
+            }
+            globalThis.capacityWake = (async () => {
+              try {
+                if (mode === 'empty-pause')
+                  scheduler.wake([
+                    ...lane.slice(0, 4),
+                    'art_' + '8'.repeat(32),
+                  ]);
+                if (mode === 'phantoms')
+                  for (let index = 1000; index < 2024; index += 1)
+                    scheduler.wake([
+                      ...lane.slice(0, 4),
+                      'art_' + index.toString(16).padStart(32, '0'),
+                    ]);
+                await enqueueLikeHead({
+                  key: crypto.randomUUID().replaceAll('-', ''),
+                  lane: afterAckLane,
+                  artifactId: afterAckLane[4],
+                  base: { version: 0 },
+                });
+                globalThis.afterAckAdmitted = true;
+                scheduler.wake(afterAckLane);
+                return 'accepted';
+              } catch (error) {
+                return error.code;
+              }
+            })();
+          };
+          scheduler.wake(lane);
+        },
+        { mode, afterArtifact },
+      );
+      if (mode === 'during-scan' || mode === 'same-lane') {
+        await page.waitForFunction(() => snapshotHeld);
+        await page.evaluate(async (mode) => {
+          await enqueueLikeHead({
+            key: crypto.randomUUID().replaceAll('-', ''),
+            lane: afterAckLane,
+            artifactId: afterAckLane[4],
+            text: '{"after":true}',
+            base: { version: mode === 'same-lane' ? 1 : 0 },
+          });
+          globalThis.afterAckAdmitted = true;
+          scheduler.wake(afterAckLane);
+          scheduler.wake(lane);
+          globalThis.capacityWake = Promise.resolve('accepted');
+          releaseSnapshot();
+        }, mode);
+      }
+      if (mode === 'fairness') {
+        await page.waitForFunction(() => trimHeld);
+        await page.evaluate(async () => {
+          scheduler.wake([...lane.slice(0, 4), 'art_' + '8'.repeat(32)]);
+          await enqueueLikeHead({
+            key: crypto.randomUUID().replaceAll('-', ''),
+            lane: afterAckLane,
+            artifactId: afterAckLane[4],
+            base: { version: 0 },
+          });
+          globalThis.afterAckAdmitted = true;
+          scheduler.wake(afterAckLane);
+          scheduler.wake(lane);
+          globalThis.capacityWake = Promise.resolve('accepted');
+          releaseTrim();
+        });
+      }
+      await page.waitForFunction(() => globalThis.capacityWake !== undefined);
+      const capacityResult = await page.evaluate(() => capacityWake);
+      assert.equal(await page.evaluate(() => afterAckAdmitted), true);
+      assert.equal(
+        capacityResult,
+        'accepted',
+        'durable admission after trim must retain its wake before idle metadata retires',
+      );
+      if (mode === 'scan-failure') {
+        await page.waitForFunction(() =>
+          events.some(
+            (event) => event.kind === 'stopped' || event.kind === 'reconciled',
+          ),
+        );
+      } else if (mode === 'scan-abort') {
+        await page.waitForFunction(() => scanReads > 0);
+        assert.equal(await page.evaluate(() => scanSignal?.aborted), true);
+      }
+      if (mode === 'scan-failure' || mode === 'scan-abort') {
+        assert.deepEqual(
+          await page.evaluate(() => storageSnapshot()),
+          await page.evaluate(() => beforeScanFault),
+          'failed/aborted reconciliation preserves all rows, checkpoints and quota accounting',
+        );
+        assert.equal(
+          await page.evaluate(() => scanAborts),
+          1,
+          'the native readonly scan transaction must be aborted',
+        );
+        assert.equal(
+          await page.evaluate(() => {
+            try {
+              scheduler.wake(afterAckLane);
+              return 'unexpected';
+            } catch (error) {
+              return error.code;
+            }
+          }),
+          'owner_not_ready',
+        );
+        assert.equal(
+          (await page.evaluate(() => store.lane(afterAckLane)))[0].state,
+          'unprepared',
+        );
+        assert.equal(requests().length, 1);
+        assert.equal(
+          await page.evaluate(
+            () => events.filter((event) => event.kind === 'reconciled').length,
+          ),
+          0,
+        );
+      } else {
+        if (mode === 'phantoms') {
+          await page.waitForFunction(() =>
+            events.some(
+              (event) =>
+                event.kind === 'reconciled' ||
+                (event.kind === 'attempt' &&
+                  event.result.kind === 'idle' &&
+                  event.lane[4] === lane[4]),
+            ),
+          );
+          assert.equal(
+            await page.evaluate(
+              () => events.find((event) => event.kind === 'reconciled')?.queued,
+            ),
+            1,
+            'phantom hints cannot displace the one durable lane',
+          );
+        }
+        if (mode === 'during-scan') {
+          await page.waitForFunction(() =>
+            events.some((event) => event.kind === 'reconciled'),
+          );
+          assert.equal(
+            await page.evaluate(
+              () => events.find((event) => event.kind === 'reconciled').pending,
+            ),
+            true,
+            'a wake after the snapshot requires another scan',
+          );
+        }
+        if (mode === 'same-lane') {
+          await page.waitForFunction(() =>
+            events.some((event) => event.kind === 'reconciled'),
+          );
+          await page.evaluate(() => {
+            globalThis.probeLane = retainedPrepLanes[0];
+            const choice = events.find(
+              (event) =>
+                event.kind === 'paused' && event.lane[4] === probeLane[4],
+            ).pause.selection;
+            return scheduler.retryPreparation(choice);
+          });
+          await page.waitForFunction(() =>
+            events.some(
+              (event) =>
+                event.kind === 'attempt' &&
+                event.result.kind === 'server_acknowledged' &&
+                event.lane[4] === probeLane[4],
+            ),
+          );
+          assert.equal(
+            requests().length,
+            3,
+            'a same-lane wake after the snapshot must run before the later explicit probe',
+          );
+          assert.equal(
+            requests()[1].url.includes(await page.evaluate(() => lane[4])),
+            true,
+          );
+        } else {
+          await page.waitForFunction(() =>
+            events.some(
+              (event) =>
+                event.kind === 'attempt' &&
+                event.result.kind === 'server_acknowledged' &&
+                event.lane[4] === afterAckLane[4],
+            ),
+          );
+          if (mode === 'fairness')
+            await page.waitForFunction(
+              () =>
+                events.filter(
+                  (event) =>
+                    event.kind === 'attempt' &&
+                    event.result.kind === 'server_acknowledged',
+                ).length === 3,
+            );
+          assert.equal(requests().length, mode === 'fairness' ? 3 : 2);
+          if (mode === 'fairness')
+            assert.deepEqual(
+              requests().map((request) => request.url.split('/')[3]),
+              await page.evaluate(() => [lane[4], afterAckLane[4], lane[4]]),
+            );
+        }
+        assert.equal(await page.evaluate(() => scanReads >= 1), true);
+        if (mode === 'phantoms')
+          assert.equal(
+            await page.evaluate(() => scanReads <= 2),
+            true,
+            '1024 phantom keys coalesce into at most an initial and follow-up scan',
+          );
+        if (mode === 'empty-pause') {
+          await page.evaluate(async () => {
+            const key = retainedPrepLanes[0];
+            await enqueueLikeHead({
+              key: crypto.randomUUID().replaceAll('-', ''),
+              lane: key,
+              artifactId: key[4],
+              base: { version: 0 },
+            });
+            capacityTrace.push('admitted');
+            scheduler.wake(key);
+            globalThis.pauseProbeLane = retainedPrepLanes[1];
+            const choice = events.find(
+              (event) =>
+                event.kind === 'paused' && event.lane[4] === pauseProbeLane[4],
+            ).pause.selection;
+            return scheduler.retryPreparation(choice);
+          });
+          await page.waitForFunction(() =>
+            events.some(
+              (event) =>
+                event.kind === 'attempt' &&
+                event.result.kind === 'server_acknowledged' &&
+                event.lane[4] === pauseProbeLane[4],
+            ),
+          );
+          const trace = await page.evaluate(() => capacityTrace);
+          assert.deepEqual(trace.slice(0, 3), [
+            'capture-1',
+            'publish-1',
+            'ack-target',
+          ]);
+          assert.equal(trace.at(-1), 'probe-ack');
+          assert.equal(trace.indexOf('admitted') > 2, true);
+          for (
+            let read = 1;
+            read <= (await page.evaluate(() => publishedScans));
+            read += 1
+          ) {
+            assert.equal(
+              trace.indexOf('capture-' + read) <
+                trace.indexOf('publish-' + read),
+              true,
+            );
+            assert.equal(
+              trace.indexOf('publish-' + read) < trace.indexOf('admitted'),
+              true,
+            );
+          }
+          console.log('capacity empty-pause observed order:', trace.join(','));
+          assert.equal(
+            requests().length,
+            3,
+            'an empty preparation pause must survive reconciliation and a later admission',
+          );
+          const pausedArtifact = await page.evaluate(
+            () => retainedPrepLanes[0][4],
+          );
+          assert.equal(
+            requests().some((request) => request.url.includes(pausedArtifact)),
+            false,
+          );
+        }
+      }
+      assert.equal(
+        await page.evaluate(
+          () =>
+            events.filter(
+              (event) =>
+                event.kind === 'paused' &&
+                event.pause.kind === 'preparation_paused',
+            ).length,
+        ),
+        prepCount,
+      );
+      assert.equal(await page.evaluate(() => revalidationCalls), 0);
+      await close(page);
+    }
+  }
+
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'capacity-reconcile-budget')
+  ) {
+    for (const failures of [31, 32]) {
+      const page = await fresh('invalid_json');
+      await page.evaluate(async () => {
+        for (const character of ['b', 'c', 'd', 'e']) {
+          const key = [...lane.slice(0, 4), 'art_' + character.repeat(32)];
+          await enqueueLikeHead({
+            key: crypto.randomUUID().replaceAll('-', ''),
+            lane: key,
+            artifactId: key[4],
+            base: { version: 0 },
+          });
+          scheduler.wake(key);
+        }
+        scheduler.wake(lane);
+      });
+      for (let count = 5; count <= 30; count += 5) {
+        await page.waitForFunction(
+          (count) =>
+            events.filter((event) => event.kind === 'delivery_retrying')
+              .length === count,
+          count,
+        );
+        if (count < 30) await fireRetries(page);
+      }
+      for (let count = 31; count <= failures; count += 1) {
+        await page.evaluate(() => {
+          const timer = timers.find(
+            (timer) => timer.active && timer.milliseconds < 15000,
+          );
+          if (timer === undefined) throw new Error('missing eligible retry');
+          timer.active = false;
+          timer.callback();
+        });
+        await page.waitForFunction(
+          (count) =>
+            events.filter(
+              (event) =>
+                event.kind === 'attempt' &&
+                event.result.kind === 'delivery_failed',
+            ).length === count,
+          count,
+        );
+        await page.evaluate(() => storageSnapshot());
+      }
+      await page.evaluate(async () => {
+        globalThis.budgetLane = [...lane.slice(0, 4), 'art_' + '9'.repeat(32)];
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: budgetLane,
+          artifactId: budgetLane[4],
+          base: { version: 0 },
+        });
+        for (let index = 1000; index < 1251; index += 1)
+          scheduler.wake([
+            ...lane.slice(0, 4),
+            'art_' + index.toString(16).padStart(32, '0'),
+          ]);
+        scheduler.wake(budgetLane);
+      });
+      await page.waitForFunction(() =>
+        events.some(
+          (event) =>
+            event.lane?.[4] === budgetLane[4] &&
+            (event.kind === 'paused' || event.kind === 'delivery_retrying'),
+        ),
+      );
+      assert.equal(
+        requests().length,
+        32,
+        'reconciliation must neither consume nor replenish mutation attempts',
+      );
+      assert.equal(
+        await page.evaluate(
+          () =>
+            events.findLast(
+              (event) =>
+                event.kind === 'paused' && event.lane[4] === budgetLane[4],
+            )?.pause.reason,
+        ),
+        failures === 31 ? 'invalid_response' : 'aggregate_exhausted',
+      );
+      assert.equal(await page.evaluate(() => revalidationCalls), 0);
+      assert.equal(
+        await page.evaluate(
+          () => timers.filter((timer) => timer.active).length,
+        ),
+        0,
+      );
+      await close(page);
+    }
+  }
+
+  if (
+    createArtifact === undefined &&
     (selected === undefined || selected === 'cleanup-empty-budget')
   ) {
     const page = await fresh();

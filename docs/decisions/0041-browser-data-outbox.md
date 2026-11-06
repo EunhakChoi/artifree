@@ -934,7 +934,27 @@ reset only the lane counter. Retry timers use the specified injected clock,
 jitter and bounded Retry-After floor; wakes and new admissions cannot clear
 timers, pauses or counters. Healthy empty lanes are reclaimed without imposing
 a lifetime artifact limit, including a successfully trimmed lane under exhausted
-HTTP budget. Only a successful bounded capture proving no rows and no retained
+HTTP budget. At the transient 256-lane metadata limit, wake retains one coalesced
+FIFO reconciliation marker instead of rejecting a durably admitted lane or
+retaining caller-supplied keys. Wakes are scheduling hints within this already
+authorized fresh owner; only its bounded durable owner/binding snapshot can
+supply additional lane heads, ordered by durable admission sequence at the
+marker position. Nonexistent/stale key hints cannot exhaust a separate queue.
+Existing pauses/history remain intact; a wake during snapshot reading protects
+its existing lane and requests another scan for newly admitted lanes. Scan
+failure or authority invalidation closes without partial metadata publication.
+This is not an automatic-progress guarantee when all 256 metadata slots retain
+pauses/history. In particular, directly discarding 256 preparation-paused lanes
+through the low-level store can leave no durable rows but 256 retained gates;
+a subsequently admitted different lane remains pending without automatic HTTP.
+The internal scheduler does not yet integrate rule 17's typed disposal action
+with callback fencing and committed metadata retirement. It must not infer
+disposal from an empty snapshot, discard the gates, or reinterpret preparation
+retry as successful cleanup. That disposal integration and an explicit,
+actionable treatment of retained empty gates are blockers for public sender
+activation; the current internal slice preserves the gates and bounded waiting.
+The readonly transaction is abortable. Scans do not consume or renew delivery
+budget/epochs, revalidate online identity, or authorize inherited recovery. Only a successful bounded capture proving no rows and no retained
 failure/pause permits reclamation; a failed capture closes without deleting work.
 
 Preparation aborts and ACK-storage aborts have separate opaque internal actions.
