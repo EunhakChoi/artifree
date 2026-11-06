@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { expect } from '@playwright/test';
+import { rewriteSuccessfulJson } from './lib/rewrite-successful-json.mjs';
 import { api } from './smoke-workspace.mjs';
 
 /**
@@ -857,7 +858,7 @@ async function control(page) {
  * and `files` gives other content for a revision's `index.html`. Returns
  * the function that stops.
  */
-function replaceData(tracked, id, { upTo, files = {} }) {
+export function replaceData(tracked, id, { upTo, files = {} }) {
   const answer = async (route) => {
     const request = route.request();
     const name = kind(request);
@@ -873,14 +874,14 @@ function replaceData(tracked, id, { upTo, files = {} }) {
     }
     if (upTo === undefined) return route.fallback();
     if (name === 'list') {
-      const body = await (await route.fetch()).json();
-      const artifacts =
-        upTo === 0
-          ? []
-          : body.artifacts.map((item) =>
-              item.id === id ? { ...item, current_revision: upTo } : item,
-            );
-      return route.fulfill({ json: { artifacts } });
+      return rewriteSuccessfulJson(route, (body) => ({
+        artifacts:
+          upTo === 0
+            ? []
+            : body.artifacts.map((item) =>
+                item.id === id ? { ...item, current_revision: upTo } : item,
+              ),
+      }));
     }
     if (!pathname.includes(id)) return route.fallback();
     if (upTo === 0)
@@ -889,16 +890,15 @@ function replaceData(tracked, id, { upTo, files = {} }) {
         json: { error: { code: 'not_found', message: 'No such artifact.' } },
       });
     if (name === 'artifact') {
-      const body = await (await route.fetch()).json();
-      return route.fulfill({ json: { ...body, current_revision: upTo } });
+      return rewriteSuccessfulJson(route, (body) => ({
+        ...body,
+        current_revision: upTo,
+      }));
     }
     if (name === 'revisions') {
-      const body = await (await route.fetch()).json();
-      return route.fulfill({
-        json: {
-          revisions: body.revisions.filter(({ revision }) => revision <= upTo),
-        },
-      });
+      return rewriteSuccessfulJson(route, (body) => ({
+        revisions: body.revisions.filter(({ revision }) => revision <= upTo),
+      }));
     }
     return route.fallback();
   };
