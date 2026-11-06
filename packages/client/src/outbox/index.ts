@@ -551,7 +551,7 @@ class LocalCoordinator {
       this.ensureOpen();
       try {
         const row = await this.store.enqueue({
-          format: 1,
+          format: 2,
           state: 'unprepared',
           version: 1,
           key: newRandomId(),
@@ -560,6 +560,7 @@ class LocalCoordinator {
           lane: [...binding, snapshot.artifactId],
           artifactId: snapshot.artifactId,
           admittedGeneration: this.binding.actor_generation,
+          authorizedGeneration: this.binding.actor_generation,
           operation: snapshot.operation,
           path: snapshot.path,
           text: snapshot.text,

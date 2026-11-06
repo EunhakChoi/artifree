@@ -1,3 +1,4 @@
+import { checkOutboxStore } from './smoke-outbox-store.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -15,6 +16,7 @@ const binding = {
 
 /** Real origin storage and Web Locks, with an owned HTTP metadata-only fixture. */
 export async function checkOutbox(browser, live) {
+  await checkOutboxStore(browser);
   const bundle = await build({
     stdin: {
       contents: `import {openBrowserOutbox} from './packages/client/src/outbox/index.ts';
@@ -1297,7 +1299,7 @@ export async function checkOutbox(browser, live) {
       const newerPage = await page(newerContext);
       await newerPage.evaluate(async () => {
         const db = await new Promise((resolve, reject) => {
-          const pending = indexedDB.open('artifree-data-outbox', 2);
+          const pending = indexedDB.open('artifree-data-outbox', 3);
           pending.onupgradeneeded = () =>
             pending.result.createObjectStore('future');
           pending.onsuccess = () => resolve(pending.result);
