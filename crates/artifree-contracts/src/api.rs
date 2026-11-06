@@ -755,9 +755,12 @@ impl JsonSchema for JsonValue {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadDataQuery {
-    /// The path to read: `/`-separated segments of 1-64 ASCII letters,
-    /// digits, `_`, or `-`, at most 16. Absent or empty is the root, which is
-    /// always an object. This is the decoded value of the query parameter.
+    /// The path to read: at most 16 `/`-separated segments of 1-64 UTF-8
+    /// bytes. ASCII letters, digits, `_`, `-` and non-ASCII Unicode 16.0.0
+    /// letters, marks, numbers and symbols are allowed, excluding whitespace,
+    /// default ignorables, noncharacters and slash lookalikes (0046).
+    /// Exact scalar identity; no normalization. Absent or empty is the root,
+    /// always an object. The query parameter is strictly decoded once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }

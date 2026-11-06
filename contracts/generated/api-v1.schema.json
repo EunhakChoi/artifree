@@ -2001,7 +2001,7 @@
       "description": "Query of `GET /v1/artifacts/{id}/data`.",
       "properties": {
         "path": {
-          "description": "The path to read: `/`-separated segments of 1-64 ASCII letters,\ndigits, `_`, or `-`, at most 16. Absent or empty is the root, which is\nalways an object. This is the decoded value of the query parameter.",
+          "description": "The path to read: at most 16 `/`-separated segments of 1-64 UTF-8\nbytes. ASCII letters, digits, `_`, `-` and non-ASCII Unicode 16.0.0\nletters, marks, numbers and symbols are allowed, excluding whitespace,\ndefault ignorables, noncharacters and slash lookalikes (0046).\nExact scalar identity; no normalization. Absent or empty is the root,\nalways an object. The query parameter is strictly decoded once.",
           "type": [
             "string",
             "null"

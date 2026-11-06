@@ -29,7 +29,8 @@ it, and it is not in a revision, an export, or a preview. A page running in a
 preview cannot read or write it. There is no history: a write replaces the
 value for good, and a duplicate gets a copy only with
 artifree artifact duplicate --copy-data.
-A path is up to 16 segments of 1-64 ASCII letters, digits, "_" or "-"
+A path is up to 16 segments of 1-64 UTF-8 bytes: ASCII letters, digits,
+"_", "-", and allowed Unicode 16.0.0 letters, marks, numbers or symbols
 separated by "/", such as todos/first; the empty path "" is the root. A path
 addresses object members, never array elements. get prints the value at the
 path ("exists": false, without a value, where nothing is) and the data_version.

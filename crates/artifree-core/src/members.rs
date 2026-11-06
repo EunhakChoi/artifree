@@ -177,6 +177,29 @@ mod tests {
     }
 
     #[test]
+    fn persisted_ascii_token_bytes_survive_the_unicode_grammar_expansion() {
+        // Independently recorded SHA-256(artifact || NUL || "a/b")[..16]
+        // followed by the ASCII name. This is the unchanged pre-0046 layout.
+        let old = [
+            0x50, 0xca, 0x75, 0x81, 0xa6, 0xda, 0x88, 0x31, 0x56, 0x42, 0x9e, 0xa2, 0x3e, 0x35,
+            0xc9, 0xd7, 0x6c, 0x61, 0x73, 0x74, 0x2d, 0x6f, 0x6e, 0x65,
+        ];
+        let token = MemberToken::from_bytes(&old).unwrap_or_else(|| panic!("old ASCII token"));
+        assert!(token.matches(&artifact(1), &path("a/b")));
+        assert_eq!(token.name().as_str(), "last-one");
+        assert_eq!(
+            MemberToken::new(&artifact(1), &path("a/b"), name("last-one")).to_bytes(),
+            old
+        );
+        for text in ["é", "e\u{301}", "한글", "𝄞"] {
+            let token = MemberToken::new(&artifact(1), &path(text), name(text));
+            assert_eq!(MemberToken::from_bytes(&token.to_bytes()), Some(token));
+        }
+        let composed = MemberToken::new(&artifact(1), &path("é"), name("x"));
+        assert!(!composed.matches(&artifact(1), &path("e\u{301}")));
+    }
+
+    #[test]
     fn the_tag_is_the_first_16_bytes_of_sha256_of_artifact_zero_path() {
         let id = artifact(1);
         let mut hasher = Sha256::new();
@@ -215,7 +238,7 @@ mod tests {
             ("65-byte name", with(&[b'x'; 65])),
             ("slash", with(b"a/b")),
             ("space", with(b"a b")),
-            ("non-ASCII", with("é".as_bytes())),
+            ("default ignorable", with("\u{fe0f}".as_bytes())),
             ("invalid UTF-8", with(&[0xff])),
         ] {
             assert_eq!(MemberToken::from_bytes(&bytes), None, "{case}");

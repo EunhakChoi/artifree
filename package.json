@@ -29,7 +29,7 @@
     "check:rust": "node scripts/check-rust.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm run lint && npm run check:contracts && npm run check:runtime && npm run check:boundaries && npm run check:digests && npm run check:architecture && npm run typecheck && npm run test:tooling && npm run check:rust",
+    "check": "npm run format:check && npm run lint && npm run check:contracts && npm run check:data-unicode && npm run check:runtime && npm run check:boundaries && npm run check:digests && npm run check:architecture && npm run typecheck && npm run test:tooling && npm run check:rust",
     "cli": "node apps/cli/dist/main.js",
     "test:smoke": "node scripts/smoke.mjs",
     "test:outbox": "node scripts/test-outbox.mjs",
@@ -37,7 +37,8 @@
     "lint:css": "stylelint \"apps/web/src/**/*.css\" \"docs/architecture/**/*.css\" --max-warnings 0",
     "lint": "npm run lint:code && npm run lint:css",
     "check:architecture": "node scripts/build-architecture.mjs --check",
-    "test:tooling": "node --test --test-timeout=180000 scripts/tests/*.test.mjs"
+    "test:tooling": "node --test --test-timeout=180000 scripts/tests/*.test.mjs",
+    "check:data-unicode": "node scripts/generate-data-unicode.mjs --check"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",

@@ -12,7 +12,8 @@ Before an implementation PR, follow the roadmap's evidence entry conditions;
 record any original-source comparison privately and distinguish it from these
 choices. This document does not claim that comparison has been completed.
 
-**Nothing in this proposal is implemented.** The accepted ASCII grammar of
+**No implementation slice has merged.** R06b-1 implementation is under review.
+The accepted ASCII grammar of
 0031 and the listing rules of 0040 remain in effect. Each numbered rule below
 becomes effective only when the corresponding implementation slice is merged
 and its status is recorded here. A rule amendment requires a separate
@@ -158,11 +159,11 @@ members, changing ASCII request identities, or creating a second path syntax.
 
 ## Implementation slices and acceptance
 
-| Slice  | Observable result and checks                                                                                                                                                                  | Status                 |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| R06b-0 | This proposed decision and roadmap, without implementation or changed accepted behavior.                                                                                                      | Proposed specification |
-| R06b-1 | Shared domain grammar and strict transport handling; HTTP/MCP, client/CLI, outbox, contracts and listing accept the same names. Verify replay and old rows/tokens as well as rejection paths. | Not started            |
-| R06b-2 | Cross-process upgrade/restart and backup/restore evidence, independent guide examples, full required gates and final status update. Depends on R06b-1.                                        | Not started            |
+| Slice  | Observable result and checks                                                                                                                                                                  | Status                      |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| R06b-0 | This proposed decision and roadmap, without implementation or changed accepted behavior.                                                                                                      | Proposed specification      |
+| R06b-1 | Shared domain grammar and strict transport handling; HTTP/MCP, client/CLI, outbox, contracts and listing accept the same names. Verify replay and old rows/tokens as well as rejection paths. | Under implementation review |
+| R06b-2 | Cross-process upgrade/restart and backup/restore evidence, independent guide examples, full required gates and final status update. Depends on R06b-1.                                        | Not started                 |
 
 R06b-1 must not ship a server-only expansion whose accepted response names the
 bundled client cannot handle. This requires transport/response compatibility,

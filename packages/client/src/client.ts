@@ -202,6 +202,18 @@ export function newIdempotencyKey(): string {
   return `key-${id.slice(0, 8)}-${id.slice(8)}`;
 }
 
+/** Queries must preserve scalar identity instead of replacing lone surrogates. */
+function queryDataPath(path: string): string {
+  for (const scalar of path) {
+    const point = scalar.codePointAt(0);
+    if (point !== undefined && point >= 0xd800 && point <= 0xdfff)
+      throw new TypeError(
+        'A data query path must contain well-formed Unicode.',
+      );
+  }
+  return path;
+}
+
 /**
  * Encodes file bytes for upload in whichever form is smaller on the wire:
  * UTF-8 text when the bytes are valid UTF-8 and their JSON escaping does not
@@ -847,7 +859,7 @@ export class ArtifreeClient {
     const query =
       path === undefined || path === ''
         ? ''
-        : `?path=${encodeURIComponent(path)}`;
+        : `?path=${encodeURIComponent(queryDataPath(path))}`;
     return this.json(
       'GET',
       `/v1/artifacts/${encodeURIComponent(artifactId)}/data${query}`,
@@ -864,7 +876,8 @@ export class ArtifreeClient {
     const { signal } = options;
     signal?.throwIfAborted();
     const query = new URLSearchParams();
-    if (options.path !== undefined) query.set('path', options.path);
+    if (options.path !== undefined)
+      query.set('path', queryDataPath(options.path));
     if (options.limit !== undefined) query.set('limit', String(options.limit));
     if (options.pageToken !== undefined)
       query.set('page_token', options.pageToken);
@@ -943,7 +956,7 @@ export class ArtifreeClient {
     const query =
       dataPath === undefined || dataPath === ''
         ? ''
-        : `?path=${encodeURIComponent(dataPath)}`;
+        : `?path=${encodeURIComponent(queryDataPath(dataPath))}`;
     const path = `/v1/artifacts/${encodeURIComponent(artifactId)}/data${query}`;
     try {
       const response = await this.send('GET', path, {

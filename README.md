@@ -201,7 +201,7 @@ await following;
 
 `client.listDataMembers(artifactId, { path, limit, pageToken, atDataVersion,
 signal })` reads one page of names, not values. The default page size is 50 and
-the maximum is 100. Names follow byte order and the existing ASCII path grammar;
+the maximum is 100. Names follow UTF-8 byte order and the Unicode 16.0.0 [data path grammar](docs/data-paths.md);
 other names are skipped. Pass `next_page_token` unchanged as `pageToken` and
 the first page's `data_version` as `atDataVersion` on each subsequent page to
 keep the listing consistent. On `data_conflict`, start again from the first

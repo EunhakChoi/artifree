@@ -26,8 +26,8 @@ Independent Artifree design: no private evidence was consulted, and nothing
 below is presented as an observation of the original product.
 
 > Follow-up proposal: [0046](0046-utf8-data-paths.md) specifies R06b Unicode
-> paths. It is not implemented and does not yet amend the accepted ASCII
-> grammar, listing rules, or transport bounds in this record.
+> paths. R06b-1 implementation is under review; no implementation slice has
+> merged yet, so this record's accepted ASCII rules remain the released basis.
 
 ## Context: what existed before R07a-1
 
