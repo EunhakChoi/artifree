@@ -54,8 +54,15 @@ function kept(page, artifactId) {
   );
 }
 
-/** Opens the newly created artifact in a separate page. */
-async function open(context, origin, server, title, copiedOwner, incomplete) {
+/** Opens the newly created artifact's preview in a separate page. */
+async function openPreview(
+  context,
+  origin,
+  server,
+  title,
+  copiedOwner,
+  incomplete,
+) {
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   if (copiedOwner !== undefined)
@@ -88,8 +95,21 @@ async function open(context, origin, server, title, copiedOwner, incomplete) {
   await expect(
     area.getByRole('heading', { name: title, exact: true }),
   ).toBeVisible();
-  await area.getByRole('tab', { name: 'Source' }).click();
   return { page, area, text: area.getByLabel('index.html', { exact: true }) };
+}
+
+/** Opens the source editor without waiting for the preview to finish. */
+async function open(context, origin, server, title, copiedOwner, incomplete) {
+  const tab = await openPreview(
+    context,
+    origin,
+    server,
+    title,
+    copiedOwner,
+    incomplete,
+  );
+  await tab.area.getByRole('tab', { name: 'Source' }).click();
+  return tab;
 }
 
 async function create(server, title) {
@@ -291,12 +311,17 @@ export async function checkStrictDraftRecovery({
     await dev.listen();
     const address = dev.httpServer?.address();
     assert.ok(address && typeof address === 'object');
-    const tab = await open(
+    const tab = await openPreview(
       context,
       `http://127.0.0.1:${address.port}`,
       server,
       artifact.title,
     );
+    // Finish preparing the Strict Mode preview on both loads before testing
+    // draft recovery. smoke-runtime separately covers abandoning a pending view.
+    const preview = tab.area.frameLocator('iframe[title^="Preview of"]');
+    await expect(preview.locator('p')).toHaveText('base');
+    await tab.area.getByRole('tab', { name: 'Source' }).click();
     const original = '<p>recovered under Strict Mode</p>';
     await tab.text.fill(original);
     const owner = await tab.page.evaluate(
@@ -308,6 +333,7 @@ export async function checkStrictDraftRecovery({
       .poll(() => kept(tab.page, artifact.id))
       .toEqual([{ owner, text: original }]);
     await tab.page.reload();
+    await expect(preview.locator('p')).toHaveText('base');
     await tab.area.getByRole('tab', { name: 'Source' }).click();
     await expect(
       tab.area.getByRole('button', { name: 'Recover draft' }),
