@@ -637,6 +637,84 @@ export async function checkOutboxScheduler(harness) {
 
   if (
     createArtifact === undefined &&
+    (selected === undefined || selected === 'binding-observer-cleanup')
+  ) {
+    harness.configureBinding('normal');
+    const page = await fresh();
+    await page.evaluate(() => {
+      faultPut('intents', 'acknowledged');
+      scheduler.wake(lane);
+    });
+    await waitPause(page);
+    const retained = await page.evaluate(() => storageSnapshot());
+    harness.configureBinding('401stalled');
+    const failure = await page.evaluate(async () => {
+      restorePut();
+      authenticationInvalidationException = makeAuthorityException();
+      globalThis.bindingObserverUnhandled = 0;
+      addEventListener('unhandledrejection', (event) => {
+        event.preventDefault();
+        bindingObserverUnhandled += 1;
+      });
+      const originalFetch = globalThis.fetch;
+      const nativeFetch = originalFetch.bind(globalThis);
+      globalThis.fetch = (input, init) => {
+        if (String(input).endsWith('/v1/data-outbox/binding'))
+          globalThis.observerFetchSignal = init.signal;
+        return nativeFetch(input, init);
+      };
+      try {
+        await scheduler.resumeDelivery(selection);
+        return { code: 'unexpected' };
+      } catch (error) {
+        return {
+          code: error.code,
+          message: error.message,
+          body: error.body,
+          cause: error.cause,
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+    assert.deepEqual(failure, {
+      code: 'owner_not_ready',
+      message: 'owner_not_ready',
+      body: undefined,
+      cause: undefined,
+    });
+    assert.equal(
+      await page.evaluate(() => stop.signal.aborted),
+      false,
+      'the throwing invalidator did not abort host authority',
+    );
+    assert.equal(
+      await page.evaluate(() => observerFetchSignal.aborted),
+      true,
+      'a status observer exception must cancel its unread native Fetch body',
+    );
+    await harness.waitBindingClosed();
+    assert.equal(harness.bindingReadCount(), 1);
+    assert.equal(requests().length, 1);
+    assert.deepEqual(await page.evaluate(() => storageSnapshot()), retained);
+    assert.equal(await page.evaluate(() => bindingObserverUnhandled), 0);
+    assert.equal(
+      await page.evaluate(() => {
+        try {
+          scheduler.wake(lane);
+          return 'unexpected';
+        } catch (error) {
+          return error.code;
+        }
+      }),
+      'owner_not_ready',
+    );
+    harness.configureBinding('normal');
+    await close(page);
+  }
+
+  if (
+    createArtifact === undefined &&
     (selected === undefined ||
       selected === 'revalidation-mismatch' ||
       selected === 'revalidation-transient')

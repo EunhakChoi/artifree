@@ -154,6 +154,9 @@ export async function readBinding(
     if (error instanceof ArtifreeApiError) throw failure(error.code);
     throw failure(status === 0 ? 'network_error' : 'invalid_response');
   } finally {
+    // The status observer may throw before a BodyReader owns the response.
+    // Always cancel this invocation's Fetch before detaching its abort source.
+    controller.abort();
     clearTimeout(headersTimeout);
     clearTimeout(wholeTimeout);
     signal?.removeEventListener('abort', abort);

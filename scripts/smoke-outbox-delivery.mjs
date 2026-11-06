@@ -35,6 +35,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
   let status = 409;
   let bindingMode = 'normal';
   let bindingReads = 0;
+  let bindingClosures = [];
   let heldBinding;
   let onBindingArrived;
   let errorBody = {
@@ -91,6 +92,9 @@ export async function checkOutboxDelivery(browser, serverApi) {
     if (request.url === '/v1/data-outbox/binding') {
       if (bindingMode !== 'normal') {
         bindingReads += 1;
+        bindingClosures.push(
+          new Promise((resolve) => response.once('close', resolve)),
+        );
         const respond = () => {
           if (bindingMode === 'network') {
             response.destroy();
@@ -701,7 +705,9 @@ export async function checkOutboxDelivery(browser, serverApi) {
       configureBinding(nextMode) {
         bindingMode = nextMode;
         bindingReads = 0;
+        bindingClosures = [];
       },
+      waitBindingClosed: () => Promise.all(bindingClosures),
       bindingReadCount: () => bindingReads,
       waitBinding() {
         return new Promise((resolve) => {
