@@ -61,9 +61,15 @@ recovery, orphan adoption, rejected disposal or unknown-outcome abandonment.
    rollback/storage failure. Settle the initiating action with its committed
    `discarded_unsent` result, while suppressing stale observations, metadata
    publication, reconciliation and dispatch under the invalidated context.
-   Before commit, authentication invalidation aborts the active transaction;
-   explicit close follows the existing policy of settling an already-started
-   local transaction. Neither case grants post-close/authentication authority.
+   Authentication invalidation and explicit close both follow the internal
+   scheduler's existing policy: synchronously fence work and attempt to abort
+   its active native transaction, then await that transaction's terminal event.
+   This does not adopt the public local coordinator's different close policy
+   of allowing an already-started transaction to settle without requesting an
+   abort. A terminal abort retains rows/accounting and yields failure; a terminal
+   complete preserves the committed deletion result even if the abort request
+   arrived too late. A close signal or abort request alone proves neither
+   rollback nor commit. Neither outcome grants post-close/authentication authority.
 3. **Survivors and failure.** Independent survivors remain paused and retain
    their accounting and applicable history until their existing explicit action.
    A newly admitted dependent or changed phase/version rejects the entire stale
@@ -148,9 +154,12 @@ retained gates automatically or renewing delivery authority.
 - Separate post-commit logout/authentication invalidation and close from
   pre-commit abort: committed disposal settles as `discarded_unsent`, rows and
   counters remain deleted, and no stale publication/reconciliation/dispatch
-  follows. Pre-commit authentication invalidation retains rows and accounting;
-  explicit close lets an already-started local transaction settle according to
-  its terminal event. These outcomes preserve 0041 rule 17's local-only result
+  follows. Both authentication invalidation and explicit scheduler close must
+  synchronously fence and attempt native transaction abort. Test a terminal
+  abort retaining rows/accounting and a too-late abort request followed by
+  terminal complete preserving committed deletion; neither the abort request
+  nor close signal alone determines the result. Do not import the public local
+  coordinator's close settlement policy. These outcomes preserve 0041 rule 17's local-only result
   and existing authority model, without rollback or delivery claims.
 - For each new action kind, call the same token twice while pending and assert
   Promise identity and one actual operation. Cross-kind calls reject while the
