@@ -7,6 +7,7 @@
 pub mod assets;
 pub mod change;
 pub mod data;
+mod data_unicode;
 pub mod identity;
 pub mod job;
 pub mod package;

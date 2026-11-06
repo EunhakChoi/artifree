@@ -1,6 +1,8 @@
 //! The application data routes (decision 0031) through the real router, core,
 //! and `SQLite` store.
 
+use std::fmt;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -19,6 +21,24 @@ use tower::ServiceExt;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const OWNER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// Encodes every fixture byte so query transport cannot normalize its text.
+fn encode_query_path(text: &str) -> Result<String, fmt::Error> {
+    let mut encoded = String::with_capacity(text.len() * 3);
+    for byte in text.bytes() {
+        write!(encoded, "%{byte:02X}")?;
+    }
+    Ok(encoded)
+}
+
+#[test]
+fn query_fixture_encoding_preserves_each_utf8_byte() -> Result<(), fmt::Error> {
+    assert_eq!(encode_query_path("")?, "");
+    assert_eq!(encode_query_path("a%/+")?, "%61%25%2F%2B");
+    assert_eq!(encode_query_path("한/𝄞")?, "%ED%95%9C%2F%F0%9D%84%9E");
+    assert_eq!(encode_query_path("e\u{301}/é")?, "%65%CC%81%2F%C3%A9");
+    Ok(())
+}
 
 struct Harness {
     directory: PathBuf,
@@ -153,9 +173,8 @@ impl Harness {
 
     /// Reads a well-formed path of the data space.
     async fn at(&self, id: &str, path: &str) -> Result<Value, Box<dyn std::error::Error>> {
-        let reply = self
-            .read(id, &format!("?path={}", path.replace('/', "%2F")))
-            .await?;
+        let encoded = encode_query_path(path)?;
+        let reply = self.read(id, &format!("?path={encoded}")).await?;
         assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
         reply.json().map_err(Into::into)
     }
@@ -784,6 +803,164 @@ async fn one_request_sent_twice_at_once_is_written_once() -> TestResult {
 // --- what is refused -----------------------------------------------------------
 
 #[tokio::test]
+async fn unicode_data_keeps_byte_identity_versions_replay_and_listing() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("unicode").await?;
+    let original = json!({"é": 1, "e\u{301}": 2, "한글": {"값": 3}, "𝄞": 4, "bad/name": 5});
+    accepted(&harness.set(&id, "unicode-root", 0, "", &original).await?)?;
+    assert_eq!(harness.at(&id, "é").await?["value"], 1);
+    assert_eq!(harness.at(&id, "e\u{301}").await?["value"], 2);
+    assert_eq!(harness.at(&id, "한글/값").await?["value"], 3);
+    let page = harness.members(&id, "?limit=100").await?;
+    assert_eq!(
+        listed(&page)?,
+        (strings(&["e\u{301}", "é", "한글", "𝄞"]), None)
+    );
+    let first = harness.members(&id, "?limit=1&at_data_version=1").await?;
+    let (_, token) = listed(&first)?;
+    let token = token.ok_or("Unicode continuation token")?;
+    let continuation = harness
+        .members(
+            &id,
+            &format!("?limit=3&at_data_version=1&page_token={token}"),
+        )
+        .await?;
+    assert_eq!(listed(&continuation)?, (strings(&["é", "한글", "𝄞"]), None));
+    assert_eq!(
+        harness.at(&id, "").await?["data_version"],
+        1,
+        "listing never writes"
+    );
+    assert_eq!(
+        harness.at(&id, "").await?["value"],
+        original,
+        "unaddressable members survive"
+    );
+    accepted(
+        &harness
+            .set(&id, "ascii-stable", 1, "ascii/path", &json!(7))
+            .await?,
+    )?;
+    accepted(
+        &harness
+            .set(&id, "unicode-head", 2, "한글/값", &json!(8))
+            .await?,
+    )?;
+    let replay = harness
+        .set(&id, "ascii-stable", 1, "ascii/path", &json!(7))
+        .await?
+        .json()?;
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(
+        replay["data_version"], 2,
+        "historical receipt survives a newer head"
+    );
+    let mismatch = harness
+        .set(&id, "unicode-head", 2, "e\u{301}", &json!(8))
+        .await?;
+    assert!(
+        mismatch.is(StatusCode::UNPROCESSABLE_ENTITY, "request_key_reused"),
+        "{}",
+        mismatch.text
+    );
+    let noop = harness
+        .set(&id, "unicode-noop", 3, "한글/값", &json!(8))
+        .await?
+        .json()?;
+    assert_eq!(noop["changed"], false);
+    assert_eq!(noop["data_version"], 3);
+    accepted(
+        &harness
+            .update(&id, "unicode-update", 3, "한글", &json!({"추가": 9}))
+            .await?,
+    )?;
+    assert_eq!(harness.at(&id, "한글/추가").await?["value"], 9);
+    accepted(&harness.remove(&id, "unicode-delete", 4, "é").await?)?;
+    assert_eq!(harness.at(&id, "é").await?["exists"], false);
+    assert_eq!(harness.at(&id, "e\u{301}").await?["value"], 2);
+    let removed = harness
+        .members(&id, &format!("?limit=100&page_token={token}"))
+        .await?;
+    assert_eq!(listed(&removed)?.0, strings(&["한글", "𝄞"]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn data_queries_reject_malformed_bytes_and_decode_only_once() -> TestResult {
+    let harness = Harness::new()?;
+    let id = harness.artifact("strict-query").await?;
+    accepted(
+        &harness
+            .set(
+                &id,
+                "strict-root",
+                0,
+                "",
+                &json!({"a": {"b": 1}, "한": {"글": 2}}),
+            )
+            .await?,
+    )?;
+    for query in [
+        "?path=%",
+        "?path=%2",
+        "?path=%GG",
+        "?path=%FF",
+        "?path=%C0%AF",
+        "?path=%ED%A0%80",
+        "?path=%F4%90%80%80",
+        "?path=%E2%28%A1",
+        "?path=a&path=b",
+        "?unknown=%FF",
+    ] {
+        for reply in [
+            harness.read(&id, query).await?,
+            harness.members(&id, query).await?,
+        ] {
+            assert!(
+                reply.is(StatusCode::BAD_REQUEST, "invalid_request"),
+                "{query}: {}",
+                reply.text
+            );
+            assert!(
+                !reply.text.contains(query),
+                "query contents must stay confidential"
+            );
+        }
+    }
+    for query in ["?path=a%252Fb", "?path=a+b", "?path=a%2Bb"] {
+        assert!(
+            harness
+                .read(&id, query)
+                .await?
+                .is(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request"),
+            "{query}"
+        );
+        assert!(
+            harness
+                .members(&id, query)
+                .await?
+                .is(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request"),
+            "{query}"
+        );
+    }
+    assert_eq!(harness.read(&id, "?path=a%2Fb").await?.json()?["value"], 1);
+    assert_eq!(
+        harness
+            .read(&id, "?path=%ED%95%9C%2F%EA%B8%80")
+            .await?
+            .json()?["value"],
+        2
+    );
+    assert!(
+        harness
+            .set(&id, "no-json-decode", 1, "a%2Fb", &json!(8))
+            .await?
+            .is(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn paths_that_break_the_grammar_are_refused_without_echoing_them() -> TestResult {
     let harness = Harness::new()?;
     let id = harness.artifact("A").await?;
@@ -799,7 +976,7 @@ async fn paths_that_break_the_grammar_are_refused_without_echoing_them() -> Test
         "a/../b",
         "has space",
         "per%cent",
-        "naïve",
+        "bad\u{200d}name",
         "tab\t",
         "semi;colon",
         &seventeen,
@@ -828,7 +1005,7 @@ async fn paths_that_break_the_grammar_are_refused_without_echoing_them() -> Test
         "?path=a%2F%2Fb",
         "?path=..",
         "?path=a%20b",
-        "?path=na%C3%AFve",
+        "?path=bad%E2%80%8Dname",
     ] {
         let reply = harness.read(&id, query).await?;
         assert_eq!(
@@ -1660,7 +1837,7 @@ async fn names_outside_the_path_grammar_are_skipped_and_never_counted() -> TestR
             &id,
             "skip-1",
             0,
-            &json!({ "a": 1, "a b": 1, "b": 1, "\u{e9}": 1, long: 1 }),
+            &json!({ "a": 1, "a b": 1, "b": 1, "\u{fe0f}": 1, long: 1 }),
         )
         .await?;
     // `GET data` still returns the skipped names.
@@ -1685,7 +1862,7 @@ async fn names_outside_the_path_grammar_are_skipped_and_never_counted() -> TestR
     );
     // Only skipped names: an empty page, no token.
     harness
-        .fill(&id, "skip-2", 1, &json!({ "a b": 1, "\u{e9}": 1 }))
+        .fill(&id, "skip-2", 1, &json!({ "a b": 1, "\u{fe0f}": 1 }))
         .await?;
     assert_eq!(
         listed(&harness.members(&id, "").await?)?,
@@ -1799,7 +1976,7 @@ async fn a_path_that_breaks_the_grammar_is_refused_without_being_echoed() -> Tes
         "%2Fa",
         "a%2F",
         "a%20b",
-        "%C3%A9",
+        "%EF%B8%8F",
         ".",
         "a%2F..%2Fb",
     ] {
@@ -2067,7 +2244,7 @@ async fn a_page_token_that_was_not_issued_for_the_request_is_refused() -> TestRe
         ("bad name", with_name(b"a b")),
         ("oversized", "A".repeat(2_000)),
         ("108 characters", with_name(&[b'a'; 65])),
-        ("non-ASCII name", with_name("\u{e9}".as_bytes())),
+        ("default ignorable name", with_name("\u{fe0f}".as_bytes())),
         ("another path", issued(&id, "d").await?),
         ("another artifact", issued(&second, "").await?),
         ("root token under a path", root_token.clone()),
@@ -2264,11 +2441,11 @@ async fn the_largest_page_is_within_the_published_bound() -> TestResult {
     let harness = Harness::new()?;
     let id = harness.artifact("A").await?;
     let deepest = (0..16)
-        .map(|n| format!("{n:x}").repeat(64))
+        .map(|_| "𝄞".repeat(16))
         .collect::<Vec<_>>()
         .join("/");
     let members: Value = (0..101)
-        .map(|n| (format!("{n:03}{}", "n".repeat(61)), json!(n)))
+        .map(|n| (format!("{n:03}{}_", "한".repeat(20)), json!(n)))
         .collect();
     accepted(&harness.set(&id, "big-1", 0, &deepest, &members).await?)?;
     // The version is raised in the file, because 2^53 - 1 writes do not fit
@@ -2276,11 +2453,10 @@ async fn the_largest_page_is_within_the_published_bound() -> TestResult {
     let connection = rusqlite::Connection::open(harness.directory.join("db.sqlite3"))?;
     let changed = connection.execute("UPDATE app_data SET data_version = 9007199254740991", [])?;
     assert_eq!(changed, 1);
+    let encoded = encode_query_path(&deepest)?;
+    assert_eq!(encoded.len(), 3_117);
     let reply = harness
-        .members(
-            &id,
-            &format!("?limit=100&path={}", deepest.replace('/', "%2F")),
-        )
+        .members(&id, &format!("?limit=100&path={encoded}"))
         .await?;
     let (names, token) = listed(&reply)?;
     assert_eq!(names.len(), 100);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ArtifreeClient } from '../../packages/client/dist/index.js';
+import { ArtifreeClient, JsonText } from '../../packages/client/dist/index.js';
 
 const page = {
   artifact_id: 'artifact',
@@ -18,6 +18,87 @@ function client(fetch, clock) {
     clock,
   });
 }
+
+test('data GET transports exact Unicode and percent data without normalization', async () => {
+  const seen = [];
+  const api = client(async (url) => {
+    const path = new URL(url).searchParams.get('path');
+    seen.push(path);
+    return Response.json({
+      ...page,
+      path,
+      value: 1,
+      names: ['e\u0301', 'é', '한글', '𝄞'],
+    });
+  });
+  for (const path of ['한글/𝄞', 'e\u0301', 'é', '%2F', 'a+b', 'a//b']) {
+    assert.equal((await api.getData('artifact', path)).path, path);
+    assert.deepEqual((await api.listDataMembers('artifact', { path })).names, [
+      'e\u0301',
+      'é',
+      '한글',
+      '𝄞',
+    ]);
+  }
+  assert.deepEqual(seen, [
+    '한글/𝄞',
+    '한글/𝄞',
+    'e\u0301',
+    'e\u0301',
+    'é',
+    'é',
+    '%2F',
+    '%2F',
+    'a+b',
+    'a+b',
+    'a//b',
+    'a//b',
+  ]);
+});
+
+test('data GET refuses lone surrogates before Fetch can replace identity', async () => {
+  let requests = 0;
+  const api = client(async () => {
+    requests++;
+    return Response.json(page);
+  });
+  for (const path of ['\ud800', '\udfff', 'a\ud800b', '𝄞\ud800']) {
+    await assert.rejects(api.getData('artifact', path), Error);
+    await assert.rejects(api.listDataMembers('artifact', { path }), TypeError);
+  }
+  assert.equal(requests, 0);
+});
+
+test('data writes retain invalid paths and raw JSON for the server rejection', async () => {
+  const seen = [];
+  const api = client(async (url, init) => {
+    seen.push(init.body);
+    return Response.json({
+      artifact_id: 'artifact',
+      path: '\ud800',
+      data_version: 1,
+      changed: true,
+      replayed: false,
+    });
+  });
+  for (const path of ['\ud800', 'a//b', 'e\u0301', '한글']) {
+    await api.setData(
+      'artifact',
+      {
+        path,
+        base_data_version: 0,
+        value: new JsonText('{"n":9007199254740993,"n":2}'),
+      },
+      { idempotencyKey: 'unicode-test-key' },
+    );
+    assert.equal(
+      seen.at(-1),
+      '{"base_data_version":0,"path":' +
+        JSON.stringify(path) +
+        ',"value":{"n":9007199254740993,"n":2}}',
+    );
+  }
+});
 
 test('lists one page with encoded options and a continuation token', async () => {
   let request;

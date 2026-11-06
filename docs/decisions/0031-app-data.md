@@ -19,9 +19,12 @@ original product.
 > R07a: decision 14, as a data write that changes the space records a
 > `data_changed` change in the feed.
 
-> Follow-up proposal: [0046](0046-utf8-data-paths.md) specifies R06b Unicode
-> paths. It is not implemented and does not yet amend the accepted ASCII
-> grammar, listing rules, or transport bounds in this record.
+> Version amendment (2026-11-07, contract 0.19.0): the implemented R06b-1
+> portion of [0046](0046-utf8-data-paths.md) expands decision 2's path grammar
+> to its pinned Unicode 16.0.0 rules. The numbered text below records the
+> original ASCII behavior. Existing data, versions, ASCII request identities
+> and schema remain unchanged. R06b-2's upgrade/recovery evidence is proposed;
+> acceptance of the R06b-1 amendment takes effect when that slice merges.
 
 ## Context
 

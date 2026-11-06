@@ -755,9 +755,12 @@ impl JsonSchema for JsonValue {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadDataQuery {
-    /// The path to read: `/`-separated segments of 1-64 ASCII letters,
-    /// digits, `_`, or `-`, at most 16. Absent or empty is the root, which is
-    /// always an object. This is the decoded value of the query parameter.
+    /// The path to read: at most 16 `/`-separated segments of 1-64 UTF-8
+    /// bytes. ASCII letters, digits, `_`, `-` and non-ASCII Unicode 16.0.0
+    /// letters, marks, numbers and symbols are allowed, excluding whitespace,
+    /// default ignorables, noncharacters and slash lookalikes (0046).
+    /// Exact scalar identity; no normalization. Absent or empty is the root,
+    /// always an object. The query parameter is strictly decoded once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
@@ -843,9 +846,10 @@ pub struct DataMembers {
     /// exists.
     pub exists: bool,
     /// Member names after the page token's name, ascending by their UTF-8
-    /// bytes, at most `limit`. Only names that a path can address are listed
-    /// (`[A-Za-z0-9_-]{1,64}`); other names are skipped, do not count toward
-    /// `limit`, and do not make `next_page_token` present.
+    /// bytes, at most `limit`. Only names addressable by the Unicode 16.0.0
+    /// segment grammar of decision 0046 are listed (1-64 UTF-8 bytes, exact
+    /// scalar identity without normalization). Other names are skipped, do
+    /// not count toward `limit`, and do not make `next_page_token` present.
     pub names: Vec<String>,
     /// Present exactly when more listed names follow at `data_version`. Pass
     /// it as `page_token` for the next page.

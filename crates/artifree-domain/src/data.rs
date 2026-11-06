@@ -120,21 +120,36 @@ impl fmt::Display for DataError {
 
 impl std::error::Error for DataError {}
 
-/// One segment of a [`DataPath`]: 1 to 64 ASCII letters, digits, `_`, or `-`.
+/// The shared Unicode 16.0.0 segment grammar; length is in UTF-8 bytes.
 fn valid_segment(segment: &str) -> bool {
     (1..=MAX_SEGMENT_BYTES).contains(&segment.len())
-        && segment
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && segment.chars().all(|scalar| {
+            if scalar.is_ascii() {
+                return scalar.is_ascii_alphanumeric() || scalar == '_' || scalar == '-';
+            }
+            let point = u32::from(scalar);
+            crate::data_unicode::RANGES
+                .binary_search_by(|&(start, end)| {
+                    if end < point {
+                        std::cmp::Ordering::Less
+                    } else if start > point {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .is_ok()
+        })
 }
 
 /// A place in a data space: zero to 16 segments, written separated by `/`.
 /// The empty path is the root.
 ///
-/// Each segment is 1 to 64 ASCII letters, digits, `_`, or `-`. Nothing else is
-/// accepted: no leading, trailing, or doubled `/`, no `.` or `..`, no
-/// whitespace, no percent escapes. Segments are case sensitive and are the
-/// names of object members, so a path never reaches into an array.
+/// Each segment is 1 to 64 UTF-8 bytes: ASCII letters, digits, `_`, `-`, or
+/// non-ASCII Unicode 16.0.0 letters, marks, numbers and symbols, excluding
+/// whitespace, default ignorables, noncharacters and the slash lookalikes
+/// in decision 0046. There is no normalization, leading/trailing/doubled `/`,
+/// percent decoding or array indexing. Names preserve exact scalar identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct DataPath(Vec<String>);
 
@@ -176,7 +191,7 @@ impl FromStr for DataPath {
         }
         if !segments.iter().all(|segment| valid_segment(segment)) {
             return Err(DataError::InvalidPath(
-                "segments are 1-64 ASCII letters, digits, '_' or '-', separated by single '/'",
+                "segments must match the Unicode 16.0.0 data grammar in 1-64 UTF-8 bytes, separated by single '/'",
             ));
         }
         Ok(Self(segments.into_iter().map(str::to_owned).collect()))
@@ -190,7 +205,7 @@ impl fmt::Display for DataPath {
 }
 
 /// The name of an object member that a path can address: one segment of a
-/// [`DataPath`], 1 to 64 ASCII letters, digits, `_`, or `-`. Members whose
+/// [`DataPath`], using its Unicode 16.0.0 grammar and 1 to 64 UTF-8 bytes. Members whose
 /// names are valid but longer or outside this grammar (up to 256 bytes, see
 /// [`MAX_MEMBER_NAME_BYTES`]) exist in a space, but no path reaches them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -212,7 +227,7 @@ impl FromStr for MemberName {
             Ok(Self(value.to_owned()))
         } else {
             Err(DataError::InvalidPath(
-                "a member name is 1-64 ASCII letters, digits, '_' or '-'",
+                "a member name must match the Unicode 16.0.0 data grammar in 1-64 UTF-8 bytes",
             ))
         }
     }
@@ -1064,7 +1079,6 @@ mod tests {
             "a b",
             "a%2Fb",
             "a\\b",
-            "caf\u{e9}",
             "a\u{0}",
             "a?b",
             "a#b",
@@ -1082,6 +1096,113 @@ mod tests {
         let secret = "secret value!";
         let error = secret.parse::<DataPath>().err().map(|e| e.to_string());
         assert!(!error.unwrap_or_default().contains("secret"));
+    }
+
+    #[test]
+    fn unicode_segments_preserve_exact_identity_and_utf8_byte_limits() {
+        for good in [
+            "한글",
+            "漢字",
+            "é",
+            "e\u{301}",
+            "\u{301}",
+            "𝄞",
+            "а",
+            "a",
+            "\u{1c89}",
+            "\u{105c0}",
+            "\u{1cc00}",
+        ] {
+            assert_eq!(path(good).to_string(), good);
+            assert_eq!(name(good).as_str(), good);
+        }
+        assert_ne!(path("é"), path("e\u{301}"));
+        assert_ne!(path("a"), path("а"), "Latin and Cyrillic remain distinct");
+        let boundary = format!("{}a", "한".repeat(21));
+        assert_eq!(boundary.len(), 64);
+        assert_eq!(path(&boundary).to_string(), boundary);
+        let too_long = format!("{boundary}a");
+        assert!(matches!(
+            too_long.parse::<DataPath>(),
+            Err(DataError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            too_long.parse::<MemberName>(),
+            Err(DataError::InvalidPath(_))
+        ));
+        let deepest = vec![boundary.as_str(); 16].join("/");
+        assert_eq!(deepest.len(), 1_039);
+        assert_eq!(path(&deepest).to_string(), deepest);
+    }
+
+    #[test]
+    fn unicode_exclusions_apply_to_paths_and_listing_names() {
+        for scalar in [
+            '\u{85}',
+            '\u{a0}',
+            '\u{ad}',
+            '\u{34f}',
+            '\u{115f}',
+            '\u{1160}',
+            '\u{17b4}',
+            '\u{180b}',
+            '\u{180f}',
+            '\u{200b}',
+            '\u{200d}',
+            '\u{202e}',
+            '\u{2066}',
+            '\u{fe00}',
+            '\u{fe0f}',
+            '\u{feff}',
+            '\u{e0100}',
+            '\u{fdd0}',
+            '\u{10ffff}',
+            '\u{e000}',
+            '\u{378}',
+            '\u{1e6c0}', // Added in Unicode 17, unassigned in the pinned release.
+            '\u{2044}',
+            '\u{2215}',
+            '\u{29f8}',
+            '\u{ff0f}',
+            '\u{ff3c}',
+            '\u{fe68}',
+            '\u{3001}', // Punctuation is outside the category allowlist.
+        ] {
+            let text = format!("a{scalar}b");
+            assert!(
+                matches!(text.parse::<DataPath>(), Err(DataError::InvalidPath(_))),
+                "accepted {scalar:?}"
+            );
+            assert!(
+                matches!(text.parse::<MemberName>(), Err(DataError::InvalidPath(_))),
+                "listed {scalar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_names_are_listed_in_byte_order_without_rewriting_other_members() {
+        let original = r#"{"é":1,"e\u0301":2,"한글":3,"𝄞":4,"a b":5,"\ufe0f":6}"#;
+        let stored = space(original);
+        assert_eq!(stored.get(&path("é")), Some(&value("1")));
+        assert_eq!(stored.get(&path("e\u{301}")), Some(&value("2")));
+        assert_eq!(
+            page(stored.members(&DataPath::root(), None, 100)),
+            (names(&["e\u{301}", "é", "한글", "𝄞"]), false)
+        );
+        // Escapes keep non-NFC expectations explicit under the source NFC lint.
+        assert_eq!(
+            stored.to_canonical(),
+            "{\"a b\":5,\"e\u{301}\":2,\"é\":1,\"한글\":3,\"\u{fe0f}\":6,\"𝄞\":4}"
+        );
+        assert_eq!(
+            set(original, "한글/next", "1"),
+            Err(DataError::PathConflict)
+        );
+        assert_eq!(
+            patch(original, "é", "7"),
+            Ok("{\"a b\":5,\"e\u{301}\":2,\"é\":7,\"한글\":3,\"\u{fe0f}\":6,\"𝄞\":4}".into())
+        );
     }
 
     #[test]
@@ -1624,7 +1745,7 @@ mod tests {
         for good in ["a", "A", "0", "_", "-", &"x".repeat(64)] {
             assert!(good.parse::<MemberName>().is_ok(), "{good}");
         }
-        for bad in ["", "a b", "a/b", "\u{e9}", ".", "a.b", &"x".repeat(65)] {
+        for bad in ["", "a b", "a/b", "\u{fe0f}", ".", "a.b", &"x".repeat(65)] {
             assert!(bad.parse::<MemberName>().is_err(), "{bad:?}");
         }
     }
@@ -1651,8 +1772,8 @@ mod tests {
 
     #[test]
     fn names_outside_the_grammar_are_skipped_without_counting() {
-        // `a b` sorts between `a` and `b`; `\u{e9}` is after every ASCII name.
-        let listed = space(r#"{"a":1,"a b":1,"b":1,"\u00e9":1}"#);
+        // `a b` and the default-ignorable name remain unaddressable.
+        let listed = space(r#"{"a":1,"a b":1,"b":1,"\ufe0f":1}"#);
         let root = DataPath::root();
         assert_eq!(
             page(listed.members(&root, None, 2)),

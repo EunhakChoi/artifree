@@ -259,8 +259,10 @@ preview, or an export. **A page running in a preview cannot read or write it.**
 Only these tools, HTTP, and the CLI can ([decision
 0031](decisions/0031-app-data.md)).
 
-`get_data` reads the value at a `path`: up to 16 segments of 1-64 letters, digits,
-`_`, or `-`, separated by `/`, such as `todos/first`; no path, or the empty one, is
+`get_data` reads the value at a `path`: up to 16 segments of 1-64 UTF-8 bytes,
+using the Unicode 16.0.0 [data path grammar](data-paths.md), separated by `/`,
+such as `todos/first` or `한글/값`. Paths preserve exact text, with no Unicode
+normalization or URL decoding. No path, or the empty one, is
 the root. A path addresses object members and never enters an array. A path with
 nothing at it succeeds with `exists: false`. Read `data_version` and send it as
 `base_data_version` in the next write; if another write won, the call fails with

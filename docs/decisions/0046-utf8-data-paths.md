@@ -1,24 +1,29 @@
 # 0046: UTF-8 names in application data paths
 
-Date: 2026-11-06. Status: proposed. Roadmap: R06b.
+Date: 2026-11-06. R06b-1 implementation: 2026-11-07. Status: implemented
+for R06b-1; R06b-2 remains proposed. Roadmap: R06b.
 Builds on [0031](0031-app-data.md),
 [0040](0040-data-changes-and-member-listing.md), and
 [0041](0041-browser-data-outbox.md).
 
 This is an independent Artifree design, not an observation of another product.
-No private evidence was consulted for this proposal. R06b's grammar, limits,
-transport handling, and compatibility rules below are our own decisions.
-Before an implementation PR, follow the roadmap's evidence entry conditions;
-record any original-source comparison privately and distinguish it from these
-choices. This document does not claim that comparison has been completed.
+The original proposal did not consult private evidence. The R06b-1 implementation
+reviewed the relevant owner/outbox observations separately and recorded that
+comparison privately. R06b's Unicode grammar, limits, transport handling and
+compatibility rules below remain Artifree's own decisions; original-product
+Unicode behavior has not been established.
 
-**Nothing in this proposal is implemented.** The accepted ASCII grammar of
-0031 and the listing rules of 0040 remain in effect. Each numbered rule below
-becomes effective only when the corresponding implementation slice is merged
-and its status is recorded here. A rule amendment requires a separate
-specification PR, as required by the contribution policy.
+**The implementation is limited to R06b-1.** It expands the path grammar of
+0031 and the addressable names of 0040, with exact UTF-8 identity, strict
+transport handling and the compatibility tests described below. The original
+ASCII rules in those records document the earlier release; their version notes
+identify this amendment. R06b-2's cross-process upgrade/restart and backup/restore
+evidence remains proposed. Repository gates and reviews are required before
+merging. Acceptance takes effect for the implemented slice when it is merged;
+this implementation status does not mark R06b-2 or all of R06b complete. A rule
+amendment still requires a separate specification PR.
 
-## Context
+## Context before R06b-1
 
 Application JSON already permits object member names of 1 to 256 UTF-8 bytes.
 Only some names can be addressed by a path or returned by a member listing:
@@ -27,7 +32,7 @@ store a Korean member that a subsequent path read cannot address. Widening the
 path grammar should expose such names without rewriting existing JSON, merging
 members, changing ASCII request identities, or creating a second path syntax.
 
-## Proposed rules
+## Path rules implemented by R06b-1
 
 1. **Identity is exact Unicode text.** Preserve the sequence of Unicode scalar
    values and its UTF-8 bytes. Do not apply NFC, NFD, NFKC, NFKD, case folding,
@@ -158,11 +163,11 @@ members, changing ASCII request identities, or creating a second path syntax.
 
 ## Implementation slices and acceptance
 
-| Slice  | Observable result and checks                                                                                                                                                                  | Status                 |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| R06b-0 | This proposed decision and roadmap, without implementation or changed accepted behavior.                                                                                                      | Proposed specification |
-| R06b-1 | Shared domain grammar and strict transport handling; HTTP/MCP, client/CLI, outbox, contracts and listing accept the same names. Verify replay and old rows/tokens as well as rejection paths. | Not started            |
-| R06b-2 | Cross-process upgrade/restart and backup/restore evidence, independent guide examples, full required gates and final status update. Depends on R06b-1.                                        | Not started            |
+| Slice  | Observable result and checks                                                                                                                                                                  | Status                                            |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| R06b-0 | This proposed decision and roadmap, without implementation or changed accepted behavior.                                                                                                      | Proposed specification                            |
+| R06b-1 | Shared domain grammar and strict transport handling; HTTP/MCP, client/CLI, outbox, contracts and listing accept the same names. Verify replay and old rows/tokens as well as rejection paths. | Implemented; repository gates and review required |
+| R06b-2 | Cross-process upgrade/restart and backup/restore evidence, independent guide examples, full required gates and final status update. Depends on R06b-1.                                        | Not started                                       |
 
 R06b-1 must not ship a server-only expansion whose accepted response names the
 bundled client cannot handle. This requires transport/response compatibility,

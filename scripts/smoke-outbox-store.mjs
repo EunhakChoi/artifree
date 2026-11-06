@@ -439,16 +439,20 @@ export async function checkOutboxStore(browser) {
       await store.trim(await store.lane(lane), authorize, signal);
     });
     // These payloads intentionally violate Rust's domain rules. Storage preserves their bytes.
-    for (const [key, text] of [
-      ['5', '{'],
-      ['6', '{"n":9007199254740993}'],
-      ['7', '"' + 'x'.repeat(262142) + '"'],
+    for (const [key, text, path] of [
+      ['5', '{', 'raw//path'],
+      ['6', '{"n":9007199254740993}', 'raw//path'],
+      ['7', '"' + 'x'.repeat(262142) + '"', 'raw//path'],
+      ['8', '{"a":1,"a":2}', '\ud800'],
+      ['9', '{"raw":1}', 'e\u0301/한글/𝄞'],
+      ['a', '{', 'bad\u200dname'],
     ]) {
       const preserved = await page.evaluate(
-        async ({ key, text }) => {
-          const row = await store.enqueue(
-            input(key, { version: 9007199254740990 }, 'set', text),
-          );
+        async ({ key, text, path }) => {
+          const row = await store.enqueue({
+            ...input(key, { version: 9007199254740990 }, 'set', text),
+            path,
+          });
           const prepared = await store.prepare(row, authorize, signal);
           await reopen();
           const recovered = (await store.lane(lane))[0];
@@ -461,12 +465,14 @@ export async function checkOutboxStore(browser) {
           await store.trim(await store.lane(lane), authorize, signal);
           return { prepared, recovered };
         },
-        { key, text },
+        { key, text, path },
       );
       assert.deepEqual(preserved.recovered, preserved.prepared);
       assert.equal(
         preserved.prepared.request.body,
-        '{"base_data_version":9007199254740990,"path":"raw//path","value":' +
+        '{"base_data_version":9007199254740990,"path":' +
+          JSON.stringify(path) +
+          ',"value":' +
           text +
           '}',
       );

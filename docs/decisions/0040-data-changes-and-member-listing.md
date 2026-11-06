@@ -25,9 +25,13 @@ and [0036](0036-multi-user-identity.md). Roadmap rows: R07, R07a–R07e.
 Independent Artifree design: no private evidence was consulted, and nothing
 below is presented as an observation of the original product.
 
-> Follow-up proposal: [0046](0046-utf8-data-paths.md) specifies R06b Unicode
-> paths. It is not implemented and does not yet amend the accepted ASCII
-> grammar, listing rules, or transport bounds in this record.
+> Version amendment (2026-11-07, contract 0.19.0): the implemented R06b-1
+> portion of [0046](0046-utf8-data-paths.md) expands the addressable names used
+> by rules 8–11 to its pinned Unicode 16.0.0 grammar. The numbered text below
+> records the earlier ASCII basis. Exact UTF-8 byte order, existing ASCII
+> tokens, the token layout and the verified transport bounds are preserved.
+> R06b-2's upgrade/recovery evidence remains proposed; acceptance of this
+> amendment takes effect when R06b-1 merges.
 
 ## Context: what existed before R07a-1
 
