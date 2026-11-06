@@ -16,7 +16,8 @@ use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
@@ -27,6 +28,7 @@ use artifree_providers::tokens::SqliteTokenStore;
 use artifree_server::auth::AccessToken;
 use artifree_server::http::{self, AppState, Settings};
 use artifree_server::limits::RequestLimits;
+use artifree_server::rooms::RoomClock;
 use artifree_server::{changes, preview};
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -52,10 +54,28 @@ const CAPABILITIES: [&str; 4] = [
     "source.write",
 ];
 
+/// Room leases move only when a test advances time, independent of `SQLite` or
+/// scheduler delays while the isolation tables walk the routes.
+#[derive(Debug, Default)]
+struct ManualRoomClock(AtomicU64);
+
+impl ManualRoomClock {
+    fn advance(&self, millis: u64) {
+        self.0.fetch_add(millis, Ordering::SeqCst);
+    }
+}
+
+impl RoomClock for ManualRoomClock {
+    fn elapsed(&self) -> Duration {
+        Duration::from_millis(self.0.load(Ordering::SeqCst))
+    }
+}
+
 struct Harness {
     directory: PathBuf,
     api: Router,
     content: Router,
+    room_clock: Arc<ManualRoomClock>,
 }
 
 impl Harness {
@@ -74,7 +94,9 @@ impl Harness {
         std::fs::create_dir_all(&directory)
             .unwrap_or_else(|error| panic!("cannot create test directory: {error}"));
         let database = directory.join("db.sqlite3");
+        let room_clock = Arc::new(ManualRoomClock::default());
         let mut settings = Settings {
+            room_clock: room_clock.clone(),
             content_origin: CONTENT_ORIGIN.into(),
             preview_ttl: Duration::from_secs(60),
             frame_ancestors: "http://127.0.0.1:*".into(),
@@ -103,6 +125,7 @@ impl Harness {
                 ([127, 0, 0, 1], 40_000),
             )))),
             content: preview::router(state),
+            room_clock,
         }
     }
 
@@ -1079,12 +1102,13 @@ fn http_cases() -> Vec<Case> {
     ]
 }
 
-/// Routes that name no artifact. Each has its own test: listing and creating
-/// are scoped to the caller, the rest are administrative.
-const NOT_ARTIFACT_SCOPED: [&str; 12] = [
+/// Routes that name no artifact. Each has its own caller-scoped or
+/// administrative authorization tests.
+const NOT_ARTIFACT_SCOPED: [&str; 13] = [
     "/mcp",
     "/v1/artifacts",
     "/v1/changes",
+    "/v1/data-outbox/binding",
     "/v1/content/unreferenced",
     "/v1/jobs",
     "/v1/runtime-sessions",
@@ -1343,6 +1367,43 @@ async fn nobody_else_can_reach_what_a_user_holds_over_http() -> TestResult {
     .await?;
     state_is_untouched(&harness, &alice, &ids).await?;
     the_holder_is_not_refused(&harness, &alice, &ids).await
+}
+
+#[tokio::test]
+async fn a_users_room_participant_expires_at_its_lease_boundary() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("alice").await?;
+    let ids = fixture(&harness, &alice, "alice").await?;
+    let heartbeat = ids.fill(
+        "/v1/runtime-sessions/{session}/artifacts/{artifact}/room/participants/{participant}/{epoch}/heartbeat",
+    );
+
+    harness.room_clock.advance(14_999);
+    let renewed: Value = harness
+        .expect(
+            200,
+            "POST",
+            &heartbeat,
+            &alice.secret,
+            None,
+            Some(json!({ "after": 0 })),
+        )
+        .await?;
+    assert_eq!(renewed["participant"], ids.participant);
+
+    harness.room_clock.advance(15_000);
+    let expired: Value = harness
+        .expect(
+            404,
+            "POST",
+            &heartbeat,
+            &alice.secret,
+            None,
+            Some(json!({ "after": 0 })),
+        )
+        .await?;
+    assert_eq!(expired["error"]["code"], "not_found");
+    Ok(())
 }
 
 /// Creates an artifact for `token` and moves it to the trash; returns its id
@@ -2978,5 +3039,121 @@ async fn one_users_open_streams_do_not_use_up_anothers_places() -> TestResult {
     );
     let _bobs = harness.open_stream(&bob.secret).await?;
     let _owners = harness.open_stream(OWNER).await?;
+    Ok(())
+}
+
+async fn outbox_binding(harness: &Harness, token: &str) -> Result<Value, TestError> {
+    harness
+        .expect(200, "GET", "/v1/data-outbox/binding", token, None, None)
+        .await
+}
+
+async fn outbox_artifact(harness: &Harness, token: &str) -> Result<String, TestError> {
+    let created: Value = harness.expect(201, "POST", "/v1/artifacts", token, Some("outbox-create-alice"), Some(json!({"title":"Outbox", "files":[{"path":"index.html","encoding":"utf8","content":"<p>example</p>"}]}))).await?;
+    Ok(created["artifact"]["id"].as_str().ok_or("id")?.to_owned())
+}
+
+async fn outbox_write(
+    harness: &Harness,
+    token: &str,
+    id: &str,
+    binding: &Value,
+) -> Result<Reply, TestError> {
+    let request = Request::put(format!("/v1/artifacts/{id}/data"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", "outbox-user-write")
+        .header(
+            "artifree-outbox-actor",
+            binding["actor_id"].as_str().ok_or("actor")?,
+        )
+        .header(
+            "artifree-outbox-epoch",
+            binding["storage_epoch"].as_str().ok_or("epoch")?,
+        )
+        .header(
+            "artifree-outbox-actor-generation",
+            binding["actor_generation"].as_str().ok_or("generation")?,
+        )
+        .body(Body::from(
+            json!({"path":"item", "base_data_version":0,"value":1}).to_string(),
+        ))?;
+    let response = harness.api.clone().oneshot(request).await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 4096).await?;
+    Ok(Reply {
+        status,
+        text: String::from_utf8(bytes.to_vec())?,
+    })
+}
+
+#[tokio::test]
+async fn outbox_actor_replacement_preserves_target_access_before_semantic_fencing() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("outbox-alice").await?;
+    let bob = harness.person("outbox-bob").await?;
+    let binding = outbox_binding(&harness, &alice.secret).await?;
+    let other = outbox_binding(&harness, &bob.secret).await?;
+    assert_eq!(binding["actor_id"], alice.id);
+    assert_eq!(other["actor_id"], bob.id);
+    assert_eq!(other["storage_epoch"], binding["storage_epoch"]);
+    let id = outbox_artifact(&harness, &alice.secret).await?;
+    let denied = outbox_write(&harness, &bob.secret, &id, &binding).await?;
+    assert_eq!(denied.status, StatusCode::NOT_FOUND);
+    let error: Value = serde_json::from_str(&denied.text)?;
+    assert_eq!(error["error"]["code"], "not_found");
+    let stale = outbox_write(&harness, &alice.secret, &id, &other).await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    let error: Value = serde_json::from_str(&stale.text)?;
+    assert_eq!(error["error"]["code"], "outbox_binding_changed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_binding_tracks_disable_enable_but_not_token_rotation() -> TestResult {
+    let harness = Harness::new();
+    let alice = harness.person("outbox-alice").await?;
+    let binding = outbox_binding(&harness, &alice.secret).await?;
+    assert_eq!(binding["actor_generation"], "1");
+    let id = outbox_artifact(&harness, &alice.secret).await?;
+    let committed = outbox_write(&harness, &alice.secret, &id, &binding).await?;
+    assert_eq!(committed.status, StatusCode::OK);
+    let rotated: RotateTokenResponse = harness
+        .expect(
+            200,
+            "POST",
+            &format!("/v1/tokens/{}/rotate", alice.token_id),
+            OWNER,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(outbox_binding(&harness, &rotated.secret).await?, binding);
+    let replay = outbox_write(&harness, &rotated.secret, &id, &binding).await?;
+    assert_eq!(replay.status, StatusCode::OK);
+    let receipt: Value = serde_json::from_str(&replay.text)?;
+    assert_eq!(receipt["replayed"], true);
+    set_disabled(&harness, &alice.id, true).await?;
+    let disabled = harness
+        .send(
+            "GET",
+            "/v1/data-outbox/binding",
+            Some(&rotated.secret),
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(disabled.status, StatusCode::UNAUTHORIZED);
+    set_disabled(&harness, &alice.id, false).await?;
+    let current = outbox_binding(&harness, &rotated.secret).await?;
+    assert_eq!(current["actor_generation"], "3");
+    let stale = outbox_write(&harness, &rotated.secret, &id, &binding).await?;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    let error: Value = serde_json::from_str(&stale.text)?;
+    assert_eq!(error["error"]["code"], "outbox_binding_changed");
+    let replay = outbox_write(&harness, &rotated.secret, &id, &current).await?;
+    assert_eq!(replay.status, StatusCode::OK);
+    let receipt: Value = serde_json::from_str(&replay.text)?;
+    assert_eq!(receipt["replayed"], true);
     Ok(())
 }

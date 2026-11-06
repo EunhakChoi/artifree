@@ -14,6 +14,8 @@ import {
   checkStrictDraftRecovery,
 } from './smoke-draft-guards.mjs';
 import { checkDuplicate } from './smoke-duplicate.mjs';
+import { checkData } from './smoke-data.mjs';
+import { checkOutbox } from './smoke-outbox.mjs';
 import { checkEditor } from './smoke-editor.mjs';
 import { checkExport } from './smoke-export.mjs';
 import { checkHandoff } from './smoke-handoff.mjs';
@@ -153,6 +155,7 @@ async function checkAccessibility(label, target = page) {
 }
 try {
   browser = await engines[browserName].launch();
+  await checkOutbox(browser, { origin, token: api.token });
   context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
     reducedMotion: 'reduce',
@@ -249,6 +252,7 @@ try {
     checkAccessibility,
   });
   const live = await checkLiveUpdates({ browser, origin, server: api });
+  await checkData({ browser, origin, server: api });
   const list = await checkListAndMetadata({
     browser,
     origin,

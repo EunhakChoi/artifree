@@ -375,6 +375,7 @@ fn an_older_backup_keeps_its_version_and_a_restore_upgrades_it() -> TestResult {
                 value: DataValue::parse("1")?,
             };
             store.write_data(DataWrite {
+                fence: None,
                 request: RequestIdentity {
                     actor: &owner,
                     key: &key("after-restore"),
@@ -638,6 +639,7 @@ fn application_data_and_its_keys_survive_a_restore() -> TestResult {
         };
         target
             .write_data(DataWrite {
+                fence: None,
                 request: RequestIdentity {
                     actor: &owner,
                     key: &key(name),
@@ -691,6 +693,7 @@ fn a_backup_made_before_a_purge_still_holds_the_purged_data() -> TestResult {
         value: DataValue::parse("\"still here\"")?,
     };
     store.write_data(DataWrite {
+        fence: None,
         request: RequestIdentity {
             actor: &owner,
             key: &key("d1"),
@@ -1076,5 +1079,61 @@ fn files_of_does_not_turn_an_unreadable_file_into_empty_bytes() -> TestResult {
         message.contains("cannot read") && message.contains("secret"),
         "{message}"
     );
+    Ok(())
+}
+
+#[test]
+fn outbox_restore_fences_historical_replay_with_the_renewed_feed_identity() -> TestResult {
+    use artifree_domain::identity::StateGeneration;
+    use artifree_ports::data_store::{DataStoreError, OutboxFence};
+
+    let layout = Layout::new();
+    let store = SqliteStore::open(&layout.database())?;
+    let owner = ActorId::owner();
+    let created = create_demo(
+        &store,
+        &owner,
+        &key("outbox-create"),
+        "Example",
+        "<p>example</p>",
+    )?;
+    let binding = store.outbox_binding(&owner, StateGeneration::FIRST)?;
+    let fence = OutboxFence {
+        expected: binding,
+        authenticated_generation: StateGeneration::FIRST,
+    };
+    let change = DataChange::Set {
+        path: "item".parse()?,
+        value: DataValue::parse("1")?,
+    };
+    let write = |store: &SqliteStore, fence: &OutboxFence| {
+        store.write_data(DataWrite {
+            request: RequestIdentity {
+                actor: &owner,
+                key: &key("outbox-write"),
+                fingerprint: RequestFingerprint(digest("outbox-write")),
+            },
+            artifact: &created.artifact.id,
+            base: AppDataVersion(0),
+            change: &change,
+            now: UnixMillis(1000),
+            fence: Some(fence),
+        })
+    };
+    assert_eq!(write(&store, &fence)?.delivery, Delivery::Committed);
+    backup(&layout.data(), &layout.output())?;
+    restore(&layout.output(), &layout.target())?;
+    let restored = SqliteStore::open(&database_in(&layout.target()))?;
+    assert_eq!(
+        write(&restored, &fence),
+        Err(DataStoreError::OutboxBindingChanged)
+    );
+    let current = restored.outbox_binding(&owner, StateGeneration::FIRST)?;
+    assert_ne!(current.epoch, fence.expected.epoch);
+    let current = OutboxFence {
+        expected: current,
+        authenticated_generation: StateGeneration::FIRST,
+    };
+    assert_eq!(write(&restored, &current)?.delivery, Delivery::Replayed);
     Ok(())
 }

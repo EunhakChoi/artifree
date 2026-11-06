@@ -115,6 +115,10 @@ Artifact behavior is tested at the boundary that owns it:
   size, malformed and several ranges as `400`, the whole file without a
   byte range or with `If-Range`, and a missing file, revision, or trashed
   artifact refused before any range, telling nothing of the size.
+- `crates/artifree-server/tests/serve_shutdown.rs`: one real Unix stop signal
+  sent inside the readiness callback gracefully stops all three listeners,
+  even though their shutdown futures start later. The shared latch also has
+  a unit test for waiters created after the stop request.
 - `scripts/tests/server.test.mjs`: the CLI against a spawned server, exact
   bytes through upload and `cat`, uploads that JSON escaping would inflate past
   the body limit, refused dot segments, a base newer than current reported as
@@ -185,9 +189,11 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   Windows); and an invalid `--change-streams` stops the server.
 - `scripts/tests/limits.test.mjs`: the server binary with small limits. The
   official MCP client and the CLI share the budget, a refused create commits
-  nothing and its key works after the delay, a CLI retry of a committed
-  create refused by the rate limit says the attempt was not processed and
-  replays after the delay, a
+  nothing and its key works after the delay. A fixed HTTP `429` fixture checks
+  the CLI's exact retry delay and key diagnostic independently of process
+  startup time; the first commit and the replay after that injected refusal
+  still use the real server. Separate fixture cases check `Retry-After` values
+  of 1 and 7 seconds without waiting. The real server tests also check that a
   refused 30 MiB upload still receives the `429`, a refused body that never
   ends is answered within the drain bound and immediately once 32 are being
   read, a request held mid-body

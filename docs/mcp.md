@@ -289,8 +289,10 @@ all is `invalid_request` too. Limits: 256 KiB per value, 1 MiB and 10,000 values
 (`data_too_large`). **The three write tools are marked destructive: nothing keeps
 the value they replace, so an overwrite cannot be undone** (a duplicate with
 `copy_data` is the only snapshot). Retries follow the same key rules as every
-write, and keys are shared with all other requests. Data is not pushed: poll
-`get_data` and compare `data_version`. An artifact in the trash or purged, and
+write, and keys are shared with all other requests. MCP has no data subscription
+or member-listing tool: poll `get_data` and compare `data_version`. HTTP and the
+TypeScript client can follow data changes and list member names; see the
+[application data guide](../README.md#application-data). An artifact in the trash or purged, and
 another actor's artifact, answer `not_found`; a purge erases the data.
 
 ## Errors and retries

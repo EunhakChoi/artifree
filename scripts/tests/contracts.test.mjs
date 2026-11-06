@@ -235,3 +235,63 @@ test('A runtime view always states its SDK pin, including null for ordinary prev
   assert.equal(check(missingSession), false, 'A view must name its session.');
   assert.equal(check({ ...view, sdk: 12 }), false);
 });
+
+test('outbox binding schema preserves exact actor, epoch and SQLite integer text', () => {
+  const check = body('DataOutboxBinding');
+  const binding = {
+    actor_id: 'local',
+    actor_generation: '1',
+    storage_epoch: '0123456789abcdef0123456789abcdef',
+  };
+  for (const actor_generation of [
+    '1',
+    '9007199254740993',
+    '9223372036854775807',
+  ]) {
+    assert.equal(
+      check({ ...binding, actor_generation }),
+      true,
+      actor_generation,
+    );
+  }
+  assert.equal(check({ ...binding, actor_id: `u-${'a'.repeat(32)}` }), true);
+  for (const actor_generation of [
+    0,
+    1,
+    '',
+    '0',
+    '01',
+    '+1',
+    ' 1',
+    '1 ',
+    '-1',
+    '1.0',
+    '1e2',
+    '9223372036854775808',
+    '9999999999999999999',
+    '10000000000000000000',
+  ]) {
+    assert.equal(
+      check({ ...binding, actor_generation }),
+      false,
+      String(actor_generation),
+    );
+  }
+  for (const actor_id of ['owner', 'u-abc', `u-${'A'.repeat(32)}`]) {
+    assert.equal(check({ ...binding, actor_id }), false, actor_id);
+  }
+  for (const storage_epoch of [
+    '',
+    'a'.repeat(31),
+    'a'.repeat(33),
+    'A'.repeat(32),
+  ]) {
+    assert.equal(check({ ...binding, storage_epoch }), false, storage_epoch);
+  }
+  assert.equal(check({ ...binding, token: 'must not appear' }), false);
+  for (const field of Object.keys(binding)) {
+    const incomplete = { ...binding };
+    delete incomplete[field];
+    assert.equal(check(incomplete), false, field);
+  }
+});
