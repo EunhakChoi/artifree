@@ -507,10 +507,14 @@ upload receipt independently checkable, as bounded asset reads already require
 Web Crypto. No decoded bytes are added to persistent client state.
 
 Both operations use authenticated original-origin requests with redirect
-refusal, no-store, existing transport deadlines and cancellation, at most 64 KiB
-success JSON and 4 KiB error bodies. Existing bounded error vocabulary is
-preserved; no raw response body, credential or URL becomes a diagnostic. A
-response cannot grant authority to another artifact or account.
+refusal and no-store. They reuse the management transport's 45-second
+response-body stall limit and cancellation. The body reader starts that timer
+after headers while waiting for the first byte; afterwards it runs only while
+a read is pending. A consumer holding a chunk is not a stalled read. This does not introduce or
+claim a timeout for waiting for response headers. Success JSON is at most
+64 KiB and error bodies 4 KiB. Existing bounded error vocabulary is preserved;
+no raw response body, credential or URL becomes a diagnostic. A response cannot
+grant authority to another artifact or account.
 
 Upload success validates the opaque asset ID, MIME equal to the original
 declaration, byte count and SHA-256 equal to the original decoded request,
