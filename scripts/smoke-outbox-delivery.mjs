@@ -4,7 +4,10 @@ import { once } from 'node:events';
 import { build } from 'esbuild';
 import { cleanupOutboxDelivery } from './lib/outbox-delivery-cleanup.mjs';
 import { checkOutboxScheduler } from './smoke-outbox-scheduler.mjs';
-import { checkSchedulerDisposalLive } from './smoke-outbox-disposal.mjs';
+import {
+  checkRejectedDisposalLive,
+  checkSchedulerDisposalLive,
+} from './smoke-outbox-disposal.mjs';
 import { checkRejectionResume } from './smoke-outbox-rejection.mjs';
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
@@ -354,11 +357,18 @@ export async function checkOutboxDelivery(browser, serverApi) {
     artifact = ARTIFACT,
     base = 0,
     immediateClock = false,
+    reuse,
   } = {}) {
-    const context = await browser.newContext();
-    contexts.push(context);
-    const page = await context.newPage();
-    await page.goto(origin);
+    let page = reuse;
+    if (page === undefined) {
+      const context = await browser.newContext();
+      contexts.push(context);
+      page = await context.newPage();
+      await page.goto(origin);
+    } else {
+      // A reload keeps the browser context, so only in-memory page state is lost.
+      await page.reload();
+    }
     await page.waitForFunction(() => globalThis.deliveryApi !== undefined);
     await page.evaluate(
       async ({
@@ -370,6 +380,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         token,
         key,
         immediateClock,
+        reattach,
       }) => {
         const {
           openStore,
@@ -526,22 +537,24 @@ export async function checkOutboxDelivery(browser, serverApi) {
             },
           });
         };
-        globalThis.head = await store.enqueue({
-          format: 2,
-          state: 'unprepared',
-          version: 1,
-          key,
-          owner,
-          binding: lane.slice(0, 4),
-          lane,
-          artifactId: artifact,
-          admittedGeneration: auth.actor_generation,
-          authorizedGeneration: auth.actor_generation,
-          operation,
-          path,
-          text: operation === 'delete' ? null : text,
-          base: { version: base },
-        });
+        // A reattached page keeps the head that is already durable in the store.
+        if (!reattach)
+          globalThis.head = await store.enqueue({
+            format: 2,
+            state: 'unprepared',
+            version: 1,
+            key,
+            owner,
+            binding: lane.slice(0, 4),
+            lane,
+            artifactId: artifact,
+            admittedGeneration: auth.actor_generation,
+            authorizedGeneration: auth.actor_generation,
+            operation,
+            path,
+            text: operation === 'delete' ? null : text,
+            base: { version: base },
+          });
         globalThis.enqueueLikeHead = (changes, localAuthority) => {
           const intent = { ...head, ...changes };
           delete intent.sequence;
@@ -693,6 +706,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         base,
         token: live?.token ?? 'test-token',
         immediateClock,
+        reattach: reuse !== undefined,
         key:
           live === undefined
             ? '1'.repeat(32)
@@ -740,6 +754,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
       await checkLiveDisposal();
       return;
     }
+    if (process.env.ARTIFREE_SCHEDULER_CASE === 'rejected-disposal-live') {
+      assert.notEqual(
+        serverApi,
+        undefined,
+        'rejected-disposal-live requires the Rust server',
+      );
+      await checkLiveRejectedDisposal();
+      return;
+    }
     await checkOutboxScheduler({
       setup,
       close,
@@ -764,6 +787,9 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       setMode(nextMode) {
         mode = nextMode;
+      },
+      setErrorBody(nextBody) {
+        errorBody = nextBody;
       },
       configure(nextMode, nextStatus) {
         mode = nextMode;
@@ -1305,6 +1331,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       await checkRealServer();
       await checkLiveRejection();
       await checkLiveDisposal();
+      await checkLiveRejectedDisposal();
       await selectActor('Outbox scheduler');
       await checkOutboxScheduler({
         setup,
@@ -1356,6 +1383,19 @@ export async function checkOutboxDelivery(browser, serverApi) {
         setMode(next) {
           mode = next;
         },
+        setStatus(next) {
+          status = next;
+        },
+        setErrorBody(next) {
+          errorBody = next;
+        },
+        reload(page, artifact) {
+          return setup({ artifact, reuse: page });
+        },
+        waiting,
+        releaseHeld() {
+          held();
+        },
         requests: () => requests,
         forwardedMutations: () => forwardedMutations,
         responses: () => forwardedReplies,
@@ -1405,6 +1445,48 @@ export async function checkOutboxDelivery(browser, serverApi) {
       requests: () => requests,
       bindingReadCount: () => liveBindingReads,
       expectedActorId: live.actorId,
+    });
+  }
+  async function checkLiveRejectedDisposal() {
+    bindingMode = 'normal';
+    await checkRejectedDisposalLive({
+      setup,
+      close,
+      createArtifact: createRealArtifact,
+      async selectActor(label) {
+        await selectActor(label);
+      },
+      configure(next) {
+        mode = next;
+        requests = [];
+      },
+      setMode(next) {
+        mode = next;
+      },
+      setStatus(next) {
+        status = next;
+      },
+      setErrorBody(next) {
+        errorBody = next;
+      },
+      requests: () => requests,
+      bindingReadCount: () => liveBindingReads,
+      async independentWrite(artifact, base, path, value) {
+        const response = await fetch(
+          live.origin + '/v1/artifacts/' + artifact + '/data',
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: 'Bearer ' + live.token,
+              'Content-Type': 'application/json',
+              'Idempotency-Key': crypto.randomUUID(),
+            },
+            body: JSON.stringify({ path, base_data_version: base, value }),
+          },
+        );
+        assert.equal(response.status, 200);
+        return response.json();
+      },
     });
   }
   async function checkAuthorityException({

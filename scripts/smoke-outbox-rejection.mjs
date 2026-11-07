@@ -25,6 +25,34 @@ export async function checkRejectionResume(harness, selected) {
     ],
     ['capture-abort', () => checkPauseCapture(harness, 'abort')],
     ['capture-authority', () => checkPauseCapture(harness, 'authority')],
+    ['rejected-proof-conflict', () => checkFreshConflict(harness, false, true)],
+    ['rejected-proof-prepared', () => checkFreshConflict(harness, true, true)],
+    [
+      'rejected-proof-budget',
+      () => checkRecreatedPreparation(harness, false, true),
+    ],
+    ['rejected-no-downgrade-unknown', () => checkUnknownNoDowngrade(harness)],
+    [
+      'rejected-no-downgrade-unresolved',
+      () => checkRecreatedPreparation(harness, true, true),
+    ],
+    ['rejected-recreated', () => checkRejectedRecreated(harness)],
+    ['rejected-ineligible-pauses', () => checkIneligiblePauses(harness)],
+    [
+      'rejected-definitive-selections',
+      () => checkDefinitiveSelections(harness),
+    ],
+    ['rejected-codes', () => checkRejectedCodes(harness)],
+    [
+      'rejected-no-downgrade-lost-conflict',
+      () => checkLostResponseConflict(harness),
+    ],
+    ['rejected-reload', () => checkRejectedReload(harness)],
+    ['rejected-binding-changed', () => checkBindingChanged(harness)],
+    ['rejected-active-lane', () => checkActiveLane(harness)],
+    ['rejected-ineligible-failures', () => checkIneligibleFailures(harness)],
+    ['rejected-cleanup-paused', () => checkCleanupPaused(harness)],
+    ['rejected-renewal-survives', () => checkRenewalSurvives(harness)],
   ];
   if (selected !== undefined && !cases.some(([name]) => name === selected))
     throw new Error('Unknown rejection sequence');
@@ -33,11 +61,26 @@ export async function checkRejectionResume(harness, selected) {
   }
 }
 
-async function setup(harness) {
+async function setup(harness, withCleanup = false) {
   harness.configure('normal');
   const artifact = await harness.createArtifact();
   const page = await harness.setup({ artifact });
-  await page.evaluate(() => {
+  await installRejectionHarness(page, withCleanup);
+  assert.equal(
+    await page.evaluate(() => auth.actor_id),
+    harness.expectedActorId,
+  );
+  const key = await page.evaluate(() => head.key);
+  return {
+    page,
+    artifact,
+    expected: { method: 'PUT', body: originalBody, key },
+  };
+}
+
+/** Installs the page-side rejection helpers again after a reload drops them. */
+async function installRejectionHarness(page, withCleanup) {
+  await page.evaluate((withCleanup) => {
     globalThis.rejectionUnhandled = 0;
     addEventListener('unhandledrejection', (event) => {
       event.preventDefault();
@@ -74,18 +117,63 @@ async function setup(harness) {
         db.close();
       }
     };
-    installScheduler();
-  });
-  assert.equal(
-    await page.evaluate(() => auth.actor_id),
-    harness.expectedActorId,
-  );
-  const key = await page.evaluate(() => head.key);
-  return {
-    page,
-    artifact,
-    expected: { method: 'PUT', body: originalBody, key },
-  };
+    globalThis.rejectionIdentity = {};
+    globalThis.rejectionModes = [];
+    globalThis.rejectionCleanup = {
+      gate: new deliveryApi.LocalOperationGate(),
+      async authorize(mode, signal) {
+        rejectionModes.push(mode);
+        authorize();
+        if (!locallyAuthenticated)
+          throw new deliveryApi.OutboxError('owner_not_ready');
+        if (mode === 'online') {
+          const current = await deliveryApi.readBinding(
+            location.origin,
+            deliveryContext.accessToken,
+            signal,
+            (status) => {
+              if (status === 401) deliveryContext.invalidateAuthentication();
+            },
+          );
+          if (JSON.stringify(current) !== JSON.stringify(auth))
+            throw new deliveryApi.OutboxError('owner_not_ready');
+        }
+        return Object.freeze({
+          identity: rejectionIdentity,
+          signal: stop.signal,
+          check() {
+            authorize();
+            if (!locallyAuthenticated)
+              throw new deliveryApi.OutboxError('owner_not_ready');
+          },
+        });
+      },
+    };
+    // A fresh gate per scheduler: closing a scheduler closes its host's gate.
+    globalThis.freshRejectionCleanup = () => ({
+      gate: new deliveryApi.LocalOperationGate(),
+      authorize: rejectionCleanup.authorize,
+    });
+    globalThis.lastRejectedSelection = undefined;
+    globalThis.selectionOutcome = async (mode = 'online') => {
+      lastRejectedSelection = undefined;
+      try {
+        lastRejectedSelection = await scheduler.selectRejected(lane, mode);
+        return 'accepted';
+      } catch (error) {
+        return error instanceof deliveryApi.OutboxError
+          ? error.code
+          : String(error);
+      }
+    };
+    globalThis.rejectionObservation = async () => ({
+      storage: await rejectionSnapshot(),
+      events: events.length,
+      failures: scheduler.aggregateFailures,
+      epoch: scheduler.epoch,
+    });
+    installScheduler(withCleanup ? rejectionCleanup : undefined);
+  }, withCleanup);
 }
 
 async function startUnknown(page, localPreparation = false) {
@@ -131,6 +219,531 @@ async function startUnknown(page, localPreparation = false) {
     base: 0,
   });
   return snapshot;
+}
+
+/** One competing direct write, then one dispatch that the server rejects. */
+async function dispatchIntoConflict(harness, page, artifact, retryPreparation) {
+  const independent = await harness.independentWrite(artifact, 0, {
+    canonical: 1,
+  });
+  assert.equal(independent.data_version, 1);
+  harness.configure('normal');
+  if (retryPreparation) {
+    await retryAfterPreparationAbort(harness, page);
+  } else await page.evaluate(() => scheduler.wake(lane));
+  await page.waitForFunction(
+    () =>
+      events.some(
+        (event) =>
+          event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+      ) &&
+      events.some(
+        (event) =>
+          event.kind === 'paused' && event.pause.kind !== 'preparation_paused',
+      ),
+  );
+}
+
+/**
+ * Runs selectRejected in the page and asserts its outcome. Neither outcome may
+ * change rows, checkpoints, usage, counters, events or HTTP requests.
+ */
+async function checkRejectedSelection(
+  harness,
+  page,
+  expected,
+  mode = 'online',
+) {
+  const before = await page.evaluate(() => rejectionObservation());
+  const requests = harness.requests().length;
+  const mutations = harness.forwardedMutations();
+  assert.equal(
+    await page.evaluate((mode) => selectionOutcome(mode), mode),
+    expected,
+  );
+  assert.deepEqual(await page.evaluate(() => rejectionObservation()), before);
+  assert.equal(harness.requests().length, requests);
+  assert.equal(harness.forwardedMutations(), mutations);
+}
+
+async function checkUnknownNoDowngrade(harness) {
+  const { page } = await setup(harness, true);
+  harness.configure('drop_before_forward');
+  await startUnknown(page);
+  // Forwarding is restored before the selection, so only the scheduler's own
+  // authority read can run there.
+  harness.setMode('normal');
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await harness.close(page);
+  console.log('outbox rejection: rejected-no-downgrade-unknown passed');
+}
+
+async function checkRejectedRecreated(harness) {
+  const { page, artifact } = await setup(harness, true);
+  await dispatchIntoConflict(harness, page, artifact, false);
+  await checkRejectedSelection(harness, page, 'accepted');
+  // The proof is memory-only, so a recreated scheduler has no lane to select.
+  await page.evaluate(() => {
+    scheduler.close();
+    installScheduler(freshRejectionCleanup());
+  });
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await harness.close(page);
+  console.log('outbox rejection: rejected-recreated passed');
+}
+
+async function checkIneligiblePauses(harness) {
+  const preparation = await setup(harness, true);
+  await preparation.page.evaluate(() => {
+    faultPut('intents', 'prepared');
+    scheduler.wake(lane);
+  });
+  await preparation.page.waitForFunction(() =>
+    events.some(
+      (event) =>
+        event.kind === 'paused' && event.pause.kind === 'preparation_paused',
+    ),
+  );
+  assert.equal(harness.requests().length, 0, 'preparation abort sends no HTTP');
+  await checkRejectedSelection(harness, preparation.page, 'invalid_selection');
+  await harness.close(preparation.page);
+
+  const budget = await setup(harness, true);
+  await retryAfterPreparationAbort(harness, budget.page, true);
+  await budget.page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'retry_paused',
+    ),
+  );
+  assert.equal(harness.requests().length, 0);
+  await checkRejectedSelection(harness, budget.page, 'invalid_selection');
+  await harness.close(budget.page);
+  console.log('outbox rejection: rejected-ineligible-pauses passed');
+}
+
+const attemptKeys = [
+  'failure',
+  'initialState',
+  'kind',
+  'outcome',
+  'priorDelivery',
+];
+
+/** The newest delivery_failed attempt, as the page published it. */
+async function latestFailure(page) {
+  return page.evaluate(
+    () =>
+      events.findLast(
+        (event) =>
+          event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+      ).result,
+  );
+}
+
+/** The newest pause, reduced to the fields the contract names. */
+async function latestPause(page) {
+  return page.evaluate(() => {
+    const { pause } = events.findLast((event) => event.kind === 'paused');
+    return JSON.parse(
+      JSON.stringify({
+        kind: pause.kind,
+        reason: pause.reason,
+        scope: pause.scope,
+        failure: pause.failure,
+      }),
+    );
+  });
+}
+
+/**
+ * The selection brand is module-private, so the observable contract is a frozen
+ * object whose only own key is that brand, set to true.
+ */
+async function checkSelectionShape(page) {
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const keys = Reflect.ownKeys(lastRejectedSelection);
+      return {
+        frozen: Object.isFrozen(lastRejectedSelection),
+        keys: keys.map((key) => String(key)),
+        value: lastRejectedSelection[keys[0]],
+      };
+    }),
+    { frozen: true, keys: ['Symbol(rejectedAction)'], value: true },
+  );
+}
+
+async function checkDefinitiveSelections(harness) {
+  const { page, artifact, expected } = await setup(harness, true);
+  await dispatchIntoConflict(harness, page, artifact, false);
+  const failure = {
+    reason: 'data_conflict',
+    status: 409,
+    currentDataVersion: 1,
+  };
+  const attempt = await latestFailure(page);
+  assert.deepEqual(Object.keys(attempt).sort(), attemptKeys);
+  assert.deepEqual(attempt, {
+    kind: 'delivery_failed',
+    failure,
+    outcome: 'unknown',
+    initialState: 'unprepared',
+    priorDelivery: 'none',
+  });
+  // The published events carry no prepared row and no request body.
+  const published = await page.evaluate(() => JSON.stringify(events));
+  assert.equal(published.includes('base_data_version'), false);
+  assert.equal(published.includes('original'), false);
+  assert.deepEqual(await latestPause(page), { kind: 'blocked', failure });
+  await checkRejectedSelection(harness, page, 'accepted', 'online');
+  await checkSelectionShape(page);
+  await checkRejectedSelection(harness, page, 'accepted', 'offline');
+  await checkSelectionShape(page);
+  assert.deepEqual(await page.evaluate(() => rejectionModes), [
+    'online',
+    'offline',
+  ]);
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected],
+  );
+  await harness.close(page);
+  console.log('outbox rejection: rejected-definitive-selections passed');
+}
+
+async function checkRejectedCode(harness, status, code, mode) {
+  const { page, expected } = await setup(harness, true);
+  harness.configure('status');
+  harness.setStatus(status);
+  harness.setErrorBody({ error: { code, message: 'fixed rejection' } });
+  await page.evaluate(() => scheduler.wake(lane));
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'blocked',
+    ),
+  );
+  const failure = { reason: 'rejected', status, code };
+  assert.deepEqual(await latestFailure(page), {
+    kind: 'delivery_failed',
+    failure,
+    outcome: 'unknown',
+    initialState: 'unprepared',
+    priorDelivery: 'none',
+  });
+  assert.deepEqual(await latestPause(page), { kind: 'blocked', failure });
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected],
+  );
+  await checkRejectedSelection(harness, page, 'accepted', mode);
+  await checkSelectionShape(page);
+  await harness.close(page);
+  console.log(`outbox rejection: rejected-code-${code} passed`);
+}
+
+async function checkRejectedCodes(harness) {
+  await checkRejectedCode(harness, 409, 'data_path_conflict', 'online');
+  await checkRejectedCode(harness, 400, 'invalid_request', 'offline');
+}
+
+async function checkLostResponseConflict(harness) {
+  const { page, artifact, expected } = await setup(harness, true);
+  harness.configure('drop_before_forward');
+  await startUnknown(page);
+  // The lost first response leaves delivery unknown. The competing write then
+  // turns the retry into a conflict, which must not prove a rejection.
+  await harness.independentWrite(artifact, 0, { canonical: 1 });
+  harness.setMode('normal');
+  await page.evaluate(() =>
+    timers
+      .find((timer) => timer.active && timer.milliseconds === 250)
+      .callback(),
+  );
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'retry_paused',
+    ),
+  );
+  assert.deepEqual(await latestFailure(page), {
+    kind: 'delivery_failed',
+    failure: { reason: 'data_conflict', status: 409, currentDataVersion: 1 },
+    outcome: 'unknown',
+    initialState: 'prepared',
+    priorDelivery: 'unknown',
+  });
+  assert.deepEqual(await latestPause(page), {
+    kind: 'retry_paused',
+    reason: 'unresolved_after_rejection',
+    scope: 'lane',
+  });
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected, expected],
+  );
+  assert.equal(harness.responses().length, 1);
+  assert.equal(harness.responses()[0].status, 409);
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await harness.close(page);
+  console.log('outbox rejection: rejected-no-downgrade-lost-conflict passed');
+}
+
+async function checkRejectedReload(harness) {
+  const { page, artifact } = await setup(harness, true);
+  await dispatchIntoConflict(harness, page, artifact, false);
+  await checkRejectedSelection(harness, page, 'accepted');
+  // The proof is memory-only: a reload drops it while the durable head stays.
+  await harness.reload(page, artifact);
+  await installRejectionHarness(page, true);
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await harness.close(page);
+  console.log('outbox rejection: rejected-reload passed');
+}
+
+async function checkBindingChanged(harness) {
+  const { page, expected } = await setup(harness, true);
+  harness.configure('binding_changed');
+  await page.evaluate(() => scheduler.wake(lane));
+  await page.waitForFunction(() =>
+    events.some(
+      (event) =>
+        event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+    ),
+  );
+  assert.deepEqual(await latestFailure(page), {
+    kind: 'delivery_failed',
+    failure: { reason: 'binding_changed', status: 409 },
+    outcome: 'unknown',
+    initialState: 'unprepared',
+    priorDelivery: 'none',
+  });
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected],
+  );
+  // The binding refusal closes the scheduler, so selection fails its owner check.
+  await checkRejectedSelection(harness, page, 'owner_not_ready');
+  await harness.close(page);
+  console.log('outbox rejection: rejected-binding-changed passed');
+}
+
+async function checkActiveLane(harness) {
+  const { page } = await setup(harness, true);
+  harness.configure('hold_forward');
+  const arrival = harness.waiting();
+  await page.evaluate(() => scheduler.wake(lane));
+  // The held PUT has reached the proxy, so the lane's attempt is in flight.
+  await arrival;
+  // Selection waits for the in-flight attempt, so it starts before the release.
+  // The released write is acknowledged, so the lane is then not blocked.
+  await page.evaluate(() => {
+    globalThis.activeSelection = selectionOutcome('offline');
+  });
+  harness.releaseHeld();
+  assert.equal(await page.evaluate(() => activeSelection), 'invalid_selection');
+  assert.equal(harness.requests().length, 1);
+  await harness.close(page);
+  console.log('outbox rejection: rejected-active-lane passed');
+}
+
+const ineligibleFailures = [
+  {
+    name: 'access-401',
+    mode: 'status',
+    status: 401,
+    body: { error: { code: 'unauthorized', message: 'fixed refusal' } },
+    closes: true,
+  },
+  {
+    name: 'access-403',
+    mode: 'status',
+    status: 403,
+    body: { error: { code: 'forbidden', message: 'fixed refusal' } },
+    pause: {
+      kind: 'blocked',
+      failure: { reason: 'access_unavailable', status: 403 },
+    },
+  },
+  {
+    name: 'access-404',
+    mode: 'status',
+    status: 404,
+    body: { error: { code: 'not_found', message: 'fixed refusal' } },
+    pause: {
+      kind: 'blocked',
+      failure: { reason: 'access_unavailable', status: 404 },
+    },
+  },
+  {
+    name: 'network-error',
+    mode: 'drop_before_forward',
+    budget: true,
+    pause: {
+      kind: 'retry_paused',
+      reason: 'network_error',
+      scope: 'coordinator',
+    },
+  },
+  {
+    name: 'invalid-response',
+    mode: 'invalid_json',
+    budget: true,
+    pause: {
+      kind: 'retry_paused',
+      reason: 'invalid_response',
+      scope: 'coordinator',
+    },
+  },
+  {
+    name: 'rate-limited',
+    mode: 'status',
+    status: 429,
+    body: { error: { code: 'rate_limited', message: 'fixed refusal' } },
+    budget: true,
+    pause: {
+      kind: 'retry_paused',
+      reason: 'rate_limited',
+      scope: 'coordinator',
+    },
+  },
+  {
+    name: 'server-error',
+    mode: 'status',
+    status: 500,
+    body: { error: { code: 'internal', message: 'fixed refusal' } },
+    budget: true,
+    pause: {
+      kind: 'retry_paused',
+      reason: 'server_error',
+      scope: 'coordinator',
+    },
+  },
+  {
+    name: 'unclassified',
+    mode: 'status',
+    status: 418,
+    body: { error: { code: 'teapot', message: 'fixed refusal' } },
+    pause: {
+      kind: 'retry_paused',
+      reason: 'unclassified_error_response',
+      scope: 'lane',
+    },
+  },
+  {
+    name: 'ack-storage',
+    mode: 'normal',
+    ackFault: true,
+    pause: {
+      kind: 'retry_paused',
+      reason: 'ack_storage_failed',
+      scope: 'lane',
+    },
+  },
+];
+
+async function checkIneligibleFailure(harness, entry) {
+  const { page, expected } = await setup(harness, true);
+  harness.configure(entry.mode);
+  if (entry.status !== undefined) harness.setStatus(entry.status);
+  if (entry.body !== undefined) harness.setErrorBody(entry.body);
+  // One more failure exhausts the epoch budget, so this failure's own reason is
+  // the retry pause, with no retry timer.
+  if (entry.budget === true) {
+    await page.evaluate(() => {
+      scheduler.aggregateFailures = 31;
+    });
+  }
+  if (entry.ackFault === true) {
+    await page.evaluate(() => faultPut('intents', 'acknowledged'));
+  }
+  await page.evaluate(() => scheduler.wake(lane));
+  if (entry.closes === true) {
+    // Invalidated authentication closes the scheduler before any pause publishes.
+    await page.waitForFunction(() => stop.signal.aborted);
+    await checkRejectedSelection(harness, page, 'owner_not_ready');
+  } else {
+    await page.waitForFunction(() =>
+      events.some((event) => event.kind === 'paused'),
+    );
+    assert.deepEqual(await latestPause(page), entry.pause);
+    await checkRejectedSelection(harness, page, 'invalid_selection');
+  }
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected],
+  );
+  await harness.close(page);
+  console.log(`outbox rejection: rejected-ineligible-${entry.name} passed`);
+}
+
+async function checkIneligibleFailures(harness) {
+  for (const entry of ineligibleFailures)
+    await checkIneligibleFailure(harness, entry);
+}
+
+async function checkCleanupPaused(harness) {
+  const { page, expected } = await setup(harness, true);
+  // The durable ACK succeeds, then the post-ACK trim fails: a deliberate
+  // cleanup continuation, as the scheduler smoke's durable-ACK case shows.
+  await page.evaluate(() => {
+    faultPut('usage');
+    scheduler.wake(lane);
+  });
+  await page.waitForFunction(() =>
+    events.some(
+      (event) =>
+        event.kind === 'paused' && event.pause.kind === 'cleanup_paused',
+    ),
+  );
+  await page.evaluate(() => restorePut());
+  assert.deepEqual(await latestPause(page), { kind: 'cleanup_paused' });
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected],
+  );
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await harness.close(page);
+  console.log('outbox rejection: rejected-cleanup-paused passed');
+}
+
+async function checkRenewalSurvives(harness) {
+  const { page, artifact } = await setup(harness, true);
+  await dispatchIntoConflict(harness, page, artifact, false);
+  // A second lane for another artifact, budget-paused so its resume renews the epoch.
+  const other = await harness.createArtifact();
+  await page.evaluate(async (other) => {
+    globalThis.laneB = [
+      owner,
+      location.origin,
+      auth.actor_id,
+      auth.storage_epoch,
+      other,
+    ];
+    await enqueueLikeHead({
+      artifactId: other,
+      lane: laneB,
+      binding: laneB.slice(0, 4),
+      key: 'b'.repeat(32),
+    });
+    scheduler.aggregateFailures = 32;
+    scheduler.wake(laneB);
+  }, other);
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'retry_paused',
+    ),
+  );
+  await page.evaluate(() => {
+    const choice = events.findLast((event) => event.kind === 'paused').pause
+      .selection;
+    globalThis.renewal = scheduler.resumeDelivery(choice);
+  });
+  await page.evaluate(() => renewal);
+  await page.evaluate(() => scheduler.activeTask);
+  assert.equal(await page.evaluate(() => scheduler.epoch), 1);
+  // The other lane's renewal keeps the blocked lane's proof and pause.
+  await checkRejectedSelection(harness, page, 'accepted');
+  await harness.close(page);
+  console.log('outbox rejection: rejected-renewal-survives passed');
 }
 
 function requestIdentity(request) {
@@ -528,8 +1141,12 @@ async function checkPreparationProofMismatch(harness) {
   console.log('outbox rejection: preparation-proof-mismatch passed');
 }
 
-async function checkRecreatedPreparation(harness, recreate = true) {
-  const { page, artifact, expected } = await setup(harness);
+async function checkRecreatedPreparation(
+  harness,
+  recreate = true,
+  selectRejected = false,
+) {
+  const { page, artifact, expected } = await setup(harness, selectRejected);
   await harness.independentWrite(artifact, 0, { canonical: 1 });
   harness.configure('normal');
   // Inject only the existing exhausted gate so a successful local preparation
@@ -552,11 +1169,11 @@ async function checkRecreatedPreparation(harness, recreate = true) {
     { failures: 32, epoch: 0, reads: 0 },
   );
   if (recreate) {
-    await page.evaluate(() => {
+    await page.evaluate((selectRejected) => {
       scheduler.close();
-      installScheduler();
+      installScheduler(selectRejected ? freshRejectionCleanup() : undefined);
       scheduler.wake(lane);
-    });
+    }, selectRejected);
   } else {
     await page.evaluate(() => {
       const choice = events.findLast((event) => event.kind === 'paused').pause
@@ -595,6 +1212,12 @@ async function checkRecreatedPreparation(harness, recreate = true) {
     [expected],
   );
   assert.equal(harness.responses()[0].status, 409);
+  if (selectRejected)
+    await checkRejectedSelection(
+      harness,
+      page,
+      recreate ? 'invalid_selection' : 'accepted',
+    );
   await harness.close(page);
   console.log(
     'outbox rejection: ' +
@@ -605,27 +1228,13 @@ async function checkRecreatedPreparation(harness, recreate = true) {
   );
 }
 
-async function checkFreshConflict(harness, retryPreparation = false) {
-  const { page, artifact, expected } = await setup(harness);
-  const independent = await harness.independentWrite(artifact, 0, {
-    canonical: 1,
-  });
-  assert.equal(independent.data_version, 1);
-  harness.configure('normal');
-  if (retryPreparation) {
-    await retryAfterPreparationAbort(harness, page);
-  } else await page.evaluate(() => scheduler.wake(lane));
-  await page.waitForFunction(
-    () =>
-      events.some(
-        (event) =>
-          event.kind === 'attempt' && event.result.kind === 'delivery_failed',
-      ) &&
-      events.some(
-        (event) =>
-          event.kind === 'paused' && event.pause.kind !== 'preparation_paused',
-      ),
-  );
+async function checkFreshConflict(
+  harness,
+  retryPreparation = false,
+  selectRejected = false,
+) {
+  const { page, artifact, expected } = await setup(harness, selectRejected);
+  await dispatchIntoConflict(harness, page, artifact, retryPreparation);
   const observed = await page.evaluate(() => ({
     pause: events.findLast((event) => event.kind === 'paused').pause,
     attempt: events.find(
@@ -691,6 +1300,7 @@ async function checkFreshConflict(harness, retryPreparation = false) {
     body: originalBody,
     base: 0,
   });
+  if (selectRejected) await checkRejectedSelection(harness, page, 'accepted');
   await harness.close(page);
   console.log(
     'outbox rejection: ' +

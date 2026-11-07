@@ -174,8 +174,12 @@ of B2, B3/B18, B8/B12, B13/B21 and B22/B23. Internal suites also exercise
 preparation/ACK/trim, native mutation redirects and receipt rejection, bounded
 retry scheduling and distinct preparation/delivery actions. The full smoke and
 `scripts/test-outbox-delivery-live.mjs` add real Rust replay/dependency cases.
-These do not establish complete B8/B15/B19, public lifecycle integration or the
-end-to-end R08 matrix. Injected transaction aborts and page-local reopen checks
+The internal scheduler suites also cover R08c-3a `discardRejected` in both
+engines (closure deletion and accounting, survivor pause, offline authority,
+abort and fence cases, 256-gate recovery), and the full smoke adds its real Rust
+rejected case. These do not establish complete B8/B15/B19, public lifecycle
+integration or the end-to-end R08 matrix. Injected transaction aborts and page-local reopen checks
 are not native-process crash restoration. Public recovery continuation,
-reauthorization, access recovery, rejected disposal, unresolved abandonment and
-native-process recovery remain R08c/R08d work.
+reauthorization, access recovery, unresolved abandonment and native-process
+recovery remain R08c/R08d work; rejected disposal exists only inside the
+internal scheduler, with no public handle.

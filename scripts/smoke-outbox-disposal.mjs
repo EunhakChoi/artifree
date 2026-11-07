@@ -41,6 +41,34 @@ export async function checkSchedulerDisposal(harness, selected) {
     'admission-auth-abort',
     'admission-auth-commit',
     'disposal-authority-check',
+    'rejected-wrong-kind',
+    'rejected-pending-identity',
+    'rejected-offline-authority',
+    'rejected-abort',
+    'rejected-no-resurrection',
+    'rejected-serialization',
+    'rejected-stale-selection',
+    'rejected-token-forgery',
+    'rejected-replaced-pause',
+    'rejected-post-commit-close',
+    'rejected-post-commit-wake',
+    'rejected-accounting',
+    'rejected-survivors',
+    'rejected-online-read',
+    'rejected-selection-guards',
+    'rejected-foreign-owner',
+    'rejected-foreign-actor',
+    'rejected-foreign-binding',
+    'rejected-offline-logout',
+    'rejected-offline-lock-loss',
+    'rejected-offline-generation',
+    'rejected-offline-profile',
+    'rejected-offline-invalidated',
+    'rejected-offline-check-throws',
+    'rejected-offline-closed',
+    'rejected-offline-aborted',
+    'rejected-post-commit-auth',
+    'rejected-online-401',
   ];
   for (const mode of modes.filter(
     (value) =>
@@ -55,6 +83,7 @@ export async function checkSchedulerDisposal(harness, selected) {
       globalThis.localGate = new deliveryApi.LocalOperationGate();
       globalThis.cleanupIdentity = {};
       globalThis.cleanupBindingReads = 0;
+      globalThis.cleanupAuthorizeModes = [];
       globalThis.cleanupObservedStatuses = [];
       globalThis.cleanupUnhandled = 0;
       addEventListener('unhandledrejection', (event) => {
@@ -115,6 +144,7 @@ export async function checkSchedulerDisposal(harness, selected) {
       installScheduler({
         gate: localGate,
         async authorize(mode, signal) {
+          cleanupAuthorizeModes.push(mode);
           if (globalThis.cleanupAuthorityFailure !== undefined)
             throw cleanupAuthorityFailure;
           proof.check();
@@ -154,7 +184,9 @@ export async function checkSchedulerDisposal(harness, selected) {
       globalThis.cleanupLanes = [[...lane]];
     });
     if (!['disposal-capacity', 'disposal-empty'].includes(mode)) {
-      await checkDisposalFault(harness, page, mode);
+      if (mode.startsWith('rejected-'))
+        await checkRejectedDisposal(harness, page, mode);
+      else await checkDisposalFault(harness, page, mode);
       assert.equal(await page.evaluate(() => cleanupUnhandled), 0);
       await harness.close(page);
       console.log(`outbox disposal: ${mode} passed`);
@@ -1814,6 +1846,1039 @@ async function checkDisposalFault(harness, page, mode) {
   assert.equal(await page.evaluate(() => scheduler.aggregateFailures), 0);
 }
 
+/**
+ * Rejected-head fixtures for the internal discardRejected path. Each mode first
+ * blocks a lane with one definitive 409 (data_conflict), so the lane holds a
+ * rejection proof, then exercises one part of the rejected acceptance matrix.
+ */
+async function checkRejectedDisposal(harness, page, mode) {
+  harness.configure('status', 409);
+  await page.evaluate(async () => {
+    globalThis.rejectedKey = [...lane.slice(0, 4), 'art_' + 'e'.repeat(32)];
+    globalThis.rejectedHead = {
+      key: crypto.randomUUID().replaceAll('-', ''),
+      lane: rejectedKey,
+      artifactId: rejectedKey[4],
+      base: { version: 0 },
+    };
+    globalThis.rejectionCode = (promise) =>
+      promise.then(
+        () => 'unexpected',
+        (error) => error.code,
+      );
+    globalThis.rejectedLaneState = () => {
+      const current = scheduler.lanes.get(JSON.stringify(rejectedKey));
+      return {
+        present: current !== undefined,
+        identical:
+          current !== undefined &&
+          current === rejectedOriginal.lane &&
+          current.pause === rejectedOriginal.pause &&
+          current.rejection === rejectedOriginal.proof,
+        pause: current?.pause?.kind ?? null,
+        proof: current?.rejection !== undefined,
+        failures: current?.failures ?? null,
+        aggregate: scheduler.aggregateFailures,
+        epoch: scheduler.epoch,
+      };
+    };
+    globalThis.rejectedHeadRow = await enqueueLikeHead(rejectedHead);
+    scheduler.wake(rejectedKey);
+  });
+  await page.waitForFunction(() =>
+    events.some(
+      (event) =>
+        event.kind === 'paused' &&
+        event.lane?.[4] === rejectedKey[4] &&
+        event.pause.kind === 'blocked',
+    ),
+  );
+  await page.evaluate(() => {
+    const current = scheduler.lanes.get(JSON.stringify(rejectedKey));
+    globalThis.rejectedOriginal = {
+      lane: current,
+      pause: current.pause,
+      proof: current.rejection,
+    };
+  });
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      reason: events.findLast(
+        (event) =>
+          event.kind === 'paused' && event.lane?.[4] === rejectedKey[4],
+      ).pause.failure.reason,
+      proof: rejectedOriginal.proof !== undefined,
+    })),
+    { reason: 'data_conflict', proof: true },
+  );
+  const requests = harness.requests().length;
+  assert.equal(requests, 1);
+  const observe = () =>
+    page.evaluate(async () => ({
+      storage: await cleanupStorageSnapshot(),
+      lane: rejectedLaneState(),
+      bindingReads: cleanupBindingReads,
+      events: events.length,
+    }));
+  const before = await observe();
+  assert.equal(before.lane.identical, true);
+  switch (mode) {
+    case 'rejected-wrong-kind': {
+      // Wrong-kind, unbranded, copied and derived tokens are refused before any
+      // consumption, so the genuine token still works afterwards.
+      await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+      });
+      const refusals = await page.evaluate(async () => ({
+        unsent: await rejectionCode(scheduler.discardUnsent(rejectedChoice)),
+        unbranded: await rejectionCode(scheduler.discardRejected({})),
+        copied: await rejectionCode(
+          scheduler.discardRejected({ ...rejectedChoice }),
+        ),
+        derived: await rejectionCode(
+          scheduler.discardRejected(Object.create(rejectedChoice)),
+        ),
+      }));
+      assert.deepEqual(refusals, {
+        unsent: 'invalid_selection',
+        unbranded: 'invalid_selection',
+        copied: 'invalid_selection',
+        derived: 'invalid_selection',
+      });
+      assert.deepEqual(await observe(), before);
+      assert.deepEqual(
+        await page.evaluate(() => scheduler.discardRejected(rejectedChoice)),
+        { kind: 'discarded_rejected', removedDependents: 0 },
+      );
+      const after = await observe();
+      assert.equal(after.storage.rows.length, before.storage.rows.length - 1);
+      assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-pending-identity': {
+      const outcome = await page.evaluate(async () => {
+        const choice = await scheduler.selectRejected(rejectedKey, 'offline');
+        const first = scheduler.discardRejected(choice);
+        const second = scheduler.discardRejected(choice);
+        const crossKind = await rejectionCode(scheduler.discardUnsent(choice));
+        const result = await first;
+        const consumed = await rejectionCode(scheduler.discardRejected(choice));
+        return { shared: first === second, crossKind, result, consumed };
+      });
+      assert.deepEqual(outcome, {
+        shared: true,
+        crossKind: 'invalid_selection',
+        result: { kind: 'discarded_rejected', removedDependents: 0 },
+        consumed: 'invalid_selection',
+      });
+      const after = await observe();
+      // One operation: a second run would remove the head twice.
+      assert.equal(after.storage.rows.length, before.storage.rows.length - 1);
+      assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+      assert.equal(after.bindingReads, 0);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-offline-authority': {
+      const local = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        globalThis.cleanupAuthorityFailure = new deliveryApi.OutboxError(
+          'owner_not_ready',
+        );
+        const code = await rejectionCode(
+          scheduler.discardRejected(rejectedChoice),
+        );
+        globalThis.cleanupAuthorityFailure = undefined;
+        return code;
+      });
+      assert.equal(local, 'owner_not_ready');
+      assert.deepEqual(await observe(), before);
+      const midTransaction = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const deletion = IDBObjectStore.prototype.delete;
+        globalThis.rejectedDeletes = 0;
+        globalThis.restoreRejectedDelete = () => {
+          IDBObjectStore.prototype.delete = deletion;
+        };
+        IDBObjectStore.prototype.delete = function (...args) {
+          const pending = deletion.apply(this, args);
+          if (this.name === 'intents')
+            pending.addEventListener(
+              'success',
+              () => {
+                rejectedDeletes += 1;
+                // Authority changes after the intent delete, so the transaction's
+                // own check before commit must refuse the closure.
+                currentAuthority = Symbol();
+              },
+              { once: true },
+            );
+          return pending;
+        };
+        const code = await rejectionCode(
+          scheduler.discardRejected(rejectedChoice),
+        );
+        restoreRejectedDelete();
+        return { code, deletes: rejectedDeletes };
+      });
+      assert.deepEqual(midTransaction, { code: 'owner_not_ready', deletes: 1 });
+      assert.deepEqual(await observe(), before);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-abort': {
+      const aborted = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        // The usage write is the last request before commit, so this aborts
+        // after the closure's intent and checkpoint writes have succeeded.
+        faultPut('usage');
+        const code = await rejectionCode(
+          scheduler.discardRejected(rejectedChoice),
+        );
+        restorePut();
+        return code;
+      });
+      assert.equal(aborted, 'storage_failed');
+      assert.deepEqual(await observe(), before);
+      assert.equal(harness.requests().length, requests);
+      // Any attempt consumes the token, so the failed selection cannot be retried.
+      assert.equal(
+        await page.evaluate(() =>
+          rejectionCode(scheduler.discardRejected(rejectedChoice)),
+        ),
+        'invalid_selection',
+      );
+      assert.deepEqual(await observe(), before);
+      const committed = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        return scheduler.discardRejected(rejectedChoice);
+      });
+      assert.deepEqual(committed, {
+        kind: 'discarded_rejected',
+        removedDependents: 0,
+      });
+      const after = await observe();
+      const removed = before.storage.rows.filter(
+        (row) => !after.storage.rows.some((kept) => kept.key === row.key),
+      );
+      // Accounting once: the aborted attempt left counters untouched, and the
+      // committed attempt subtracts the removed row's recorded bytes exactly once.
+      assert.equal(removed.length, 1);
+      assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+      assert.equal(
+        after.storage.usage.bytes,
+        before.storage.usage.bytes - removed[0].bytes,
+      );
+      assert.equal(
+        after.storage.checkpoints.length,
+        before.storage.checkpoints.length - 1,
+      );
+      break;
+    }
+    case 'rejected-no-resurrection': {
+      const replay = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const first = await scheduler.discardRejected(rejectedChoice);
+        return {
+          first,
+          retired: !scheduler.lanes.has(JSON.stringify(rejectedKey)),
+          replay: await rejectionCode(
+            scheduler.discardRejected(rejectedChoice),
+          ),
+        };
+      });
+      assert.deepEqual(replay, {
+        first: { kind: 'discarded_rejected', removedDependents: 0 },
+        retired: true,
+        replay: 'invalid_selection',
+      });
+      // A new row under the same lane key is a new incarnation. It must not
+      // inherit the old proof, pause or failure count. The held request keeps
+      // the lane in flight, so the state is observed before any response.
+      harness.configure('headers_hold');
+      const arrival = harness.waitRequest();
+      await page.evaluate(async () => {
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: rejectedKey,
+          artifactId: rejectedKey[4],
+          base: { version: 0 },
+        });
+        scheduler.wake(rejectedKey);
+      });
+      await arrival;
+      assert.deepEqual(
+        await page.evaluate(() => {
+          const { present, pause, proof, failures } = rejectedLaneState();
+          return { present, pause, proof, failures };
+        }),
+        { present: true, pause: null, proof: false, failures: 0 },
+      );
+      assert.equal(harness.requests().length, 1);
+      break;
+    }
+    case 'rejected-serialization': {
+      const outcome = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const admittedKey = crypto.randomUUID().replaceAll('-', '');
+        let admission;
+        // The hook runs inside the action's authority check, so the admission
+        // waits for the gate. If it joined the closure, the snapshot would change
+        // and the discard would refuse with invalid_selection.
+        globalThis.onCleanupProofCheck = () => {
+          if (admission === undefined)
+            admission = enqueueLikeHead({
+              key: admittedKey,
+              lane: rejectedKey,
+              artifactId: rejectedKey[4],
+              base: { version: 0 },
+            });
+        };
+        // The gated admission starts only after the committed discard has retired
+        // the blocked lane, so it cannot see the old lane.
+        let lanePresentAtAdmission;
+        globalThis.onAdmissionStart = () => {
+          lanePresentAtAdmission = scheduler.lanes.has(
+            JSON.stringify(rejectedKey),
+          );
+        };
+        const result = await scheduler.discardRejected(rejectedChoice);
+        globalThis.onCleanupProofCheck = undefined;
+        globalThis.onAdmissionStart = undefined;
+        await admission;
+        return { result, admittedKey, lanePresentAtAdmission };
+      });
+      assert.deepEqual(outcome.result, {
+        kind: 'discarded_rejected',
+        removedDependents: 0,
+      });
+      assert.equal(outcome.lanePresentAtAdmission, false);
+      const after = await observe();
+      assert.equal(
+        after.storage.rows.some((row) => row.key === outcome.admittedKey),
+        true,
+      );
+      assert.equal(after.storage.rows.length, before.storage.rows.length);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-stale-selection': {
+      // A wake between selection and entry changes the wake marker.
+      const woken = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        scheduler.wake(rejectedKey);
+        return rejectionCode(scheduler.discardRejected(rejectedChoice));
+      });
+      assert.equal(woken, 'invalid_selection');
+      assert.deepEqual(await observe(), before);
+      // A wake inside the transaction, after the intent delete, is refused by
+      // the transaction's own check before commit.
+      const wokenInside = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const deletion = IDBObjectStore.prototype.delete;
+        let fired = false;
+        globalThis.restoreRejectedDelete = () => {
+          IDBObjectStore.prototype.delete = deletion;
+        };
+        IDBObjectStore.prototype.delete = function (...args) {
+          const pending = deletion.apply(this, args);
+          if (this.name === 'intents' && !fired)
+            pending.addEventListener(
+              'success',
+              () => {
+                fired = true;
+                scheduler.wake(rejectedKey);
+              },
+              { once: true },
+            );
+          return pending;
+        };
+        const code = await rejectionCode(
+          scheduler.discardRejected(rejectedChoice),
+        );
+        restoreRejectedDelete();
+        return code;
+      });
+      assert.equal(wokenInside, 'invalid_selection');
+      assert.deepEqual(await observe(), before);
+      // A dependent enqueued after selection changes the closure signature.
+      await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: rejectedKey,
+          artifactId: rejectedKey[4],
+          base: { version: 0 },
+        });
+      });
+      const withDependent = await observe();
+      assert.equal(
+        withDependent.storage.rows.length,
+        before.storage.rows.length + 1,
+      );
+      assert.equal(
+        await page.evaluate(() =>
+          rejectionCode(scheduler.discardRejected(rejectedChoice)),
+        ),
+        'invalid_selection',
+      );
+      assert.deepEqual(await observe(), withDependent);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-token-forgery': {
+      // Forged brands and tokens of other kinds are refused before consumption,
+      // so the genuine token still discards afterwards.
+      await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+      });
+      assert.deepEqual(
+        await page.evaluate(async () => ({
+          forgedBrand: await rejectionCode(
+            scheduler.discardRejected(Object.freeze({ [Symbol()]: true })),
+          ),
+          retryPreparation: await rejectionCode(
+            scheduler.retryPreparation(rejectedChoice),
+          ),
+          resumeDelivery: await rejectionCode(
+            scheduler.resumeDelivery(rejectedChoice),
+          ),
+          retryCleanup: await rejectionCode(
+            scheduler.retryCleanup(rejectedChoice),
+          ),
+          retireEmptyGate: await rejectionCode(
+            scheduler.retireEmptyPreparationGate(rejectedChoice),
+          ),
+        })),
+        {
+          forgedBrand: 'invalid_selection',
+          retryPreparation: 'invalid_selection',
+          resumeDelivery: 'invalid_selection',
+          retryCleanup: 'invalid_selection',
+          retireEmptyGate: 'invalid_selection',
+        },
+      );
+      assert.deepEqual(await observe(), before);
+      assert.equal(harness.requests().length, requests);
+      assert.deepEqual(
+        await page.evaluate(() => scheduler.discardRejected(rejectedChoice)),
+        { kind: 'discarded_rejected', removedDependents: 0 },
+      );
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-replaced-pause': {
+      // An equal-content copy is not the pause the proof was made against.
+      const refused = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const current = scheduler.lanes.get(JSON.stringify(rejectedKey));
+        current.pause = { ...current.pause };
+        const code = await rejectionCode(
+          scheduler.discardRejected(rejectedChoice),
+        );
+        current.pause = rejectedOriginal.pause;
+        return code;
+      });
+      assert.equal(refused, 'invalid_selection');
+      assert.deepEqual(await observe(), before);
+      assert.equal(harness.requests().length, requests);
+      assert.deepEqual(
+        await page.evaluate(async () => {
+          globalThis.rejectedChoice = await scheduler.selectRejected(
+            rejectedKey,
+            'offline',
+          );
+          return scheduler.discardRejected(rejectedChoice);
+        }),
+        { kind: 'discarded_rejected', removedDependents: 0 },
+      );
+      break;
+    }
+    case 'rejected-post-commit-close': {
+      // Closing right after the commit decides the result: the committed removal
+      // stays, publication is suppressed and the lane is not retired.
+      const outcome = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const transaction = IDBDatabase.prototype.transaction;
+        globalThis.restoreRejectedTransaction = () => {
+          IDBDatabase.prototype.transaction = transaction;
+        };
+        IDBDatabase.prototype.transaction = function (...args) {
+          const tx = Reflect.apply(transaction, this, args);
+          if (args[1] === 'readwrite' && [args[0]].flat().includes('intents'))
+            tx.addEventListener('complete', () => scheduler.close(), {
+              once: true,
+            });
+          return tx;
+        };
+        const result = await scheduler.discardRejected(rejectedChoice).then(
+          (value) => value,
+          (error) => ({ rejected: error.code }),
+        );
+        restoreRejectedTransaction();
+        return {
+          result,
+          retained: scheduler.lanes.has(JSON.stringify(rejectedKey)),
+        };
+      });
+      assert.deepEqual(outcome, {
+        result: { kind: 'discarded_rejected', removedDependents: 0 },
+        retained: true,
+      });
+      const after = await observe();
+      assert.equal(after.storage.rows.length, before.storage.rows.length - 1);
+      assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+      assert.equal(after.events, before.events);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-post-commit-auth': {
+      // Invalidating authentication right after the commit decides the result the
+      // same way closing does: the removal stays, nothing publishes, and the lane
+      // is not retired.
+      const outcome = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const transaction = IDBDatabase.prototype.transaction;
+        globalThis.restoreRejectedTransaction = () => {
+          IDBDatabase.prototype.transaction = transaction;
+        };
+        IDBDatabase.prototype.transaction = function (...args) {
+          const tx = Reflect.apply(transaction, this, args);
+          if (args[1] === 'readwrite' && [args[0]].flat().includes('intents'))
+            tx.addEventListener(
+              'complete',
+              () => deliveryContext.invalidateAuthentication(),
+              { once: true },
+            );
+          return tx;
+        };
+        const result = await scheduler.discardRejected(rejectedChoice).then(
+          (value) => value,
+          (error) => ({ rejected: error.code }),
+        );
+        restoreRejectedTransaction();
+        return {
+          result,
+          retained: scheduler.lanes.has(JSON.stringify(rejectedKey)),
+        };
+      });
+      assert.deepEqual(outcome, {
+        result: { kind: 'discarded_rejected', removedDependents: 0 },
+        retained: true,
+      });
+      const after = await observe();
+      assert.equal(after.storage.rows.length, before.storage.rows.length - 1);
+      assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+      assert.equal(after.events, before.events);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-post-commit-wake': {
+      // A wake after the commit does not keep the removed lane alive.
+      const outcome = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        const transaction = IDBDatabase.prototype.transaction;
+        globalThis.restoreRejectedTransaction = () => {
+          IDBDatabase.prototype.transaction = transaction;
+        };
+        IDBDatabase.prototype.transaction = function (...args) {
+          const tx = Reflect.apply(transaction, this, args);
+          if (args[1] === 'readwrite' && [args[0]].flat().includes('intents'))
+            tx.addEventListener('complete', () => scheduler.wake(rejectedKey), {
+              once: true,
+            });
+          return tx;
+        };
+        const result = await scheduler.discardRejected(rejectedChoice).then(
+          (value) => value,
+          (error) => ({ rejected: error.code }),
+        );
+        restoreRejectedTransaction();
+        return {
+          result,
+          retained: scheduler.lanes.has(JSON.stringify(rejectedKey)),
+        };
+      });
+      assert.deepEqual(outcome, {
+        result: { kind: 'discarded_rejected', removedDependents: 0 },
+        retained: false,
+      });
+      const after = await observe();
+      assert.equal(after.storage.rows.length, before.storage.rows.length - 1);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-accounting': {
+      // A committed zero-survivor disposal moves only the removed row's usage.
+      await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+      });
+      const counters = () =>
+        page.evaluate(() => ({
+          aggregate: scheduler.aggregateFailures,
+          epoch: scheduler.epoch,
+        }));
+      const countersBefore = await counters();
+      assert.deepEqual(
+        await page.evaluate(() => scheduler.discardRejected(rejectedChoice)),
+        { kind: 'discarded_rejected', removedDependents: 0 },
+      );
+      assert.deepEqual(await counters(), countersBefore);
+      const after = await observe();
+      const removed = before.storage.rows.filter(
+        (row) => !after.storage.rows.some((kept) => kept.key === row.key),
+      );
+      assert.equal(removed.length, 1);
+      assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+      assert.equal(
+        after.storage.usage.bytes,
+        before.storage.usage.bytes - removed[0].bytes,
+      );
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-survivors': {
+      // Survivors stay held until the resume token minted at publication sends
+      // them with their original key and base.
+      const survivorKey = await page.evaluate(async () => {
+        // Counts page-side fetches when they start, before the network can deliver
+        // them to the harness.
+        globalThis.fetchLog = [];
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = (input, init) => {
+          fetchLog.push({ method: init?.method ?? 'GET', url: String(input) });
+          return originalFetch(input, init);
+        };
+        const newKey = () => crypto.randomUUID().replaceAll('-', '');
+        // A dependent must name the current lane tail, so it is enqueued before
+        // the independent survivor becomes the tail.
+        await enqueueLikeHead({
+          key: newKey(),
+          lane: rejectedKey,
+          artifactId: rejectedKey[4],
+          base: { after: rejectedHeadRow.sequence },
+          path: 'dependent',
+          text: '{"d":1}',
+        });
+        const survivor = await enqueueLikeHead({
+          key: newKey(),
+          lane: rejectedKey,
+          artifactId: rejectedKey[4],
+          base: { version: 0 },
+          path: 'survivor',
+          text: '{"s":1}',
+        });
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        return survivor.key;
+      });
+      const baseline = await observe();
+      assert.equal(
+        baseline.storage.rows.length,
+        before.storage.rows.length + 2,
+      );
+      assert.deepEqual(
+        await page.evaluate(() =>
+          scheduler.discardRejected(rejectedChoice).then(
+            (value) => value,
+            (error) => ({ rejected: error.code }),
+          ),
+        ),
+        { kind: 'discarded_rejected', removedDependents: 1 },
+      );
+      const committed = await observe();
+      assert.equal(
+        committed.storage.rows.length,
+        baseline.storage.rows.length - 2,
+      );
+      assert.equal(
+        committed.storage.rows.some((row) => row.key === survivorKey),
+        true,
+      );
+      assert.deepEqual(
+        await page.evaluate(() => {
+          const current = scheduler.lanes.get(JSON.stringify(rejectedKey));
+          const published = events.filter(
+            (event) =>
+              event.kind === 'paused' &&
+              event.pause.reason === 'survivors_after_disposal',
+          );
+          return {
+            kind: current.pause?.kind ?? null,
+            reason: current.pause?.reason ?? null,
+            scope: current.pause?.scope ?? null,
+            publications: published.length,
+            proof: current.rejection === undefined,
+          };
+        }),
+        {
+          kind: 'retry_paused',
+          reason: 'survivors_after_disposal',
+          scope: 'lane',
+          publications: 1,
+          proof: true,
+        },
+      );
+      // Wake and a second selection send nothing before the resume token is used.
+      // The macrotask yield lets a dispatch that the wake starts reach the counter.
+      assert.equal(
+        await page.evaluate(async () => {
+          scheduler.wake(rejectedKey);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return fetchLog.length;
+        }),
+        0,
+      );
+      assert.equal(
+        await page.evaluate(() =>
+          rejectionCode(scheduler.selectRejected(rejectedKey, 'offline')),
+        ),
+        'invalid_selection',
+      );
+      assert.equal(harness.requests().length, requests);
+      // The resume token is a DeliveryResume, which discardRejected refuses by
+      // brand. The unprepared-lane selections refuse a retry-paused lane.
+      const publishedState = await observe();
+      assert.deepEqual(
+        await page.evaluate(async () => {
+          const token = scheduler.lanes.get(JSON.stringify(rejectedKey)).pause
+            .selection;
+          return {
+            discardRejected: await rejectionCode(
+              scheduler.discardRejected(token),
+            ),
+            selectUnsent: await rejectionCode(
+              scheduler.selectUnsent(rejectedKey, 'offline'),
+            ),
+            selectEmptyGate: await rejectionCode(
+              scheduler.selectEmptyPreparationGate(rejectedKey, 'offline'),
+            ),
+          };
+        }),
+        {
+          discardRejected: 'invalid_selection',
+          selectUnsent: 'invalid_selection',
+          selectEmptyGate: 'invalid_selection',
+        },
+      );
+      assert.deepEqual(await observe(), publishedState);
+      harness.configure('normal');
+      const arrival = harness.waitRequest();
+      assert.equal(
+        await page.evaluate(() => {
+          const token = scheduler.lanes.get(JSON.stringify(rejectedKey)).pause
+            .selection;
+          return scheduler.resumeDelivery(token).then(
+            () => 'resumed',
+            (error) => error.code,
+          );
+        }),
+        'resumed',
+      );
+      // The resume's dispatch is asynchronous; configure() starts a new request
+      // log, so the survivor is the only request after it.
+      await arrival;
+      // The dispatch carries the survivor's own row key as its idempotency key.
+      const sent = harness.requests().map((request) => ({
+        method: request.method,
+        idempotencyKey: request.headers['idempotency-key'],
+      }));
+      assert.deepEqual(sent, [{ method: 'PUT', idempotencyKey: survivorKey }]);
+      // The resume may first read the binding; only the artifact PUT is counted.
+      assert.deepEqual(
+        await page.evaluate(() =>
+          fetchLog
+            .filter((entry) => entry.method === 'PUT')
+            .map((entry) => entry.url.endsWith('/data')),
+        ),
+        [true],
+      );
+      await page.waitForFunction(() =>
+        events.some(
+          (event) =>
+            event.kind === 'attempt' &&
+            event.result.kind === 'server_acknowledged',
+        ),
+      );
+      const resumed = await observe();
+      assert.equal(
+        resumed.storage.rows.some((row) => row.key === survivorKey),
+        false,
+      );
+      break;
+    }
+    case 'rejected-online-read': {
+      // A failed online revalidation fails closed: no offline fallback, no token,
+      // no storage change, and one binding read per revalidating call.
+      harness.configureBinding('503');
+      assert.equal(
+        await page.evaluate(() =>
+          rejectionCode(scheduler.selectRejected(rejectedKey, 'online')),
+        ),
+        'unavailable',
+      );
+      const failed = await observe();
+      assert.equal(failed.bindingReads, before.bindingReads + 1);
+      assert.deepEqual(
+        { ...failed, bindingReads: 0 },
+        { ...before, bindingReads: 0 },
+      );
+      assert.deepEqual(await page.evaluate(() => cleanupAuthorizeModes), [
+        'online',
+      ]);
+      harness.configureBinding('normal');
+      assert.deepEqual(
+        await page.evaluate(async () => {
+          globalThis.rejectedChoice = await scheduler.selectRejected(
+            rejectedKey,
+            'online',
+          );
+          return scheduler.discardRejected(rejectedChoice);
+        }),
+        { kind: 'discarded_rejected', removedDependents: 0 },
+      );
+      const committed = await observe();
+      assert.equal(committed.bindingReads, before.bindingReads + 3);
+      assert.deepEqual(await page.evaluate(() => cleanupAuthorizeModes), [
+        'online',
+        'online',
+        'online',
+      ]);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-online-401': {
+      // A 401 from the online revalidation invalidates authentication and closes
+      // the scheduler. Nothing is deleted and no offline authority is tried.
+      // Invalidation without an abort leaves the close to the scheduler itself.
+      await page.evaluate(() => {
+        globalThis.authInvalidationAborts = false;
+      });
+      harness.configureBinding('401stalled');
+      await page.evaluate(() => {
+        globalThis.onlineFailure = scheduler
+          .selectRejected(rejectedKey, 'online')
+          .then(
+            () => 'unexpected',
+            (error) => ({
+              code: error.code,
+              status: error.status,
+              retryAfterSeconds: error.retryAfterSeconds,
+            }),
+          );
+      });
+      await page.waitForFunction(() => cleanupObservedStatuses.includes(401));
+      assert.equal(await page.evaluate(() => locallyAuthenticated), false);
+      const failure = await page.evaluate(() => onlineFailure);
+      assert.deepEqual(failure, {
+        code: await page.evaluate(() => cleanupRawReadDiagnostic.code),
+        status: 401,
+        retryAfterSeconds: 3600,
+      });
+      // The close happens after the body completes, so it is observed here.
+      assert.equal(
+        await page.evaluate(() => scheduler.fence.signal.aborted),
+        true,
+      );
+      assert.deepEqual(await page.evaluate(() => cleanupAuthorizeModes), [
+        'online',
+      ]);
+      const after = await observe();
+      assert.equal(after.bindingReads, before.bindingReads + 1);
+      assert.deepEqual(
+        { ...after, bindingReads: 0 },
+        { ...before, bindingReads: 0 },
+      );
+      assert.equal(harness.requests().length, requests);
+      assert.equal(
+        await page.evaluate(() =>
+          rejectionCode(scheduler.selectRejected(rejectedKey, 'offline')),
+        ),
+        'owner_not_ready',
+      );
+      // Later checks in this process read the binding normally again.
+      harness.configureBinding('normal');
+      break;
+    }
+    case 'rejected-selection-guards': {
+      // Unsettled lanes (a pending timer, a queued turn or the active turn) are
+      // refused before any head is selected.
+      const refused = await page.evaluate(async () => {
+        const current = scheduler.lanes.get(JSON.stringify(rejectedKey));
+        const select = (key) =>
+          rejectionCode(scheduler.selectRejected(key, 'offline'));
+        const outcomes = {};
+        current.cancelTimer = () => {};
+        outcomes.timer = await select(rejectedKey);
+        delete current.cancelTimer;
+        current.queued = true;
+        outcomes.queued = await select(rejectedKey);
+        current.queued = false;
+        const active = scheduler.activeLane;
+        scheduler.activeLane = current;
+        outcomes.active = await select(rejectedKey);
+        scheduler.activeLane = active;
+        return outcomes;
+      });
+      assert.deepEqual(refused, {
+        timer: 'invalid_selection',
+        queued: 'invalid_selection',
+        active: 'invalid_selection',
+      });
+      assert.deepEqual(await observe(), before);
+      assert.equal(harness.requests().length, requests);
+      assert.deepEqual(
+        await page.evaluate(async () => {
+          globalThis.rejectedChoice = await scheduler.selectRejected(
+            rejectedKey,
+            'offline',
+          );
+          return scheduler.discardRejected(rejectedChoice);
+        }),
+        { kind: 'discarded_rejected', removedDependents: 0 },
+      );
+      break;
+    }
+    case 'rejected-foreign-owner':
+    case 'rejected-foreign-actor':
+    case 'rejected-foreign-binding': {
+      // A key naming another owner, actor or storage epoch is refused. The
+      // scheduler fails closed on its first failed check, so each one runs on
+      // its own page.
+      const index = {
+        'rejected-foreign-owner': 0,
+        'rejected-foreign-actor': 2,
+        'rejected-foreign-binding': 3,
+      }[mode];
+      const refused = await page.evaluate(
+        ({ index }) => {
+          const replacement = {
+            0: 'other-owner',
+            2: 'other-actor',
+            3: rejectedKey[3] + 1,
+          };
+          const key = [...rejectedKey];
+          key[index] = replacement[index];
+          return rejectionCode(scheduler.selectRejected(key, 'offline'));
+        },
+        { index },
+      );
+      assert.equal(refused, 'owner_not_ready');
+      assert.deepEqual(await observe(), before);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-offline-logout':
+    case 'rejected-offline-lock-loss':
+    case 'rejected-offline-generation':
+    case 'rejected-offline-profile':
+    case 'rejected-offline-invalidated':
+    case 'rejected-offline-closed':
+    case 'rejected-offline-aborted':
+    case 'rejected-offline-check-throws': {
+      // One lost authority fact, a close or an aborted authority signal, injected
+      // between selection and the transaction. The scheduler fails closed on its first failed check, so
+      // each fact runs on its own page.
+      const fact = mode.slice('rejected-offline-'.length);
+      const refused = await page.evaluate(async (fact) => {
+        const facts = {
+          logout: () => {
+            locallyAuthenticated = false;
+          },
+          'lock-loss': () => {
+            lockHeld = false;
+          },
+          generation: () => {
+            currentAuthority = Symbol();
+          },
+          profile: () => {
+            sessionStorage.setItem(
+              'artifree-data-outbox-owner-v1',
+              'replaced-owner',
+            );
+          },
+          invalidated: () => {
+            authInvalidationAborts = false;
+            deliveryContext.invalidateAuthentication();
+          },
+          closed: () => {
+            scheduler.close();
+          },
+          aborted: () => {
+            stop.abort();
+          },
+          'check-throws': () => {
+            authorityException = makeAuthorityException();
+          },
+        };
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        facts[fact]();
+        return rejectionCode(scheduler.discardRejected(rejectedChoice));
+      }, fact);
+      assert.equal(refused, 'owner_not_ready');
+      assert.deepEqual(await observe(), before);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    default:
+      throw new Error(`unknown rejected disposal fixture: ${mode}`);
+  }
+}
+
 /** Small real-Rust authority to native-IDB cleanup slice; public delivery stays off. */
 export async function checkSchedulerDisposalLive(harness) {
   for (const empty of [false, true]) {
@@ -2033,4 +3098,429 @@ export async function checkSchedulerDisposalLive(harness) {
     await harness.close(page);
   }
   console.log('outbox disposal: disposal-live passed');
+}
+
+// The real Rust server rejects the first three heads; owned fixtures answer the last three.
+// Each lane starts with one acknowledged write. The rejected head is queued after it while
+// that write is still in the lane, so the checkpoint keeps it as the predecessor.
+const defaultPredecessor = { path: 'predecessor', text: '{"p":1}', base: 0 };
+
+const rejectedLiveCases = [
+  {
+    name: 'data_conflict',
+    head: { path: 'marker', text: '{"original":1}' },
+    competing: { path: '', base: 1, value: { competing: 1 } },
+    survivorBase: 2,
+    reason: 'data_conflict',
+    status: 409,
+    code: undefined,
+  },
+  {
+    name: 'data_path_conflict',
+    predecessor: { path: 'marker', text: '1', base: 0 },
+    head: { path: 'marker/deeper', text: '1' },
+    survivorBase: 1,
+    reason: 'rejected',
+    status: 409,
+    code: 'data_path_conflict',
+  },
+  {
+    name: 'invalid_request',
+    head: { path: 'a%2Fb', text: '1' },
+    survivorBase: 1,
+    reason: 'rejected',
+    status: 422,
+    code: 'invalid_request',
+  },
+  {
+    name: 'data_too_large',
+    fixture: {
+      status: 422,
+      body: {
+        error: { code: 'data_too_large', message: 'private-response-marker' },
+      },
+    },
+    head: { path: 'marker', text: '{"original":1}' },
+    survivorBase: 1,
+    reason: 'rejected',
+    status: 422,
+    code: 'data_too_large',
+  },
+  {
+    name: 'request_key_reused',
+    fixture: {
+      status: 422,
+      body: {
+        error: {
+          code: 'request_key_reused',
+          message: 'private-response-marker',
+        },
+      },
+    },
+    head: { path: 'marker', text: '{"original":1}' },
+    survivorBase: 1,
+    reason: 'rejected',
+    status: 422,
+    code: 'request_key_reused',
+  },
+  {
+    name: 'payload_too_large',
+    fixture: {
+      status: 413,
+      body: {
+        error: {
+          code: 'payload_too_large',
+          message: 'private-response-marker',
+        },
+      },
+    },
+    head: { path: 'marker', text: '{"original":1}' },
+    survivorBase: 1,
+    reason: 'rejected',
+    status: 413,
+    code: 'payload_too_large',
+  },
+];
+
+export async function checkRejectedDisposalLive(harness) {
+  for (const liveCase of rejectedLiveCases)
+    await checkRejectedLiveCase(harness, liveCase);
+  console.log(
+    'outbox disposal: rejected-disposal-live passed; data_too_large, request_key_reused and payload_too_large are owned HTTP fixtures',
+  );
+}
+
+function bytesOf(rows) {
+  return rows.reduce((total, row) => total + row.bytes, 0);
+}
+
+function rowAt(rows, sequence) {
+  const row = rows.find((candidate) => candidate.sequence === sequence);
+  assert.notEqual(row, undefined, `row ${sequence} is stored`);
+  return row;
+}
+
+async function checkRejectedLiveCase(harness, liveCase) {
+  // The foreign artifact shares the lane's binding; the foreign actor has its own binding.
+  const foreignArtifact = `art_${'e'.repeat(32)}`;
+  const foreignActorId = `u-${'f'.repeat(32)}`;
+  // The server caps user labels at 64 characters, and selectActor appends a 36-character id.
+  await harness.selectActor(`Rejected ${liveCase.name}`);
+  harness.configure('normal');
+  const artifact = await harness.createArtifact();
+  const predecessorWrite = liveCase.predecessor ?? defaultPredecessor;
+  const page = await harness.setup({
+    artifact,
+    path: predecessorWrite.path,
+    text: predecessorWrite.text,
+    base: predecessorWrite.base,
+  });
+  // Every row is queued before the predecessor's single kernel attempt, so the head is chained
+  // after an unsent predecessor and stays unsent until the competing write has happened.
+  const seeded = await page.evaluate(
+    async ({
+      headPath,
+      headText,
+      survivorBase,
+      foreignArtifact,
+      foreignActorId,
+    }) => {
+      globalThis.rejectedSnapshot = async () => {
+        const opening = indexedDB.open('artifree-data-outbox');
+        const db = await new Promise((resolve, reject) => {
+          opening.onsuccess = () => resolve(opening.result);
+          opening.onerror = () => reject(opening.error);
+        });
+        try {
+          return await new Promise((resolve, reject) => {
+            const tx = db.transaction(['intents', 'checkpoints', 'usage']);
+            const rows = tx.objectStore('intents').getAll();
+            const checkpoints = tx.objectStore('checkpoints').getAll();
+            const usage = tx.objectStore('usage').get('global');
+            tx.oncomplete = () =>
+              resolve({
+                rows: rows.result,
+                checkpoints: checkpoints.result,
+                usage: usage.result,
+              });
+            tx.onabort = () => reject(tx.error);
+          });
+        } finally {
+          db.close();
+        }
+      };
+      globalThis.installRejectedCleanup = () => {
+        const gate = new deliveryApi.LocalOperationGate();
+        const proof = Object.freeze({
+          identity: {},
+          signal: stop.signal,
+          check() {
+            authorize();
+            if (!locallyAuthenticated)
+              throw new deliveryApi.OutboxError('owner_not_ready');
+          },
+        });
+        installScheduler({
+          gate,
+          async authorize(mode, signal) {
+            proof.check();
+            if (mode !== 'online')
+              throw new Error('Expected explicit online proof');
+            const current = await deliveryApi.readBinding(
+              location.origin,
+              deliveryContext.accessToken,
+              signal,
+              (status) => {
+                if (status === 401) deliveryContext.invalidateAuthentication();
+              },
+            );
+            if (JSON.stringify(current) !== JSON.stringify(auth)) {
+              currentAuthority = Symbol();
+              stop.abort();
+              throw new deliveryApi.OutboxError('owner_not_ready');
+            }
+            proof.check();
+            return proof;
+          },
+        });
+      };
+      installRejectedCleanup();
+      const newKey = () => crypto.randomUUID().replaceAll('-', '');
+      const predecessorKey = head.key;
+      const predecessorSequence = head.sequence;
+      const target = await enqueueLikeHead({
+        key: newKey(),
+        base: { after: predecessorSequence },
+        path: headPath,
+        text: headText,
+      });
+      const dependent = await enqueueLikeHead({
+        key: newKey(),
+        base: { after: target.sequence },
+        path: 'dependent',
+        text: '{"d":1}',
+      });
+      const grandchild = await enqueueLikeHead({
+        key: newKey(),
+        base: { after: dependent.sequence },
+        path: 'grandchild',
+        text: '{"d":2}',
+      });
+      const survivor = await enqueueLikeHead({
+        key: newKey(),
+        base: { version: survivorBase },
+        path: 'survivor',
+        text: '{"s":1}',
+      });
+      const foreign = await enqueueLikeHead({
+        key: newKey(),
+        lane: [...lane.slice(0, 4), foreignArtifact],
+        artifactId: foreignArtifact,
+        path: 'foreign',
+        text: '{"f":1}',
+      });
+      const foreignActor = await enqueueLikeHead({
+        key: newKey(),
+        binding: [lane[0], lane[1], foreignActorId, lane[3]],
+        lane: [lane[0], lane[1], foreignActorId, lane[3], foreignArtifact],
+        artifactId: foreignArtifact,
+        path: 'foreign-actor',
+        text: '{"a":1}',
+      });
+      // This is the only attempt before the head wakes: it sends the predecessor alone.
+      const attempt = await kernel.run(lane);
+      return {
+        predecessorKey,
+        predecessorSequence,
+        predecessorKind: attempt.kind,
+        head: target.sequence,
+        headKey: target.key,
+        dependent: dependent.sequence,
+        grandchild: grandchild.sequence,
+        survivor: survivor.sequence,
+        survivorKey: survivor.key,
+        foreign: foreign.sequence,
+        foreignActor: foreignActor.sequence,
+      };
+    },
+    {
+      headPath: liveCase.head.path,
+      headText: liveCase.head.text,
+      survivorBase: liveCase.survivorBase,
+      foreignArtifact,
+      foreignActorId,
+    },
+  );
+  assert.equal(
+    seeded.predecessorKind,
+    'server_acknowledged',
+    'the predecessor is acknowledged before the rejected head is woken',
+  );
+  if (liveCase.competing !== undefined)
+    await harness.independentWrite(
+      artifact,
+      liveCase.competing.base,
+      liveCase.competing.path,
+      liveCase.competing.value,
+    );
+  if (liveCase.fixture !== undefined) {
+    harness.setStatus(liveCase.fixture.status);
+    harness.setErrorBody(liveCase.fixture.body);
+    harness.setMode('status');
+  }
+  await page.evaluate(() => scheduler.wake(lane));
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'blocked',
+    ),
+  );
+  const before = await page.evaluate(async () => ({
+    storage: await rejectedSnapshot(),
+    pause: scheduler.lanes.get(JSON.stringify(lane)).pause,
+  }));
+  const readsBefore = harness.bindingReadCount();
+  const discarded = await page.evaluate(async () => {
+    globalThis.rejectedSelection = await scheduler.selectRejected(
+      lane,
+      'online',
+    );
+    return scheduler.discardRejected(rejectedSelection);
+  });
+  assert.equal(
+    harness.bindingReadCount() - readsBefore,
+    2,
+    'selection and action each read the live binding once',
+  );
+  const after = await page.evaluate(async () => {
+    const { kind, reason, scope } = scheduler.lanes.get(
+      JSON.stringify(lane),
+    ).pause;
+    return {
+      storage: await rejectedSnapshot(),
+      pause: { kind, reason, scope },
+    };
+  });
+  const laneKey = JSON.stringify(rowAt(before.storage.rows, seeded.head).lane);
+  const foreignLaneKey = JSON.stringify(
+    rowAt(before.storage.rows, seeded.foreign).lane,
+  );
+  const foreignActorKey = JSON.stringify(
+    rowAt(before.storage.rows, seeded.foreignActor).lane,
+  );
+  const checkpointsOf = (storage, key) =>
+    storage.checkpoints.filter(
+      (checkpoint) => JSON.stringify(checkpoint.lane) === key,
+    );
+  assert.equal(before.storage.rows.length, 6);
+  assert.equal(rowAt(before.storage.rows, seeded.head).state, 'prepared');
+  assert.equal(before.pause.kind, 'blocked');
+  assert.equal(before.pause.failure.reason, liveCase.reason);
+  assert.equal(before.pause.failure.status, liveCase.status);
+  assert.equal(before.pause.failure.code, liveCase.code);
+  assert.deepEqual(
+    harness.requests().map((request) => request.headers['idempotency-key']),
+    [seeded.predecessorKey, seeded.headKey],
+    'only the acknowledged predecessor and the rejected head reached the server before disposal',
+  );
+  assert.equal(before.storage.usage.rows, 6);
+  assert.equal(before.storage.usage.bytes, bytesOf(before.storage.rows));
+  const [beforeLane] = checkpointsOf(before.storage, laneKey);
+  assert.deepEqual(
+    beforeLane.predecessor,
+    { sequence: seeded.predecessorSequence, dataVersion: 1 },
+    'the acknowledged predecessor anchors the lane',
+  );
+  assert.deepEqual(
+    after.storage.rows.map((row) => row.sequence),
+    [seeded.survivor, seeded.foreign, seeded.foreignActor],
+    'the dependent-of-dependent leaves with the closure',
+  );
+  assert.deepEqual(discarded, {
+    kind: 'discarded_rejected',
+    removedDependents: 2,
+  });
+  assert.deepEqual(
+    after.storage.rows,
+    [
+      rowAt(before.storage.rows, seeded.survivor),
+      rowAt(before.storage.rows, seeded.foreign),
+      rowAt(before.storage.rows, seeded.foreignActor),
+    ],
+    'survivors and foreign bindings keep their rows unchanged',
+  );
+  assert.deepEqual(after.storage.usage, {
+    ...before.storage.usage,
+    rows: 3,
+    bytes: bytesOf(after.storage.rows),
+  });
+  assert.deepEqual(
+    checkpointsOf(after.storage, laneKey),
+    [
+      {
+        ...beforeLane,
+        rows: 1,
+        bytes: rowAt(after.storage.rows, seeded.survivor).bytes,
+      },
+    ],
+    'the survivor checkpoint counts the survivor and keeps the predecessor',
+  );
+  assert.deepEqual(
+    checkpointsOf(after.storage, foreignLaneKey),
+    checkpointsOf(before.storage, foreignLaneKey),
+  );
+  assert.deepEqual(
+    checkpointsOf(after.storage, foreignActorKey),
+    checkpointsOf(before.storage, foreignActorKey),
+  );
+  assert.deepEqual(after.pause, {
+    kind: 'retry_paused',
+    reason: 'survivors_after_disposal',
+    scope: 'lane',
+  });
+  assert.equal(
+    harness.requests().length,
+    2,
+    'the survivor waits for resumeDelivery',
+  );
+  harness.setMode('normal');
+  await page.evaluate(() =>
+    scheduler.resumeDelivery(
+      scheduler.lanes.get(JSON.stringify(lane)).pause.selection,
+    ),
+  );
+  // resumeDelivery settles before the dispatched request is issued; wait for the survivor's ACK.
+  await page.waitForFunction(
+    () =>
+      events.filter(
+        (event) =>
+          event.kind === 'attempt' &&
+          event.result.kind === 'server_acknowledged',
+      ).length === 1,
+  );
+  const sent = harness.requests();
+  assert.equal(sent.length, 3, 'resume sends only the survivor');
+  const survivorBody = JSON.parse(sent[2].body);
+  assert.equal(sent[2].headers['idempotency-key'], seeded.survivorKey);
+  assert.equal(survivorBody.path, 'survivor');
+  assert.equal(survivorBody.base_data_version, liveCase.survivorBase);
+  assert.deepEqual(survivorBody.value, { s: 1 });
+  const acknowledged = await page.evaluate(
+    () =>
+      events.findLast(
+        (event) =>
+          event.kind === 'attempt' &&
+          event.result.kind === 'server_acknowledged',
+      ).result.receipt,
+  );
+  assert.equal(
+    acknowledged.data_version,
+    liveCase.survivorBase + 1,
+    'the server acknowledges the survivor at the next data version',
+  );
+  const final = await page.evaluate(() => rejectedSnapshot());
+  assert.deepEqual(final.rows, [
+    rowAt(before.storage.rows, seeded.foreign),
+    rowAt(before.storage.rows, seeded.foreignActor),
+  ]);
+  await harness.close(page);
 }

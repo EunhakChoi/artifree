@@ -118,6 +118,38 @@ export type DeliveryAttempt =
       readonly ackDurable: true;
     };
 
+/**
+ * Kernel-internal channel for the frozen decoded row of a failed dispatch. It is
+ * kept beside DeliveryAttempt rather than on it, so the row never reaches an
+ * observation: a structured clone of an attempt does not carry the entry.
+ */
+const dispatchedRows = new WeakMap<DeliveryAttempt, Readonly<PreparedRow>>();
+
+/**
+ * Returns the row this kernel dispatched for a `delivery_failed` attempt, or
+ * undefined for any other attempt, including a clone of one.
+ */
+export function dispatchedRow(
+  attempt: DeliveryAttempt,
+): Readonly<PreparedRow> | undefined {
+  return dispatchedRows.get(attempt);
+}
+
+function deepFreeze(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value))
+    return;
+  Object.freeze(value);
+  const children: unknown[] = Object.values(value);
+  for (const child of children) deepFreeze(child);
+}
+
+/** Copies the row so the registered form cannot change after the attempt returns. */
+function freezeRow(row: PreparedRow): Readonly<PreparedRow> {
+  const copy = structuredClone(row);
+  deepFreeze(copy);
+  return copy;
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -571,13 +603,15 @@ export class DeliveryKernel {
           throw new OutboxError('owner_not_ready');
         }
       }
-      return {
+      const failedAttempt: DeliveryAttempt = {
         kind: 'delivery_failed',
         failure: outcome.failure,
         outcome: 'unknown',
         initialState,
         priorDelivery,
       };
+      dispatchedRows.set(failedAttempt, freezeRow(prepared));
+      return failedAttempt;
     }
     let acknowledged: AcknowledgedRow;
     try {

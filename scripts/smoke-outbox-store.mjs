@@ -8,8 +8,9 @@ export async function checkOutboxStore(browser) {
   const bundle = await build({
     stdin: {
       contents: `import {openStore} from './packages/client/src/outbox/store.ts';
-        import {openBrowserOutbox} from './packages/client/src/outbox/index.ts';
-        globalThis.openStore = openStore; globalThis.openBrowserOutbox = openBrowserOutbox;`,
+        import {OutboxError, openBrowserOutbox} from './packages/client/src/outbox/index.ts';
+        globalThis.openStore = openStore; globalThis.openBrowserOutbox = openBrowserOutbox;
+        globalThis.OutboxError = OutboxError;`,
       resolveDir: process.cwd(),
       loader: 'ts',
     },
@@ -976,6 +977,660 @@ export async function checkOutboxStore(browser) {
       await publicBox.close();
     });
     assert.deepEqual(await page.evaluate(() => snapshot()), matchingOriginal);
+
+    // Rejected-head disposal (0049 rules 7, 9 and 10) through the scheduler-only
+    // store operation. Each case starts from an empty database, so every counter
+    // and checkpoint asserted here is absolute.
+    const primaryArtifact = `art_${'a'.repeat(32)}`;
+    const foreignArtifact = `art_${'c'.repeat(32)}`;
+    const otherArtifact = `art_${'e'.repeat(32)}`;
+    const LANE_BYTES = 2 * 1024 * 1024;
+    const laneCheckpoint = (state, artifactId) =>
+      state.checkpoints.find((row) => row.lane.at(-1) === artifactId);
+    const sumBytes = (rows) => rows.reduce((sum, row) => sum + row.bytes, 0);
+    await page.evaluate(() => {
+      globalThis.resetDatabase = async () => {
+        store.close();
+        await new Promise((resolve, reject) => {
+          const deleting = indexedDB.deleteDatabase('artifree-data-outbox');
+          deleting.onsuccess = () => resolve();
+          deleting.onerror = () => reject(deleting.error);
+          deleting.onblocked = () =>
+            reject(new Error('outbox database deletion blocked'));
+        });
+        store = await openStore();
+      };
+      globalThis.foreignLane = [...binding, `art_${'c'.repeat(32)}`];
+      globalThis.keyFor = (index) =>
+        index.toString(16).padStart(2, '0').repeat(16);
+      globalThis.enqueueChainPair = async () => {
+        globalThis.chainHead = await store.enqueue(input('1'));
+        globalThis.chainChild = await store.enqueue(
+          input('2', { after: chainHead.sequence }, 'update', '{"a":1,"a":2}'),
+        );
+      };
+      globalThis.selectLane = () =>
+        store.captureCleanup(lane, authorize, signal);
+      globalThis.disposeRejected = (expected, dispatched) =>
+        store.discardRejectedSnapshot(expected, dispatched, authorize, signal);
+      globalThis.otherBinding = [
+        'd'.repeat(32),
+        location.origin,
+        'local',
+        'b'.repeat(32),
+      ];
+      globalThis.otherLane = [...otherBinding, `art_${'e'.repeat(32)}`];
+      globalThis.rowOverhead = (row) => row.bytes - row.text.length;
+      // Resolves to { value } or { error: code }, so each case asserts the exact outcome.
+      globalThis.settle = (promise) =>
+        promise.then(
+          (value) => ({ value }),
+          (error) => ({
+            error: error instanceof OutboxError ? error.code : String(error),
+          }),
+        );
+      globalThis.closureFixture = async () => {
+        await resetDatabase();
+        await enqueueChainPair();
+        globalThis.chainGrand = await store.enqueue(
+          input('4', { after: chainChild.sequence }),
+        );
+        globalThis.survivor = await store.enqueue(
+          input('3', { version: 77 }, 'delete'),
+        );
+        globalThis.preparedHead = await store.prepare(
+          chainHead,
+          authorize,
+          signal,
+        );
+        globalThis.selection = await selectLane();
+      };
+      globalThis.countAuthorizeCalls = (expected, dispatched) => {
+        let calls = 0;
+        return settle(
+          store.discardRejectedSnapshot(
+            expected,
+            dispatched,
+            () => {
+              calls += 1;
+            },
+            signal,
+          ),
+        ).then((outcome) => ({ outcome, calls }));
+      };
+      // Interrupts the closure discard at authorize call `call`. A denial throws
+      // invalid_selection; an abort invalidates the transaction.
+      globalThis.interruptedDiscard = (call, mode) => {
+        const controller = new AbortController();
+        let calls = 0;
+        return settle(
+          store.discardRejectedSnapshot(
+            selection,
+            preparedHead,
+            () => {
+              calls += 1;
+              if (calls !== call) {
+                return;
+              }
+              if (mode === 'abort') {
+                controller.abort();
+              } else {
+                throw new OutboxError('invalid_selection');
+              }
+            },
+            controller.signal,
+          ),
+        );
+      };
+      globalThis.faultPutAbortFirst = (name) => {
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function (...args) {
+          if (this.name === name && this.transaction.mode === 'readwrite') {
+            this.transaction.abort();
+          }
+          return Reflect.apply(original, this, args);
+        };
+        globalThis.restorePut = () => {
+          IDBObjectStore.prototype.put = original;
+        };
+      };
+      // Counts the readwrite transactions that the action opens.
+      globalThis.countReadwrite = async (action) => {
+        const original = IDBDatabase.prototype.transaction;
+        let readwrite = 0;
+        IDBDatabase.prototype.transaction = function (...args) {
+          if (args[1] === 'readwrite') {
+            readwrite += 1;
+          }
+          return Reflect.apply(original, this, args);
+        };
+        try {
+          return { result: await settle(action()), readwrite };
+        } finally {
+          IDBDatabase.prototype.transaction = original;
+        }
+      };
+      // Raw IndexedDB writes that bypass the store. A put adds a record; a field edit
+      // sets one field of an existing record (`lane` addresses the lane's checkpoint).
+      globalThis.rawEdit = async (edits) => {
+        const db = await new Promise((resolve, reject) => {
+          const opening = indexedDB.open('artifree-data-outbox');
+          opening.onsuccess = () => resolve(opening.result);
+          opening.onerror = () => reject(opening.error);
+        });
+        try {
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction(
+              ['intents', 'checkpoints', 'usage'],
+              'readwrite',
+            );
+            tx.oncomplete = () => resolve();
+            tx.onabort = () => reject(new Error('raw edit aborted'));
+            for (const edit of edits) {
+              const target = tx.objectStore(edit.store);
+              if (edit.put !== undefined) {
+                target.put(edit.put);
+              } else {
+                const read = target.get(edit.lane ? lane : edit.key);
+                read.onsuccess = () => {
+                  if (read.result === undefined) {
+                    tx.abort();
+                    return;
+                  }
+                  target.put({ ...read.result, [edit.field]: edit.value });
+                };
+              }
+            }
+          });
+        } finally {
+          db.close();
+        }
+      };
+      // A lane of 63 chained rows: the first is about 28 KB, the others 32 KB each.
+      globalThis.fillBoundPrefix = async () => {
+        await resetDatabase();
+        globalThis.boundPrefix = [];
+        for (let index = 0; index < 63; index += 1) {
+          const previous = boundPrefix.at(-1);
+          const base = previous ? { after: previous.sequence } : { version: 0 };
+          const size = previous ? 32768 - rowOverhead(previous) : 28000;
+          boundPrefix.push(
+            await store.enqueue({
+              ...input('0', base, 'update', 'x'.repeat(size)),
+              key: keyFor(index),
+            }),
+          );
+        }
+      };
+      // The 64th row, sized so the lane totals LANE_BYTES plus `extra` bytes.
+      globalThis.closingInput = (extra) => {
+        const used = boundPrefix.reduce((sum, row) => sum + row.bytes, 0);
+        const size =
+          2 * 1024 * 1024 - used - rowOverhead(boundPrefix.at(-1)) + extra;
+        return {
+          ...input(
+            '0',
+            { after: boundPrefix.at(-1).sequence },
+            'update',
+            'x'.repeat(size),
+          ),
+          key: keyFor(63),
+        };
+      };
+      globalThis.fillSmallLane = async (count) => {
+        await resetDatabase();
+        globalThis.smallRows = [];
+        for (let index = 0; index < count; index += 1) {
+          const previous = smallRows.at(-1);
+          const base = previous ? { after: previous.sequence } : { version: 0 };
+          smallRows.push(
+            await store.enqueue({ ...input('0', base), key: keyFor(index) }),
+          );
+        }
+      };
+    });
+
+    // B22 shape: head, two chained dependents, a numeric-base survivor, a row in
+    // another lane of the same binding, and a row under a different owner.
+    await page.evaluate(async () => {
+      await resetDatabase();
+      await enqueueChainPair();
+      globalThis.chainGrand = await store.enqueue(
+        input('4', { after: chainChild.sequence }),
+      );
+      globalThis.survivor = await store.enqueue(
+        input('3', { version: 77 }, 'delete'),
+      );
+      globalThis.foreign = await store.enqueue({
+        ...input('5'),
+        artifactId: foreignLane.at(-1),
+        lane: foreignLane,
+      });
+      globalThis.foreignBinding = await store.enqueue({
+        ...input('6'),
+        owner: otherBinding[0],
+        binding: otherBinding,
+        lane: otherLane,
+        artifactId: otherLane.at(-1),
+      });
+      globalThis.preparedHead = await store.prepare(
+        chainHead,
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+    });
+    const closureBefore = await page.evaluate(() => snapshot());
+    const survivorRow = await page.evaluate(() => survivor);
+    const foreignRow = await page.evaluate(() => foreign);
+    const foreignBindingRow = await page.evaluate(() => foreignBinding);
+    assert.equal(closureBefore.rows.length, 6);
+    assert.deepEqual(
+      await page.evaluate(() => disposeRejected(selection, preparedHead)),
+      { removedDependents: 2, survivors: [survivorRow] },
+    );
+    const closureAfter = await page.evaluate(() => snapshot());
+    assert.deepEqual(closureAfter.rows, [
+      survivorRow,
+      foreignRow,
+      foreignBindingRow,
+    ]);
+    // The survivor checkpoint keeps the lane's predecessor and counts only survivors.
+    assert.deepEqual(laneCheckpoint(closureAfter, primaryArtifact), {
+      ...laneCheckpoint(closureBefore, primaryArtifact),
+      rows: 1,
+      bytes: survivorRow.bytes,
+    });
+    assert.deepEqual(
+      laneCheckpoint(closureAfter, foreignArtifact),
+      laneCheckpoint(closureBefore, foreignArtifact),
+    );
+    assert.deepEqual(
+      laneCheckpoint(closureAfter, otherArtifact),
+      laneCheckpoint(closureBefore, otherArtifact),
+    );
+    // The head, its two dependents and nothing else leave usage, each with its
+    // recorded bytes (every row's bytes include the 4096 reserve).
+    const [headRow, childRow, grandRow] = closureBefore.rows;
+    assert.deepEqual(
+      [headRow, childRow, grandRow].map((row) => row.bytes >= 4096),
+      [true, true, true],
+    );
+    assert.equal(closureBefore.usage.rows - closureAfter.usage.rows, 3);
+    assert.equal(
+      closureBefore.usage.bytes - closureAfter.usage.bytes,
+      headRow.bytes + childRow.bytes + grandRow.bytes,
+    );
+
+    // Zero survivors: the lane checkpoint is deleted and usage returns to zero.
+    await page.evaluate(async () => {
+      await resetDatabase();
+      await enqueueChainPair();
+      globalThis.preparedHead = await store.prepare(
+        chainHead,
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+    });
+    const emptyBefore = await page.evaluate(() => snapshot());
+    assert.equal(emptyBefore.rows.length, 2);
+    assert.deepEqual(
+      await page.evaluate(() => disposeRejected(selection, preparedHead)),
+      { removedDependents: 1, survivors: [] },
+    );
+    const emptyAfter = await page.evaluate(() => snapshot());
+    assert.deepEqual(emptyAfter.rows, []);
+    assert.deepEqual(emptyAfter.checkpoints, []);
+    assert.equal(emptyBefore.usage.rows - emptyAfter.usage.rows, 2);
+    assert.equal(emptyAfter.usage.bytes, 0);
+    assert.equal(
+      emptyBefore.usage.bytes - emptyAfter.usage.bytes,
+      sumBytes(emptyBefore.rows),
+    );
+
+    // A trimmed predecessor stays on the survivor checkpoint after the closure goes.
+    await page.evaluate(async () => {
+      await resetDatabase();
+      // The closure is chained after the earlier row, so trimming that row keeps
+      // it as the checkpoint predecessor. A lane emptied by trim would lose it.
+      globalThis.earlier = await store.enqueue(input('6'));
+      globalThis.chainHead = await store.enqueue(
+        input('1', { after: earlier.sequence }),
+      );
+      globalThis.chainChild = await store.enqueue(
+        input('2', { after: chainHead.sequence }, 'update', '{"a":1,"a":2}'),
+      );
+      globalThis.survivor = await store.enqueue(
+        input('3', { version: 77 }, 'delete'),
+      );
+      const earlierPrepared = await store.prepare(earlier, authorize, signal);
+      globalThis.earlierAck = await store.acknowledge(
+        earlierPrepared,
+        receipt(earlierPrepared),
+        authorize,
+        signal,
+      );
+      await store.trim(
+        [earlierAck, chainHead, chainChild, survivor],
+        authorize,
+        signal,
+      );
+      globalThis.preparedHead = await store.prepare(
+        chainHead,
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+    });
+    const predecessorBefore = await page.evaluate(() => snapshot());
+    const predecessorRow = await page.evaluate(() => survivor);
+    assert.notEqual(
+      laneCheckpoint(predecessorBefore, primaryArtifact).predecessor,
+      null,
+    );
+    assert.deepEqual(
+      await page.evaluate(() => disposeRejected(selection, preparedHead)),
+      { removedDependents: 1, survivors: [predecessorRow] },
+    );
+    const predecessorAfter = await page.evaluate(() => snapshot());
+    assert.deepEqual(laneCheckpoint(predecessorAfter, primaryArtifact), {
+      ...laneCheckpoint(predecessorBefore, primaryArtifact),
+      rows: 1,
+      bytes: predecessorRow.bytes,
+    });
+
+    // Counter-step aborts leave rows, checkpoint and usage intact; a fresh
+    // selection then commits once.
+    await page.evaluate(async () => {
+      await resetDatabase();
+      await enqueueChainPair();
+      globalThis.abortSurvivor = await store.enqueue(
+        input('3', { version: 77 }, 'delete'),
+      );
+      globalThis.preparedHead = await store.prepare(
+        chainHead,
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+    });
+    const abortSurvivorRow = await page.evaluate(() => abortSurvivor);
+    const abortBefore = await page.evaluate(() => snapshot());
+    // The usage write is the last counter step: a quota denial there, and an
+    // abort after its request succeeds, must each roll back everything.
+    await page.evaluate(() => faultPut('usage', 'quota'));
+    await assert.rejects(
+      page.evaluate(() => disposeRejected(selection, preparedHead)),
+      /storage_failed/,
+    );
+    await page.evaluate(() => restorePut());
+    assert.deepEqual(await page.evaluate(() => snapshot()), abortBefore);
+    await page.evaluate(() => faultPut('usage'));
+    await assert.rejects(
+      page.evaluate(() => disposeRejected(selection, preparedHead)),
+      /storage_failed/,
+    );
+    await page.evaluate(() => restorePut());
+    assert.deepEqual(await page.evaluate(() => snapshot()), abortBefore);
+    await page.evaluate(async () => {
+      globalThis.selection = await selectLane();
+    });
+    assert.deepEqual(
+      await page.evaluate(() => disposeRejected(selection, preparedHead)),
+      { removedDependents: 1, survivors: [abortSurvivorRow] },
+    );
+    const abortAfter = await page.evaluate(() => snapshot());
+    assert.deepEqual(abortAfter.rows, [abortSurvivorRow]);
+    assert.equal(abortBefore.usage.rows - abortAfter.usage.rows, 2);
+    assert.equal(
+      abortBefore.usage.bytes - abortAfter.usage.bytes,
+      sumBytes(abortBefore.rows.slice(0, 2)),
+    );
+
+    // Abort before the usage counter: the usage write runs after its transaction
+    // has been aborted. The result is storage_failed and nothing is removed.
+    await page.evaluate(() => closureFixture());
+    const abortFirstBefore = await page.evaluate(() => snapshot());
+    await page.evaluate(() => faultPutAbortFirst('usage'));
+    assert.deepEqual(
+      await page.evaluate(() =>
+        settle(disposeRejected(selection, preparedHead)),
+      ),
+      { error: 'storage_failed' },
+    );
+    await page.evaluate(() => restorePut());
+    assert.deepEqual(await page.evaluate(() => snapshot()), abortFirstBefore);
+
+    // Authorize sweep. The closure discard makes `counted.calls` authorize calls.
+    // Throwing at each call in turn rejects with that error, and aborting the signal
+    // at each call in turn rejects with owner_not_ready. Each leaves the state intact.
+    await page.evaluate(() => closureFixture());
+    const counted = await page.evaluate(() =>
+      countAuthorizeCalls(selection, preparedHead),
+    );
+    assert.equal(counted.outcome.value.removedDependents, 2);
+    assert.ok(
+      counted.calls >= 6,
+      'each of the three deletes is bracketed by authorize calls',
+    );
+    for (const [mode, code] of [
+      ['deny', 'invalid_selection'],
+      ['abort', 'owner_not_ready'],
+    ]) {
+      for (let call = 1; call <= counted.calls; call += 1) {
+        await page.evaluate(() => closureFixture());
+        const before = await page.evaluate(() => snapshot());
+        assert.deepEqual(
+          await page.evaluate(
+            ({ call, mode }) => interruptedDiscard(call, mode),
+            { call, mode },
+          ),
+          { error: code },
+          `${mode} at authorize call ${call}`,
+        );
+        assert.deepEqual(
+          await page.evaluate(() => snapshot()),
+          before,
+          `${mode} at authorize call ${call} changed state`,
+        );
+      }
+    }
+
+    // Bound: 64 rows that total exactly LANE_BYTES are one closure, deleted in one
+    // readwrite transaction with exact deltas.
+    await page.evaluate(async () => {
+      await fillBoundPrefix();
+      await store.enqueue(closingInput(0));
+      globalThis.preparedHead = await store.prepare(
+        boundPrefix[0],
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+    });
+    const boundBefore = await page.evaluate(() => snapshot());
+    assert.equal(boundBefore.rows.length, 64);
+    assert.equal(sumBytes(boundBefore.rows), LANE_BYTES);
+    assert.equal(laneCheckpoint(boundBefore, primaryArtifact).rows, 64);
+    assert.equal(
+      laneCheckpoint(boundBefore, primaryArtifact).bytes,
+      LANE_BYTES,
+    );
+    assert.deepEqual(
+      await page.evaluate(() =>
+        countReadwrite(() => disposeRejected(selection, preparedHead)),
+      ),
+      {
+        result: { value: { removedDependents: 63, survivors: [] } },
+        readwrite: 1,
+      },
+    );
+    const boundAfter = await page.evaluate(() => snapshot());
+    assert.deepEqual(boundAfter.rows, []);
+    assert.deepEqual(boundAfter.checkpoints, []);
+    assert.equal(boundBefore.usage.rows - boundAfter.usage.rows, 64);
+    assert.equal(boundBefore.usage.bytes - boundAfter.usage.bytes, LANE_BYTES);
+
+    // Bound +1: a 65th row, and a 64th row that takes the lane one byte past
+    // LANE_BYTES, are refused by enqueue with capacity_exceeded. Rows and usage stay.
+    await page.evaluate(() => fillSmallLane(64));
+    const rowCapBefore = await page.evaluate(() => snapshot());
+    assert.equal(rowCapBefore.rows.length, 64);
+    assert.deepEqual(
+      await page.evaluate(() =>
+        settle(
+          store.enqueue({
+            ...input('0', { after: smallRows.at(-1).sequence }),
+            key: keyFor(64),
+          }),
+        ),
+      ),
+      { error: 'capacity_exceeded' },
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), rowCapBefore);
+    await page.evaluate(() => fillBoundPrefix());
+    const byteCapBefore = await page.evaluate(() => snapshot());
+    assert.equal(byteCapBefore.rows.length, 63);
+    assert.deepEqual(
+      await page.evaluate(() => settle(store.enqueue(closingInput(1)))),
+      { error: 'capacity_exceeded' },
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), byteCapBefore);
+
+    // A lane above the cap, written through IndexedDB: 64 stored rows plus a raw 65th
+    // intent. The counters stay as the store wrote them, so the global usage check
+    // (intent count against the checkpoints) refuses the store before any delete.
+    // ADR 0049 rule 7 requires the strict decoder to refuse a lane above the caps
+    // without partial deletion but does not name the code; storage_corrupt is
+    // asserted here and is flagged as unspecified by the ADR.
+    await page.evaluate(async () => {
+      await fillBoundPrefix();
+      globalThis.closingRow = await store.enqueue(closingInput(0));
+      globalThis.preparedHead = await store.prepare(
+        boundPrefix[0],
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+      await rawEdit([
+        {
+          store: 'intents',
+          put: {
+            ...closingRow,
+            sequence: closingRow.sequence + 1,
+            key: keyFor(64),
+            base: { after: closingRow.sequence },
+          },
+        },
+      ]);
+    });
+    const aboveCap = await page.evaluate(() => snapshot());
+    assert.equal(aboveCap.rows.length, 65);
+    assert.deepEqual(
+      await page.evaluate(() =>
+        settle(disposeRejected(selection, preparedHead)),
+      ),
+      { error: 'storage_corrupt' },
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), aboveCap);
+
+    // Corruption: a usage counter below the closure, or a checkpoint below the lane,
+    // makes the discard refuse with storage_corrupt and delete nothing.
+    for (const tamper of [
+      { store: 'usage', key: 'global', field: 'rows', value: 2 },
+      { store: 'usage', key: 'global', field: 'bytes', value: 0 },
+      { store: 'checkpoints', lane: true, field: 'rows', value: 2 },
+    ]) {
+      await page.evaluate(() => closureFixture());
+      await page.evaluate((edit) => rawEdit([edit]), tamper);
+      const tampered = await page.evaluate(() => snapshot());
+      assert.deepEqual(
+        await page.evaluate(() =>
+          settle(disposeRejected(selection, preparedHead)),
+        ),
+        { error: 'storage_corrupt' },
+        JSON.stringify(tamper),
+      );
+      assert.deepEqual(
+        await page.evaluate(() => snapshot()),
+        tampered,
+        JSON.stringify(tamper),
+      );
+    }
+
+    // LocalStore.discard and discardSnapshot keep refusing a prepared head; only the
+    // scheduler's rejected-head operation removes one.
+    await page.evaluate(() => closureFixture());
+    const preparedClosure = await page.evaluate(() => snapshot());
+    assert.deepEqual(
+      await page.evaluate(() =>
+        settle(store.discard(selection.rows, authorize, signal)),
+      ),
+      { error: 'invalid_selection' },
+    );
+    assert.deepEqual(
+      await page.evaluate(() =>
+        settle(store.discardSnapshot(selection, authorize, signal)),
+      ),
+      { error: 'invalid_selection' },
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), preparedClosure);
+
+    // Rejections before any delete: an unprepared head, a dispatched copy that
+    // differs from the stored head, and a dependent admitted after the selection.
+    await page.evaluate(async () => {
+      await resetDatabase();
+      await enqueueChainPair();
+      globalThis.selection = await selectLane();
+    });
+    const unpreparedBefore = await page.evaluate(() => snapshot());
+    await assert.rejects(
+      page.evaluate(() => disposeRejected(selection, chainHead)),
+      /invalid_selection/,
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), unpreparedBefore);
+
+    await page.evaluate(async () => {
+      await resetDatabase();
+      await enqueueChainPair();
+      globalThis.preparedHead = await store.prepare(
+        chainHead,
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+    });
+    const mismatchBefore = await page.evaluate(() => snapshot());
+    await assert.rejects(
+      page.evaluate(() =>
+        disposeRejected(selection, {
+          ...preparedHead,
+          request: { ...preparedHead.request, body: '{"changed":true}' },
+        }),
+      ),
+      /invalid_selection/,
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), mismatchBefore);
+
+    await page.evaluate(async () => {
+      await resetDatabase();
+      await enqueueChainPair();
+      globalThis.preparedHead = await store.prepare(
+        chainHead,
+        authorize,
+        signal,
+      );
+      globalThis.selection = await selectLane();
+      await store.enqueue(input('4', { after: chainChild.sequence }));
+    });
+    const staleBefore = await page.evaluate(() => snapshot());
+    assert.equal(staleBefore.rows.length, 3);
+    await assert.rejects(
+      page.evaluate(() => disposeRejected(selection, preparedHead)),
+      /invalid_selection/,
+    );
+    assert.deepEqual(await page.evaluate(() => snapshot()), staleBefore);
   } finally {
     await context.close();
     server.closeAllConnections();
@@ -984,6 +1639,6 @@ export async function checkOutboxStore(browser) {
     );
   }
   console.log(
-    'outbox store: native preparation, ACK/checkpoint, trim, abort/quota and stale guards passed',
+    'outbox store: native preparation, ACK/checkpoint, trim, abort/quota/signal/authorize interruptions, lane caps, corruption and rejected-head discard passed',
   );
 }
