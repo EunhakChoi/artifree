@@ -170,7 +170,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   with `replayed: false`; a request abandoned after admission that keeps
   its slot until its work ends and still commits; and refused requests
   cancelled while their body is read, which release their place among the
-  bodies being read.
+  bodies being read. Refusals with `413` that drain the unread
+  body (decision 0048) are covered there too.
 - `crates/artifree-server/tests/change_feed.rs`: a stream starts with `ready`
   at the head and sends each commit once and nothing for a replay or
   conflict; deletes and recoveries arrive as `deleted` and `recovered`, and
@@ -187,6 +188,9 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   on the same database arrives within the poll interval; shutdown ends open
   streams (on Unix: Node cannot send a graceful stop signal to a child on
   Windows); and an invalid `--change-streams` stops the server.
+- `scripts/tests/refused-body-drain.test.mjs`: a raw socket sends a body over
+  the request limit to `/mcp` and `/v1/artifacts` and must read the `413`
+  (decision 0048).
 - `scripts/tests/limits.test.mjs`: the server binary with small limits. The
   official MCP client and the CLI share the budget, a refused create commits
   nothing and its key works after the delay. A fixed HTTP `429` fixture checks
