@@ -1,15 +1,15 @@
 # 0048: Drain request bodies refused with 413
 
-Date: 2026-11-07. Status: **proposed** (specification only; accepted by the
-code pull request that implements it). Amends rule 4 of
+Date: 2026-11-07. Status: **accepted** (implemented by roadmap row O07; the
+specification was merged first as proposed). Amends rule 4 of
 [0004](0004-inbound-mcp-adapter.md) and rule 3 of
 [0005](0005-request-limits.md). Roadmap row: O07.
 
-> **Nothing here is implemented.** On `main`, a request refused with `413`
-> leaves the unread rest of its body to the connection, as described in the
-> Context. Every numbered rule below describes what the code pull request
-> builds. A code pull request may not change a numbered rule; an amendment is a
-> separate documentation pull request.
+> **Implemented by O07.** The Context describes the state before O07. Rules
+> 1-6 describe what the code does now. That the Windows failure recorded in the
+> Context is gone is confirmed only by the Windows CI of the merge commit and
+> later main runs, not by this record. A numbered rule is amended by a separate
+> documentation pull request.
 
 Independent Artifree design: no private evidence was consulted, and nothing
 below is presented as an observation of the original product.
@@ -180,6 +180,6 @@ CI of the merge commit and later main runs.
 
 ## Implementation status
 
-| Row | Slice                               | Status                    |
-| --- | ----------------------------------- | ------------------------- |
-| O07 | rules 1-6 and the acceptance checks | proposed, not implemented |
+| Row | Slice                               | Status      |
+| --- | ----------------------------------- | ----------- |
+| O07 | rules 1-6 and the acceptance checks | implemented |

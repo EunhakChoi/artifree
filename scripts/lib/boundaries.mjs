@@ -7,7 +7,9 @@ import { parseSync } from 'oxc-parser';
 // sha2 fingerprints requests and addresses stored content, rusqlite is local
 // storage, getrandom creates identifiers and tokens, axum/tokio serve HTTP,
 // base64 decodes uploads, and tower drives in-process router tests; http-body
-// builds request bodies that never finish for cancellation tests. rmcp is
+// names the frame and size-hint types of the request-body wrapper that hands
+// back what a refused request left unread, which must not alter size hints or
+// trailers (decision 0048), and builds bodies that never finish in tests. rmcp is
 // the official MCP SDK serving the inbound MCP adapter, and serde parses its
 // tool arguments into contract DTOs (decision 0004). futures-core provides
 // only the Stream trait that Axum's server-sent events response consumes; it
@@ -34,6 +36,7 @@ const rustEdges = {
     'base64',
     'futures-core',
     'getrandom',
+    'http-body',
     'rmcp',
     'serde',
     'serde_json',
@@ -46,7 +49,7 @@ const rustEdges = {
 // leftover content that a healthy server never produces, to prove the
 // cleanup route removes it (decision 0029).
 const rustDevEdges = {
-  'artifree-server': ['http-body', 'rusqlite', 'tower'],
+  'artifree-server': ['rusqlite', 'tower'],
 };
 
 const clientEdges = {

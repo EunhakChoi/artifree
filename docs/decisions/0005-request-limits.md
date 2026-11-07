@@ -4,10 +4,9 @@ Date: 2026-10-27. Status: accepted. Amends
 [0004](0004-inbound-mcp-adapter.md) and applies to the HTTP API of
 [0003](0003-local-html-artifact-slice.md).
 
-> Amended by [0048](0048-drain-over-limit-bodies.md) (proposed; in effect when
-> accepted): rule 3, as a body refused with `413` is also read and dropped within
-> these bounds before the `413` is sent. If 0048 is not accepted, this note is
-> removed with it.
+> Amended by [0048](0048-drain-over-limit-bodies.md), in effect since 0048 was
+> accepted (O07): rule 3, as a body refused with `413` is also read and dropped
+> within these bounds before the `413` is sent.
 
 ## Context
 
