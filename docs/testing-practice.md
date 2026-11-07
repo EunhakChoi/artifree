@@ -38,6 +38,22 @@ without private notes. Nothing here is checked by a script.
   on CI for the pull request, and a flake is not a reason to merge on the
   strength of a local re-run.
 
+The source-download confirmation check measures accessibility after that open
+popup's own finite entry animations finish. Visibility alone does not mean a
+fade has reached its final opacity. The wait rejects closing/removal, cancelled
+animations, infinite animations and a five-second deadline; it does not wait
+for animated descendants such as spinners. The axe rules, contrast threshold
+and product colors stay unchanged. Native animation/close/deadline fixtures and
+a real insufficient-contrast control run in both browser smokes; run them alone
+with `node scripts/test-popup-animation.mjs` or
+`ARTIFREE_BROWSER=firefox node scripts/test-popup-animation.mjs`.
+
+A previous Firefox `source-download-prompt` check reported 4.13:1 contrast.
+Natural diagnostic runs on main and the follow-up did not reproduce it, while
+a forced intermediate animation failed and the original stable colors passed.
+Those observations support measuring settled state; they do not establish the
+exact timing of the original failure or a persistent product-color defect.
+
 ## Run heavy commands in isolation
 
 - Heavy commands are `cargo` builds and tests, `npm run check`, `build`, and the
