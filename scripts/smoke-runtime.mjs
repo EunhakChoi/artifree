@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { expect } from '@playwright/test';
 import { api } from './smoke-workspace.mjs';
+import { searchWorkspaceArtifacts } from './lib/workspace-search.mjs';
 
 const entry = `<!doctype html><html lang="en"><head><!-- artifree-runtime -->
 <meta charset="utf-8"><title>Runtime probe</title></head><body>
@@ -197,7 +198,7 @@ async function openInContext(
   const workspace = page.locator('#artifacts');
   await workspace.getByLabel('Access token').fill(server.token);
   await workspace.getByRole('button', { name: 'Connect' }).click();
-  await workspace.getByLabel('Search titles').fill(artifact.title);
+  await searchWorkspaceArtifacts(page, artifact.title);
   await workspace
     .getByRole('navigation', { name: 'Artifacts' })
     .getByRole('button', { name: new RegExp(`^${artifact.title}`) })
