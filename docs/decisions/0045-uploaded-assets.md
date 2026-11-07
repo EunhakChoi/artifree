@@ -1,13 +1,13 @@
 # 0045: Uploaded assets scoped to a user and artifact
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete, R09b1 supplies read-only client calls; the remainder of R09b–R09d is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls and R09b2 the bounded upload/delete client calls; the remainder of R09b–R09d is proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
 The four-type target below remains unchanged. The read-only TypeScript client
-lists assets, reads metadata and verifies bounded content. There is no
-upload/delete client, CLI, MCP tool, copy extension,
-management panel, grant or frame access yet. Builds on [0003](0003-local-html-artifact-slice.md),
+lists assets, reads metadata and verifies bounded content; `uploadAsset` and
+`deleteAsset` perform one explicit mutation each (R09b2). There is no CLI, MCP
+tool, copy extension, management panel, grant or frame access yet. Builds on [0003](0003-local-html-artifact-slice.md),
 [0012](0012-duplicate-artifacts.md), [0020](0020-runtime-grants.md),
 [0027](0027-backup-restore-and-schema-upgrade.md),
 [0029](0029-retention-and-cleanup.md), [0031](0031-app-data.md),
@@ -75,9 +75,13 @@ No automatic retry, pixel decoding or content execution is introduced.
 R09b1 depends only on the already verified text HTTP/storage behavior and
 adds no new admission or authority semantics. Full R09a image validation and
 the remainder of R09b remain incomplete.
-Upload/delete client operations and their unknown-outcome handling remain R09b.
-Direct callers must freeze the identical envelope and key themselves after an
-unknown outcome.
+R09b2 implements the TypeScript upload/delete calls (see its section below):
+each makes one request with the caller's key, requires exactly 201 or 200,
+checks the receipt against the captured request and never retries.
+Direct callers, and callers of those functions, must freeze the identical
+envelope and key themselves after an unknown outcome. CLI/MCP upload and
+delete, `copy_assets` and the unknown-outcome handling of other adapters remain
+R09b.
 No asset change subscription is emitted. Asset copying remains absent and
 existing duplicate requests retain their files/data behavior.
 
@@ -455,16 +459,16 @@ remote URL import, transforms, asset history, global disk enforcement,
 resource-closed export and external blob storage remain future work. Expanding
 those product boundaries requires a separate specification decision.
 
-## Proposed R09b2: bounded TypeScript mutation client
+## R09b2: bounded TypeScript mutation client
 
-Status: proposed while this documentation PR is unmerged. Review and merge of
-this documentation-only PR constitutes explicit acceptance of this exact R09b2
-client contract and dependency exception; no additional contract-approval PR is
-required. An unmerged proposal authorizes no implementation. Acceptance permits
-a subsequent, separate code PR only within the bounds below, with its own review
-and acceptance evidence. This document supplies no implementation and does not
-claim implementation completion. The existing numbered rules above are
-unchanged. R09a image validation and full R09b remain incomplete.
+Status: contract accepted by the merged documentation PR; **implemented** by the
+code PR that follows it for `uploadAsset` and `deleteAsset` in
+`packages/client` (`asset-mutations.ts`), exported from the client index and
+tested in `scripts/tests/asset-mutation-client.test.mjs` against the real Rust
+server and bounded HTTP-boundary faults. The existing numbered rules above are
+unchanged. R09a image validation and full R09b (CLI, MCP, `copy_assets`)
+remain incomplete; PNG/JPEG upload is still refused by the server. The
+implementation notes that follow the contract text are marked as such.
 
 ### Dependency and scope
 
@@ -574,5 +578,38 @@ specific assertion. Compile failures, timeouts, unselected tests and cleanup
 failures are not guard kills. Preserve unsuccessful batches separately. Run
 formatter/check/build and relevant real-server client tests under the repository
 sandbox and cleanup rules; use both browser engines for any new browser Fetch
-or Web Crypto fixture. No implemented or public feature is claimed by this
-proposal, and no new test result is claimed here.
+or Web Crypto fixture.
+
+### Implementation notes (R09b2 code PR)
+
+These record choices the contract left open; the contract above wins on any
+conflict.
+
+- `uploadAsset(client, artifactId, request, { idempotencyKey, signal? })` and
+  `deleteAsset(client, artifactId, assetId, request, { idempotencyKey, signal? })`
+  take the generated request DTOs and return plain, checked copies of the
+  generated receipt DTOs. Receipt validation does not reuse R09b1's four-type
+  MIME allowlist: the receipt MIME must equal the declared spelling.
+- Before dispatch the client checks the key (8–128 of `A-Za-z0-9._:-`, the
+  server's rule), the identifiers, the MIME spelling (lowercase,
+  parameter-free, at most 127 characters) and strict canonical base64, bounded
+  by character count and by the decoded size computed from the text, before
+  the output is allocated. The 8 MiB serialized bound follows from the 5 MiB
+  decoded bound (at most 6,990,508 base64 characters plus a short envelope).
+  A local refusal is `invalid_request` with status 0, and nothing is sent. A
+  base of 2^53 - 1 is also refused locally, because its successor version
+  could not be checked as a safe integer.
+- Web Crypto failure, absence or an abort while the digest is computed ends
+  the call with nothing sent. A signal aborted before dispatch likewise.
+- The exact-status rule is a `expectStatus` option of the shared
+  `ArtifreeClient.json` helper; a different 2xx is `invalid_response` and its
+  body is cancelled unread.
+- A 409 `asset_conflict` is reported with the existing error vocabulary; its
+  `current_asset_version` is available only in `ArtifreeApiError.body`, not as
+  a typed field. No typed accessor was added.
+- Tests: `scripts/tests/asset-mutation-client.test.mjs` runs the real Rust
+  server (lifecycle, foreign user, lost response and replay, delete replay,
+  upload replay after deletion, key reuse, stale base, type and quota
+  refusals, rejected receipt then same-key replay) plus fake-fetch and
+  fake-clock tests of the envelope, receipt, status, size, stall, abort and
+  redirect rules. No browser fixture was added, so no browser smoke applies.

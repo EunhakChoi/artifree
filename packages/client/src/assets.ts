@@ -6,7 +6,7 @@ import { isCount, isRecord } from './responses.js';
 const MAX_ASSET_BYTES = 5 * 1024 * 1024;
 const MAX_SPACE_BYTES = 25 * 1024 * 1024;
 const MAX_SPACE_ASSETS = 64;
-const ASSET_ID = /^[0-9a-f]{64}$/;
+export const ASSET_ID = /^[0-9a-f]{64}$/;
 const ARTIFACT_ID = /^art_[0-9a-f]{32}$/;
 
 function mediaType(value: unknown): value is string {
@@ -66,6 +66,19 @@ function snapshot(value: unknown): AssetList | undefined {
   return { asset_version, assets: parsed, bytes, max_assets, max_bytes };
 }
 
+/**
+ * Lowercase hexadecimal SHA-256 of `bytes` from Web Crypto. Its absence or
+ * failure rejects; there is no weaker fallback.
+ */
+export async function sha256Hex(
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+}
+
 function invalidResponse(): ArtifreeApiError {
   return new ArtifreeApiError(
     'The asset response does not match its metadata.',
@@ -76,7 +89,8 @@ function invalidResponse(): ArtifreeApiError {
   );
 }
 
-function pathOf(artifactId: string, assetId?: string): string {
+/** The asset route for a validated artifact (and asset) identifier. */
+export function pathOf(artifactId: string, assetId?: string): string {
   if (
     typeof artifactId !== 'string' ||
     !ARTIFACT_ID.test(artifactId) ||
@@ -173,9 +187,9 @@ export async function readAsset(
     content.bytes.byteLength !== metadata.asset.size_bytes
   )
     throw invalidResponse();
-  let digest: ArrayBuffer;
+  let hex: string;
   try {
-    digest = await globalThis.crypto.subtle.digest('SHA-256', content.bytes);
+    hex = await sha256Hex(content.bytes);
   } catch (cause: unknown) {
     throw new ArtifreeApiError('Asset digest verification failed.', {
       status: 200,
@@ -183,9 +197,6 @@ export async function readAsset(
       cause,
     });
   }
-  const hex = Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, '0'),
-  ).join('');
   if (hex !== metadata.asset.sha256) throw invalidResponse();
   if (options.signal?.aborted === true)
     throw new ArtifreeApiError('The asset read was aborted.', {
