@@ -7,6 +7,11 @@ Date: 2026-10-27. Status: accepted. Builds on
 [0003](0003-local-html-artifact-slice.md); its storage, revision, retry, and
 preview rules apply unchanged.
 
+> Amended by [0048](0048-drain-over-limit-bodies.md) (proposed; in effect when
+> accepted): rule 4, as a body refused with `413` is also read and dropped
+> within the bounds of 0005 before the `413` is sent. If 0048 is not accepted,
+> this note is removed with it.
+
 ## Context
 
 External agents such as Codex and Pi should be able to use the implemented
