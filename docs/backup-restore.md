@@ -147,7 +147,7 @@ artifree-server serve --data-dir /path/to/new-data ...
 ## Upgrade between versions
 
 1. Back up the running server with the **new** build's `backup` command. It
-   reads schema versions 1 to 10, so it works on a directory written by a
+   reads schema versions 1 to 12, so it works on a directory written by a
    release that has no `backup` command. If you cannot run the new binary
    against the old directory, stop the old server and copy its whole data
    directory instead.
@@ -167,6 +167,21 @@ Schema 12 adds private asset associations, independent versions, ID reservations
 file content, and the `cleanup_runs` table (decision 0029). Schema 6 adds the token table to the versioned
 schema. A server of an older release that is started again on a directory this
 build upgraded will refuse it.
+
+The UTF-8 application-data path expansion (0046) keeps schema 12. Existing JSON
+members and ASCII request keys need no migration. Restart the server and client
+together before using the expanded paths, and restart any member-list traversal;
+the grammar change does not increment `data_version` or emit a change event.
+See [application-data paths](data-paths.md) for examples and the explicit
+two-binary upgrade verification command.
+
+An ordinary server restart keeps its change-feed identity and outbox binding.
+Restore creates a new feed identity and storage epoch. A browser request frozen
+with the original outbox binding is refused with `outbox_binding_changed`, even
+if its key committed before the backup. This does not erase the stored receipt:
+a direct retry, or a request deliberately authenticated with the restored
+binding, can still replay it. The verification command tests these separately;
+it does not add automatic browser queue adoption or delivery after restore.
 
 ## Containers
 
