@@ -24,7 +24,8 @@ original product.
 > to its pinned Unicode 16.0.0 rules. The numbered text below records the
 > original ASCII behavior. Existing data, versions, ASCII request identities
 > and schema remain unchanged. R06b-1 merged in #124. R06b-2 adds focused
-> upgrade/recovery evidence; its final gates and review remain pending in 0046.
+> upgrade/recovery evidence; acceptance follows the current-head gate and review
+> conditions in 0046.
 
 ## Context
 

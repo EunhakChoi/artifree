@@ -2,9 +2,9 @@
 
 R06b-1 implements the path and transport slice of [0046](decisions/0046-utf8-data-paths.md).
 R06b-2 adds the process upgrade/restart and backup/restore checks described here.
-Those focused checks passed; the follow-up's final repository gates and review
-remain pending in that decision. Neither slice adds browser delivery or native
-session recovery.
+Those focused checks passed; acceptance of the follow-up follows the
+current-head gate and review conditions in that decision. Neither slice adds
+browser delivery or native session recovery.
 
 A path addresses object members, with `/` between segments and the empty string
 for the root. Each segment is 1–64 UTF-8 bytes; there are at most 16 segments.

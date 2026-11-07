@@ -1,8 +1,8 @@
 # 0046: UTF-8 names in application data paths
 
 Date: 2026-11-06. R06b-1 implementation: 2026-11-07. Status: accepted for
-R06b-1; R06b-2 recovery verification added, final gates and review pending.
-Roadmap: R06b.
+R06b-1; R06b-2 recovery verification, effective on merge after required
+current-head gates and reviews. Roadmap: R06b.
 Builds on [0031](0031-app-data.md),
 [0040](0040-data-changes-and-member-listing.md), and
 [0041](0041-browser-data-outbox.md).
@@ -19,9 +19,10 @@ Unicode behavior has not been established.
 transport handling and the compatibility tests described below. The original
 ASCII rules in those records document the earlier release; their version notes
 identify this amendment. R06b-2 adds real cross-process upgrade/restart and
-backup/restore verification and independent examples; its remaining required
-gates and review are recorded below. It does not change the numbered rules.
-R06b-2 and all of R06b remain incomplete until those gates and review pass.
+backup/restore verification and independent examples. It does not change the
+numbered rules. R06b is complete when this follow-up passes the repository's
+current-head gates and reviews and is merged; adding the evidence alone does
+not waive those conditions. Verification scopes and limitations are below.
 A rule amendment still requires a separate specification PR.
 
 ## Context before R06b-1
@@ -164,11 +165,11 @@ members, changing ASCII request identities, or creating a second path syntax.
 
 ## Implementation slices and acceptance
 
-| Slice  | Observable result and checks                                                                                                                                                                  | Status                                             |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| R06b-0 | This decision and roadmap, without implementation or changed accepted behavior.                                                                                                               | Accepted specification                             |
-| R06b-1 | Shared domain grammar and strict transport handling; HTTP/MCP, client/CLI, outbox, contracts and listing accept the same names. Verify replay and old rows/tokens as well as rejection paths. | Implemented and merged in #124                     |
-| R06b-2 | Cross-process upgrade/restart and backup/restore evidence, independent guide examples, full required gates and final status update. Depends on R06b-1.                                        | Recovery checks passed; final gates/review pending |
+| Slice  | Observable result and checks                                                                                                                                                                  | Status                                                     |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| R06b-0 | This decision and roadmap, without implementation or changed accepted behavior.                                                                                                               | Accepted specification                                     |
+| R06b-1 | Shared domain grammar and strict transport handling; HTTP/MCP, client/CLI, outbox, contracts and listing accept the same names. Verify replay and old rows/tokens as well as rejection paths. | Implemented and merged in #124                             |
+| R06b-2 | Cross-process upgrade/restart and backup/restore evidence, independent guide examples, full required gates and final status update. Depends on R06b-1.                                        | Recovery verified; acceptance on merge after gates/reviews |
 
 R06b-1 must not ship a server-only expansion whose accepted response names the
 bundled client cannot handle. This requires transport/response compatibility,
@@ -239,11 +240,39 @@ These are real Artifree server/SQLite process results and synthetic process
 boundary failure tests. R06b-1's browser storage/reopen and real-server delivery
 fixtures remain separate evidence. This run did not execute an old client
 bundle, restore a native browser session, or add automatic queue recovery;
-native browser recovery remains R08d. The unchanged outbox store implementation
-and retained request fixtures are not described as an old-client process test.
-No original-product Unicode behavior is inferred. Full `npm run check`,
-`npm run build`, applicable real-browser checks and final review remain pending
-for this follow-up; the focused runs do not substitute for those gates.
+native browser recovery remains R08d. The outbox store was unchanged between
+the two immutable revisions used for that compatibility run; this is not a
+claim that later outbox work leaves it unchanged or that an old client bundle
+was executed. No original-product Unicode behavior is inferred.
+
+## Repository gates and acceptance record
+
+The recovery head `4748150631e7a85866e21fb1ac9b454cb21d03f8` passed full
+`npm run check` (847 Node tests plus Rust/Clippy/rustdoc), `npm run build`, the
+independent curl guide example and Chromium full smoke. Its Firefox full smoke
+failed the source-download prompt's color-contrast assertion (4.13:1). That
+run is retained as failed; it is not counted as a completed full gate.
+
+[PR #127](https://github.com/EunhakChoi/artifree/pull/127) separately added a
+bounded wait for the popup's own finite entry animations before the unchanged
+axe check. It changed no product tokens or contrast threshold. One natural
+diagnostic run each on main and the follow-up did not reproduce the original
+failure. Forced intermediate-animation fixtures reproduced the failure class,
+finished animations passed, and a deliberately bad stable contrast still
+failed. The first before/after fixture was invalid because another lifecycle
+consumer released it early; that attempt was excluded from proof. The corrected
+controlled fixture failed the original offer and passed with the completion
+wait. None of these forced cases establishes the exact original timing.
+
+The exact popup-fix head `055f82a5d0a5760b19be98e9283d434d19aa350f` passed full
+check/build, Chromium and Firefox full smoke, the single automatic Codex review
+and all 14 CI jobs. Its merge is included in this recovery follow-up. Those
+results establish the popup fix's scope; they do not substitute for checking
+the combined recovery head. Acceptance requires that head's full check/build,
+applicable real-browser checks, the two required reviews and successful CI,
+recorded with exact revisions in the implementation PR. Focused process and
+browser fixtures are not reported as native-session recovery or a completed
+current-head gate before it runs.
 
 ## Alternatives
 
