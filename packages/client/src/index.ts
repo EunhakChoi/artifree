@@ -27,6 +27,8 @@ export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
 export { getAsset, listAssets, readAsset } from './assets.js';
 export type { AssetBytes } from './assets.js';
+export { deleteAsset, uploadAsset } from './asset-mutations.js';
+export type { AssetMutationOptions } from './asset-mutations.js';
 export {
   MAX_DOWNLOAD_NAME_CHARS,
   MAX_SOURCE_PART_BYTES,
