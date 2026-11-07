@@ -7,6 +7,11 @@ native transport/storage kernel. R08c-2b adds a host-only bounded scheduler
 sub-slice. Public delivery coordination and the remaining numbered
 sender/lifecycle contract are proposed.
 
+> Supplemented by [0049](0049-outbox-rejected-unresolved-disposal.md)
+> (proposed; in effect when accepted by the R08c-3a code PR): an additive internal scheduler
+> contract for rule 17's `discardRejected` and `abandonUnresolved` (roadmap
+> R08c-3a/3b). The numbered rules below are unchanged.
+
 Scope: R08, an opt-in browser TypeScript client for R06 application-data
 writes. This specification does not enable it in the management UI or runtime
 frames. Numbered rules define the complete target contract; changes to
