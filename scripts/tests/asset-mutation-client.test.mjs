@@ -25,10 +25,33 @@ import { buildServer, startServer } from '../lib/server-process.mjs';
 
 const encoder = new TextEncoder();
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-/** Lets every promise step of a pending client call run (digest, fetch, body). */
+/** Runs queued promise steps only; real work such as the digest needs until. */
 const flush = async () => {
   for (let step = 0; step < 4; step += 1) await tick();
 };
+/**
+ * Polls `condition` one tick at a time until it holds. Real work, such as the
+ * digest on the thread pool, takes a varying amount of time, so a step is
+ * awaited by its observable effect and never by a fixed number of ticks. A
+ * step that never happens fails the test by assertion.
+ */
+const UNTIL_TICKS = 1_000_000;
+async function until(condition, what) {
+  for (let step = 0; !condition(); step += 1) {
+    if (step === UNTIL_TICKS) assert.fail(`never reached: ${what}`);
+    await tick();
+  }
+}
+/** Waits for `promise` to settle with the same bound as `until`. */
+async function ended(promise, what) {
+  let done = false;
+  const mark = () => {
+    done = true;
+  };
+  promise.then(mark, mark);
+  await until(() => done, what);
+  await promise;
+}
 const hang = () => new Promise(() => {});
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
@@ -62,6 +85,7 @@ const invalid = { code: 'invalid_response' };
 /** A clock that only moves when a test says so. */
 class FakeClock {
   now = 0;
+  armCount = 0;
   #timers = new Map();
   #next = 0;
 
@@ -70,6 +94,7 @@ class FakeClock {
   }
 
   after(callback, milliseconds) {
+    this.armCount += 1;
     if (this.immediate) {
       callback();
       return () => {};
@@ -762,12 +787,12 @@ for (const [name, run, status, valid] of [
     const answer = recorder(() => new Response(source.body, { status }));
     const call = run(clientWith(answer.fetch, clock));
     const settled = assert.rejects(call, { code: 'network_error', status });
-    await flush();
-    await flush();
+    await until(() => clock.pending === 1, 'the stall timer is armed');
+    assert.equal(clock.pending, 1);
     await clock.advance(44_999);
     assert.equal(source.cancelled.count, 0);
     await clock.advance(1);
-    await settled;
+    await ended(settled, 'the silent call ended');
     assert.equal(source.cancelled.count, 1);
     assert.equal(clock.pending, 0);
     assert.equal(answer.calls.length, 1);
@@ -780,16 +805,20 @@ for (const [name, run, status, valid] of [
     const settled = assert.rejects(run(clientWith(answer.fetch, clock)), {
       code: 'network_error',
     });
-    await flush();
+    await until(() => clock.pending === 1, 'the stall timer is armed');
+    assert.equal(clock.pending, 1);
     source.push(JSON.stringify(valid).slice(0, 5));
-    await flush();
+    await until(
+      () => clock.armCount === 2,
+      'the stall timer is armed again after the byte',
+    );
     await clock.advance(30_000);
     for (let index = 0; index < 5; index += 1) {
       source.push(new Uint8Array(0));
       await clock.advance(3000);
     }
     await clock.advance(1000);
-    await settled;
+    await ended(settled, 'the call with empty chunks ended');
     assert.equal(source.cancelled.count, 1);
     assert.equal(clock.pending, 0);
   });
@@ -840,9 +869,10 @@ for (const [name, run, status, valid] of [
       code: 'invalid_response',
       status: 409,
     });
-    await flush();
+    await until(() => clock.pending === 1, 'the stall timer is armed');
+    assert.equal(clock.pending, 1);
     await clock.advance(45_000);
-    await settled;
+    await ended(settled, 'the stalled error body ended');
     assert.equal(source.cancelled.count, 1);
     assert.equal(clock.pending, 0);
   });
@@ -866,9 +896,10 @@ for (const [name, run, status, valid] of [
     const settled = assert.rejects(run(clientWith(answer.fetch, clock)), {
       code: 'network_error',
     });
-    await flush();
+    await until(() => clock.pending === 1, 'the stall timer is armed');
+    assert.equal(clock.pending, 1);
     await clock.advance(45_000);
-    await settled;
+    await ended(settled, 'the stalled read ended');
     assert.equal(cancels, 1);
   });
 
@@ -882,10 +913,10 @@ for (const [name, run, status, valid] of [
         ? upload(clientWith(answer.fetch), uploadRequest(), options)
         : remove(clientWith(answer.fetch), { base_asset_version: 3 }, options);
     const settled = assert.rejects(call, { code: 'network_error' });
-    await flush();
-    await flush();
+    await until(() => source.body.locked, 'the body is being read');
+    assert.equal(source.body.locked, true);
     controller.abort();
-    await settled;
+    await ended(settled, 'the aborted read ended');
     assert.equal(source.cancelled.count, 1);
     assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
   });
@@ -1043,16 +1074,24 @@ for (const [name, crypto] of brokenCryptos) {
 test('a digest that never settles ends by abort with zero requests and no listener', async () => {
   const controller = new AbortController();
   const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
-  const crypto = { subtle: { digest: hang } };
+  let digests = 0;
+  const crypto = {
+    subtle: {
+      digest: () => {
+        digests += 1;
+        return hang();
+      },
+    },
+  };
   await withCrypto(crypto, async () => {
     const call = upload(client, uploadRequest(), {
       idempotencyKey: KEY,
       signal: controller.signal,
     });
     const settled = assert.rejects(call, { code: 'network_error', status: 0 });
-    await flush();
+    await until(() => digests === 1, 'the digest started');
     controller.abort();
-    await settled;
+    await ended(settled, 'the aborted digest ended');
   });
   assert.equal(calls.length, 0);
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
@@ -1175,17 +1214,24 @@ test('a foreign-realm signal aborted before the call sends nothing', async () =>
 test('a foreign-realm signal aborted while the digest is pending sends nothing', async () => {
   const foreign = foreignSignal();
   const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
-  await withCrypto({ subtle: { digest: hang } }, async () => {
+  let digests = 0;
+  const crypto = {
+    subtle: {
+      digest: () => {
+        digests += 1;
+        return hang();
+      },
+    },
+  };
+  await withCrypto(crypto, async () => {
     const call = upload(client, uploadRequest(), {
       idempotencyKey: KEY,
       signal: foreign.signal,
     });
-    // Observed at once so that an early rejection is reported by the assertion
-    // below rather than as an unhandled rejection.
-    call.catch(() => undefined);
-    await flush();
+    const settled = assert.rejects(call, abortedNothingSent);
+    await until(() => digests === 1, 'the digest started');
     foreign.abort();
-    await assert.rejects(call, abortedNothingSent);
+    await ended(settled, 'the aborted digest ended');
   });
   assert.equal(calls.length, 0);
   assert.equal(foreign.listenerCount(), 0);
@@ -1251,7 +1297,7 @@ test('aborting while the request is pending ends the call and leaves no listener
   const settled = assert.rejects(call, { code: 'network_error', status: 0 });
   await started;
   controller.abort();
-  await settled;
+  await ended(settled, 'the aborted request ended');
   assert.equal(answer.calls.length, 1);
 });
 
@@ -1263,10 +1309,10 @@ test('headers with no body at all hold a clocked read until the stall limit, nev
   const settled = assert.rejects(upload(clientWith(answer.fetch, clock)), {
     code: 'network_error',
   });
-  await flush();
+  await until(() => clock.pending === 1, 'the stall timer is armed');
   assert.equal(clock.pending, 1);
   await clock.advance(45_000);
-  await settled;
+  await ended(settled, 'the stalled read ended');
   assert.equal(clock.pending, 0);
 });
 
