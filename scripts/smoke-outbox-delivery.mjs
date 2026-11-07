@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { build } from 'esbuild';
 import { cleanupOutboxDelivery } from './lib/outbox-delivery-cleanup.mjs';
 import { checkOutboxScheduler } from './smoke-outbox-scheduler.mjs';
+import { checkSchedulerDisposalLive } from './smoke-outbox-disposal.mjs';
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
 const EPOCH = 'b'.repeat(32);
@@ -22,7 +23,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
       import {OutboxError} from './packages/client/src/outbox/types.ts';
       import {ArtifreeApiError} from './packages/client/src/errors.ts';
       import {DeliveryScheduler} from './packages/client/src/outbox/scheduler.ts';
-      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, openStore, readBinding, OutboxError, ArtifreeApiError};`,
+      import {LocalOperationGate} from './packages/client/src/outbox/local-operation-gate.ts';
+      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError};`,
       resolveDir: process.cwd(),
       loader: 'ts',
     },
@@ -35,6 +37,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
   let status = 409;
   let bindingMode = 'normal';
   let bindingReads = 0;
+  let liveBindingReads = 0;
   let bindingClosures = [];
   let heldBinding;
   let onBindingArrived;
@@ -151,6 +154,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         return;
       }
       if (live !== undefined) {
+        liveBindingReads += 1;
         forward(request, response, '');
         return;
       }
@@ -440,13 +444,14 @@ export async function checkOutboxDelivery(browser, serverApi) {
           clock,
         };
         globalThis.kernel = new DeliveryKernel(store, deliveryContext);
-        globalThis.installScheduler = () => {
+        globalThis.installScheduler = (cleanup) => {
           globalThis.events = [];
           globalThis.revalidationCalls = 0;
           globalThis.failRevalidation = false;
           globalThis.observedBindingStatuses = [];
           globalThis.scheduler = new deliveryApi.DeliveryScheduler(store, {
             context: deliveryContext,
+            ...(cleanup === undefined ? {} : { cleanup }),
             random: () => 0,
             observe: (event) => {
               events.push(event);
@@ -523,11 +528,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
           text: operation === 'delete' ? null : text,
           base: { version: base },
         });
-        globalThis.enqueueLikeHead = (changes) => {
+        globalThis.enqueueLikeHead = (changes, localAuthority) => {
           const intent = { ...head, ...changes };
           delete intent.sequence;
           delete intent.bytes;
-          return store.enqueue(intent);
+          return store.enqueue(
+            intent,
+            localAuthority?.check,
+            localAuthority?.signal,
+          );
         };
         globalThis.start = () => {
           globalThis.pending = kernel.run(lane).then(
@@ -699,6 +708,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
   }
   let scenarioFailure;
   try {
+    if (process.env.ARTIFREE_SCHEDULER_CASE === 'disposal-live') {
+      assert.notEqual(
+        serverApi,
+        undefined,
+        'disposal-live requires the Rust server',
+      );
+      await checkLiveDisposal();
+      return;
+    }
     await checkOutboxScheduler({
       setup,
       close,
@@ -1258,6 +1276,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       }
       await selectActor('Outbox replay');
       await checkRealServer();
+      await checkLiveDisposal();
       await selectActor('Outbox scheduler');
       await checkOutboxScheduler({
         setup,
@@ -1290,6 +1309,20 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       scenarioFailure,
     );
+  }
+  async function checkLiveDisposal() {
+    await selectActor('Outbox explicit cleanup');
+    mode = 'normal';
+    bindingMode = 'normal';
+    requests = [];
+    await checkSchedulerDisposalLive({
+      setup,
+      close,
+      createArtifact: createRealArtifact,
+      requests: () => requests,
+      bindingReadCount: () => liveBindingReads,
+      expectedActorId: live.actorId,
+    });
   }
   async function checkAuthorityException({
     phase,
@@ -1425,7 +1458,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
     assert.equal(issued.token.user_id, user.id);
     assert.equal(typeof issued.secret, 'string');
     assert.notEqual(issued.secret, '');
-    live = { origin: serverApi.origin, token: issued.secret };
+    live = { origin: serverApi.origin, token: issued.secret, actorId: user.id };
   }
   async function adminPost(path, body, expectedStatus = 200) {
     const response = await fetch(serverApi.origin + path, {

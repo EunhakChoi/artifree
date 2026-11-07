@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { expect } from '@playwright/test';
 import { ArtifreeClient, newRandomId } from '../packages/client/dist/index.js';
 import { recordRuntimeViews } from './lib/runtime-view-recorder.mjs';
+import { waitForPopupEntrance } from './lib/popup-animation.mjs';
 import { api, bytes } from './smoke-workspace.mjs';
 
 /**
@@ -206,6 +207,7 @@ async function offer(opened, name, answer, inspect = async () => {}) {
   const box = await opened.element.boundingBox();
   await opened.frame.getByRole('button', { name }).click();
   await expect(dialog).toBeVisible();
+  await waitForPopupEntrance(dialog);
   assert.deepEqual(
     await opened.element.boundingBox(),
     box,
