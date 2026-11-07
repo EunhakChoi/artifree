@@ -516,6 +516,11 @@ claim a timeout for waiting for response headers. Success JSON is at most
 no raw response body, credential or URL becomes a diagnostic. A response cannot
 grant authority to another artifact or account.
 
+Upload requires exactly HTTP `201 Created`; delete requires exactly HTTP
+`200 OK`, for both initial and replayed receipts, matching rule 9. Any other
+2xx status is an `invalid_response`, even with an otherwise valid receipt. It
+does not prove rollback or permit changing the original envelope or key.
+
 Upload success validates the opaque asset ID, MIME equal to the original
 declaration, byte count and SHA-256 equal to the original decoded request,
 creation time, safe integer version and boolean replay flag. Its resulting
@@ -554,9 +559,12 @@ response is lost; delete replay; upload replay after deletion without
 resurrection; key reuse, stale base and current type/quota refusals.
 
 Hold a request and mutate caller-owned request/options objects to prove the
-attempt and its validation use the original captured values. Corrupt status,
-ID, MIME, size, digest, version and replay/deleted fields independently, and
-exercise oversize, malformed, stalled and redirect responses without accepting
+attempt and its validation use the original captured values. Independently
+replace upload's `201` and delete's `200` with other 2xx statuses, for both
+initial and replayed receipts, and require `invalid_response` despite an
+otherwise valid body. Corrupt ID, MIME, size, digest, version and replay/deleted
+fields independently, and exercise oversize, malformed, stalled and redirect
+responses without accepting
 a receipt or following credentials/body to a collector. Absence/failure of Web
 Crypto must cause zero mutation HTTP. Explicit same-key replay after a rejected
 receipt must observe one server association/version change, not a second write.
