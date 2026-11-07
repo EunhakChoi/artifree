@@ -469,6 +469,11 @@ interface SendOptions {
   readonly successBodyLimit?: number;
   readonly errorBodyLimit?: number;
   readonly redirect?: 'error';
+  /**
+   * The one success status the contract allows. Any other 2xx is an
+   * `invalid_response` whose body is cancelled unread.
+   */
+  readonly expectStatus?: number;
 }
 
 type GrantState = 'settled' | 'pending' | 'unknown';
@@ -1896,6 +1901,16 @@ export class ArtifreeClient {
     request: Omit<SendOptions, 'headers'> = {},
   ): Promise<T> {
     const response = await this.send(method, path, request);
+    if (
+      request.expectStatus !== undefined &&
+      response.status !== request.expectStatus
+    ) {
+      if (response.body !== null) cancelQuietly(response.body);
+      throw new ArtifreeApiError(
+        `${method} ${path} answered HTTP ${response.status}, not ${request.expectStatus}.`,
+        { status: response.status, code: 'invalid_response' },
+      );
+    }
     const value =
       request.successBodyLimit !== undefined
         ? await readSuccessJson(
