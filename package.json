@@ -33,6 +33,7 @@
     "cli": "node apps/cli/dist/main.js",
     "test:smoke": "node scripts/smoke.mjs",
     "test:outbox": "node scripts/test-outbox.mjs",
+    "test:data-upgrade": "node scripts/test-data-upgrade.mjs",
     "lint:code": "oxlint --deny-warnings",
     "lint:css": "stylelint \"apps/web/src/**/*.css\" \"docs/architecture/**/*.css\" --max-warnings 0",
     "lint": "npm run lint:code && npm run lint:css",
