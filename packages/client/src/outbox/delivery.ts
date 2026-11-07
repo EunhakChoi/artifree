@@ -97,6 +97,10 @@ export type DeliveryAttempt =
       readonly kind: 'delivery_failed';
       readonly failure: DeliveryFailure;
       readonly outcome: 'unknown';
+      /** Durable phase at attempt entry, independently of local dispatch history. */
+      readonly initialState: 'unprepared' | 'prepared';
+      /** Earlier delivery is unknown unless this instance proves no dispatch. */
+      readonly priorDelivery: 'none' | 'unknown';
     }
   | {
       readonly kind: 'ack_storage_failed';
@@ -418,13 +422,17 @@ export class DeliveryKernel {
     this.clock = context.clock ?? systemClock;
   }
 
-  async run(lane: LaneKey): Promise<DeliveryAttempt> {
+  /** The coordinator may pass only its own just-committed, never-dispatched head. */
+  async run(
+    lane: LaneKey,
+    locallyPrepared?: PreparedRow,
+  ): Promise<DeliveryAttempt> {
     if (this.active)
       throw new DeliveryAttemptError(new OutboxError('owner_not_ready'), false);
     this.active = true;
     this.dispatched = false;
     try {
-      return await this.attempt(lane);
+      return await this.attempt(lane, locallyPrepared);
     } catch (error: unknown) {
       if (error instanceof OutboxError)
         throw new DeliveryAttemptError(error, this.dispatched);
@@ -500,7 +508,10 @@ export class DeliveryKernel {
         };
   }
 
-  private async attempt(lane: LaneKey): Promise<DeliveryAttempt> {
+  private async attempt(
+    lane: LaneKey,
+    locallyPrepared: PreparedRow | undefined,
+  ): Promise<DeliveryAttempt> {
     const check = (): void => this.check(lane);
     check();
     const rows = await this.store.lane(lane);
@@ -511,6 +522,13 @@ export class DeliveryKernel {
       throw new OutboxError('owner_not_ready');
     if (first.state === 'acknowledged')
       return this.cleanup(first, lane, 'retained');
+    const initialState = first.state;
+    const priorDelivery =
+      initialState === 'unprepared' ||
+      (locallyPrepared !== undefined &&
+        JSON.stringify(first) === JSON.stringify(locallyPrepared))
+        ? 'none'
+        : 'unknown';
     let prepared: PreparedRow;
     if (first.state === 'unprepared') {
       try {
@@ -557,6 +575,8 @@ export class DeliveryKernel {
         kind: 'delivery_failed',
         failure: outcome.failure,
         outcome: 'unknown',
+        initialState,
+        priorDelivery,
       };
     }
     let acknowledged: AcknowledgedRow;

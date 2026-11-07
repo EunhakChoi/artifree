@@ -199,6 +199,21 @@ Rust binding 확인부터 native IDB commit·metadata retirement까지의 작은
 수직 case도 두 engine에서 검증했으나, 이는 전체 gate나 모든 권한 실패·
 crash 복원 경로의 완료를 뜻하지 않는다.
 
+### R08c의 내부 unknown/rejection 재개 부분 구현
+
+기존0041 규칙 11·16·17에 따라, 이전부터 `prepared`였고 durable ACK가 없는
+head가 후행 확정 거절을 받아도 `retry_paused`의
+`unresolved_after_rejection`과 기존 명시적 `DeliveryResumeSelection`을 유지한다.
+실패 횟수나 epoch 초기화는 이전 전송의 불확실성을 지우지 않는다. 새로 준비한
+첫 시도의 확정 거절은 기존 blocked 동작을 유지하며, 실제 same-key replay
+receipt는 정상 durable ACK/trim 경로를 따른다. 후행 거절·pause capture 실패·
+늦은 authority 상실에도 저장 행과 accounting을 보존한다.
+
+이는 내부 fixed-owner host의 작은 후속 구현이다. 공개 handle·sender 활성화,
+`discardRejected`, `abandonUnresolved`, generation 재인가·복구 continuation과
+native-process 복구는 여전히 미완료다. 기존0041 번호 규칙이나0047의 폐기
+정책을 바꾸지 않는다.
+
 ## P 선택 가능한 provider 기능
 
 외부 agent의 생성·수정에 내장 모델 provider가 필수인 것은 아니다. 모델이나 외부

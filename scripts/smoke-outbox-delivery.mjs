@@ -5,6 +5,7 @@ import { build } from 'esbuild';
 import { cleanupOutboxDelivery } from './lib/outbox-delivery-cleanup.mjs';
 import { checkOutboxScheduler } from './smoke-outbox-scheduler.mjs';
 import { checkSchedulerDisposalLive } from './smoke-outbox-disposal.mjs';
+import { checkRejectionResume } from './smoke-outbox-rejection.mjs';
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
 const EPOCH = 'b'.repeat(32);
@@ -51,6 +52,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
   let redirectStatus = 307;
   let redirectTarget = '/collect';
   let requests = [];
+  let forwardedMutations = 0;
+  let forwardedReplies = [];
   let collected = [];
   const receipts = new Map();
   const createdArtifacts = [];
@@ -189,6 +192,10 @@ export async function checkOutboxDelivery(browser, serverApi) {
       return;
     }
     if (mode === 'headers_hold') return;
+    if (mode === 'drop_before_forward') {
+      response.destroy();
+      return;
+    }
     if (mode === 'binding_changed') {
       response.writeHead(409, { 'Content-Type': 'application/json' });
       response.end(
@@ -294,6 +301,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
     );
   });
   function forward(request, response, body) {
+    if (request.url?.endsWith('/data') && request.method !== 'GET')
+      forwardedMutations += 1;
     const upstream = httpRequest(
       new URL(request.url, live.origin),
       {
@@ -304,6 +313,11 @@ export async function checkOutboxDelivery(browser, serverApi) {
         const chunks = [];
         reply.on('data', (chunk) => chunks.push(chunk));
         reply.on('end', () => {
+          if (request.url?.endsWith('/data') && request.method !== 'GET')
+            forwardedReplies.push({
+              status: reply.statusCode,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
           if (mode === 'lost_response') {
             response.destroy();
             return;
@@ -708,6 +722,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
   }
   let scenarioFailure;
   try {
+    if (process.env.ARTIFREE_SCHEDULER_CASE === 'rejection-resume-live') {
+      assert.notEqual(
+        serverApi,
+        undefined,
+        'rejection-resume-live requires Rust',
+      );
+      await checkLiveRejection();
+      return;
+    }
     if (process.env.ARTIFREE_SCHEDULER_CASE === 'disposal-live') {
       assert.notEqual(
         serverApi,
@@ -787,6 +810,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
           status: failureMode === 'unexpected_2xx' ? 201 : 200,
         },
         outcome: 'unknown',
+        initialState: 'unprepared',
+        priorDelivery: 'none',
       });
       assert.equal(
         (await page.evaluate(() => snapshot()))[0].state,
@@ -980,6 +1005,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
         kind: 'delivery_failed',
         failure: expected,
         outcome: 'unknown',
+        initialState: 'unprepared',
+        priorDelivery: 'none',
       });
       assert.equal(
         JSON.stringify(result).includes('private-response-marker'),
@@ -1276,6 +1303,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       }
       await selectActor('Outbox replay');
       await checkRealServer();
+      await checkLiveRejection();
       await checkLiveDisposal();
       await selectActor('Outbox scheduler');
       await checkOutboxScheduler({
@@ -1308,6 +1336,61 @@ export async function checkOutboxDelivery(browser, serverApi) {
         listeners: [server, target],
       },
       scenarioFailure,
+    );
+  }
+  async function checkLiveRejection() {
+    await selectActor('Outbox unknown rejection');
+    bindingMode = 'normal';
+    await checkRejectionResume(
+      {
+        setup,
+        close,
+        createArtifact: createRealArtifact,
+        expectedActorId: live.actorId,
+        configure(next) {
+          mode = next;
+          requests = [];
+          forwardedMutations = 0;
+          forwardedReplies = [];
+        },
+        setMode(next) {
+          mode = next;
+        },
+        requests: () => requests,
+        forwardedMutations: () => forwardedMutations,
+        responses: () => forwardedReplies,
+        async canonical(artifact) {
+          const response = await fetch(
+            live.origin + '/v1/artifacts/' + artifact + '/data',
+            {
+              headers: { Authorization: 'Bearer ' + live.token },
+            },
+          );
+          assert.equal(response.status, 200);
+          return response.json();
+        },
+        async independentWrite(artifact, base, value) {
+          const response = await fetch(
+            live.origin + '/v1/artifacts/' + artifact + '/data',
+            {
+              method: 'PUT',
+              headers: {
+                Authorization: 'Bearer ' + live.token,
+                'Content-Type': 'application/json',
+                'Idempotency-Key': crypto.randomUUID(),
+              },
+              body: JSON.stringify({
+                path: '',
+                base_data_version: base,
+                value,
+              }),
+            },
+          );
+          assert.equal(response.status, 200);
+          return response.json();
+        },
+      },
+      process.env.ARTIFREE_REJECTION_SEQUENCE,
     );
   }
   async function checkLiveDisposal() {
