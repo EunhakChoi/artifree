@@ -1028,3 +1028,41 @@ and unresolved abandonment remain proposed. The public browser handle remains
 local-only; management UI, runtime frames and direct-write behavior are unchanged.
 Numeric limits, host contracts and action policy are Artifree choices, separate
 from the limited original observations described above.
+
+## R08c: internal resume after a retained prepared request is rejected
+
+This internal sub-slice implements rule 17's existing
+`unresolved_after_rejection` path for the already authorized fixed-owner host.
+The kernel reports the durable head phase read at attempt entry. A retained
+`prepared` head without a durable ACK remains unknown; failure counters, a new
+budget epoch or a later refusal cannot establish that its earlier attempt did
+not commit. No new stored sent/commit flag, schema or server behavior is added.
+
+A validated `data_conflict` or known rejection of that retained prepared head
+publishes a lane-scoped `retry_paused` with reason
+`unresolved_after_rejection` and the existing `DeliveryResumeSelection`.
+The bounded attempt observation still reports the actual response classification.
+There is no automatic retry, disposal choice, key replacement or rebase. One
+explicit resume follows the existing binding-read, snapshot, authority and epoch
+rules, then retries the original method/body/base/key. A later rejection pauses
+again, including after failure counters have been reset. The lane gate remains
+independent of another lane renewing the coordinator budget.
+
+The pause captures the current complete lane snapshot and rechecks authority
+before publishing its selection. A failed native capture or lost authority
+fences queued work without changing rows, receipts, checkpoints or accounting.
+Existing pending-promise identity and wrong-kind/consumed-token rejection apply.
+A newly prepared first-attempt rejection keeps its existing blocked behavior.
+A valid same-key historical receipt still takes the durable ACK/trim path;
+its older version never replaces newer canonical data.
+
+Focused native IndexedDB and actual Rust checks contrast a request dropped
+before upstream forwarding followed by a real version conflict, with an actual
+commit whose response is lost followed by a historical replay receipt. The
+client may not use the fixture's knowledge of forwarding as outcome evidence.
+They also cover first-attempt rejection, explicit epoch renewal, exact request
+identity, pending-token kinds and native pause-capture abort/authority loss.
+Guard mutations exercise these assertions. These are internal scheduling
+subcases, not complete B15/B19/B22, native-process recovery or all R08 acceptance.
+Public delivery, rejected disposal, unresolved abandonment, access/generation
+recovery and page-global integration remain outside this slice.

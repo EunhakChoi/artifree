@@ -97,6 +97,8 @@ export type DeliveryAttempt =
       readonly kind: 'delivery_failed';
       readonly failure: DeliveryFailure;
       readonly outcome: 'unknown';
+      /** Durable phase at attempt entry; retained preparation is unresolved. */
+      readonly initialState: 'unprepared' | 'prepared';
     }
   | {
       readonly kind: 'ack_storage_failed';
@@ -511,6 +513,7 @@ export class DeliveryKernel {
       throw new OutboxError('owner_not_ready');
     if (first.state === 'acknowledged')
       return this.cleanup(first, lane, 'retained');
+    const initialState = first.state;
     let prepared: PreparedRow;
     if (first.state === 'unprepared') {
       try {
@@ -557,6 +560,7 @@ export class DeliveryKernel {
         kind: 'delivery_failed',
         failure: outcome.failure,
         outcome: 'unknown',
+        initialState,
       };
     }
     let acknowledged: AcknowledgedRow;
