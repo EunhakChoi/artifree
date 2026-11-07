@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
-import { searchWorkspaceArtifacts } from '../lib/workspace-search.mjs';
+import { beginWorkspaceArtifactSearch } from '../lib/workspace-search.mjs';
+
+async function searchWorkspaceArtifacts(page, title) {
+  const search = await beginWorkspaceArtifactSearch(page, title);
+  await search.settled;
+}
 
 // Control the browser I/O boundary, not the search helper or application UI.
 function boundary({ fillFailure, failed = false, changed = false } = {}) {
@@ -241,7 +246,7 @@ test('early request and response failures stay handled while input failure is re
       `
     import assert from 'node:assert/strict';
     import { setImmediate } from 'node:timers/promises';
-    const { searchWorkspaceArtifacts } = await import(process.argv[1]);
+    const { beginWorkspaceArtifactSearch } = await import(process.argv[1]);
     const unhandled = [];
     process.on('unhandledRejection', (error) => unhandled.push(error));
     const input = new Error('input detached');
@@ -250,7 +255,7 @@ test('early request and response failures stay handled while input failure is re
       waitForResponse: () => Promise.reject(new Error('response closed')),
       locator: () => ({ getByLabel: () => ({ fill: async () => { throw input; } }) }),
     };
-    await assert.rejects(searchWorkspaceArtifacts(page, 'Runtime probe'), (error) => error === input);
+    await assert.rejects(beginWorkspaceArtifactSearch(page, 'Runtime probe'), (error) => error === input);
     await setImmediate();
     assert.deepEqual(unhandled, []);
     console.log('input retained; unhandled=0');
@@ -262,4 +267,87 @@ test('early request and response failures stay handled while input failure is re
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), 'input retained; unhandled=0');
+});
+
+test('starting a search returns while a held read still blocks query admission', async () => {
+  const browser = boundary();
+  const starting = beginWorkspaceArtifactSearch(browser.page, 'Runtime probe');
+  let returned = false;
+  void starting.then(() => {
+    returned = true;
+  });
+  await setImmediate();
+  assert.equal(
+    returned,
+    true,
+    'The caller must be able to release its held read.',
+  );
+  assert.deepEqual(browser.calls, [['fill', 'Runtime probe']]);
+  const search = await starting;
+  let complete = false;
+  void search.settled.then(() => {
+    complete = true;
+  });
+  const old = browser.createRequest(
+    'GET',
+    'http://localhost/v1/artifacts?q=Runtime+probe',
+  );
+  assert.equal(
+    browser.answer(old),
+    false,
+    'An older answer cannot settle the staged operation.',
+  );
+  await setImmediate();
+  assert.equal(complete, false);
+  const current = browser.createRequest(
+    'GET',
+    'http://localhost/v1/artifacts?q=Runtime+probe',
+  );
+  browser.emit(current);
+  browser.answer(current);
+  await setImmediate();
+  assert.equal(complete, false, 'Response alone is not rendered settlement.');
+  browser.rendered.resolve();
+  await search.settled;
+  assert.equal(complete, true);
+});
+
+test('staged settlement keeps failures handled until the held-read owner can consume them', () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `
+    import assert from 'node:assert/strict';
+    import { setImmediate } from 'node:timers/promises';
+    const { beginWorkspaceArtifactSearch } = await import(process.argv[1]);
+    const request = Promise.withResolvers();
+    const response = Promise.withResolvers();
+    const unhandled = [];
+    process.on('unhandledRejection', (error) => unhandled.push(error));
+    const page = {
+      waitForRequest: () => request.promise,
+      waitForResponse: () => response.promise,
+      locator: () => ({ getByLabel: () => ({ fill: async () => {} }) }),
+    };
+    const search = await beginWorkspaceArtifactSearch(page, 'Runtime probe');
+    const failure = new Error('request cancelled while caller released its held read');
+    request.reject(failure);
+    response.reject(new Error('response also cancelled'));
+    await setImmediate();
+    assert.deepEqual(unhandled, []);
+    await assert.rejects(search.settled, (error) => error === failure);
+    console.log('settlement failure retained; unhandled=0');
+  `,
+      new URL('../lib/workspace-search.mjs', import.meta.url).href,
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    result.stdout.trim(),
+    'settlement failure retained; unhandled=0',
+  );
 });
