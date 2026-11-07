@@ -2385,8 +2385,9 @@ async function checkRejectedDisposal(harness, page, mode) {
       break;
     }
     case 'rejected-close-releases-proof': {
-      // Close ends the proof and the lane's selection pointer. The lane and its
-      // blocked pause stay, and the held selection still fails closed.
+      // Close ends the proof, the lane's selection pointer and the selection's
+      // token entry. The lane and its blocked pause stay, and the retired
+      // selection still fails closed.
       const closed = await page.evaluate(async () => {
         globalThis.rejectedChoice = await scheduler.selectRejected(
           rejectedKey,
@@ -2400,6 +2401,7 @@ async function checkRejectedDisposal(harness, page, mode) {
           pause: current?.pause?.kind ?? null,
           proof: current?.rejection !== undefined,
           selection: current?.rejectedSelection !== undefined,
+          tokenEntry: scheduler.rejections.tokens.has(rejectedChoice),
         };
       });
       assert.deepEqual(closed, {
@@ -2408,6 +2410,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         pause: 'blocked',
         proof: false,
         selection: false,
+        tokenEntry: false,
       });
       assert.equal(
         await page.evaluate(() =>
@@ -2878,17 +2881,50 @@ async function checkRejectedDisposal(harness, page, mode) {
       assert.equal(harness.requests().length, requests);
       break;
     }
+    case 'rejected-offline-closed': {
+      // Close retires the held selection. Its token entry and the lane's proof
+      // leave, the blocked pause stays, and the retired selection still fails
+      // closed with nothing stored, emitted or requested.
+      const closed = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        scheduler.close();
+        const current = scheduler.lanes.get(JSON.stringify(rejectedKey));
+        return {
+          pause: current?.pause?.kind ?? null,
+          proof: current?.rejection !== undefined,
+          selection: current?.rejectedSelection !== undefined,
+          tokenEntry: scheduler.rejections.tokens.has(rejectedChoice),
+        };
+      });
+      assert.deepEqual(closed, {
+        pause: 'blocked',
+        proof: false,
+        selection: false,
+        tokenEntry: false,
+      });
+      assert.equal(
+        await page.evaluate(() =>
+          rejectionCode(scheduler.discardRejected(rejectedChoice)),
+        ),
+        'owner_not_ready',
+      );
+      await expectUnchangedExceptFence(before);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
     case 'rejected-offline-logout':
     case 'rejected-offline-lock-loss':
     case 'rejected-offline-generation':
     case 'rejected-offline-profile':
     case 'rejected-offline-invalidated':
-    case 'rejected-offline-closed':
     case 'rejected-offline-aborted':
     case 'rejected-offline-check-throws': {
-      // One lost authority fact, a close or an aborted authority signal, injected
-      // between selection and the transaction. The scheduler fails closed on its first failed check, so
-      // each fact runs on its own page.
+      // One lost authority fact, an aborted authority signal or a throwing check,
+      // injected between selection and the transaction. The scheduler fails
+      // closed on its first failed check, so each fact runs on its own page.
       const fact = mode.slice('rejected-offline-'.length);
       const refused = await page.evaluate(async (fact) => {
         const facts = {
@@ -2910,9 +2946,6 @@ async function checkRejectedDisposal(harness, page, mode) {
           invalidated: () => {
             authInvalidationAborts = false;
             deliveryContext.invalidateAuthentication();
-          },
-          closed: () => {
-            scheduler.close();
           },
           aborted: () => {
             stop.abort();

@@ -219,6 +219,7 @@ function pendingChoice<T extends object, Context, Result>(
   registry: Actions<T, Context, Result>,
   brand: symbol,
   operation: (selection: T) => Promise<Result>,
+  closed?: () => boolean,
 ): Promise<Result> {
   if (typeof selection !== 'object' || selection === null)
     return Promise.reject(new OutboxError('invalid_selection'));
@@ -230,7 +231,9 @@ function pendingChoice<T extends object, Context, Result>(
   }
   const pending = registry.pending.get(selection);
   if (pending !== undefined) return pending;
-  if (!registry.tokens.has(selection))
+  // ADR 0049 rule 8 checks the scheduler before the token. While the scheduler
+  // is closed, an unregistered token reaches the operation, whose check answers.
+  if (!registry.tokens.has(selection) && closed?.() !== true)
     return Promise.reject(new OutboxError('invalid_selection'));
   const attempt = new Promise<Result>((resolve, reject) => {
     queueMicrotask(() => {
@@ -474,9 +477,11 @@ export class DeliveryScheduler {
     for (const lane of this.lanes.values()) {
       lane.cancelTimer?.();
       // The proof ends with the fence (ADR 0049 rule 2), and the lane stops
-      // referencing its selection, so a closed scheduler keeps no rows. The
-      // blocked pause stays. The token entry stays too: a closed scheduler must
-      // refuse it with owner_not_ready, which rule 8 checks before the token.
+      // referencing its selection, so a closed scheduler keeps no rows. A
+      // retired selection also leaves the token map (rule 16). The blocked
+      // pause stays.
+      if (lane.rejectedSelection !== undefined)
+        this.rejections.tokens.delete(lane.rejectedSelection);
       delete lane.rejection;
       delete lane.rejectedSelection;
     }
@@ -673,6 +678,7 @@ export class DeliveryScheduler {
       async (chosen) => {
         const context = this.rejections.tokens.get(chosen);
         this.rejections.tokens.delete(chosen);
+        this.check();
         if (context === undefined) throw new OutboxError('invalid_selection');
         return this.cleanupBoundary(async (host) => {
           this.checkRejectedContext(context);
@@ -716,6 +722,7 @@ export class DeliveryScheduler {
           return result;
         });
       },
+      () => this.fence.signal.aborted,
     );
   }
 
