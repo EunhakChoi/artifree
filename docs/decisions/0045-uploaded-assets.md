@@ -454,3 +454,125 @@ public publishing, asset change subscriptions, automatic offline replay,
 remote URL import, transforms, asset history, global disk enforcement,
 resource-closed export and external blob storage remain future work. Expanding
 those product boundaries requires a separate specification decision.
+
+## Proposed R09b2: bounded TypeScript mutation client
+
+Status: proposed while this documentation PR is unmerged. Review and merge of
+this documentation-only PR constitutes explicit acceptance of this exact R09b2
+client contract and dependency exception; no additional contract-approval PR is
+required. An unmerged proposal authorizes no implementation. Acceptance permits
+a subsequent, separate code PR only within the bounds below, with its own review
+and acceptance evidence. This document supplies no implementation and does not
+claim implementation completion. The existing numbered rules above are
+unchanged. R09a image validation and full R09b remain incomplete.
+
+### Dependency and scope
+
+The proposed exception follows R09b1's already implemented text HTTP/storage
+boundary instead of waiting for full PNG/JPEG admission. It adds only named
+`uploadAsset` and `deleteAsset` management TypeScript functions over the existing
+HTTP routes and generated `UploadAssetRequest`, `DeleteAssetRequest` and receipt
+DTOs. Their options require the caller's explicit `idempotencyKey`, using the
+existing mutation convention. No new endpoint, database format or server
+application behavior is proposed. Reusing generated DTOs does not authorize a
+request or remove runtime checks.
+
+This is not permission to enable any image upload. New PNG/JPEG uploads remain
+unsupported; historical image envelopes and matching receipts must remain
+replayable under rules 5–7. The client must not substitute today's text-only
+allowlist for the server's stable envelope and replay ordering. It performs no
+pixel decoding, content sanitization, MIME sniffing, normalization, remote fetch
+or filesystem access. CLI, MCP, copying, management UI and runtime grants remain
+separate R09b–d work. No R08 outbox, persistent pending request or background
+sender is introduced.
+
+### Explicit request and receipt boundary
+
+The caller supplies the original artifact, independent `base_asset_version`,
+lowercase parameter-free MIME declaration and base64 string for upload, or the
+asset ID and base for deletion. The caller also supplies the key. The method
+captures its own plain envelope and key before its first await; later changes
+to caller-owned objects must not change that attempt or its receipt checks.
+Stable envelope checks, including identifiers, key syntax and nonnegative safe
+integer bases, and size bounds apply before large allocations. They do
+not duplicate Rust text/image admission. The generated request continues to use
+a MIME string rather than narrowing it to the currently admitted types.
+
+An upload's decoded bytes are bounded by 5 MiB and the serialized envelope by
+8 MiB. The empty decoded envelope remains distinct from the server's current
+nonempty-content policy. Before dispatch, Web Crypto must compute SHA-256 from
+the bounded original decoded bytes; absence or failure refuses without HTTP.
+No weaker hash or image transformation is a fallback. This requirement makes an
+upload receipt independently checkable, as bounded asset reads already require
+Web Crypto. No decoded bytes are added to persistent client state.
+
+Both operations use authenticated original-origin requests with redirect
+refusal and no-store. They reuse the management transport's 45-second
+response-body stall limit and cancellation. The body reader starts that timer
+after headers while waiting for the first byte; afterwards it runs only while
+a read is pending. A consumer holding a chunk is not a stalled read. This does not introduce or
+claim a timeout for waiting for response headers. Success JSON is at most
+64 KiB and error bodies 4 KiB. Existing bounded error vocabulary is preserved;
+no raw response body, credential or URL becomes a diagnostic. A response cannot
+grant authority to another artifact or account.
+
+Upload requires exactly HTTP `201 Created`; delete requires exactly HTTP
+`200 OK`, for both initial and replayed receipts, matching rule 9. Any other
+2xx status is an `invalid_response`, even with an otherwise valid receipt. It
+does not prove rollback or permit changing the original envelope or key.
+
+Upload success validates the opaque asset ID, MIME equal to the original
+declaration, byte count and SHA-256 equal to the original decoded request,
+creation time, safe integer version and boolean replay flag. Its resulting
+version must match the original upload's base plus one. Delete validates the
+exact requested asset ID, boolean deleted/replayed flags and safe integer
+version equal to its base plus one when deleted, otherwise its base. Invalid,
+oversize, malformed or stalled receipts are failures, never success evidence.
+A replay's version is its historical receipt, not a replacement for a newer
+canonical asset-space version; metadata/content are separate current reads.
+
+### Unknown outcomes and explicit retries
+
+Each call makes one mutation request. It does not generate or rotate a key,
+refresh the base, rebase, automatically retry, recreate a deleted upload or
+interpret a transport/receipt failure as rollback. The caller must retain the
+same immutable envelope and key for a deliberate retry after an unknown
+outcome. Rebuilding an upload from a mutable byte buffer, rereading a file,
+reading a newer base or silently choosing a new key is not that retry.
+Per-call capture does not freeze a caller's separate later call: callers remain
+responsible for supplying the original values. The service's durable matching
+receipt, authority checks and shared actor-wide key space remain authoritative.
+
+A current 409, 422, 429 or access refusal does not establish that an earlier
+unknown attempt did not commit. This client slice adds no cleanup authority or
+asset-specific recovery state machine. Historical upload replay after deletion
+returns only its original receipt and cannot restore bytes. Delete replay keeps
+its original deleted result even when the association is already absent.
+
+### Acceptance before implementation completion
+
+Use the real Rust server and original independently created text/CSV inputs,
+plus bounded HTTP-boundary faults; do not mock the service or receipt oracle.
+Verify upload/list/metadata/exact read/delete; independent asset versions and
+unchanged source/data; foreign-user denial; exact key replay after a committed
+response is lost; delete replay; upload replay after deletion without
+resurrection; key reuse, stale base and current type/quota refusals.
+
+Hold a request and mutate caller-owned request/options objects to prove the
+attempt and its validation use the original captured values. Independently
+replace upload's `201` and delete's `200` with other 2xx statuses, for both
+initial and replayed receipts, and require `invalid_response` despite an
+otherwise valid body. Corrupt ID, MIME, size, digest, version and replay/deleted
+fields independently, and exercise oversize, malformed, stalled and redirect
+responses without accepting
+a receipt or following credentials/body to a collector. Absence/failure of Web
+Crypto must cause zero mutation HTTP. Explicit same-key replay after a rejected
+receipt must observe one server association/version change, not a second write.
+
+Each important rejection needs a runtime guard mutation that fails by its
+specific assertion. Compile failures, timeouts, unselected tests and cleanup
+failures are not guard kills. Preserve unsuccessful batches separately. Run
+formatter/check/build and relevant real-server client tests under the repository
+sandbox and cleanup rules; use both browser engines for any new browser Fetch
+or Web Crypto fixture. No implemented or public feature is claimed by this
+proposal, and no new test result is claimed here.
