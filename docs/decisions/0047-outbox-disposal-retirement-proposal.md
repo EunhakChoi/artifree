@@ -14,6 +14,12 @@ before the implementation PR can merge; an implementation PR cannot supply its
 own specification approval or treat passing tests as approval. Separate review
 and required gates remain mandatory for both changes.
 
+> Supplemented by [0049](0049-outbox-rejected-unresolved-disposal.md)
+> (accepted contract, implementation pending): rejected disposal and
+> unresolved abandonment, which this record excludes, and metadata retirement
+> after those committed disposals. Rules 1–7 below, including rule 5's
+> empty-gate eligibility, are unchanged.
+
 ## Problem and evidence
 
 0041 rule 17 already requires typed never-prepared disposal, callback fencing and
