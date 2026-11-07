@@ -4,6 +4,12 @@ Date: 2026-10-27. Status: accepted. Amends
 [0004](0004-inbound-mcp-adapter.md) and applies to the HTTP API of
 [0003](0003-local-html-artifact-slice.md).
 
+> Amended by [0048](0048-drain-over-limit-bodies.md) (proposed; in effect when
+> accepted): decision 3, as the bounded reading of a refused body, with the same
+> time limit and the same 32 places, also precedes a `413` for a body over the
+> request limit. That request is already admitted and keeps its permit while its
+> body is read.
+
 ## Context
 
 The MCP specification (2026-07-28, server tools, security considerations)

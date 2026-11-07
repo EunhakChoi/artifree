@@ -7,6 +7,11 @@ Date: 2026-10-27. Status: accepted. Builds on
 [0003](0003-local-html-artifact-slice.md); its storage, revision, retry, and
 preview rules apply unchanged.
 
+> Amended by [0048](0048-drain-over-limit-bodies.md) (proposed; in effect when
+> accepted): decision 4, as a request refused with `413` has the unread rest of
+> its body read and dropped, within the bounds of 0005, before the `413` is
+> sent. The status and the SDK's plain-text body are unchanged.
+
 ## Context
 
 External agents such as Codex and Pi should be able to use the implemented
