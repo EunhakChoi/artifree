@@ -16,9 +16,15 @@ import { buildServer, startServer } from '../lib/server-process.mjs';
 // once chunked.
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const MIB = 1024 * 1024;
+// Mirrors MAX_BODY_BYTES of the server (36 MiB, the request limit of /mcp and
+// of the API). The body must exceed it by more than the unread rest a drain
+// can leave in socket buffers, or the test would not exercise the refusal.
 const REQUEST_LIMIT = 36 * MIB;
 const BODY_BYTES = REQUEST_LIMIT + 4 * MIB;
-const DEADLINE_MS = 20_000;
+// A silent socket is destroyed after IDLE_MS; a case that is still going after
+// OVERALL_MS (a sender that never finishes, an answer that never ends) too.
+const IDLE_MS = 20_000;
+const OVERALL_MS = 60_000;
 let binary;
 let scratch;
 let server;
@@ -80,10 +86,14 @@ function post(path, shape) {
     const socket = connect({ host: '127.0.0.1', port: Number(port) });
     const received = [];
     const outcome = { ended: false, error: undefined };
-    socket.setTimeout(DEADLINE_MS, () =>
-      socket.destroy(
-        Object.assign(new Error('no answer in time'), { code: 'TEST_TIMEOUT' }),
-      ),
+    const fail = (message, code) =>
+      socket.destroy(Object.assign(new Error(message), { code }));
+    socket.setTimeout(IDLE_MS, () =>
+      fail('no answer in time', 'TEST_IDLE_TIMEOUT'),
+    );
+    const overall = setTimeout(
+      () => fail('the case did not finish in time', 'TEST_OVERALL_TIMEOUT'),
+      OVERALL_MS,
     );
     socket.on('data', (data) => received.push(data));
     socket.on('end', () => {
@@ -92,9 +102,10 @@ function post(path, shape) {
     socket.on('error', (error) => {
       outcome.error = error;
     });
-    socket.on('close', () =>
-      resolve({ ...outcome, text: Buffer.concat(received).toString('utf8') }),
-    );
+    socket.on('close', () => {
+      clearTimeout(overall);
+      resolve({ ...outcome, text: Buffer.concat(received).toString('utf8') });
+    });
     // A failed write surfaces as the socket's error event, so it only has to
     // stop the sender.
     (async () => {

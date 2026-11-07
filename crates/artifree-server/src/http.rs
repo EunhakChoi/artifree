@@ -45,7 +45,7 @@ use artifree_ports::token_store::TokenStore;
 use artifree_ports::user_store::UserStore;
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::{SqliteTokenStore, hash_token_secret};
-use axum::body::{Body, BodyDataStream};
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
@@ -55,7 +55,6 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures_core::Stream;
 
 use crate::auth::{AccessToken, AuthContext};
 use crate::changes::{self, Feed};
@@ -799,7 +798,7 @@ async fn admit_under(
     let permit = match limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
-            discard(&state, request.into_body().into_data_stream()).await;
+            discard(&state, request.into_body()).await;
             return refused(refusal);
         }
     };
@@ -848,15 +847,15 @@ pub const MAX_DRAINING: usize = 32;
 /// [`MAX_DRAIN_TIME`], at the end of the body or a read error, or at once when
 /// [`MAX_DRAINING`] bodies are already being read; a slow or endless sender
 /// then gets the refusal regardless.
-async fn discard(state: &AppState, mut body: BodyDataStream) {
+async fn discard(state: &AppState, mut body: Body) {
     let Some(_reading) = Draining::start(&state.shared.draining) else {
         return;
     };
     let drain = async {
         let mut read = 0;
         while read <= MAX_BODY_BYTES {
-            match poll_fn(|context| Pin::new(&mut body).poll_next(context)).await {
-                Some(Ok(data)) => read += data.len(),
+            match poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
+                Some(Ok(frame)) => read += frame.data_ref().map_or(0, Bytes::len),
                 _ => break,
             }
         }
@@ -939,7 +938,7 @@ where
     let permit = match state.shared.limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
-            discard(state, request.into_body().into_data_stream()).await;
+            discard(state, request.into_body()).await;
             return refused(refusal);
         }
     };
