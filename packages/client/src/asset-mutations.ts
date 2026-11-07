@@ -6,11 +6,9 @@ import type {
 } from '@artifree/contracts';
 import type { ArtifreeClient, MutationOptions, ReadOptions } from './client.js';
 import { ArtifreeApiError } from './errors.js';
-import { ASSET_ID, pathOf, sha256Hex } from './assets.js';
+import { ASSET_ID, MAX_ASSET_BYTES, pathOf, sha256Hex } from './assets.js';
 import { isCount, isRecord } from './responses.js';
 
-/** One asset's decoded bytes are at most 5 MiB (decision 0045 rule 4). */
-const MAX_ASSET_BYTES = 5 * 1024 * 1024;
 /** The stable upload envelope spelling of a MIME declaration, not a policy. */
 const MIME_TYPE = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
 const MAX_MIME_CHARS = 127;
@@ -35,7 +33,10 @@ const SEXTETS: Int8Array = (() => {
 /**
  * Strict standard base64 with canonical padding and trailing bits, decoded
  * without building large intermediate strings. The size is computed from the
- * text's length and padding and bounded before the output is allocated.
+ * text's length and padding and bounded before the output is allocated. Not
+ * `decodeBase64` from source-part.ts: its anchored regex throws a RangeError
+ * (call stack exceeded) on a 6,990,508-character input, and it builds large
+ * intermediate binary strings, which this decoder avoids.
  */
 function decodeUpload(text: string): Uint8Array<ArrayBuffer> {
   if (text.length % 4 !== 0)
@@ -108,11 +109,24 @@ function requestRecord(value: unknown): Record<string, unknown> {
   return value;
 }
 
+/**
+ * Whether `value` has the members this client uses on a signal. A signal from
+ * another realm, such as an iframe's, passes where `instanceof` would refuse
+ * it. Code on this path must not rely on any other member.
+ */
+function isSignalLike(value: unknown): value is AbortSignal {
+  return (
+    isRecord(value) &&
+    typeof value.aborted === 'boolean' &&
+    typeof value.addEventListener === 'function' &&
+    typeof value.removeEventListener === 'function'
+  );
+}
+
 function requestSignal(value: unknown): AbortSignal | undefined {
   if (value === undefined) return undefined;
   // Silently dropping a cancellation handle would hide an abort the caller wants.
-  if (!(value instanceof AbortSignal))
-    throw refused('signal must be an AbortSignal.');
+  if (!isSignalLike(value)) throw refused('signal must be an AbortSignal.');
   return value;
 }
 
@@ -133,17 +147,14 @@ function aborted(): ArtifreeApiError {
 /**
  * SHA-256 of the bounded original bytes, before any request. Web Crypto's
  * absence or failure, and an abort while it runs, reject with nothing sent;
- * the abort also ends a digest that never settles.
+ * the abort also ends a digest that never settles. The caller refuses an
+ * already aborted signal first, because no abort event comes for it.
  */
 function digestBeforeDispatch(
   bytes: Uint8Array<ArrayBuffer>,
   signal: AbortSignal | undefined,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted === true) {
-      reject(aborted());
-      return;
-    }
     const onAbort = (): void => reject(aborted());
     signal?.addEventListener('abort', onAbort, { once: true });
     sha256Hex(bytes).then(
@@ -164,7 +175,7 @@ function digestBeforeDispatch(
   });
 }
 
-function boolean(value: unknown): value is boolean {
+function isBoolean(value: unknown): value is boolean {
   return typeof value === 'boolean';
 }
 
@@ -219,7 +230,11 @@ export async function uploadAsset(
     content_type: declared,
     content_base64: encoded,
   };
+  refuseIfAborted(signal);
   const digest = await digestBeforeDispatch(bytes, signal);
+  // The digest removed its abort listener when it settled, so an abort since
+  // then is seen only here.
+  refuseIfAborted(signal);
   return client.json(
     'POST',
     path,
@@ -236,7 +251,7 @@ export async function uploadAsset(
         typeof created_at_ms !== 'number' ||
         !Number.isSafeInteger(created_at_ms) ||
         value.asset_version !== base + 1 ||
-        !boolean(value.replayed)
+        !isBoolean(value.replayed)
       )
         return undefined;
       return {
@@ -295,7 +310,7 @@ export async function deleteAsset(
     (value): DeleteAssetResponse | undefined => {
       if (!isRecord(value)) return undefined;
       const { asset_id, asset_version, deleted, replayed } = value;
-      if (!boolean(deleted) || !boolean(replayed)) return undefined;
+      if (!isBoolean(deleted) || !isBoolean(replayed)) return undefined;
       const version = deleted ? base + 1 : base;
       if (asset_id !== assetId || asset_version !== version) return undefined;
       return { asset_id: assetId, asset_version: version, deleted, replayed };

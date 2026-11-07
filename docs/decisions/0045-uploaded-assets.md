@@ -592,15 +592,23 @@ conflict.
   MIME allowlist: the receipt MIME must equal the declared spelling.
 - Before dispatch the client checks the key (8–128 of `A-Za-z0-9._:-`, the
   server's rule), the identifiers, the MIME spelling (lowercase,
-  parameter-free, at most 127 characters) and strict canonical base64, bounded
-  by character count and by the decoded size computed from the text, before
-  the output is allocated. The 8 MiB serialized bound follows from the 5 MiB
+  parameter-free, at most 127 characters) and strict canonical base64; the
+  decoded size is computed from the text length and padding and bounded at
+  5 MiB before the output is allocated, so a text longer than 6,990,508 base64
+  characters is refused (unpadded text of exactly that length decodes to more
+  than 5 MiB). The 8 MiB serialized bound follows from the 5 MiB
   decoded bound (at most 6,990,508 base64 characters plus a short envelope).
   A local refusal is `invalid_request` with status 0, and nothing is sent. A
   base of 2^53 - 1 is also refused locally, because its successor version
   could not be checked as a safe integer.
 - Web Crypto failure, absence or an abort while the digest is computed ends
   the call with nothing sent. A signal aborted before dispatch likewise.
+- A signal is accepted structurally: `aborted` must be a boolean, and
+  `addEventListener` and `removeEventListener` must be functions. So a signal
+  from another realm is accepted, and an object without those members is
+  refused with `invalid_request` and nothing sent. An abort between the digest
+  and dispatch also sends nothing, with the same error as an abort before the
+  call.
 - The exact-status rule is a `expectStatus` option of the shared
   `ArtifreeClient.json` helper; a different 2xx is `invalid_response` and its
   body is cancelled unread.

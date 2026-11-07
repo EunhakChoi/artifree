@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import {
   ArtifreeClient,
   createUser,
@@ -304,7 +305,7 @@ for (const [name, key] of [
   });
 }
 
-test('identifiers, a missing request and a foreign signal are refused with no request', async () => {
+test('identifiers, a missing request and a value that is not a signal are refused with no request', async () => {
   const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
   const options = { idempotencyKey: KEY };
   await assert.rejects(
@@ -350,6 +351,53 @@ test('identifiers, a missing request and a foreign signal are refused with no re
   );
   assert.equal(calls.length, 0);
 });
+
+const notSignals = [
+  ['an object with none of the members', {}],
+  ['null', null],
+  ['a string', 'signal'],
+  [
+    'an object without removeEventListener',
+    { aborted: false, addEventListener() {} },
+  ],
+  [
+    'an object without addEventListener',
+    { aborted: false, removeEventListener() {} },
+  ],
+  [
+    'an object whose aborted is not a boolean',
+    { aborted: 0, addEventListener() {}, removeEventListener() {} },
+  ],
+  [
+    'an object whose listeners are not functions',
+    { aborted: false, addEventListener: true, removeEventListener: true },
+  ],
+];
+for (const [name, signal] of notSignals) {
+  test(`a signal argument that is ${name} is refused with no request`, async () => {
+    const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
+    const refusal = {
+      code: 'invalid_request',
+      status: 0,
+      message: 'signal must be an AbortSignal.',
+    };
+    await assert.rejects(
+      upload(client, uploadRequest(), { idempotencyKey: KEY, signal }),
+      refusal,
+    );
+    await assert.rejects(
+      deleteAsset(
+        client,
+        ARTIFACT,
+        ID,
+        { base_asset_version: 3 },
+        { idempotencyKey: 'delete-key-0001', signal },
+      ),
+      refusal,
+    );
+    assert.equal(calls.length, 0);
+  });
+}
 
 for (const bytes of [
   Buffer.from('a'),
@@ -1053,6 +1101,113 @@ test('an abort before the call, during the digest and after it sends nothing', a
   );
   assert.equal(calls.length, 0);
   assert.equal(getEventListeners(during.signal, 'abort').length, 0);
+});
+
+/**
+ * A signal-like object from another JavaScript realm. node:vm has no
+ * AbortController, so its three members are written inside that realm. The
+ * tests check that it is not an AbortSignal of this realm.
+ */
+const FOREIGN_SIGNAL = `(() => {
+  const listeners = [];
+  const signal = {
+    aborted: false,
+    addEventListener(type, listener, options) {
+      if (type === 'abort')
+        listeners.push({ listener, once: options?.once === true });
+    },
+    removeEventListener(type, listener) {
+      const at = listeners.findIndex((entry) => entry.listener === listener);
+      if (type === 'abort' && at >= 0) listeners.splice(at, 1);
+    },
+  };
+  return {
+    signal,
+    listenerCount: () => listeners.length,
+    abort() {
+      if (signal.aborted) return;
+      signal.aborted = true;
+      for (const entry of [...listeners]) {
+        if (entry.once) listeners.splice(listeners.indexOf(entry), 1);
+        entry.listener({ type: 'abort' });
+      }
+    },
+  };
+})()`;
+const foreignSignal = () => runInNewContext(FOREIGN_SIGNAL);
+const abortedNothingSent = {
+  code: 'network_error',
+  status: 0,
+  message: 'The asset request was aborted; nothing was sent.',
+};
+
+test('a signal from another realm is accepted, and it is passed with the request', async () => {
+  const foreign = foreignSignal();
+  assert.equal(foreign.signal instanceof AbortSignal, false);
+  const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
+  await assert.doesNotReject(
+    upload(client, uploadRequest(), {
+      idempotencyKey: KEY,
+      signal: foreign.signal,
+    }),
+    'a signal from another realm must pass the check',
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.signal, foreign.signal);
+  assert.equal(foreign.listenerCount(), 0);
+});
+
+test('a foreign-realm signal aborted before the call sends nothing', async () => {
+  const foreign = foreignSignal();
+  foreign.abort();
+  const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
+  await assert.rejects(
+    upload(client, uploadRequest(), {
+      idempotencyKey: KEY,
+      signal: foreign.signal,
+    }),
+    abortedNothingSent,
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(foreign.listenerCount(), 0);
+});
+
+test('a foreign-realm signal aborted while the digest is pending sends nothing', async () => {
+  const foreign = foreignSignal();
+  const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
+  await withCrypto({ subtle: { digest: hang } }, async () => {
+    const call = upload(client, uploadRequest(), {
+      idempotencyKey: KEY,
+      signal: foreign.signal,
+    });
+    // Observed at once so that an early rejection is reported by the assertion
+    // below rather than as an unhandled rejection.
+    call.catch(() => undefined);
+    await flush();
+    foreign.abort();
+    await assert.rejects(call, abortedNothingSent);
+  });
+  assert.equal(calls.length, 0);
+  assert.equal(foreign.listenerCount(), 0);
+});
+
+test('an abort landing as the digest settles, before dispatch, sends nothing', async () => {
+  const controller = new AbortController();
+  const { signal } = controller;
+  // The digest removes its abort listener as it settles, its last step before
+  // dispatch. Aborting in that same step leaves no listener to report it.
+  const removeListener = AbortSignal.prototype.removeEventListener;
+  signal.removeEventListener = (type, listener, options) => {
+    removeListener.call(signal, type, listener, options);
+    controller.abort();
+  };
+  const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
+  await assert.rejects(
+    upload(client, uploadRequest(), { idempotencyKey: KEY, signal }),
+    abortedNothingSent,
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(getEventListeners(signal, 'abort').length, 0);
 });
 
 test('a finished call leaves no listener on its signal, whether it succeeded or failed', async () => {

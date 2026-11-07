@@ -3,7 +3,8 @@ import type { ArtifreeClient, ReadOptions } from './client.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord } from './responses.js';
 
-const MAX_ASSET_BYTES = 5 * 1024 * 1024;
+/** One asset's decoded bytes are at most 5 MiB (decision 0045 rule 4). */
+export const MAX_ASSET_BYTES = 5 * 1024 * 1024;
 const MAX_SPACE_BYTES = 25 * 1024 * 1024;
 const MAX_SPACE_ASSETS = 64;
 export const ASSET_ID = /^[0-9a-f]{64}$/;
