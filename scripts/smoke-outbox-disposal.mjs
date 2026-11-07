@@ -51,6 +51,7 @@ export async function checkSchedulerDisposal(harness, selected) {
     'rejected-token-forgery',
     'rejected-replaced-pause',
     'rejected-post-commit-close',
+    'rejected-close-releases-proof',
     'rejected-post-commit-wake',
     'rejected-accounting',
     'rejected-survivors',
@@ -1880,6 +1881,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         failures: current?.failures ?? null,
         aggregate: scheduler.aggregateFailures,
         epoch: scheduler.epoch,
+        fenced: scheduler.fence.signal.aborted,
       };
     };
     globalThis.rejectedHeadRow = await enqueueLikeHead(rejectedHead);
@@ -1920,6 +1922,16 @@ async function checkRejectedDisposal(harness, page, mode) {
       bindingReads: cleanupBindingReads,
       events: events.length,
     }));
+  // ADR 0049 rule 2: a fence ends the proof and nothing else about the lane.
+  // The proof must be present exactly while the scheduler is open.
+  async function expectUnchangedExceptFence(before) {
+    const after = await observe();
+    const { fenced } = after.lane;
+    assert.deepEqual(after, {
+      ...before,
+      lane: { ...before.lane, fenced, proof: !fenced, identical: !fenced },
+    });
+  }
   const before = await observe();
   assert.equal(before.lane.identical, true);
   switch (mode) {
@@ -1948,7 +1960,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         copied: 'invalid_selection',
         derived: 'invalid_selection',
       });
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.deepEqual(
         await page.evaluate(() => scheduler.discardRejected(rejectedChoice)),
         { kind: 'discarded_rejected', removedDependents: 0 },
@@ -1999,7 +2011,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         return code;
       });
       assert.equal(local, 'owner_not_ready');
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       const midTransaction = await page.evaluate(async () => {
         globalThis.rejectedChoice = await scheduler.selectRejected(
           rejectedKey,
@@ -2032,7 +2044,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         return { code, deletes: rejectedDeletes };
       });
       assert.deepEqual(midTransaction, { code: 'owner_not_ready', deletes: 1 });
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.equal(harness.requests().length, requests);
       break;
     }
@@ -2052,7 +2064,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         return code;
       });
       assert.equal(aborted, 'storage_failed');
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.equal(harness.requests().length, requests);
       // Any attempt consumes the token, so the failed selection cannot be retried.
       assert.equal(
@@ -2061,7 +2073,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         ),
         'invalid_selection',
       );
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       const committed = await page.evaluate(async () => {
         globalThis.rejectedChoice = await scheduler.selectRejected(
           rejectedKey,
@@ -2195,7 +2207,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         return rejectionCode(scheduler.discardRejected(rejectedChoice));
       });
       assert.equal(woken, 'invalid_selection');
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       // A wake inside the transaction, after the intent delete, is refused by
       // the transaction's own check before commit.
       const wokenInside = await page.evaluate(async () => {
@@ -2228,7 +2240,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         return code;
       });
       assert.equal(wokenInside, 'invalid_selection');
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       // A dependent enqueued after selection changes the closure signature.
       await page.evaluate(async () => {
         globalThis.rejectedChoice = await scheduler.selectRejected(
@@ -2292,7 +2304,7 @@ async function checkRejectedDisposal(harness, page, mode) {
           retireEmptyGate: 'invalid_selection',
         },
       );
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.equal(harness.requests().length, requests);
       assert.deepEqual(
         await page.evaluate(() => scheduler.discardRejected(rejectedChoice)),
@@ -2317,7 +2329,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         return code;
       });
       assert.equal(refused, 'invalid_selection');
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.equal(harness.requests().length, requests);
       assert.deepEqual(
         await page.evaluate(async () => {
@@ -2368,6 +2380,43 @@ async function checkRejectedDisposal(harness, page, mode) {
       const after = await observe();
       assert.equal(after.storage.rows.length, before.storage.rows.length - 1);
       assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+      assert.equal(after.events, before.events);
+      assert.equal(harness.requests().length, requests);
+      break;
+    }
+    case 'rejected-close-releases-proof': {
+      // Close ends the proof and the lane's selection pointer. The lane and its
+      // blocked pause stay, and the held selection still fails closed.
+      const closed = await page.evaluate(async () => {
+        globalThis.rejectedChoice = await scheduler.selectRejected(
+          rejectedKey,
+          'offline',
+        );
+        scheduler.close();
+        const current = scheduler.lanes.get(JSON.stringify(rejectedKey));
+        return {
+          sameLane: current === rejectedOriginal.lane,
+          samePause: current?.pause === rejectedOriginal.pause,
+          pause: current?.pause?.kind ?? null,
+          proof: current?.rejection !== undefined,
+          selection: current?.rejectedSelection !== undefined,
+        };
+      });
+      assert.deepEqual(closed, {
+        sameLane: true,
+        samePause: true,
+        pause: 'blocked',
+        proof: false,
+        selection: false,
+      });
+      assert.equal(
+        await page.evaluate(() =>
+          rejectionCode(scheduler.discardRejected(rejectedChoice)),
+        ),
+        'owner_not_ready',
+      );
+      const after = await observe();
+      assert.deepEqual(after.storage, before.storage);
       assert.equal(after.events, before.events);
       assert.equal(harness.requests().length, requests);
       break;
@@ -2736,9 +2785,19 @@ async function checkRejectedDisposal(harness, page, mode) {
       ]);
       const after = await observe();
       assert.equal(after.bindingReads, before.bindingReads + 1);
+      // The 401 fenced the scheduler (asserted above), so the proof has ended.
       assert.deepEqual(
         { ...after, bindingReads: 0 },
-        { ...before, bindingReads: 0 },
+        {
+          ...before,
+          bindingReads: 0,
+          lane: {
+            ...before.lane,
+            fenced: true,
+            proof: false,
+            identical: false,
+          },
+        },
       );
       assert.equal(harness.requests().length, requests);
       assert.equal(
@@ -2776,7 +2835,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         queued: 'invalid_selection',
         active: 'invalid_selection',
       });
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.equal(harness.requests().length, requests);
       assert.deepEqual(
         await page.evaluate(async () => {
@@ -2815,7 +2874,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         { index },
       );
       assert.equal(refused, 'owner_not_ready');
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.equal(harness.requests().length, requests);
       break;
     }
@@ -2870,7 +2929,7 @@ async function checkRejectedDisposal(harness, page, mode) {
         return rejectionCode(scheduler.discardRejected(rejectedChoice));
       }, fact);
       assert.equal(refused, 'owner_not_ready');
-      assert.deepEqual(await observe(), before);
+      await expectUnchangedExceptFence(before);
       assert.equal(harness.requests().length, requests);
       break;
     }

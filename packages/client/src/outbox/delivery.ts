@@ -119,15 +119,16 @@ export type DeliveryAttempt =
     };
 
 /**
- * Kernel-internal channel for the frozen decoded row of a failed dispatch. It is
- * kept beside DeliveryAttempt rather than on it, so the row never reaches an
+ * Kernel-internal channel for the frozen decoded row of a refused dispatch. It
+ * is kept beside DeliveryAttempt rather than on it, so the row never reaches an
  * observation: a structured clone of an attempt does not carry the entry.
  */
 const dispatchedRows = new WeakMap<DeliveryAttempt, Readonly<PreparedRow>>();
 
 /**
- * Returns the row this kernel dispatched for a `delivery_failed` attempt, or
- * undefined for any other attempt, including a clone of one.
+ * Returns the frozen row this kernel dispatched for a refused `delivery_failed`
+ * attempt (`data_conflict` or `rejected`). Returns undefined for any other
+ * attempt, including a retryable failure and a clone of one.
  */
 export function dispatchedRow(
   attempt: DeliveryAttempt,
@@ -610,7 +611,14 @@ export class DeliveryKernel {
         initialState,
         priorDelivery,
       };
-      dispatchedRows.set(failedAttempt, freezeRow(prepared));
+      // Only a refusal proves that the head was refused, so a retryable failure
+      // keeps no row.
+      if (
+        outcome.failure.reason === 'data_conflict' ||
+        outcome.failure.reason === 'rejected'
+      ) {
+        dispatchedRows.set(failedAttempt, freezeRow(prepared));
+      }
       return failedAttempt;
     }
     let acknowledged: AcknowledgedRow;

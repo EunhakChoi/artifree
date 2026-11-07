@@ -24,7 +24,7 @@ const deliveryAction = Symbol();
 const cleanupAction = Symbol();
 const unsentAction = Symbol();
 const emptyGateAction = Symbol();
-const rejectedAction = Symbol('rejectedAction');
+const rejectedAction = Symbol();
 const reconciliation = Symbol();
 const MAX_LANES = 256;
 
@@ -471,7 +471,15 @@ export class DeliveryScheduler {
   private stopDelivery(): void {
     if (this.fence.signal.aborted) return;
     this.fence.abort();
-    for (const lane of this.lanes.values()) lane.cancelTimer?.();
+    for (const lane of this.lanes.values()) {
+      lane.cancelTimer?.();
+      // The proof ends with the fence (ADR 0049 rule 2), and the lane stops
+      // referencing its selection, so a closed scheduler keeps no rows. The
+      // blocked pause stays. The token entry stays too: a closed scheduler must
+      // refuse it with owner_not_ready, which rule 8 checks before the token.
+      delete lane.rejection;
+      delete lane.rejectedSelection;
+    }
     this.ready.length = 0;
     this.reconciliationQueued = false;
     this.reconcileAgain = false;

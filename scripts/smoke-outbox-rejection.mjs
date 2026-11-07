@@ -369,7 +369,7 @@ async function checkSelectionShape(page) {
         value: lastRejectedSelection[keys[0]],
       };
     }),
-    { frozen: true, keys: ['Symbol(rejectedAction)'], value: true },
+    { frozen: true, keys: ['Symbol()'], value: true },
   );
 }
 

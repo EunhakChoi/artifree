@@ -21,14 +21,14 @@ export async function checkOutboxDelivery(browser, serverApi) {
   const isolatedUsers = [];
   const bundle = await build({
     stdin: {
-      contents: `import {DeliveryKernel} from './packages/client/src/outbox/delivery.ts';
+      contents: `import {DeliveryKernel, dispatchedRow} from './packages/client/src/outbox/delivery.ts';
       import {openStore} from './packages/client/src/outbox/store.ts';
       import {readBinding} from './packages/client/src/outbox/binding.ts';
       import {OutboxError} from './packages/client/src/outbox/types.ts';
       import {ArtifreeApiError} from './packages/client/src/errors.ts';
       import {DeliveryScheduler} from './packages/client/src/outbox/scheduler.ts';
       import {LocalOperationGate} from './packages/client/src/outbox/local-operation-gate.ts';
-      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError};`,
+      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError, dispatchedRow};`,
       resolveDir: process.cwd(),
       loader: 'ts',
     },
@@ -718,6 +718,23 @@ export async function checkOutboxDelivery(browser, serverApi) {
   async function run(page) {
     return page.evaluate(() => kernel.run(lane));
   }
+  // Also reads the kernel's dispatched-row registration for the same attempt.
+  async function runRegistered(page) {
+    return page.evaluate(async () => {
+      const { dispatchedRow } = deliveryApi;
+      const attempt = await kernel.run(lane);
+      const registered = dispatchedRow(attempt);
+      return {
+        attempt,
+        registered,
+        frozen:
+          registered !== undefined &&
+          Object.isFrozen(registered) &&
+          Object.isFrozen(registered.request),
+        stored: (await snapshot())[0],
+      };
+    });
+  }
   async function close(page) {
     await page.evaluate(async () => {
       stop.abort();
@@ -1048,6 +1065,64 @@ export async function checkOutboxDelivery(browser, serverApi) {
         await assert.rejects(run(page), /owner_not_ready/);
         assert.equal(requests.length, 1);
       }
+      await close(page);
+    }
+    // Only a refusal proves that the head was refused, so only a refusal keeps
+    // the frozen dispatched row. A retryable failure keeps none.
+    for (const [httpStatus, body, expected] of [
+      [
+        429,
+        '{',
+        { reason: 'rate_limited', status: 429, retryAfterSeconds: 3600 },
+      ],
+      [
+        503,
+        'x'.repeat(70_000),
+        { reason: 'server_error', status: 503, retryAfterSeconds: 3600 },
+      ],
+    ]) {
+      page = await setup();
+      mode = 'status';
+      status = httpStatus;
+      errorBody = body;
+      requests = [];
+      const { attempt, registered } = await runRegistered(page);
+      assert.deepEqual(attempt.failure, expected);
+      assert.equal(registered, undefined);
+      await close(page);
+    }
+    for (const [httpStatus, body, expected] of [
+      [
+        409,
+        {
+          error: {
+            code: 'data_conflict',
+            message: 'private-response-marker',
+            current_data_version: 5,
+          },
+        },
+        { reason: 'data_conflict', status: 409, currentDataVersion: 5 },
+      ],
+      [
+        422,
+        {
+          error: {
+            code: 'request_key_reused',
+            message: 'private-response-marker',
+          },
+        },
+        { reason: 'rejected', status: 422, code: 'request_key_reused' },
+      ],
+    ]) {
+      page = await setup();
+      mode = 'status';
+      status = httpStatus;
+      errorBody = body;
+      requests = [];
+      const { attempt, registered, frozen, stored } = await runRegistered(page);
+      assert.deepEqual(attempt.failure, expected);
+      assert.deepEqual(registered, stored);
+      assert.equal(frozen, true);
       await close(page);
     }
     // The kernel fences itself even when the host revokes its proof without aborting.
