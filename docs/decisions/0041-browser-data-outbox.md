@@ -8,7 +8,7 @@ sub-slice. Public delivery coordination and the remaining numbered
 sender/lifecycle contract are proposed.
 
 > Supplemented by [0049](0049-outbox-rejected-unresolved-disposal.md)
-> (accepted contract, implementation pending): an additive internal scheduler
+> (proposed; in effect when accepted by the R08c-3a code PR): an additive internal scheduler
 > contract for rule 17's `discardRejected` and `abandonUnresolved` (roadmap
 > R08c-3a/3b). The numbered rules below are unchanged.
 
