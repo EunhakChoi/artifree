@@ -5,7 +5,7 @@ import { checkSchedulerDisposal } from './smoke-outbox-disposal.mjs';
 export async function checkOutboxScheduler(harness) {
   const { setup, close, configure, requests, createArtifact, waitRequest } =
     harness;
-  const { setMode } = harness;
+  const { setMode, setErrorBody } = harness;
   async function fresh(mode = 'normal') {
     // The mutation fault must not destroy the real proxy's binding GET too.
     configure('normal');
@@ -542,6 +542,270 @@ export async function checkOutboxScheduler(harness) {
       0,
       'capacity waiting must not create an automatic retry loop',
     );
+    await close(page);
+  }
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'rejected-saturation')
+  ) {
+    // The owned fixture answers 409 data_path_conflict, a definitive rejection.
+    const rejection = {
+      error: { code: 'data_path_conflict', message: 'private-response-marker' },
+    };
+    // The owned fixture's default error body, restored when this case ends.
+    const defaultBody = {
+      error: {
+        code: 'data_conflict',
+        message: 'private-response-marker',
+        current_data_version: 5,
+      },
+    };
+    configure('normal');
+    const page = await setup({});
+    await page.evaluate(() => {
+      globalThis.saturationIdentity = {};
+      globalThis.saturationCleanup = {
+        gate: new deliveryApi.LocalOperationGate(),
+        async authorize(mode, signal) {
+          authorize();
+          if (!locallyAuthenticated)
+            throw new deliveryApi.OutboxError('owner_not_ready');
+          if (mode === 'online') {
+            const current = await deliveryApi.readBinding(
+              location.origin,
+              deliveryContext.accessToken,
+              signal,
+              (status) => {
+                if (status === 401) deliveryContext.invalidateAuthentication();
+              },
+            );
+            if (JSON.stringify(current) !== JSON.stringify(auth))
+              throw new deliveryApi.OutboxError('owner_not_ready');
+          }
+          return Object.freeze({
+            identity: saturationIdentity,
+            signal: stop.signal,
+            check() {
+              authorize();
+              if (!locallyAuthenticated)
+                throw new deliveryApi.OutboxError('owner_not_ready');
+            },
+          });
+        },
+      };
+      globalThis.saturationKey = (index) => [
+        ...lane.slice(0, 4),
+        'art_' + index.toString(16).padStart(32, '0'),
+      ];
+      // Resolves true once the predicate holds and false after about ten
+      // seconds, so a missed state fails its own assertion, not a timeout.
+      globalThis.reached = (predicate) =>
+        new Promise((resolve, reject) => {
+          let attempts = 0;
+          const check = () => {
+            try {
+              if (predicate()) return resolve(true);
+              if (attempts === 400) return resolve(false);
+              attempts += 1;
+              setTimeout(check, 25);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          check();
+        });
+      installScheduler(saturationCleanup);
+    });
+    // The page leaves one durable row for the default lane. Removing it keeps
+    // the 256-row store cap from filling before the waiting lane arrives.
+    await page.evaluate(async () => {
+      await store.discard(await store.lane([...lane]), authorize, stop.signal);
+    });
+    // A retained preparation gate takes the 256th slot without a durable row,
+    // so the 256-row store cap still leaves one row for the waiting lane.
+    await page.evaluate(async () => {
+      const key = [...lane.slice(0, 4), 'art_' + '8'.repeat(32)];
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: key,
+        artifactId: key[4],
+        base: { version: 0 },
+      });
+      globalThis.retainedGate = key;
+      faultPut('intents', 'prepared');
+      scheduler.wake(key);
+    });
+    await page.waitForFunction(() =>
+      events.some((event) => event.kind === 'paused'),
+    );
+    await page.evaluate(async () => {
+      restorePut();
+      await store.discard(
+        await store.lane(retainedGate),
+        authorize,
+        stop.signal,
+      );
+    });
+    // 255 lanes are rejected. Each epoch allows 32 failures before it pauses.
+    setErrorBody(rejection);
+    configure('status', 409);
+    await page.evaluate(async () => {
+      globalThis.rejectedKeys = [];
+      for (let index = 0; index < 255; index += 1) {
+        const key = saturationKey(index);
+        rejectedKeys.push(key);
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: key,
+          artifactId: key[4],
+          base: { version: 0 },
+        });
+      }
+      for (const key of rejectedKeys) scheduler.wake(key);
+    });
+    for (let resumes = 0; ; resumes += 1) {
+      await page.waitForFunction(
+        () =>
+          scheduler.lanes.size === 256 &&
+          [...scheduler.lanes.values()].every(
+            (entry) => entry.pause !== undefined,
+          ),
+      );
+      const blocked = await page.evaluate(
+        () =>
+          [...scheduler.lanes.values()].filter(
+            (entry) => entry.pause?.kind === 'blocked',
+          ).length,
+      );
+      if (blocked === 255) break;
+      assert.ok(resumes < 7, 'the 255 rejections need exactly seven resumes');
+      await page.evaluate(() =>
+        scheduler.resumeDelivery(
+          [...scheduler.lanes.values()].find(
+            (entry) =>
+              entry.pause?.kind === 'retry_paused' &&
+              entry.pause.scope === 'coordinator',
+          ).pause.selection,
+        ),
+      );
+    }
+    assert.equal(await page.evaluate(() => revalidationCalls), 7);
+    assert.equal(requests().length, 255);
+    assert.equal(await page.evaluate(() => scheduler.aggregateFailures), 31);
+    assert.equal(
+      (await page.evaluate(() => storageSnapshot())).rows.length,
+      255,
+    );
+    // Capacity is full while the budget still has room, so the waiting lane
+    // reaches no HTTP until one rejected slot is discarded.
+    await page.evaluate(async () => {
+      const key = [...lane.slice(0, 4), 'art_' + '9'.repeat(32)];
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: key,
+        artifactId: key[4],
+        base: { version: 0 },
+      });
+      globalThis.waitingKey = key;
+      globalThis.reconciledBefore = events.filter(
+        (event) => event.kind === 'reconciled',
+      ).length;
+      scheduler.wake(key);
+    });
+    await page.waitForFunction(
+      () =>
+        events.filter((event) => event.kind === 'reconciled').length >
+        reconciledBefore,
+    );
+    assert.equal(
+      await page.evaluate(
+        () => events.findLast((event) => event.kind === 'reconciled').pending,
+      ),
+      true,
+    );
+    assert.equal(requests().length, 255, 'a waiting lane must not reach HTTP');
+    assert.equal(await page.evaluate(() => revalidationCalls), 7);
+    configure('normal');
+    // Other lanes are compared by object identity: a replaced pause or proof,
+    // or a retired lane, fails the check below.
+    await page.evaluate(() => {
+      globalThis.intactBefore = [...scheduler.lanes]
+        .filter(([id]) => id !== JSON.stringify(saturationKey(0)))
+        .map(([id, entry]) => ({
+          id,
+          pause: entry.pause,
+          rejection: entry.rejection,
+        }));
+    });
+    assert.equal(await page.evaluate(() => intactBefore.length), 255);
+    assert.deepEqual(
+      await page.evaluate(async () => {
+        const selection = await scheduler.selectRejected(saturationKey(0));
+        return scheduler.discardRejected(selection);
+      }),
+      { kind: 'discarded_rejected', removedDependents: 0 },
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        reached(() =>
+          events.some(
+            (event) =>
+              event.kind === 'attempt' &&
+              event.result.kind === 'server_acknowledged',
+          ),
+        ),
+      ),
+      true,
+      'the waiting lane must dispatch and ACK once the discarded slot is reconciled',
+    );
+    assert.equal(
+      await page.evaluate(
+        () =>
+          intactBefore.filter(({ id, pause, rejection }) => {
+            const entry = scheduler.lanes.get(id);
+            return (
+              entry !== undefined &&
+              entry.pause === pause &&
+              entry.rejection === rejection
+            );
+          }).length,
+      ),
+      255,
+      'the other 255 lanes keep their pauses and proofs and are not retired',
+    );
+    assert.equal(
+      await page.evaluate(() => reached(() => scheduler.lanes.size === 255)),
+      true,
+      'only the discarded and the acknowledged lanes leave the lane map',
+    );
+    assert.equal(requests().length, 1);
+    assert.ok(
+      requests()[0].url.includes(await page.evaluate(() => waitingKey[4])),
+    );
+    assert.equal(await page.evaluate(() => revalidationCalls), 7);
+    assert.equal(await page.evaluate(() => scheduler.aggregateFailures), 31);
+    assert.equal(
+      await page.evaluate(() =>
+        scheduler.lanes.has(JSON.stringify(retainedGate)),
+      ),
+      true,
+      'the retained gate survives the discard',
+    );
+    assert.equal(
+      await page.evaluate(
+        () =>
+          [...scheduler.lanes.values()].filter(
+            (entry) => entry.pause?.kind === 'blocked',
+          ).length,
+      ),
+      254,
+      'the other rejected gates stay blocked',
+    );
+    assert.equal(
+      (await page.evaluate(() => storageSnapshot())).rows.length,
+      254,
+    );
+    setErrorBody(defaultBody);
     await close(page);
   }
   if (selected === undefined || selected === 'capacity-wake-race') {

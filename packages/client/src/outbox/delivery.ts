@@ -118,6 +118,39 @@ export type DeliveryAttempt =
       readonly ackDurable: true;
     };
 
+/**
+ * Kernel-internal channel for the frozen decoded row of a refused dispatch. It
+ * is kept beside DeliveryAttempt rather than on it, so the row never reaches an
+ * observation: a structured clone of an attempt does not carry the entry.
+ */
+const dispatchedRows = new WeakMap<DeliveryAttempt, Readonly<PreparedRow>>();
+
+/**
+ * Returns the frozen row this kernel dispatched for a refused `delivery_failed`
+ * attempt (`data_conflict` or `rejected`). Returns undefined for any other
+ * attempt, including a retryable failure and a clone of one.
+ */
+export function dispatchedRow(
+  attempt: DeliveryAttempt,
+): Readonly<PreparedRow> | undefined {
+  return dispatchedRows.get(attempt);
+}
+
+function deepFreeze(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value))
+    return;
+  Object.freeze(value);
+  const children: unknown[] = Object.values(value);
+  for (const child of children) deepFreeze(child);
+}
+
+/** Copies the row so the registered form cannot change after the attempt returns. */
+function freezeRow(row: PreparedRow): Readonly<PreparedRow> {
+  const copy = structuredClone(row);
+  deepFreeze(copy);
+  return copy;
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -571,13 +604,22 @@ export class DeliveryKernel {
           throw new OutboxError('owner_not_ready');
         }
       }
-      return {
+      const failedAttempt: DeliveryAttempt = {
         kind: 'delivery_failed',
         failure: outcome.failure,
         outcome: 'unknown',
         initialState,
         priorDelivery,
       };
+      // Only a refusal proves that the head was refused, so a retryable failure
+      // keeps no row.
+      if (
+        outcome.failure.reason === 'data_conflict' ||
+        outcome.failure.reason === 'rejected'
+      ) {
+        dispatchedRows.set(failedAttempt, freezeRow(prepared));
+      }
+      return failedAttempt;
     }
     let acknowledged: AcknowledgedRow;
     try {

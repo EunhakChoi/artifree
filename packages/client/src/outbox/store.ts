@@ -74,6 +74,14 @@ export type CleanupSnapshot =
       readonly rows: IntentRow[];
       readonly signature: string;
     };
+/**
+ * Committed result of removing one rejected prepared head. The head is not
+ * counted in `removedDependents`; `survivors` are the lane rows left behind.
+ */
+export interface RejectedDisposal {
+  readonly removedDependents: number;
+  readonly survivors: readonly IntentRow[];
+}
 interface Predecessor {
   readonly sequence: number;
   readonly dataVersion: number;
@@ -547,20 +555,36 @@ async function page(
   return request(store.getAll(range, 32));
 }
 
-/** Origin-wide quota ledger is metadata-only and bounded by the row cap. */
-async function usage(tx: IDBTransaction): Promise<Usage> {
+/** Recheck for a read made outside any caller-bound transaction context. */
+function noRecheck(): void {
+  // No caller context exists here, so there is no recheck to run.
+}
+
+/**
+ * Origin-wide quota ledger is metadata-only and bounded by the row cap. A
+ * caller inside a recheck-bound transaction passes `authorize`, which then runs
+ * before and after each request (0049 rule 7).
+ */
+async function usage(
+  tx: IDBTransaction,
+  authorize: () => void = noRecheck,
+): Promise<Usage> {
+  authorize();
   const global = decodeUsage(
     await request(tx.objectStore('usage').get('global')),
   );
+  authorize();
   const store = tx.objectStore('checkpoints');
   let last: IDBValidKey | undefined;
   let rows = 0;
   let bytes = 0;
   for (;;) {
+    authorize();
     const values = await page(
       store,
       last === undefined ? undefined : IDBKeyRange.lowerBound(last, true),
     );
+    authorize();
     for (const value of values) {
       const checkpoint = decodeCheckpoint(value);
       rows += checkpoint.rows;
@@ -571,15 +595,19 @@ async function usage(tx: IDBTransaction): Promise<Usage> {
       throw new OutboxError('storage_corrupt');
     if (values.length < 32) break;
   }
+  authorize();
   const newest = await request(
     tx.objectStore('intents').openKeyCursor(null, 'prev'),
   );
+  authorize();
+  const count = await request(tx.objectStore('intents').count());
+  authorize();
   if (
     (newest !== null &&
       (!natural(newest.primaryKey) || newest.primaryKey >= global.next)) ||
     rows !== global.rows ||
     bytes !== global.bytes ||
-    (await request(tx.objectStore('intents').count())) !== rows
+    count !== rows
   )
     throw new OutboxError('storage_corrupt');
   return global;
@@ -588,15 +616,18 @@ async function usage(tx: IDBTransaction): Promise<Usage> {
 async function laneRows(
   tx: IDBTransaction,
   lane: LaneKey,
+  authorize: () => void = noRecheck,
 ): Promise<IntentRow[]> {
   const values: IntentRow[] = [];
   const index = tx.objectStore('intents').index('laneSequence');
   let after = 0;
   for (;;) {
+    authorize();
     const batch = await page(
       index,
       IDBKeyRange.bound([lane, after], [lane, Number.MAX_SAFE_INTEGER], true),
     );
+    authorize();
     for (const value of batch) {
       const row = decodeRow(value);
       if (
@@ -611,9 +642,11 @@ async function laneRows(
     }
     if (batch.length < 32) break;
   }
+  authorize();
   const stored: unknown = await request(
     tx.objectStore('checkpoints').get(lane),
   );
+  authorize();
   if (values.length === 0) {
     if (stored !== undefined) throw new OutboxError('storage_corrupt');
     return values;
@@ -696,7 +729,7 @@ async function cleanupSnapshot(
     authorize();
     return { kind: checkpoint === undefined ? 'empty' : 'anchors' };
   }
-  const rows = await laneRows(tx, lane);
+  const rows = await laneRows(tx, lane, authorize);
   authorize();
   const checkpoint = decodeCheckpoint(
     await request(tx.objectStore('checkpoints').get(lane)),
@@ -709,14 +742,20 @@ async function cleanupSnapshot(
   };
 }
 
-async function removeUnsent(
+/**
+ * Deletes the head and the unprepared rows chained to it through `after`. The
+ * caller's transaction makes the removal atomic; `headState` names the only
+ * head state this call may remove.
+ */
+async function removeClosure(
   tx: IDBTransaction,
   current: IntentRow[],
   global: Usage,
   authorize: () => void,
-): Promise<IntentRow[]> {
+  headState: 'unprepared' | 'prepared',
+): Promise<{ removed: number; survivors: IntentRow[] }> {
   const head = current[0];
-  if (head?.state !== 'unprepared') throw new OutboxError('invalid_selection');
+  if (head?.state !== headState) throw new OutboxError('invalid_selection');
   const removed = new Set([head.sequence]);
   for (const row of current.slice(1)) {
     if ('after' in row.base && removed.has(row.base.after)) {
@@ -731,6 +770,13 @@ async function removeUnsent(
   );
   if (global.rows < removed.size || global.bytes < bytes)
     throw new OutboxError('storage_corrupt');
+  authorize();
+  const checkpoint = decodeCheckpoint(
+    await request(tx.objectStore('checkpoints').get(head.lane)),
+  );
+  authorize();
+  if (checkpoint.rows < removed.size || checkpoint.bytes < bytes)
+    throw new OutboxError('storage_corrupt');
   for (const row of current) {
     if (removed.has(row.sequence)) {
       authorize();
@@ -739,13 +785,10 @@ async function removeUnsent(
     }
   }
   const survivors = current.filter((row) => !removed.has(row.sequence));
+  authorize();
   if (survivors.length === 0)
     await request(tx.objectStore('checkpoints').delete(head.lane));
   else {
-    const checkpoint = decodeCheckpoint(
-      await request(tx.objectStore('checkpoints').get(head.lane)),
-    );
-    authorize();
     await request(
       tx.objectStore('checkpoints').put({
         ...checkpoint,
@@ -763,6 +806,23 @@ async function removeUnsent(
     }),
   );
   authorize();
+  return { removed: removed.size, survivors };
+}
+
+/** Unprepared heads only; a prepared head is never removed here. */
+async function removeUnsent(
+  tx: IDBTransaction,
+  current: IntentRow[],
+  global: Usage,
+  authorize: () => void,
+): Promise<IntentRow[]> {
+  const { survivors } = await removeClosure(
+    tx,
+    current,
+    global,
+    authorize,
+    'unprepared',
+  );
   return survivors;
 }
 
@@ -1104,6 +1164,51 @@ export class LocalStore {
         return (
           (await removeUnsent(tx, current.rows, global, authorize)).length === 0
         );
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Scheduler-only: removes one rejected prepared head and its unprepared
+   * closure. `dispatched` must be JSON-equal to the stored head, and the result
+   * is returned only after the transaction completes.
+   */
+  discardRejectedSnapshot(
+    expected: Extract<CleanupSnapshot, { kind: 'intents' }>,
+    dispatched: Readonly<PreparedRow>,
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<RejectedDisposal> {
+    return transaction(
+      this.database,
+      'readwrite',
+      async (tx) => {
+        const head = expected.rows[0];
+        if (head === undefined) throw new OutboxError('invalid_selection');
+        authorize();
+        const global = await usage(tx, authorize);
+        const current = await cleanupSnapshot(tx, head.lane, authorize);
+        if (
+          current.kind !== 'intents' ||
+          current.signature !== expected.signature
+        )
+          throw new OutboxError('invalid_selection');
+        const [stored, ...others] = current.rows;
+        if (
+          stored?.state !== 'prepared' ||
+          !same(stored, dispatched) ||
+          others.some((row) => row.state !== 'unprepared')
+        )
+          throw new OutboxError('invalid_selection');
+        const { removed, survivors } = await removeClosure(
+          tx,
+          current.rows,
+          global,
+          authorize,
+          'prepared',
+        );
+        return { removedDependents: removed - 1, survivors };
       },
       signal,
     );

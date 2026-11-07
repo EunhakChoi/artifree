@@ -4,7 +4,10 @@ import { once } from 'node:events';
 import { build } from 'esbuild';
 import { cleanupOutboxDelivery } from './lib/outbox-delivery-cleanup.mjs';
 import { checkOutboxScheduler } from './smoke-outbox-scheduler.mjs';
-import { checkSchedulerDisposalLive } from './smoke-outbox-disposal.mjs';
+import {
+  checkRejectedDisposalLive,
+  checkSchedulerDisposalLive,
+} from './smoke-outbox-disposal.mjs';
 import { checkRejectionResume } from './smoke-outbox-rejection.mjs';
 
 const ARTIFACT = `art_${'a'.repeat(32)}`;
@@ -18,14 +21,14 @@ export async function checkOutboxDelivery(browser, serverApi) {
   const isolatedUsers = [];
   const bundle = await build({
     stdin: {
-      contents: `import {DeliveryKernel} from './packages/client/src/outbox/delivery.ts';
+      contents: `import {DeliveryKernel, dispatchedRow} from './packages/client/src/outbox/delivery.ts';
       import {openStore} from './packages/client/src/outbox/store.ts';
       import {readBinding} from './packages/client/src/outbox/binding.ts';
       import {OutboxError} from './packages/client/src/outbox/types.ts';
       import {ArtifreeApiError} from './packages/client/src/errors.ts';
       import {DeliveryScheduler} from './packages/client/src/outbox/scheduler.ts';
       import {LocalOperationGate} from './packages/client/src/outbox/local-operation-gate.ts';
-      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError};`,
+      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError, dispatchedRow};`,
       resolveDir: process.cwd(),
       loader: 'ts',
     },
@@ -354,11 +357,18 @@ export async function checkOutboxDelivery(browser, serverApi) {
     artifact = ARTIFACT,
     base = 0,
     immediateClock = false,
+    reuse,
   } = {}) {
-    const context = await browser.newContext();
-    contexts.push(context);
-    const page = await context.newPage();
-    await page.goto(origin);
+    let page = reuse;
+    if (page === undefined) {
+      const context = await browser.newContext();
+      contexts.push(context);
+      page = await context.newPage();
+      await page.goto(origin);
+    } else {
+      // A reload keeps the browser context, so only in-memory page state is lost.
+      await page.reload();
+    }
     await page.waitForFunction(() => globalThis.deliveryApi !== undefined);
     await page.evaluate(
       async ({
@@ -370,6 +380,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         token,
         key,
         immediateClock,
+        reattach,
       }) => {
         const {
           openStore,
@@ -526,22 +537,24 @@ export async function checkOutboxDelivery(browser, serverApi) {
             },
           });
         };
-        globalThis.head = await store.enqueue({
-          format: 2,
-          state: 'unprepared',
-          version: 1,
-          key,
-          owner,
-          binding: lane.slice(0, 4),
-          lane,
-          artifactId: artifact,
-          admittedGeneration: auth.actor_generation,
-          authorizedGeneration: auth.actor_generation,
-          operation,
-          path,
-          text: operation === 'delete' ? null : text,
-          base: { version: base },
-        });
+        // A reattached page keeps the head that is already durable in the store.
+        if (!reattach)
+          globalThis.head = await store.enqueue({
+            format: 2,
+            state: 'unprepared',
+            version: 1,
+            key,
+            owner,
+            binding: lane.slice(0, 4),
+            lane,
+            artifactId: artifact,
+            admittedGeneration: auth.actor_generation,
+            authorizedGeneration: auth.actor_generation,
+            operation,
+            path,
+            text: operation === 'delete' ? null : text,
+            base: { version: base },
+          });
         globalThis.enqueueLikeHead = (changes, localAuthority) => {
           const intent = { ...head, ...changes };
           delete intent.sequence;
@@ -693,6 +706,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         base,
         token: live?.token ?? 'test-token',
         immediateClock,
+        reattach: reuse !== undefined,
         key:
           live === undefined
             ? '1'.repeat(32)
@@ -703,6 +717,23 @@ export async function checkOutboxDelivery(browser, serverApi) {
   }
   async function run(page) {
     return page.evaluate(() => kernel.run(lane));
+  }
+  // Also reads the kernel's dispatched-row registration for the same attempt.
+  async function runRegistered(page) {
+    return page.evaluate(async () => {
+      const { dispatchedRow } = deliveryApi;
+      const attempt = await kernel.run(lane);
+      const registered = dispatchedRow(attempt);
+      return {
+        attempt,
+        registered,
+        frozen:
+          registered !== undefined &&
+          Object.isFrozen(registered) &&
+          Object.isFrozen(registered.request),
+        stored: (await snapshot())[0],
+      };
+    });
   }
   async function close(page) {
     await page.evaluate(async () => {
@@ -740,6 +771,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
       await checkLiveDisposal();
       return;
     }
+    if (process.env.ARTIFREE_SCHEDULER_CASE === 'rejected-disposal-live') {
+      assert.notEqual(
+        serverApi,
+        undefined,
+        'rejected-disposal-live requires the Rust server',
+      );
+      await checkLiveRejectedDisposal();
+      return;
+    }
     await checkOutboxScheduler({
       setup,
       close,
@@ -764,6 +804,9 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       setMode(nextMode) {
         mode = nextMode;
+      },
+      setErrorBody(nextBody) {
+        errorBody = nextBody;
       },
       configure(nextMode, nextStatus) {
         mode = nextMode;
@@ -1022,6 +1065,64 @@ export async function checkOutboxDelivery(browser, serverApi) {
         await assert.rejects(run(page), /owner_not_ready/);
         assert.equal(requests.length, 1);
       }
+      await close(page);
+    }
+    // Only a refusal proves that the head was refused, so only a refusal keeps
+    // the frozen dispatched row. A retryable failure keeps none.
+    for (const [httpStatus, body, expected] of [
+      [
+        429,
+        '{',
+        { reason: 'rate_limited', status: 429, retryAfterSeconds: 3600 },
+      ],
+      [
+        503,
+        'x'.repeat(70_000),
+        { reason: 'server_error', status: 503, retryAfterSeconds: 3600 },
+      ],
+    ]) {
+      page = await setup();
+      mode = 'status';
+      status = httpStatus;
+      errorBody = body;
+      requests = [];
+      const { attempt, registered } = await runRegistered(page);
+      assert.deepEqual(attempt.failure, expected);
+      assert.equal(registered, undefined);
+      await close(page);
+    }
+    for (const [httpStatus, body, expected] of [
+      [
+        409,
+        {
+          error: {
+            code: 'data_conflict',
+            message: 'private-response-marker',
+            current_data_version: 5,
+          },
+        },
+        { reason: 'data_conflict', status: 409, currentDataVersion: 5 },
+      ],
+      [
+        422,
+        {
+          error: {
+            code: 'request_key_reused',
+            message: 'private-response-marker',
+          },
+        },
+        { reason: 'rejected', status: 422, code: 'request_key_reused' },
+      ],
+    ]) {
+      page = await setup();
+      mode = 'status';
+      status = httpStatus;
+      errorBody = body;
+      requests = [];
+      const { attempt, registered, frozen, stored } = await runRegistered(page);
+      assert.deepEqual(attempt.failure, expected);
+      assert.deepEqual(registered, stored);
+      assert.equal(frozen, true);
       await close(page);
     }
     // The kernel fences itself even when the host revokes its proof without aborting.
@@ -1305,6 +1406,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       await checkRealServer();
       await checkLiveRejection();
       await checkLiveDisposal();
+      await checkLiveRejectedDisposal();
       await selectActor('Outbox scheduler');
       await checkOutboxScheduler({
         setup,
@@ -1356,6 +1458,19 @@ export async function checkOutboxDelivery(browser, serverApi) {
         setMode(next) {
           mode = next;
         },
+        setStatus(next) {
+          status = next;
+        },
+        setErrorBody(next) {
+          errorBody = next;
+        },
+        reload(page, artifact) {
+          return setup({ artifact, reuse: page });
+        },
+        waiting,
+        releaseHeld() {
+          held();
+        },
         requests: () => requests,
         forwardedMutations: () => forwardedMutations,
         responses: () => forwardedReplies,
@@ -1405,6 +1520,48 @@ export async function checkOutboxDelivery(browser, serverApi) {
       requests: () => requests,
       bindingReadCount: () => liveBindingReads,
       expectedActorId: live.actorId,
+    });
+  }
+  async function checkLiveRejectedDisposal() {
+    bindingMode = 'normal';
+    await checkRejectedDisposalLive({
+      setup,
+      close,
+      createArtifact: createRealArtifact,
+      async selectActor(label) {
+        await selectActor(label);
+      },
+      configure(next) {
+        mode = next;
+        requests = [];
+      },
+      setMode(next) {
+        mode = next;
+      },
+      setStatus(next) {
+        status = next;
+      },
+      setErrorBody(next) {
+        errorBody = next;
+      },
+      requests: () => requests,
+      bindingReadCount: () => liveBindingReads,
+      async independentWrite(artifact, base, path, value) {
+        const response = await fetch(
+          live.origin + '/v1/artifacts/' + artifact + '/data',
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: 'Bearer ' + live.token,
+              'Content-Type': 'application/json',
+              'Idempotency-Key': crypto.randomUUID(),
+            },
+            body: JSON.stringify({ path, base_data_version: base, value }),
+          },
+        );
+        assert.equal(response.status, 200);
+        return response.json();
+      },
     });
   }
   async function checkAuthorityException({
