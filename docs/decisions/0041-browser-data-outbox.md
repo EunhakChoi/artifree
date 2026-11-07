@@ -1036,7 +1036,14 @@ This internal sub-slice implements rule 17's existing
 The kernel reports the durable head phase read at attempt entry. A retained
 `prepared` head without a durable ACK remains unknown; failure counters, a new
 budget epoch or a later refusal cannot establish that its earlier attempt did
-not commit. No new stored sent/commit flag, schema or server behavior is added.
+not commit. A preparation retry is different: its successful local transaction
+has made no HTTP attempt. The current coordinator retains the exact returned
+prepared head as a bounded, one-use local proof and passes it only to the first
+kernel run. The kernel compares the whole head; a mismatch remains unknown.
+The proof is consumed before that run, survives an existing delivery-budget gate,
+and is absent in a recreated coordinator. Durable phase and prior-delivery
+knowledge are separate attempt observations. No new stored sent/commit flag,
+schema or server behavior is added.
 
 A validated `data_conflict` or known rejection of that retained prepared head
 publishes a lane-scoped `retry_paused` with reason
@@ -1060,8 +1067,12 @@ Focused native IndexedDB and actual Rust checks contrast a request dropped
 before upstream forwarding followed by a real version conflict, with an actual
 commit whose response is lost followed by a historical replay receipt. The
 client may not use the fixture's knowledge of forwarding as outcome evidence.
-They also cover first-attempt rejection, explicit epoch renewal, exact request
-identity, pending-token kinds and native pause-capture abort/authority loss.
+They also cover first-attempt rejection after a real preparation abort and local
+retry, proof consumption before a later unknown/rejection, exhausted-budget gating
+and conservative coordinator recreation, explicit epoch renewal, exact request
+identity, pending-token kinds and native pause-capture abort/authority loss. The
+budget-gating fixture injects only an exhausted counter to hold the prepared head;
+it does not add evidence of failure counting or native-process restoration.
 Guard mutations exercise these assertions. These are internal scheduling
 subcases, not complete B15/B19/B22, native-process recovery or all R08 acceptance.
 Public delivery, rejected disposal, unresolved abandonment, access/generation

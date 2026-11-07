@@ -9,6 +9,20 @@ export async function checkRejectionResume(harness, selected) {
     ['unforwarded', () => checkUnforwarded(harness)],
     ['committed', () => checkCommitted(harness)],
     ['fresh-conflict', () => checkFreshConflict(harness)],
+    ['preparation-first-conflict', () => checkFreshConflict(harness, true)],
+    [
+      'preparation-proof-mismatch',
+      () => checkPreparationProofMismatch(harness),
+    ],
+    ['preparation-unknown-rejection', () => checkUnforwarded(harness, true)],
+    [
+      'preparation-recreated-rejection',
+      () => checkRecreatedPreparation(harness),
+    ],
+    [
+      'preparation-budget-conflict',
+      () => checkRecreatedPreparation(harness, false),
+    ],
     ['capture-abort', () => checkPauseCapture(harness, 'abort')],
     ['capture-authority', () => checkPauseCapture(harness, 'authority')],
   ];
@@ -74,8 +88,8 @@ async function setup(harness) {
   };
 }
 
-async function startUnknown(page) {
-  await page.evaluate(() => scheduler.wake(lane));
+async function startUnknown(page, localPreparation = false) {
+  if (!localPreparation) await page.evaluate(() => scheduler.wake(lane));
   // The published retry observation and installed timer follow the completed
   // preparation transaction and HTTP failure. No readonly scan is used as a
   // substitute for scheduler publication.
@@ -85,12 +99,16 @@ async function startUnknown(page) {
       timers.some((timer) => timer.active && timer.milliseconds === 250),
   );
   const observation = await page.evaluate(() => {
-    const result = events.find((event) => event.kind === 'attempt').result;
+    const result = events.find(
+      (event) =>
+        event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+    ).result;
     return {
       result: {
         kind: result.kind,
         failure: result.failure,
         outcome: result.outcome,
+        priorDelivery: result.priorDelivery,
       },
       epoch: scheduler.epoch,
       failures: scheduler.aggregateFailures,
@@ -100,6 +118,7 @@ async function startUnknown(page) {
     kind: 'delivery_failed',
     failure: { reason: 'network_error', status: 0 },
     outcome: 'unknown',
+    priorDelivery: 'none',
   });
   assert.equal(observation.epoch, 0);
   assert.equal(observation.failures, 1);
@@ -122,10 +141,11 @@ function requestIdentity(request) {
   };
 }
 
-async function checkUnforwarded(harness) {
+async function checkUnforwarded(harness, localPreparation = false) {
   const { page, artifact, expected } = await setup(harness);
   harness.configure('drop_before_forward');
-  const prepared = await startUnknown(page);
+  if (localPreparation) await retryAfterPreparationAbort(harness, page);
+  const prepared = await startUnknown(page, localPreparation);
   assert.deepEqual(
     harness.requests().map((request) => requestIdentity(request)),
     [expected],
@@ -144,7 +164,10 @@ async function checkUnforwarded(harness) {
   harness.setMode('normal');
   await page.evaluate(() => fire(250));
   await page.waitForFunction(() =>
-    events.some((event) => event.kind === 'paused'),
+    events.some(
+      (event) =>
+        event.kind === 'paused' && event.pause.kind !== 'preparation_paused',
+    ),
   );
   const state = await page.evaluate(() => {
     const paused = events.findLast((event) => event.kind === 'paused').pause;
@@ -219,6 +242,7 @@ async function checkUnforwarded(harness) {
   assert.equal(state.pause.reason, 'unresolved_after_rejection');
   assert.equal(state.pause.scope, 'lane');
   assert.equal(state.result.initialState, 'prepared');
+  assert.equal(state.result.priorDelivery, 'unknown');
   const pendingKinds = await page.evaluate(() => {
     globalThis.rejectionResume = scheduler.resumeDelivery(rejectionSelection);
     const duplicate = scheduler.resumeDelivery(rejectionSelection);
@@ -264,7 +288,11 @@ async function checkUnforwarded(harness) {
     reads: 1,
   });
   await page.waitForFunction(
-    () => events.filter((event) => event.kind === 'paused').length === 2,
+    () =>
+      events.filter(
+        (event) =>
+          event.kind === 'paused' && event.pause.kind !== 'preparation_paused',
+      ).length === 2,
   );
   assert.deepEqual(
     harness.requests().map((request) => requestIdentity(request)),
@@ -300,7 +328,11 @@ async function checkUnforwarded(harness) {
   assert.equal(canonical.data_version, 1);
   assert.deepEqual(canonical.value, { canonical: 1 });
   await harness.close(page);
-  console.log('outbox rejection: unforwarded passed');
+  console.log(
+    'outbox rejection: ' +
+      (localPreparation ? 'preparation-unknown-rejection' : 'unforwarded') +
+      ' passed',
+  );
 }
 
 async function checkCommitted(harness) {
@@ -404,20 +436,202 @@ async function checkCommitted(harness) {
   console.log('outbox rejection: committed passed');
 }
 
-async function checkFreshConflict(harness) {
+async function retryAfterPreparationAbort(
+  harness,
+  page,
+  blockedBudget = false,
+) {
+  await page.evaluate(() => {
+    faultPut('intents', 'prepared');
+    scheduler.wake(lane);
+  });
+  await page.waitForFunction(() =>
+    events.some(
+      (event) =>
+        event.kind === 'paused' && event.pause.kind === 'preparation_paused',
+    ),
+  );
+  assert.equal(harness.requests().length, 0, 'preparation abort sends no HTTP');
+  const beforeRetry = await page.evaluate(() => rejectionSnapshot());
+  assert.equal(beforeRetry.rows.length, 1);
+  assert.equal(beforeRetry.rows[0].state, 'unprepared');
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      failures: scheduler.aggregateFailures,
+      epoch: scheduler.epoch,
+      reads: revalidationCalls,
+    })),
+    { failures: 0, epoch: 0, reads: 0 },
+  );
+  await page.evaluate(async (blockedBudget) => {
+    restorePut();
+    if (blockedBudget) scheduler.aggregateFailures = 32;
+    const choice = events.findLast((event) => event.kind === 'paused').pause
+      .selection;
+    const first = scheduler.retryPreparation(choice);
+    const duplicate = scheduler.retryPreparation(choice);
+    globalThis.rejectionPreparationSame = first === duplicate;
+    const wrong = scheduler.resumeDelivery(choice).then(
+      () => 'unexpected',
+      (error) => error.code,
+    );
+    await first;
+    globalThis.rejectionPreparationWrong = await wrong;
+  }, blockedBudget);
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      same: rejectionPreparationSame,
+      wrong: rejectionPreparationWrong,
+    })),
+    { same: true, wrong: 'invalid_selection' },
+  );
+}
+
+async function checkPreparationProofMismatch(harness) {
+  const { page, artifact, expected } = await setup(harness);
+  await harness.independentWrite(artifact, 0, { canonical: 1 });
+  harness.configure('normal');
+  await page.evaluate(async () => {
+    globalThis.rejectionPrepared = await store.prepare(
+      head,
+      authorize,
+      stop.signal,
+    );
+  });
+  assert.equal(harness.requests().length, 0);
+  const before = await page.evaluate(() => rejectionSnapshot());
+  const result = await page.evaluate(() =>
+    kernel.run(lane, {
+      ...rejectionPrepared,
+      request: {
+        ...rejectionPrepared.request,
+        body: rejectionPrepared.request.body + ' ',
+      },
+    }),
+  );
+  assert.equal(result.kind, 'delivery_failed');
+  assert.equal(result.initialState, 'prepared');
+  assert.equal(
+    result.priorDelivery,
+    'unknown',
+    'a different body cannot prove this exact prepared request was never sent',
+  );
+  assert.equal(result.failure.reason, 'data_conflict');
+  assert.deepEqual(await page.evaluate(() => rejectionSnapshot()), before);
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected],
+  );
+  assert.equal(harness.responses()[0].status, 409);
+  assert.equal(await page.evaluate(() => rejectionUnhandled), 0);
+  await harness.close(page);
+  console.log('outbox rejection: preparation-proof-mismatch passed');
+}
+
+async function checkRecreatedPreparation(harness, recreate = true) {
+  const { page, artifact, expected } = await setup(harness);
+  await harness.independentWrite(artifact, 0, { canonical: 1 });
+  harness.configure('normal');
+  // Inject only the existing exhausted gate so a successful local preparation
+  // can be observed before any dispatch. This does not prove failure counting.
+  await retryAfterPreparationAbort(harness, page, true);
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'retry_paused',
+    ),
+  );
+  assert.equal(harness.requests().length, 0);
+  const prepared = await page.evaluate(() => rejectionSnapshot());
+  assert.equal(prepared.rows[0].state, 'prepared');
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      failures: scheduler.aggregateFailures,
+      epoch: scheduler.epoch,
+      reads: revalidationCalls,
+    })),
+    { failures: 32, epoch: 0, reads: 0 },
+  );
+  if (recreate) {
+    await page.evaluate(() => {
+      scheduler.close();
+      installScheduler();
+      scheduler.wake(lane);
+    });
+  } else {
+    await page.evaluate(() => {
+      const choice = events.findLast((event) => event.kind === 'paused').pause
+        .selection;
+      return scheduler.resumeDelivery(choice);
+    });
+  }
+  await page.waitForFunction(() =>
+    events.some(
+      (event) =>
+        event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+    ),
+  );
+  await page.evaluate(() => scheduler.activeTask);
+  const observed = await page.evaluate(() => ({
+    pause: events.findLast((event) => event.kind === 'paused').pause,
+    result: events.findLast((event) => event.kind === 'attempt').result,
+    failures: scheduler.aggregateFailures,
+    epoch: scheduler.epoch,
+    reads: revalidationCalls,
+    unhandled: rejectionUnhandled,
+  }));
+  assert.equal(observed.result.initialState, 'prepared');
+  assert.equal(observed.result.priorDelivery, recreate ? 'unknown' : 'none');
+  assert.equal(observed.result.failure.reason, 'data_conflict');
+  assert.equal(observed.pause.kind, recreate ? 'retry_paused' : 'blocked');
+  if (recreate)
+    assert.equal(observed.pause.reason, 'unresolved_after_rejection');
+  assert.equal(observed.failures, 1);
+  assert.equal(observed.epoch, recreate ? 0 : 1);
+  assert.equal(observed.reads, recreate ? 0 : 1);
+  assert.equal(observed.unhandled, 0);
+  assert.deepEqual(await page.evaluate(() => rejectionSnapshot()), prepared);
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected],
+  );
+  assert.equal(harness.responses()[0].status, 409);
+  await harness.close(page);
+  console.log(
+    'outbox rejection: ' +
+      (recreate
+        ? 'preparation-recreated-rejection'
+        : 'preparation-budget-conflict') +
+      ' passed',
+  );
+}
+
+async function checkFreshConflict(harness, retryPreparation = false) {
   const { page, artifact, expected } = await setup(harness);
   const independent = await harness.independentWrite(artifact, 0, {
     canonical: 1,
   });
   assert.equal(independent.data_version, 1);
   harness.configure('normal');
-  await page.evaluate(() => scheduler.wake(lane));
-  await page.waitForFunction(() =>
-    events.some((event) => event.kind === 'paused'),
+  if (retryPreparation) {
+    await retryAfterPreparationAbort(harness, page);
+  } else await page.evaluate(() => scheduler.wake(lane));
+  await page.waitForFunction(
+    () =>
+      events.some(
+        (event) =>
+          event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+      ) &&
+      events.some(
+        (event) =>
+          event.kind === 'paused' && event.pause.kind !== 'preparation_paused',
+      ),
   );
   const observed = await page.evaluate(() => ({
     pause: events.findLast((event) => event.kind === 'paused').pause,
-    attempt: events.find((event) => event.kind === 'attempt').result,
+    attempt: events.find(
+      (event) =>
+        event.kind === 'attempt' && event.result.kind === 'delivery_failed',
+    ).result,
     epoch: scheduler.epoch,
     failures: scheduler.aggregateFailures,
     retryTimers: timers.filter(
@@ -425,12 +639,36 @@ async function checkFreshConflict(harness) {
     ).length,
     unhandled: rejectionUnhandled,
   }));
-  assert.equal(observed.attempt.initialState, 'unprepared');
+  assert.equal(
+    observed.attempt.initialState,
+    retryPreparation ? 'prepared' : 'unprepared',
+  );
+  assert.equal(observed.attempt.priorDelivery, 'none');
   assert.deepEqual(observed.attempt.failure, {
     reason: 'data_conflict',
     status: 409,
     currentDataVersion: 1,
   });
+  const replies = harness.responses();
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].status, 409);
+  assert.ok(Buffer.byteLength(replies[0].body) <= 65_536);
+  const rejection = JSON.parse(replies[0].body);
+  assert.equal(rejection?.error?.code, 'data_conflict');
+  assert.equal(rejection?.error?.current_data_version, 1);
+  console.log(
+    'outbox rejection preparation evidence: ' +
+      JSON.stringify({
+        retryPreparation,
+        response: {
+          status: replies[0].status,
+          code: rejection.error.code,
+          currentDataVersion: rejection.error.current_data_version,
+        },
+        observed,
+        snapshot: await page.evaluate(() => rejectionSnapshot()),
+      }),
+  );
   assert.equal(
     observed.pause.kind,
     'blocked',
@@ -454,7 +692,11 @@ async function checkFreshConflict(harness) {
     base: 0,
   });
   await harness.close(page);
-  console.log('outbox rejection: fresh-conflict passed');
+  console.log(
+    'outbox rejection: ' +
+      (retryPreparation ? 'preparation-first-conflict' : 'fresh-conflict') +
+      ' passed',
+  );
 }
 
 async function checkPauseCapture(harness, fault) {

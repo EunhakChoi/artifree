@@ -13,6 +13,7 @@ import type {
   IntentRow,
   LaneKey,
   LocalStore,
+  PreparedRow,
 } from './store.js';
 import { OutboxError } from './types.js';
 import { LocalOperationGate } from './local-operation-gate.js';
@@ -138,6 +139,8 @@ interface Lane {
   failures: number;
   queued: boolean;
   wakeMark: object;
+  /** Current-instance terminal preparation proof; consumed before the first run. */
+  preparedWithoutDispatch?: PreparedRow;
   pause?: Pause;
   cancelTimer?: () => void;
   unsentSelection?: SchedulerUnsentDiscardSelection;
@@ -1008,7 +1011,9 @@ export class DeliveryScheduler {
       this.activeLane = lane;
       this.activeWake = false;
       try {
-        result = await this.kernel.run(lane.key);
+        const locallyPrepared = lane.preparedWithoutDispatch;
+        delete lane.preparedWithoutDispatch;
+        result = await this.kernel.run(lane.key, locallyPrepared);
         woken = this.activeWake;
       } catch (error: unknown) {
         if (error instanceof DeliveryAttemptError && error.dispatched) {
@@ -1082,7 +1087,7 @@ export class DeliveryScheduler {
           break;
         case 'delivery_failed':
           this.failed(lane);
-          await this.failure(lane, result.failure, result.initialState);
+          await this.failure(lane, result.failure, result.priorDelivery);
           break;
         default: {
           const exhaustive: never = result;
@@ -1166,8 +1171,9 @@ export class DeliveryScheduler {
     if (first?.state !== 'unprepared')
       throw new OutboxError('invalid_selection');
     beginMutation();
+    let prepared: PreparedRow;
     try {
-      await this.store.prepare(
+      prepared = await this.store.prepare(
         first,
         () => this.check(lane.key),
         this.fence.signal,
@@ -1185,6 +1191,9 @@ export class DeliveryScheduler {
       return false;
     }
     this.check();
+    // This proof comes only from this instance's completed local transaction.
+    // It survives delivery gates, but never a run, head replacement or reload.
+    lane.preparedWithoutDispatch = prepared;
     return true;
   }
 
@@ -1249,14 +1258,14 @@ export class DeliveryScheduler {
   private async failure(
     lane: Lane,
     failure: DeliveryFailure,
-    initialState: 'unprepared' | 'prepared',
+    priorDelivery: 'none' | 'unknown',
   ): Promise<void> {
     if (failure.reason === 'binding_changed') {
       this.close();
       return;
     }
     if (
-      initialState === 'prepared' &&
+      priorDelivery === 'unknown' &&
       (failure.reason === 'data_conflict' || failure.reason === 'rejected')
     ) {
       // A refusal of this attempt cannot resolve the retained prepared head.

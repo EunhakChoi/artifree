@@ -811,6 +811,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         },
         outcome: 'unknown',
         initialState: 'unprepared',
+        priorDelivery: 'none',
       });
       assert.equal(
         (await page.evaluate(() => snapshot()))[0].state,
@@ -1005,6 +1006,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
         failure: expected,
         outcome: 'unknown',
         initialState: 'unprepared',
+        priorDelivery: 'none',
       });
       assert.equal(
         JSON.stringify(result).includes('private-response-marker'),
