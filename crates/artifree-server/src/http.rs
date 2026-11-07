@@ -11,6 +11,7 @@
 
 mod assets;
 mod data_query;
+mod unread;
 
 use std::future::poll_fn;
 use std::net::SocketAddr;
@@ -44,7 +45,7 @@ use artifree_ports::token_store::TokenStore;
 use artifree_ports::user_store::UserStore;
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::{SqliteTokenStore, hash_token_secret};
-use axum::body::{Body, Bytes, HttpBody};
+use axum::body::{Body, BodyDataStream};
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{self, HeaderValue};
@@ -54,6 +55,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_core::Stream;
 
 use crate::auth::{AccessToken, AuthContext};
 use crate::changes::{self, Feed};
@@ -70,6 +72,8 @@ use crate::runtime_source::{self, FrameCall};
 use crate::tokens;
 use crate::users;
 use crate::web::WebAssets;
+
+use self::unread::Unread;
 
 /// Largest accepted request body: a maximum package in base64 plus JSON
 /// framing. Clients send a file as UTF-8 text only when its JSON escaping is
@@ -777,6 +781,11 @@ async fn admit_room(State(state): State<AppState>, request: Request, next: Next)
     admit_under(&state.shared.room_limiter, state.clone(), request, next).await
 }
 
+/// Admits the request under `limiter`'s budget for its actor and runs it.
+///
+/// A response with status `413` for a body that was not read to its end is
+/// sent after that rest is drained (decision 0048). The drain runs in the
+/// request's task, so the request keeps its permit until it ends.
 async fn admit_under(
     limiter: &Limiter,
     state: AppState,
@@ -790,7 +799,7 @@ async fn admit_under(
     let permit = match limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
-            discard(&state, request.into_body()).await;
+            discard(&state, request.into_body().into_data_stream()).await;
             return refused(refusal);
         }
     };
@@ -798,11 +807,17 @@ async fn admit_under(
         .extensions_mut()
         .insert(Authenticated(auth.actor.clone()));
     request.extensions_mut().insert(auth);
+    let unread = Unread::watch(&mut request);
     // The request runs in its own task, which keeps the permit until the
     // handler finishes. A client that disconnects cancels only this wait, so
     // it cannot free the slot while storage work continues.
     let task = tokio::spawn(async move {
         let response = next.run(request).await;
+        if response.status() == StatusCode::PAYLOAD_TOO_LARGE
+            && let Some(rest) = unread.and_then(Unread::into_rest)
+        {
+            discard(&state, rest).await;
+        }
         drop(permit);
         response
     });
@@ -816,26 +831,32 @@ async fn admit_under(
     })
 }
 
-/// How long a refused request's body is read before the refusal is sent.
+/// How long a refused request's body is read before the refusal is sent: a
+/// `429` (decision 0005) or a `413` (decision 0048).
 pub const MAX_DRAIN_TIME: Duration = Duration::from_secs(2);
-/// Refused bodies read at the same time, across all actors. Refused requests
-/// hold no permit, so this bounds the connections and tasks they can occupy.
+/// Refused bodies read at the same time, `429` and `413` together, across all
+/// actors. A `429` request holds no permit and a `413` request keeps its own
+/// while its body is read, so this bounds the connections and tasks that
+/// refusals can occupy.
 pub const MAX_DRAINING: usize = 32;
 
 /// Reads and drops a refused request's body so that a client still sending
-/// it reads the refusal rather than a reset connection. Nothing is kept in
-/// memory, and the reading stops at the API body limit, after
-/// [`MAX_DRAIN_TIME`], or at once when [`MAX_DRAINING`] bodies are already
-/// being read; a slow or endless sender then gets the refusal regardless.
-async fn discard(state: &AppState, mut body: Body) {
+/// it reads the refusal rather than a reset connection. The refusal is a
+/// `429` from the limiter or a `413` whose body the request left unread.
+/// Nothing is kept in memory, and the reading stops after the first frame that
+/// brings what this call read above [`MAX_BODY_BYTES`], after
+/// [`MAX_DRAIN_TIME`], at the end of the body or a read error, or at once when
+/// [`MAX_DRAINING`] bodies are already being read; a slow or endless sender
+/// then gets the refusal regardless.
+async fn discard(state: &AppState, mut body: BodyDataStream) {
     let Some(_reading) = Draining::start(&state.shared.draining) else {
         return;
     };
     let drain = async {
         let mut read = 0;
         while read <= MAX_BODY_BYTES {
-            match poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
-                Some(Ok(frame)) => read += frame.data_ref().map_or(0, Bytes::len),
+            match poll_fn(|context| Pin::new(&mut body).poll_next(context)).await {
+                Some(Ok(data)) => read += data.len(),
                 _ => break,
             }
         }
@@ -845,7 +866,7 @@ async fn discard(state: &AppState, mut body: Body) {
 }
 
 /// One refused body counted against [`MAX_DRAINING`]. The count is released
-/// on drop, so a request cancelled mid-read, such as when its connection is
+/// on drop, so a `429` cancelled mid-read, such as when its connection is
 /// dropped, does not keep it.
 struct Draining<'count>(&'count AtomicUsize);
 
@@ -918,7 +939,7 @@ where
     let permit = match state.shared.limiter.admit(&auth.actor) {
         Ok(permit) => permit,
         Err(refusal) => {
-            discard(state, request.into_body()).await;
+            discard(state, request.into_body().into_data_stream()).await;
             return refused(refusal);
         }
     };

@@ -1,15 +1,17 @@
 # 0048: Drain request bodies refused with 413
 
-Date: 2026-11-07. Status: **proposed** (specification only; accepted by the
-code pull request that implements it). Amends rule 4 of
+Date: 2026-11-07. Status: **accepted** (implemented by roadmap row O07; the
+specification was merged first as proposed). Amends rule 4 of
 [0004](0004-inbound-mcp-adapter.md) and rule 3 of
 [0005](0005-request-limits.md). Roadmap row: O07.
 
-> **Nothing here is implemented.** On `main`, a request refused with `413`
-> leaves the unread rest of its body to the connection, as described in the
-> Context. Every numbered rule below describes what the code pull request
-> builds. A code pull request may not change a numbered rule; an amendment is a
-> separate documentation pull request.
+> **Implemented by O07.** Before O07, a request refused with `413` left the
+> unread rest of its body to the connection, as described in the Context; the
+> Context describes that earlier state. Rules 1-6 describe what the code does
+> now. Whether the Windows failure recorded in the Context is gone is not
+> established by this record: the Acceptance section explains what the tests
+> show, and confirmation is the Windows CI of the merge commit and later main
+> runs. A numbered rule is amended by a separate documentation pull request.
 
 Independent Artifree design: no private evidence was consulted, and nothing
 below is presented as an observation of the original product.
@@ -180,6 +182,29 @@ CI of the merge commit and later main runs.
 
 ## Implementation status
 
-| Row | Slice                               | Status                    |
-| --- | ----------------------------------- | ------------------------- |
-| O07 | rules 1-6 and the acceptance checks | proposed, not implemented |
+| Row | Slice                               | Status      |
+| --- | ----------------------------------- | ----------- |
+| O07 | rules 1-6 and the acceptance checks | implemented |
+
+How the code meets the rules: the admission middleware wraps the request body
+of every admitted request that has one, in a type private to the HTTP module.
+If the wrapper is dropped before the end of the body it hands the rest back
+through a channel owned by that request alone. When the response of the
+admitted request has status `413` and the rest came back, the existing bounded
+read (`discard`, with `MAX_BODY_BYTES`, `MAX_DRAIN_TIME` and the shared count
+`MAX_DRAINING`) runs in the request's task before its permit is released, and
+the response is returned unchanged. No new configuration, error code or
+contract field exists.
+
+The tests, named after the Acceptance items: `request_limits.rs` has one check
+per admission path (item 1: MCP, owner API, frame route, room route), the
+endless body (2), the slow body (3), the mixed `429` and `413` saturation (4),
+permit retention (5), the dropped connection (6) and the unused key (rule 4).
+`scripts/tests/refused-body-drain.test.mjs` is item 7 with a raw socket on both
+routes and both body shapes. The escape-heavy MCP test (item 8) is unchanged.
+Item 7 was run 20 times on Linux without the drain in two batches: 2 and 4
+runs failed (a socket error `EPIPE`, or an answer that never arrived); with the
+drain it passed 20 of 20 in both batches. Items 1-6 were each checked by
+breaking the guard they name; the pull request lists the mutations. Not shown
+by any of this: a Windows run. The body wrapper reports the end of the body
+through the stream it wraps, so a body read to its end hands nothing back.
