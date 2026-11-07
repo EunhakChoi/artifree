@@ -35,10 +35,35 @@ fn ttl_expiry_ends_the_session_and_removes_the_directory() -> TestResult {
         ],
         &[],
     )?;
+    // Startup consumes the lifetime; expiry need not produce a ready line.
+    let status = server.wait_exit()?;
+    assert!(status.success(), "TTL expiry is a normal end: {status:?}");
+    assert_eq!(root.entries()?, 0);
+    server.wait_stderr_contains("session ended")?;
+    Ok(())
+}
+
+#[test]
+fn a_one_shot_ready_line_identifies_its_live_directory() -> TestResult {
+    let root = Root::new()?;
+    let mut server = Server::start(
+        &[
+            "serve",
+            "--one-shot-ttl-seconds",
+            "120",
+            "--session-root",
+            root.arg(),
+            "--api-listen",
+            "127.0.0.1:0",
+            "--content-listen",
+            "127.0.0.1:0",
+        ],
+        &[],
+    )?;
     let ready = server.ready()?;
     let data_dir = data_dir_of(&ready)?;
     assert_eq!(ready["mode"], "one-shot");
-    assert_eq!(ready["session_ttl_seconds"], 1);
+    assert_eq!(ready["session_ttl_seconds"], 120);
     assert_eq!(data_dir.parent(), Some(root.path()), "{ready}");
     assert_eq!(
         Path::new(ready["token_file"].as_str().ok_or("no token_file")?),
@@ -46,12 +71,15 @@ fn ttl_expiry_ends_the_session_and_removes_the_directory() -> TestResult {
     );
     assert!(data_dir.join("access-token").is_file());
 
-    let status = server.wait_exit()?;
-    assert!(status.success(), "TTL expiry is a normal end: {status:?}");
-    assert!(!data_dir.exists(), "{} must be gone", data_dir.display());
-    assert_eq!(root.entries()?, 0);
+    assert_eq!(
+        root.entries()?,
+        1,
+        "the ready session has its live directory"
+    );
     server.wait_stderr_contains("nothing is kept")?;
-    server.wait_stderr_contains("session ended")?;
+    // This case observes readiness, not TTL cleanup. The owned process guard
+    // kills and reaps it; Root removes only this test's scratch directory.
+    drop(server);
     Ok(())
 }
 
