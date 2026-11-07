@@ -5,10 +5,9 @@ Date: 2026-10-27. Status: accepted. Amends
 [0003](0003-local-html-artifact-slice.md).
 
 > Amended by [0048](0048-drain-over-limit-bodies.md) (proposed; in effect when
-> accepted): decision 3, as the bounded reading of a refused body, with the same
-> time limit and the same 32 places, also precedes a `413` for a body over the
-> request limit. That request is already admitted and keeps its permit while its
-> body is read.
+> accepted): rule 3, as a body refused with `413` is also read and dropped within
+> these bounds before the `413` is sent. If 0048 is not accepted, this note is
+> removed with it.
 
 ## Context
 

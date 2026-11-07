@@ -8,9 +8,9 @@ Date: 2026-10-27. Status: accepted. Builds on
 preview rules apply unchanged.
 
 > Amended by [0048](0048-drain-over-limit-bodies.md) (proposed; in effect when
-> accepted): decision 4, as a request refused with `413` has the unread rest of
-> its body read and dropped, within the bounds of 0005, before the `413` is
-> sent. The status and the SDK's plain-text body are unchanged.
+> accepted): rule 4, as a body refused with `413` is also read and dropped
+> within the bounds of 0005 before the `413` is sent. If 0048 is not accepted,
+> this note is removed with it.
 
 ## Context
 
