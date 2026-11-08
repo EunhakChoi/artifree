@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
+import { parallelShards } from './smoke-parallel.mjs';
 import { checkDrafts } from './smoke-drafts.mjs';
 import {
   checkDraftsWithoutLocks,
@@ -36,7 +37,19 @@ assert.ok(
   Object.hasOwn(engines, browserName),
   `Unsupported browser: ${browserName}`,
 );
-const qa = resolve(root, '.artifree/qa', browserName);
+// `all` runs the whole suite in this process. `outbox` and `ui` each run as
+// their own process (CI, and smoke-parallel.mjs) with their own evidence folder.
+const shard = process.env.ARTIFREE_SMOKE_SHARD ?? 'all';
+const shards = ['all', ...parallelShards];
+assert.ok(
+  shards.includes(shard),
+  `Unsupported ARTIFREE_SMOKE_SHARD: ${JSON.stringify(shard)}. Use ${shards.join(', ')}.`,
+);
+const qa = resolve(
+  root,
+  '.artifree/qa',
+  shard === 'all' ? browserName : `${browserName}-${shard}`,
+);
 await mkdir(qa, { recursive: true });
 const inventory = JSON.parse(
   await readFile(
@@ -156,369 +169,380 @@ async function checkAccessibility(label, target = page) {
 }
 try {
   browser = await engines[browserName].launch();
-  await checkPopupAnimationBoundary(browser);
-  await checkOutbox(browser, { origin, token: api.token });
-  context = await browser.newContext({
-    viewport: { width: 1440, height: 1000 },
-    reducedMotion: 'reduce',
-  });
-  await context.tracing.start({
-    screenshots: true,
-    snapshots: true,
-    sources: true,
-  });
-  page = await context.newPage();
-  page.setDefaultTimeout(10_000);
-  page.setDefaultNavigationTimeout(15_000);
-  page.on('pageerror', (error) => pageErrors.push(error.message));
-  page.on('console', (message) => {
-    if (message.type() !== 'error' && message.type() !== 'warning') return;
-    // Sandbox and CSP refusals inside the preview are expected evidence.
-    const source = message.location().url;
-    if (source.startsWith(api.content_origin))
-      artifactConsole.push(message.text());
-    // Browsers log the 401, 409, and 503 the workspace test provokes on purpose.
-    else if (
-      source.startsWith(`${origin}/v1/`) &&
-      /status of (401|409|503) /.test(message.text())
-    )
-      expectedApiFailures.push(message.text().match(/status of (\d+)/)[1]);
-    else consoleErrors.push(message.text());
-  });
-  page.on('request', (request) => {
-    const url = request.url();
-    if (
-      /^https?:/.test(url) &&
-      !url.startsWith(origin) &&
-      !url.startsWith(api.content_origin)
-    )
-      externalRequests.push(url);
-  });
-  await page.goto(origin);
-  await page.getByRole('heading', { name: /A place for what/ }).waitFor();
-  let accessibilityCases = 0;
-  for (const theme of ['light', 'dark']) {
-    if (theme === 'dark')
-      await page.getByRole('button', { name: 'Toggle color theme' }).click();
-    for (const layer of ['presentation', 'logic', 'provider', 'shared']) {
-      await page.getByRole('tab', { name: layer, exact: true }).click();
-      await expect(page.getByRole('tabpanel').getByRole('article')).toHaveCount(
-        inventory.components.filter((item) => item.layer === layer).length,
-      );
-      await checkAccessibility(`${theme}-${layer}`);
-      accessibilityCases += 1;
-    }
-    const about = page.getByRole('button', { name: 'About this foundation' });
-    await about.click();
-    const dialog = page.getByRole('dialog', { name: 'What works today' });
-    await expect(dialog).toBeVisible();
-    // Focus moves in after the dialog opens. Wait for it instead of sampling
-    // once: a single sample raced the move on a slower CI runner.
-    await expect
-      .poll(
-        () =>
-          dialog.evaluate((element) =>
-            element.contains(document.activeElement),
-          ),
-        { message: 'Dialog must receive keyboard focus.' },
+  if (shard !== 'outbox') await checkPopupAnimationBoundary(browser);
+  if (shard !== 'ui') await checkOutbox(browser, { origin, token: api.token });
+  let result;
+  if (shard === 'outbox') {
+    // The outbox shard stops here; the page checks below belong to ui and all.
+    result = { status: 'passed', browser: browserName };
+  } else {
+    context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      reducedMotion: 'reduce',
+    });
+    await context.tracing.start({
+      screenshots: true,
+      snapshots: true,
+      sources: true,
+    });
+    page = await context.newPage();
+    page.setDefaultTimeout(10_000);
+    page.setDefaultNavigationTimeout(15_000);
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    page.on('console', (message) => {
+      if (message.type() !== 'error' && message.type() !== 'warning') return;
+      // Sandbox and CSP refusals inside the preview are expected evidence.
+      const source = message.location().url;
+      if (source.startsWith(api.content_origin))
+        artifactConsole.push(message.text());
+      // Browsers log the 401, 409, and 503 the workspace test provokes on purpose.
+      else if (
+        source.startsWith(`${origin}/v1/`) &&
+        /status of (401|409|503) /.test(message.text())
       )
-      .toBe(true);
-    await checkAccessibility(`${theme}-dialog`);
-    accessibilityCases += 1;
-    await page.keyboard.press('Escape');
-    await expect(dialog).toBeHidden();
-    await expect(about).toBeFocused();
-  }
-  await page.getByRole('button', { name: 'Toggle color theme' }).click();
-  await expect(
-    page.getByText('Build-time inventory', { exact: true }),
-  ).toBeVisible();
-  await page.getByRole('tab', { name: 'presentation', exact: true }).click();
-  await page
-    .getByRole('tab', { name: 'presentation', exact: true })
-    .press('ArrowRight');
-  await expect(
-    page.getByRole('tab', { name: 'logic', exact: true }),
-  ).toBeFocused();
-  await page.getByRole('tab', { name: 'logic', exact: true }).press('Enter');
-  await expect(
-    page.getByRole('tab', { name: 'logic', exact: true }),
-  ).toHaveAttribute('aria-selected', 'true');
-  await page.getByRole('tab', { name: 'presentation', exact: true }).click();
-  await page.screenshot({ path: resolve(qa, 'web-desktop.png') });
-  const workspace = await checkWorkspace({
-    page,
-    origin,
-    server: api,
-    qa,
-    checkAccessibility,
-  });
-  const live = await checkLiveUpdates({ browser, origin, server: api });
-  await checkData({ browser, origin, server: api });
-  const list = await checkListAndMetadata({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const history = await checkHistory({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const duplicate = await checkDuplicate({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const exported = await checkExport({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const trash = await checkTrash({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const editor = await checkEditor({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const handoff = await checkHandoff({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const drafts = await checkDrafts({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const noLocks = await checkDraftsWithoutLocks({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const incompleteLocks = await checkIncompleteLockSnapshot({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const strictRecovery = await checkStrictDraftRecovery({
-    browser,
-    server: api,
-    checkAccessibility,
-  });
-  const runtime = await checkRuntime({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const source = await checkSource({
-    browser,
-    origin,
-    server: api,
-    checkAccessibility,
-  });
-  const staticDefault = await checkStaticDefault({
-    browser,
-    binary: serverBinary,
-  });
-  await page.getByRole('button', { name: 'Toggle color theme' }).click();
-  await checkAccessibility('dark-workspace-preview');
-  await page.getByRole('button', { name: 'Toggle color theme' }).click();
+        expectedApiFailures.push(message.text().match(/status of (\d+)/)[1]);
+      else consoleErrors.push(message.text());
+    });
+    page.on('request', (request) => {
+      const url = request.url();
+      if (
+        /^https?:/.test(url) &&
+        !url.startsWith(origin) &&
+        !url.startsWith(api.content_origin)
+      )
+        externalRequests.push(url);
+    });
+    await page.goto(origin);
+    await page.getByRole('heading', { name: /A place for what/ }).waitFor();
+    let accessibilityCases = 0;
+    for (const theme of ['light', 'dark']) {
+      if (theme === 'dark')
+        await page.getByRole('button', { name: 'Toggle color theme' }).click();
+      for (const layer of ['presentation', 'logic', 'provider', 'shared']) {
+        await page.getByRole('tab', { name: layer, exact: true }).click();
+        await expect(
+          page.getByRole('tabpanel').getByRole('article'),
+        ).toHaveCount(
+          inventory.components.filter((item) => item.layer === layer).length,
+        );
+        await checkAccessibility(`${theme}-${layer}`);
+        accessibilityCases += 1;
+      }
+      const about = page.getByRole('button', { name: 'About this foundation' });
+      await about.click();
+      const dialog = page.getByRole('dialog', { name: 'What works today' });
+      await expect(dialog).toBeVisible();
+      // Focus moves in after the dialog opens. Wait for it instead of sampling
+      // once: a single sample raced the move on a slower CI runner.
+      await expect
+        .poll(
+          () =>
+            dialog.evaluate((element) =>
+              element.contains(document.activeElement),
+            ),
+          { message: 'Dialog must receive keyboard focus.' },
+        )
+        .toBe(true);
+      await checkAccessibility(`${theme}-dialog`);
+      accessibilityCases += 1;
+      await page.keyboard.press('Escape');
+      await expect(dialog).toBeHidden();
+      await expect(about).toBeFocused();
+    }
+    await page.getByRole('button', { name: 'Toggle color theme' }).click();
+    await expect(
+      page.getByText('Build-time inventory', { exact: true }),
+    ).toBeVisible();
+    await page.getByRole('tab', { name: 'presentation', exact: true }).click();
+    await page
+      .getByRole('tab', { name: 'presentation', exact: true })
+      .press('ArrowRight');
+    await expect(
+      page.getByRole('tab', { name: 'logic', exact: true }),
+    ).toBeFocused();
+    await page.getByRole('tab', { name: 'logic', exact: true }).press('Enter');
+    await expect(
+      page.getByRole('tab', { name: 'logic', exact: true }),
+    ).toHaveAttribute('aria-selected', 'true');
+    await page.getByRole('tab', { name: 'presentation', exact: true }).click();
+    await page.screenshot({ path: resolve(qa, 'web-desktop.png') });
+    const workspace = await checkWorkspace({
+      page,
+      origin,
+      server: api,
+      qa,
+      checkAccessibility,
+    });
+    const live = await checkLiveUpdates({ browser, origin, server: api });
+    await checkData({ browser, origin, server: api });
+    const list = await checkListAndMetadata({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const history = await checkHistory({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const duplicate = await checkDuplicate({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const exported = await checkExport({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const trash = await checkTrash({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const editor = await checkEditor({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const handoff = await checkHandoff({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const drafts = await checkDrafts({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const noLocks = await checkDraftsWithoutLocks({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const incompleteLocks = await checkIncompleteLockSnapshot({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const strictRecovery = await checkStrictDraftRecovery({
+      browser,
+      server: api,
+      checkAccessibility,
+    });
+    const runtime = await checkRuntime({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const source = await checkSource({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const staticDefault = await checkStaticDefault({
+      browser,
+      binary: serverBinary,
+    });
+    await page.getByRole('button', { name: 'Toggle color theme' }).click();
+    await checkAccessibility('dark-workspace-preview');
+    await page.getByRole('button', { name: 'Toggle color theme' }).click();
 
-  await page.goto(`${origin}/architecture.html`);
-  await page.locator('[data-module="web"]').waitFor();
-  assert.equal(
-    await page.locator('[data-module]').count(),
-    inventory.components.length,
-  );
-  for (const component of inventory.components) {
-    await page.locator(`[data-module="${component.id}"]`).click();
+    await page.goto(`${origin}/architecture.html`);
+    await page.locator('[data-module="web"]').waitFor();
+    assert.equal(
+      await page.locator('[data-module]').count(),
+      inventory.components.length,
+    );
+    for (const component of inventory.components) {
+      await page.locator(`[data-module="${component.id}"]`).click();
+      assert.equal(
+        await page.locator('#inspector-content h3').innerText(),
+        component.name,
+      );
+      assert.ok(
+        (await page.locator('.source-path').getAttribute('href')).endsWith(
+          component.path,
+        ),
+      );
+      assert.equal(
+        await page.locator('[data-module][aria-pressed="true"]').count(),
+        1,
+      );
+    }
+    await page.locator('[data-module="api"]').focus();
+    await page.keyboard.press('Enter');
     assert.equal(
       await page.locator('#inspector-content h3').innerText(),
-      component.name,
+      'Application API',
     );
-    assert.ok(
-      (await page.locator('.source-path').getAttribute('href')).endsWith(
-        component.path,
-      ),
-    );
-    assert.equal(
-      await page.locator('[data-module][aria-pressed="true"]').count(),
-      1,
-    );
-  }
-  await page.locator('[data-module="api"]').focus();
-  await page.keyboard.press('Enter');
-  assert.equal(
-    await page.locator('#inspector-content h3').innerText(),
-    'Application API',
-  );
-  await page.screenshot({ path: resolve(qa, 'architecture-desktop.png') });
-  await page
-    .locator('#layers')
-    .screenshot({ path: resolve(qa, 'architecture-layers.png') });
+    await page.screenshot({ path: resolve(qa, 'architecture-desktop.png') });
+    await page
+      .locator('#layers')
+      .screenshot({ path: resolve(qa, 'architecture-layers.png') });
 
-  let deploymentCases = 0;
-  for (const mode of ['local', 'server', 'hosted']) {
-    await page.locator(`[data-mode="${mode}"]`).click();
-    for (const persistent of [true, false]) {
-      await page.locator('#persistent').setChecked(persistent, { force: true });
-      for (const access of ['direct', 'tunnel', 'private']) {
-        await page.locator('#access').selectOption(access);
-        assert.equal(
-          await page.locator('#profile-label').innerText(),
-          `${mode.toUpperCase()} / ${persistent ? 'PERSISTENT' : 'TEMPORARY'}`,
-        );
-        assert.ok(
-          (await page.locator('#profile-storage').innerText()).length > 10,
-        );
-        assert.ok(
-          (await page.locator('#profile-access').innerText()).length > 10,
-        );
-        assert.equal(
-          await page.locator('[data-mode][aria-pressed="true"]').count(),
-          1,
-        );
-        if (mode === 'hosted' && !persistent)
-          assert.ok(
-            (await page.locator('#profile-storage').innerText()).includes(
-              'TTL',
-            ),
+    let deploymentCases = 0;
+    for (const mode of ['local', 'server', 'hosted']) {
+      await page.locator(`[data-mode="${mode}"]`).click();
+      for (const persistent of [true, false]) {
+        await page
+          .locator('#persistent')
+          .setChecked(persistent, { force: true });
+        for (const access of ['direct', 'tunnel', 'private']) {
+          await page.locator('#access').selectOption(access);
+          assert.equal(
+            await page.locator('#profile-label').innerText(),
+            `${mode.toUpperCase()} / ${persistent ? 'PERSISTENT' : 'TEMPORARY'}`,
           );
-        deploymentCases += 1;
+          assert.ok(
+            (await page.locator('#profile-storage').innerText()).length > 10,
+          );
+          assert.ok(
+            (await page.locator('#profile-access').innerText()).length > 10,
+          );
+          assert.equal(
+            await page.locator('[data-mode][aria-pressed="true"]').count(),
+            1,
+          );
+          if (mode === 'hosted' && !persistent)
+            assert.ok(
+              (await page.locator('#profile-storage').innerText()).includes(
+                'TTL',
+              ),
+            );
+          deploymentCases += 1;
+        }
       }
     }
-  }
-  for (let index = 0; index < 6; index += 1) {
-    await page.locator(`[data-step="${index}"]`).click();
+    for (let index = 0; index < 6; index += 1) {
+      await page.locator(`[data-step="${index}"]`).click();
+      assert.equal(
+        await page.locator('[data-step][aria-pressed="true"]').count(),
+        1,
+      );
+      assert.ok((await page.locator('#flow-code').innerText()).length > 50);
+    }
+    await page.locator('.source-tree summary').click();
+    assert.equal(await page.locator('.tree-link').count(), 15);
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.locator('#download-html').click(),
+    ]);
+    const downloadPath = resolve(qa, 'artifree-architecture-downloaded.html');
+    await download.saveAs(downloadPath);
+    assert.equal(download.suggestedFilename(), 'artifree-architecture.html');
+    await page.goto(pathToFileURL(downloadPath).href);
+    await page.locator('[data-module="web"]').waitFor();
     assert.equal(
-      await page.locator('[data-step][aria-pressed="true"]').count(),
-      1,
+      await page.locator('[data-module]').count(),
+      inventory.components.length,
+      'Downloaded HTML must not duplicate hydrated modules.',
     );
-    assert.ok((await page.locator('#flow-code').innerText()).length > 50);
-  }
-  await page.locator('.source-tree summary').click();
-  assert.equal(await page.locator('.tree-link').count(), 15);
-  const [download] = await Promise.all([
-    page.waitForEvent('download'),
-    page.locator('#download-html').click(),
-  ]);
-  const downloadPath = resolve(qa, 'artifree-architecture-downloaded.html');
-  await download.saveAs(downloadPath);
-  assert.equal(download.suggestedFilename(), 'artifree-architecture.html');
-  await page.goto(pathToFileURL(downloadPath).href);
-  await page.locator('[data-module="web"]').waitFor();
-  assert.equal(
-    await page.locator('[data-module]').count(),
-    inventory.components.length,
-    'Downloaded HTML must not duplicate hydrated modules.',
-  );
-  assert.equal(
-    await page.locator('#profile-label').innerText(),
-    'LOCAL / PERSISTENT',
-  );
-  await page.locator('[data-module="contracts"]').click();
-  assert.equal(
-    await page.locator('#inspector-content h3').innerText(),
-    'Shared contracts',
-  );
+    assert.equal(
+      await page.locator('#profile-label').innerText(),
+      'LOCAL / PERSISTENT',
+    );
+    await page.locator('[data-module="contracts"]').click();
+    assert.equal(
+      await page.locator('#inspector-content h3').innerText(),
+      'Shared contracts',
+    );
 
-  await page.goto(`${origin}/architecture.html`);
-  for (const width of [375, 390, 768, 1440]) {
-    await page.setViewportSize({ width, height: 1000 });
+    await page.goto(`${origin}/architecture.html`);
+    for (const width of [375, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 1000 });
+      assert.ok(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth,
+        ),
+        `Architecture overflow at ${width}px.`,
+      );
+      if (width === 390)
+        await page.screenshot({ path: resolve(qa, 'architecture-mobile.png') });
+    }
+    if (browserName === 'chromium') {
+      await page.emulateMedia({ media: 'print' });
+      await page.pdf({
+        path: resolve(qa, 'architecture.pdf'),
+        format: 'A4',
+        printBackground: true,
+      });
+      await page.emulateMedia({ media: 'screen' });
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(origin);
     assert.ok(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
-      `Architecture overflow at ${width}px.`,
+      'Web shell overflow on mobile.',
     );
-    if (width === 390)
-      await page.screenshot({ path: resolve(qa, 'architecture-mobile.png') });
-  }
-  if (browserName === 'chromium') {
-    await page.emulateMedia({ media: 'print' });
-    await page.pdf({
-      path: resolve(qa, 'architecture.pdf'),
-      format: 'A4',
-      printBackground: true,
-    });
-    await page.emulateMedia({ media: 'screen' });
-  }
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(origin);
-  assert.ok(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-    'Web shell overflow on mobile.',
-  );
-  await expect(
-    page.locator('iframe[title^="Preview of"]'),
-    'A reload keeps the tab session and reopens the artifact.',
-  ).toBeVisible();
-  await page.screenshot({ path: resolve(qa, 'web-mobile.png') });
-  assert.deepEqual(pageErrors, [], 'Browser JavaScript errors.');
-  assert.deepEqual(consoleErrors, [], 'Browser console errors or warnings.');
-  // Firefox does not log failed fetch responses; Chromium logs each one.
-  if (browserName === 'chromium')
+    await expect(
+      page.locator('iframe[title^="Preview of"]'),
+      'A reload keeps the tab session and reopens the artifact.',
+    ).toBeVisible();
+    await page.screenshot({ path: resolve(qa, 'web-mobile.png') });
+    assert.deepEqual(pageErrors, [], 'Browser JavaScript errors.');
+    assert.deepEqual(consoleErrors, [], 'Browser console errors or warnings.');
+    // Firefox does not log failed fetch responses; Chromium logs each one.
+    if (browserName === 'chromium')
+      assert.deepEqual(
+        expectedApiFailures.sort(),
+        // The runtime connection rejects the token before list or stream start.
+        ['401', '409', '503', '503', '503', '503'],
+        'Only the deliberate rejected token, stale save, lost responses, and failed load may fail.',
+      );
     assert.deepEqual(
-      expectedApiFailures.sort(),
-      // The runtime connection rejects the token before list or stream start.
-      ['401', '409', '503', '503', '503', '503'],
-      'Only the deliberate rejected token, stale save, lost responses, and failed load may fail.',
+      externalRequests,
+      [],
+      'Preview must not load external resources.',
     );
-  assert.deepEqual(
-    externalRequests,
-    [],
-    'Preview must not load external resources.',
-  );
-  const result = {
-    status: 'passed',
-    browser: browserName,
-    accessibilityCases,
-    pdf: browserName === 'chromium' ? 'passed' : 'not supported by Firefox',
-    modules: inventory.components.length,
-    deploymentCases,
-    flowSteps: 6,
-    widths: [375, 390, 768, 1440],
-    downloadedHtml: 'passed',
-    workspace,
-    live,
-    list,
-    history,
-    duplicate,
-    export: exported,
-    trash,
-    editor,
-    drafts,
-    noLocks,
-    incompleteLocks,
-    strictRecovery,
-    runtime,
-    source,
-    staticDefault,
-    handoff,
-    artifactConsole,
-    expectedApiFailures,
-    pageErrors,
-    consoleErrors,
-    externalRequests,
-  };
+    result = {
+      status: 'passed',
+      browser: browserName,
+      accessibilityCases,
+      pdf: browserName === 'chromium' ? 'passed' : 'not supported by Firefox',
+      modules: inventory.components.length,
+      deploymentCases,
+      flowSteps: 6,
+      widths: [375, 390, 768, 1440],
+      downloadedHtml: 'passed',
+      workspace,
+      live,
+      list,
+      history,
+      duplicate,
+      export: exported,
+      trash,
+      editor,
+      drafts,
+      noLocks,
+      incompleteLocks,
+      strictRecovery,
+      runtime,
+      source,
+      staticDefault,
+      handoff,
+      artifactConsole,
+      expectedApiFailures,
+      pageErrors,
+      consoleErrors,
+      externalRequests,
+    };
+  }
+  result.shard = shard;
   await writeFile(
     resolve(qa, 'smoke-results.json'),
     `${JSON.stringify(result, null, 2)}\n`,
@@ -528,7 +552,7 @@ try {
   try {
     await writeFile(
       resolve(qa, 'failure.json'),
-      `${JSON.stringify({ status: 'failed', browser: browserName, message: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, null, 2)}\n`,
+      `${JSON.stringify({ status: 'failed', browser: browserName, shard, message: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, null, 2)}\n`,
     );
   } catch (reportError) {
     console.error('Could not save the browser failure report:', reportError);
