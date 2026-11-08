@@ -1707,6 +1707,22 @@ fn tool_cases(ids: &Ids) -> Vec<(&'static str, Value)> {
             "get_data",
             json!({ "artifact_id": artifact, "path": "notes" }),
         ),
+        ("list_assets", json!({ "artifact_id": artifact })),
+        (
+            "read_asset",
+            json!({ "artifact_id": artifact, "asset_id": ids.asset }),
+        ),
+        (
+            "upload_asset",
+            json!({ "artifact_id": artifact, "base_asset_version": 1,
+                    "content_type": "text/plain", "content_base64": "dGFrZW4=",
+                    "idempotency_key": "tool-asset-00001" }),
+        ),
+        (
+            "delete_asset",
+            json!({ "artifact_id": artifact, "asset_id": ids.asset,
+                    "base_asset_version": 1, "idempotency_key": "tool-asset-00002" }),
+        ),
         ("list_jobs", json!({ "artifact_id": artifact })),
         ("get_job", json!({ "job_id": ids.job })),
         (

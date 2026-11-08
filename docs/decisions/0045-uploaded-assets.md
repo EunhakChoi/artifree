@@ -4,14 +4,14 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); CLI/MCP asset commands and the remainder of R09b–R09d are proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) are implemented; CLI asset commands and the remainder of R09b–R09d are proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
-`deleteAsset` perform one explicit mutation each (R09b2). There is no CLI, MCP
-tool, grant or frame access yet. A duplicate copies the
+`deleteAsset` perform one explicit mutation each (R09b2). The MCP tools `list_assets`, `read_asset`, `upload_asset` and `delete_asset`
+exist (R09b3). There is no CLI asset command, grant or frame access yet. A duplicate copies the
 requesting actor's current asset space only when `copy_assets` is true (rule 10).
 The management web has an Assets tab (R09c: usage, upload, list,
 attachment download, delete, conflict and unknown-outcome retry), and its
@@ -87,8 +87,9 @@ R09b2 implements the TypeScript upload/delete calls (see its section below):
 each makes one request with the caller's key, requires exactly 201 or 200,
 checks the receipt against the captured request and never retries.
 Direct callers, and callers of those functions, must freeze the identical
-envelope and key themselves after an unknown outcome. CLI/MCP upload and
-delete and the unknown-outcome handling of other adapters remain R09b.
+envelope and key themselves after an unknown outcome. CLI upload and
+delete and the unknown-outcome handling of other adapters remain R09b; MCP
+has its own tools (R09b3).
 No asset change subscription is emitted. Duplicates copy assets only with the
 `copy_assets` opt-in (see "Implementation notes (copy_assets)" below); requests
 without it keep their files/data behavior and fingerprints.
@@ -700,3 +701,34 @@ conflict.
   form the request whose key is kept for an unchanged resend and replaced for
   any other (0012 decision 8). `asset_limit_exceeded` is shown with the
   panel's limit wording. A held asset attempt still disables Duplicate.
+
+## R09b3: MCP asset tools
+
+Implements the MCP half of rule 11. It adds no numbered rule and changes none.
+`list_assets`, `read_asset`, `upload_asset` and `delete_asset` call the same
+`operations` functions as the HTTP asset routes (the handlers were thinned to
+call them), so limits, base checks, key replay, receipts and error codes are
+those of rules 1-9. What rule 11 left open and this slice fixes:
+
+- `read_asset` returns `{ asset_version, asset, content_base64 }` in one
+  result: the stored bytes as strict standard padded base64, with the space's
+  `asset_version` read together with the metadata. There is no paging and no
+  separate size limit beyond the 5 MiB asset limit (about 6.7 MB of base64).
+- `upload_asset` takes `base_asset_version`, `content_type`, `content_base64`
+  and `idempotency_key`; `delete_asset` takes `asset_id`, `base_asset_version`
+  and `idempotency_key`. Neither accepts a host path or URL. Results are the
+  HTTP bodies (`replayed` included) and failures are the HTTP error bodies with
+  `isError: true`. An unknown or foreign artifact or asset, or one in the trash,
+  is `not_found`.
+- The two write tools are destructive (`destructiveHint`) and idempotent; the
+  tool catalog gets the effect `asset`, whose mutating tools must require
+  `idempotency_key`. The two read tools are read-only.
+- Asset writes emit no change-feed event, as over HTTP; MCP has no asset
+  subscription. Assets remain unreadable by a preview (R09d is not started).
+
+Verification: the shared operations keep the existing HTTP asset tests green;
+`crates/artifree-server/tests/mcp_adapter.rs` and `scripts/tests/mcp.test.mjs`
+exercise the tools against the real server (round trip, same-key replay, stale
+base, rejections, isolation between users, HTTP/MCP byte parity, tool hints),
+with mutation checks for the base-version guard and the returned bytes. The
+CLI `asset` commands remain proposed.

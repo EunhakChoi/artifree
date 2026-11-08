@@ -22,6 +22,8 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -110,9 +112,14 @@ impl Harness {
 
     /// Calls a tool and returns the JSON-RPC result.
     async fn call(&self, name: &str, arguments: Value) -> Result<Value, TestError> {
+        self.call_as(TOKEN, name, arguments).await
+    }
+
+    /// Calls a tool with `token` and returns the JSON-RPC result.
+    async fn call_as(&self, token: &str, name: &str, arguments: Value) -> Result<Value, TestError> {
         let (status, body) = self
             .post(rpc(
-                Some(TOKEN),
+                Some(token),
                 &json!({
                     "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                     "params": { "name": name, "arguments": arguments }
@@ -122,6 +129,56 @@ impl Harness {
         assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let reply: Value = serde_json::from_slice(&body)?;
         Ok(reply["result"].clone())
+    }
+
+    /// Sends a request with the owner's token to the HTTP API; returns the
+    /// status and the body.
+    async fn owner_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(StatusCode, Vec<u8>), TestError> {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        let request = match body {
+            Some(body) => request.body(Body::from(body.to_string()))?,
+            None => request.body(Body::empty())?,
+        };
+        self.post(request).await
+    }
+
+    /// Registers a user as the owner would, and returns a token that acts as
+    /// that user.
+    async fn user_token(&self, label: &str) -> Result<String, TestError> {
+        let (status, body) = self
+            .owner_request("POST", "/v1/users", Some(json!({ "label": label })))
+            .await?;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let user: Value = serde_json::from_slice(&body)?;
+        let (status, body) = self
+            .owner_request(
+                "POST",
+                "/v1/tokens",
+                Some(json!({ "name": label, "user_id": user["id"] })),
+            )
+            .await?;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let issued: Value = serde_json::from_slice(&body)?;
+        Ok(issued["secret"].as_str().ok_or("secret")?.to_owned())
     }
 }
 
@@ -913,10 +970,11 @@ async fn data_requests_that_cannot_be_served_get_the_http_error_codes() -> TestR
     Ok(())
 }
 
-/// Only the tools that overwrite data without keeping it are marked
-/// destructive; the rest of the catalog keeps its hints.
+/// Only the writes that replace or remove data or assets without keeping the
+/// earlier state are marked destructive: the data writes and the asset writes,
+/// and no other tool. The data tools also say so in their own hints.
 #[tokio::test]
-async fn the_data_tools_say_what_they_change() -> TestResult {
+async fn only_data_and_asset_writes_are_destructive() -> TestResult {
     let harness = Harness::new();
     let (_, body) = harness.post(rpc(Some(TOKEN), &list_tools())?).await?;
     let listed: Value = serde_json::from_slice(&body)?;
@@ -942,7 +1000,16 @@ async fn the_data_tools_say_what_they_change() -> TestResult {
         .filter(|tool| tool["annotations"]["destructiveHint"] == true)
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert_eq!(destructive, ["set_data", "update_data", "delete_data"]);
+    assert_eq!(
+        destructive,
+        [
+            "set_data",
+            "update_data",
+            "delete_data",
+            "upload_asset",
+            "delete_asset"
+        ]
+    );
     Ok(())
 }
 
@@ -1076,7 +1143,7 @@ async fn duplicate_artifact_copies_assets_only_when_asked() -> TestResult {
         .as_str()
         .ok_or("artifact")?
         .to_owned();
-    // No MCP asset tool exists yet; the upload goes through the same service.
+    // The upload goes through the service, which the MCP asset tools also call.
     let service = ArtifactService::new(SqliteStore::open(&harness.database)?);
     let actor: ActorId = parsed("local");
     let uploaded = service.upload_asset(
@@ -1206,5 +1273,523 @@ async fn data_tools_refuse_text_that_is_not_data_without_panicking() -> TestResu
             .await?;
         assert_eq!(result["isError"], false, "{text}: {result}");
     }
+    Ok(())
+}
+
+/// The bytes of the round-trip upload, and their SHA-256 digest as `sha256sum`
+/// prints it. The digest comes from outside this crate, so the check does not
+/// trust the server's own hashing.
+const ROUND_TRIP: &[u8] = "round trip: 한글\r\n".as_bytes();
+const ROUND_TRIP_SHA256: &str = "ac5c78c73a01e13e1d7705aeb76418c297d85ca8730434548177ba7e818d09cc";
+
+/// The asset ID that an upload result names.
+fn uploaded_asset_id(upload: &Value) -> Result<String, TestError> {
+    Ok(upload["structuredContent"]["asset"]["id"]
+        .as_str()
+        .ok_or("asset id")?
+        .to_owned())
+}
+
+/// Creates an artifact for the owner and returns its ID.
+async fn new_artifact(harness: &Harness, key: &str) -> Result<String, TestError> {
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Assets", "idempotency_key": key,
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    assert_eq!(created["isError"], false, "{created}");
+    Ok(created["structuredContent"]["artifact"]["id"]
+        .as_str()
+        .ok_or("artifact id")?
+        .to_owned())
+}
+
+/// Uploads `bytes` as `text/plain` and returns the tool result.
+async fn upload_text(
+    harness: &Harness,
+    artifact: &str,
+    base: u64,
+    key: &str,
+    bytes: &[u8],
+) -> Result<Value, TestError> {
+    harness
+        .call(
+            "upload_asset",
+            json!({
+                "artifact_id": artifact, "base_asset_version": base,
+                "content_type": "text/plain", "content_base64": STANDARD.encode(bytes),
+                "idempotency_key": key
+            }),
+        )
+        .await
+}
+
+async fn list_assets(harness: &Harness, artifact: &str) -> Result<Value, TestError> {
+    harness
+        .call("list_assets", json!({ "artifact_id": artifact }))
+        .await
+}
+
+async fn read_asset(harness: &Harness, artifact: &str, asset: &str) -> Result<Value, TestError> {
+    harness
+        .call(
+            "read_asset",
+            json!({ "artifact_id": artifact, "asset_id": asset }),
+        )
+        .await
+}
+
+async fn delete_asset(
+    harness: &Harness,
+    artifact: &str,
+    asset: &str,
+    base: u64,
+    key: &str,
+) -> Result<Value, TestError> {
+    harness
+        .call(
+            "delete_asset",
+            json!({
+                "artifact_id": artifact, "asset_id": asset,
+                "base_asset_version": base, "idempotency_key": key
+            }),
+        )
+        .await
+}
+
+/// Reads are read-only and not destructive; uploads and deletes are destructive
+/// and idempotent. Every write needs a base version and a retry key.
+#[tokio::test]
+async fn the_asset_tools_say_what_they_change() -> TestResult {
+    let harness = Harness::new();
+    let (_, body) = harness.post(rpc(Some(TOKEN), &list_tools())?).await?;
+    let listed: Value = serde_json::from_slice(&body)?;
+    let tools = listed["result"]["tools"].as_array().ok_or("tools")?;
+    for (name, read_only, required) in [
+        ("list_assets", true, vec!["artifact_id"]),
+        ("read_asset", true, vec!["artifact_id", "asset_id"]),
+        (
+            "upload_asset",
+            false,
+            vec![
+                "artifact_id",
+                "base_asset_version",
+                "content_base64",
+                "content_type",
+                "idempotency_key",
+            ],
+        ),
+        (
+            "delete_asset",
+            false,
+            vec![
+                "artifact_id",
+                "asset_id",
+                "base_asset_version",
+                "idempotency_key",
+            ],
+        ),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .ok_or_else(|| format!("{name} is not offered"))?;
+        let hints = &tool["annotations"];
+        assert_eq!(hints["readOnlyHint"], read_only, "{name}");
+        assert_eq!(hints["destructiveHint"], !read_only, "{name}");
+        assert_eq!(hints["idempotentHint"], true, "{name}");
+        assert_eq!(hints["openWorldHint"], false, "{name}");
+        let mut declared: Vec<&str> = tool["inputSchema"]["required"]
+            .as_array()
+            .ok_or("required")?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        declared.sort_unstable();
+        assert_eq!(declared, required, "{name}");
+    }
+    Ok(())
+}
+
+/// An upload is listed and read back byte for byte, and a delete made with the
+/// version the upload left removes it.
+#[tokio::test]
+async fn agents_upload_list_read_and_delete_an_asset() -> TestResult {
+    let harness = Harness::new();
+    let artifact = new_artifact(&harness, "asset-create-1").await?;
+    let empty = list_assets(&harness, &artifact).await?;
+    assert_eq!(
+        empty["structuredContent"],
+        json!({
+            "asset_version": 0, "assets": [], "bytes": 0,
+            "max_assets": 64, "max_bytes": 26_214_400
+        }),
+        "{empty}"
+    );
+
+    let uploaded = upload_text(&harness, &artifact, 0, "asset-upload-1", ROUND_TRIP).await?;
+    assert_eq!(uploaded["isError"], false, "{uploaded}");
+    let receipt = &uploaded["structuredContent"];
+    assert_eq!(receipt["asset_version"], 1, "{uploaded}");
+    assert_eq!(receipt["replayed"], false, "{uploaded}");
+    assert_eq!(receipt["asset"]["content_type"], "text/plain", "{uploaded}");
+    assert_eq!(
+        receipt["asset"]["size_bytes"],
+        ROUND_TRIP.len(),
+        "{uploaded}"
+    );
+    assert_eq!(receipt["asset"]["sha256"], ROUND_TRIP_SHA256, "{uploaded}");
+    let asset = uploaded_asset_id(&uploaded)?;
+
+    let listed = list_assets(&harness, &artifact).await?;
+    assert_eq!(listed["structuredContent"]["asset_version"], 1, "{listed}");
+    assert_eq!(
+        listed["structuredContent"]["bytes"],
+        ROUND_TRIP.len(),
+        "{listed}"
+    );
+    assert_eq!(
+        listed["structuredContent"]["assets"],
+        json!([receipt["asset"]]),
+        "{listed}"
+    );
+
+    let read = read_asset(&harness, &artifact, &asset).await?;
+    assert_eq!(read["isError"], false, "{read}");
+    assert_eq!(read["structuredContent"]["asset_version"], 1, "{read}");
+    assert_eq!(
+        read["structuredContent"]["asset"], receipt["asset"],
+        "{read}"
+    );
+    assert_eq!(
+        read["structuredContent"]["content_base64"],
+        STANDARD.encode(ROUND_TRIP),
+        "read_asset must return the stored bytes"
+    );
+
+    let removed = delete_asset(&harness, &artifact, &asset, 1, "asset-delete-1").await?;
+    assert_eq!(removed["isError"], false, "{removed}");
+    assert_eq!(
+        removed["structuredContent"],
+        json!({ "asset_id": asset, "asset_version": 2, "deleted": true, "replayed": false }),
+        "{removed}"
+    );
+    let gone = read_asset(&harness, &artifact, &asset).await?;
+    assert_eq!(error_code(&gone), "not_found", "{gone}");
+    let after = list_assets(&harness, &artifact).await?;
+    assert_eq!(after["structuredContent"]["asset_version"], 2, "{after}");
+    assert_eq!(after["structuredContent"]["assets"], json!([]), "{after}");
+    Ok(())
+}
+
+/// A same-key resend replays the first receipt even after the space moved on,
+/// and creates no second asset.
+#[tokio::test]
+async fn a_same_key_upload_replays_its_receipt_after_the_space_moves_on() -> TestResult {
+    let harness = Harness::new();
+    let artifact = new_artifact(&harness, "asset-create-2").await?;
+    let first = upload_text(&harness, &artifact, 0, "asset-upload-2", b"first\n").await?;
+    assert_eq!(first["isError"], false, "{first}");
+    // Another upload and its deletion move the version to 3 and leave one asset.
+    let other = upload_text(&harness, &artifact, 1, "asset-upload-3", b"other\n").await?;
+    assert_eq!(other["structuredContent"]["asset_version"], 2, "{other}");
+    let other_asset = uploaded_asset_id(&other)?;
+    let removed = delete_asset(&harness, &artifact, &other_asset, 2, "asset-delete-2").await?;
+    assert_eq!(
+        removed["structuredContent"]["asset_version"], 3,
+        "{removed}"
+    );
+
+    // The same request as before, with its original base, which is no longer current.
+    let replay = upload_text(&harness, &artifact, 0, "asset-upload-2", b"first\n").await?;
+    assert_eq!(replay["isError"], false, "{replay}");
+    assert_eq!(replay["structuredContent"]["replayed"], true, "{replay}");
+    assert_eq!(replay["structuredContent"]["asset_version"], 1, "{replay}");
+    assert_eq!(
+        replay["structuredContent"]["asset"], first["structuredContent"]["asset"],
+        "{replay}"
+    );
+    let listed = list_assets(&harness, &artifact).await?;
+    assert_eq!(listed["structuredContent"]["asset_version"], 3, "{listed}");
+    assert_eq!(
+        listed["structuredContent"]["assets"],
+        json!([first["structuredContent"]["asset"]]),
+        "{listed}"
+    );
+    Ok(())
+}
+
+/// A replayed upload does not bring back an asset that was deleted: the receipt
+/// replays, reads are `not_found`, and deleting it again changes nothing.
+#[tokio::test]
+async fn a_replayed_upload_does_not_recreate_a_deleted_asset() -> TestResult {
+    let harness = Harness::new();
+    let artifact = new_artifact(&harness, "asset-create-3").await?;
+    let first = upload_text(&harness, &artifact, 0, "asset-upload-4", b"gone\n").await?;
+    assert_eq!(first["isError"], false, "{first}");
+    let asset = uploaded_asset_id(&first)?;
+    let removed = delete_asset(&harness, &artifact, &asset, 1, "asset-delete-3").await?;
+    assert_eq!(removed["structuredContent"]["deleted"], true, "{removed}");
+
+    let replay = upload_text(&harness, &artifact, 0, "asset-upload-4", b"gone\n").await?;
+    assert_eq!(replay["isError"], false, "{replay}");
+    assert_eq!(replay["structuredContent"]["replayed"], true, "{replay}");
+    assert_eq!(
+        replay["structuredContent"]["asset"]["id"], asset,
+        "{replay}"
+    );
+    let gone = read_asset(&harness, &artifact, &asset).await?;
+    assert_eq!(error_code(&gone), "not_found", "{gone}");
+    let listed = list_assets(&harness, &artifact).await?;
+    assert_eq!(listed["structuredContent"]["asset_version"], 2, "{listed}");
+    assert_eq!(listed["structuredContent"]["assets"], json!([]), "{listed}");
+
+    let again = delete_asset(&harness, &artifact, &asset, 2, "asset-delete-4").await?;
+    assert_eq!(again["structuredContent"]["deleted"], false, "{again}");
+    assert_eq!(again["structuredContent"]["asset_version"], 2, "{again}");
+    Ok(())
+}
+
+/// A stale base is refused with the current version and writes nothing. The
+/// same key then still works with the current base, so the refusal consumed
+/// nothing.
+#[tokio::test]
+async fn a_stale_base_is_a_conflict_that_writes_nothing() -> TestResult {
+    let harness = Harness::new();
+    let artifact = new_artifact(&harness, "asset-create-4").await?;
+    let kept = upload_text(&harness, &artifact, 0, "asset-upload-5", b"kept\n").await?;
+    assert_eq!(kept["isError"], false, "{kept}");
+    let asset = uploaded_asset_id(&kept)?;
+    let before = list_assets(&harness, &artifact).await?;
+
+    // The space is at version 1; both writes were prepared against version 0.
+    let stale = upload_text(&harness, &artifact, 0, "asset-upload-6", b"stale\n").await?;
+    assert_eq!(error_code(&stale), "asset_conflict", "{stale}");
+    assert_eq!(
+        stale["structuredContent"]["error"]["current_asset_version"], 1,
+        "{stale}"
+    );
+    let stale_delete = delete_asset(&harness, &artifact, &asset, 0, "asset-delete-5").await?;
+    assert_eq!(
+        error_code(&stale_delete),
+        "asset_conflict",
+        "{stale_delete}"
+    );
+    assert_eq!(
+        stale_delete["structuredContent"]["error"]["current_asset_version"], 1,
+        "{stale_delete}"
+    );
+
+    let after = list_assets(&harness, &artifact).await?;
+    assert_eq!(
+        after["structuredContent"], before["structuredContent"],
+        "{after}"
+    );
+    let read = read_asset(&harness, &artifact, &asset).await?;
+    assert_eq!(read["isError"], false, "{read}");
+
+    let current = upload_text(&harness, &artifact, 1, "asset-upload-6", b"stale\n").await?;
+    assert_eq!(current["isError"], false, "{current}");
+    assert_eq!(
+        current["structuredContent"]["asset_version"], 2,
+        "{current}"
+    );
+    assert_eq!(current["structuredContent"]["replayed"], false, "{current}");
+    Ok(())
+}
+
+/// Refused uploads answer with their codes and change nothing. None of them
+/// consumes its key, and a different request under a used key is refused.
+#[tokio::test]
+async fn refused_uploads_answer_with_their_codes_and_change_nothing() -> TestResult {
+    let harness = Harness::new();
+    let artifact = new_artifact(&harness, "asset-create-5").await?;
+    let key = "asset-refused-1";
+    let over_limit = vec![b'a'; 5 * 1024 * 1024 + 1];
+    for (what, content_type, content, code) in [
+        (
+            "an image",
+            "image/png",
+            STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+            "asset_type_unsupported",
+        ),
+        ("empty text", "text/plain", String::new(), "invalid_asset"),
+        (
+            "invalid UTF-8",
+            "text/plain",
+            STANDARD.encode([0xff]),
+            "invalid_asset",
+        ),
+        (
+            "a NUL byte",
+            "text/csv",
+            STANDARD.encode(b"a\0b"),
+            "invalid_asset",
+        ),
+        (
+            "unpadded base64",
+            "text/plain",
+            "YQ".to_owned(),
+            "invalid_request",
+        ),
+        (
+            "5 MiB plus one byte",
+            "text/plain",
+            STANDARD.encode(&over_limit),
+            "asset_limit_exceeded",
+        ),
+    ] {
+        let refused = harness
+            .call(
+                "upload_asset",
+                json!({
+                    "artifact_id": artifact, "base_asset_version": 0,
+                    "content_type": content_type, "content_base64": content,
+                    "idempotency_key": key
+                }),
+            )
+            .await?;
+        assert_eq!(error_code(&refused), code, "{what}: {refused}");
+        let listed = list_assets(&harness, &artifact).await?;
+        assert_eq!(
+            listed["structuredContent"]["asset_version"], 0,
+            "{what}: {listed}"
+        );
+        assert_eq!(
+            listed["structuredContent"]["assets"],
+            json!([]),
+            "{what}: {listed}"
+        );
+    }
+
+    let stored = upload_text(&harness, &artifact, 0, key, b"valid\n").await?;
+    assert_eq!(stored["isError"], false, "{stored}");
+    assert_eq!(stored["structuredContent"]["replayed"], false, "{stored}");
+    let reused = upload_text(&harness, &artifact, 1, key, b"other\n").await?;
+    assert_eq!(error_code(&reused), "request_key_reused", "{reused}");
+    let listed = list_assets(&harness, &artifact).await?;
+    assert_eq!(listed["structuredContent"]["asset_version"], 1, "{listed}");
+    assert_eq!(
+        listed["structuredContent"]["assets"],
+        json!([stored["structuredContent"]["asset"]]),
+        "{listed}"
+    );
+    Ok(())
+}
+
+/// Another user's token reaches none of this user's assets, and an artifact in
+/// the trash reaches none of them through any tool.
+#[tokio::test]
+async fn other_users_and_the_trash_reach_no_asset() -> TestResult {
+    let harness = Harness::new();
+    let artifact = new_artifact(&harness, "asset-create-6").await?;
+    let kept = upload_text(&harness, &artifact, 0, "asset-upload-7", b"mine\n").await?;
+    assert_eq!(kept["isError"], false, "{kept}");
+    let asset = uploaded_asset_id(&kept)?;
+    let before = list_assets(&harness, &artifact).await?;
+    // Every write carries the current base, so a refusal can only be about access.
+    let calls = |artifact_id: &str, asset_id: &str| -> [(&'static str, Value); 4] {
+        [
+            ("list_assets", json!({ "artifact_id": artifact_id })),
+            (
+                "read_asset",
+                json!({ "artifact_id": artifact_id, "asset_id": asset_id }),
+            ),
+            (
+                "upload_asset",
+                json!({
+                    "artifact_id": artifact_id, "base_asset_version": 1,
+                    "content_type": "text/plain", "content_base64": STANDARD.encode(b"theirs\n"),
+                    "idempotency_key": "asset-probe-1"
+                }),
+            ),
+            (
+                "delete_asset",
+                json!({
+                    "artifact_id": artifact_id, "asset_id": asset_id,
+                    "base_asset_version": 1, "idempotency_key": "asset-probe-2"
+                }),
+            ),
+        ]
+    };
+
+    let other = harness.user_token("someone").await?;
+    for (tool, arguments) in calls(&artifact, &asset) {
+        let result = harness.call_as(&other, tool, arguments).await?;
+        assert_eq!(
+            error_code(&result),
+            "not_found",
+            "another user's {tool}: {result}"
+        );
+    }
+    let after = list_assets(&harness, &artifact).await?;
+    assert_eq!(
+        after["structuredContent"], before["structuredContent"],
+        "{after}"
+    );
+
+    let trashed = harness
+        .call(
+            "update_artifact",
+            json!({
+                "artifact_id": artifact, "base_metadata_revision": 1, "deleted": true,
+                "idempotency_key": "asset-trash-1"
+            }),
+        )
+        .await?;
+    assert_eq!(trashed["isError"], false, "{trashed}");
+    for (tool, arguments) in calls(&artifact, &asset) {
+        let result = harness.call(tool, arguments).await?;
+        assert_eq!(error_code(&result), "not_found", "trashed {tool}: {result}");
+    }
+    Ok(())
+}
+
+/// Over HTTP and over MCP, one asset has the same bytes and the same digest.
+#[tokio::test]
+async fn http_and_mcp_read_the_same_asset() -> TestResult {
+    let harness = Harness::new();
+    let artifact = new_artifact(&harness, "asset-create-7").await?;
+    let uploaded = upload_text(&harness, &artifact, 0, "asset-upload-8", ROUND_TRIP).await?;
+    assert_eq!(uploaded["isError"], false, "{uploaded}");
+    let asset = uploaded_asset_id(&uploaded)?;
+    let mcp = read_asset(&harness, &artifact, &asset).await?;
+    let mcp_bytes = STANDARD.decode(
+        mcp["structuredContent"]["content_base64"]
+            .as_str()
+            .ok_or("content_base64")?,
+    )?;
+
+    let path = format!("/v1/artifacts/{artifact}/assets/{asset}");
+    let content = harness
+        .api
+        .clone()
+        .oneshot(
+            Request::get(format!("{path}/content"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(content.status(), StatusCode::OK);
+    let http_bytes = to_bytes(content.into_body(), usize::MAX).await?;
+    let (status, body) = harness.owner_request("GET", &path, None).await?;
+    assert_eq!(status, StatusCode::OK);
+    let metadata: Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(&http_bytes[..], ROUND_TRIP, "HTTP content");
+    assert_eq!(mcp_bytes, ROUND_TRIP, "MCP content");
+    assert_eq!(
+        metadata["asset"]["sha256"], ROUND_TRIP_SHA256,
+        "HTTP metadata"
+    );
+    assert_eq!(
+        mcp["structuredContent"]["asset"]["sha256"], ROUND_TRIP_SHA256,
+        "MCP metadata"
+    );
+    assert_eq!(metadata["asset"], mcp["structuredContent"]["asset"]);
     Ok(())
 }

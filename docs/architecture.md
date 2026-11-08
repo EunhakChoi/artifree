@@ -183,8 +183,8 @@ admitted. PNG and JPEG uploads are `asset_type_unsupported` until complete
 validation satisfies decision 0045, rule 3; no image decoder ships. Historical
 MIME metadata and matching receipts remain readable/replayable before current
 admission policy. Reads are authenticated scoped attachments with
-no-store/nosniff; there is no public URL, client/CLI/MCP operation, asset copy
-or frame access. The [content policy](asset-validation.md) records these limits.
+no-store/nosniff; there is no public URL, CLI asset operation or frame access (the client calls,
+the MCP tools and the duplicate asset copy exist). The [content policy](asset-validation.md) records these limits.
 SQLite schema 12 keeps immutable bytes, independent versions, receipts and
 logical quotas in the same database as source files. Source and asset
 associations both protect shared blobs from purge and cleanup.
@@ -217,7 +217,7 @@ delays, and stops on other failures.
 `POST /mcp` serves MCP Streamable HTTP through the official Rust SDK, `rmcp`,
 statelessly and with JSON responses, for protocol versions up to 2026-07-28.
 It requires the same bearer token, accepts only loopback `Host` names, and
-refuses requests carrying an `Origin`. Twenty-three tools are served. Twelve
+refuses requests carrying an `Origin`. Twenty-seven tools are served. Twelve
 mirror the artifact HTTP routes: `list_artifacts`, `get_artifact`,
 `create_artifact`, `save_revision`, `edit_files`, `restore_revision`, `duplicate_artifact`,
 `update_artifact`, `list_revisions`, `get_revision`, `read_file`, and
@@ -226,7 +226,10 @@ mirror the artifact HTTP routes: `list_artifacts`, `get_artifact`,
 Four mirror the application data routes: `get_data`, `set_data`, `update_data`,
 and `delete_data` ([0031](decisions/0031-app-data.md)); the three that write
 take their value as JSON text and are marked destructive, since nothing keeps
-what they replace. Results
+what they replace. Four mirror the asset routes: `list_assets`, `read_asset`,
+`upload_asset`, and `delete_asset` ([0045](decisions/0045-uploaded-assets.md)); uploads
+and deletes are marked destructive, and bytes travel as base64, never a host
+path. Results
 are the HTTP API v1 bodies; failures are those error bodies with
 `isError: true`. MCP requests share the per-actor request limits with HTTP;
 a refused call is an HTTP `429`. The generated catalog is
