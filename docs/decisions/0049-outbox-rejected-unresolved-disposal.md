@@ -1,5 +1,9 @@
 # 0049: Scheduler-owned rejected disposal and unresolved abandonment
 
+> Browser engines: Firefox is suspended in CI until the planned feature set is
+> complete. A Firefox acceptance below is met in Chromium and reported as pending
+> re-verification ([quality](../quality.md#browser-engines)).
+
 Date: 2026-11-07. Status: **accepted by the R08c-3a code pull request;
 implemented in the internal scheduler** (`discardRejected` by R08c-3a, the
 internal `abandonUnresolved` by R08c-3b). Builds on

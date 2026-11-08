@@ -98,7 +98,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, firefox]
+        # Firefox is suspended until the planned feature set is complete; see
+        # docs/quality.md "Browser engines". The scripts still accept
+        # ARTIFREE_BROWSER=firefox for local runs.
+        browser: [chromium]
     env:
       ARTIFREE_BROWSER: ${{ matrix.browser }}
       # Relative to the checkout; github.workspace is a host path in containers.

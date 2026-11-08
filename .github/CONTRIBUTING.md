@@ -45,19 +45,19 @@ Run focused tests while developing, then the applicable full checks. See the
 are written and how heavy commands are isolated is in
 [testing practice](../docs/testing-practice.md).
 
-For web UI or standalone HTML changes, run the real-server smoke suite in both
-engines. If browser binaries are absent, install them through the locked local
-Playwright package:
+For web UI or standalone HTML changes, run the real-server smoke suite in
+Chromium. Firefox is suspended in CI until the planned feature set is complete
+(see [quality](../docs/quality.md#browser-engines)). If browser binaries are
+absent, install them through the locked local Playwright package:
 
 ```sh
-npx --no-install playwright install chromium firefox
+npx --no-install playwright install chromium
 npm run test:smoke
-ARTIFREE_BROWSER=firefox npm run test:smoke
 ```
 
-In PowerShell, replace the last line with `$env:ARTIFREE_BROWSER = 'firefox'`
-followed by `npm run test:smoke`. Afterwards, use
-`Remove-Item Env:ARTIFREE_BROWSER` to return to the default engine.
+To run Firefox locally anyway, install `firefox` the same way and set
+`ARTIFREE_BROWSER=firefox` (in PowerShell, `$env:ARTIFREE_BROWSER = 'firefox'`,
+then `Remove-Item Env:ARTIFREE_BROWSER` afterwards).
 
 Rust and Rust dependency changes must also pass the minimum-version check.
 These are the same installation and test commands as the `msrv` CI job:

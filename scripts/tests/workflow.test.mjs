@@ -29,7 +29,13 @@ test('Browser container user matches the GitHub-mounted home owner', () => {
   assert.match(
     workflow.jobs.browsers.container.options,
     /(?:^|\s)--user\s+1001(?:\s|$)/,
-    'Firefox requires the process user to own the mounted home directory.',
+    'Firefox requires the process user to own the mounted home directory; keep it for when Firefox returns.',
+  );
+});
+test('Browser jobs run Chromium while Firefox is suspended', () => {
+  assert.ok(
+    workflow.jobs.browsers.strategy.matrix.browser.includes('chromium'),
+    'docs/quality.md "Browser engines": CI must keep Chromium.',
   );
 });
 test('An unpinned action is rejected', () => {

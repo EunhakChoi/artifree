@@ -50,6 +50,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-assets.mjs check-ci "$GITHUB_SHA"
+      - name: Firefox is back in the CI browser matrix
+        if: ${{ github.ref_type == 'tag' }}
+        # docs/quality.md "Browser engines": Firefox is suspended in CI until the
+        # feature set is complete and must return before the first release.
+        run: |
+          grep -Eq '^\s*browser: \[[^]]*firefox' .github/workflows/ci.yml
 
   build:
     name: Archive (${{ matrix.target }})
