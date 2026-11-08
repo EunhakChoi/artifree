@@ -1,5 +1,9 @@
 # Outbox disposal and empty preparation-gate retirement
 
+> Browser engines: Firefox is suspended in CI until the planned feature set is
+> complete. A Firefox acceptance below is met in Chromium and reported as pending
+> re-verification ([quality](../quality.md#browser-engines)).
+
 Status: **Accepted contract; implementation pending.** Acceptance takes effect
 when this separate documentation-only approval change is reviewed and merged.
 It accepts the additive contract below for a subsequent implementation PR;

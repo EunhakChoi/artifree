@@ -1,5 +1,9 @@
 # 0040: Data changes in the feed and a member listing
 
+> Browser engines: Firefox is suspended in CI until the planned feature set is
+> complete. A Firefox acceptance below is met in Chromium and reported as pending
+> re-verification ([quality](../quality.md#browser-engines)).
+
 Date: 2026-11-04. Status: accepted. Builds on [0006](0006-change-feed.md),
 [0007](0007-live-web-workspace.md),
 [0027](0027-backup-restore-and-schema-upgrade.md), [0031](0031-app-data.md),

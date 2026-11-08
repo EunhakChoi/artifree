@@ -1,5 +1,9 @@
 # 0045: Uploaded assets scoped to a user and artifact
 
+> Browser engines: Firefox is suspended in CI until the planned feature set is
+> complete. A Firefox acceptance below is met in Chromium and reported as pending
+> re-verification ([quality](../quality.md#browser-engines)).
+
 Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls and R09b2 the bounded upload/delete client calls; the remainder of R09b–R09d is proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image

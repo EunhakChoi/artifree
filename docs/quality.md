@@ -49,6 +49,9 @@ CI matrix and every Firefox-specific acceptance is re-run at once. Until then:
 - The scripts keep `ARTIFREE_BROWSER=firefox`, so a change that touches
   engine-specific APIs (IndexedDB, Web Locks, downloads, printing) can still
   be run in Firefox locally when its author wants to.
+- Re-adding Firefox to the CI matrix and passing it is a precondition of the
+  first public release (O03c). The release workflow refuses a tag while
+  `ci.yml` has no Firefox entry in its browser matrix.
 
 ## Checks must be capable of failing
 
@@ -285,8 +288,8 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   the workspace dependency. A real storage read held across a generation
   replacement must refuse its late result. The client refuses malformed or mismatched view
   and metadata responses. The current server has one local actor.
-  `scripts/smoke-runtime.mjs` runs Chromium and
-  Firefox against a real server and sandboxed frame: metadata reaches the
+  `scripts/smoke-runtime.mjs` runs Chromium (and
+  Firefox, suspended in CI; see Browser engines) against a real server and sandboxed frame: metadata reaches the
   frame without the account token, a wrong initialization and a different
   opaque window are refused, an expired host message sends no RPC, and a
   successful response held across frame navigation is not delivered afterwards.
@@ -318,7 +321,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   without a leaked pending slot; and drive the host's token bucket, offer gate
   (delay, trust, one at a time, cooldown, every withdrawal leaving no timer or
   listener), call parser, pending cap and object-URL lifetime on an injected
-  clock. `scripts/smoke-source.mjs` runs Chromium and Firefox: the bytes a frame
+  clock. `scripts/smoke-source.mjs` runs Chromium (Firefox suspended in CI): the bytes a frame
   read and the files the browser saved (a non-ASCII text, a binary file, the
   archive) are compared by digest with the stored bytes; no grant, a decline's
   cooldown, and a page whose snapshot still says "granted" after the server
@@ -346,7 +349,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   each field, and one for other bytes with a correct digest of its own; run
   hostile save arguments, a platform without `crypto.subtle`, the retry rule held
   to the client's, the schema bounds, and the route's class. `scripts/smoke-source.mjs`
-  saves from a frame in Chromium and Firefox: the stored bytes and digest of the
+  saves from a frame in Chromium (Firefox suspended in CI): the stored bytes and digest of the
   new revision equal what the frame sent, the refusals make no revision, and the
   next view starts without the grant. These tests do not show roles (there are
   none), that a preview cannot use the network, or anything about MCP.
@@ -393,7 +396,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   polling, acknowledgement, a missing source followed by another delivery,
   the created resource's Location, and retrying a confirmed send after source
   deletion. Rust tests check concurrent cancel and poll, a source lookup held
-  across logout, and send or cancellation while a source check fails. Chromium and Firefox exercise the source editor, trusted
+  across logout, and send or cancellation while a source check fails. Chromium (Firefox suspended in CI) exercises the source editor, trusted
   user actions, an unconfirmed send retried with the same ID, cancellation,
   receipt-only status, and the dialog's accessibility. A closed connection
   while listing inboxes is replaced in Source; a close before stage requires

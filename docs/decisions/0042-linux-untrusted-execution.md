@@ -1,5 +1,9 @@
 # 0042: Linux untrusted execution limits
 
+> Browser engines: Firefox is suspended in CI until the planned feature set is
+> complete. A Firefox acceptance below is met in Chromium and reported as pending
+> re-verification ([quality](../quality.md#browser-engines)).
+
 Date: 2026-11-06. Status: **proposed boundary; partial read-only inspection
 implemented, no untrusted execution**. Roadmap: R02.
 Builds on [0030](0030-persistent-jobs-and-worker.md),
