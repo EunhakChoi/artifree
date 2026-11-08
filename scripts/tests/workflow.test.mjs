@@ -210,22 +210,29 @@ test('Each cargo-nextest install writes its version once, and both platforms agr
   assert.match(windows, comment, 'Document the Windows version link.');
 });
 
-test(
-  '.config/nextest.toml declares the cargo-nextest version that CI installs',
-  {
-    skip: existsSync(NEXTEST_TOML)
-      ? false
-      : 'pending: .config/nextest.toml does not exist yet',
-  },
-  async () => {
-    const toml = await readFile(NEXTEST_TOML, 'utf8');
-    assert.equal(
-      /^\s*nextest-version\s*=\s*"([^"]+)"/m.exec(toml)?.[1],
-      LINUX_VERSION.exec(checksStep(LINUX_NEXTEST).run)?.[1],
-      'The CI install and .config/nextest.toml must pin the same cargo-nextest version.',
-    );
-  },
-);
+test('.config/nextest.toml declares the cargo-nextest version that both CI installs pin', async () => {
+  assert.ok(
+    existsSync(NEXTEST_TOML),
+    'The repository must contain .config/nextest.toml, which declares the cargo-nextest version CI installs.',
+  );
+  const toml = await readFile(NEXTEST_TOML, 'utf8');
+  const tomlVersion = /^\s*nextest-version\s*=\s*"([^"]+)"/m.exec(toml)?.[1];
+  assert.match(
+    tomlVersion ?? '',
+    /^\d+\.\d+\.\d+$/,
+    '.config/nextest.toml must declare nextest-version as an exact version.',
+  );
+  assert.equal(
+    tomlVersion,
+    LINUX_VERSION.exec(checksStep(LINUX_NEXTEST).run)?.[1],
+    'The Linux cargo-nextest install must pin the version in .config/nextest.toml.',
+  );
+  assert.equal(
+    tomlVersion,
+    WINDOWS_VERSION.exec(checksStep(WINDOWS_NEXTEST).run)?.[1],
+    'The Windows cargo-nextest install must pin the version in .config/nextest.toml.',
+  );
+});
 
 test('Every job that runs the Rust checks installs cargo-nextest', () => {
   const missing = Object.entries(workflow.jobs)

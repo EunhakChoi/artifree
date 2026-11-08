@@ -6,4 +6,5 @@ nextest-version = "0.9.149"
 [profile.default]
 # A test running past 120 s is reported as slow, and is terminated after five such periods (10 min).
 slow-timeout = { period = "120s", terminate-after = 5 }
-fail-fast = false
+# Fail-fast is not set here. scripts/check-rust.mjs passes --no-fail-fast, so the gate runs every test
+# even after one fails. A bare `cargo nextest run` uses nextest's default and stops at the first failure.

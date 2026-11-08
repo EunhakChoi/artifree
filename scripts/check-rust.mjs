@@ -15,16 +15,33 @@ function pinnedNextestVersion() {
   return version;
 }
 
-// The tests run only under cargo-nextest. A missing install stops the gate; it never falls back to cargo test.
-const probe = spawnSync('cargo', ['nextest', '--version'], { stdio: 'ignore' });
-if (probe.error) throw probe.error;
+// The tests run only under cargo-nextest. The probe runs first, so a missing or broken install fails before the
+// minutes-long clippy step. It never falls back to cargo test.
+const probe = spawnSync('cargo', ['nextest', '--version'], {
+  encoding: 'utf8',
+});
+if (probe.error) {
+  process.stderr.write(
+    `Could not run \`cargo nextest --version\`: ${probe.error.message}\n`,
+  );
+  process.exit(1);
+}
 if (probe.status !== 0) {
   const version = pinnedNextestVersion();
-  process.stderr.write(
-    `cargo-nextest ${version} is required to run the Rust tests, and it is not installed.\n` +
-      `Install the pinned version: cargo install cargo-nextest --version ${version} --locked\n` +
-      'CI installs the same release archive from https://github.com/nextest-rs/nextest/releases.\n',
-  );
+  const outcome = probe.signal
+    ? `killed by ${probe.signal}`
+    : `exit code ${probe.status}`;
+  // Show the probe's own output, so a failure other than a missing install is not hidden.
+  const probeOutput = [probe.stdout, probe.stderr]
+    .map((text) => text.trim())
+    .filter((text) => text !== '');
+  const lines = [
+    `cargo-nextest ${version} is required to run the Rust tests, and \`cargo nextest --version\` failed (${outcome}).`,
+    ...probeOutput,
+    `Install the pinned version: cargo install cargo-nextest --version ${version} --locked`,
+    'CI installs the same release archive from https://github.com/nextest-rs/nextest/releases.',
+  ];
+  process.stderr.write(`${lines.join('\n')}\n`);
   process.exit(1);
 }
 
@@ -41,6 +58,8 @@ const commands = [
     '-D',
     'warnings',
   ],
+  // --no-fail-fast runs every test even after one fails, so one run reports all failures. The gate sets
+  // fail-fast here, not in .config/nextest.toml.
   [
     'nextest',
     'run',
