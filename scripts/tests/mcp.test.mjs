@@ -609,13 +609,63 @@ test('tools/list serves the generated catalog in both protocol eras', async () =
         assert.deepEqual(tool.outputSchema, expected.outputSchema);
         assert.deepEqual(tool.annotations, {
           readOnlyHint: expected.effect === 'read',
-          destructiveHint: expected.effect === 'data',
+          destructiveHint: ['data', 'asset'].includes(expected.effect),
           idempotentHint: !['issue_link', 'issue_session'].includes(
             expected.effect,
           ),
           openWorldHint: false,
         });
       }
+      // The destructive tools, written out rather than derived from effects.
+      assert.deepEqual(
+        tools
+          .filter((tool) => tool.annotations.destructiveHint)
+          .map((tool) => tool.name),
+        [
+          'set_data',
+          'update_data',
+          'delete_data',
+          'upload_asset',
+          'delete_asset',
+        ],
+      );
+      const byName = new Map(tools.map((tool) => [tool.name, tool]));
+      for (const name of ['list_assets', 'read_asset']) {
+        assert.deepEqual(byName.get(name).annotations, {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        });
+      }
+      for (const name of ['upload_asset', 'delete_asset']) {
+        assert.deepEqual(byName.get(name).annotations, {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: false,
+        });
+      }
+      // Mutating asset tools require the retry key.
+      assert.deepEqual(
+        new Set(byName.get('upload_asset').inputSchema.required),
+        new Set([
+          'artifact_id',
+          'base_asset_version',
+          'content_type',
+          'content_base64',
+          'idempotency_key',
+        ]),
+      );
+      assert.deepEqual(
+        new Set(byName.get('delete_asset').inputSchema.required),
+        new Set([
+          'artifact_id',
+          'asset_id',
+          'base_asset_version',
+          'idempotency_key',
+        ]),
+      );
     }, era);
   }
 });
@@ -935,6 +985,128 @@ test('Data tools conform to the contract, share HTTP semantics, and take values 
         assert.ok(validate(result), JSON.stringify(validate.errors));
     }, era);
   }
+});
+
+test('An agent uploads, reads, retries, and deletes an asset; HTTP serves its bytes', async () => {
+  const text = 'Zoë 😀\r\nline two\n';
+  const bytes = Buffer.from(text);
+  const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff];
+  // The limits of one asset space, as the domain defines them (decision 0045).
+  const space = { max_assets: 64, max_bytes: 25 * 1024 * 1024 };
+  await withClient(async (client) => {
+    const created = await ok(client, 'create_artifact', {
+      title: 'Asset agent',
+      files: [utf8('index.html', '<p>assets</p>')],
+      idempotency_key: freshKey(),
+    });
+    const artifact_id = created.artifact.id;
+    const empty = await ok(client, 'list_assets', { artifact_id });
+    assert.deepEqual(empty, {
+      asset_version: 0,
+      assets: [],
+      bytes: 0,
+      ...space,
+    });
+
+    const upload = {
+      artifact_id,
+      base_asset_version: empty.asset_version,
+      content_type: 'text/plain',
+      content_base64: bytes.toString('base64'),
+      idempotency_key: freshKey(),
+    };
+    const stored = await ok(client, 'upload_asset', upload);
+    assert.equal(stored.replayed, false);
+    assert.equal(stored.asset_version, 1);
+    assert.match(stored.asset.id, /^[0-9a-f]{64}$/);
+    assert.equal(stored.asset.content_type, 'text/plain');
+    assert.equal(stored.asset.size_bytes, bytes.length);
+    assert.equal(
+      stored.asset.sha256,
+      createHash('sha256').update(bytes).digest('hex'),
+    );
+    const listed = {
+      asset_version: 1,
+      assets: [stored.asset],
+      bytes: bytes.length,
+      ...space,
+    };
+    assert.deepEqual(await ok(client, 'list_assets', { artifact_id }), listed);
+
+    // A retry after a lost response replays the first result and adds no asset.
+    const retried = await ok(client, 'upload_asset', upload);
+    assert.equal(retried.replayed, true);
+    assert.deepEqual({ ...retried, replayed: false }, stored);
+    assert.deepEqual(await ok(client, 'list_assets', { artifact_id }), listed);
+
+    // A refused upload writes nothing.
+    const stale = await refused(
+      client,
+      'upload_asset',
+      {
+        ...upload,
+        content_base64: Buffer.from('other').toString('base64'),
+        idempotency_key: freshKey(),
+      },
+      'asset_conflict',
+    );
+    assert.equal(stale.current_asset_version, 1);
+    await refused(
+      client,
+      'upload_asset',
+      {
+        artifact_id,
+        base_asset_version: listed.asset_version,
+        content_type: 'image/png',
+        content_base64: Buffer.from(png).toString('base64'),
+        idempotency_key: freshKey(),
+      },
+      'asset_type_unsupported',
+    );
+    assert.deepEqual(await ok(client, 'list_assets', { artifact_id }), listed);
+
+    // MCP and the HTTP content route return the same stored bytes.
+    const read = await ok(client, 'read_asset', {
+      artifact_id,
+      asset_id: stored.asset.id,
+    });
+    assert.deepEqual(read, {
+      asset_version: 1,
+      asset: stored.asset,
+      content_base64: bytes.toString('base64'),
+    });
+    const content = await fetch(
+      `${server.api_url}/v1/artifacts/${artifact_id}/assets/${stored.asset.id}/content`,
+      { headers: { authorization: `Bearer ${server.token}` } },
+    );
+    assert.equal(content.status, 200);
+    assert.deepEqual(Buffer.from(await content.arrayBuffer()), bytes);
+
+    const deleted = await ok(client, 'delete_asset', {
+      artifact_id,
+      asset_id: stored.asset.id,
+      base_asset_version: listed.asset_version,
+      idempotency_key: freshKey(),
+    });
+    assert.deepEqual(deleted, {
+      asset_id: stored.asset.id,
+      asset_version: 2,
+      deleted: true,
+      replayed: false,
+    });
+    await refused(
+      client,
+      'read_asset',
+      { artifact_id, asset_id: stored.asset.id },
+      'not_found',
+    );
+    assert.deepEqual(await ok(client, 'list_assets', { artifact_id }), {
+      asset_version: 2,
+      assets: [],
+      bytes: 0,
+      ...space,
+    });
+  });
 });
 
 test('Retries replay, a reused key is refused, and keys are shared with HTTP', async () => {

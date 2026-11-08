@@ -5,25 +5,28 @@
 //! error semantics; only the framing differs.
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, CancelJobResponse,
-    CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
-    CreateRuntimeViewRequest, DataMembers, DataWriteResponse, DeleteDataRequest,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
-    EnqueueJobResponse, ErrorBody, ErrorCode, ExportRuntime, FileChange as WireChange,
-    FileEdit as WireEdit, FileUpload, Handoff, HandoffState, Job as WireJob,
-    JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult,
-    JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
-    Preview, PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
-    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
-    Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
-    RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, Asset, AssetList,
+    CancelJobResponse, CommitResponse, ConflictingFile, ContentEncoding, CopiedPart,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
+    DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
+    ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
+    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
+    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
+    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
+    PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentRequest,
+    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
+    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
     SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
+    UploadAssetResponse,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
     ArtifactError, ArtifactService, CopyParts, MetadataChange, Missing, RevisionExport,
 };
+use artifree_core::assets::AssetUpload;
 use artifree_core::data::DataMutation;
 use artifree_core::jobs::JobPageSize;
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
@@ -31,6 +34,10 @@ use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberTo
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
+use artifree_domain::assets::{
+    AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion, MAX_ASSET_BYTES,
+    MAX_SPACE_ASSETS, MAX_SPACE_BYTES,
+};
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, Title, TokenId};
 use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
@@ -42,6 +49,7 @@ use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
     ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
+use artifree_ports::asset_store::{AssetContent, AssetStoreError};
 use artifree_ports::data_store::OutboxFence;
 use artifree_ports::job_store::JobRecord;
 use artifree_providers::archive::{self, ArchiveEntry};
@@ -236,6 +244,48 @@ impl From<ArtifactError> for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::Internal,
                 message,
+            ),
+        }
+    }
+}
+
+/// The contract error of a refused asset command. Any other storage failure
+/// is unavailable, and its message says to retry with the same key.
+impl From<AssetStoreError> for ApiError {
+    fn from(error: AssetStoreError) -> Self {
+        let message = error.to_string();
+        match error {
+            AssetStoreError::NotFound => {
+                Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
+            }
+            AssetStoreError::RequestKeyReused => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::RequestKeyReused,
+                message,
+            ),
+            AssetStoreError::Conflict { current } => {
+                let mut conflict =
+                    Self::new(StatusCode::CONFLICT, ErrorCode::AssetConflict, message);
+                conflict.body.current_asset_version = Some(current.0);
+                conflict
+            }
+            AssetStoreError::SourceConflict { current } => {
+                let mut conflict =
+                    Self::new(StatusCode::CONFLICT, ErrorCode::RevisionConflict, message);
+                conflict.body.current_revision = Some(current.0);
+                conflict
+            }
+            AssetStoreError::Rejected(reason) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                match reason {
+                    AssetRejection::UnsupportedType => ErrorCode::AssetTypeUnsupported,
+                    AssetRejection::LimitExceeded => ErrorCode::AssetLimitExceeded,
+                    _ => ErrorCode::InvalidAsset,
+                },
+                message,
+            ),
+            _ => Self::unavailable(
+                "asset storage unavailable; retry an identical mutation with the same key",
             ),
         }
     }
@@ -1423,6 +1473,14 @@ pub(crate) fn job_id(value: &str) -> Result<JobId, ApiError> {
         .map_err(|_| ApiError::not_found("job not found"))
 }
 
+/// Parses an asset identifier. One that cannot name an asset is not found, as
+/// for an artifact, and is not quoted back.
+pub(crate) fn asset_id(value: &str) -> Result<AssetId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::not_found("asset not found"))
+}
+
 pub(crate) async fn enqueue_job(
     state: &AppState,
     actor: ActorId,
@@ -1738,6 +1796,148 @@ async fn write_data(
         changed: outcome.changed,
         replayed: outcome.delivery == Delivery::Replayed,
     })
+}
+
+/// Lists the assets of an artifact, with the space's version and totals.
+pub(crate) async fn list_assets(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+) -> Result<AssetList, ApiError> {
+    let artifact = artifact_id(id)?;
+    let snapshot = state
+        .run_assets(move |service| service.assets(&actor, &artifact))
+        .await?;
+    Ok(AssetList {
+        asset_version: snapshot.version.0,
+        assets: snapshot.assets.iter().map(asset_dto).collect(),
+        bytes: snapshot.bytes,
+        max_assets: MAX_SPACE_ASSETS,
+        max_bytes: MAX_SPACE_BYTES,
+    })
+}
+
+/// Uploads an asset under the retry key `key`. The base64 text is bounded
+/// before it is decoded, and the decoded bytes are bounded before the store
+/// sees them. The response is marked replayed when an earlier upload with the
+/// same key is answered again.
+pub(crate) async fn upload_asset(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    request: UploadAssetRequest,
+) -> Result<UploadAssetResponse, ApiError> {
+    let artifact = artifact_id(id)?;
+    let base = base(request.base_asset_version)?;
+    let media: AssetMediaType = request
+        .content_type
+        .parse()
+        .map_err(|error| ApiError::invalid(format!("content_type: {error}")))?;
+    // Bound before allocation; STANDARD refuses URL-safe alphabets, missing padding,
+    // noncanonical trailing bits and whitespace. Empty input belongs to content policy.
+    let max_encoded = MAX_ASSET_BYTES.div_ceil(3) * 4;
+    if request.content_base64.len() > max_encoded {
+        return Err(ApiError::from(AssetStoreError::Rejected(
+            AssetRejection::LimitExceeded,
+        )));
+    }
+    let bytes = BASE64
+        .decode(&request.content_base64)
+        .map_err(|_| ApiError::invalid("content_base64 must be strict standard base64"))?;
+    if bytes.len() > MAX_ASSET_BYTES {
+        return Err(ApiError::from(AssetStoreError::Rejected(
+            AssetRejection::LimitExceeded,
+        )));
+    }
+    let now = state.clock().now();
+    let receipt = state
+        .run_assets(move |service| {
+            service.upload_asset(
+                &actor,
+                &key,
+                &artifact,
+                AssetUpload {
+                    base,
+                    content_type: &media,
+                    bytes: &bytes,
+                    now,
+                },
+            )
+        })
+        .await?;
+    let metadata = receipt
+        .uploaded
+        .ok_or_else(|| ApiError::unavailable("upload receipt has no metadata"))?;
+    Ok(UploadAssetResponse {
+        asset_version: receipt.version.0,
+        asset: asset_dto(&metadata),
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+/// Reads one asset of an artifact: its metadata and exact bytes, with the
+/// version of the space they were read at.
+pub(crate) async fn asset_content(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    asset: &str,
+) -> Result<AssetContent, ApiError> {
+    let artifact = artifact_id(id)?;
+    let asset = asset_id(asset)?;
+    Ok(state
+        .run_assets(move |service| service.asset_content(&actor, &artifact, &asset))
+        .await?)
+}
+
+/// Deletes the association of an asset with an artifact under the retry key
+/// `key`. The response is marked replayed when an earlier delete with the same
+/// key is answered again.
+pub(crate) async fn delete_asset(
+    state: &AppState,
+    actor: ActorId,
+    key: RequestKey,
+    id: &str,
+    asset: &str,
+    request: DeleteAssetRequest,
+) -> Result<DeleteAssetResponse, ApiError> {
+    let artifact = artifact_id(id)?;
+    let asset = asset_id(asset)?;
+    let base = base(request.base_asset_version)?;
+    let now = state.clock().now();
+    let receipt = state
+        .run_assets(move |service| service.delete_asset(&actor, &key, &artifact, base, &asset, now))
+        .await?;
+    Ok(DeleteAssetResponse {
+        asset_id: receipt.id.as_str().to_owned(),
+        asset_version: receipt.version.0,
+        deleted: receipt.deleted,
+        replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+/// The wire form of an asset's metadata.
+pub(crate) fn asset_dto(metadata: &AssetMetadata) -> Asset {
+    let sha256 = hex(&metadata.digest);
+    Asset {
+        id: metadata.id.as_str().to_owned(),
+        content_type: metadata.content_type.as_str().to_owned(),
+        size_bytes: metadata.size,
+        sha256,
+        created_at_ms: metadata.created_at.0,
+    }
+}
+
+/// Reads an asset base version. It must be a safe integer, at most 2^53 - 1,
+/// so that a double-precision client holds it exactly.
+fn base(value: u64) -> Result<AssetVersion, ApiError> {
+    if value > MAX_SAFE_INTEGER {
+        return Err(ApiError::invalid(
+            "base_asset_version must be a safe unsigned integer",
+        ));
+    }
+    Ok(AssetVersion(value))
 }
 
 fn job_dto(record: &JobRecord) -> WireJob {

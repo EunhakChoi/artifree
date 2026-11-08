@@ -56,6 +56,7 @@ export function checkMcpCatalog(catalog) {
         'handoff',
         'job',
         'data',
+        'asset',
       ].includes(tool.effect),
       `${tool.name}: unknown effect ${tool.effect}`,
     );
@@ -85,7 +86,8 @@ export function checkMcpCatalog(catalog) {
     if (
       tool.effect === 'commit' ||
       tool.effect === 'job' ||
-      tool.effect === 'data'
+      tool.effect === 'data' ||
+      tool.effect === 'asset'
     )
       assert.ok(
         tool.inputSchema.required?.includes('idempotency_key'),

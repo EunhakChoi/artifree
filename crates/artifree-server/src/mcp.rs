@@ -14,19 +14,20 @@ use std::sync::Arc;
 
 use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
-    CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest, DeleteDataRequest,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
-    EnqueueJobResponse, ErrorResponse, JsonValue, ListArtifactsQuery, ListJobsQuery,
-    RestoreRevisionRequest, SaveRevisionRequest, SetDataRequest, UpdateArtifactRequest,
-    UpdateArtifactResponse, UpdateDataRequest,
+    CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest, DeleteAssetRequest,
+    DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
+    EnqueueJobRequest, EnqueueJobResponse, ErrorResponse, JsonValue, ListArtifactsQuery,
+    ListJobsQuery, RestoreRevisionRequest, SaveRevisionRequest, SetDataRequest,
+    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
 };
 use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, CancelJobArguments,
-    CreateArtifactArguments, DeleteDataArguments, DuplicateArtifactArguments, EditFilesArguments,
-    EnqueueJobArguments, FileArguments, FileContent, GetDataArguments, JobArguments,
-    ListJobsArguments, PollHandoffArguments, RegisterHandoffSessionArguments,
-    RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments, SetDataArguments,
-    ToolDefinition, UpdateArtifactArguments, UpdateDataArguments,
+    CreateArtifactArguments, DeleteAssetArguments, DeleteDataArguments, DuplicateArtifactArguments,
+    EditFilesArguments, EnqueueJobArguments, FileArguments, FileContent, GetDataArguments,
+    JobArguments, ListAssetsArguments, ListJobsArguments, PollHandoffArguments, ReadAssetArguments,
+    ReadAssetResponse, RegisterHandoffSessionArguments, RestoreRevisionArguments,
+    RevisionArguments, SaveRevisionArguments, SetDataArguments, ToolDefinition,
+    UpdateArtifactArguments, UpdateDataArguments, UploadAssetArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
@@ -335,7 +336,7 @@ async fn dispatch_data(
             })
             .await
         }
-        _ => return dispatch_handoffs(state, actor, generation, name, arguments).await,
+        _ => return dispatch_assets(state, actor, generation, name, arguments).await,
     };
     Some(outcome)
 }
@@ -381,6 +382,64 @@ async fn dispatch_jobs(
         }
         "cancel_job" => json(cancel_job(state, actor, arguments)).await,
         _ => return dispatch_data(state, actor, generation, name, arguments).await,
+    };
+    Some(outcome)
+}
+
+/// Routes the uploaded asset tools (decision 0045): the same operations as the
+/// asset routes of HTTP, so keys, access, errors, and the asset and quota limits are the
+/// same. The transport bound is MCP's own 36 MiB request limit (decision 0005), not the
+/// 8 MiB body cap of the HTTP asset routes.
+async fn dispatch_assets(
+    state: &AppState,
+    actor: ActorId,
+    generation: StateGeneration,
+    name: &str,
+    arguments: Value,
+) -> Option<Result<Value, ApiError>> {
+    let outcome = match name {
+        "list_assets" => {
+            json(async {
+                let ListAssetsArguments { artifact_id } = parse(arguments)?;
+                operations::list_assets(state, actor, &artifact_id).await
+            })
+            .await
+        }
+        "read_asset" => json(read_asset(state, actor, arguments)).await,
+        "upload_asset" => {
+            json(async {
+                let UploadAssetArguments {
+                    artifact_id,
+                    base_asset_version,
+                    content_type,
+                    content_base64,
+                    idempotency_key,
+                } = parse(arguments)?;
+                let key = operations::request_key("idempotency_key", &idempotency_key)?;
+                let request = UploadAssetRequest {
+                    base_asset_version,
+                    content_type,
+                    content_base64,
+                };
+                operations::upload_asset(state, actor, key, &artifact_id, request).await
+            })
+            .await
+        }
+        "delete_asset" => {
+            json(async {
+                let DeleteAssetArguments {
+                    artifact_id,
+                    asset_id,
+                    base_asset_version,
+                    idempotency_key,
+                } = parse(arguments)?;
+                let key = operations::request_key("idempotency_key", &idempotency_key)?;
+                let request = DeleteAssetRequest { base_asset_version };
+                operations::delete_asset(state, actor, key, &artifact_id, &asset_id, request).await
+            })
+            .await
+        }
+        _ => return dispatch_handoffs(state, actor, generation, name, arguments).await,
     };
     Some(outcome)
 }
@@ -640,6 +699,26 @@ async fn read_file(
         next_offset,
         encoding,
         content,
+    })
+}
+
+/// Reads one asset: its metadata, the space's version, and its exact bytes. The
+/// bytes travel as standard padded base64, the form `upload_asset` accepts, so
+/// a read returns exactly the stored bytes.
+async fn read_asset(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<ReadAssetResponse, ApiError> {
+    let ReadAssetArguments {
+        artifact_id,
+        asset_id,
+    } = parse(arguments)?;
+    let content = operations::asset_content(state, actor, &artifact_id, &asset_id).await?;
+    Ok(ReadAssetResponse {
+        asset_version: content.version.0,
+        asset: operations::asset_dto(&content.metadata),
+        content_base64: BASE64.encode(&content.bytes),
     })
 }
 

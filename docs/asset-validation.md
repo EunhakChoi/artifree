@@ -35,5 +35,5 @@ quota, retry and lifecycle tests remain part of this text-only partial slice.
 Generated HTTP DTOs and read-only TypeScript client calls (`listAssets`,
 `getAsset`, `readAsset`) exist. The client checks bounded metadata and content
 responses, MIME, size and digest; it does not decode images or broaden upload
-admission. Upload/delete client calls, CLI, MCP, copying, management UI and
-frame capabilities remain R09b–R09d work.
+admission. The upload/delete client calls, the MCP asset tools, copying and the management
+UI exist; the CLI asset commands and frame capabilities remain R09b–R09d work.
