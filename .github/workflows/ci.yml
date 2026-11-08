@@ -45,6 +45,41 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install pinned cargo-nextest (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Must match nextest-version in .config/nextest.toml.
+          nextest_version=0.9.149
+          nextest_sha256=32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770
+          nextest_asset="cargo-nextest-${nextest_version}-x86_64-unknown-linux-gnu.tar.gz"
+          nextest_archive="$RUNNER_TEMP/$nextest_asset"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$nextest_archive" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${nextest_version}/$nextest_asset"
+          echo "$nextest_sha256  $nextest_archive" | sha256sum -c -
+          mkdir -p "$HOME/.cargo/bin"
+          tar -xzf "$nextest_archive" -C "$HOME/.cargo/bin" cargo-nextest
+          cargo nextest --version
+      - name: Install pinned cargo-nextest (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          # Must match nextest-version in .config/nextest.toml.
+          $nextestVersion = '0.9.149'
+          $nextestSha256 = 'bf904b85c7c5c2a29c340053a8d9d8e8027ff0d55a2bf7cef7d23032f8166438'
+          $nextestAsset = "cargo-nextest-$nextestVersion-x86_64-pc-windows-msvc.zip"
+          $nextestArchive = Join-Path $env:RUNNER_TEMP $nextestAsset
+          Invoke-WebRequest -Uri "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$nextestVersion/$nextestAsset" -OutFile $nextestArchive
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $nextestArchive).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $nextestSha256) { throw "cargo-nextest archive checksum mismatch: $actualSha256" }
+          $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+          New-Item -ItemType Directory -Force -Path $cargoBin | Out-Null
+          Expand-Archive -LiteralPath $nextestArchive -DestinationPath $cargoBin -Force
+          cargo nextest --version
       - run: npm ci
       - run: npm run check
       - run: npm run build

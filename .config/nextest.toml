@@ -1,0 +1,9 @@
+# cargo-nextest configuration for `npm run check:rust` and CI.
+# A bare version is a minimum that nextest enforces: an older release refuses to run.
+# The pinned download in .github/workflows/ci.yml must use the version below.
+nextest-version = "0.9.149"
+
+[profile.default]
+# A test running past 120 s is reported as slow, and is terminated after five such periods (10 min).
+slow-timeout = { period = "120s", terminate-after = 5 }
+fail-fast = false

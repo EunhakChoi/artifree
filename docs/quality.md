@@ -686,8 +686,17 @@ CI runs the gate/build on Ubuntu 24.04 with Node 22.12.0 and Windows Server 2025
 with Node 22.22.2. Runner OS labels are fixed instead of following a moving
 `latest` image. GitHub actions run on their supported Node 24 runtime; that is
 separate from the application Node versions under test.
-Another job runs Cargo tests on Rust 1.88.0; regular checks use the pinned Rust
-toolchain. Rust/CLI JSON equivalence and all CLI rejection cases run in the
+Another job runs Cargo tests on Rust 1.88.0 with plain `cargo test`; regular
+checks use the pinned Rust toolchain. `npm run check:rust` runs the Rust tests
+with cargo-nextest (pinned in `.config/nextest.toml`, installed by the `checks`
+job from a release archive whose SHA-256 is verified, on Linux and Windows) and
+then the doctests, because nextest does not run them. nextest runs the test
+binaries in parallel, which cut the Rust test step from about 59 s to 16 s on a
+16-CPU sandbox. A test with a wall-clock budget that fails only when the runner
+is busy gets `threads-required` in that file, after it is shown to fail or slow
+down under load; none needed it when this was measured. The version in
+`.config/nextest.toml` is a minimum and must match the install step in
+`.github/workflows/ci.yml`. Rust/CLI JSON equivalence and all CLI rejection cases run in the
 general gate. Browser jobs use the official Playwright image, pinned by version
 and OCI digest, with browsers and system libraries already installed. They save
 screenshots, a JSON result, and a trace under `.artifree/qa/<browser>-<shard>/`
