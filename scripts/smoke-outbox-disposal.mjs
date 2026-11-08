@@ -4327,6 +4327,15 @@ async function checkUnresolvedDisposal(harness, page, mode) {
           );
         });
         const before = await page.evaluate(() => unresolvedLedger());
+        // A local preparation sets the one-use proof, and the pump clears it only
+        // when it starts a run. Aggregate exhaustion pauses the lane before that
+        // run, so the pause keeps the proof. This sets the field directly for the
+        // stored head instead of replaying that route (this head was dispatched
+        // earlier). The commit below deletes the head.
+        await page.evaluate(async () => {
+          const [head] = await store.lane(unresolvedKey('c'));
+          unresolvedLane('c').preparedWithoutDispatch = head;
+        });
         const outcome = await page.evaluate(() =>
           unresolvedTransactions(() => scheduler.abandonUnresolved(choice)),
         );
@@ -4377,6 +4386,15 @@ async function checkUnresolvedDisposal(harness, page, mode) {
             fresh: true,
           },
           'one lane-scope survivor pause with a fresh resume token',
+        );
+        // The commit deleted the head that the one-use proof names, so the lane
+        // that the survivors keep must not carry that proof into a later run.
+        assert.equal(
+          await page.evaluate(
+            () => unresolvedLane('c').preparedWithoutDispatch === undefined,
+          ),
+          true,
+          'the surviving lane drops the one-use proof of the deleted head',
         );
         assert.equal(
           await page.evaluate(() =>
@@ -5478,8 +5496,13 @@ async function checkUnresolvedDisposal(harness, page, mode) {
       }
       case 'unresolved-late-response': {
         // The committed receipt is held past the 60 s attempt deadline. The
-        // deadline aborts the attempt, so after the lane is abandoned the late
-        // body must not recreate rows, write an ACK or dispatch anything.
+        // deadline aborts the attempt's fetch and the body reader stops on that
+        // abort, so the held bytes never reach receipt parsing (ADR 0049 rule
+        // 14). Releasing them after abandonment must leave the ledger
+        // unchanged: no row, ACK, successor or request. This case proves only
+        // the abort path. The lane-identity check for a late kernel callback is
+        // covered by unresolved-kernel-identity, which withdraws identity while
+        // the body is held.
         harness.configure('body_hold');
         const arrival = harness.waitRequest();
         await page.evaluate((tag) => unresolvedStart(tag), '4');
@@ -5518,7 +5541,17 @@ async function checkUnresolvedDisposal(harness, page, mode) {
         });
         const before = await page.evaluate(() => unresolvedLedger());
         const requests = harness.requests().length;
-        harness.releaseHeld();
+        // Resolves once the held response has closed on the server: after the
+        // rest of the body was written, or at once because the client aborted.
+        await harness.releaseHeld();
+        // Let the page finish what it started. The pump settles first, then a
+        // few macrotasks let queued callbacks run before the ledger is read.
+        await page.evaluate(async () => {
+          await scheduler.activeTask;
+          for (let turn = 0; turn < 5; turn += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        });
         const after = await page.evaluate(() => unresolvedLedger());
         assert.equal(laneRowsOf(after.storage.rows, '4').length, 0);
         assert.deepEqual(after.storage.receipts, before.storage.receipts);

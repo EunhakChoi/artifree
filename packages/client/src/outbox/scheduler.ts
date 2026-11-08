@@ -215,24 +215,20 @@ interface CleanupActionContext extends Action {
   readonly wakeMark: object;
 }
 
-interface RejectedActionContext extends Action {
-  readonly mode: 'online' | 'offline';
-  readonly authority: SchedulerCleanupAuthority;
-  readonly snapshotState: CleanupSnapshot;
-  readonly gatePause: BlockedPause;
-  readonly wakeMark: object;
-  readonly proof: RejectionProof;
-  readonly failures: number;
-}
-
-/** Binds the cleanup fields for an unresolved head, which carries no rejection proof. */
-interface UnresolvedActionContext extends Action {
+/** Cleanup fields that a settled head's disposal binds; see checkActionBinding. */
+interface SettledHeadContext extends Action {
   readonly mode: 'online' | 'offline';
   readonly authority: SchedulerCleanupAuthority;
   readonly snapshotState: CleanupSnapshot;
   readonly gatePause: Pause;
   readonly wakeMark: object;
   readonly failures: number;
+}
+
+/** A rejected head narrows the gate to its blocked pause and carries its proof. */
+interface RejectedActionContext extends SettledHeadContext {
+  readonly gatePause: BlockedPause;
+  readonly proof: RejectionProof;
 }
 
 /** The fields every cleanup action context binds; see checkActionBinding. */
@@ -450,7 +446,7 @@ export class DeliveryScheduler {
   > = { tokens: new WeakMap(), pending: new WeakMap() };
   private readonly unresolved: Actions<
     UnresolvedAbandonSelection,
-    UnresolvedActionContext,
+    SettledHeadContext,
     AbandonedUnknownResult
   > = { tokens: new WeakMap(), pending: new WeakMap() };
   private aggregateFailures = 0;
@@ -666,7 +662,6 @@ export class DeliveryScheduler {
       if (
         lane === undefined ||
         lane.rejection !== undefined ||
-        lane.pause === undefined ||
         !this.settled(lane) ||
         !unresolvedPause(lane.pause) ||
         state.kind !== 'intents' ||
@@ -675,7 +670,7 @@ export class DeliveryScheduler {
       )
         throw new OutboxError('invalid_selection');
       this.retireCleanupChoices(lane);
-      const context: UnresolvedActionContext = {
+      const context: SettledHeadContext = {
         lane,
         snapshot: state.signature,
         snapshotState: state,
@@ -850,9 +845,7 @@ export class DeliveryScheduler {
           const disposal = await this.cleanupSignal(authority, (signal) =>
             this.store.abandonUnresolvedSnapshot(
               snapshot,
-              () => {
-                this.checkUnresolvedContext(context);
-              },
+              () => this.checkUnresolvedContext(context),
               signal,
             ),
           );
@@ -914,7 +907,7 @@ export class DeliveryScheduler {
       throw new OutboxError('invalid_selection');
   }
 
-  private checkUnresolvedContext(context: UnresolvedActionContext): Lane {
+  private checkUnresolvedContext(context: SettledHeadContext): void {
     const lane = this.checkActionBinding(context);
     if (
       lane.rejection !== undefined ||
@@ -923,7 +916,6 @@ export class DeliveryScheduler {
       !this.settled(lane)
     )
       throw new OutboxError('invalid_selection');
-    return lane;
   }
 
   private retireCleanupLane(lane: Lane): void {
@@ -948,6 +940,10 @@ export class DeliveryScheduler {
     survivors: readonly IntentRow[],
   ): void {
     const lane = context.lane;
+    // The committed closure deleted the head that this one-use proof names
+    // (ADR 0049, Context), so no later run may receive it. Drop it before any
+    // publication check; the commit result does not depend on this step.
+    delete lane.preparedWithoutDispatch;
     try {
       this.checkCleanupProof(authority, lane.key);
       if (this.lanes.get(JSON.stringify(lane.key)) !== lane)
@@ -1133,7 +1129,7 @@ export class DeliveryScheduler {
 
   // A blocked lane is settled only when no delivery, timer or queue entry can
   // still change its pause or rows.
-  private settled(lane: Lane): boolean {
+  private settled(lane: Lane): lane is Lane & { readonly pause: Pause } {
     return (
       lane.pause !== undefined &&
       this.activeLane !== lane &&
@@ -1453,7 +1449,10 @@ export class DeliveryScheduler {
         continue;
       }
       lane.queued = false;
-      if (this.lanes.get(JSON.stringify(lane.key)) !== lane) continue;
+      // The lane key is never mutated after creation, so one id serves every
+      // identity check in this iteration.
+      const id = JSON.stringify(lane.key);
+      if (this.lanes.get(id) !== lane) continue;
       // wake() can have queued this lane while its previous HTTP was active.
       // Eligibility may have changed after that wake, before this dequeue.
       if (lane.pause !== undefined || lane.cancelTimer !== undefined) continue;
@@ -1469,17 +1468,16 @@ export class DeliveryScheduler {
         const locallyPrepared = lane.preparedWithoutDispatch;
         delete lane.preparedWithoutDispatch;
         // The kernel rechecks lane identity before each ACK, trim and prepare.
+        // The fence check runs first, so this decides only lane identity.
         result = await this.kernel.run(
           lane.key,
           locallyPrepared,
-          () =>
-            this.lanes.get(JSON.stringify(lane.key)) === lane &&
-            !this.fence.signal.aborted,
+          () => this.lanes.get(id) === lane,
         );
         woken = this.activeWake;
       } catch (error: unknown) {
         // A retired lane's late failure must not count or close the scheduler.
-        if (this.lanes.get(JSON.stringify(lane.key)) !== lane) return;
+        if (this.lanes.get(id) !== lane) return;
         if (error instanceof DeliveryAttemptError && error.dispatched) {
           lane.failures += 1;
           this.aggregateFailures += 1;
@@ -1491,7 +1489,7 @@ export class DeliveryScheduler {
       if (this.fence.signal.aborted) return;
       this.check();
       // A late result for a retired lane must not pause, fence or observe.
-      if (this.lanes.get(JSON.stringify(lane.key)) !== lane) return;
+      if (this.lanes.get(id) !== lane) return;
       if (
         result.kind === 'delivery_failed' &&
         result.failure.reason === 'binding_changed'

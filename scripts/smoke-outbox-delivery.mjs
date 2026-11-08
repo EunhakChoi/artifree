@@ -246,7 +246,15 @@ export async function checkOutboxDelivery(browser, serverApi) {
       });
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.write(receipt.slice(0, 1));
-      held = () => response.end(receipt.slice(1));
+      // Settles when the response closes: once the held rest is written, or at
+      // once if the client aborted first.
+      const closed = new Promise((resolve) => {
+        response.once('close', resolve);
+      });
+      held = () => {
+        response.end(receipt.slice(1));
+        return closed;
+      };
       return;
     }
     if (
@@ -800,7 +808,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       waitRequest: waiting,
       releaseHeld() {
-        held();
+        return held();
       },
       setMode(nextMode) {
         mode = nextMode;
@@ -816,8 +824,12 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       requests: () => requests,
     });
-    // A named scheduler case ends here; the rest of this scenario is separate.
-    if (process.env.ARTIFREE_SCHEDULER_CASE !== undefined) return;
+    // A named scheduler case runs its live variant after the mock one, then
+    // ends here; the rest of this scenario is separate.
+    if (process.env.ARTIFREE_SCHEDULER_CASE !== undefined) {
+      if (serverApi !== undefined) await checkLiveScheduler();
+      return;
+    }
     // Failure to prepare never dispatches. The same accepted row remains available.
     let page = await setup();
     requests = [];
@@ -1409,17 +1421,7 @@ export async function checkOutboxDelivery(browser, serverApi) {
       await checkLiveRejection();
       await checkLiveDisposal();
       await checkLiveRejectedDisposal();
-      await selectActor('Outbox scheduler');
-      await checkOutboxScheduler({
-        setup,
-        close,
-        configure(nextMode) {
-          mode = nextMode;
-          requests = [];
-        },
-        requests: () => requests,
-        createArtifact: createRealArtifact,
-      });
+      await checkLiveScheduler();
     }
     console.log(
       'outbox delivery: native exact request, bounded status/receipt, redirect and authority fences passed; public sender disabled',
@@ -1564,6 +1566,21 @@ export async function checkOutboxDelivery(browser, serverApi) {
       requests: () => requests,
       bindingReadCount: () => liveBindingReads,
       expectedActorId: live.actorId,
+    });
+  }
+  async function checkLiveScheduler() {
+    await selectActor('Outbox scheduler');
+    // A mock case may have left a binding fault behind; live checks start normal.
+    bindingMode = 'normal';
+    await checkOutboxScheduler({
+      setup,
+      close,
+      configure(nextMode) {
+        mode = nextMode;
+        requests = [];
+      },
+      requests: () => requests,
+      createArtifact: createRealArtifact,
     });
   }
   async function checkLiveRejectedDisposal() {
