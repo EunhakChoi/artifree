@@ -4,14 +4,17 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls and R09b2 the bounded upload/delete client calls; the remainder of R09b–R09d is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls and R09c (partial) the management assets panel without copy controls; the remainder of R09b–R09d is proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). There is no CLI, MCP
-tool, copy extension, management panel, grant or frame access yet. Builds on [0003](0003-local-html-artifact-slice.md),
+tool, copy extension, grant or frame access yet. The management web has an
+Assets tab (partial R09c: usage, upload, list, attachment download, delete,
+conflict and unknown-outcome retry); its explicit copy control waits for the
+R09b copy extension. Builds on [0003](0003-local-html-artifact-slice.md),
 [0012](0012-duplicate-artifacts.md), [0020](0020-runtime-grants.md),
 [0027](0027-backup-restore-and-schema-upgrade.md),
 [0029](0029-retention-and-cleanup.md), [0031](0031-app-data.md),
@@ -625,3 +628,40 @@ conflict.
   refusals, rejected receipt then same-key replay) plus fake-fetch and
   fake-clock tests of the envelope, receipt, status, size, stall, abort and
   redirect rules. No browser fixture was added, so no browser smoke applies.
+
+## R09c (partial): management assets panel
+
+Status: **partially implemented**. The management web has an Assets tab per
+artifact with usage, upload, list, attachment download, delete, conflict
+handling and unknown-outcome retry. The explicit copy control of rule 11 is
+not implemented: `copy_assets` and the copy extension remain R09b, so existing
+duplicate requests keep their files/data behavior and the duplicate dialog is
+unchanged. Firefox acceptance is pending re-verification
+([quality](../quality.md#browser-engines)).
+
+These notes record choices rule 11 and R09b2 left open; the rules win on any
+conflict.
+
+- Usage and limits come from one list snapshot (`bytes`/`max_bytes`, file
+  count/`max_assets`), each live association at full logical size. The actor
+  cap (256 files, 100 MiB) has no wire field; the panel says the server checks
+  it on upload.
+- A file over 5 MiB is refused from its size before it is read. Empty files
+  are sent and refused by the server. The declared type is chosen from the
+  file's own valid MIME spelling, `text/plain` or `text/csv` and sent as given;
+  there is no client allowlist, so other types reach the server's
+  `asset_type_unsupported`.
+- Each upload or delete is frozen once (artifact, base, declared type, encoded
+  bytes and key). One attempt with an unknown outcome is held in page memory
+  per open artifact; retry resends the identical request and key, forget
+  drops it and sends nothing, and a later refusal never clears it. While an
+  attempt is held or sending, further uploads and deletes and opening another
+  artifact are locked; reloading the page forgets it. A held attempt that
+  predates a possible data replacement can only be forgotten.
+- `asset_conflict` shows `current_asset_version` from the error envelope and
+  raises the asset write gate's floor; the list is read again after every
+  settled attempt instead of trusting a receipt. A replayed receipt is shown
+  as the original result.
+- Downloads read verified bytes through the client and save them as
+  `asset-<id>` with type `application/octet-stream`. No asset content is put
+  in the management DOM, previewed or opened.

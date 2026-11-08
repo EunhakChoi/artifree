@@ -70,6 +70,11 @@ interface MetadataActionsProps {
   onConflict: () => void;
   /** Whether the editor holds changes that are not saved. */
   unsaved: boolean;
+  /**
+   * Whether an asset upload or delete is being sent or has an unknown
+   * outcome; moving the artifact to the trash would drop it from the page.
+   */
+  assetsPending: boolean;
 }
 
 /**
@@ -121,6 +126,11 @@ export function MetadataActions(props: MetadataActionsProps) {
       {props.unsaved ? (
         <p id="trash-locked" className="text-xs text-muted-foreground">
           Save or discard your changes to move this artifact to the trash.
+        </p>
+      ) : props.assetsPending ? (
+        <p id="trash-locked" className="text-xs text-muted-foreground">
+          Wait for the asset upload or delete, or retry or forget it, to move
+          this artifact to the trash.
         </p>
       ) : null}
       <WriteNotice
@@ -288,7 +298,9 @@ function TrashDialog({
   onDeleted,
   onConflict,
   unsaved,
+  assetsPending,
 }: MetadataActionsProps) {
+  const locked = unsaved || assetsPending;
   const latest = artifact.metadata_revision;
   const [open, setOpen] = useState(false);
   const [prepared, setPrepared] = useState<RenameBase>({
@@ -339,8 +351,8 @@ function TrashDialog({
           <Button
             variant="outline"
             size="sm"
-            disabled={unsaved || wait(latest) === 'replaced'}
-            aria-describedby={unsaved ? 'trash-locked' : undefined}
+            disabled={locked || wait(latest) === 'replaced'}
+            aria-describedby={locked ? 'trash-locked' : undefined}
           />
         }
       >

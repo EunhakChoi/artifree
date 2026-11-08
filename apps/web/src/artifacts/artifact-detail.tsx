@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { RotateCwIcon } from 'lucide-react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Artifact, Revision } from '@artifree/contracts';
@@ -19,6 +19,8 @@ import {
   NativeSelectOption,
 } from '@/components/ui/native-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { AssetPanel } from './asset-panel';
+import { AssetOutcome } from './asset-writes-view';
 import { refusedFloor, useWriteGate } from './conditional-write';
 import { DuplicateDialog } from './duplicate-dialog';
 import { DataPanel } from './data-panel';
@@ -33,6 +35,7 @@ import type { TrashState, Version } from './use-live-workspace';
 import { PreviewFrame } from './preview-frame';
 import { SourcePanel } from './source-editor';
 import { SourceRecovery } from './source-recovery';
+import { useAssetWrites } from './use-asset-writes';
 import { useRequest } from './use-request';
 
 /** An artifact's metadata and history, with when they were read. */
@@ -85,6 +88,11 @@ interface ArtifactDetailProps {
   unsaved: boolean;
   /** Reports when the editor gains or loses unsaved changes. */
   onUnsavedChange: (unsaved: boolean) => void;
+  /**
+   * Reports when an asset upload or delete is being sent or has an unknown
+   * outcome; opening another artifact would drop it from the page.
+   */
+  onAssetsPendingChange: (pending: boolean) => void;
   /** Where the page keeps source drafts in the browser (decision 0018). */
   drafts: PageDrafts;
 }
@@ -107,6 +115,7 @@ export function ArtifactDetail({
   isCurrent,
   unsaved,
   onUnsavedChange,
+  onAssetsPendingChange,
   drafts,
 }: ArtifactDetailProps) {
   // In the trash every read of the artifact answers as for one that does
@@ -174,6 +183,15 @@ export function ArtifactDetail({
     },
     reload,
   );
+  // Asset writes have their own version and gate (decision 0045, rule 1).
+  // They live here, so an attempt whose outcome is unknown outlives the
+  // assets tab and can still be retried as it was.
+  const assetWrites = useAssetWrites(client, artifactId, resets);
+  const assetsPending = assetWrites.held !== undefined || assetWrites.sending;
+  useEffect(() => {
+    onAssetsPendingChange(assetsPending);
+  }, [assetsPending, onAssetsPendingChange]);
+  useEffect(() => () => onAssetsPendingChange(false), [onAssetsPendingChange]);
   // A revision chosen for the preview, kept across tabs; none follows the
   // latest. It belongs to the read it was chosen from.
   const [chosen, setChosen] = useChoice<number>(shown?.resets ?? resets);
@@ -235,6 +253,7 @@ export function ArtifactDetail({
                   onDeleted={onDeleted}
                   onConflict={reload}
                   unsaved={unsaved}
+                  assetsPending={assetsPending}
                 />
                 <DuplicateDialog
                   client={client}
@@ -242,6 +261,7 @@ export function ArtifactDetail({
                   revisions={revisions}
                   revision={previewed}
                   unsaved={unsaved}
+                  assetsPending={assetsPending}
                   resets={resets}
                   stale={stale}
                   onDuplicated={onSaved}
@@ -302,6 +322,7 @@ export function ArtifactDetail({
               <TabsTrigger value="source">Source</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
               <TabsTrigger value="data">Data</TabsTrigger>
+              <TabsTrigger value="assets">Assets</TabsTrigger>
             </TabsList>
             {/* The views that read the artifact are not mounted in the
                 trash; they mount afresh once it is recovered. */}
@@ -349,6 +370,26 @@ export function ArtifactDetail({
                   resets={resets}
                 />
               )}
+            </TabsContent>
+            <TabsContent value="assets" className="mt-4">
+              <div className="flex flex-col gap-4">
+                {/* Outside the trash and stale branches, so a held attempt
+                    can always be retried or forgotten and the workspace
+                    lock it sets released. */}
+                <AssetOutcome writes={assetWrites} />
+                {inTrash ? (
+                  <InTrash what="read or change its assets" />
+                ) : stale ? (
+                  <p>Waiting until the artifact is read again.</p>
+                ) : (
+                  <AssetPanel
+                    client={client}
+                    artifactId={artifactId}
+                    writes={assetWrites}
+                    resets={resets}
+                  />
+                )}
+              </div>
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
               <SourceRecovery
