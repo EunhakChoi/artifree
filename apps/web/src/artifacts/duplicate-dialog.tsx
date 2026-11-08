@@ -36,6 +36,11 @@ interface DuplicateDialogProps {
   /** The revision offered first: the one the preview shows. */
   revision: number;
   unsaved: boolean;
+  /**
+   * Whether an asset upload or delete is being sent or has an unknown
+   * outcome; opening the copy would drop it from the page.
+   */
+  assetsPending: boolean;
   /** How often the server's data may have been replaced so far. */
   resets: number;
   /** Whether what is shown was read before the last possible replacement. */
@@ -58,10 +63,12 @@ export function DuplicateDialog({
   revisions,
   revision,
   unsaved,
+  assetsPending,
   resets,
   stale,
   onDuplicated,
 }: DuplicateDialogProps) {
+  const locked = unsaved || assetsPending;
   const duplicate = useRetryableWrite({
     send: (request: { revision: number }, idempotencyKey: string) =>
       client.duplicateArtifact(
@@ -108,8 +115,8 @@ export function DuplicateDialog({
                 variant="outline"
                 size="sm"
                 className="w-fit self-end"
-                disabled={unsaved || stale}
-                aria-describedby={unsaved ? 'duplicate-locked' : undefined}
+                disabled={locked || stale}
+                aria-describedby={locked ? 'duplicate-locked' : undefined}
               />
             }
           >
@@ -167,6 +174,11 @@ export function DuplicateDialog({
           <FieldDescription id="duplicate-locked" className="text-right">
             Save or discard your changes to duplicate; the copy opens in their
             place.
+          </FieldDescription>
+        ) : assetsPending ? (
+          <FieldDescription id="duplicate-locked" className="text-right">
+            Wait for the asset upload or delete, or retry or forget it, to
+            duplicate; the copy opens in place of this artifact.
           </FieldDescription>
         ) : null}
       </Field>

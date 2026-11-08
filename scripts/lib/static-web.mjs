@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,13 +36,48 @@ export function buildStaticWeb(outDir, server) {
 }
 
 /**
- * Serves the files of `directory` like any static host would: no proxy, no
- * API, so the page must reach its server across origins. Port 0 picks a free
- * port, which `origin` reports. The directory may be filled after the call.
+ * Forwards one request to the API at `apiUrl`, like the Vite dev server's
+ * proxy, so a page served next to it stays same-origin with the API.
  */
-export async function serveStatic(directory, port) {
+export function forwardToApi(apiUrl, request, response) {
+  const target = new URL(request.url ?? '/', apiUrl);
+  const upstream = httpRequest(
+    target,
+    {
+      method: request.method,
+      headers: { ...request.headers, host: target.host },
+    },
+    (reply) => {
+      response.writeHead(reply.statusCode ?? 502, reply.headers);
+      reply.pipe(response);
+    },
+  );
+  upstream.on('error', () => {
+    if (!response.headersSent) response.writeHead(502);
+    response.end();
+  });
+  // A client that leaves ends the upstream request, as a real proxy does;
+  // otherwise the API keeps every abandoned change stream and its slot.
+  response.on('close', () => {
+    if (!response.writableFinished) upstream.destroy();
+  });
+  request.pipe(upstream);
+}
+
+/**
+ * Serves the files of `directory` like any static host would. Without
+ * `apiUrl` there is no proxy and no API, so the page must reach its server
+ * across origins; with it, `/v1/` is forwarded there (see `forwardToApi`).
+ * Port 0 picks a free port, which `origin` reports. The directory may be
+ * filled after the call.
+ */
+export async function serveStatic(directory, port, { apiUrl } = {}) {
   const root = resolve(directory);
   const server = createServer(async (request, response) => {
+    if (apiUrl !== undefined && (request.url ?? '').startsWith('/v1/')) {
+      forwardToApi(apiUrl, request, response);
+      return;
+    }
     try {
       const pathname = decodeURIComponent(
         new URL(request.url ?? '/', 'http://localhost').pathname,
