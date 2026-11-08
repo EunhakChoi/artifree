@@ -112,6 +112,11 @@ export function DuplicateDialog({
   const [openedResets, setOpenedResets] = useState(resets);
   const pending = duplicate.state.status === 'sending';
   const replaced = openedResets !== resets;
+  // After a lost answer the copy may exist. Resending the same choice reuses
+  // its key; a changed choice gets a new key and could make a second copy,
+  // so the choice stays as sent until closing the dialog clears the notice.
+  const frozen =
+    pending || (duplicate.state.status === 'failed' && duplicate.state.unknown);
 
   async function confirm(): Promise<void> {
     if (replaced) return;
@@ -167,7 +172,7 @@ export function DuplicateDialog({
               <NativeSelect
                 id="duplicate-revision"
                 value={String(chosen)}
-                disabled={pending}
+                disabled={frozen}
                 onChange={(event) => setChosen(Number(event.target.value))}
               >
                 {revisions.map((item) => (
@@ -181,7 +186,8 @@ export function DuplicateDialog({
               <Checkbox
                 id="duplicate-copy-assets"
                 checked={copyAssets}
-                disabled={pending}
+                // Like the Duplicate button: replaced data sends nothing.
+                disabled={frozen || replaced}
                 onCheckedChange={(checked) => setCopyAssets(checked)}
               />
               <FieldContent>

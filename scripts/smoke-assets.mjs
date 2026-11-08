@@ -1,28 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { expect } from '@playwright/test';
-import { api } from './smoke-workspace.mjs';
+import { api, raw } from './smoke-workspace.mjs';
 
 const MIB = 1024 * 1024;
 const FILE_LIMIT = 5 * MIB;
 const PNG = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
 ]);
-
-/**
- * One raw request with the bearer token and, for a write, a caller-chosen
- * idempotency key, so that a seed or a replay check names its own key.
- */
-export async function raw(server, method, path, body, key) {
-  const init = { method, headers: { authorization: `Bearer ${server.token}` } };
-  if (body !== undefined) {
-    init.headers['content-type'] = 'application/json';
-    init.headers['idempotency-key'] = key;
-    init.body = JSON.stringify(body);
-  }
-  const response = await fetch(`${server.api_url}${path}`, init);
-  return { status: response.status, json: await response.json() };
-}
 
 /**
  * Browser checks for an artifact's assets (decision 0045, rule 11) against a

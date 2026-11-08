@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { expect } from '@playwright/test';
-import { raw } from './smoke-assets.mjs';
 import { forgeReset } from './smoke-history.mjs';
-import { api } from './smoke-workspace.mjs';
+import { api, raw } from './smoke-workspace.mjs';
 
 const FILE_LIMIT = 5 * 1024 * 1024;
 const SPACE_FILES = 5;
@@ -165,6 +164,8 @@ export async function checkDuplicate({
     const send = dialog.getByRole('button', { name: 'Duplicate', exact: true });
     await send.click();
     await expect(dialog.getByText('Outcome unknown')).toBeVisible();
+    // The choice is frozen: a changed choice would get a new key.
+    await expect(copyAssets).toBeDisabled();
     await send.click();
     await expect(dialog).toBeHidden();
     await tab.unrouteAll({ behavior: 'ignoreErrors' });
@@ -298,82 +299,89 @@ export async function checkDuplicate({
       files: [{ path: 'index.html', encoding: 'utf8', content: '<p>q</p>' }],
     });
     const filler = Buffer.alloc(FILE_LIMIT, 'f');
-    for (let index = 0; index < SPACE_FILES; index += 1) {
-      const { status } = await seedUpload(
-        full.id,
-        index,
-        filler,
-        `smoke-duplicate-full-${index}`,
-      );
-      assert.equal(status, 201, `Filling the source failed: ${status}`);
-    }
+    const fullSpace = { id: full.id, version: 0, assets: [] };
     const fillers = [];
-    for (let index = 0; ; index += 1) {
-      if (index % SPACE_FILES === 0) {
-        const created = await api(server, 'POST', '/v1/artifacts', {
-          title: `Duplicate filler ${fillers.length}`,
-          files: [
-            { path: 'index.html', encoding: 'utf8', content: '<p>f</p>' },
-          ],
-        });
-        fillers.push({ id: created.artifact.id, version: 0, assets: [] });
-      }
-      const space = fillers.at(-1);
-      const { status, json } = await seedUpload(
-        space.id,
-        space.version,
-        filler,
-        `smoke-duplicate-fill-${index}`,
-      );
-      if (status === 422 && json.error.code === 'asset_limit_exceeded') break;
-      assert.equal(status, 201, `Filling the quota failed: ${status}`);
-      assert.ok(index < 20, 'The actor quota never filled.');
-      space.version = json.asset_version;
-      space.assets.push(json.asset.id);
-    }
-    await open('Duplicate quota');
-    await workspace
-      .getByRole('button', { name: 'Duplicate', exact: true })
-      .click();
-    const fullDialog = tab.getByRole('dialog', {
-      name: 'Duplicate Duplicate quota',
-    });
-    await fullDialog
-      .getByRole('checkbox', { name: 'Copy uploaded assets' })
-      .check();
-    await fullDialog
-      .getByRole('button', { name: 'Duplicate', exact: true })
-      .click();
-    const refused = fullDialog
-      .getByRole('alert')
-      .filter({ hasText: 'Not changed' });
-    await expect(refused).toContainText(
-      'Over the asset limit: 5 MiB per file, 64 files and 25 MiB per artifact',
-    );
-    await expect(refused).toContainText('so no copy was made');
-    const none = await api(
-      server,
-      'GET',
-      `/v1/artifacts?q=${encodeURIComponent('Duplicate quota (Copy)')}`,
-    );
-    assert.deepEqual(none.artifacts, [], 'A refused asset copy created one.');
-    await fullDialog.getByRole('button', { name: 'Cancel' }).click();
-    // Frees the actor's quota for the checks after this one.
-    let unfill = 0;
-    for (const space of fillers)
-      for (const id of space.assets) {
-        rawRequests += 1;
-        const { status, json } = await raw(
-          server,
-          'DELETE',
-          `/v1/artifacts/${space.id}/assets/${id}`,
-          { base_asset_version: space.version },
-          `smoke-duplicate-unfill-${unfill}`,
+    try {
+      for (let index = 0; index < SPACE_FILES; index += 1) {
+        const { status, json } = await seedUpload(
+          fullSpace.id,
+          fullSpace.version,
+          filler,
+          `smoke-duplicate-full-${index}`,
         );
-        unfill += 1;
-        assert.equal(status, 200, `Freeing the quota failed: ${status}`);
-        space.version = json.asset_version;
+        assert.equal(status, 201, `Filling the source failed: ${status}`);
+        fullSpace.version = json.asset_version;
+        fullSpace.assets.push(json.asset.id);
       }
+      for (let index = 0; ; index += 1) {
+        if (index % SPACE_FILES === 0) {
+          const created = await api(server, 'POST', '/v1/artifacts', {
+            title: `Duplicate filler ${fillers.length}`,
+            files: [
+              { path: 'index.html', encoding: 'utf8', content: '<p>f</p>' },
+            ],
+          });
+          fillers.push({ id: created.artifact.id, version: 0, assets: [] });
+        }
+        const space = fillers.at(-1);
+        const { status, json } = await seedUpload(
+          space.id,
+          space.version,
+          filler,
+          `smoke-duplicate-fill-${index}`,
+        );
+        if (status === 422 && json.error.code === 'asset_limit_exceeded') break;
+        assert.equal(status, 201, `Filling the quota failed: ${status}`);
+        assert.ok(index < 20, 'The actor quota never filled.');
+        space.version = json.asset_version;
+        space.assets.push(json.asset.id);
+      }
+      await open('Duplicate quota');
+      await workspace
+        .getByRole('button', { name: 'Duplicate', exact: true })
+        .click();
+      const fullDialog = tab.getByRole('dialog', {
+        name: 'Duplicate Duplicate quota',
+      });
+      await fullDialog
+        .getByRole('checkbox', { name: 'Copy uploaded assets' })
+        .check();
+      await fullDialog
+        .getByRole('button', { name: 'Duplicate', exact: true })
+        .click();
+      const refused = fullDialog
+        .getByRole('alert')
+        .filter({ hasText: 'Not changed' });
+      await expect(refused).toContainText(
+        'Over the asset limit: 5 MiB per file, 64 files and 25 MiB per artifact',
+      );
+      await expect(refused).toContainText('so no copy was made');
+      const none = await api(
+        server,
+        'GET',
+        `/v1/artifacts?q=${encodeURIComponent('Duplicate quota (Copy)')}`,
+      );
+      assert.deepEqual(none.artifacts, [], 'A refused asset copy created one.');
+      await fullDialog.getByRole('button', { name: 'Cancel' }).click();
+    } finally {
+      // Frees the actor's quota for the checks after this one, also when a
+      // check above failed: the filler artifacts' assets and the source's.
+      let unfill = 0;
+      for (const space of [fullSpace, ...fillers])
+        for (const id of space.assets) {
+          rawRequests += 1;
+          const { status, json } = await raw(
+            server,
+            'DELETE',
+            `/v1/artifacts/${space.id}/assets/${id}`,
+            { base_asset_version: space.version },
+            `smoke-duplicate-unfill-${unfill}`,
+          );
+          unfill += 1;
+          assert.equal(status, 200, `Freeing the quota failed: ${status}`);
+          space.version = json.asset_version;
+        }
+    }
 
     // A draft locks duplicating, since the copy would open in its place.
     await workspace.getByRole('tab', { name: 'Source' }).click();
