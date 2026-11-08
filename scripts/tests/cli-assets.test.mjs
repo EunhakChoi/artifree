@@ -100,6 +100,12 @@ test('The asset lifecycle over a real server: list, upload, read, replay, delete
     (await readFile(readBack)).equals(csv),
     'the file read back differs from the uploaded bytes',
   );
+  if (process.platform !== 'win32')
+    assert.equal(
+      (await stat(readBack)).mode & 0o777,
+      0o600,
+      'downloaded asset content must be owner-only',
+    );
 
   // 4. The identical request replays the original receipt; nothing new is stored.
   assert.deepEqual(parseCliSuccess(await runCli(server, upload)), {

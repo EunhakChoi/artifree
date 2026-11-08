@@ -140,7 +140,8 @@ function baseAssetVersion(value: string | undefined): number {
   if (
     value === undefined ||
     !/^[0-9]+$/.test(value) ||
-    !Number.isSafeInteger(number)
+    !Number.isSafeInteger(number) ||
+    number >= Number.MAX_SAFE_INTEGER
   )
     throw new UsageError(
       '--base-asset-version <n> is required: the asset_version from artifree asset list.',
@@ -213,7 +214,8 @@ async function read(args: string[]): Promise<void> {
   // readAsset checks the MIME type, size and SHA-256 before it resolves, so a
   // response that fails verification never reaches writeNewFile.
   const result = await readAsset(client, artifactId, assetId);
-  await writeNewFile(output, result.bytes);
+  // Downloaded asset content is private user data: owner-only, whatever the umask.
+  await writeNewFile(output, result.bytes, 0o600);
   print({
     artifact_id: artifactId,
     asset_version: result.asset_version,

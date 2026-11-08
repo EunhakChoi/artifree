@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, stat, symlink } from 'node:fs/promises';
+import {
+  mkdir,
+  readFile,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import {
@@ -11,6 +18,7 @@ import {
   startTestServer,
   writeTestFile,
 } from '../lib/cli-assets-harness.mjs';
+import { readBoundedRegularFile } from '../../apps/cli/dist/files.js';
 
 // Local refusals of `artifree asset`: usage errors (exit 2) and file refusals
 // that stop before any upload (exit 1), plus `asset read` refusing an existing
@@ -93,6 +101,16 @@ test('usage errors exit 2 with empty stdout, name the problem, and send nothing'
     {
       name: 'upload with --base-asset-version=-1',
       args: uploadWith(...fileFlag, ...typeFlag, '--base-asset-version=-1'),
+      message: '--base-asset-version <n> is required',
+    },
+    {
+      name: 'upload with --base-asset-version 9007199254740991 (2^53-1, which no asset space reaches)',
+      args: uploadWith(
+        ...fileFlag,
+        ...typeFlag,
+        '--base-asset-version',
+        '9007199254740991',
+      ),
       message: '--base-asset-version <n> is required',
     },
     {
@@ -238,4 +256,23 @@ test('asset read refuses an existing or dangling --output and writes nothing', a
     assertLocalRefusal(result, `${link} already exists; nothing was written.`);
     await assert.rejects(stat(target), { code: 'ENOENT' });
   });
+});
+
+test('a file rewritten in place while it is read is refused even at the same size', async () => {
+  const file = await writeTestFile(scratch, 'same-size.txt', 'aaaa\n');
+  // The hook runs once the bytes are read, so the change happens at a fixed
+  // point. The new content has the same length; the modification time is set
+  // explicitly, so it differs whatever the timestamp granularity.
+  await assert.rejects(
+    readBoundedRegularFile(file, 1024, async () => {
+      await writeFile(file, 'bbbb\n');
+      await utimes(file, new Date(1_000_000), new Date(1_000_000));
+    }),
+    {
+      message: `${file} changed while it was read; nothing was sent.`,
+    },
+  );
+  // Left alone, the same call returns the bytes.
+  const bytes = await readBoundedRegularFile(file, 1024, async () => {});
+  assert.deepEqual(Buffer.from(bytes), Buffer.from('bbbb\n'));
 });

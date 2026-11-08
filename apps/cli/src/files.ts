@@ -61,13 +61,17 @@ export async function readRegularFile(location: string): Promise<Uint8Array> {
 /**
  * Reads the regular file at `location` if it is no larger than `maxBytes`.
  * Symbolic links and other non-regular files are refused, as is a file that
- * is replaced while it is opened or changes size while it is read. An
- * oversized file is refused before any of its content is read. Refusals throw
- * an `Error` that names `location`.
+ * is replaced while it is opened or changes size or modification time while
+ * it is read (a best-effort check: the file system's timestamp granularity
+ * bounds what it can see). An oversized file is refused before any of its
+ * content is read. Refusals throw an `Error` that names `location`.
+ * `afterRead`, when given, runs once the bytes are read and before the final
+ * check; tests use it to change the file at a fixed point instead of racing.
  */
 export async function readBoundedRegularFile(
   location: string,
   maxBytes: number,
+  afterRead?: () => Promise<void>,
 ): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
     throw new RangeError(
@@ -79,9 +83,13 @@ export async function readBoundedRegularFile(
     throw new Error(`Refusing to follow a symbolic link: ${location}`);
   if (!status.isFile()) throw new Error(`Not a regular file: ${location}`);
   // Windows has no O_NOFOLLOW; there the dev/ino check catches a swapped link.
+  // O_NONBLOCK keeps a regular file swapped for a FIFO from blocking this open;
+  // the fstat below then refuses it (a regular file ignores the flag).
   const handle = await open(
     location,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
   );
   try {
     const opened = await handle.stat({ bigint: true });
@@ -95,10 +103,10 @@ export async function readBoundedRegularFile(
       );
     const size = Number(opened.size);
     if (size > maxBytes) {
-      // 5 MiB is the one limit with a readable name; other limits print bytes.
+      // A whole number of MiB reads better than bytes alone; any other limit prints bytes.
       const limit =
-        maxBytes === 5 * 1024 * 1024
-          ? `5 MiB (${maxBytes} bytes)`
+        maxBytes % 1048576 === 0
+          ? `${maxBytes / 1048576} MiB (${maxBytes} bytes)`
           : `${maxBytes} bytes`;
       throw new Error(`${location} is larger than ${limit}; nothing was sent.`);
     }
@@ -115,7 +123,14 @@ export async function readBoundedRegularFile(
       if (bytesRead === 0) break;
       total += bytesRead;
     }
-    if (total !== size)
+    await afterRead?.();
+    const after = await handle.stat({ bigint: true });
+    if (
+      total !== size ||
+      after.size !== opened.size ||
+      after.mtimeNs !== opened.mtimeNs ||
+      after.ctimeNs !== opened.ctimeNs
+    )
       throw new Error(
         `${location} changed while it was read; nothing was sent.`,
       );
@@ -134,10 +149,11 @@ export async function readBoundedRegularFile(
 export async function writeNewFile(
   location: string,
   content: Uint8Array,
+  mode?: number,
 ): Promise<void> {
   let handle;
   try {
-    handle = await open(location, 'wx');
+    handle = await open(location, 'wx', mode);
   } catch (error: unknown) {
     if (error instanceof Error && 'code' in error && error.code === 'EEXIST')
       throw new Error(`${location} already exists; nothing was written.`, {

@@ -768,8 +768,9 @@ and retry hints go to stderr.
   and are `asset_type_unsupported`. The file must be a regular file: a symbolic
   link or special file is refused; it is opened without following links (where
   the platform has `O_NOFOLLOW`) and its device and inode must match the check
-  before opening; a file over 5 MiB is refused before it is read, and a file that
-  changes while it is read is refused. An empty file is sent and refused by the
+  before opening; a file over 5 MiB is refused before it is read, and a file whose size or modification time changes while it is read is
+  refused (a best-effort check, bounded by the file system's timestamp
+  granularity). An empty file is sent and refused by the
   server as `invalid_asset`. Local refusals send nothing.
 - **Read.** `--output` is required, no raw bytes go to stdout, and the file is
   written only after the client verified type, size and SHA-256. It is created
@@ -778,9 +779,13 @@ and retry hints go to stderr.
   file. Exit codes: 0 success, 2 usage, 1 API or local file errors.
 - **Conflicts.** An `asset_conflict` prints `current_asset_version=<n>`, read from
   the error body because the client has no typed accessor.
-- **Known limit.** The file is opened without `O_NONBLOCK`, so a regular file
-  replaced by a FIFO between the check and the open could block the open until a
-  writer appears; the path is operator-supplied.
+- **Open flags and mode.** The file is opened with `O_NONBLOCK` where it exists,
+  so a regular file replaced by a FIFO between the check and the open cannot block
+  the open; the device, inode and type check right after the open refuses it. The
+  downloaded file is created with mode `0600`, because asset content is private
+  user data, whatever the umask.
+- **Bounds.** `--base-asset-version` must be below 2^53-1, as the client requires,
+  so an impossible value is a usage error (exit 2) before anything is sent.
 - **Not in this slice:** `asset show`, stdin or `--output -`, content-type
   inference, a CLI allowlist, CLI-side retry or a pending-request file, a typed
   `currentAssetVersion`, PNG/JPEG admission (R09a), runtime grants (R09d), change
