@@ -1,13 +1,18 @@
 import assert from 'node:assert/strict';
-import { createServer, request as httpRequest } from 'node:http';
+import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import {
+  accessibilityViolations,
+  summarizeViolations,
+} from './lib/accessibility.mjs';
 import { buildServer, startServer } from './lib/server-process.mjs';
+import { forwardToApi } from './lib/static-web.mjs';
 import { parallelShards } from './smoke-parallel.mjs';
+import { checkAssets } from './smoke-assets.mjs';
 import { checkDrafts } from './smoke-drafts.mjs';
 import {
   checkDraftsWithoutLocks,
@@ -79,36 +84,11 @@ const mime = {
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
 };
-// Like the Vite dev server, forward /v1 to the API so the page stays
-// same-origin with it; previews load from the API's content origin.
-function forward(request, response) {
-  const target = new URL(request.url ?? '/', api.api_url);
-  const upstream = httpRequest(
-    target,
-    {
-      method: request.method,
-      headers: { ...request.headers, host: target.host },
-    },
-    (reply) => {
-      response.writeHead(reply.statusCode ?? 502, reply.headers);
-      reply.pipe(response);
-    },
-  );
-  upstream.on('error', () => {
-    if (!response.headersSent) response.writeHead(502);
-    response.end();
-  });
-  // A client that leaves ends the upstream request, as a real proxy does;
-  // otherwise the API keeps every abandoned change stream and its slot.
-  response.on('close', () => {
-    if (!response.writableFinished) upstream.destroy();
-  });
-  request.pipe(upstream);
-}
-
 const server = createServer(async (request, response) => {
   if ((request.url ?? '').startsWith('/v1/')) {
-    forward(request, response);
+    // Like the Vite dev server, so the page stays same-origin with the API;
+    // previews load from the API's content origin.
+    forwardToApi(api.api_url, request, response);
     return;
   }
   try {
@@ -150,19 +130,14 @@ const artifactConsole = [];
 const expectedApiFailures = [];
 const externalRequests = [];
 async function checkAccessibility(label, target = page) {
-  const report = await new AxeBuilder({ page: target })
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
-    .analyze();
+  const violations = await accessibilityViolations(target);
   await writeFile(
     resolve(qa, `accessibility-${label}.json`),
-    `${JSON.stringify(report.violations, null, 2)}\n`,
+    `${JSON.stringify(violations, null, 2)}\n`,
   );
-  const summary = report.violations.map((violation) => ({
-    id: violation.id,
-    targets: violation.nodes.map((node) => node.target),
-  }));
+  const summary = summarizeViolations(violations);
   assert.equal(
-    report.violations.length,
+    violations.length,
     0,
     `Accessibility failures: ${label}: ${JSON.stringify(summary)}. See the saved accessibility report.`,
   );
@@ -294,6 +269,12 @@ try {
       checkAccessibility,
     });
     const exported = await checkExport({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
+    const assets = await checkAssets({
       browser,
       origin,
       server: api,
@@ -525,6 +506,7 @@ try {
       history,
       duplicate,
       export: exported,
+      assets,
       trash,
       editor,
       drafts,

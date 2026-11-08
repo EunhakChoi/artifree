@@ -798,6 +798,14 @@ outside database transactions and replay skips changed policy. Only UTF-8
 plain text/CSV uploads are admitted. Valid and invalid PNG/JPEG uploads are
 explicitly unsupported; historical image metadata and matching receipts remain
 decodable and replay before current policy without recreating deleted bytes.
-R09a is incomplete until full PNG and JPEG validation satisfy 0045 rule 3. There
-are no asset UI, client, MCP, CLI, copy or runtime tests because those adapters
-remain R09b–R09d work.
+R09a is incomplete until full PNG and JPEG validation satisfy 0045 rule 3. The
+TypeScript client has real-server tests (R09b2), the panel's frozen-attempt
+rules have Node tests (`scripts/tests/asset-attempt.test.mjs`) and the
+management assets panel has a real-server Chromium smoke
+(`scripts/smoke-assets.mjs`, partial R09c) inside the full browser smoke and
+standalone through `scripts/test-assets-live.mjs`. It covers upload, attachment
+download with no inline rendering, local oversize, type and quota refusals,
+stale base, delete confirmation and same-key retries after lost upload and
+delete replies, with the trash locked while an attempt is held and the upload
+form cleared after a retry succeeds. There are no MCP, CLI, copy or
+runtime asset tests because those adapters remain R09b and R09d work.

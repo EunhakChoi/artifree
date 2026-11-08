@@ -277,6 +277,10 @@ function WorkspaceBody({
   // While the editor holds unsaved changes, actions that would replace it are
   // disabled so the draft is never dropped silently.
   const [unsaved, setUnsaved] = useState(false);
+  // An asset upload or delete being sent or with an unknown outcome lives in
+  // the open artifact's view, so the same actions are locked while it does.
+  const [assetsPending, setAssetsPending] = useState(false);
+  const locked = unsaved || assetsPending;
   const shownQuery = queryKey(query);
   const artifacts = useRequest(
     live.canRead
@@ -332,7 +336,7 @@ function WorkspaceBody({
   const selectedId = opened({
     selected,
     trashShown: query.deleted,
-    unsaved,
+    unsaved: locked,
     inTrash,
     fresh,
     listed,
@@ -417,8 +421,8 @@ function WorkspaceBody({
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <CreateDialog client={client} disabled={unsaved} onCreated={saved} />
-        <Button variant="ghost" disabled={unsaved} onClick={onDisconnect}>
+        <CreateDialog client={client} disabled={locked} onCreated={saved} />
+        <Button variant="ghost" disabled={locked} onClick={onDisconnect}>
           <LogOutIcon data-icon="inline-start" aria-hidden="true" />
           Disconnect
         </Button>
@@ -429,7 +433,7 @@ function WorkspaceBody({
       {notice === undefined ? null : (
         <div className="flex flex-wrap items-center gap-3">
           <output className="text-sm">{notice.text}</output>
-          {!notice.toTrash || query.deleted || unsaved ? null : (
+          {!notice.toTrash || query.deleted || locked ? null : (
             <Button
               type="button"
               variant="outline"
@@ -445,7 +449,7 @@ function WorkspaceBody({
       <KeptDrafts
         drafts={drafts}
         openId={selectedId}
-        locked={unsaved}
+        locked={locked}
         onOpen={(id) => dispatch({ type: 'choose', id })}
       />
       {shownList === undefined && artifacts.status !== 'error' ? (
@@ -465,7 +469,7 @@ function WorkspaceBody({
             <ListControls
               query={query}
               onQueryChange={changeQuery}
-              trashLocked={unsaved}
+              trashLocked={locked}
             />
             {query.deleted ? (
               <TrashNav
@@ -485,7 +489,7 @@ function WorkspaceBody({
               <ArtifactNav
                 artifacts={listed ?? []}
                 selectedId={selectedId}
-                locked={unsaved}
+                locked={locked}
                 onSelect={(id) => dispatch({ type: 'choose', id })}
                 empty={emptyList}
                 onShowMore={showMoreArtifacts}
@@ -529,6 +533,7 @@ function WorkspaceBody({
                 isCurrent={isCurrent}
                 unsaved={unsaved}
                 onUnsavedChange={setUnsaved}
+                onAssetsPendingChange={setAssetsPending}
                 drafts={drafts}
               />
             )}

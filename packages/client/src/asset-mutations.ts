@@ -12,6 +12,15 @@ import { isCount, isRecord } from './responses.js';
 /** The stable upload envelope spelling of a MIME declaration, not a policy. */
 const MIME_TYPE = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
 const MAX_MIME_CHARS = 127;
+
+/**
+ * Whether `value` is spelled as the upload envelope requires a declared
+ * type: a lowercase MIME type without parameters, at most 127 characters.
+ * A spelling check, not a policy: the server decides which types it admits.
+ */
+export function isDeclarableMimeType(value: string): boolean {
+  return value.length <= MAX_MIME_CHARS && MIME_TYPE.test(value);
+}
 const REQUEST_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 
 /** Options of an asset mutation: the caller's key, and cancellation. */
@@ -213,11 +222,7 @@ export async function uploadAsset(
   const encoded = fields.content_base64;
   const key = requestKey(settings.idempotencyKey);
   const signal = requestSignal(settings.signal);
-  if (
-    typeof declared !== 'string' ||
-    declared.length > MAX_MIME_CHARS ||
-    !MIME_TYPE.test(declared)
-  )
+  if (typeof declared !== 'string' || !isDeclarableMimeType(declared))
     throw refused(
       'content_type must be a lowercase MIME type without parameters.',
     );
