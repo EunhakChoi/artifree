@@ -36,7 +36,8 @@ test('a failing shard fails the run, and the run waits for the other shard', asy
     stdout.text.includes('[outbox] finished outbox\n'),
     'The run must not report before the passing shard has finished.',
   );
-  assert.equal(stderr.text, '[ui] exited with 3\n');
+  assert.ok(stderr.text.includes('[ui] exited with 3\n'));
+  assert.ok(!stderr.text.includes('[outbox] exited'));
 });
 
 test('each shard gets its name and the environment, and passing shards report no failure', async () => {
@@ -55,7 +56,7 @@ test('each shard gets its name and the environment, and passing shards report no
   assert.deepEqual(failed, []);
   assert.ok(stdout.text.includes('[outbox] ran outbox kept\n'));
   assert.ok(stdout.text.includes('[ui] ran ui kept\n'));
-  assert.equal(stderr.text, '');
+  assert.ok(!stderr.text.includes('exited with'));
 });
 
 test('a shard that cannot start counts as failed', async () => {

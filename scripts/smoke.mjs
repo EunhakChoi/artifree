@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, firefox, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { buildServer, startServer } from './lib/server-process.mjs';
+import { parallelShards } from './smoke-parallel.mjs';
 import { checkDrafts } from './smoke-drafts.mjs';
 import {
   checkDraftsWithoutLocks,
@@ -39,9 +40,10 @@ assert.ok(
 // `all` runs the whole suite in this process. `outbox` and `ui` each run as
 // their own process (CI, and smoke-parallel.mjs) with their own evidence folder.
 const shard = process.env.ARTIFREE_SMOKE_SHARD ?? 'all';
+const shards = ['all', ...parallelShards];
 assert.ok(
-  ['all', 'outbox', 'ui'].includes(shard),
-  `Unsupported ARTIFREE_SMOKE_SHARD: ${JSON.stringify(shard)}. Use all, outbox, or ui.`,
+  shards.includes(shard),
+  `Unsupported ARTIFREE_SMOKE_SHARD: ${JSON.stringify(shard)}. Use ${shards.join(', ')}.`,
 );
 const qa = resolve(
   root,
@@ -172,7 +174,7 @@ try {
   let result;
   if (shard === 'outbox') {
     // The outbox shard stops here; the page checks below belong to ui and all.
-    result = { status: 'passed', browser: browserName, shard };
+    result = { status: 'passed', browser: browserName };
   } else {
     context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
@@ -540,6 +542,7 @@ try {
       externalRequests,
     };
   }
+  result.shard = shard;
   await writeFile(
     resolve(qa, 'smoke-results.json'),
     `${JSON.stringify(result, null, 2)}\n`,
@@ -549,7 +552,7 @@ try {
   try {
     await writeFile(
       resolve(qa, 'failure.json'),
-      `${JSON.stringify({ status: 'failed', browser: browserName, message: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, null, 2)}\n`,
+      `${JSON.stringify({ status: 'failed', browser: browserName, shard, message: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, null, 2)}\n`,
     );
   } catch (reportError) {
     console.error('Could not save the browser failure report:', reportError);

@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { buildServer } from './lib/server-process.mjs';
 
 /** The two shards of scripts/smoke.mjs that together cover the whole browser smoke. */
 export const parallelShards = ['outbox', 'ui'];
@@ -18,21 +20,35 @@ export async function runShards({
   args = [fileURLToPath(new URL('./smoke.mjs', import.meta.url))],
   stdout = process.stdout,
   stderr = process.stderr,
+  signals = process,
 } = {}) {
-  const passed = await Promise.all(
-    shards.map((shard) =>
-      runShard(shard, { env, command, args, stdout, stderr }),
-    ),
-  );
-  return shards.filter((_shard, index) => !passed[index]);
+  const children = new Set();
+  // Stopping this runner stops the shards, so no browser or server outlives it.
+  const forward = (signal) => {
+    for (const child of children) child.kill(signal);
+  };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+    signals.on(signal, forward);
+  try {
+    const passed = await Promise.all(
+      shards.map((shard) =>
+        runShard(shard, { env, command, args, stdout, stderr, children }),
+      ),
+    );
+    return shards.filter((_shard, index) => !passed[index]);
+  } finally {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+      signals.off(signal, forward);
+  }
 }
 
-function runShard(shard, { env, command, args, stdout, stderr }) {
+function runShard(shard, { env, command, args, stdout, stderr, children }) {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       env: { ...env, ARTIFREE_SMOKE_SHARD: shard },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    children.add(child);
     let startError;
     // A command that cannot start emits 'error' and then 'close'. The verdict
     // waits for 'close', so all of the shard's output has been relayed by then.
@@ -40,6 +56,7 @@ function runShard(shard, { env, command, args, stdout, stderr }) {
       startError = error;
     });
     child.once('close', (code, signal) => {
+      children.delete(child);
       if (startError !== undefined)
         stderr.write(`[${shard}] could not run: ${startError.message}\n`);
       else if (code !== 0)
@@ -58,7 +75,13 @@ function relayLines(input, shard, output) {
 }
 
 async function main() {
-  const failed = await runShards();
+  // Build the server once here; parallel shards would each run cargo build.
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+  const env =
+    process.env.ARTIFREE_SERVER_BIN === undefined
+      ? { ...process.env, ARTIFREE_SERVER_BIN: buildServer(root) }
+      : process.env;
+  const failed = await runShards({ env });
   if (failed.length > 0) {
     console.error(`Browser smoke shard failed: ${failed.join(', ')}.`);
     process.exitCode = 1;

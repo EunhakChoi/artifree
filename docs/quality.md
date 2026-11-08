@@ -59,7 +59,9 @@ separate jobs, and each shard has its own server, data directory, and evidence
 folder (`.artifree/qa/<browser>-<shard>/`). `npm run test:smoke:parallel` runs
 both shards at once on one machine and fails if either fails. The whole suite
 still runs in one process with `npm run test:smoke`, which is what happens when
-the variable is unset or `all`.
+the variable is unset or `all`. CI runs only the shards, so the `ui` checks start
+on a server the outbox checks have not used; a check must not depend on running
+after another shard.
 
 ## Checks must be capable of failing
 
@@ -681,7 +683,8 @@ Another job runs Cargo tests on Rust 1.88.0; regular checks use the pinned Rust
 toolchain. Rust/CLI JSON equivalence and all CLI rejection cases run in the
 general gate. Browser jobs use the official Playwright image, pinned by version
 and OCI digest, with browsers and system libraries already installed. They save
-screenshots, a JSON result, and a trace under `.artifree/qa/<browser>/`. The image is for trusted scaffold UI tests, not product artifact isolation. Local
+screenshots, a JSON result, and a trace under `.artifree/qa/<browser>-<shard>/`
+(`.artifree/qa/<browser>/` for a local whole-suite run). The image is for trusted scaffold UI tests, not product artifact isolation. Local
 checks do not require Docker. PDF output
 is checked in Chromium; Playwright's Firefox does not implement PDF printing.
 
