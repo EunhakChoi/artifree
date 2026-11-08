@@ -4,14 +4,14 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) are implemented; CLI asset commands and the remainder of R09b–R09d are proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). The MCP tools `list_assets`, `read_asset`, `upload_asset` and `delete_asset`
-exist (R09b3). There is no CLI asset command, grant or frame access yet. A duplicate copies the
+exist (R09b3). The CLI `asset list|upload|read|delete` commands exist (R09b4). There is no grant or frame access yet. A duplicate copies the
 requesting actor's current asset space only when `copy_assets` is true (rule 10).
 The management web has an Assets tab (R09c: usage, upload, list,
 attachment download, delete, conflict and unknown-outcome retry), and its
@@ -87,9 +87,9 @@ R09b2 implements the TypeScript upload/delete calls (see its section below):
 each makes one request with the caller's key, requires exactly 201 or 200,
 checks the receipt against the captured request and never retries.
 Direct callers, and callers of those functions, must freeze the identical
-envelope and key themselves after an unknown outcome. CLI upload and
-delete and the unknown-outcome handling of other adapters remain R09b; MCP
-has its own tools (R09b3).
+envelope and key themselves after an unknown outcome. MCP has its own tools (R09b3) and the CLI its own commands (R09b4); a separate
+CLI run cannot freeze the bytes, so the server's key fingerprint enforces the
+identical resend there (see R09b4).
 No asset change subscription is emitted. Duplicates copy assets only with the
 `copy_assets` opt-in (see "Implementation notes (copy_assets)" below); requests
 without it keep their files/data behavior and fingerprints.
@@ -736,4 +736,63 @@ Verification: the shared operations keep the existing HTTP asset tests green;
 exercise the tools against the real server (round trip, same-key replay, stale
 base, rejections, isolation between users, HTTP/MCP byte parity, tool hints),
 with mutation checks for the base-version guard and the returned bytes. The
-CLI `asset` commands remain proposed.
+The CLI `asset` commands are R09b4 below.
+
+## R09b4: CLI asset commands
+
+Implements the CLI half of rule 11. It adds no numbered rule and changes none;
+nothing changes on the server, in the TypeScript client or in the generated
+contracts. `artifree asset list|upload|read|delete` call the client functions of
+R09b1 and R09b2 and print their validated results as JSON on stdout; diagnostics
+and retry hints go to stderr.
+
+- **Grammar.** `asset list <artifact-id>`; `asset upload <artifact-id> --file
+<path> --content-type <mime> --base-asset-version <n> [--idempotency-key
+<key>]`; `asset read <artifact-id> <asset-id> --output <file>`; `asset delete
+<artifact-id> <asset-id> --base-asset-version <n> [--idempotency-key <key>]`.
+  `delete` has no `--yes`: the required base is the confirmation, as for
+  `data delete`.
+- **Base and key.** `--base-asset-version` is required and is never read from
+  the server by the CLI, because reading it again would turn a retry into a
+  different request. Without `--idempotency-key` the CLI makes one and reports it
+  only for an unknown or rate-limited outcome. There is one request and no
+  retry (R09b2). After an unknown outcome stderr says to resend with the same
+  key and the same parts: for upload the artifact, `--content-type`, base and
+  file content, with the file's sha256 and size so the operator can check it did
+  not change; for delete the artifact, asset ID and base. A separate CLI run
+  cannot freeze the bytes, so the server's fingerprint enforces identity: the
+  same key with other content is `request_key_reused` and never a second write.
+- **Input.** Upload takes only a path the operator names (rule 11); there is no
+  stdin. `--content-type` is required and never inferred from the file name; the
+  CLI checks only its spelling, so `image/png` and `text/html` reach the server
+  and are `asset_type_unsupported`. The file must be a regular file: a symbolic
+  link or special file is refused; it is opened without following links (where
+  the platform has `O_NOFOLLOW`) and its device and inode must match the check
+  before opening; a file over 5 MiB is refused before it is read, and a file whose size or modification time changes while it is read is
+  refused (a best-effort check, bounded by the file system's timestamp
+  granularity). An empty file is sent and refused by the
+  server as `invalid_asset`. Local refusals send nothing.
+- **Read.** `--output` is required, no raw bytes go to stdout, and the file is
+  written only after the client verified type, size and SHA-256. It is created
+  exclusively: an existing path, including a symbolic link, is refused and a
+  partial file is removed. A digest mismatch is `invalid_response` and creates no
+  file. Exit codes: 0 success, 2 usage, 1 API or local file errors.
+- **Conflicts.** An `asset_conflict` prints `current_asset_version=<n>`, read from
+  the error body because the client has no typed accessor.
+- **Open flags and mode.** The file is opened with `O_NONBLOCK` where it exists,
+  so a regular file replaced by a FIFO between the check and the open cannot block
+  the open; the device, inode and type check right after the open refuses it. The
+  downloaded file is created with mode `0600`, because asset content is private
+  user data, whatever the umask.
+- **Bounds.** `--base-asset-version` must be below 2^53-1, as the client requires,
+  so an impossible value is a usage error (exit 2) before anything is sent.
+- **Not in this slice:** `asset show`, stdin or `--output -`, content-type
+  inference, a CLI allowlist, CLI-side retry or a pending-request file, a typed
+  `currentAssetVersion`, PNG/JPEG admission (R09a), runtime grants (R09d), change
+  following, bulk upload.
+
+Verification: real-server CLI tests in `scripts/tests/cli-assets.test.mjs`
+(lifecycle, replay, exactly 5 MiB), `cli-assets-refusals.test.mjs` (server
+refusals), `cli-assets-local.test.mjs` (nothing sent) and
+`cli-assets-outcome.test.mjs` (lost reply through a proxy, corrupted read), with
+guard mutations for each rule above.

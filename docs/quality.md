@@ -837,5 +837,5 @@ form cleared after a retry succeeds. The duplicate
 space/actor overflow with no key or partial copy, actor scoping, independence,
 purge of either side) and HTTP, MCP, client and CLI tests of `copied`, the
 fingerprint, overflow and replay after source change or purge. There are no MCP
-asset tool, CLI asset command or runtime tests because those adapters remain
-R09b and R09d work.
+asset tool or runtime tests here: the MCP tools (R09b3) and the CLI commands
+(R09b4) have their own tests, and runtime grants remain R09d work.

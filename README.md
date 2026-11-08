@@ -249,6 +249,22 @@ codex mcp add artifree --url http://127.0.0.1:7410/mcp --bearer-token-env-var AR
 [Using Artifree from MCP agents](docs/mcp.md) covers the tools, Pi's
 configuration, examples, and retry rules.
 
+### Uploaded assets
+
+Each artifact can also keep uploaded assets, a separate space with its own
+`asset_version` ([decision 0045](docs/decisions/0045-uploaded-assets.md)).
+`artifree asset list <id>` shows it; `asset upload <id> --file <path>
+--content-type <mime> --base-asset-version <n>` stores one asset and `asset delete
+<id> <asset-id> --base-asset-version <n>` removes one for good; both take an
+optional `--idempotency-key`, and a stale base fails with `asset_conflict` and
+`current_asset_version`. `asset read <id> <asset-id> --output <file>` writes the
+verified bytes to a new file and never replaces an existing one. Only UTF-8
+`text/plain` and `text/csv` are accepted today, at most 5 MiB each; the CLI sends
+only the file you name, never infers a type, and refuses a symbolic link or a file
+over the limit before sending. After a lost reply, resend the identical command
+with the same key and the same file. MCP agents use `list_assets`, `read_asset`,
+`upload_asset` and `delete_asset`. A page running in a preview cannot read assets.
+
 ## Architecture
 
 | Layer          | Location                                                     | Choice                                                                  |
