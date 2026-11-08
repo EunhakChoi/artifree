@@ -8,7 +8,8 @@ sub-slice. Public delivery coordination and the remaining numbered
 sender/lifecycle contract are proposed.
 
 > Supplemented by [0049](0049-outbox-rejected-unresolved-disposal.md)
-> (proposed; in effect when accepted by the R08c-3a code PR): an additive internal scheduler
+> (accepted by the R08c-3a code PR; implemented in the internal scheduler only
+> by R08c-3a and R08c-3b): an additive internal scheduler
 > contract for rule 17's `discardRejected` and `abandonUnresolved` (roadmap
 > R08c-3a/3b). The numbered rules below are unchanged.
 
@@ -1028,8 +1029,10 @@ refusal is reported synchronously under still-current host authority, using
 independent snapshots. External close, authentication abort or an observer
 exception cancels any remaining publication.
 Page-global public integration, bounded recovery
-continuation, generation reauthorization, access recovery, rejected disposal
-and unresolved abandonment remain proposed. The public browser handle remains
+continuation, generation reauthorization and access recovery remain proposed.
+Rejected disposal and unresolved abandonment exist only inside the internal
+scheduler ([0049](0049-outbox-rejected-unresolved-disposal.md)), with no
+public handle. The public browser handle remains
 local-only; management UI, runtime frames and direct-write behavior are unchanged.
 Numeric limits, host contracts and action policy are Artifree choices, separate
 from the limited original observations described above.

@@ -15,7 +15,8 @@ own specification approval or treat passing tests as approval. Separate review
 and required gates remain mandatory for both changes.
 
 > Supplemented by [0049](0049-outbox-rejected-unresolved-disposal.md)
-> (proposed; in effect when accepted by the R08c-3a code PR): rejected disposal and
+> (accepted by the R08c-3a code PR; implemented in the internal scheduler only
+> by R08c-3a and R08c-3b): rejected disposal and
 > unresolved abandonment, which this record excludes, and metadata retirement
 > after those committed disposals. Rules 1–7 below, including rule 5's
 > empty-gate eligibility, are unchanged.

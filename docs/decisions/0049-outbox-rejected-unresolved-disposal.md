@@ -1,19 +1,19 @@
 # 0049: Scheduler-owned rejected disposal and unresolved abandonment
 
 Date: 2026-11-07. Status: **accepted by the R08c-3a code pull request;
-partially implemented** (the internal `discardRejected` is implemented; the
-internal `abandonUnresolved`, R08c-3b, is still proposed). Builds on
+implemented in the internal scheduler** (`discardRejected` by R08c-3a, the
+internal `abandonUnresolved` by R08c-3b). Builds on
 [0041](0041-browser-data-outbox.md) (rules 11, 12, 16–18 and B11/B22),
 [0044](0044-browser-outbox-local.md) and
 [0047](0047-outbox-disposal-retirement-proposal.md). Roadmap rows: R08c-3s
 (this record), R08c-3a, R08c-3b.
 
-> **Only the rejected kind is implemented.** This record merged as a
-> documentation-only specification with status proposed, following
+> **Both kinds are implemented, internal scheduler only.** This record merged as
+> a documentation-only specification with status proposed, following
 > `.github/CONTRIBUTING.md`, and the R08c-3a code PR accepted it when it
-> implemented `discardRejected` (internal scheduler only). The rules for
-> `abandonUnresolved` are not in effect until R08c-3b implements them under the
-> same record. (0047 was staged differently: proposed in #123 and accepted by a
+> implemented `discardRejected`. The R08c-3b code PR implemented
+> `abandonUnresolved` under the same record without changing a numbered rule.
+> There is no public registry, sender or handle. (0047 was staged differently: proposed in #123 and accepted by a
 > separate documentation PR, #126. This record did not follow that path.) A
 > code PR may not change a numbered rule below; an amendment is a separate
 > documentation PR. The numbered rules of 0041 and 0047 remain unchanged.
@@ -602,10 +602,12 @@ the baseline:
 | ------------------------------------ | ------------------------------------- |
 | This specification (R08c-3s)         | Accepted by the R08c-3a code PR       |
 | R08c-3a internal `discardRejected`   | Implemented (internal scheduler only) |
-| R08c-3b internal `abandonUnresolved` | Proposed; not implemented             |
+| R08c-3b internal `abandonUnresolved` | Implemented (internal scheduler only) |
 | Public handle, registry, sender      | Not implemented; outside this record  |
 | Native-process recovery (R08d)       | Not implemented; outside this record  |
 
 The R08c-3a code change is covered by the internal outbox suites in both
 browser engines and the real Rust server case; it adds no public registry,
-sender or delivery. It ran no acceptance case for `abandonUnresolved`.
+sender or delivery. It ran no acceptance case for `abandonUnresolved`. The
+R08c-3b code change adds the internal `abandonUnresolved` acceptance and guard
+cases to the same suites; it adds no public registry, sender or delivery.

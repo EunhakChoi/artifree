@@ -48,6 +48,65 @@ export async function checkOutboxScheduler(harness) {
     });
   }
 
+  // Cleanup host shared by the rejected and unresolved saturation cases: its
+  // authority follows the page's own locallyAuthenticated flag.
+  async function installSaturationCleanup(page) {
+    await page.evaluate(() => {
+      globalThis.saturationIdentity = {};
+      globalThis.saturationCleanup = {
+        gate: new deliveryApi.LocalOperationGate(),
+        async authorize(mode, signal) {
+          authorize();
+          if (!locallyAuthenticated)
+            throw new deliveryApi.OutboxError('owner_not_ready');
+          if (mode === 'online') {
+            const current = await deliveryApi.readBinding(
+              location.origin,
+              deliveryContext.accessToken,
+              signal,
+              (status) => {
+                if (status === 401) deliveryContext.invalidateAuthentication();
+              },
+            );
+            if (JSON.stringify(current) !== JSON.stringify(auth))
+              throw new deliveryApi.OutboxError('owner_not_ready');
+          }
+          return Object.freeze({
+            identity: saturationIdentity,
+            signal: stop.signal,
+            check() {
+              authorize();
+              if (!locallyAuthenticated)
+                throw new deliveryApi.OutboxError('owner_not_ready');
+            },
+          });
+        },
+      };
+      globalThis.saturationKey = (index) => [
+        ...lane.slice(0, 4),
+        'art_' + index.toString(16).padStart(32, '0'),
+      ];
+      // Resolves true once the predicate holds and false after about ten
+      // seconds, so a missed state fails its own assertion, not a timeout.
+      globalThis.reached = (predicate) =>
+        new Promise((resolve, reject) => {
+          let attempts = 0;
+          const check = () => {
+            try {
+              if (predicate()) return resolve(true);
+              if (attempts === 400) return resolve(false);
+              attempts += 1;
+              setTimeout(check, 25);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          check();
+        });
+      installScheduler(saturationCleanup);
+    });
+  }
+
   const selected = process.env.ARTIFREE_SCHEDULER_CASE;
   await checkSchedulerDisposal(harness, selected);
   if (
@@ -562,60 +621,7 @@ export async function checkOutboxScheduler(harness) {
     };
     configure('normal');
     const page = await setup({});
-    await page.evaluate(() => {
-      globalThis.saturationIdentity = {};
-      globalThis.saturationCleanup = {
-        gate: new deliveryApi.LocalOperationGate(),
-        async authorize(mode, signal) {
-          authorize();
-          if (!locallyAuthenticated)
-            throw new deliveryApi.OutboxError('owner_not_ready');
-          if (mode === 'online') {
-            const current = await deliveryApi.readBinding(
-              location.origin,
-              deliveryContext.accessToken,
-              signal,
-              (status) => {
-                if (status === 401) deliveryContext.invalidateAuthentication();
-              },
-            );
-            if (JSON.stringify(current) !== JSON.stringify(auth))
-              throw new deliveryApi.OutboxError('owner_not_ready');
-          }
-          return Object.freeze({
-            identity: saturationIdentity,
-            signal: stop.signal,
-            check() {
-              authorize();
-              if (!locallyAuthenticated)
-                throw new deliveryApi.OutboxError('owner_not_ready');
-            },
-          });
-        },
-      };
-      globalThis.saturationKey = (index) => [
-        ...lane.slice(0, 4),
-        'art_' + index.toString(16).padStart(32, '0'),
-      ];
-      // Resolves true once the predicate holds and false after about ten
-      // seconds, so a missed state fails its own assertion, not a timeout.
-      globalThis.reached = (predicate) =>
-        new Promise((resolve, reject) => {
-          let attempts = 0;
-          const check = () => {
-            try {
-              if (predicate()) return resolve(true);
-              if (attempts === 400) return resolve(false);
-              attempts += 1;
-              setTimeout(check, 25);
-            } catch (error) {
-              reject(error);
-            }
-          };
-          check();
-        });
-      installScheduler(saturationCleanup);
-    });
+    await installSaturationCleanup(page);
     // The page leaves one durable row for the default lane. Removing it keeps
     // the 256-row store cap from filling before the waiting lane arrives.
     await page.evaluate(async () => {
@@ -806,6 +812,209 @@ export async function checkOutboxScheduler(harness) {
       254,
     );
     setErrorBody(defaultBody);
+    await close(page);
+  }
+  if (
+    createArtifact === undefined &&
+    (selected === undefined || selected === 'unresolved-saturation')
+  ) {
+    // A 404 is an access refusal, not a rejection. Each lane blocks with its
+    // prepared head still unresolved, so only an explicit abandonment frees it.
+    configure('normal');
+    const page = await setup({});
+    await installSaturationCleanup(page);
+    // The page leaves one durable row for the default lane. Removing it keeps
+    // the 256-row store cap from filling before the waiting lane arrives.
+    await page.evaluate(async () => {
+      await store.discard(await store.lane([...lane]), authorize, stop.signal);
+    });
+    // The 256th slot is a retained preparation gate, not a refused lane: a
+    // 256th refusal would exhaust the last epoch and leave nothing to resume.
+    await page.evaluate(async () => {
+      const key = [...lane.slice(0, 4), 'art_' + '8'.repeat(32)];
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: key,
+        artifactId: key[4],
+        base: { version: 0 },
+      });
+      globalThis.retainedGate = key;
+      faultPut('intents', 'prepared');
+      scheduler.wake(key);
+    });
+    await page.waitForFunction(() =>
+      events.some((event) => event.kind === 'paused'),
+    );
+    await page.evaluate(async () => {
+      restorePut();
+      await store.discard(
+        await store.lane(retainedGate),
+        authorize,
+        stop.signal,
+      );
+    });
+    // 255 lanes are refused with 404. Each epoch allows 32 failures before it
+    // pauses, so the fill takes exactly seven explicit resumes.
+    configure('status', 404);
+    await page.evaluate(async () => {
+      globalThis.refusedKeys = [];
+      for (let index = 0; index < 255; index += 1) {
+        const key = saturationKey(index);
+        refusedKeys.push(key);
+        await enqueueLikeHead({
+          key: crypto.randomUUID().replaceAll('-', ''),
+          lane: key,
+          artifactId: key[4],
+          base: { version: 0 },
+        });
+      }
+      for (const key of refusedKeys) scheduler.wake(key);
+    });
+    for (let resumes = 0; ; resumes += 1) {
+      await page.waitForFunction(
+        () =>
+          scheduler.lanes.size === 256 &&
+          [...scheduler.lanes.values()].every(
+            (entry) => entry.pause !== undefined,
+          ),
+      );
+      const blocked = await page.evaluate(
+        () =>
+          [...scheduler.lanes.values()].filter(
+            (entry) => entry.pause?.kind === 'blocked',
+          ).length,
+      );
+      if (blocked === 255) break;
+      assert.ok(resumes < 7, 'the 255 refusals need exactly seven resumes');
+      await page.evaluate(() =>
+        scheduler.resumeDelivery(
+          [...scheduler.lanes.values()].find(
+            (entry) =>
+              entry.pause?.kind === 'retry_paused' &&
+              entry.pause.scope === 'coordinator',
+          ).pause.selection,
+        ),
+      );
+    }
+    assert.equal(await page.evaluate(() => revalidationCalls), 7);
+    assert.equal(requests().length, 255);
+    assert.equal(
+      await page.evaluate(() => scheduler.aggregateFailures),
+      31,
+      'the eighth epoch keeps one failure of budget',
+    );
+    assert.equal(
+      (await page.evaluate(() => storageSnapshot())).rows.length,
+      255,
+    );
+    // The waiting lane fits the store but not the lane map. Budget is not the
+    // reason it waits: one failure remains in the eighth epoch.
+    await page.evaluate(async () => {
+      const key = [...lane.slice(0, 4), 'art_' + '9'.repeat(32)];
+      await enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: key,
+        artifactId: key[4],
+        base: { version: 0 },
+      });
+      globalThis.waitingKey = key;
+      globalThis.reconciledBefore = events.filter(
+        (event) => event.kind === 'reconciled',
+      ).length;
+      scheduler.wake(key);
+    });
+    await page.waitForFunction(
+      () =>
+        events.filter((event) => event.kind === 'reconciled').length >
+        reconciledBefore,
+    );
+    assert.equal(
+      await page.evaluate(
+        () => events.findLast((event) => event.kind === 'reconciled').pending,
+      ),
+      true,
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        scheduler.lanes.has(JSON.stringify(waitingKey)),
+      ),
+      false,
+      'a lane beyond capacity is not admitted',
+    );
+    assert.equal(requests().length, 255, 'a waiting lane must not reach HTTP');
+    assert.equal(await page.evaluate(() => revalidationCalls), 7);
+    configure('normal');
+    // Other lanes are compared by object identity: a replaced pause or a
+    // retired lane fails the checks below.
+    await page.evaluate(() => {
+      globalThis.intactBefore = [...scheduler.lanes]
+        .filter(([id]) => id !== JSON.stringify(saturationKey(0)))
+        .map(([id, entry]) => ({ id, pause: entry.pause }));
+    });
+    assert.equal(await page.evaluate(() => intactBefore.length), 255);
+    assert.deepEqual(
+      await page.evaluate(async () => {
+        const selection = await scheduler.selectUnresolved(saturationKey(0));
+        return scheduler.abandonUnresolved(selection);
+      }),
+      { kind: 'abandoned_unknown', removedDependents: 0 },
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        reached(() =>
+          events.some(
+            (event) =>
+              event.kind === 'attempt' &&
+              event.result.kind === 'server_acknowledged',
+          ),
+        ),
+      ),
+      true,
+      'saturation reconciliation dispatches the waiting lane',
+    );
+    assert.equal(
+      await page.evaluate(
+        () =>
+          intactBefore.filter(({ id, pause }) => {
+            const entry = scheduler.lanes.get(id);
+            return entry !== undefined && entry.pause === pause;
+          }).length,
+      ),
+      255,
+      'the other 255 gates keep their pauses and are not retired',
+    );
+    assert.equal(
+      await page.evaluate(() => reached(() => scheduler.lanes.size === 255)),
+      true,
+      'only the abandoned and the acknowledged lanes leave the lane map',
+    );
+    assert.equal(requests().length, 1);
+    assert.ok(
+      requests()[0].url.includes(await page.evaluate(() => waitingKey[4])),
+    );
+    assert.equal(await page.evaluate(() => revalidationCalls), 7);
+    assert.equal(await page.evaluate(() => scheduler.aggregateFailures), 31);
+    assert.equal(
+      await page.evaluate(() =>
+        scheduler.lanes.has(JSON.stringify(retainedGate)),
+      ),
+      true,
+      'the retained gate survives the abandonment',
+    );
+    assert.equal(
+      await page.evaluate(
+        () =>
+          [...scheduler.lanes.values()].filter(
+            (entry) => entry.pause?.kind === 'blocked',
+          ).length,
+      ),
+      254,
+      'the other refused lanes stay blocked',
+    );
+    assert.equal(
+      (await page.evaluate(() => storageSnapshot())).rows.length,
+      254,
+    );
     await close(page);
   }
   if (selected === undefined || selected === 'capacity-wake-race') {

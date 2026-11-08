@@ -75,13 +75,17 @@ export type CleanupSnapshot =
       readonly signature: string;
     };
 /**
- * Committed result of removing one rejected prepared head. The head is not
- * counted in `removedDependents`; `survivors` are the lane rows left behind.
+ * Committed result of removing one prepared head and its closure. The head is
+ * not counted in `removedDependents`; `survivors` are the lane rows left behind.
  */
-export interface RejectedDisposal {
+interface ClosureDisposal {
   readonly removedDependents: number;
   readonly survivors: readonly IntentRow[];
 }
+/** Result of a committed discardRejected (ADR 0049 rule 9). */
+export type RejectedDisposal = ClosureDisposal;
+/** Result of a committed abandonUnresolved (ADR 0049 rule 9). */
+export type UnresolvedDisposal = ClosureDisposal;
 interface Predecessor {
   readonly sequence: number;
   readonly dataVersion: number;
@@ -1180,6 +1184,36 @@ export class LocalStore {
     authorize: () => void,
     signal: AbortSignal,
   ): Promise<RejectedDisposal> {
+    return this.disposePreparedHead(expected, authorize, signal, (stored) =>
+      same(stored, dispatched),
+    );
+  }
+
+  /**
+   * Scheduler-only, ADR 0049 rule 7: removes one prepared head whose delivery
+   * is unknown, with its unprepared closure. There is no dispatch comparison
+   * or rejection proof; the result is not an ACK, a rejection receipt or a
+   * statement of non-delivery (rule 9).
+   */
+  abandonUnresolvedSnapshot(
+    expected: Extract<CleanupSnapshot, { kind: 'intents' }>,
+    authorize: () => void,
+    signal: AbortSignal,
+  ): Promise<UnresolvedDisposal> {
+    return this.disposePreparedHead(expected, authorize, signal, () => true);
+  }
+
+  /**
+   * Shared transaction for the two prepared-head disposals. `headMatches` is
+   * the only difference between them; it runs on the stored head before any
+   * row is removed.
+   */
+  private disposePreparedHead(
+    expected: Extract<CleanupSnapshot, { kind: 'intents' }>,
+    authorize: () => void,
+    signal: AbortSignal,
+    headMatches: (stored: PreparedRow) => boolean,
+  ): Promise<ClosureDisposal> {
     return transaction(
       this.database,
       'readwrite',
@@ -1197,7 +1231,7 @@ export class LocalStore {
         const [stored, ...others] = current.rows;
         if (
           stored?.state !== 'prepared' ||
-          !same(stored, dispatched) ||
+          !headMatches(stored) ||
           others.some((row) => row.state !== 'unprepared')
         )
           throw new OutboxError('invalid_selection');
