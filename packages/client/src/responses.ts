@@ -272,15 +272,34 @@ export function parseCommit(value: unknown): CommitResponse | undefined {
   };
 }
 
-/** Parses the response of a duplicate. */
+/** The optional parts a duplicate request asked to copy besides the files. */
+export interface RequestedCopy {
+  data: boolean;
+  assets: boolean;
+}
+
+/**
+ * Parses the response of a duplicate that asked for `requested`. `copied` is
+ * read as a set and must name exactly what was asked for: always `files`,
+ * `data` exactly when data was requested, and `assets` exactly when assets
+ * were. Anything else does not match the contract.
+ */
 export function parseDuplicate(
   value: unknown,
+  requested: RequestedCopy,
 ): DuplicateArtifactResponse | undefined {
   const commit = parseCommit(value);
   const copied = isRecord(value)
     ? list(value.copied, (part) => (isCopiedPart(part) ? part : undefined))
     : undefined;
   if (commit === undefined || copied === undefined) return undefined;
+  const received = new Set<CopiedPart>(copied);
+  if (
+    !received.has('files') ||
+    received.has('data') !== requested.data ||
+    received.has('assets') !== requested.assets
+  )
+    return undefined;
   return { ...commit, copied };
 }
 

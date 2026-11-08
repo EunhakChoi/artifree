@@ -2322,6 +2322,59 @@ test('A duplicate names the revision and title; a copy must say what it copied',
   }
 });
 
+test('A duplicate receipt must name exactly the parts that were requested', async () => {
+  let copied = ['files'];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async () =>
+      Response.json(
+        {
+          artifact: { ...artifact, id: 'art_copy' },
+          revision: {
+            revision: 1,
+            created_by: 'owner',
+            created_at_ms: 1,
+            files: [],
+          },
+          copied,
+          replayed: false,
+        },
+        { status: 201 },
+      ),
+  });
+  const duplicate = (request) =>
+    client.duplicateArtifact(artifact.id, 2, request, {
+      idempotencyKey: 'test-key-1',
+    });
+  // `copied` is a set: order does not matter.
+  copied = ['assets', 'data', 'files'];
+  assert.deepEqual(
+    (await duplicate({ copy_data: true, copy_assets: true })).copied,
+    ['assets', 'data', 'files'],
+  );
+  const mismatches = [
+    // A requested part is missing.
+    [{ copy_assets: true }, ['files']],
+    [{ copy_data: true }, ['files']],
+    [{ copy_data: true, copy_assets: true }, ['files', 'data']],
+    [{ copy_data: true }, ['data']],
+    // A part that was not requested (or was declined) is reported.
+    [{}, ['files', 'assets']],
+    [{ copy_assets: false }, ['files', 'assets']],
+    [{ copy_assets: true }, ['files', 'data', 'assets']],
+  ];
+  for (const [request, parts] of mismatches) {
+    copied = parts;
+    const error = await failure(duplicate(request));
+    assert.equal(
+      error.code,
+      'invalid_response',
+      `${JSON.stringify(request)} answered ${JSON.stringify(parts)}`,
+    );
+  }
+});
+
 // Application data (decision 0031).
 
 const dataRoute = `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/data`;

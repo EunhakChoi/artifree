@@ -787,7 +787,9 @@ export class ArtifreeClient {
    * gets its own copy of the caller's entire uploaded asset space of the
    * source, with the same asset IDs; when those do not fit the asset limits
    * the whole duplicate rejects with code `asset_limit_exceeded` and nothing
-   * is created. `copied` lists what the copy received; treat it as a set.
+   * is created. `copied` lists what the copy received; treat it as a set. A
+   * receipt whose `copied` omits a requested part or names an unrequested
+   * one rejects with `invalid_response`.
    */
   async duplicateArtifact(
     id: string,
@@ -795,10 +797,16 @@ export class ArtifreeClient {
     request: DuplicateArtifactRequest,
     options: MutationOptions,
   ): Promise<DuplicateArtifactResponse> {
+    // Captured before the first await, so the receipt is checked against
+    // what was sent even if the caller changes `request` meanwhile.
+    const requested = {
+      data: request.copy_data === true,
+      assets: request.copy_assets === true,
+    };
     return this.json(
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/duplicate`,
-      parseDuplicate,
+      (value) => parseDuplicate(value, requested),
       {
         mutation: { body: request, idempotencyKey: options.idempotencyKey },
       },

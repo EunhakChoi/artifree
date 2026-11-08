@@ -1879,7 +1879,8 @@ pub enum ErrorCode {
     AssetTypeUnsupported,
     /// Empty or invalid asset content.
     InvalidAsset,
-    /// Upload byte, count or logical quota exceeded.
+    /// An upload, or the assets an asset-copying duplicate would copy, would
+    /// exceed an asset byte, count or logical quota. Nothing was written.
     AssetLimitExceeded,
     /// The opt-in write authority changed; no key or mutation was recorded.
     OutboxBindingChanged,

@@ -167,21 +167,44 @@ fn usage(
         u64::try_from(bytes).map_err(corrupt)?,
     ))
 }
+/// Whether `add_count` more associations totalling `add_bytes` fit the
+/// actor's limits for `artifact`'s space and across all their spaces, trash
+/// included. Uploads and asset-copying duplicates both admit through here, so
+/// they enforce identical limits.
+fn admits(
+    connection: &Connection,
+    actor: &ActorId,
+    artifact: &ArtifactId,
+    add_count: u64,
+    add_bytes: u64,
+) -> Result<bool, StoreError> {
+    for (scope, max_count, max_bytes) in [
+        (Some(artifact), MAX_SPACE_ASSETS, MAX_SPACE_BYTES),
+        (None, MAX_ACTOR_ASSETS, MAX_ACTOR_BYTES),
+    ] {
+        let (count, bytes) = usage(connection, actor, scope)?;
+        let fits = count
+            .checked_add(add_count)
+            .is_some_and(|next| next <= max_count)
+            && bytes
+                .checked_add(add_bytes)
+                .is_some_and(|next| next <= max_bytes);
+        if !fits {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 fn check_quota(
     connection: &Connection,
     write: AssetWrite<'_>,
     size: u64,
 ) -> Result<(), AssetStoreError> {
-    for (artifact, max_count, max_bytes) in [
-        (Some(write.artifact), MAX_SPACE_ASSETS, MAX_SPACE_BYTES),
-        (None, MAX_ACTOR_ASSETS, MAX_ACTOR_BYTES),
-    ] {
-        let (count, bytes) = usage(connection, write.request.actor, artifact)?;
-        if count >= max_count || bytes.checked_add(size).is_none_or(|next| next > max_bytes) {
-            return Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded));
-        }
+    if admits(connection, write.request.actor, write.artifact, 1, size)? {
+        Ok(())
+    } else {
+        Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded))
     }
-    Ok(())
 }
 fn advance(
     transaction: &Transaction<'_>,
@@ -245,23 +268,10 @@ pub(super) fn copy_space(
     if count == 0 {
         return Ok(());
     }
-    // The copy is new, so its space holds exactly what is copied into it.
-    let (actor_count, actor_bytes) = usage(transaction, actor, None)?;
-    let fits = |(used_count, used_bytes): (u64, u64), max_count: u64, max_bytes: u64| {
-        used_count
-            .checked_add(count)
-            .is_some_and(|next| next <= max_count)
-            && used_bytes
-                .checked_add(bytes)
-                .is_some_and(|next| next <= max_bytes)
-    };
-    if !fits((0, 0), MAX_SPACE_ASSETS, MAX_SPACE_BYTES)
-        || !fits(
-            (actor_count, actor_bytes),
-            MAX_ACTOR_ASSETS,
-            MAX_ACTOR_BYTES,
-        )
-    {
+    // The copy is new, so its space starts empty. The source space was
+    // admitted under the same limits, so the space check here only guards
+    // against legacy or corrupt data; the actor-wide check is the real limit.
+    if !admits(transaction, actor, copy, count, bytes)? {
         return Err(StoreError::AssetLimitExceeded);
     }
     transaction

@@ -1085,7 +1085,7 @@
         },
         {
           "const": "asset_limit_exceeded",
-          "description": "Upload byte, count or logical quota exceeded.",
+          "description": "An upload, or the assets an asset-copying duplicate would copy, would\nexceed an asset byte, count or logical quota. Nothing was written.",
           "type": "string"
         },
         {
