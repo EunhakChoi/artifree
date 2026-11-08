@@ -275,6 +275,11 @@ impl ArtifactStore for SqliteStore {
             if let Some(source) = request.source.filter(|source| source.copy_data) {
                 data::copy_space(transaction, source.artifact, &id, request.request.actor)?;
             }
+            // Likewise the copy's assets (0045): copied before the key is
+            // recorded, so a copy that does not fit leaves neither behind.
+            if let Some(source) = request.source.filter(|source| source.copy_assets) {
+                assets::copy_space(transaction, source.artifact, &id, request.request.actor)?;
+            }
             let position = (revision, metadata);
             record_key(transaction, request.request, &id, position, now)?;
             record_change(transaction, &id, ChangeKind::Created, position, now)?;

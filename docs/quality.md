@@ -807,5 +807,11 @@ standalone through `scripts/test-assets-live.mjs`. It covers upload, attachment
 download with no inline rendering, local oversize, type and quota refusals,
 stale base, delete confirmation and same-key retries after lost upload and
 delete replies, with the trash locked while an attempt is held and the upload
-form cleared after a retry succeeds. There are no MCP, CLI, copy or
-runtime asset tests because those adapters remain R09b and R09d work.
+form cleared after a retry succeeds. The duplicate
+`copy_assets` extension has provider tests
+(`crates/artifree-providers/tests/asset_copy.rs`: full copy, empty space,
+space/actor overflow with no key or partial copy, actor scoping, independence,
+purge of either side) and HTTP, MCP, client and CLI tests of `copied`, the
+fingerprint, overflow and replay after source change or purge. There are no MCP
+asset tool, CLI asset command or runtime tests because those adapters remain
+R09b and R09d work.

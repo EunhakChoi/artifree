@@ -142,6 +142,11 @@ pub struct DuplicateArtifactArguments {
     /// as its own independent data space. By default `false`: files only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_data: Option<bool>,
+    /// Whether the copy also receives a copy of your entire uploaded asset
+    /// space of the source, with the same asset IDs, as its own independent
+    /// asset space; independent of `copy_data`. By default `false`: no assets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_assets: Option<bool>,
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
@@ -831,9 +836,12 @@ fn commit_tools() -> [ToolDefinition; 6] {
                 "Create a new artifact you own whose revision 1 has the files of one revision of \
                  an artifact, exactly as they were. The copy has its own history, is not \
                  pinned, and is named title, or the source's title followed by \" (Copy)\". \
-                 Later changes to either artifact leave the other as it is. Only files are \
-                 copied unless copy_data is true, which also gives the copy its own copy of the \
-                 source's application data (copied lists what was copied). {KEY_RULE}"
+                 Later changes to either artifact leave the other as it is. By default only \
+                 files are copied. copy_data true also gives the copy its own copy of the \
+                 source's application data. copy_assets true also gives the copy its own copy \
+                 of all your uploaded assets of the source, with the same asset IDs, and is \
+                 refused as a whole with asset_limit_exceeded when they do not fit your asset \
+                 limits. copied lists what was copied. {KEY_RULE}"
             ),
             ToolEffect::Commit,
         ),

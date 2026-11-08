@@ -835,6 +835,7 @@ fn copy_of(fixture: &Fixture, name: &str, copy_data: bool) -> Result<CommitRecei
         source: Some(CopySource {
             artifact: fixture.id(),
             copy_data,
+            copy_assets: false,
         }),
     })
 }

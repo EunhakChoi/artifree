@@ -4,6 +4,7 @@ use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 use artifree_server::auth::AccessToken;
 use artifree_server::http::{self, AppState, Settings};
+use artifree_server::limits::RequestLimits;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode, header};
@@ -31,6 +32,20 @@ impl Reply {
 }
 impl Harness {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::configured(Settings::default())
+    }
+    /// A harness whose request budget admits the few hundred uploads that
+    /// fill an actor's asset limit.
+    fn unthrottled() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::configured(Settings {
+            limits: RequestLimits {
+                burst: 1000,
+                ..RequestLimits::default()
+            },
+            ..Settings::default()
+        })
+    }
+    fn configured(settings: Settings) -> Result<Self, Box<dyn std::error::Error>> {
         static SEQUENCE: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "artifree-assets-{}-{}",
@@ -43,7 +58,7 @@ impl Harness {
             SqliteStore::open(&db)?,
             SqliteTokenStore::open(&db)?,
             AccessToken::parse(OWNER).ok_or("token")?,
-            Settings::default(),
+            settings,
         )?;
         Ok(Self {
             dir,
@@ -742,5 +757,330 @@ async fn historical_png_receipts_replay_before_current_policy_without_recreating
     let list = harness.call("GET", &path, None, None).await?;
     assert_eq!(list.json()?["assets"], json!([]));
     assert_eq!(list.json()?["asset_version"], 2);
+    Ok(())
+}
+
+// --- duplicates that copy the asset space (decision 0045 rule 10) ----------
+
+impl Harness {
+    async fn named_artifact(&self, key: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let body = json!({"title": key, "files": [{"path": "index.html", "encoding": "utf8",
+            "content": "<h1>fixture</h1>"}]});
+        let created = self
+            .call("POST", "/v1/artifacts", Some(key), Some(body))
+            .await?;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.json());
+        Ok(created.json()?["artifact"]["id"]
+            .as_str()
+            .ok_or("artifact")?
+            .to_owned())
+    }
+    async fn duplicate(
+        &self,
+        artifact: &str,
+        revision: u64,
+        key: &str,
+        body: Value,
+    ) -> Result<Reply, Box<dyn std::error::Error>> {
+        self.call(
+            "POST",
+            &format!("/v1/artifacts/{artifact}/revisions/{revision}/duplicate"),
+            Some(key),
+            Some(body),
+        )
+        .await
+    }
+    async fn assets_of(&self, artifact: &str) -> Result<Value, Box<dyn std::error::Error>> {
+        let list = self
+            .call(
+                "GET",
+                &format!("/v1/artifacts/{artifact}/assets"),
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(list.status, StatusCode::OK, "{:?}", list.json());
+        Ok(list.json()?)
+    }
+    async fn put_asset(
+        &self,
+        artifact: &str,
+        key: &str,
+        base: u64,
+        bytes: &[u8],
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let reply = self
+            .call(
+                "POST",
+                &format!("/v1/artifacts/{artifact}/assets"),
+                Some(key),
+                Some(upload(base, "text/plain", bytes)),
+            )
+            .await?;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.json());
+        Ok(reply.json()?["asset"].clone())
+    }
+}
+fn copy_id(reply: &Reply) -> Result<String, Box<dyn std::error::Error>> {
+    assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.json());
+    Ok(reply.json()?["artifact"]["id"]
+        .as_str()
+        .ok_or("artifact")?
+        .to_owned())
+}
+
+#[tokio::test]
+async fn a_duplicate_copies_current_assets_only_when_asked() -> TestResult {
+    let h = Harness::new()?;
+    let source = h.artifact().await?;
+    let first = h.put_asset(&source, "first", 0, b"first bytes").await?;
+    let saved = h
+        .call(
+            "POST",
+            &format!("/v1/artifacts/{source}/revisions"),
+            Some("save"),
+            Some(
+                json!({"base_revision": 1, "changes": [{"op": "put", "path": "index.html",
+                "encoding": "utf8", "content": "<h1>second</h1>"}]}),
+            ),
+        )
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED);
+    let second = h
+        .put_asset(&source, "second", 1, b"after revision 2")
+        .await?;
+
+    let plain = h.duplicate(&source, 1, "plain", json!({})).await?;
+    assert_eq!(plain.json()?["copied"], json!(["files"]));
+    let plain_assets = h.assets_of(&copy_id(&plain)?).await?;
+    assert_eq!(
+        (
+            plain_assets["assets"].clone(),
+            plain_assets["asset_version"].clone()
+        ),
+        (json!([]), json!(0))
+    );
+
+    // Revision 1 predates the second upload; the copy takes the current space.
+    let copy = h
+        .duplicate(&source, 1, "assets", json!({"copy_assets": true}))
+        .await?;
+    assert_eq!(copy.json()?["copied"], json!(["files", "assets"]));
+    let copy = copy_id(&copy)?;
+    let copied = h.assets_of(&copy).await?;
+    assert_eq!(copied["assets"], h.assets_of(&source).await?["assets"]);
+    assert_eq!(copied["asset_version"], 1);
+    let mut ids = [first["id"].clone(), second["id"].clone()];
+    ids.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    assert_eq!(
+        copied["assets"]
+            .as_array()
+            .ok_or("assets")?
+            .iter()
+            .map(|asset| asset["id"].clone())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    let id = first["id"].as_str().ok_or("id")?;
+    let content = h
+        .call(
+            "GET",
+            &format!("/v1/artifacts/{copy}/assets/{id}/content"),
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(content.bytes, b"first bytes");
+
+    let both = h
+        .duplicate(
+            &source,
+            2,
+            "both",
+            json!({"copy_data": true, "copy_assets": true}),
+        )
+        .await?;
+    assert_eq!(both.json()?["copied"], json!(["files", "data", "assets"]));
+
+    // An empty space is still reported as copied, and the copy stays at 0.
+    let empty = h.named_artifact("empty-source").await?;
+    let empty_copy = h
+        .duplicate(&empty, 1, "empty", json!({"copy_assets": true}))
+        .await?;
+    assert_eq!(empty_copy.json()?["copied"], json!(["files", "assets"]));
+    assert_eq!(
+        h.assets_of(&copy_id(&empty_copy)?).await?["asset_version"],
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn copy_assets_is_part_of_the_duplicate_fingerprint() -> TestResult {
+    let h = Harness::new()?;
+    let source = h.artifact().await?;
+    h.put_asset(&source, "upload", 0, b"bytes").await?;
+    let plain = h.duplicate(&source, 1, "plain", json!({})).await?;
+    let plain_id = copy_id(&plain)?;
+    let explicit = h
+        .duplicate(&source, 1, "plain", json!({"copy_assets": false}))
+        .await?;
+    assert_eq!(
+        explicit.json()?["replayed"],
+        true,
+        "false is the old request"
+    );
+    assert_eq!(copy_id(&explicit)?, plain_id);
+    for (key, body) in [
+        ("plain", json!({"copy_assets": true})),
+        ("plain", json!({"copy_data": true, "copy_assets": true})),
+    ] {
+        let reused = h.duplicate(&source, 1, key, body.clone()).await?;
+        assert_eq!(
+            (reused.status, reused.json()?["error"]["code"].clone()),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!("request_key_reused")
+            ),
+            "{body}"
+        );
+    }
+    h.duplicate(&source, 1, "data", json!({"copy_data": true}))
+        .await
+        .and_then(|reply| copy_id(&reply))?;
+    let reused = h
+        .duplicate(
+            &source,
+            1,
+            "data",
+            json!({"copy_data": true, "copy_assets": true}),
+        )
+        .await?;
+    assert_eq!(reused.json()?["error"]["code"], "request_key_reused");
+    let malformed = h
+        .duplicate(&source, 1, "malformed", json!({"copy_assets": "yes"}))
+        .await?;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_asset_copy_over_the_actor_limit_is_refused_and_copies_nothing() -> TestResult {
+    let h = Harness::unthrottled()?;
+    let source = h.artifact().await?;
+    for n in 0..64 {
+        h.put_asset(&source, &format!("source-{n}"), n, b"a")
+            .await?;
+    }
+    // Two full spaces in the trash still count: 192 associations, so the
+    // 64 copied ones fit exactly, and one more association does not.
+    for space in 0..2 {
+        let full = h.named_artifact(&format!("full-{space}")).await?;
+        for n in 0..64 {
+            h.put_asset(&full, &format!("full-{space}-{n}"), n, b"a")
+                .await?;
+        }
+        let trashed = h
+            .call(
+                "PATCH",
+                &format!("/v1/artifacts/{full}"),
+                Some(&format!("trash-{space}")),
+                Some(json!({"base_metadata_revision": 1, "deleted": true})),
+            )
+            .await?;
+        assert_eq!(trashed.status, StatusCode::OK, "{:?}", trashed.json());
+    }
+    let extra = h.named_artifact("extra").await?;
+    let one = h.put_asset(&extra, "extra-asset", 0, b"a").await?;
+    let listed = h.call("GET", "/v1/artifacts", None, None).await?.json()?;
+
+    let refused = h
+        .duplicate(&source, 1, "copy", json!({"copy_assets": true}))
+        .await?;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.json()?["error"]["code"], "asset_limit_exceeded");
+    assert_eq!(
+        h.call("GET", "/v1/artifacts", None, None).await?.json()?,
+        listed,
+        "no copy was created"
+    );
+
+    let one = one["id"].as_str().ok_or("id")?;
+    let freed = h
+        .call(
+            "DELETE",
+            &format!("/v1/artifacts/{extra}/assets/{one}"),
+            Some("free"),
+            Some(json!({"base_asset_version": 1})),
+        )
+        .await?;
+    assert_eq!(freed.json()?["deleted"], true);
+    let copied = h
+        .duplicate(&source, 1, "copy", json!({"copy_assets": true}))
+        .await?;
+    assert_eq!(copied.json()?["replayed"], false, "the refusal kept no key");
+    let copy = copy_id(&copied)?;
+    assert_eq!(
+        h.assets_of(&copy).await?["assets"].as_array().map(Vec::len),
+        Some(64)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_asset_copy_replays_after_its_source_changes_or_is_purged() -> TestResult {
+    let h = Harness::new()?;
+    let source = h.artifact().await?;
+    h.put_asset(&source, "before", 0, b"before copy").await?;
+    let first = h
+        .duplicate(&source, 1, "copy", json!({"copy_assets": true}))
+        .await?;
+    let copy = copy_id(&first)?;
+    let copied = h.assets_of(&copy).await?;
+
+    h.put_asset(&source, "after", 1, b"after copy").await?;
+    let replay = h
+        .duplicate(&source, 1, "copy", json!({"copy_assets": true}))
+        .await?;
+    assert_eq!(
+        (replay.json()?["replayed"].clone(), copy_id(&replay)?),
+        (json!(true), copy.clone())
+    );
+    assert_eq!(replay.json()?["copied"], json!(["files", "assets"]));
+    assert_eq!(
+        h.assets_of(&copy).await?,
+        copied,
+        "the replay copies nothing"
+    );
+
+    let trashed = h
+        .call(
+            "PATCH",
+            &format!("/v1/artifacts/{source}"),
+            Some("trash"),
+            Some(json!({"base_metadata_revision": 1, "deleted": true})),
+        )
+        .await?;
+    assert_eq!(trashed.status, StatusCode::OK, "{:?}", trashed.json());
+    let purged = h
+        .call(
+            "POST",
+            &format!("/v1/artifacts/{source}/purge"),
+            Some("purge"),
+            Some(json!({"base_metadata_revision": 2})),
+        )
+        .await?;
+    assert_eq!(purged.status, StatusCode::OK, "{:?}", purged.json());
+    let after_purge = h
+        .duplicate(&source, 1, "copy", json!({"copy_assets": true}))
+        .await?;
+    assert_eq!(
+        (
+            after_purge.json()?["replayed"].clone(),
+            copy_id(&after_purge)?
+        ),
+        (json!(true), copy.clone())
+    );
+    assert_eq!(h.assets_of(&copy).await?, copied);
     Ok(())
 }

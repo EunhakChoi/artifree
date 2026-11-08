@@ -4,17 +4,18 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls and R09c (partial) the management assets panel without copy controls; the remainder of R09b–R09d is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c (partial) supplies the management assets panel without its copy control; CLI/MCP asset commands and the remainder of R09b–R09d are proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). There is no CLI, MCP
-tool, copy extension, grant or frame access yet. The management web has an
-Assets tab (partial R09c: usage, upload, list, attachment download, delete,
-conflict and unknown-outcome retry); its explicit copy control waits for the
-R09b copy extension. Builds on [0003](0003-local-html-artifact-slice.md),
+tool, grant or frame access yet. A duplicate copies the
+requesting actor's current asset space only when `copy_assets` is true (rule 10).
+The management web has an Assets tab (partial R09c: usage, upload, list,
+attachment download, delete, conflict and unknown-outcome retry); its explicit
+copy control is not implemented yet. Builds on [0003](0003-local-html-artifact-slice.md),
 [0012](0012-duplicate-artifacts.md), [0020](0020-runtime-grants.md),
 [0027](0027-backup-restore-and-schema-upgrade.md),
 [0029](0029-retention-and-cleanup.md), [0031](0031-app-data.md),
@@ -87,10 +88,10 @@ each makes one request with the caller's key, requires exactly 201 or 200,
 checks the receipt against the captured request and never retries.
 Direct callers, and callers of those functions, must freeze the identical
 envelope and key themselves after an unknown outcome. CLI/MCP upload and
-delete, `copy_assets` and the unknown-outcome handling of other adapters remain
-R09b.
-No asset change subscription is emitted. Asset copying remains absent and
-existing duplicate requests retain their files/data behavior.
+delete and the unknown-outcome handling of other adapters remain R09b.
+No asset change subscription is emitted. Duplicates copy assets only with the
+`copy_assets` opt-in (see "Implementation notes (copy_assets)" below); requests
+without it keep their files/data behavior and fingerprints.
 
 ## Target rules (partially implemented)
 
@@ -629,14 +630,38 @@ conflict.
   fake-clock tests of the envelope, receipt, status, size, stall, abort and
   redirect rules. No browser fixture was added, so no browser smoke applies.
 
+## Implementation notes (copy_assets)
+
+Status: **implemented** for HTTP, the TypeScript client, the CLI
+(`--copy-assets`) and the MCP `duplicate_artifact` argument. These notes record
+choices rule 10 left open; the rule wins on any conflict.
+
+- The copy runs inside the duplicate's creating transaction, after the source
+  and optional data copy and before the request key is recorded, so an
+  overflow leaves no artifact, key, association or blob change.
+- Destination checks cover both the space limits (64 files, 25 MiB) and the
+  actor limits (256 files, 100 MiB, trash included), with every copied
+  association charged at full logical size. Overflow is `422
+asset_limit_exceeded` with the same generic message as uploads; it does not
+  say which limit was hit.
+- Copied associations keep the source's asset ID, type, size, digest and
+  `created_at` (metadata is immutable per ID). Only the requesting actor's
+  rows are copied; upload receipts are not. A nonempty copy starts at
+  `asset_version` 1, an empty one writes no space row and reads as 0.
+- `copied` lists `files`, then `data` and `assets` when requested (`assets`
+  also for an empty space); clients treat it as a set. `copy_assets: false`
+  and omission keep the earlier fingerprint; `true` adds a distinct
+  component.
+- The management web duplicate dialog does not offer the copy yet (R09c).
+
 ## R09c (partial): management assets panel
 
 Status: **partially implemented**. The management web has an Assets tab per
 artifact with usage, upload, list, attachment download, delete, conflict
 handling and unknown-outcome retry. The explicit copy control of rule 11 is
-not implemented: `copy_assets` and the copy extension remain R09b, so existing
-duplicate requests keep their files/data behavior and the duplicate dialog is
-unchanged. Firefox acceptance is pending re-verification
+not implemented yet: the server's `copy_assets` extension exists (see
+"Implementation notes (copy_assets)" above), but the duplicate dialog does not
+offer it. Firefox acceptance is pending re-verification
 ([quality](../quality.md#browser-engines)).
 
 These notes record choices rule 11 and R09b2 left open; the rules win on any

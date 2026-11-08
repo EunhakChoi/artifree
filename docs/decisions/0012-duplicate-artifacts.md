@@ -99,7 +99,10 @@ unpublished trace maps each to its evidence.
   a copy of everything. _Update, [0031](0031-app-data.md): application data
   exists, and a duplicate copies it only when asked (`copy_data`), as the
   copying actor's data at the moment the copy commits. The default stays files
-  only. Uploaded assets are still not copied (R09)._
+  only. Uploaded assets are still not copied (R09)._ _Update,
+  [0045](0045-uploaded-assets.md) rule 10: a duplicate copies the copying
+  actor's current uploaded assets only when asked (`copy_assets`); the default
+  stays files only._
 - The copy does not record its source; a list cannot show where a copy
   came from.
 - The web page names the copy by default and offers no title; a rename

@@ -108,6 +108,7 @@ impl From<StoreError> for AssetStoreError {
         match error {
             StoreError::NotFound => Self::NotFound,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
+            StoreError::AssetLimitExceeded => Self::Rejected(AssetRejection::LimitExceeded),
             other => Self::Unavailable(other.to_string()),
         }
     }
@@ -157,4 +158,18 @@ pub trait AssetStore {
         write: AssetWrite<'_>,
         id: &AssetId,
     ) -> Result<AssetReceipt, AssetStoreError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asset_limit_store_error_is_a_limit_rejection() {
+        assert_eq!(
+            AssetStoreError::from(StoreError::AssetLimitExceeded),
+            AssetStoreError::Rejected(AssetRejection::LimitExceeded),
+            "an asset quota refusal must not read as unavailable storage"
+        );
+    }
 }

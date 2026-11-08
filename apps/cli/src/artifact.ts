@@ -39,6 +39,7 @@ export const ARTIFACT_HELP = `Usage:
       [--expect <package-path>=<sha256|absent>]...
   artifree artifact restore <id> <revision> --base <revision>
   artifree artifact duplicate <id> <revision> [--title <title>] [--copy-data]
+      [--copy-assets]
   artifree artifact rename <id> <title> --base-metadata <n>
   artifree artifact pin <id> --base-metadata <n>
   artifree artifact unpin <id> --base-metadata <n>
@@ -92,9 +93,13 @@ restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
 revision, with its own history; it is unpinned and named --title or the
-source's title followed by " (Copy)". Only files are copied, unless
+source's title followed by " (Copy)". By default only files are copied.
 --copy-data also gives the copy its own copy of your application data for the
 source (artifree data --help), as it is when the copy is made.
+--copy-assets, independently, also gives the copy its own copy of all your
+uploaded assets of the source, unreferenced ones included, with the same asset
+IDs, as they are when the copy is made. They count in full toward your asset
+limits; when they do not fit, nothing is created (asset_limit_exceeded).
 export writes a ZIP archive of one revision's files, at their package paths
 and byte for byte, with the manifest .artifree-export.json, to a new file
 (--output; an existing file is never replaced). It prints the archive's size
@@ -650,6 +655,7 @@ async function duplicate(args: string[]): Promise<void> {
       ...connectionOptions,
       title: { type: 'string' },
       'copy-data': { type: 'boolean' },
+      'copy-assets': { type: 'boolean' },
       'idempotency-key': { type: 'string' },
     },
     allowPositionals: true,
@@ -667,6 +673,7 @@ async function duplicate(args: string[]): Promise<void> {
         {
           ...(values.title === undefined ? {} : { title: values.title }),
           ...(values['copy-data'] === true ? { copy_data: true } : {}),
+          ...(values['copy-assets'] === true ? { copy_assets: true } : {}),
         },
         { idempotencyKey },
       ),

@@ -147,7 +147,7 @@ export type ArtifactKind = 'app' | 'document' | 'slides' | 'dashboard' | 'design
 /**
  * A part of an artifact that a duplicate copies.
  */
-export type CopiedPart = 'files' | 'data';
+export type CopiedPart = 'files' | 'data' | 'assets';
 /**
  * Delivery state; acknowledgement is receipt, not model completion.
  */
@@ -560,8 +560,8 @@ export interface RevisionFile {
 export interface DuplicateArtifactResponse {
   artifact: Artifact;
   /**
-   * What the copy received: `files`, and `data` when the request asked for
-   * it. Uploaded assets do not exist yet and are never copied.
+   * What the copy received: `files`, then `data` and `assets` when the
+   * request asked for them. Treat it as a set.
    */
   copied: CopiedPart[];
   /**
@@ -2017,6 +2017,18 @@ export interface CancelJobRequest {}
  * creates an artifact from the files of that revision.
  */
 export interface DuplicateArtifactRequest {
+  /**
+   * Whether the copy also receives a copy of the caller's entire current
+   * uploaded asset space of the source, unreferenced uploads included, as
+   * its own independent asset space; independent of `copy_data`. By default
+   * `false`: no assets are copied. Copied assets keep their IDs, so
+   * references in the copied files and data still resolve, and count in
+   * full toward the copy's and the caller's asset limits. A copy that does
+   * not fit is refused as a whole with `asset_limit_exceeded`. The assets
+   * copied are the source's when the copy commits, whichever revision the
+   * files come from.
+   */
+  copy_assets?: boolean | null;
   /**
    * Whether the copy also receives a copy of the source's application
    * data, as its own independent data space. By default `false`: the copy

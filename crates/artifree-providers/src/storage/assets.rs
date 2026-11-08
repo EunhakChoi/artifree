@@ -153,7 +153,7 @@ fn usage(
     connection: &Connection,
     actor: &ActorId,
     artifact: Option<&ArtifactId>,
-) -> Result<(u64, u64), AssetStoreError> {
+) -> Result<(u64, u64), StoreError> {
     let (count, bytes): (i64, i64) = connection
         .query_row(
             "SELECT count(*), coalesce(sum(size),0) FROM assets WHERE actor = ?1 AND (?2 IS NULL OR
@@ -167,21 +167,44 @@ fn usage(
         u64::try_from(bytes).map_err(corrupt)?,
     ))
 }
+/// Whether `add_count` more associations totalling `add_bytes` fit the
+/// actor's limits for `artifact`'s space and across all their spaces, trash
+/// included. Uploads and asset-copying duplicates both admit through here, so
+/// they enforce identical limits.
+fn admits(
+    connection: &Connection,
+    actor: &ActorId,
+    artifact: &ArtifactId,
+    add_count: u64,
+    add_bytes: u64,
+) -> Result<bool, StoreError> {
+    for (scope, max_count, max_bytes) in [
+        (Some(artifact), MAX_SPACE_ASSETS, MAX_SPACE_BYTES),
+        (None, MAX_ACTOR_ASSETS, MAX_ACTOR_BYTES),
+    ] {
+        let (count, bytes) = usage(connection, actor, scope)?;
+        let fits = count
+            .checked_add(add_count)
+            .is_some_and(|next| next <= max_count)
+            && bytes
+                .checked_add(add_bytes)
+                .is_some_and(|next| next <= max_bytes);
+        if !fits {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 fn check_quota(
     connection: &Connection,
     write: AssetWrite<'_>,
     size: u64,
 ) -> Result<(), AssetStoreError> {
-    for (artifact, max_count, max_bytes) in [
-        (Some(write.artifact), MAX_SPACE_ASSETS, MAX_SPACE_BYTES),
-        (None, MAX_ACTOR_ASSETS, MAX_ACTOR_BYTES),
-    ] {
-        let (count, bytes) = usage(connection, write.request.actor, artifact)?;
-        if count >= max_count || bytes.checked_add(size).is_none_or(|next| next > max_bytes) {
-            return Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded));
-        }
+    if admits(connection, write.request.actor, write.artifact, 1, size)? {
+        Ok(())
+    } else {
+        Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded))
     }
-    Ok(())
 }
 fn advance(
     transaction: &Transaction<'_>,
@@ -227,6 +250,45 @@ fn new_id(transaction: &Transaction<'_>) -> Result<AssetId, AssetStoreError> {
     Err(AssetStoreError::Unavailable(
         "asset identifier collision budget exhausted".into(),
     ))
+}
+/// Copies the actor's entire asset space of `source` into the new artifact
+/// `copy` (decision 0045 rule 10): the same IDs, types, sizes, digests and
+/// creation times, as new associations of the copy alone, at asset version 1.
+/// Nothing is written for an empty space, so the copy stays at version 0.
+/// Blobs are shared, but every association is charged in full to the copy's
+/// space and to the actor, trash included; a copy that does not fit is
+/// refused before anything is written. Receipts are not copied.
+pub(super) fn copy_space(
+    transaction: &Transaction<'_>,
+    source: &ArtifactId,
+    copy: &ArtifactId,
+    actor: &ActorId,
+) -> Result<(), StoreError> {
+    let (count, bytes) = usage(transaction, actor, Some(source))?;
+    if count == 0 {
+        return Ok(());
+    }
+    // The copy is new, so its space starts empty. The source space was
+    // admitted under the same limits, so the space check here only guards
+    // against legacy or corrupt data; the actor-wide check is the real limit.
+    if !admits(transaction, actor, copy, count, bytes)? {
+        return Err(StoreError::AssetLimitExceeded);
+    }
+    transaction
+        .execute(
+            "INSERT INTO assets (artifact_id, actor, id, content_type, size, digest, created_at)
+             SELECT ?2, actor, id, content_type, size, digest, created_at FROM assets
+             WHERE artifact_id = ?1 AND actor = ?3",
+            params![source.as_str(), copy.as_str(), actor.as_str()],
+        )
+        .map_err(unavailable)?;
+    transaction
+        .execute(
+            "INSERT INTO asset_spaces (artifact_id, actor, asset_version) VALUES (?1, ?2, 1)",
+            params![copy.as_str(), actor.as_str()],
+        )
+        .map_err(unavailable)?;
+    Ok(())
 }
 /// Deletes a blob only if neither source history nor any asset association needs it.
 fn remove_blob(transaction: &Transaction<'_>, digest: &[u8]) -> Result<(), StoreError> {

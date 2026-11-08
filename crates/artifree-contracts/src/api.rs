@@ -158,6 +158,17 @@ pub struct DuplicateArtifactRequest {
     /// commits, whichever revision the files come from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_data: Option<bool>,
+    /// Whether the copy also receives a copy of the caller's entire current
+    /// uploaded asset space of the source, unreferenced uploads included, as
+    /// its own independent asset space; independent of `copy_data`. By default
+    /// `false`: no assets are copied. Copied assets keep their IDs, so
+    /// references in the copied files and data still resolve, and count in
+    /// full toward the copy's and the caller's asset limits. A copy that does
+    /// not fit is refused as a whole with `asset_limit_exceeded`. The assets
+    /// copied are the source's when the copy commits, whichever revision the
+    /// files come from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_assets: Option<bool>,
 }
 
 /// Body of `PATCH /v1/artifacts/{id}`: a new title, pin, trash state, or
@@ -347,6 +358,10 @@ pub enum CopiedPart {
     /// space. Listed only when the request asked for it; a source whose data
     /// space is empty copies nothing, and the copy's data space is then empty.
     Data,
+    /// The caller's uploaded asset space of the source as of the copy, as the
+    /// copy's own asset space with the same asset IDs. Listed only when the
+    /// request asked for it, even when the source had no assets to copy.
+    Assets,
 }
 
 /// Response of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`.
@@ -359,8 +374,8 @@ pub struct DuplicateArtifactResponse {
     pub artifact: Artifact,
     /// Revision 1 of the copy.
     pub revision: Revision,
-    /// What the copy received: `files`, and `data` when the request asked for
-    /// it. Uploaded assets do not exist yet and are never copied.
+    /// What the copy received: `files`, then `data` and `assets` when the
+    /// request asked for them. Treat it as a set.
     pub copied: Vec<CopiedPart>,
     /// True when an earlier request with the same key already created it.
     pub replayed: bool,
@@ -1864,7 +1879,8 @@ pub enum ErrorCode {
     AssetTypeUnsupported,
     /// Empty or invalid asset content.
     InvalidAsset,
-    /// Upload byte, count or logical quota exceeded.
+    /// An upload, or the assets an asset-copying duplicate would copy, would
+    /// exceed an asset byte, count or logical quota. Nothing was written.
     AssetLimitExceeded,
     /// The opt-in write authority changed; no key or mutation was recorded.
     OutboxBindingChanged,

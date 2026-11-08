@@ -79,31 +79,31 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 
 ## Tools
 
-| Tool                       | Arguments                                                                                               | Result                                     |
-| -------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `list_artifacts`           | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                        | `{ artifacts, next_page_token? }`          |
-| `get_artifact`             | `artifact_id`                                                                                           | artifact with `current_revision`           |
-| `create_artifact`          | `title`, `files`, `idempotency_key`                                                                     | `{ artifact, revision, replayed }`         |
-| `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                            | `{ artifact, revision, replayed }`         |
-| `edit_files`               | `artifact_id`, `base_revision`, `edits` (each with `expect`), `idempotency_key`                         | `{ artifact, revision, replayed }`         |
-| `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                           | `{ artifact, revision, replayed }`         |
-| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, `idempotency_key`                    | `{ artifact, revision, copied, replayed }` |
-| `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key` | `{ artifact, replayed }`                   |
-| `list_revisions`           | `artifact_id`                                                                                           | `{ revisions }`, newest first              |
-| `get_revision`             | `artifact_id`, `revision`                                                                               | one revision manifest                      |
-| `read_file`                | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                       | exact bytes as `utf8` or `base64`          |
-| `create_preview`           | `artifact_id`, `revision`                                                                               | `{ url, revision, expires_at_ms }`         |
-| `register_handoff_session` | `name`                                                                                                  | `{ session_id, session_secret }`           |
-| `poll_handoffs`            | `session_id`, `session_secret`                                                                          | `{ deliveries }`                           |
-| `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                           | receipt state                              |
-| `enqueue_job`              | `artifact_id`, `revision`, `kind` (`verify_revision`), `idempotency_key`                                | `{ job, replayed }`                        |
-| `get_job`                  | `job_id`                                                                                                | one job                                    |
-| `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                           | `{ jobs, next_page_token? }`               |
-| `cancel_job`               | `job_id`, `idempotency_key`                                                                             | `{ job, replayed }`                        |
-| `get_data`                 | `artifact_id`, optional `path`                                                                          | `{ data_version, exists, value? }`         |
-| `set_data`                 | `artifact_id`, `path`, `base_data_version`, `value` (JSON text), `idempotency_key`                      | `{ data_version, changed, replayed }`      |
-| `update_data`              | `artifact_id`, `path`, `base_data_version`, `patch` (JSON text), `idempotency_key`                      | `{ data_version, changed, replayed }`      |
-| `delete_data`              | `artifact_id`, `path`, `base_data_version`, `idempotency_key`                                           | `{ data_version, changed, replayed }`      |
+| Tool                       | Arguments                                                                                                    | Result                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------ |
+| `list_artifacts`           | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                             | `{ artifacts, next_page_token? }`          |
+| `get_artifact`             | `artifact_id`                                                                                                | artifact with `current_revision`           |
+| `create_artifact`          | `title`, `files`, `idempotency_key`                                                                          | `{ artifact, revision, replayed }`         |
+| `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                                 | `{ artifact, revision, replayed }`         |
+| `edit_files`               | `artifact_id`, `base_revision`, `edits` (each with `expect`), `idempotency_key`                              | `{ artifact, revision, replayed }`         |
+| `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                                | `{ artifact, revision, replayed }`         |
+| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, optional `copy_assets`, `idempotency_key` | `{ artifact, revision, copied, replayed }` |
+| `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key`      | `{ artifact, replayed }`                   |
+| `list_revisions`           | `artifact_id`                                                                                                | `{ revisions }`, newest first              |
+| `get_revision`             | `artifact_id`, `revision`                                                                                    | one revision manifest                      |
+| `read_file`                | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                            | exact bytes as `utf8` or `base64`          |
+| `create_preview`           | `artifact_id`, `revision`                                                                                    | `{ url, revision, expires_at_ms }`         |
+| `register_handoff_session` | `name`                                                                                                       | `{ session_id, session_secret }`           |
+| `poll_handoffs`            | `session_id`, `session_secret`                                                                               | `{ deliveries }`                           |
+| `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                                | receipt state                              |
+| `enqueue_job`              | `artifact_id`, `revision`, `kind` (`verify_revision`), `idempotency_key`                                     | `{ job, replayed }`                        |
+| `get_job`                  | `job_id`                                                                                                     | one job                                    |
+| `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                                | `{ jobs, next_page_token? }`               |
+| `cancel_job`               | `job_id`, `idempotency_key`                                                                                  | `{ job, replayed }`                        |
+| `get_data`                 | `artifact_id`, optional `path`                                                                               | `{ data_version, exists, value? }`         |
+| `set_data`                 | `artifact_id`, `path`, `base_data_version`, `value` (JSON text), `idempotency_key`                           | `{ data_version, changed, replayed }`      |
+| `update_data`              | `artifact_id`, `path`, `base_data_version`, `patch` (JSON text), `idempotency_key`                           | `{ data_version, changed, replayed }`      |
+| `delete_data`              | `artifact_id`, `path`, `base_data_version`, `idempotency_key`                                                | `{ data_version, changed, replayed }`      |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
@@ -168,8 +168,14 @@ source's title followed by " (Copy)". It needs no `base_revision`, and a retry
 with the same key returns the same copy. `copied` lists what the copy received:
 `files`, and `data` when `copy_data` is true, which gives the copy its own copy of
 your application data as it is when the copy commits (decision
-[0031](decisions/0031-app-data.md)); uploaded assets do not exist yet and are
-never copied (decision [0012](decisions/0012-duplicate-artifacts.md)).
+[0031](decisions/0031-app-data.md)), and `assets` when `copy_assets` is true.
+`copy_assets`, independently of `copy_data`, gives the copy its own copy of all
+your uploaded assets of the source, unreferenced ones included, with the same
+asset IDs, as they are when the copy commits. They count in full toward your
+asset limits; when they do not fit, nothing is created
+(`asset_limit_exceeded`). Treat `copied` as a set (decisions
+[0012](decisions/0012-duplicate-artifacts.md) and
+[0045](decisions/0045-uploaded-assets.md)).
 `read_file` with `offset` and `length` reads part of a file: `length` bytes
 at most from `offset`, ending before a UTF-8 character it would split, so
 each part of a text file is text. Read on from the returned `next_offset`,

@@ -106,6 +106,15 @@ pub struct CopySource<'a> {
     /// the same transaction as the create. The copy's data starts at version 1
     /// when the source's space has any member, and is not written otherwise.
     pub copy_data: bool,
+    /// Whether the actor's entire current asset space of the source
+    /// (decision 0045) is copied into the new artifact's own asset space, in
+    /// the same transaction as the create. Associations keep their asset IDs,
+    /// types, sizes, digests and creation times, and are charged in full to
+    /// the copy's space and the actor's quota; the create is refused as
+    /// [`StoreError::AssetLimitExceeded`] when they do not fit. The copy's
+    /// asset version starts at 1 when anything is copied, and is 0 otherwise.
+    /// Other actors' spaces and upload receipts are never copied.
+    pub copy_assets: bool,
 }
 
 /// What a file must be like in the artifact's current revision for an edit
@@ -494,6 +503,9 @@ pub enum StoreError {
     },
     /// The edits do not make a valid package; nothing was written.
     Package(PackageError),
+    /// A copy's assets would exceed a space or actor asset limit (decision
+    /// 0045); nothing was written and no key was recorded.
+    AssetLimitExceeded,
     /// Storage could not complete the operation; the outcome is not committed
     /// unless a later retry with the same key reports it.
     Unavailable(String),
@@ -523,6 +535,7 @@ impl fmt::Display for StoreError {
                 current.0
             ),
             Self::Package(error) => write!(formatter, "invalid package: {error}"),
+            Self::AssetLimitExceeded => formatter.write_str("asset limit exceeded"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -551,7 +564,8 @@ pub trait ArtifactStore {
     /// # Errors
     ///
     /// [`StoreError::NotFound`] when the copy's source is missing or in the
-    /// trash, [`StoreError::RequestKeyReused`] when the key was used with
+    /// trash, [`StoreError::AssetLimitExceeded`] when the copied assets do not
+    /// fit, [`StoreError::RequestKeyReused`] when the key was used with
     /// another fingerprint, or [`StoreError::Unavailable`].
     fn create_artifact(&self, request: NewArtifact<'_>) -> Result<CommitReceipt, StoreError>;
 

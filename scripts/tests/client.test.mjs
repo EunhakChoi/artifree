@@ -2290,6 +2290,11 @@ test('A duplicate names the revision and title; a copy must say what it copied',
     'files',
     'data',
   ]);
+  copied = ['files', 'assets'];
+  assert.deepEqual((await duplicate({ copy_assets: true })).copied, [
+    'files',
+    'assets',
+  ]);
   copied = ['files'];
   assert.deepEqual(sent, [
     [
@@ -2304,12 +2309,69 @@ test('A duplicate names the revision and title; a copy must say what it copied',
       `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
       '{"copy_data":true}',
     ],
+    [
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
+      '{"copy_assets":true}',
+    ],
   ]);
   // A part this client does not know could be data it would not report.
-  for (const parts of [undefined, 'files', ['files', 'assets']]) {
+  for (const parts of [undefined, 'files', ['files', 'grants']]) {
     copied = parts;
     const error = await failure(duplicate({}));
     assert.equal(error.code, 'invalid_response', String(parts));
+  }
+});
+
+test('A duplicate receipt must name exactly the parts that were requested', async () => {
+  let copied = ['files'];
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async () =>
+      Response.json(
+        {
+          artifact: { ...artifact, id: 'art_copy' },
+          revision: {
+            revision: 1,
+            created_by: 'owner',
+            created_at_ms: 1,
+            files: [],
+          },
+          copied,
+          replayed: false,
+        },
+        { status: 201 },
+      ),
+  });
+  const duplicate = (request) =>
+    client.duplicateArtifact(artifact.id, 2, request, {
+      idempotencyKey: 'test-key-1',
+    });
+  // `copied` is a set: order does not matter.
+  copied = ['assets', 'data', 'files'];
+  assert.deepEqual(
+    (await duplicate({ copy_data: true, copy_assets: true })).copied,
+    ['assets', 'data', 'files'],
+  );
+  const mismatches = [
+    // A requested part is missing.
+    [{ copy_assets: true }, ['files']],
+    [{ copy_data: true }, ['files']],
+    [{ copy_data: true, copy_assets: true }, ['files', 'data']],
+    [{ copy_data: true }, ['data']],
+    // A part that was not requested (or was declined) is reported.
+    [{}, ['files', 'assets']],
+    [{ copy_assets: false }, ['files', 'assets']],
+    [{ copy_assets: true }, ['files', 'data', 'assets']],
+  ];
+  for (const [request, parts] of mismatches) {
+    copied = parts;
+    const error = await failure(duplicate(request));
+    assert.equal(
+      error.code,
+      'invalid_response',
+      `${JSON.stringify(request)} answered ${JSON.stringify(parts)}`,
+    );
   }
 });
 

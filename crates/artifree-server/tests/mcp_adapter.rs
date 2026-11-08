@@ -1055,6 +1055,76 @@ async fn duplicate_artifact_copies_data_only_when_asked() -> TestResult {
     Ok(())
 }
 
+/// Duplicating with `copy_assets` copies the caller's asset space with its
+/// IDs, as over HTTP; without it the copy has no assets.
+#[tokio::test]
+async fn duplicate_artifact_copies_assets_only_when_asked() -> TestResult {
+    use artifree_core::assets::AssetUpload;
+    use artifree_domain::assets::AssetVersion;
+    use artifree_domain::identity::ArtifactId;
+    let harness = Harness::new();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "dup-asset-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"]
+        .as_str()
+        .ok_or("artifact")?
+        .to_owned();
+    // No MCP asset tool exists yet; the upload goes through the same service.
+    let service = ArtifactService::new(SqliteStore::open(&harness.database)?);
+    let actor: ActorId = parsed("local");
+    let uploaded = service.upload_asset(
+        &actor,
+        &parsed("dup-asset-upload-1"),
+        &parsed(&artifact),
+        AssetUpload {
+            base: AssetVersion(0),
+            content_type: &parsed("text/plain"),
+            bytes: b"asset bytes",
+            now: UnixMillis(1),
+        },
+    )?;
+    let duplicate = |key: &'static str, copy_assets: Option<bool>| {
+        let mut arguments =
+            json!({ "artifact_id": artifact, "revision": 1, "idempotency_key": key });
+        if let Some(copy_assets) = copy_assets {
+            arguments["copy_assets"] = json!(copy_assets);
+        }
+        harness.call("duplicate_artifact", arguments)
+    };
+    let copy_of = |reply: &Value| -> Result<ArtifactId, Box<dyn std::error::Error>> {
+        Ok(parsed(
+            reply["structuredContent"]["artifact"]["id"]
+                .as_str()
+                .ok_or("copy")?,
+        ))
+    };
+
+    let plain = duplicate("dup-asset-plain-1", None).await?;
+    assert_eq!(
+        plain["structuredContent"]["copied"],
+        json!(["files"]),
+        "{plain}"
+    );
+    assert_eq!(service.assets(&actor, &copy_of(&plain)?)?.assets, []);
+
+    let with = duplicate("dup-asset-with-1", Some(true)).await?;
+    assert_eq!(
+        with["structuredContent"]["copied"],
+        json!(["files", "assets"]),
+        "{with}"
+    );
+    let copied = service.asset_content(&actor, &copy_of(&with)?, &uploaded.id)?;
+    assert_eq!(copied.bytes, b"asset bytes");
+    Ok(())
+}
+
 /// Text that is not JSON, and numbers outside what a double holds exactly in
 /// any spelling, are `invalid_request` through both tools that take text, with
 /// no panic (`i64::MIN` once overflowed `abs`).
