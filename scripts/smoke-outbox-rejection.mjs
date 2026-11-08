@@ -53,6 +53,22 @@ export async function checkRejectionResume(harness, selected) {
     ['rejected-ineligible-failures', () => checkIneligibleFailures(harness)],
     ['rejected-cleanup-paused', () => checkCleanupPaused(harness)],
     ['rejected-renewal-survives', () => checkRenewalSurvives(harness)],
+    [
+      'unresolved-after-rejection-abandon',
+      () => checkUnresolvedAfterRejectionAbandon(harness),
+    ],
+    [
+      'unresolved-recreated-abandon',
+      () => checkUnresolvedRecreatedAbandon(harness),
+    ],
+    [
+      'unresolved-network-exhaustion',
+      () => checkUnresolvedNetworkExhaustion(harness),
+    ],
+    [
+      'unresolved-committed-purge',
+      () => checkUnresolvedCommittedPurge(harness),
+    ],
   ];
   if (selected !== undefined && !cases.some(([name]) => name === selected))
     throw new Error('Unknown rejection sequence');
@@ -1428,4 +1444,311 @@ async function checkPauseCapture(harness, fault) {
   assert.equal(harness.forwardedMutations(), 1);
   await harness.close(page);
   console.log('outbox rejection: capture-' + fault + ' passed');
+}
+
+/** The one network call an online unresolved selection or abandonment makes. */
+const bindingRead = 'GET /v1/data-outbox/binding';
+/** Backoff of a lane with random() of 0: 250 ms doubling, capped at 15 s. */
+const retryDelays = [250, 500, 1000, 2000, 4000, 8000, 15000];
+/** The first attempt, then one per retry delay: the last one exhausts. */
+const exhaustionAttempts = retryDelays.length + 1;
+
+/**
+ * Installs the unresolved selection and abandonment helpers, and a log of every
+ * fetch the page starts, so each window can assert exactly which calls it made.
+ */
+async function installUnresolvedHarness(page) {
+  await page.evaluate(() => {
+    globalThis.networkLog = [];
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+      const path = new URL(String(input), location.href).pathname;
+      networkLog.push(`${init?.method ?? 'GET'} ${path}`);
+      return nativeFetch.call(globalThis, input, init);
+    };
+    globalThis.unresolvedSelection = undefined;
+    globalThis.unresolvedOutcome = async (mode) => {
+      unresolvedSelection = undefined;
+      try {
+        unresolvedSelection = await scheduler.selectUnresolved(lane, mode);
+        return 'accepted';
+      } catch (error) {
+        return error instanceof deliveryApi.OutboxError
+          ? error.code
+          : String(error);
+      }
+    };
+    globalThis.abandonOutcome = async () => {
+      try {
+        return await scheduler.abandonUnresolved(unresolvedSelection);
+      } catch (error) {
+        return error instanceof deliveryApi.OutboxError
+          ? error.code
+          : String(error);
+      }
+    };
+  });
+}
+
+/** Returns the page's fetches since the last call, and clears them. */
+function takeNetwork(page) {
+  return page.evaluate(() => networkLog.splice(0));
+}
+
+/** The lost-response write is committed: version 1 with its value. */
+async function assertCommittedValue(harness, artifact) {
+  const canonical = await harness.canonical(artifact);
+  assert.equal(canonical.data_version, 1);
+  assert.deepEqual(canonical.value, { marker: { original: 1 } });
+}
+
+/** The 409 of a head with unknown first delivery: paused, no proof. */
+async function assertUnresolvedConflict(page) {
+  assert.deepEqual(await latestFailure(page), {
+    kind: 'delivery_failed',
+    failure: { reason: 'data_conflict', status: 409, currentDataVersion: 1 },
+    outcome: 'unknown',
+    initialState: 'prepared',
+    priorDelivery: 'unknown',
+  });
+  assert.deepEqual(await latestPause(page), {
+    kind: 'retry_paused',
+    reason: 'unresolved_after_rejection',
+    scope: 'lane',
+  });
+}
+
+/**
+ * Selects, then abandons, the lane's prepared head. The result is the bare
+ * ADR 0049 shape. Only the closure leaves storage, with its quota and the lane
+ * checkpoint that goes with its last row. Receipts, requests, forwarded writes
+ * and attempts stay as they were. `network` is the exact list of fetches each
+ * window may make.
+ */
+async function abandonUnresolvedHead(harness, page, mode, network) {
+  await takeNetwork(page);
+  const before = await page.evaluate(() => rejectionSnapshot());
+  const requests = harness.requests().length;
+  const forwarded = harness.forwardedMutations();
+  const attempts = await page.evaluate(
+    () => events.filter((event) => event.kind === 'attempt').length,
+  );
+  assert.equal(
+    await page.evaluate((mode) => unresolvedOutcome(mode), mode),
+    'accepted',
+  );
+  assert.deepEqual(await takeNetwork(page), network);
+  assert.deepEqual(await page.evaluate(() => abandonOutcome()), {
+    kind: 'abandoned_unknown',
+    removedDependents: 0,
+  });
+  assert.deepEqual(await takeNetwork(page), network);
+  // The committed selection is spent, and the lane no longer exists.
+  assert.equal(
+    await page.evaluate(() => abandonOutcome()),
+    'invalid_selection',
+  );
+  assert.equal(
+    await page.evaluate(() => unresolvedOutcome('offline')),
+    'invalid_selection',
+  );
+  assert.deepEqual(await takeNetwork(page), []);
+  const after = await page.evaluate(() => rejectionSnapshot());
+  assert.deepEqual(after.rows, []);
+  // Neither result is an ACK: receipts are untouched. The lane checkpoint goes
+  // with its last row, since no survivor remains (ADR 0049 rule 7).
+  assert.deepEqual(after.receipts, before.receipts);
+  assert.deepEqual(
+    before.checkpoints.map(({ rows, bytes }) => ({ rows, bytes })),
+    [{ rows: 1, bytes: before.usage.bytes }],
+  );
+  assert.deepEqual(after.checkpoints, []);
+  // The quota ledger returns to empty; its sequence counter is not recovered.
+  assert.equal(before.usage.rows, 1);
+  assert.notEqual(before.usage.bytes, 0);
+  assert.deepEqual(after.usage, { ...before.usage, rows: 0, bytes: 0 });
+  assert.equal(harness.requests().length, requests);
+  assert.equal(harness.forwardedMutations(), forwarded);
+  assert.equal(
+    await page.evaluate(
+      () => events.filter((event) => event.kind === 'attempt').length,
+    ),
+    attempts,
+  );
+  assert.equal(await page.evaluate(() => rejectionUnhandled), 0);
+}
+
+/** Drops the first response; a competing write turns the retry into a 409. */
+async function conflictAfterUnknown(harness, page, artifact) {
+  harness.configure('drop_before_forward');
+  await startUnknown(page);
+  await harness.independentWrite(artifact, 0, { canonical: 1 });
+  harness.setMode('normal');
+  await page.evaluate(() => fire(250));
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'retry_paused',
+    ),
+  );
+}
+
+async function checkUnresolvedAfterRejectionAbandon(harness) {
+  const { page, artifact, expected } = await setup(harness, true);
+  await installUnresolvedHarness(page);
+  await conflictAfterUnknown(harness, page, artifact);
+  await assertUnresolvedConflict(page);
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected, expected],
+  );
+  // Without a rejection proof, the rejected kind stays refused.
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await abandonUnresolvedHead(harness, page, 'online', [bindingRead]);
+  await harness.close(page);
+  console.log('outbox rejection: unresolved-after-rejection-abandon passed');
+}
+
+async function checkUnresolvedRecreatedAbandon(harness) {
+  const { page, artifact, expected } = await setup(harness, true);
+  await installUnresolvedHarness(page);
+  harness.configure('drop_before_forward');
+  await startUnknown(page);
+  await harness.independentWrite(artifact, 0, { canonical: 1 });
+  // The pause is memory-only. The recreated scheduler re-dispatches the durable
+  // prepared head, still of unknown delivery, and the 409 pauses it again.
+  await page.evaluate(() => {
+    scheduler.close();
+    installScheduler(freshRejectionCleanup());
+  });
+  harness.setMode('normal');
+  await page.evaluate(() => scheduler.wake(lane));
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'retry_paused',
+    ),
+  );
+  await assertUnresolvedConflict(page);
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected, expected],
+  );
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await abandonUnresolvedHead(harness, page, 'online', [bindingRead]);
+  await harness.close(page);
+  console.log('outbox rejection: unresolved-recreated-abandon passed');
+}
+
+async function checkUnresolvedNetworkExhaustion(harness) {
+  const { page, artifact, expected } = await setup(harness, true);
+  await installUnresolvedHarness(page);
+  // Each forwarded write commits and its response is lost, so every attempt is
+  // a network failure, and the eighth one exhausts the lane.
+  harness.configure('lost_response');
+  await startUnknown(page);
+  for (const [index, milliseconds] of retryDelays.entries()) {
+    await page.waitForFunction(
+      (milliseconds) =>
+        timers.some(
+          (timer) => timer.active && timer.milliseconds === milliseconds,
+        ),
+      milliseconds,
+    );
+    await page.evaluate((milliseconds) => fire(milliseconds), milliseconds);
+    await page.waitForFunction(
+      (count) =>
+        events.filter((event) => event.kind === 'attempt').length >= count,
+      index + 2,
+    );
+  }
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'retry_paused',
+    ),
+  );
+  assert.deepEqual(await latestFailure(page), {
+    kind: 'delivery_failed',
+    failure: { reason: 'network_error', status: 0 },
+    outcome: 'unknown',
+    initialState: 'prepared',
+    priorDelivery: 'unknown',
+  });
+  assert.deepEqual(await latestPause(page), {
+    kind: 'retry_paused',
+    reason: 'network_error',
+    scope: 'lane',
+  });
+  assert.equal(
+    await page.evaluate(() => scheduler.aggregateFailures),
+    exhaustionAttempts,
+  );
+  assert.equal(harness.forwardedMutations(), exhaustionAttempts);
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    Array.from({ length: exhaustionAttempts }, () => expected),
+  );
+  // The first forwarded write committed; the page saw only the lost response.
+  assert.equal(harness.responses()[0].status, 200);
+  // The lost-response mode also drops the binding reads that online cleanup
+  // needs, so forwarding returns to normal before any cleanup authority read.
+  harness.setMode('normal');
+  await checkRejectedSelection(harness, page, 'invalid_selection');
+  await abandonUnresolvedHead(harness, page, 'online', [bindingRead]);
+  // Abandonment claims nothing about the server, which holds the commit.
+  await assertCommittedValue(harness, artifact);
+  await harness.close(page);
+  console.log('outbox rejection: unresolved-network-exhaustion passed');
+}
+
+/**
+ * A lost-response commit, then the artifact is trashed and purged through the
+ * API. The replay of the prepared head gets the 404 access pause.
+ */
+async function committedThenPurged(harness) {
+  const { page, artifact, expected } = await setup(harness, true);
+  await installUnresolvedHarness(page);
+  harness.configure('lost_response');
+  await startUnknown(page);
+  assert.equal(harness.forwardedMutations(), 1);
+  await assertCommittedValue(harness, artifact);
+  await harness.purgeArtifact(artifact);
+  assert.equal(await harness.artifactStatus(artifact, '/data'), 404);
+  assert.equal(await harness.artifactStatus(artifact, '/data/members'), 404);
+  harness.setMode('normal');
+  await page.evaluate(() => fire(250));
+  await page.waitForFunction(() =>
+    events.some(
+      (event) => event.kind === 'paused' && event.pause.kind === 'blocked',
+    ),
+  );
+  const failure = { reason: 'access_unavailable', status: 404 };
+  assert.deepEqual(await latestFailure(page), {
+    kind: 'delivery_failed',
+    failure,
+    outcome: 'unknown',
+    initialState: 'prepared',
+    priorDelivery: 'unknown',
+  });
+  assert.deepEqual(await latestPause(page), { kind: 'blocked', failure });
+  assert.deepEqual(
+    harness.requests().map((request) => requestIdentity(request)),
+    [expected, expected],
+  );
+  assert.deepEqual(
+    harness.responses().map((response) => response.status),
+    [200, 404],
+  );
+  return { page, artifact };
+}
+
+async function checkUnresolvedCommittedPurge(harness) {
+  const online = await committedThenPurged(harness);
+  await abandonUnresolvedHead(harness, online.page, 'online', [bindingRead]);
+  assert.equal(await harness.artifactStatus(online.artifact, '/data'), 404);
+  await harness.close(online.page);
+  // A second lane, abandoned offline: the page makes no network call at all.
+  const offline = await committedThenPurged(harness);
+  await abandonUnresolvedHead(harness, offline.page, 'offline', []);
+  assert.equal(await harness.artifactStatus(offline.artifact, '/data'), 404);
+  await harness.close(offline.page);
+  console.log('outbox rejection: unresolved-committed-purge passed');
 }

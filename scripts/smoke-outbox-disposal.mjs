@@ -70,6 +70,48 @@ export async function checkSchedulerDisposal(harness, selected) {
     'rejected-offline-aborted',
     'rejected-post-commit-auth',
     'rejected-online-401',
+    'unresolved-exclusivity',
+    'unresolved-ineligible',
+    'unresolved-eligible-heads',
+    'unresolved-wrong-kind',
+    'unresolved-token-forgery',
+    'unresolved-stale-selection',
+    'unresolved-replaced-pause',
+    'unresolved-selection-guards',
+    'unresolved-foreign-owner',
+    'unresolved-foreign-actor',
+    'unresolved-foreign-binding',
+    'unresolved-accounting',
+    'unresolved-online-read',
+    'unresolved-survivors',
+    'unresolved-abort',
+    'unresolved-bound',
+    'unresolved-offline-authority',
+    'unresolved-offline-logout',
+    'unresolved-offline-lock-loss',
+    'unresolved-offline-generation',
+    'unresolved-offline-profile',
+    'unresolved-offline-invalidated',
+    'unresolved-offline-check-throws',
+    'unresolved-offline-closed',
+    'unresolved-offline-aborted',
+    'unresolved-offline-detached',
+    'unresolved-offline-mid-transaction',
+    'unresolved-online-401',
+    'unresolved-online-select-401',
+    'unresolved-online-binding',
+    'unresolved-online-select-binding',
+    'unresolved-resume-read-failed',
+    'unresolved-post-commit-close',
+    'unresolved-post-commit-auth',
+    'unresolved-post-commit-wake',
+    'unresolved-post-commit-retired',
+    'unresolved-pending-identity',
+    'unresolved-serialization',
+    'unresolved-no-resurrection',
+    'unresolved-late-rejection',
+    'unresolved-late-response',
+    'unresolved-kernel-identity',
   ];
   for (const mode of modes.filter(
     (value) =>
@@ -187,6 +229,8 @@ export async function checkSchedulerDisposal(harness, selected) {
     if (!['disposal-capacity', 'disposal-empty'].includes(mode)) {
       if (mode.startsWith('rejected-'))
         await checkRejectedDisposal(harness, page, mode);
+      else if (mode.startsWith('unresolved-'))
+        await checkUnresolvedDisposal(harness, page, mode);
       else await checkDisposalFault(harness, page, mode);
       assert.equal(await page.evaluate(() => cleanupUnhandled), 0);
       await harness.close(page);
@@ -2969,6 +3013,2676 @@ async function checkRejectedDisposal(harness, page, mode) {
     default:
       throw new Error(`unknown rejected disposal fixture: ${mode}`);
   }
+}
+
+const dataConflictBody = {
+  error: {
+    code: 'data_conflict',
+    message: 'private-response-marker',
+    current_data_version: 5,
+  },
+};
+const notFoundBody = {
+  error: { code: 'not_found', message: 'private-not-found-marker' },
+};
+const unclassifiedBody = {
+  error: {
+    code: 'unrecognized_marker',
+    message: 'private-unclassified-marker',
+  },
+};
+const eligibleBlocked = {
+  kind: 'blocked',
+  failure: { reason: 'access_unavailable', status: 404 },
+};
+
+/** Waits for a paused event of the lane tagged `tag`, then records its pause. */
+async function unresolvedWaitPause(page, tag, kind, detail = null) {
+  await page.waitForFunction(
+    ({ artifactId, kind, detail }) =>
+      events.some(
+        (event) =>
+          event.kind === 'paused' &&
+          event.lane?.[4] === artifactId &&
+          event.pause.kind === kind &&
+          (detail === null ||
+            (event.pause.reason ?? event.pause.failure?.reason) === detail),
+      ),
+    { artifactId: 'art_' + tag.repeat(32), kind, detail },
+  );
+  await page.evaluate((tag) => unresolvedMark(tag), tag);
+}
+
+/**
+ * Exhausts a blocked lane into a lane-scope retry pause: its eighth retryable
+ * failure (a 503) publishes the pause that carries a resume token.
+ */
+async function unresolvedRetryPause(harness, page, tag) {
+  await page.evaluate((tag) => {
+    const current = unresolvedLane(tag);
+    delete current.pause;
+    current.failures = 7;
+  }, tag);
+  harness.configure('status', 503);
+  await page.evaluate((tag) => scheduler.wake(unresolvedKey(tag)), tag);
+  await unresolvedWaitPause(page, tag, 'retry_paused', 'server_error');
+}
+
+/** Abandons the page's `staleChoice`, which must be refused with no observable change. */
+async function assertAbandonRefused(harness, page, label) {
+  const before = await page.evaluate(() => unresolvedObserve());
+  const requests = harness.requests().length;
+  assert.equal(
+    await page.evaluate(() =>
+      unresolvedCode(scheduler.abandonUnresolved(staleChoice)),
+    ),
+    'invalid_selection',
+    label,
+  );
+  assert.deepEqual(
+    await page.evaluate(() => unresolvedObserve()),
+    before,
+    label,
+  );
+  assert.equal(harness.requests().length, requests, label);
+}
+
+// Stored rows and checkpoints name a fixture lane by its artifact, which every
+// unresolved case builds as 'art_' followed by the tag repeated 32 times.
+function laneRowsOf(rows, tag) {
+  return rows.filter((row) => row.artifactId === 'art_' + tag.repeat(32));
+}
+
+function checkpointOf(ledger, tag) {
+  return ledger.storage.checkpoints.find(
+    (checkpoint) => checkpoint.lane[4] === 'art_' + tag.repeat(32),
+  );
+}
+
+/** The ledger without the fields that binding reads and requests advance. */
+function withoutReads(ledger) {
+  return {
+    storage: ledger.storage,
+    epoch: ledger.epoch,
+    aggregate: ledger.aggregate,
+    events: ledger.events,
+    lanes: ledger.lanes,
+  };
+}
+
+/**
+ * ADR 0049 unresolved abandonment (R08c-3b). Each lane starts from a prepared
+ * head and no rejection proof unless a case says otherwise. Refusals are checked
+ * against storage, pause identity, events, epoch and HTTP mutations.
+ */
+async function checkUnresolvedDisposal(harness, page, mode) {
+  await page.evaluate(() => {
+    globalThis.unresolvedPauses = new Map();
+    globalThis.unresolvedKey = (tag) => [
+      ...lane.slice(0, 4),
+      'art_' + tag.repeat(32),
+    ];
+    globalThis.unresolvedLane = (tag) =>
+      scheduler.lanes.get(JSON.stringify(unresolvedKey(tag)));
+    globalThis.unresolvedCode = (promise) =>
+      promise.then(
+        () => 'unexpected',
+        (error) => error.code,
+      );
+    globalThis.unresolvedSelect = (tag) =>
+      scheduler.selectUnresolved(unresolvedKey(tag), 'offline').then(
+        () => 'accepted',
+        (error) => error.code,
+      );
+    globalThis.unresolvedEnqueue = (tag) =>
+      enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: unresolvedKey(tag),
+        artifactId: unresolvedKey(tag)[4],
+        base: { version: 0 },
+      });
+    globalThis.unresolvedStart = async (tag) => {
+      await unresolvedEnqueue(tag);
+      scheduler.wake(unresolvedKey(tag));
+    };
+    globalThis.unresolvedMark = (tag) => {
+      unresolvedPauses.set(tag, unresolvedLane(tag).pause);
+    };
+    globalThis.unresolvedPaused = (tag) =>
+      unresolvedLane(tag)?.pause === unresolvedPauses.get(tag);
+    globalThis.unresolvedRows = async (tag) =>
+      (await cleanupStorageSnapshot()).rows.filter(
+        (row) => row.artifactId === unresolvedKey(tag)[4],
+      );
+    globalThis.unresolvedObserve = async () => ({
+      storage: await cleanupStorageSnapshot(),
+      epoch: scheduler.epoch,
+      events: events.length,
+    });
+    // Each helper restores what it replaced, even when the refusal is not thrown.
+    globalThis.unresolvedWithPause = async (tag, pause) => {
+      const current = unresolvedLane(tag);
+      const saved = current.pause;
+      current.pause = pause;
+      try {
+        return await unresolvedSelect(tag);
+      } finally {
+        current.pause = saved;
+      }
+    };
+    globalThis.unresolvedWithoutPause = async (tag) => {
+      const current = unresolvedLane(tag);
+      const saved = current.pause;
+      delete current.pause;
+      try {
+        return await unresolvedSelect(tag);
+      } finally {
+        current.pause = saved;
+      }
+    };
+    globalThis.unresolvedWithFlag = async (tag, field, value) => {
+      const current = unresolvedLane(tag);
+      const saved = current[field];
+      current[field] = value;
+      try {
+        return await unresolvedSelect(tag);
+      } finally {
+        current[field] = saved;
+      }
+    };
+    globalThis.unresolvedAsActive = async (tag) => {
+      const active = scheduler.activeLane;
+      scheduler.activeLane = unresolvedLane(tag);
+      try {
+        return await unresolvedSelect(tag);
+      } finally {
+        scheduler.activeLane = active;
+      }
+    };
+    // Storage-level change between selection and action, by row index in the lane.
+    // The store's own acknowledgement of the head, as a delivery would write it.
+    globalThis.unresolvedAcknowledge = async (tag) => {
+      const [head] = await store.lane(unresolvedKey(tag));
+      await localGate.run(async () =>
+        store.acknowledge(
+          head,
+          {
+            artifact_id: head.artifactId,
+            path: head.path,
+            data_version: head.request.base + 1,
+            changed: true,
+            replayed: false,
+          },
+          authorize,
+          stop.signal,
+        ),
+      );
+    };
+    // A wake that lands inside the transaction, after the first intent delete.
+    globalThis.unresolvedWakeInside = (tag) => {
+      const deletion = IDBObjectStore.prototype.delete;
+      let fired = false;
+      globalThis.restoreUnresolvedDelete = () => {
+        IDBObjectStore.prototype.delete = deletion;
+      };
+      IDBObjectStore.prototype.delete = function (...args) {
+        const pending = deletion.apply(this, args);
+        if (this.name === 'intents' && !fired)
+          pending.addEventListener(
+            'success',
+            () => {
+              fired = true;
+              scheduler.wake(unresolvedKey(tag));
+            },
+            { once: true },
+          );
+        return pending;
+      };
+    };
+    globalThis.unresolvedDependent = (tag, after, changes = {}) =>
+      enqueueLikeHead({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        lane: unresolvedKey(tag),
+        artifactId: unresolvedKey(tag)[4],
+        base: { after },
+        ...changes,
+      });
+    // A real closure member: its `after` names the stored head. The store accepts
+    // an `after` link only from the lane tail, so callers use a lane whose head is
+    // its only row.
+    globalThis.unresolvedDependentOfHead = async (tag) => {
+      const [head] = await store.lane(unresolvedKey(tag));
+      return unresolvedDependent(tag, head.sequence);
+    };
+    // Counts every page-side fetch, so a network-free path is observable.
+    globalThis.unresolvedFetches = 0;
+    const unresolvedFetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+      unresolvedFetches += 1;
+      return unresolvedFetch(input, init);
+    };
+    globalThis.unresolvedGate = (tag) => {
+      const current = unresolvedLane(tag);
+      return {
+        pause: current?.pause?.kind ?? null,
+        failures: current?.failures ?? null,
+        rejection: current?.rejection !== undefined,
+      };
+    };
+    globalThis.unresolvedLedger = async () => ({
+      storage: await cleanupStorageSnapshot(),
+      epoch: scheduler.epoch,
+      aggregate: scheduler.aggregateFailures,
+      events: events.length,
+      lanes: { c: unresolvedGate('c'), d: unresolvedGate('d') },
+      fetches: unresolvedFetches,
+      bindingReads: cleanupBindingReads,
+      authorizeModes: [...cleanupAuthorizeModes],
+    });
+    // Records the mode of every IndexedDB transaction that one operation opens.
+    globalThis.unresolvedTransactions = async (operation) => {
+      const open = IDBDatabase.prototype.transaction;
+      const modes = [];
+      IDBDatabase.prototype.transaction = function (names, mode, ...rest) {
+        modes.push(mode ?? 'readonly');
+        return Reflect.apply(open, this, [names, mode, ...rest]);
+      };
+      try {
+        return { result: await operation(), modes };
+      } finally {
+        IDBDatabase.prototype.transaction = open;
+      }
+    };
+  });
+  try {
+    switch (mode) {
+      case 'unresolved-exclusivity': {
+        // The proof-bearing 409 lane from the 3a fixture.
+        harness.setErrorBody(dataConflictBody);
+        harness.configure('status', 409);
+        await page.evaluate((tag) => unresolvedStart(tag), 'e');
+        await unresolvedWaitPause(page, 'e', 'blocked', 'data_conflict');
+        assert.equal(
+          await page.evaluate(
+            () => unresolvedLane('e').rejection !== undefined,
+          ),
+          true,
+        );
+        await page.evaluate(() => {
+          globalThis.proofOfE = unresolvedLane('e').rejection;
+        });
+        // The 409 pause is ineligible by kind. Substituting an eligible pause
+        // isolates the proof as the only reason the selection is refused.
+        const beforeProof = await page.evaluate(() => unresolvedObserve());
+        assert.equal(
+          await page.evaluate(
+            (pause) => unresolvedWithPause('e', pause),
+            eligibleBlocked,
+          ),
+          'invalid_selection',
+          'Exclusivity: both directions reject',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeProof,
+        );
+        // A proof attached after selection makes the committed action refuse.
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'f');
+        await unresolvedWaitPause(page, 'f', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.exclusiveChoice = await scheduler.selectUnresolved(
+            unresolvedKey('f'),
+            'offline',
+          );
+          unresolvedLane('f').rejection = proofOfE;
+        });
+        const beforeAbandon = await page.evaluate(() => unresolvedObserve());
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(exclusiveChoice)),
+          ),
+          'invalid_selection',
+          'Exclusivity: abandonment refuses a proof-bearing lane',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeAbandon,
+        );
+        // Without the proof, the same lane selects and commits.
+        assert.deepEqual(
+          await page.evaluate(async () => {
+            delete unresolvedLane('f').rejection;
+            globalThis.exclusiveChoice = await scheduler.selectUnresolved(
+              unresolvedKey('f'),
+              'offline',
+            );
+            return scheduler.abandonUnresolved(exclusiveChoice);
+          }),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        // The other direction: an unresolved lane refuses the rejected kind.
+        await page.evaluate((tag) => unresolvedStart(tag), '0');
+        await unresolvedWaitPause(page, '0', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.wrongKindChoice = await scheduler.selectUnresolved(
+            unresolvedKey('0'),
+            'offline',
+          );
+        });
+        const beforeRejected = await page.evaluate(() => unresolvedObserve());
+        assert.deepEqual(
+          await page.evaluate(async () => ({
+            selectRejected: await unresolvedCode(
+              scheduler.selectRejected(unresolvedKey('0'), 'offline'),
+            ),
+            discardRejected: await unresolvedCode(
+              scheduler.discardRejected(wrongKindChoice),
+            ),
+          })),
+          {
+            selectRejected: 'invalid_selection',
+            discardRejected: 'invalid_selection',
+          },
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeRejected,
+        );
+        assert.deepEqual(
+          await page.evaluate(() =>
+            scheduler.abandonUnresolved(wrongKindChoice),
+          ),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        assert.equal(harness.requests().length, 2);
+        break;
+      }
+      case 'unresolved-ineligible': {
+        harness.setErrorBody(notFoundBody);
+        // Acknowledged head: the receipt is durable but the usage write fails,
+        // so the scheduler holds cleanup_paused over an acknowledged head.
+        harness.configure('normal');
+        // The head is prepared before the usage fault is armed, as in the phase
+        // fixtures, so only the post-receipt usage write fails.
+        await page.evaluate(async (tag) => {
+          await unresolvedEnqueue(tag);
+          await localGate.run(async () =>
+            store.prepare(
+              (await store.lane(unresolvedKey(tag)))[0],
+              authorize,
+              stop.signal,
+            ),
+          );
+          faultPut('usage');
+          scheduler.wake(unresolvedKey(tag));
+        }, 'c');
+        await unresolvedWaitPause(page, 'c', 'cleanup_paused');
+        await page.evaluate(() => restorePut());
+        assert.equal(
+          (await page.evaluate(() => unresolvedRows('c')))[0].state,
+          'acknowledged',
+        );
+        assert.equal(
+          await page.evaluate(
+            (pause) => unresolvedWithPause('c', pause),
+            eligibleBlocked,
+          ),
+          'invalid_selection',
+          'acknowledged head',
+        );
+        // Unprepared head: the preparation write fails before any request.
+        harness.configure('status', 404);
+        await page.evaluate(() => faultPut('intents', 'prepared'));
+        await page.evaluate((tag) => unresolvedStart(tag), 'b');
+        await unresolvedWaitPause(page, 'b', 'preparation_paused');
+        await page.evaluate(() => restorePut());
+        assert.equal(
+          (await page.evaluate(() => unresolvedRows('b')))[0].state,
+          'unprepared',
+        );
+        assert.equal(
+          await page.evaluate(
+            (pause) => unresolvedWithPause('b', pause),
+            eligibleBlocked,
+          ),
+          'invalid_selection',
+          'unprepared head',
+        );
+        // Baseline: a prepared head under a 404 access refusal. Each factor
+        // below is substituted alone, and the baseline must select again after.
+        await page.evaluate((tag) => unresolvedStart(tag), 'a');
+        await unresolvedWaitPause(page, 'a', 'blocked', 'access_unavailable');
+        assert.equal(
+          (await page.evaluate(() => unresolvedRows('a')))[0].state,
+          'prepared',
+        );
+        const before = await page.evaluate(() => unresolvedObserve());
+        const substitutions = {
+          cleanup_paused: {
+            kind: 'cleanup_paused',
+            selection: {},
+            ackDurable: true,
+          },
+          survivors_after_disposal: {
+            kind: 'retry_paused',
+            reason: 'survivors_after_disposal',
+            scope: 'lane',
+            selection: {},
+          },
+          preparation_paused: { kind: 'preparation_paused', selection: {} },
+          'blocked 401': {
+            kind: 'blocked',
+            failure: { reason: 'access_unavailable', status: 401 },
+          },
+          'non-access blocked pause': {
+            kind: 'blocked',
+            failure: { reason: 'binding_changed', status: 409 },
+          },
+        };
+        for (const [name, pause] of Object.entries(substitutions)) {
+          assert.equal(
+            await page.evaluate(
+              (pause) => unresolvedWithPause('a', pause),
+              pause,
+            ),
+            'invalid_selection',
+            name,
+          );
+          assert.deepEqual(
+            await page.evaluate(() => unresolvedObserve()),
+            before,
+            name,
+          );
+          assert.equal(
+            await page.evaluate(() => unresolvedPaused('a')),
+            true,
+            name,
+          );
+          assert.equal(
+            await page.evaluate(() => unresolvedSelect('a')),
+            'accepted',
+            name,
+          );
+        }
+        assert.equal(
+          await page.evaluate(() => unresolvedWithoutPause('a')),
+          'invalid_selection',
+          'healthy lane with no pause',
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedWithFlag('a', 'cancelTimer', () => {}),
+          ),
+          'invalid_selection',
+          'timer-pending lane',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedAsActive('a')),
+          'invalid_selection',
+          'active lane',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        assert.equal(harness.requests().length, 1);
+        break;
+      }
+      case 'unresolved-eligible-heads': {
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 403);
+        await page.evaluate((tag) => unresolvedStart(tag), 'a');
+        await unresolvedWaitPause(page, 'a', 'blocked', 'access_unavailable');
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('a').pause.failure.status),
+          403,
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('a')),
+          'accepted',
+          'blocked 403',
+        );
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'b');
+        await unresolvedWaitPause(page, 'b', 'blocked', 'access_unavailable');
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('b').pause.failure.status),
+          404,
+        );
+        const beforeRead = await page.evaluate(() => unresolvedObserve());
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('b')),
+          'accepted',
+          'blocked 404',
+        );
+        // Selection reads storage only: no row, checkpoint, usage or epoch change.
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeRead,
+        );
+        harness.setErrorBody(unclassifiedBody);
+        harness.configure('status', 400);
+        await page.evaluate((tag) => unresolvedStart(tag), 'c');
+        await unresolvedWaitPause(
+          page,
+          'c',
+          'retry_paused',
+          'unclassified_error_response',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('c').pause.scope),
+          'lane',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('c')),
+          'accepted',
+          'unclassified_error_response (lane)',
+        );
+        // The ACK write fails after a 200 receipt, so the head stays prepared:
+        // the observed receipt is never promoted to an ACK.
+        harness.setErrorBody(notFoundBody);
+        harness.configure('normal');
+        await page.evaluate(() => faultPut('intents', 'acknowledged'));
+        await page.evaluate((tag) => unresolvedStart(tag), 'd');
+        await unresolvedWaitPause(
+          page,
+          'd',
+          'retry_paused',
+          'ack_storage_failed',
+        );
+        await page.evaluate(() => restorePut());
+        assert.equal(
+          (await page.evaluate(() => unresolvedRows('d')))[0].state,
+          'prepared',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('d')),
+          'accepted',
+          'ack_storage_failed',
+        );
+        // Coordinator-scope exhaustion of a healthy lane that holds a prepared head.
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'e');
+        await unresolvedWaitPause(page, 'e', 'blocked', 'access_unavailable');
+        await page.evaluate(() => {
+          delete unresolvedLane('e').pause;
+          globalThis.savedAggregate = scheduler.aggregateFailures;
+          scheduler.aggregateFailures = 32;
+          scheduler.wake(unresolvedKey('e'));
+        });
+        await unresolvedWaitPause(
+          page,
+          'e',
+          'retry_paused',
+          'aggregate_exhausted',
+        );
+        await page.evaluate(() => {
+          scheduler.aggregateFailures = savedAggregate;
+        });
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('e').pause.scope),
+          'coordinator',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('e')),
+          'accepted',
+          'aggregate_exhausted with a prepared head',
+        );
+        // Lane-scope exhaustion: the eighth retryable failure pauses the lane.
+        await page.evaluate((tag) => unresolvedStart(tag), 'f');
+        await unresolvedWaitPause(page, 'f', 'blocked', 'access_unavailable');
+        await page.evaluate(() => {
+          const current = unresolvedLane('f');
+          delete current.pause;
+          current.failures = 7;
+        });
+        harness.configure('status', 503);
+        await page.evaluate(() => scheduler.wake(unresolvedKey('f')));
+        await unresolvedWaitPause(page, 'f', 'retry_paused', 'server_error');
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('f').pause.scope),
+          'lane',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('f')),
+          'accepted',
+          'lane-scope retryable exhaustion',
+        );
+        break;
+      }
+      case 'unresolved-wrong-kind': {
+        harness.setErrorBody(dataConflictBody);
+        harness.configure('status', 409);
+        await page.evaluate((tag) => unresolvedStart(tag), 'e');
+        await unresolvedWaitPause(page, 'e', 'blocked', 'data_conflict');
+        await page.evaluate(async () => {
+          globalThis.rejectedChoice = await scheduler.selectRejected(
+            unresolvedKey('e'),
+            'offline',
+          );
+        });
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'f');
+        await unresolvedWaitPause(page, 'f', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('f'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        assert.deepEqual(
+          await page.evaluate(async () => ({
+            abandonRejected: await unresolvedCode(
+              scheduler.abandonUnresolved(rejectedChoice),
+            ),
+            discardUnresolved: await unresolvedCode(
+              scheduler.discardRejected(unresolvedChoice),
+            ),
+          })),
+          {
+            abandonRejected: 'invalid_selection',
+            discardUnresolved: 'invalid_selection',
+          },
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        assert.equal(harness.requests().length, 1);
+        // Refused by brand before consumption, so each token still acts once.
+        assert.deepEqual(
+          await page.evaluate(() => scheduler.discardRejected(rejectedChoice)),
+          { kind: 'discarded_rejected', removedDependents: 0 },
+        );
+        assert.deepEqual(
+          await page.evaluate(() =>
+            scheduler.abandonUnresolved(unresolvedChoice),
+          ),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        break;
+      }
+      case 'unresolved-token-forgery': {
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'f');
+        await unresolvedWaitPause(page, 'f', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.forgeryChoice = await scheduler.selectUnresolved(
+            unresolvedKey('f'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        assert.deepEqual(
+          await page.evaluate(async () => ({
+            unbranded: await unresolvedCode(scheduler.abandonUnresolved({})),
+            spreadCopy: await unresolvedCode(
+              scheduler.abandonUnresolved({ ...forgeryChoice }),
+            ),
+            prototypeDerived: await unresolvedCode(
+              scheduler.abandonUnresolved(Object.create(forgeryChoice)),
+            ),
+            freshSymbol: await unresolvedCode(
+              scheduler.abandonUnresolved(Object.freeze({ [Symbol()]: true })),
+            ),
+          })),
+          {
+            unbranded: 'invalid_selection',
+            spreadCopy: 'invalid_selection',
+            prototypeDerived: 'invalid_selection',
+            freshSymbol: 'invalid_selection',
+          },
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        // A token from another scheduler instance over the same store is unknown here.
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(
+              new deliveryApi.DeliveryScheduler(store, {
+                context: deliveryContext,
+                random: () => 0,
+                observe() {},
+                revalidate: async () => ({ kind: 'authorized' }),
+              }).abandonUnresolved(forgeryChoice),
+            ),
+          ),
+          'invalid_selection',
+          'another scheduler token',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        // The genuine token still commits once, and is then consumed.
+        assert.deepEqual(
+          await page.evaluate(() => scheduler.abandonUnresolved(forgeryChoice)),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        const committed = await page.evaluate(() => unresolvedObserve());
+        assert.equal(
+          committed.storage.rows.length,
+          before.storage.rows.length - 1,
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(forgeryChoice)),
+          ),
+          'invalid_selection',
+          'consumed token',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          committed,
+        );
+        assert.equal(harness.requests().length, 1);
+        break;
+      }
+      case 'unresolved-stale-selection': {
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        // A wake between selection and entry retires the token.
+        await page.evaluate((tag) => unresolvedStart(tag), 'a');
+        await unresolvedWaitPause(page, 'a', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('a'),
+            'offline',
+          );
+          scheduler.wake(unresolvedKey('a'));
+        });
+        // A surviving token would be refused by the wake-marker check with the
+        // same code. The retirement is checked on the registry and the lane.
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.unresolved.tokens.has(staleChoice),
+          ),
+          false,
+          'a wake retires the selection from the token map',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('a').unresolvedSelection),
+          undefined,
+          'a wake clears the lane selection',
+        );
+        await assertAbandonRefused(harness, page, 'wake before entry');
+        // A wake inside the transaction is seen by the transaction's own check.
+        await page.evaluate((tag) => unresolvedStart(tag), 'b');
+        await unresolvedWaitPause(page, 'b', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('b'),
+            'offline',
+          );
+          unresolvedWakeInside('b');
+        });
+        const beforeInside = await page.evaluate(() => unresolvedObserve());
+        assert.equal(
+          await page.evaluate(async () => {
+            const code = await unresolvedCode(
+              scheduler.abandonUnresolved(staleChoice),
+            );
+            restoreUnresolvedDelete();
+            return code;
+          }),
+          'invalid_selection',
+          'wake inside the transaction',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeInside,
+        );
+        // A dependent enqueued after selection changes the closure.
+        await page.evaluate((tag) => unresolvedStart(tag), 'c');
+        await unresolvedWaitPause(page, 'c', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+          await unresolvedDependentOfHead('c');
+        });
+        await assertAbandonRefused(
+          harness,
+          page,
+          'dependent enqueued after selection',
+        );
+        // A numeric-base row is a survivor, outside the closure. Written after
+        // selection, it still changes the lane the selection captured.
+        await page.evaluate((tag) => unresolvedStart(tag), 'd');
+        await unresolvedWaitPause(page, 'd', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('d'),
+            'offline',
+          );
+          await unresolvedEnqueue('d');
+        });
+        await assertAbandonRefused(
+          harness,
+          page,
+          'survivor enqueued after selection',
+        );
+        // The store's own ACK of the head after selection changes the closure. A
+        // trim removes only acknowledged rows, so it cannot interleave with a
+        // blocked prepared head unless the ACK happens first.
+        await page.evaluate((tag) => unresolvedStart(tag), 'd');
+        await unresolvedWaitPause(page, 'd', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('d'),
+            'offline',
+          );
+        });
+        await page.evaluate(() => unresolvedAcknowledge('d'));
+        await assertAbandonRefused(
+          harness,
+          page,
+          'ACK written after selection',
+        );
+        // Another lane's delivery resume renews the epoch after selection.
+        harness.setErrorBody(unclassifiedBody);
+        harness.configure('status', 400);
+        await page.evaluate((tag) => unresolvedStart(tag), '8');
+        await unresolvedWaitPause(
+          page,
+          '8',
+          'retry_paused',
+          'unclassified_error_response',
+        );
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), '7');
+        await unresolvedWaitPause(page, '7', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('7'),
+            'offline',
+          );
+          globalThis.epochBeforeRenewal = scheduler.epoch;
+          await scheduler.resumeDelivery(unresolvedLane('8').pause.selection);
+        });
+        await page.waitForFunction(
+          () =>
+            scheduler.epoch > epochBeforeRenewal &&
+            unresolvedLane('8')?.pause?.kind === 'blocked',
+        );
+        await assertAbandonRefused(
+          harness,
+          page,
+          'epoch renewed after selection',
+        );
+        // A reselection on the same lane retires the older token.
+        await page.evaluate((tag) => unresolvedStart(tag), '9');
+        await unresolvedWaitPause(page, '9', 'blocked', 'access_unavailable');
+        await page.evaluate(async () => {
+          globalThis.olderChoice = await scheduler.selectUnresolved(
+            unresolvedKey('9'),
+            'offline',
+          );
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('9'),
+            'offline',
+          );
+        });
+        const beforeOlder = await page.evaluate(() => unresolvedObserve());
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(olderChoice)),
+          ),
+          'invalid_selection',
+          'stale-selection row: old token is retired by reselection',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeOlder,
+        );
+        assert.deepEqual(
+          await page.evaluate(() => scheduler.abandonUnresolved(staleChoice)),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        break;
+      }
+      case 'unresolved-replaced-pause': {
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'a');
+        await unresolvedWaitPause(page, 'a', 'blocked', 'access_unavailable');
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        // An equal-content copy is not the pause the selection was made against.
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('a'),
+            'offline',
+          );
+          unresolvedLane('a').pause = { ...unresolvedLane('a').pause };
+        });
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(staleChoice)),
+          ),
+          'invalid_selection',
+          'refreshed or replaced pause rejects',
+        );
+        await page.evaluate((tag) => {
+          unresolvedLane(tag).pause = unresolvedPauses.get(tag);
+        }, 'a');
+        assert.equal(await page.evaluate(() => unresolvedPaused('a')), true);
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        // A replacement with different content is refused the same way.
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('a'),
+            'offline',
+          );
+          unresolvedLane('a').pause = {
+            kind: 'blocked',
+            failure: { reason: 'access_unavailable', status: 403 },
+          };
+        });
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(staleChoice)),
+          ),
+          'invalid_selection',
+          'replaced pause with different content rejects',
+        );
+        await page.evaluate((tag) => {
+          unresolvedLane(tag).pause = unresolvedPauses.get(tag);
+        }, 'a');
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        // The restored lane selects and commits, with no request made.
+        assert.deepEqual(
+          await page.evaluate(async () => {
+            globalThis.staleChoice = await scheduler.selectUnresolved(
+              unresolvedKey('a'),
+              'offline',
+            );
+            return scheduler.abandonUnresolved(staleChoice);
+          }),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-selection-guards': {
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'a');
+        await unresolvedWaitPause(page, 'a', 'blocked', 'access_unavailable');
+        assert.equal(
+          await page.evaluate(() => unresolvedWithFlag('a', 'queued', true)),
+          'invalid_selection',
+          'queued lane',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedAsActive('a')),
+          'invalid_selection',
+          'active lane',
+        );
+        // Control: a head with an unprepared dependent is accepted. Acknowledged
+        // or prepared dependents are not stored states, so they are not forged.
+        await page.evaluate((tag) => unresolvedStart(tag), 'b');
+        await unresolvedWaitPause(page, 'b', 'blocked', 'access_unavailable');
+        await page.evaluate((tag) => unresolvedDependentOfHead(tag), 'b');
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('b')),
+          'accepted',
+          'control: unprepared dependent',
+        );
+        break;
+      }
+      case 'unresolved-foreign-owner':
+      case 'unresolved-foreign-actor':
+      case 'unresolved-foreign-binding': {
+        // A key naming another owner, actor or storage epoch is refused. The
+        // scheduler fails closed on its first failed check, so each runs alone.
+        const index = {
+          'unresolved-foreign-owner': 0,
+          'unresolved-foreign-actor': 2,
+          'unresolved-foreign-binding': 3,
+        }[mode];
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'a');
+        await unresolvedWaitPause(page, 'a', 'blocked', 'access_unavailable');
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        assert.equal(
+          await page.evaluate((index) => {
+            const replacement = {
+              0: 'other-owner',
+              2: 'other-actor',
+              3: unresolvedKey('a')[3] + 1,
+            };
+            const key = [...unresolvedKey('a')];
+            key[index] = replacement[index];
+            return unresolvedCode(scheduler.selectUnresolved(key, 'offline'));
+          }, index),
+          'owner_not_ready',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-accounting': {
+        // Rules 7-9 and 11: one readwrite transaction removes the head and its
+        // closure, counters move once, and a full removal leaves no tombstone.
+        // The other lane keeps its pause, its counters and its selection token.
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate(async () => {
+          const head = await unresolvedEnqueue('c');
+          const first = await unresolvedDependent('c', head.sequence);
+          await unresolvedDependent('c', first.sequence);
+          await unresolvedEnqueue('d');
+          scheduler.wake(unresolvedKey('c'));
+          scheduler.wake(unresolvedKey('d'));
+        });
+        await unresolvedWaitPause(page, 'c', 'blocked', 'access_unavailable');
+        await unresolvedWaitPause(page, 'd', 'blocked', 'access_unavailable');
+        const requests = harness.requests().length;
+        const start = await page.evaluate(() => unresolvedLedger());
+        await page.evaluate(async () => {
+          globalThis.otherChoice = await scheduler.selectUnresolved(
+            unresolvedKey('d'),
+            'offline',
+          );
+          globalThis.choice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedLedger());
+        assert.equal(
+          before.fetches,
+          start.fetches,
+          'offline selection makes no network request',
+        );
+        const outcome = await page.evaluate(() =>
+          unresolvedTransactions(() => scheduler.abandonUnresolved(choice)),
+        );
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 2,
+        });
+        assert.deepEqual(outcome.modes, ['readwrite']);
+        const after = await page.evaluate(() => unresolvedLedger());
+        const removed = laneRowsOf(before.storage.rows, 'c');
+        assert.equal(removed.length, 3);
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), []);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 3);
+        assert.equal(
+          after.storage.usage.bytes,
+          before.storage.usage.bytes - bytesOf(removed),
+        );
+        assert.equal(checkpointOf(before, 'c').bytes, bytesOf(removed));
+        assert.equal(checkpointOf(after, 'c'), undefined);
+        assert.deepEqual(
+          { aggregate: after.aggregate, epoch: after.epoch },
+          { aggregate: before.aggregate, epoch: before.epoch },
+          'Accounting once: before and after counters are equal',
+        );
+        assert.deepEqual(
+          laneRowsOf(after.storage.rows, 'd'),
+          laneRowsOf(before.storage.rows, 'd'),
+        );
+        assert.deepEqual(checkpointOf(after, 'd'), checkpointOf(before, 'd'));
+        assert.deepEqual(after.lanes.d, before.lanes.d);
+        assert.equal(await page.evaluate(() => unresolvedPaused('d')), true);
+        assert.equal(
+          after.fetches,
+          before.fetches,
+          'offline abandonment makes no network request',
+        );
+        assert.deepEqual(after.authorizeModes, [
+          'offline',
+          'offline',
+          'offline',
+        ]);
+        assert.equal(harness.requests().length, requests);
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.lanes.has(JSON.stringify(unresolvedKey('c'))),
+          ),
+          false,
+          'full removal leaves no tombstone',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => {
+            scheduler.wake(unresolvedKey('c'));
+            const incarnation = scheduler.lanes.get(
+              JSON.stringify(unresolvedKey('c')),
+            );
+            return {
+              present: incarnation !== undefined,
+              failures: incarnation?.failures ?? null,
+              pause: incarnation?.pause ?? null,
+            };
+          }),
+          { present: true, failures: 0, pause: null },
+          'a later wake creates an incarnation with no failures and no pause',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => scheduler.abandonUnresolved(otherChoice)),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+          'the other lane keeps its selection token',
+        );
+        break;
+      }
+      case 'unresolved-online-read': {
+        // Rule 6: online mode makes one binding read per selection and one per
+        // action. A failed read fails closed, deletes nothing and never falls back
+        // to offline. Offline mode makes no network request at all.
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'c');
+        await unresolvedWaitPause(page, 'c', 'blocked', 'access_unavailable');
+        const start = await page.evaluate(() => unresolvedLedger());
+        harness.configureBinding('503');
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(
+              scheduler.selectUnresolved(unresolvedKey('c'), 'online'),
+            ),
+          ),
+          'unavailable',
+          'failed read deletes nothing and makes no offline transaction',
+        );
+        const refusedSelection = await page.evaluate(() => unresolvedLedger());
+        assert.equal(refusedSelection.bindingReads, start.bindingReads + 1);
+        assert.deepEqual(
+          withoutReads(refusedSelection),
+          withoutReads(start),
+          'failed read deletes nothing and makes no offline transaction',
+        );
+        assert.deepEqual(refusedSelection.authorizeModes, ['online']);
+        harness.configureBinding('normal');
+        await page.evaluate(async () => {
+          globalThis.choice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'online',
+          );
+        });
+        const selected = await page.evaluate(() => unresolvedLedger());
+        assert.equal(selected.bindingReads, refusedSelection.bindingReads + 1);
+        harness.configureBinding('503');
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(choice)),
+          ),
+          'unavailable',
+          'failed read deletes nothing and makes no offline transaction',
+        );
+        const refusedAction = await page.evaluate(() => unresolvedLedger());
+        assert.equal(refusedAction.bindingReads, selected.bindingReads + 1);
+        assert.deepEqual(
+          withoutReads(refusedAction),
+          withoutReads(selected),
+          'failed read deletes nothing and makes no offline transaction',
+        );
+        assert.deepEqual(refusedAction.authorizeModes, [
+          'online',
+          'online',
+          'online',
+        ]);
+        harness.configureBinding('normal');
+        assert.deepEqual(
+          await page.evaluate(async () => {
+            globalThis.choice = await scheduler.selectUnresolved(
+              unresolvedKey('c'),
+              'online',
+            );
+            return scheduler.abandonUnresolved(choice);
+          }),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        const committed = await page.evaluate(() => unresolvedLedger());
+        assert.equal(committed.bindingReads, refusedAction.bindingReads + 2);
+        assert.deepEqual(committed.authorizeModes, [
+          'online',
+          'online',
+          'online',
+          'online',
+          'online',
+        ]);
+        assert.deepEqual(laneRowsOf(committed.storage.rows, 'c'), []);
+        await page.evaluate((tag) => unresolvedStart(tag), 'd');
+        await unresolvedWaitPause(page, 'd', 'blocked', 'access_unavailable');
+        const offlineStart = await page.evaluate(() => unresolvedLedger());
+        assert.deepEqual(
+          await page.evaluate(async () => {
+            globalThis.offlineChoice = await scheduler.selectUnresolved(
+              unresolvedKey('d'),
+              'offline',
+            );
+            return scheduler.abandonUnresolved(offlineChoice);
+          }),
+          { kind: 'abandoned_unknown', removedDependents: 0 },
+        );
+        const offline = await page.evaluate(() => unresolvedLedger());
+        assert.equal(
+          offline.fetches,
+          offlineStart.fetches,
+          'offline mode makes zero network requests',
+        );
+        assert.equal(offline.bindingReads, offlineStart.bindingReads);
+        assert.deepEqual(offline.authorizeModes, [
+          ...committed.authorizeModes,
+          'offline',
+          'offline',
+        ]);
+        assert.deepEqual(laneRowsOf(offline.storage.rows, 'd'), []);
+        break;
+      }
+      case 'unresolved-survivors': {
+        // Rules 9-11: survivors leave as one lane-scope resume choice. Their keys,
+        // bases and failure count are unchanged, nothing is sent until that fresh
+        // token is used once, and the retired token is refused.
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate(async () => {
+          const head = await unresolvedEnqueue('c');
+          const first = await unresolvedDependent('c', head.sequence);
+          await unresolvedDependent('c', first.sequence);
+          globalThis.survivorRow = await unresolvedEnqueue('c');
+          scheduler.wake(unresolvedKey('c'));
+        });
+        await unresolvedWaitPause(page, 'c', 'blocked', 'access_unavailable');
+        // Lane-scope retry exhaustion: the eighth retryable failure pauses the lane.
+        await page.evaluate(() => {
+          const current = unresolvedLane('c');
+          delete current.pause;
+          current.failures = 7;
+        });
+        harness.configure('status', 503);
+        await page.evaluate(() => scheduler.wake(unresolvedKey('c')));
+        await unresolvedWaitPause(page, 'c', 'retry_paused', 'server_error');
+        const survivorKey = await page.evaluate(() => survivorRow.key);
+        await page.evaluate(() => {
+          globalThis.retiredResume = unresolvedLane('c').pause.selection;
+        });
+        const requests = harness.requests().length;
+        await page.evaluate(async () => {
+          globalThis.choice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedLedger());
+        const outcome = await page.evaluate(() =>
+          unresolvedTransactions(() => scheduler.abandonUnresolved(choice)),
+        );
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 2,
+        });
+        assert.deepEqual(
+          outcome.modes,
+          ['readwrite'],
+          'abandonment opens one transaction, with no second survivor read',
+        );
+        const after = await page.evaluate(() => unresolvedLedger());
+        const closure = laneRowsOf(before.storage.rows, 'c');
+        const removed = closure.slice(0, 3);
+        const survivor = closure.at(-1);
+        assert.equal(survivor.key, survivorKey);
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), [survivor]);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 3);
+        assert.equal(
+          after.storage.usage.bytes,
+          before.storage.usage.bytes - bytesOf(removed),
+        );
+        assert.equal(checkpointOf(after, 'c').rows, 1);
+        assert.equal(checkpointOf(after, 'c').bytes, survivor.bytes);
+        assert.equal(
+          after.lanes.c.failures,
+          8,
+          'survivors keep their keys, bases and failure count',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            kind: unresolvedLane('c').pause?.kind ?? null,
+            reason: unresolvedLane('c').pause?.reason ?? null,
+            scope: unresolvedLane('c').pause?.scope ?? null,
+            publications: events.filter(
+              (event) =>
+                event.kind === 'paused' &&
+                event.pause.reason === 'survivors_after_disposal',
+            ).length,
+            fresh: unresolvedLane('c').pause?.selection !== retiredResume,
+          })),
+          {
+            kind: 'retry_paused',
+            reason: 'survivors_after_disposal',
+            scope: 'lane',
+            publications: 1,
+            fresh: true,
+          },
+          'one lane-scope survivor pause with a fresh resume token',
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.resumeDelivery(retiredResume)),
+          ),
+          'invalid_selection',
+          'the retired resume token is refused',
+        );
+        await page.evaluate(async () => {
+          // A macrotask yield lets a dispatch that the wake starts reach the counter.
+          scheduler.wake(unresolvedKey('c'));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        const waiting = await page.evaluate(() => unresolvedLedger());
+        assert.equal(
+          harness.requests().length,
+          requests,
+          'zero survivor HTTP before resume',
+        );
+        assert.equal(
+          waiting.fetches,
+          after.fetches,
+          'zero survivor HTTP before resume',
+        );
+        harness.configure('normal');
+        const arrival = harness.waitRequest();
+        const eventsBefore = await page.evaluate(() => events.length);
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.resumeDelivery(unresolvedLane('c').pause.selection).then(
+              () => 'resumed',
+              (error) => error.code,
+            ),
+          ),
+          'resumed',
+          'survivor resume succeeds once without a refresh rejection',
+        );
+        await arrival;
+        assert.deepEqual(
+          harness.requests().map((request) => ({
+            method: request.method,
+            idempotencyKey: request.headers['idempotency-key'],
+          })),
+          [{ method: 'PUT', idempotencyKey: survivorKey }],
+          'survivor resume succeeds once without a refresh rejection',
+        );
+        // The acknowledged lane queues once more; with no rows left that pass is
+        // the idle attempt that retires it, so waiting for it fixes the sequence.
+        await page.waitForFunction(() =>
+          events.some(
+            (event) => event.kind === 'attempt' && event.result.kind === 'idle',
+          ),
+        );
+        assert.deepEqual(
+          await page.evaluate(
+            (from) => ({
+              attempts: events
+                .slice(from)
+                .filter((event) => event.kind === 'attempt')
+                .map((event) => event.result.kind),
+              pauses: events
+                .slice(from)
+                .filter((event) => event.kind === 'paused').length,
+            }),
+            eventsBefore,
+          ),
+          { attempts: ['server_acknowledged', 'idle'], pauses: 0 },
+          'survivor resume succeeds once without a refresh rejection',
+        );
+        const finished = await page.evaluate(() => unresolvedLedger());
+        assert.deepEqual(laneRowsOf(finished.storage.rows, 'c'), []);
+        break;
+      }
+      case 'unresolved-abort': {
+        // A failed commit keeps the gate and its resume token, sends nothing and
+        // leaves rows, checkpoint and counters intact. It consumes only its own
+        // choice, so a fresh selection commits once.
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        await page.evaluate(async () => {
+          const head = await unresolvedEnqueue('c');
+          await unresolvedDependent('c', head.sequence);
+          scheduler.wake(unresolvedKey('c'));
+        });
+        await unresolvedWaitPause(page, 'c', 'blocked', 'access_unavailable');
+        // Lane-scope retry exhaustion: the eighth retryable failure pauses the lane.
+        await page.evaluate(() => {
+          const current = unresolvedLane('c');
+          delete current.pause;
+          current.failures = 7;
+        });
+        harness.configure('status', 503);
+        await page.evaluate(() => scheduler.wake(unresolvedKey('c')));
+        await unresolvedWaitPause(page, 'c', 'retry_paused', 'server_error');
+        await page.evaluate(() => {
+          globalThis.gatePause = unresolvedLane('c').pause;
+          globalThis.gateToken = gatePause.selection;
+        });
+        const requests = harness.requests().length;
+        await page.evaluate(async () => {
+          globalThis.choice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedLedger());
+        const failed = await page.evaluate(async () => {
+          faultPut('usage');
+          const code = await unresolvedCode(
+            scheduler.abandonUnresolved(choice),
+          );
+          restorePut();
+          return {
+            code,
+            gate: {
+              pause: unresolvedLane('c')?.pause === gatePause,
+              token: unresolvedLane('c')?.pause?.selection === gateToken,
+              // The resume token is usable only while the delivery registry holds it.
+              registered: scheduler.deliveries.tokens.has(gateToken),
+            },
+          };
+        });
+        assert.deepEqual(
+          failed.gate,
+          { pause: true, token: true, registered: true },
+          'Abort before counters: the gate and resume token remain',
+        );
+        assert.equal(failed.code, 'storage_failed');
+        const aborted = await page.evaluate(() => unresolvedLedger());
+        assert.deepEqual(
+          withoutReads(aborted),
+          withoutReads(before),
+          'Abort before counters: rows, checkpoint and counters are intact',
+        );
+        assert.equal(aborted.fetches, before.fetches);
+        assert.equal(harness.requests().length, requests);
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(choice)),
+          ),
+          'invalid_selection',
+          'the failed choice is consumed',
+        );
+        const committed = await page.evaluate(async () => {
+          globalThis.choice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+          return unresolvedTransactions(() =>
+            scheduler.abandonUnresolved(choice),
+          );
+        });
+        assert.deepEqual(committed.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 1,
+        });
+        assert.deepEqual(committed.modes, ['readwrite']);
+        const after = await page.evaluate(() => unresolvedLedger());
+        const removed = laneRowsOf(before.storage.rows, 'c');
+        assert.equal(removed.length, 2);
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), []);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 2);
+        assert.equal(
+          after.storage.usage.bytes,
+          before.storage.usage.bytes - bytesOf(removed),
+        );
+        assert.equal(checkpointOf(after, 'c'), undefined);
+        assert.deepEqual(
+          { aggregate: after.aggregate, epoch: after.epoch },
+          { aggregate: before.aggregate, epoch: before.epoch },
+          'Accounting once: before and after counters are equal',
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-bound': {
+        // The lane cap is 64 rows and 2 MiB. The closure fills the cap exactly,
+        // and one readwrite transaction removes all 64 rows with exact deltas.
+        harness.setErrorBody(notFoundBody);
+        harness.configure('status', 404);
+        const closureBytes = await page.evaluate(async () => {
+          const quoted = (length) => JSON.stringify('x'.repeat(length - 2));
+          const fill = 28000;
+          const head = await unresolvedEnqueue('c');
+          let tail = head;
+          let total = head.bytes;
+          for (let index = 0; index < 62; index += 1) {
+            tail = await unresolvedDependent('c', tail.sequence, {
+              text: quoted(fill),
+            });
+            total += tail.bytes;
+          }
+          // Stored bytes are the text plus a fixed overhead per row; the last row
+          // takes exactly the lane budget that is left.
+          const overhead = tail.bytes - tail.text.length;
+          const last = await unresolvedDependent('c', tail.sequence, {
+            text: quoted(2 * 1024 * 1024 - total - overhead),
+          });
+          scheduler.wake(unresolvedKey('c'));
+          return total + last.bytes;
+        });
+        assert.equal(closureBytes, 2 * 1024 * 1024);
+        await unresolvedWaitPause(page, 'c', 'blocked', 'access_unavailable');
+        const before = await page.evaluate(() => unresolvedLedger());
+        const closure = laneRowsOf(before.storage.rows, 'c');
+        assert.equal(closure.length, 64);
+        assert.equal(bytesOf(closure), 2 * 1024 * 1024);
+        await page.evaluate(async () => {
+          globalThis.choice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const outcome = await page.evaluate(() =>
+          unresolvedTransactions(() => scheduler.abandonUnresolved(choice)),
+        );
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 63,
+        });
+        assert.deepEqual(outcome.modes, ['readwrite']);
+        const after = await page.evaluate(() => unresolvedLedger());
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), []);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 64);
+        assert.equal(
+          after.storage.usage.bytes,
+          before.storage.usage.bytes - 2 * 1024 * 1024,
+        );
+        assert.equal(checkpointOf(after, 'c'), undefined);
+        break;
+      }
+      case 'unresolved-offline-authority': {
+        // Rule 15's authority, refused by the host before the action and by a change
+        // that lands after the last pre-transaction check. A failed check closes the
+        // scheduler, so each fact that reaches one has a page of its own, and the
+        // in-transaction change runs last.
+        await unresolvedBlockedLane(harness, page, 'a');
+        await assertOfflineRefused(
+          harness,
+          page,
+          'a',
+          'host-refusal',
+          'host refusal before the action keeps rows',
+        );
+        // The change lands as the readwrite intents transaction opens, after the
+        // last pre-transaction check, so only the transaction's own check can refuse.
+        await page.evaluate(async () => {
+          unresolvedArrangers.restore();
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('a'),
+            'offline',
+          );
+        });
+        const beforeOpen = await page.evaluate(() => unresolvedObserve());
+        const requestsOpen = harness.requests().length;
+        const opened = await page.evaluate(async () => {
+          const open = IDBDatabase.prototype.transaction;
+          IDBDatabase.prototype.transaction = function (...args) {
+            if (args[1] === 'readwrite' && [args[0]].flat().includes('intents'))
+              currentAuthority = Symbol();
+            return Reflect.apply(open, this, args);
+          };
+          try {
+            return await unresolvedCode(
+              scheduler.abandonUnresolved(unresolvedChoice),
+            );
+          } finally {
+            IDBDatabase.prototype.transaction = open;
+          }
+        });
+        assert.equal(
+          opened,
+          'owner_not_ready',
+          'Offline authority: change between selection and transaction rejects',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeOpen,
+          'Offline authority: change between selection and transaction rejects',
+        );
+        assert.equal(harness.requests().length, requestsOpen);
+        break;
+      }
+      case 'unresolved-offline-logout':
+      case 'unresolved-offline-lock-loss':
+      case 'unresolved-offline-generation':
+      case 'unresolved-offline-profile':
+      case 'unresolved-offline-invalidated':
+      case 'unresolved-offline-check-throws':
+      case 'unresolved-offline-aborted':
+      case 'unresolved-offline-detached': {
+        // One lost authority fact between selection and the action, on its own page.
+        await unresolvedBlockedLane(harness, page, 'a');
+        await assertOfflineRefused(
+          harness,
+          page,
+          'a',
+          mode.slice('unresolved-offline-'.length),
+          `${mode} keeps rows`,
+        );
+        break;
+      }
+      case 'unresolved-offline-closed': {
+        // Closing after selection retires the token and the lane's selection. The
+        // blocked pause stays, and the abandonment fails closed with nothing changed.
+        await unresolvedBlockedLane(harness, page, 'a');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('a'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        assert.deepEqual(
+          await page.evaluate(() => {
+            scheduler.close();
+            return {
+              paused: unresolvedPaused('a'),
+              selection: unresolvedLane('a').unresolvedSelection !== undefined,
+              token: scheduler.unresolved.tokens.has(unresolvedChoice),
+            };
+          }),
+          { paused: true, selection: false, token: false },
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(unresolvedChoice)),
+          ),
+          'owner_not_ready',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-offline-mid-transaction': {
+        // Authentication loss after the first intents delete succeeds: the next
+        // in-transaction check fails through the aborted fence signal, so the
+        // transaction aborts and the first delete is rolled back.
+        await unresolvedBlockedLane(harness, page, 'a');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('a'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        const outcome = await page.evaluate(async () => {
+          const deletion = IDBObjectStore.prototype.delete;
+          let deletes = 0;
+          globalThis.restoreUnresolvedDelete = () => {
+            IDBObjectStore.prototype.delete = deletion;
+          };
+          IDBObjectStore.prototype.delete = function (...args) {
+            const pending = deletion.apply(this, args);
+            if (this.name === 'intents')
+              pending.addEventListener(
+                'success',
+                () => {
+                  deletes += 1;
+                  deliveryContext.invalidateAuthentication();
+                },
+                { once: true },
+              );
+            return pending;
+          };
+          const code = await unresolvedCode(
+            scheduler.abandonUnresolved(unresolvedChoice),
+          );
+          restoreUnresolvedDelete();
+          return { code, deletes };
+        });
+        assert.deepEqual(outcome, { code: 'owner_not_ready', deletes: 1 });
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-online-401':
+      case 'unresolved-online-select-401':
+      case 'unresolved-online-binding':
+      case 'unresolved-online-select-binding': {
+        // An online binding fault during the selection or the action closes the
+        // scheduler, deletes nothing and keeps the lane's pause. A 401 also
+        // invalidates authentication; a 409 outbox_binding_changed does not.
+        const atSelection = mode.includes('-select-');
+        const unauthorized = mode.endsWith('-401');
+        await unresolvedBlockedLane(harness, page, 'a');
+        await page.evaluate(() => {
+          authInvalidationAborts = false;
+        });
+        if (!atSelection)
+          await page.evaluate(async () => {
+            globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+              unresolvedKey('a'),
+              'online',
+            );
+          });
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        harness.configureBinding(unauthorized ? '401stalled' : '409binding');
+        await page.evaluate((atSelection) => {
+          globalThis.onlineOutcome = (
+            atSelection
+              ? scheduler.selectUnresolved(unresolvedKey('a'), 'online')
+              : scheduler.abandonUnresolved(unresolvedChoice)
+          ).then(
+            () => 'unexpected',
+            (error) => ({
+              code: error.code,
+              status: error.status,
+              retryAfterSeconds: error.retryAfterSeconds,
+            }),
+          );
+        }, atSelection);
+        if (unauthorized) {
+          await page.waitForFunction(() =>
+            cleanupObservedStatuses.includes(401),
+          );
+          assert.equal(
+            await page.evaluate(() => locallyAuthenticated),
+            false,
+            'a 401 invalidates authentication',
+          );
+        }
+        const failure = await page.evaluate(() => onlineOutcome);
+        const raw = await page.evaluate(() => cleanupRawReadDiagnostic);
+        assert.equal(failure.status, unauthorized ? 401 : 409);
+        assert.equal(failure.code, raw.code);
+        if (!unauthorized) assert.equal(raw.code, 'outbox_binding_changed');
+        assert.equal(
+          await page.evaluate(() => scheduler.fence.signal.aborted),
+          true,
+          'the online fault closes the scheduler',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => cleanupAuthorizeModes),
+          atSelection ? ['online'] : ['online', 'online'],
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          before,
+          'the online fault deletes nothing',
+        );
+        assert.equal(await page.evaluate(() => unresolvedPaused('a')), true);
+        assert.equal(harness.requests().length, requests);
+        harness.configureBinding('normal');
+        break;
+      }
+      case 'unresolved-resume-read-failed': {
+        // A binding read that fails during a resume replaces the retry pause
+        // with a token-refreshed copy. That replacement retires the lane's
+        // disposal selection (ADR 0049 rules 5 and 16).
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), 'a');
+        await unresolvedWaitPause(page, 'a', 'blocked', 'access_unavailable');
+        await unresolvedRetryPause(harness, page, 'a');
+        await page.evaluate(async () => {
+          globalThis.staleChoice = await scheduler.selectUnresolved(
+            unresolvedKey('a'),
+            'offline',
+          );
+        });
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.unresolved.tokens.has(staleChoice),
+          ),
+          true,
+          'the selection is current before the resume',
+        );
+        harness.configureBinding('503');
+        const failureStatus = await page.evaluate(() =>
+          scheduler.resumeDelivery(unresolvedLane('a').pause.selection).then(
+            () => 'unexpected',
+            (error) => error.status,
+          ),
+        );
+        harness.configureBinding('normal');
+        assert.equal(failureStatus, 503, 'the binding read failed with 503');
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('a').pause.kind),
+          'retry_paused',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedLane('a').unresolvedSelection),
+          undefined,
+          'the replacement pause retires the lane selection',
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            scheduler.unresolved.tokens.has(staleChoice),
+          ),
+          false,
+          'a retired selection leaves the token map',
+        );
+        assert.equal(
+          await page.evaluate(() =>
+            unresolvedCode(scheduler.abandonUnresolved(staleChoice)),
+          ),
+          'invalid_selection',
+          'a retired selection is refused',
+        );
+        assert.equal(
+          await page.evaluate(() => unresolvedSelect('a')),
+          'accepted',
+          'the lane selects again after the failed resume',
+        );
+        break;
+      }
+      case 'unresolved-post-commit-close': {
+        // Closing right after the commit decides the result: the committed removal
+        // stays, nothing publishes or reconciles, and the fenced lane keeps its metadata.
+        await unresolvedBlockedLane(harness, page, 'c');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        const outcome = await page.evaluate(async () => {
+          unresolvedCountReconciliation();
+          unresolvedOnCommit(() => scheduler.close());
+          const result = await scheduler
+            .abandonUnresolved(unresolvedChoice)
+            .then(
+              (value) => value,
+              (error) => ({ rejected: error.code }),
+            );
+          restoreUnresolvedTransaction();
+          return {
+            result,
+            retained: scheduler.lanes.has(JSON.stringify(unresolvedKey('c'))),
+            paused: unresolvedPaused('c'),
+            reconciliations: reconciliationRequests,
+          };
+        });
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 0,
+        });
+        assert.equal(
+          outcome.retained,
+          true,
+          'fenced scheduler keeps the lane metadata, no publication',
+        );
+        assert.equal(
+          outcome.paused,
+          true,
+          'fenced scheduler keeps the lane metadata, no publication',
+        );
+        assert.equal(
+          outcome.reconciliations,
+          0,
+          'no reconciliation after close',
+        );
+        const after = await page.evaluate(() => unresolvedObserve());
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), []);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+        assert.equal(
+          after.events,
+          before.events,
+          'fenced scheduler keeps the lane metadata, no publication',
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-post-commit-auth': {
+        // Invalidating authentication right after the commit decides the result the
+        // same way closing does: the removal stays, nothing publishes or reconciles.
+        await unresolvedBlockedLane(harness, page, 'c');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        const outcome = await page.evaluate(async () => {
+          authInvalidationAborts = true;
+          unresolvedCountReconciliation();
+          unresolvedOnCommit(() => deliveryContext.invalidateAuthentication());
+          const result = await scheduler
+            .abandonUnresolved(unresolvedChoice)
+            .then(
+              (value) => value,
+              (error) => ({ rejected: error.code }),
+            );
+          restoreUnresolvedTransaction();
+          return {
+            result,
+            retained: scheduler.lanes.has(JSON.stringify(unresolvedKey('c'))),
+            paused: unresolvedPaused('c'),
+            fenced: scheduler.fence.signal.aborted,
+            authenticated: locallyAuthenticated,
+            reconciliations: reconciliationRequests,
+          };
+        });
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 0,
+        });
+        assert.equal(outcome.authenticated, false);
+        assert.equal(outcome.fenced, true);
+        assert.equal(
+          outcome.retained,
+          true,
+          'fenced scheduler keeps the lane metadata, no publication',
+        );
+        assert.equal(outcome.paused, true);
+        assert.equal(
+          outcome.reconciliations,
+          0,
+          'no reconciliation after auth loss',
+        );
+        const after = await page.evaluate(() => unresolvedObserve());
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), []);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+        assert.equal(after.events, before.events);
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-post-commit-wake': {
+        // Lane a holds the setup's marker row, which a reconciliation would deliver.
+        // Parking it first leaves the reconciliation below nothing to send.
+        await unresolvedBlockedLane(harness, page, 'a');
+        // A wake between two transaction requests is refused with nothing deleted.
+        await unresolvedBlockedLane(harness, page, 'b');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('b'),
+            'offline',
+          );
+          unresolvedWakeInside('b');
+        });
+        const beforeInside = await page.evaluate(() => unresolvedObserve());
+        assert.equal(
+          await page.evaluate(async () => {
+            const code = await unresolvedCode(
+              scheduler.abandonUnresolved(unresolvedChoice),
+            );
+            restoreUnresolvedDelete();
+            return code;
+          }),
+          'invalid_selection',
+          'wake between two requests rejects with nothing deleted',
+        );
+        assert.deepEqual(
+          await page.evaluate(() => unresolvedObserve()),
+          beforeInside,
+          'wake between two requests rejects with nothing deleted',
+        );
+        // A wake after the commit does not suppress retirement, and asks for one
+        // reconciliation, which runs without dispatching anything.
+        await unresolvedBlockedLane(harness, page, 'c');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        const outcome = await page.evaluate(async () => {
+          unresolvedCountReconciliation();
+          unresolvedOnCommit(() => scheduler.wake(unresolvedKey('c')));
+          const result = await scheduler
+            .abandonUnresolved(unresolvedChoice)
+            .then(
+              (value) => value,
+              (error) => ({ rejected: error.code }),
+            );
+          restoreUnresolvedTransaction();
+          return {
+            result,
+            retained: scheduler.lanes.has(JSON.stringify(unresolvedKey('c'))),
+            reconciliations: reconciliationRequests,
+          };
+        });
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 0,
+        });
+        assert.equal(
+          outcome.retained,
+          false,
+          'post-commit wake does not suppress retirement',
+        );
+        assert.equal(
+          outcome.reconciliations,
+          1,
+          'one reconciliation is requested',
+        );
+        await unresolvedQuiet(page);
+        const after = await page.evaluate(() => unresolvedObserve());
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), []);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-post-commit-retired': {
+        // The lane leaves the map after the commit's terminal event and before the
+        // store call resolves. A wake marks it woken, then a newer incarnation
+        // takes its key. The publication check must request no reconciliation and
+        // must not remove that newer incarnation (ADR 0049 rule 11). The newer
+        // attempt is held, so it stays in the map until the check.
+        await unresolvedBlockedLane(harness, page, 'c');
+        await page.evaluate(async () => {
+          globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+            unresolvedKey('c'),
+            'offline',
+          );
+        });
+        const before = await page.evaluate(() => unresolvedObserve());
+        const requests = harness.requests().length;
+        const outcome = await page.evaluate(async () => {
+          const id = JSON.stringify(unresolvedKey('c'));
+          const stale = scheduler.lanes.get(id);
+          let newer;
+          unresolvedCountReconciliation();
+          scheduler.kernel.run = () => new Promise(() => {});
+          unresolvedOnCommit(() => {
+            scheduler.wake(unresolvedKey('c'));
+            scheduler.retireIdle(stale);
+            scheduler.wake(unresolvedKey('c'));
+            newer = scheduler.lanes.get(id);
+          });
+          const result = await scheduler
+            .abandonUnresolved(unresolvedChoice)
+            .then(
+              (value) => value,
+              (error) => ({ rejected: error.code }),
+            );
+          restoreUnresolvedTransaction();
+          delete scheduler.kernel.run;
+          const kept = scheduler.lanes.get(id);
+          return {
+            result,
+            newerKept: kept !== undefined && kept === newer,
+            reconciliations: reconciliationRequests,
+          };
+        });
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 0,
+        });
+        assert.equal(
+          outcome.newerKept,
+          true,
+          'a retired incarnation must not remove the newer one under its key',
+        );
+        assert.equal(
+          outcome.reconciliations,
+          0,
+          'a retired incarnation requests no reconciliation after commit',
+        );
+        await unresolvedQuiet(page);
+        const after = await page.evaluate(() => unresolvedObserve());
+        assert.deepEqual(laneRowsOf(after.storage.rows, 'c'), []);
+        assert.equal(after.storage.usage.rows, before.storage.usage.rows - 1);
+        assert.equal(
+          after.events,
+          before.events,
+          'a retired incarnation publishes no event after commit',
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-pending-identity': {
+        // A blocked lane (404) keeps one prepared head and no proof. Probes ask
+        // for the same token inside the transaction and after its commit, while
+        // the first operation is still pending.
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), '1');
+        await unresolvedWaitPause(page, '1', 'blocked', 'access_unavailable');
+        const requests = harness.requests().length;
+        const committed = await page.evaluate(async (tag) => {
+          const choice = await scheduler.selectUnresolved(
+            unresolvedKey(tag),
+            'offline',
+          );
+          globalThis.consumedChoice = choice;
+          const probes = [];
+          let first;
+          let armed = true;
+          let insideProbed = false;
+          const probe = (boundary) =>
+            probes.push({
+              boundary,
+              shared: scheduler.abandonUnresolved(choice) === first,
+            });
+          const open = IDBDatabase.prototype.transaction;
+          const deletion = IDBObjectStore.prototype.delete;
+          IDBDatabase.prototype.transaction = function (names, mode, ...rest) {
+            const transaction = Reflect.apply(open, this, [
+              names,
+              mode,
+              ...rest,
+            ]);
+            if (armed && mode === 'readwrite') {
+              armed = false;
+              transaction.addEventListener(
+                'complete',
+                () => probe('post-commit'),
+                { once: true },
+              );
+            }
+            return transaction;
+          };
+          IDBObjectStore.prototype.delete = function (...args) {
+            const pending = Reflect.apply(deletion, this, args);
+            if (this.name === 'intents' && !insideProbed) {
+              insideProbed = true;
+              pending.addEventListener('success', () => probe('transaction'), {
+                once: true,
+              });
+            }
+            return pending;
+          };
+          try {
+            first = scheduler.abandonUnresolved(choice);
+            const second = scheduler.abandonUnresolved(choice);
+            const crossKind = await unresolvedCode(
+              scheduler.discardRejected(choice),
+            );
+            const result = await first;
+            return {
+              shared: second === first,
+              crossKind,
+              result,
+              probes,
+              consumed: await unresolvedCode(
+                scheduler.abandonUnresolved(choice),
+              ),
+              tokenRegistered: scheduler.unresolved.tokens.has(choice),
+            };
+          } finally {
+            IDBDatabase.prototype.transaction = open;
+            IDBObjectStore.prototype.delete = deletion;
+          }
+        }, '1');
+        assert.deepEqual(committed, {
+          shared: true,
+          crossKind: 'invalid_selection',
+          result: { kind: 'abandoned_unknown', removedDependents: 0 },
+          probes: [
+            { boundary: 'transaction', shared: true },
+            { boundary: 'post-commit', shared: true },
+          ],
+          consumed: 'invalid_selection',
+          tokenRegistered: false,
+        });
+        assert.equal(harness.requests().length, requests);
+        // A refused operation also consumes its token at entry. The refusal
+        // comes from the authority, which the page makes fail for one call.
+        await page.evaluate((tag) => unresolvedStart(tag), '6');
+        await unresolvedWaitPause(page, '6', 'blocked', 'access_unavailable');
+        const requestsBeforeRefusal = harness.requests().length;
+        const refusal = await page.evaluate(async (tag) => {
+          const choice = await scheduler.selectUnresolved(
+            unresolvedKey(tag),
+            'offline',
+          );
+          globalThis.cleanupAuthorityFailure = new Error(
+            'private-authority-refusal',
+          );
+          try {
+            return {
+              refused: await unresolvedCode(
+                scheduler.abandonUnresolved(choice),
+              ),
+              tokenRegistered: scheduler.unresolved.tokens.has(choice),
+              replay: await unresolvedCode(scheduler.abandonUnresolved(choice)),
+            };
+          } finally {
+            globalThis.cleanupAuthorityFailure = undefined;
+          }
+        }, '6');
+        assert.deepEqual(refusal, {
+          refused: 'owner_not_ready',
+          tokenRegistered: false,
+          replay: 'invalid_selection',
+        });
+        // Ending the owner closes the scheduler on the next cleanup authority
+        // check. A consumed token then reaches the closed check, which answers.
+        const closed = await page.evaluate(async () => {
+          stop.abort();
+          const closing = await unresolvedCode(
+            scheduler.selectUnresolved(unresolvedKey('1'), 'offline'),
+          );
+          return {
+            closing,
+            closedRetry: await unresolvedCode(
+              scheduler.abandonUnresolved(consumedChoice),
+            ),
+          };
+        });
+        assert.deepEqual(closed, {
+          closing: 'owner_not_ready',
+          closedRetry: 'owner_not_ready',
+        });
+        const after = await page.evaluate(() => unresolvedLedger());
+        assert.equal(laneRowsOf(after.storage.rows, '1').length, 0);
+        assert.equal(laneRowsOf(after.storage.rows, '6').length, 1);
+        assert.equal(harness.requests().length, requestsBeforeRefusal);
+        break;
+      }
+      case 'unresolved-serialization': {
+        // A retry-paused lane (503) carries a resume token. An admission and a
+        // resume that start inside the action's authority check must wait for
+        // the gate, then see only the new incarnation.
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), '2');
+        await unresolvedWaitPause(page, '2', 'blocked', 'access_unavailable');
+        await unresolvedRetryPause(harness, page, '2');
+        const requests = harness.requests().length;
+        const outcome = await page.evaluate(async (tag) => {
+          const resumeToken = unresolvedLane(tag).pause.selection;
+          const choice = await scheduler.selectUnresolved(
+            unresolvedKey(tag),
+            'offline',
+          );
+          const admittedKey = crypto.randomUUID().replaceAll('-', '');
+          let started = false;
+          let admission;
+          let resume;
+          let lanePresentAtAdmission;
+          // The hook runs inside the action's authority check, so both calls
+          // queue behind the gate and cannot join the closure.
+          globalThis.onCleanupProofCheck = () => {
+            if (started) return;
+            started = true;
+            admission = enqueueLikeHead({
+              key: admittedKey,
+              lane: unresolvedKey(tag),
+              artifactId: unresolvedKey(tag)[4],
+              base: { version: 0 },
+            });
+            resume = scheduler.resumeDelivery(resumeToken).then(
+              () => 'accepted',
+              (error) => error.code,
+            );
+          };
+          globalThis.onAdmissionStart = () => {
+            lanePresentAtAdmission = scheduler.lanes.has(
+              JSON.stringify(unresolvedKey(tag)),
+            );
+          };
+          try {
+            const result = await scheduler.abandonUnresolved(choice);
+            await admission;
+            return {
+              result,
+              admittedKey,
+              lanePresentAtAdmission,
+              resume: await resume,
+            };
+          } finally {
+            globalThis.onCleanupProofCheck = undefined;
+            globalThis.onAdmissionStart = undefined;
+          }
+        }, '2');
+        assert.deepEqual(outcome.result, {
+          kind: 'abandoned_unknown',
+          removedDependents: 0,
+        });
+        assert.equal(outcome.lanePresentAtAdmission, false);
+        assert.equal(outcome.resume, 'invalid_selection');
+        const after = await page.evaluate(() => unresolvedLedger());
+        assert.equal(laneRowsOf(after.storage.rows, '2').length, 1);
+        assert.equal(
+          after.storage.rows.some((row) => row.key === outcome.admittedKey),
+          true,
+        );
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-no-resurrection': {
+        // A retry-paused lane (503) carries a resume token. After commit the old
+        // selection and token reject, and a stale kernel result changes nothing.
+        harness.configure('status', 404);
+        await page.evaluate((tag) => unresolvedStart(tag), '3');
+        await unresolvedWaitPause(page, '3', 'blocked', 'access_unavailable');
+        await unresolvedRetryPause(harness, page, '3');
+        const retired = await page.evaluate(async (tag) => {
+          const key = unresolvedKey(tag);
+          const resumeToken = unresolvedLane(tag).pause.selection;
+          const choice = await scheduler.selectUnresolved(key, 'offline');
+          const first = await scheduler.abandonUnresolved(choice);
+          return {
+            first,
+            retired: !scheduler.lanes.has(JSON.stringify(key)),
+            replay: await unresolvedCode(scheduler.abandonUnresolved(choice)),
+            resume: await unresolvedCode(scheduler.resumeDelivery(resumeToken)),
+          };
+        }, '3');
+        assert.deepEqual(retired, {
+          first: { kind: 'abandoned_unknown', removedDependents: 0 },
+          retired: true,
+          replay: 'invalid_selection',
+          resume: 'invalid_selection',
+        });
+        // White-box: the kernel is held, the lane is retired while its attempt is
+        // in flight, and the attempt then returns a binding refusal. The pump must
+        // drop that result without pausing, fencing or observing.
+        await page.evaluate(() => {
+          scheduler.kernel.run = () =>
+            new Promise((resolve) => {
+              globalThis.staleRelease = resolve;
+            });
+        });
+        await page.evaluate((tag) => unresolvedStart(tag), '3');
+        await page.waitForFunction(() => globalThis.staleRelease !== undefined);
+        const stale = await page.evaluate(async (tag) => {
+          const eventsBefore = events.length;
+          scheduler.retireIdle(unresolvedLane(tag));
+          staleRelease({
+            kind: 'delivery_failed',
+            failure: { reason: 'binding_changed', status: 409 },
+          });
+          const observed = await unresolvedObserve();
+          delete scheduler.kernel.run;
+          return {
+            events: observed.events - eventsBefore,
+            fenced: scheduler.fence.signal.aborted,
+            present: scheduler.lanes.has(JSON.stringify(unresolvedKey(tag))),
+          };
+        }, '3');
+        assert.deepEqual(stale, { events: 0, fenced: false, present: false });
+        // A new row under the same key is a new incarnation with no inherited
+        // pause or failure count.
+        harness.configure('headers_hold');
+        const arrival = harness.waitRequest();
+        await page.evaluate((tag) => unresolvedStart(tag), '3');
+        await arrival;
+        assert.deepEqual(
+          await page.evaluate(
+            (tag) => ({
+              present: scheduler.lanes.has(JSON.stringify(unresolvedKey(tag))),
+              ...unresolvedGate(tag),
+            }),
+            '3',
+          ),
+          { present: true, pause: null, failures: 0, rejection: false },
+        );
+        // configure() starts a new request log, so only the new incarnation's
+        // request is counted.
+        assert.equal(harness.requests().length, 1);
+        break;
+      }
+      case 'unresolved-late-rejection': {
+        // White-box: an attempt is held while its lane is retired, then rejects
+        // with a dispatched local failure. The pump must drop that rejection
+        // without counting it, closing the scheduler or observing it (ADR 0049
+        // rule 14), and the retired lane must not come back.
+        await page.evaluate(() => {
+          scheduler.kernel.run = () =>
+            new Promise((resolve, reject) => {
+              globalThis.staleReject = reject;
+            });
+        });
+        await page.evaluate((tag) => unresolvedStart(tag), '5');
+        await page.waitForFunction(() => globalThis.staleReject !== undefined);
+        const stale = await page.evaluate(async (tag) => {
+          const eventsBefore = events.length;
+          const failuresBefore = scheduler.aggregateFailures;
+          scheduler.retireIdle(unresolvedLane(tag));
+          staleReject(
+            new deliveryApi.DeliveryAttemptError(
+              new deliveryApi.OutboxError('storage_failed'),
+              true,
+            ),
+          );
+          // The pump's task settles only after the stale result is handled.
+          await scheduler.activeTask;
+          delete scheduler.kernel.run;
+          return {
+            events: events.length - eventsBefore,
+            failures: scheduler.aggregateFailures - failuresBefore,
+            fenced: scheduler.fence.signal.aborted,
+            present: scheduler.lanes.has(JSON.stringify(unresolvedKey(tag))),
+          };
+        }, '5');
+        assert.deepEqual(stale, {
+          events: 0,
+          failures: 0,
+          fenced: false,
+          present: false,
+        });
+        break;
+      }
+      case 'unresolved-late-response': {
+        // The committed receipt is held past the 60 s attempt deadline. The
+        // deadline aborts the attempt, so after the lane is abandoned the late
+        // body must not recreate rows, write an ACK or dispatch anything.
+        harness.configure('body_hold');
+        const arrival = harness.waitRequest();
+        await page.evaluate((tag) => unresolvedStart(tag), '4');
+        await arrival;
+        const registered = await page.evaluate(() => timers.length);
+        await page.evaluate(() => {
+          timers
+            .find((timer) => timer.active && timer.milliseconds === 60000)
+            .callback();
+        });
+        // The failed attempt schedules a retry timer. The retry is answered with
+        // 503, which pauses the lane with a resume token.
+        await page.waitForFunction(
+          (count) => timers.length > count && timers.at(-1).active,
+          registered,
+        );
+        // Lane-scope exhaustion: seven failures are already recorded, so this
+        // retry's 503 is the eighth retryable failure and publishes the
+        // resume-token pause.
+        await page.evaluate(() => {
+          unresolvedLane('4').failures = 7;
+        });
+        harness.configure('status', 503);
+        await page.evaluate(() => timers.at(-1).callback());
+        await unresolvedWaitPause(page, '4', 'retry_paused', 'server_error');
+        const outcome = await page.evaluate(async (tag) => {
+          const choice = await scheduler.selectUnresolved(
+            unresolvedKey(tag),
+            'offline',
+          );
+          return scheduler.abandonUnresolved(choice);
+        }, '4');
+        assert.deepEqual(outcome, {
+          kind: 'abandoned_unknown',
+          removedDependents: 0,
+        });
+        const before = await page.evaluate(() => unresolvedLedger());
+        const requests = harness.requests().length;
+        harness.releaseHeld();
+        const after = await page.evaluate(() => unresolvedLedger());
+        assert.equal(laneRowsOf(after.storage.rows, '4').length, 0);
+        assert.deepEqual(after.storage.receipts, before.storage.receipts);
+        assert.deepEqual(after.storage.checkpoints, before.storage.checkpoints);
+        assert.equal(after.events, before.events);
+        assert.equal(harness.requests().length, requests);
+        break;
+      }
+      case 'unresolved-kernel-identity': {
+        // Without the scheduler, the lane identity is withdrawn after the
+        // request is sent and before the held receipt body completes. The
+        // checks that run after the response arrives refuse the late callback,
+        // so it writes no ACK, trims nothing and leaves the row unchanged.
+        harness.configure('body_hold');
+        const arrival = harness.waitRequest();
+        await page.evaluate(async (tag) => {
+          await unresolvedEnqueue(tag);
+          globalThis.kernelCurrent = true;
+          globalThis.kernelAttempt = kernel
+            .run(unresolvedKey(tag), undefined, () => kernelCurrent)
+            .then(
+              () => 'completed',
+              (error) => error.code,
+            );
+        }, '8');
+        await arrival;
+        const before = await page.evaluate(() => unresolvedLedger());
+        await page.evaluate(() => {
+          kernelCurrent = false;
+        });
+        harness.releaseHeld();
+        const outcome = await page.evaluate(() => kernelAttempt);
+        const after = await page.evaluate(() => unresolvedLedger());
+        assert.equal(outcome, 'invalid_selection');
+        assert.deepEqual(
+          laneRowsOf(after.storage.rows, '8').map((row) => row.state),
+          ['prepared'],
+        );
+        assert.deepEqual(after.storage.receipts, before.storage.receipts);
+        assert.deepEqual(after.storage.checkpoints, before.storage.checkpoints);
+        assert.equal(harness.requests().length, 1);
+        break;
+      }
+      default:
+        throw new Error(`unknown unresolved disposal mode: ${mode}`);
+    }
+  } finally {
+    harness.setErrorBody(dataConflictBody);
+  }
+}
+
+/**
+ * Starts lane `tag` as a blocked unresolved lane (404 access_unavailable) with a
+ * prepared head, and installs the page helpers that the unresolved cases share.
+ * Tag `a` is the artifact of the setup's marker row, so a case that expects a
+ * lane to empty uses another tag.
+ */
+async function unresolvedBlockedLane(harness, page, tag) {
+  await page.evaluate(() => {
+    // Each arranger injects one rule 15 fact or a refusal. None of them is
+    // reverted by the page itself, so a case restores what it needs.
+    globalThis.unresolvedArrangers = {
+      restore() {
+        cleanupAuthorityFailure = undefined;
+        authorityException = undefined;
+        currentAuthority = authority;
+      },
+      'host-refusal'() {
+        cleanupAuthorityFailure = new deliveryApi.OutboxError(
+          'owner_not_ready',
+        );
+      },
+      // A detached handle refuses its check with owner_not_ready.
+      detached() {
+        authorityException = new deliveryApi.OutboxError('owner_not_ready');
+      },
+      logout() {
+        locallyAuthenticated = false;
+      },
+      'lock-loss'() {
+        lockHeld = false;
+      },
+      generation() {
+        currentAuthority = Symbol();
+      },
+      profile() {
+        sessionStorage.setItem(
+          'artifree-data-outbox-owner-v1',
+          'replaced-owner',
+        );
+      },
+      // A 401 invalidates authentication and aborts the authority signal.
+      invalidated() {
+        authInvalidationAborts = true;
+        deliveryContext.invalidateAuthentication();
+      },
+      aborted() {
+        stop.abort();
+      },
+      'check-throws'() {
+        authorityException = makeAuthorityException();
+      },
+    };
+    // Counts requests for reconciliation without changing what it does.
+    globalThis.unresolvedCountReconciliation = () => {
+      const original = scheduler.requestReconciliation;
+      globalThis.reconciliationRequests = 0;
+      scheduler.requestReconciliation = function () {
+        reconciliationRequests += 1;
+        return original.call(this);
+      };
+    };
+    // Runs `action` when the next intents readwrite transaction completes.
+    globalThis.unresolvedOnCommit = (action) => {
+      const open = IDBDatabase.prototype.transaction;
+      globalThis.restoreUnresolvedTransaction = () => {
+        IDBDatabase.prototype.transaction = open;
+      };
+      IDBDatabase.prototype.transaction = function (...args) {
+        const tx = Reflect.apply(open, this, args);
+        if (args[1] === 'readwrite' && [args[0]].flat().includes('intents'))
+          tx.addEventListener('complete', action, { once: true });
+        return tx;
+      };
+    };
+  });
+  harness.setErrorBody(notFoundBody);
+  harness.configure('status', 404);
+  await page.evaluate((tag) => unresolvedStart(tag), tag);
+  await unresolvedWaitPause(page, tag, 'blocked', 'access_unavailable');
+}
+
+/** Waits until the page's scheduler has no reconciliation queued or running. */
+async function unresolvedQuiet(page) {
+  await page.waitForFunction(
+    () => !scheduler.reconciling && !scheduler.reconciliationQueued,
+  );
+}
+
+/**
+ * Selects lane `tag` offline, applies one named arranger, and checks that the
+ * abandonment is refused as owner_not_ready with every row and counter intact.
+ */
+async function assertOfflineRefused(harness, page, tag, arranger, label) {
+  await page.evaluate(async (tag) => {
+    unresolvedArrangers.restore();
+    globalThis.unresolvedChoice = await scheduler.selectUnresolved(
+      unresolvedKey(tag),
+      'offline',
+    );
+  }, tag);
+  const before = await page.evaluate(() => unresolvedObserve());
+  const requests = harness.requests().length;
+  const code = await page.evaluate((arranger) => {
+    unresolvedArrangers[arranger]();
+    return unresolvedCode(scheduler.abandonUnresolved(unresolvedChoice));
+  }, arranger);
+  assert.equal(code, 'owner_not_ready', label);
+  assert.deepEqual(
+    await page.evaluate(() => unresolvedObserve()),
+    before,
+    label,
+  );
+  assert.equal(harness.requests().length, requests, label);
 }
 
 /** Small real-Rust authority to native-IDB cleanup slice; public delivery stays off. */

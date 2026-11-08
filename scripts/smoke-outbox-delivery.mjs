@@ -21,14 +21,14 @@ export async function checkOutboxDelivery(browser, serverApi) {
   const isolatedUsers = [];
   const bundle = await build({
     stdin: {
-      contents: `import {DeliveryKernel, dispatchedRow} from './packages/client/src/outbox/delivery.ts';
+      contents: `import {DeliveryAttemptError, DeliveryKernel, dispatchedRow} from './packages/client/src/outbox/delivery.ts';
       import {openStore} from './packages/client/src/outbox/store.ts';
       import {readBinding} from './packages/client/src/outbox/binding.ts';
       import {OutboxError} from './packages/client/src/outbox/types.ts';
       import {ArtifreeApiError} from './packages/client/src/errors.ts';
       import {DeliveryScheduler} from './packages/client/src/outbox/scheduler.ts';
       import {LocalOperationGate} from './packages/client/src/outbox/local-operation-gate.ts';
-      globalThis.deliveryApi = {DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError, dispatchedRow};`,
+      globalThis.deliveryApi = {DeliveryAttemptError, DeliveryKernel, DeliveryScheduler, LocalOperationGate, openStore, readBinding, OutboxError, ArtifreeApiError, dispatchedRow};`,
       resolveDir: process.cwd(),
       loader: 'ts',
     },
@@ -816,6 +816,8 @@ export async function checkOutboxDelivery(browser, serverApi) {
       },
       requests: () => requests,
     });
+    // A named scheduler case ends here; the rest of this scenario is separate.
+    if (process.env.ARTIFREE_SCHEDULER_CASE !== undefined) return;
     // Failure to prepare never dispatches. The same accepted row remains available.
     let page = await setup();
     requests = [];
@@ -1503,6 +1505,48 @@ export async function checkOutboxDelivery(browser, serverApi) {
           );
           assert.equal(response.status, 200);
           return response.json();
+        },
+        async purgeArtifact(artifact) {
+          const headers = {
+            Authorization: 'Bearer ' + live.token,
+            'Content-Type': 'application/json',
+          };
+          const trashed = await fetch(
+            live.origin + '/v1/artifacts/' + artifact,
+            {
+              method: 'PATCH',
+              headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
+              body: JSON.stringify({
+                base_metadata_revision: 1,
+                deleted: true,
+              }),
+            },
+          );
+          assert.equal(trashed.status, 200);
+          const purged = await fetch(
+            live.origin + '/v1/artifacts/' + artifact + '/purge',
+            {
+              method: 'POST',
+              headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
+              body: JSON.stringify({ base_metadata_revision: 2 }),
+            },
+          );
+          assert.equal(purged.status, 200);
+          // Cleanup would trash this artifact again and fail on the purged 404,
+          // so it stops tracking the artifact once the purge has committed.
+          const index = createdArtifacts.findIndex(
+            (entry) => entry.id === artifact,
+          );
+          assert.notEqual(index, -1);
+          createdArtifacts.splice(index, 1);
+        },
+        async artifactStatus(artifact, path) {
+          const response = await fetch(
+            live.origin + '/v1/artifacts/' + artifact + path,
+            { headers: { Authorization: 'Bearer ' + live.token } },
+          );
+          await response.arrayBuffer();
+          return response.status;
         },
       },
       process.env.ARTIFREE_REJECTION_SEQUENCE,

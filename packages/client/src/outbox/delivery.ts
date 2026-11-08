@@ -455,17 +455,24 @@ export class DeliveryKernel {
     this.clock = context.clock ?? systemClock;
   }
 
-  /** The coordinator may pass only its own just-committed, never-dispatched head. */
+  /**
+   * Runs one delivery attempt for `lane`. The coordinator may pass only its own
+   * just-committed, never-dispatched head as `locallyPrepared`. `current` reports
+   * whether the caller's lane incarnation is still live. Once it returns false,
+   * the attempt rejects with `invalid_selection` at its next check point,
+   * before the next prepare, dispatch, acknowledge or trim step.
+   */
   async run(
     lane: LaneKey,
     locallyPrepared?: PreparedRow,
+    current: () => boolean = () => true,
   ): Promise<DeliveryAttempt> {
     if (this.active)
       throw new DeliveryAttemptError(new OutboxError('owner_not_ready'), false);
     this.active = true;
     this.dispatched = false;
     try {
-      return await this.attempt(lane, locallyPrepared);
+      return await this.attempt(lane, locallyPrepared, current);
     } catch (error: unknown) {
       if (error instanceof OutboxError)
         throw new DeliveryAttemptError(error, this.dispatched);
@@ -511,16 +518,29 @@ export class DeliveryKernel {
     }
   }
 
+  /**
+   * Returns the check that each step of an attempt or cleanup runs. Once
+   * `current` reports that the caller's lane incarnation is gone, the check
+   * rejects with `invalid_selection`.
+   */
+  private guardFor(lane: LaneKey, current: () => boolean): () => void {
+    return (): void => {
+      this.check(lane);
+      if (!current()) throw new OutboxError('invalid_selection');
+    };
+  }
+
   private async cleanup(
     row: AcknowledgedRow,
     lane: LaneKey,
     source: 'received' | 'retained',
+    current: () => boolean,
   ): Promise<DeliveryAttempt> {
-    const check = (): void => this.check(lane);
-    const current = await this.store.lane(lane);
+    const check = this.guardFor(lane, current);
+    const rows = await this.store.lane(lane);
     check();
     try {
-      await this.store.trim(current, check, this.context.signal);
+      await this.store.trim(rows, check, this.context.signal);
     } catch (error: unknown) {
       check();
       if (!(error instanceof OutboxError) || error.code !== 'storage_failed')
@@ -544,8 +564,9 @@ export class DeliveryKernel {
   private async attempt(
     lane: LaneKey,
     locallyPrepared: PreparedRow | undefined,
+    current: () => boolean,
   ): Promise<DeliveryAttempt> {
-    const check = (): void => this.check(lane);
+    const check = this.guardFor(lane, current);
     check();
     const rows = await this.store.lane(lane);
     check();
@@ -554,7 +575,7 @@ export class DeliveryKernel {
     if (first.authorizedGeneration !== this.context.binding.actor_generation)
       throw new OutboxError('owner_not_ready');
     if (first.state === 'acknowledged')
-      return this.cleanup(first, lane, 'retained');
+      return this.cleanup(first, lane, 'retained', current);
     const initialState = first.state;
     const priorDelivery =
       initialState === 'unprepared' ||
@@ -640,6 +661,6 @@ export class DeliveryKernel {
       };
     }
     check();
-    return this.cleanup(acknowledged, lane, 'received');
+    return this.cleanup(acknowledged, lane, 'received', current);
   }
 }

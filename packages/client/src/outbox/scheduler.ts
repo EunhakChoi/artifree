@@ -25,6 +25,7 @@ const cleanupAction = Symbol();
 const unsentAction = Symbol();
 const emptyGateAction = Symbol();
 const rejectedAction = Symbol();
+const unresolvedAction = Symbol();
 const reconciliation = Symbol();
 const MAX_LANES = 256;
 
@@ -67,6 +68,21 @@ export interface RejectedDiscardSelection {
 /** Committed rejected discard; `removedDependents` excludes the discarded head. */
 export interface RejectedDiscardResult {
   readonly kind: 'discarded_rejected';
+  readonly removedDependents: number;
+}
+
+/** Internal explicit choice to abandon one unresolved head; caller-initiated only. */
+export interface UnresolvedAbandonSelection {
+  readonly [unresolvedAction]: true;
+}
+
+/**
+ * Committed unresolved abandonment; `removedDependents` excludes the abandoned
+ * head. The result is not an ACK, a rejection receipt, a rollback, a statement
+ * of non-delivery or a statement about the key (ADR 0049 rule 9).
+ */
+export interface AbandonedUnknownResult {
+  readonly kind: 'abandoned_unknown';
   readonly removedDependents: number;
 }
 
@@ -177,6 +193,7 @@ interface Lane {
   emptySelection?: EmptyPreparationGateSelection;
   rejection?: RejectionProof;
   rejectedSelection?: RejectedDiscardSelection;
+  unresolvedSelection?: UnresolvedAbandonSelection;
 }
 
 interface Action {
@@ -208,11 +225,46 @@ interface RejectedActionContext extends Action {
   readonly failures: number;
 }
 
+/** Binds the cleanup fields for an unresolved head, which carries no rejection proof. */
+interface UnresolvedActionContext extends Action {
+  readonly mode: 'online' | 'offline';
+  readonly authority: SchedulerCleanupAuthority;
+  readonly snapshotState: CleanupSnapshot;
+  readonly gatePause: Pause;
+  readonly wakeMark: object;
+  readonly failures: number;
+}
+
 /** The fields every cleanup action context binds; see checkActionBinding. */
 type CleanupBinding = Pick<
   CleanupActionContext,
   'authority' | 'epoch' | 'gatePause' | 'lane' | 'wakeMark'
 >;
+
+/**
+ * ADR 0049 rule 4 pause eligibility for an unresolved head: any retry pause
+ * except a survivor resume, or a blocked 403/404 access refusal. A blocked 401
+ * is ineligible because its authentication was invalidated (rule 15).
+ */
+function unresolvedPause(pause: Pause | undefined): boolean {
+  if (pause === undefined) return false;
+  switch (pause.kind) {
+    case 'retry_paused':
+      return pause.reason !== 'survivors_after_disposal';
+    case 'blocked':
+      return (
+        pause.failure.reason === 'access_unavailable' &&
+        (pause.failure.status === 403 || pause.failure.status === 404)
+      );
+    case 'preparation_paused':
+    case 'cleanup_paused':
+      return false;
+    default: {
+      const exhaustive: never = pause;
+      return exhaustive;
+    }
+  }
+}
 
 function pendingChoice<T extends object, Context, Result>(
   selection: T,
@@ -396,6 +448,11 @@ export class DeliveryScheduler {
     RejectedActionContext,
     RejectedDiscardResult
   > = { tokens: new WeakMap(), pending: new WeakMap() };
+  private readonly unresolved: Actions<
+    UnresolvedAbandonSelection,
+    UnresolvedActionContext,
+    AbandonedUnknownResult
+  > = { tokens: new WeakMap(), pending: new WeakMap() };
   private aggregateFailures = 0;
   private epoch = 0;
   private pumping = false;
@@ -479,11 +536,15 @@ export class DeliveryScheduler {
       // The proof ends with the fence (ADR 0049 rule 2), and the lane stops
       // referencing its selection, so a closed scheduler keeps no rows. A
       // retired selection also leaves the token map (rule 16). The blocked
-      // pause stays.
+      // pause stays. 0047's unsent and empty-gate selections keep their
+      // existing close behavior.
       if (lane.rejectedSelection !== undefined)
         this.rejections.tokens.delete(lane.rejectedSelection);
+      if (lane.unresolvedSelection !== undefined)
+        this.unresolved.tokens.delete(lane.unresolvedSelection);
       delete lane.rejection;
       delete lane.rejectedSelection;
+      delete lane.unresolvedSelection;
     }
     this.ready.length = 0;
     this.reconciliationQueued = false;
@@ -578,6 +639,58 @@ export class DeliveryScheduler {
       });
       this.rejections.tokens.set(selection, context);
       lane.rejectedSelection = selection;
+      return selection;
+    });
+  }
+
+  /**
+   * Selects the unresolved head of a settled lane that has no rejection proof
+   * (ADR 0049 rules 1, 4 and 5): a prepared head without a durable ACK, with
+   * unprepared dependents, under a retry pause other than a survivor resume or
+   * a 403/404 access refusal. Caller-initiated only: throws invalid_selection
+   * and changes nothing unless the stored closure still matches. Online mode
+   * makes one bound read; offline mode makes none.
+   */
+  async selectUnresolved(
+    key: LaneKey,
+    mode: 'online' | 'offline' = 'online',
+  ): Promise<UnresolvedAbandonSelection> {
+    const selectedKey = this.selectedLaneKey(key);
+    return this.cleanupBoundary(async (host) => {
+      const { authority, state } = await this.captureSelection(
+        host,
+        selectedKey,
+        mode,
+      );
+      const lane = this.lanes.get(JSON.stringify(selectedKey));
+      if (
+        lane === undefined ||
+        lane.rejection !== undefined ||
+        lane.pause === undefined ||
+        !this.settled(lane) ||
+        !unresolvedPause(lane.pause) ||
+        state.kind !== 'intents' ||
+        state.rows[0]?.state !== 'prepared' ||
+        !state.rows.slice(1).every((row) => row.state === 'unprepared')
+      )
+        throw new OutboxError('invalid_selection');
+      this.retireCleanupChoices(lane);
+      const context: UnresolvedActionContext = {
+        lane,
+        snapshot: state.signature,
+        snapshotState: state,
+        epoch: this.epoch,
+        mode,
+        authority,
+        gatePause: lane.pause,
+        wakeMark: lane.wakeMark,
+        failures: lane.failures,
+      };
+      const selection = Object.freeze<UnresolvedAbandonSelection>({
+        [unresolvedAction]: true,
+      });
+      this.unresolved.tokens.set(selection, context);
+      lane.unresolvedSelection = selection;
       return selection;
     });
   }
@@ -700,25 +813,54 @@ export class DeliveryScheduler {
             kind: 'discarded_rejected',
             removedDependents: disposal.removedDependents,
           });
-          const lane = context.lane;
-          // The transaction's terminal event has decided. Losing authority or
-          // the lane identity now suppresses publication, never the result.
-          try {
-            this.checkCleanupProof(authority, lane.key);
-            if (this.lanes.get(JSON.stringify(lane.key)) !== lane)
-              throw new OutboxError('invalid_selection');
-          } catch {
-            return result;
-          }
-          if (disposal.survivors.length === 0) {
-            // A wake after complete does not block retirement; a reconciliation
-            // rediscovers any rows that the wake enqueued.
-            const woken = lane.wakeMark !== context.wakeMark;
-            this.retireCleanupLane(lane);
-            if (woken && !this.capacityWaiting) this.requestReconciliation();
-          } else {
-            this.publishSurvivors(lane, disposal.survivors);
-          }
+          this.publishDisposal(context, authority, disposal.survivors);
+          return result;
+        });
+      },
+      () => this.fence.signal.aborted,
+    );
+  }
+
+  /**
+   * Abandons a selected unresolved head and its unprepared dependents in one
+   * local transaction (ADR 0049 rules 6-13). Rejects, with no stored change, if
+   * the selection is stale or authority is lost before commit. A committed
+   * result is returned even if publication is suppressed afterwards.
+   */
+  abandonUnresolved(
+    selection: UnresolvedAbandonSelection,
+  ): Promise<AbandonedUnknownResult> {
+    return pendingChoice(
+      selection,
+      this.unresolved,
+      unresolvedAction,
+      async (chosen) => {
+        const context = this.unresolved.tokens.get(chosen);
+        this.unresolved.tokens.delete(chosen);
+        this.check();
+        if (context === undefined) throw new OutboxError('invalid_selection');
+        return this.cleanupBoundary(async (host) => {
+          this.checkUnresolvedContext(context);
+          const authority = await this.cleanupAuthority(host, context.mode);
+          this.sameCleanupAuthority(context, authority);
+          this.checkUnresolvedContext(context);
+          const snapshot = context.snapshotState;
+          if (snapshot.kind !== 'intents')
+            throw new OutboxError('invalid_selection');
+          const disposal = await this.cleanupSignal(authority, (signal) =>
+            this.store.abandonUnresolvedSnapshot(
+              snapshot,
+              () => {
+                this.checkUnresolvedContext(context);
+              },
+              signal,
+            ),
+          );
+          const result = Object.freeze<AbandonedUnknownResult>({
+            kind: 'abandoned_unknown',
+            removedDependents: disposal.removedDependents,
+          });
+          this.publishDisposal(context, authority, disposal.survivors);
           return result;
         });
       },
@@ -772,6 +914,18 @@ export class DeliveryScheduler {
       throw new OutboxError('invalid_selection');
   }
 
+  private checkUnresolvedContext(context: UnresolvedActionContext): Lane {
+    const lane = this.checkActionBinding(context);
+    if (
+      lane.rejection !== undefined ||
+      !unresolvedPause(lane.pause) ||
+      lane.failures !== context.failures ||
+      !this.settled(lane)
+    )
+      throw new OutboxError('invalid_selection');
+    return lane;
+  }
+
   private retireCleanupLane(lane: Lane): void {
     this.retirePause(lane);
     this.retireCleanupChoices(lane);
@@ -779,6 +933,37 @@ export class DeliveryScheduler {
     lane.queued = false;
     this.lanes.delete(JSON.stringify(lane.key));
     if (this.capacityWaiting) this.requestReconciliation();
+  }
+
+  /**
+   * Publishes the outcome of a committed disposal for its bound lane (ADR 0049
+   * rules 11 and 12): survivors get a lane-scope resume pause, and a lane with
+   * no survivors is retired. Losing authority or the lane identity after the
+   * terminal event suppresses this step, never the committed result, so each
+   * caller returns the committed result either way.
+   */
+  private publishDisposal(
+    context: CleanupBinding,
+    authority: SchedulerCleanupAuthority,
+    survivors: readonly IntentRow[],
+  ): void {
+    const lane = context.lane;
+    try {
+      this.checkCleanupProof(authority, lane.key);
+      if (this.lanes.get(JSON.stringify(lane.key)) !== lane)
+        throw new OutboxError('invalid_selection');
+    } catch {
+      return;
+    }
+    if (survivors.length === 0) {
+      // A wake after complete does not block retirement; a reconciliation
+      // rediscovers any rows that the wake enqueued (ADR 0049 rule 11).
+      const woken = lane.wakeMark !== context.wakeMark;
+      this.retireCleanupLane(lane);
+      if (woken && !this.capacityWaiting) this.requestReconciliation();
+    } else {
+      this.publishSurvivors(lane, survivors);
+    }
   }
 
   /**
@@ -938,9 +1123,12 @@ export class DeliveryScheduler {
       this.emptyGates.tokens.delete(lane.emptySelection);
     if (lane.rejectedSelection !== undefined)
       this.rejections.tokens.delete(lane.rejectedSelection);
+    if (lane.unresolvedSelection !== undefined)
+      this.unresolved.tokens.delete(lane.unresolvedSelection);
     delete lane.unsentSelection;
     delete lane.emptySelection;
     delete lane.rejectedSelection;
+    delete lane.unresolvedSelection;
   }
 
   // A blocked lane is settled only when no delivery, timer or queue entry can
@@ -1280,9 +1468,18 @@ export class DeliveryScheduler {
       try {
         const locallyPrepared = lane.preparedWithoutDispatch;
         delete lane.preparedWithoutDispatch;
-        result = await this.kernel.run(lane.key, locallyPrepared);
+        // The kernel rechecks lane identity before each ACK, trim and prepare.
+        result = await this.kernel.run(
+          lane.key,
+          locallyPrepared,
+          () =>
+            this.lanes.get(JSON.stringify(lane.key)) === lane &&
+            !this.fence.signal.aborted,
+        );
         woken = this.activeWake;
       } catch (error: unknown) {
+        // A retired lane's late failure must not count or close the scheduler.
+        if (this.lanes.get(JSON.stringify(lane.key)) !== lane) return;
         if (error instanceof DeliveryAttemptError && error.dispatched) {
           lane.failures += 1;
           this.aggregateFailures += 1;
@@ -1293,6 +1490,8 @@ export class DeliveryScheduler {
       }
       if (this.fence.signal.aborted) return;
       this.check();
+      // A late result for a retired lane must not pause, fence or observe.
+      if (this.lanes.get(JSON.stringify(lane.key)) !== lane) return;
       if (
         result.kind === 'delivery_failed' &&
         result.failure.reason === 'binding_changed'
@@ -1545,9 +1744,10 @@ export class DeliveryScheduler {
       failure.reason === 'rate_limited' ||
       failure.reason === 'server_error';
     if (!retryable) {
-      // Access/generation recovery and unresolved abandonment (R08c-3b) are not
-      // implemented by this fixed-authority host. Only the rejection proof below
-      // reaches discardRejected; no token here may bypass those future gates.
+      // Access/generation recovery is not implemented by this fixed-authority
+      // host. The rejection proof below reaches discardRejected, and only an
+      // explicit selectUnresolved reaches abandonUnresolved; no token here may
+      // bypass those gates.
       if (failure.reason === 'unclassified_error_response') {
         await this.pause(lane, failure.reason, 'lane');
       } else {
@@ -1695,6 +1895,9 @@ export class DeliveryScheduler {
             [deliveryAction]: true,
           });
           tokens.delete(selection);
+          // The token refresh replaces the gate, so the lane's disposal choice
+          // from the old gate retires with it (ADR 0049 rules 5 and 16).
+          this.retireCleanupChoices(action.lane);
           this.deliveries.tokens.set(replacement, action);
           action.lane.pause = {
             ...pause,
