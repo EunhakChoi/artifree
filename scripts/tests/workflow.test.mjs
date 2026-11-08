@@ -38,6 +38,13 @@ test('Browser jobs run Chromium while Firefox is suspended', () => {
     'docs/quality.md "Browser engines": CI must keep Chromium.',
   );
 });
+test('Browser jobs run both smoke shards', () => {
+  assert.deepEqual(
+    [...workflow.jobs.browsers.strategy.matrix.shard].sort(),
+    ['outbox', 'ui'],
+    'scripts/smoke.mjs runs as the outbox and ui shards in CI; a missing shard leaves its checks unrun.',
+  );
+});
 test('An unpinned action is rejected', () => {
   const invalid = structuredClone(workflow);
   invalid.jobs.checks.steps[0].uses = 'actions/checkout@v4';

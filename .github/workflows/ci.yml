@@ -86,7 +86,7 @@ jobs:
           retention-days: 1
 
   browsers:
-    name: Browser (${{ matrix.browser }})
+    name: Browser (${{ matrix.browser }}, ${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # The Playwright image has no Rust toolchain. Ubuntu 24.04 runner and the
@@ -102,8 +102,11 @@ jobs:
         # docs/quality.md "Browser engines". The scripts still accept
         # ARTIFREE_BROWSER=firefox for local runs.
         browser: [chromium]
+        # The two shards of scripts/smoke.mjs; together they run the whole suite.
+        shard: [outbox, ui]
     env:
       ARTIFREE_BROWSER: ${{ matrix.browser }}
+      ARTIFREE_SMOKE_SHARD: ${{ matrix.shard }}
       # Relative to the checkout; github.workspace is a host path in containers.
       ARTIFREE_SERVER_BIN: .artifree/bin/artifree-server
     steps:
@@ -126,8 +129,8 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: browser-${{ matrix.browser }}
-          path: .artifree/qa/${{ matrix.browser }}/
+          name: browser-${{ matrix.browser }}-${{ matrix.shard }}
+          path: .artifree/qa/${{ matrix.browser }}-${{ matrix.shard }}/
           if-no-files-found: error
           retention-days: 7
 
