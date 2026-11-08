@@ -1,4 +1,11 @@
-import { lstat, open, readdir, readFile, rm } from 'node:fs/promises';
+import {
+  constants,
+  lstat,
+  open,
+  readdir,
+  readFile,
+  rm,
+} from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 /** A local file mapped to a package path. */
@@ -49,6 +56,74 @@ export async function readRegularFile(location: string): Promise<Uint8Array> {
   const status = await lstat(location);
   if (!status.isFile()) throw new Error(`Not a regular file: ${location}`);
   return readFile(location);
+}
+
+/**
+ * Reads the regular file at `location` if it is no larger than `maxBytes`.
+ * Symbolic links and other non-regular files are refused, as is a file that
+ * is replaced while it is opened or changes size while it is read. An
+ * oversized file is refused before any of its content is read. Refusals throw
+ * an `Error` that names `location`.
+ */
+export async function readBoundedRegularFile(
+  location: string,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+    throw new RangeError(
+      `maxBytes must be a non-negative safe integer, got ${maxBytes}.`,
+    );
+  // Inode numbers can exceed 2^53, so file identity is compared as bigint.
+  const status = await lstat(location, { bigint: true });
+  if (status.isSymbolicLink())
+    throw new Error(`Refusing to follow a symbolic link: ${location}`);
+  if (!status.isFile()) throw new Error(`Not a regular file: ${location}`);
+  // Windows has no O_NOFOLLOW; there the dev/ino check catches a swapped link.
+  const handle = await open(
+    location,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (
+      !opened.isFile() ||
+      opened.dev !== status.dev ||
+      opened.ino !== status.ino
+    )
+      throw new Error(
+        `${location} changed while it was opened; nothing was sent.`,
+      );
+    const size = Number(opened.size);
+    if (size > maxBytes) {
+      // 5 MiB is the one limit with a readable name; other limits print bytes.
+      const limit =
+        maxBytes === 5 * 1024 * 1024
+          ? `5 MiB (${maxBytes} bytes)`
+          : `${maxBytes} bytes`;
+      throw new Error(`${location} is larger than ${limit}; nothing was sent.`);
+    }
+    // One spare byte shows whether the file grew after it was measured.
+    const buffer = new Uint8Array(size + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total !== size)
+      throw new Error(
+        `${location} changed while it was read; nothing was sent.`,
+      );
+    // slice copies, so the spare byte is not reachable through `.buffer`.
+    return buffer.slice(0, size);
+  } finally {
+    await handle.close();
+  }
 }
 
 /**

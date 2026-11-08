@@ -36,4 +36,4 @@ Generated HTTP DTOs and read-only TypeScript client calls (`listAssets`,
 `getAsset`, `readAsset`) exist. The client checks bounded metadata and content
 responses, MIME, size and digest; it does not decode images or broaden upload
 admission. The upload/delete client calls, the MCP asset tools, copying and the management
-UI exist; the CLI asset commands and frame capabilities remain R09b–R09d work.
+UI exist, as do the CLI asset commands; frame capabilities remain R09d work.

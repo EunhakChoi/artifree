@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { ArtifreeApiError, FileConflictError } from '@artifree/client';
 import { scaffoldDescription } from '@artifree/contracts';
 import { runArtifact, UsageError } from './artifact.js';
+import { runAsset } from './asset.js';
 import { runContent } from './content.js';
 import { runData } from './data.js';
 import { runJob } from './jobs.js';
@@ -13,6 +14,7 @@ const help = `Artifree — open artifacts, any agent.
 
 Usage:
   artifree artifact <command>  Create, read, save, rename, pin, and preview artifacts
+  artifree asset <command>     List, upload, read, and delete an artifact's uploaded assets
   artifree content <command>   Find and delete file content no revision refers to (cleanup)
   artifree data <command>      Read and write the application data of an artifact (get, set, update, delete)
   artifree job <command>       Queue, read, list, and cancel verification jobs (enqueue, show, list, cancel)
@@ -23,6 +25,7 @@ Usage:
   artifree --help            Show this help
 
 Artifact commands talk to a running artifree-server; see artifree artifact --help.
+Asset commands talk to a running artifree-server; see artifree asset --help.
 Content commands talk to a running artifree-server; see artifree content --help.
 Data commands talk to a running artifree-server; see artifree data --help.
 Job commands talk to a running artifree-server; see artifree job --help. A job runs only while an
@@ -95,9 +98,34 @@ function isUsageError(error: unknown): boolean {
   );
 }
 
+// The client does not copy this field onto the error. It is read from the
+// unchecked body here and validated before it is printed.
+function currentAssetVersionOf(error: ArtifreeApiError): number | undefined {
+  if (error.code !== 'asset_conflict') return undefined;
+  const body = error.body;
+  if (typeof body !== 'object' || body === null || !('error' in body))
+    return undefined;
+  const detail = body.error;
+  if (
+    typeof detail !== 'object' ||
+    detail === null ||
+    !('current_asset_version' in detail)
+  )
+    return undefined;
+  const version = detail.current_asset_version;
+  if (
+    typeof version !== 'number' ||
+    !Number.isSafeInteger(version) ||
+    version < 0
+  )
+    return undefined;
+  return version;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === 'artifact') await runArtifact(args.slice(1));
+  else if (args[0] === 'asset') await runAsset(args.slice(1));
   else if (args[0] === 'content') await runContent(args.slice(1));
   else if (args[0] === 'data') await runData(args.slice(1));
   else if (args[0] === 'job') await runJob(args.slice(1));
@@ -119,6 +147,9 @@ try {
       );
     if (error.currentDataVersion !== undefined)
       console.error(`current_data_version=${error.currentDataVersion}`);
+    const currentAssetVersion = currentAssetVersionOf(error);
+    if (currentAssetVersion !== undefined)
+      console.error(`current_asset_version=${currentAssetVersion}`);
     if (error instanceof FileConflictError) {
       for (const file of error.files)
         console.error(
