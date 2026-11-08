@@ -1886,10 +1886,9 @@ pub(crate) async fn asset_content(
 ) -> Result<AssetContent, ApiError> {
     let artifact = artifact_id(id)?;
     let asset = asset_id(asset)?;
-    let content = state
+    Ok(state
         .run_assets(move |service| service.asset_content(&actor, &artifact, &asset))
-        .await?;
-    Ok(content)
+        .await?)
 }
 
 /// Deletes the association of an asset with an artifact under the retry key

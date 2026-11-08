@@ -387,7 +387,9 @@ async fn dispatch_jobs(
 }
 
 /// Routes the uploaded asset tools (decision 0045): the same operations as the
-/// asset routes of HTTP, so keys, access, errors, and limits are the same.
+/// asset routes of HTTP, so keys, access, errors, and the asset and quota limits are the
+/// same. The transport bound is MCP's own 36 MiB request limit (decision 0005), not the
+/// 8 MiB body cap of the HTTP asset routes.
 async fn dispatch_assets(
     state: &AppState,
     actor: ActorId,

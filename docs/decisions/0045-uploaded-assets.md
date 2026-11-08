@@ -713,14 +713,19 @@ those of rules 1-9. What rule 11 left open and this slice fixes:
 - `read_asset` returns `{ asset_version, asset, content_base64 }` in one
   result: the stored bytes as strict standard padded base64, with the space's
   `asset_version` read together with the metadata. There is no paging and no
-  separate size limit beyond the 5 MiB asset limit (about 6.7 MB of base64).
+  separate size limit beyond the 5 MiB asset limit (about 6.7 MB of base64, sent
+  twice by the MCP result envelope: about 13 MB on the wire). An `upload_asset`
+  request is bounded by MCP's 36 MiB request limit (decision 0005) before the
+  asset limit applies, not by the 8 MiB body cap of the HTTP asset routes.
 - `upload_asset` takes `base_asset_version`, `content_type`, `content_base64`
   and `idempotency_key`; `delete_asset` takes `asset_id`, `base_asset_version`
   and `idempotency_key`. Neither accepts a host path or URL. Results are the
   HTTP bodies (`replayed` included) and failures are the HTTP error bodies with
   `isError: true`. An unknown or foreign artifact or asset, or one in the trash,
   is `not_found`.
-- The two write tools are destructive (`destructiveHint`) and idempotent; the
+- The two write tools are destructive (`destructiveHint`) and idempotent, as
+  rule 11 requires of mutating MCP tools. An upload replaces nothing, so for
+  `upload_asset` the hint follows that rule, not its effect on stored data. The
   tool catalog gets the effect `asset`, whose mutating tools must require
   `idempotency_key`. The two read tools are read-only.
 - Asset writes emit no change-feed event, as over HTTP; MCP has no asset

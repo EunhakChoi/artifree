@@ -183,8 +183,8 @@ admitted. PNG and JPEG uploads are `asset_type_unsupported` until complete
 validation satisfies decision 0045, rule 3; no image decoder ships. Historical
 MIME metadata and matching receipts remain readable/replayable before current
 admission policy. Reads are authenticated scoped attachments with
-no-store/nosniff; there is no public URL, CLI asset operation or frame access (the client calls,
-the MCP tools and the duplicate asset copy exist). The [content policy](asset-validation.md) records these limits.
+no-store/nosniff; there is no public URL, CLI asset operation or frame access. The client calls,
+the MCP tools and the duplicate asset copy do exist. The [content policy](asset-validation.md) records these limits.
 SQLite schema 12 keeps immutable bytes, independent versions, receipts and
 logical quotas in the same database as source files. Source and asset
 associations both protect shared blobs from purge and cleanup.
