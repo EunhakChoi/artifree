@@ -392,3 +392,18 @@ export async function api(server, method, path, body) {
   );
   return JSON.parse(text);
 }
+
+/**
+ * One raw request with the bearer token and, for a write, a caller-chosen
+ * idempotency key, so that a seed or a replay check names its own key.
+ */
+export async function raw(server, method, path, body, key) {
+  const init = { method, headers: { authorization: `Bearer ${server.token}` } };
+  if (body !== undefined) {
+    init.headers['content-type'] = 'application/json';
+    init.headers['idempotency-key'] = key;
+    init.body = JSON.stringify(body);
+  }
+  const response = await fetch(`${server.api_url}${path}`, init);
+  return { status: response.status, json: await response.json() };
+}
