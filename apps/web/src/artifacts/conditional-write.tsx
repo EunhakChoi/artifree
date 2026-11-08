@@ -94,9 +94,12 @@ function useRequestKey(): (request: unknown) => string {
 export function useRetryableWrite<Request, Result>(options: {
   readonly send: (request: Request, idempotencyKey: string) => Promise<Result>;
   readonly onDone: (result: Result) => void;
+  /** A readable message for a failure; {@link describeFailure} if absent. */
+  readonly describe?: (error: unknown) => string;
 }) {
   const [state, setState] = useState<WriteState>({ status: 'idle' });
   const keyFor = useRequestKey();
+  const describe = options.describe ?? describeFailure;
 
   async function write(request: Request): Promise<WriteResult> {
     const key = keyFor(request);
@@ -109,7 +112,7 @@ export function useRetryableWrite<Request, Result>(options: {
     } catch (error: unknown) {
       setState({
         status: 'failed',
-        message: describeFailure(error),
+        message: describe(error),
         unknown: mayHaveCommitted(error),
         base: undefined,
       });

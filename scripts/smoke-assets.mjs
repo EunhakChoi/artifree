@@ -13,7 +13,7 @@ const PNG = Buffer.from([
  * One raw request with the bearer token and, for a write, a caller-chosen
  * idempotency key, so that a seed or a replay check names its own key.
  */
-async function raw(server, method, path, body, key) {
+export async function raw(server, method, path, body, key) {
   const init = { method, headers: { authorization: `Bearer ${server.token}` } };
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json';

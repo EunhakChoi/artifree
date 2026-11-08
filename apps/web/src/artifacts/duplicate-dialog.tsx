@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { CopyIcon } from 'lucide-react';
+import { ArtifreeApiError } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Artifact, Revision } from '@artifree/contracts';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogClose,
@@ -15,6 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import {
   Field,
+  FieldContent,
   FieldDescription,
   FieldGroup,
   FieldLabel,
@@ -23,11 +26,13 @@ import {
   NativeSelect,
   NativeSelectOption,
 } from '@/components/ui/native-select';
+import { refusalText } from './asset-attempt';
 import {
   FailureNotice,
   ReplacedNotice,
   useRetryableWrite,
 } from './conditional-write';
+import { describeFailure } from './failure';
 
 interface DuplicateDialogProps {
   client: ArtifreeClient;
@@ -49,13 +54,33 @@ interface DuplicateDialogProps {
   onDuplicated: (copy: Artifact) => void;
 }
 
+/** What the dialog sends: the revision, and whether assets are copied. */
+interface DuplicateChoice {
+  readonly revision: number;
+  readonly copyAssets: boolean;
+}
+
+/**
+ * A failed duplicate in words. A requested asset copy that does not fit is
+ * told with the assets panel's limit wording (decision 0045, rule 10).
+ */
+function describeDuplicateFailure(error: unknown): string {
+  return error instanceof ArtifreeApiError &&
+    error.code === 'asset_limit_exceeded'
+    ? `${refusalText(error)} The uploaded assets do not fit, so no copy was made.`
+    : describeFailure(error);
+}
+
 /**
  * Copies one revision's files into a new artifact with its own history
- * (decision 0012). The revision offered first is fixed when the dialog
- * opens, and sending the same revision again reuses its key, so a retry
- * after a lost answer creates at most one copy. If the server's data may
- * have been replaced since it opened, it sends nothing more (0011 decision
- * 6): the same number may name another revision.
+ * (decision 0012), and the caller's current uploaded assets only when asked
+ * (decision 0045, rule 10); application data is never copied here. The
+ * revision offered first is fixed when the dialog opens and the asset copy
+ * starts off each time. Sending the same choice again reuses its key, so a
+ * retry after a lost answer creates at most one copy; any other choice gets
+ * a new key. If the server's data may have been replaced since it opened, it
+ * sends nothing more (0011 decision 6): the same number may name another
+ * revision.
  */
 export function DuplicateDialog({
   client,
@@ -70,26 +95,27 @@ export function DuplicateDialog({
 }: DuplicateDialogProps) {
   const locked = unsaved || assetsPending;
   const duplicate = useRetryableWrite({
-    send: (request: { revision: number }, idempotencyKey: string) =>
+    send: (request: DuplicateChoice, idempotencyKey: string) =>
       client.duplicateArtifact(
         artifact.id,
         request.revision,
-        {},
-        {
-          idempotencyKey,
-        },
+        // Omitted unless asked: the files-only default keeps its fingerprint.
+        request.copyAssets ? { copy_assets: true } : {},
+        { idempotencyKey },
       ),
     onDone: (result) => onDuplicated(result.artifact),
+    describe: describeDuplicateFailure,
   });
   const [open, setOpen] = useState(false);
   const [chosen, setChosen] = useState(revision);
+  const [copyAssets, setCopyAssets] = useState(false);
   const [openedResets, setOpenedResets] = useState(resets);
   const pending = duplicate.state.status === 'sending';
   const replaced = openedResets !== resets;
 
   async function confirm(): Promise<void> {
     if (replaced) return;
-    if ((await duplicate.write({ revision: chosen })) === 'done')
+    if ((await duplicate.write({ revision: chosen, copyAssets })) === 'done')
       setOpen(false);
   }
 
@@ -103,6 +129,7 @@ export function DuplicateDialog({
             if (pending) return;
             if (next) {
               setChosen(revision);
+              setCopyAssets(false);
               setOpenedResets(resets);
               duplicate.clear();
             }
@@ -130,7 +157,9 @@ export function DuplicateDialog({
                 The copy is a new artifact whose history starts with the files
                 of the chosen revision, byte for byte. It is named after this
                 artifact followed by &ldquo;(Copy)&rdquo; and is not pinned.
-                Only files are copied, and this artifact stays as it is.
+                This artifact stays as it is. By default only the chosen
+                revision&apos;s files are copied; application data and uploaded
+                assets are not.
               </DialogDescription>
             </DialogHeader>
             <Field orientation="horizontal">
@@ -148,6 +177,29 @@ export function DuplicateDialog({
                 ))}
               </NativeSelect>
             </Field>
+            <Field orientation="horizontal">
+              <Checkbox
+                id="duplicate-copy-assets"
+                checked={copyAssets}
+                disabled={pending}
+                onCheckedChange={(checked) => setCopyAssets(checked)}
+              />
+              <FieldContent>
+                <FieldLabel htmlFor="duplicate-copy-assets">
+                  Copy uploaded assets
+                </FieldLabel>
+                <FieldDescription>
+                  Also copies all of your current uploaded assets of this
+                  artifact as they are now, whatever revision is chosen. The
+                  copy has its own asset version. If they do not fit the asset
+                  limits, the whole duplicate is refused and nothing is created.
+                </FieldDescription>
+              </FieldContent>
+            </Field>
+            <p className="text-sm text-muted-foreground">
+              Application data is copied only when asked through the CLI, MCP or
+              API; this dialog does not copy it.
+            </p>
             {/* Replaced data sends nothing, so no retry is offered. */}
             {replaced ? (
               <ReplacedNotice state={duplicate.state} />

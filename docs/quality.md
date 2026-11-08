@@ -563,7 +563,14 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   key and creates one copy, which opens unpinned at revision 1 with the
   source revision's digests; the source keeps its revisions, pin, and
   title; a dialog open during a forged `reset` sends nothing; a draft
-  disables duplicating. The dialog is checked for accessibility.
+  disables duplicating. The "Copy uploaded assets" box starts unchecked at
+  every opening, and an unchecked duplicate sends no `copy_assets` and its
+  copy's Assets tab is empty; checked, the copy has the source's asset IDs
+  (from an older revision), and a cut answer is resent with the same body
+  under the same key, which differs from the default duplicate's; with the
+  actor's quota filled through the API, a checked duplicate is refused with
+  the asset limit wording and no copy exists (R09c). The dialog is checked
+  for accessibility.
 - `scripts/smoke-export.mjs`: a failed download says nothing changed and is
   checked for accessibility; tried again, the file the browser saves for
   the revision the preview shows is named after it and holds that
@@ -802,7 +809,7 @@ R09a is incomplete until full PNG and JPEG validation satisfy 0045 rule 3. The
 TypeScript client has real-server tests (R09b2), the panel's frozen-attempt
 rules have Node tests (`scripts/tests/asset-attempt.test.mjs`) and the
 management assets panel has a real-server Chromium smoke
-(`scripts/smoke-assets.mjs`, partial R09c) inside the full browser smoke and
+(`scripts/smoke-assets.mjs`, R09c) inside the full browser smoke and
 standalone through `scripts/test-assets-live.mjs`. It covers upload, attachment
 download with no inline rendering, local oversize, type and quota refusals,
 stale base, delete confirmation and same-key retries after lost upload and

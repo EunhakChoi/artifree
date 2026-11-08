@@ -4,7 +4,7 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c (partial) supplies the management assets panel without its copy control; CLI/MCP asset commands and the remainder of R09b–R09d are proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); CLI/MCP asset commands and the remainder of R09b–R09d are proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
@@ -13,9 +13,9 @@ lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). There is no CLI, MCP
 tool, grant or frame access yet. A duplicate copies the
 requesting actor's current asset space only when `copy_assets` is true (rule 10).
-The management web has an Assets tab (partial R09c: usage, upload, list,
-attachment download, delete, conflict and unknown-outcome retry); its explicit
-copy control is not implemented yet. Builds on [0003](0003-local-html-artifact-slice.md),
+The management web has an Assets tab (R09c: usage, upload, list,
+attachment download, delete, conflict and unknown-outcome retry), and its
+duplicate dialog copies assets only when asked (R09c). Builds on [0003](0003-local-html-artifact-slice.md),
 [0012](0012-duplicate-artifacts.md), [0020](0020-runtime-grants.md),
 [0027](0027-backup-restore-and-schema-upgrade.md),
 [0029](0029-retention-and-cleanup.md), [0031](0031-app-data.md),
@@ -652,17 +652,16 @@ asset_limit_exceeded` with the same generic message as uploads; it does not
   also for an empty space); clients treat it as a set. `copy_assets: false`
   and omission keep the earlier fingerprint; `true` adds a distinct
   component.
-- The management web duplicate dialog does not offer the copy yet (R09c).
+- The management web duplicate dialog offers the copy as an unchecked box
+  (R09c, below).
 
-## R09c (partial): management assets panel
+## R09c: management assets panel and copy control
 
-Status: **partially implemented**. The management web has an Assets tab per
-artifact with usage, upload, list, attachment download, delete, conflict
-handling and unknown-outcome retry. The explicit copy control of rule 11 is
-not implemented yet: the server's `copy_assets` extension exists (see
-"Implementation notes (copy_assets)" above), but the duplicate dialog does not
-offer it. Firefox acceptance is pending re-verification
-([quality](../quality.md#browser-engines)).
+Status: **implemented in Chromium; Firefox acceptance is pending
+re-verification** ([quality](../quality.md#browser-engines)). The management
+web has an Assets tab per artifact with usage, upload, list, attachment
+download, delete, conflict handling and unknown-outcome retry, and the
+duplicate dialog has the explicit copy control of rule 11.
 
 These notes record choices rule 11 and R09b2 left open; the rules win on any
 conflict.
@@ -690,3 +689,14 @@ conflict.
 - Downloads read verified bytes through the client and save them as
   `asset-<id>` with type `application/octet-stream`. No asset content is put
   in the management DOM, previewed or opened.
+- The duplicate dialog's "Copy uploaded assets" box starts unchecked each
+  time the dialog opens; `copy_assets: true` is sent only when it is checked,
+  and an unchecked request omits the field. The dialog states the three cases
+  apart: by default only the chosen revision's files are copied; checked, all
+  of the caller's current assets of the source are copied as they are now,
+  whatever revision is chosen, with their own asset version, and an overflow
+  refuses the whole duplicate; application data is copied only on request
+  through the CLI, MCP or API, never by this dialog. The revision and the box
+  form the request whose key is kept for an unchanged resend and replaced for
+  any other (0012 decision 8). `asset_limit_exceeded` is shown with the
+  panel's limit wording. A held asset attempt still disables Duplicate.
