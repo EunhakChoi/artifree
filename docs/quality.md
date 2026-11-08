@@ -53,6 +53,14 @@ CI matrix and every Firefox-specific acceptance is re-run at once. Until then:
   first public release (O03c). The release workflow refuses a tag while
   `ci.yml` has no Firefox entry in its browser matrix.
 
+The Chromium smoke runs as two shards, chosen with `ARTIFREE_SMOKE_SHARD`:
+`outbox` runs the outbox checks and `ui` runs everything else. CI runs them as
+separate jobs, and each shard has its own server, data directory, and evidence
+folder (`.artifree/qa/<browser>-<shard>/`). `npm run test:smoke:parallel` runs
+both shards at once on one machine and fails if either fails. The whole suite
+still runs in one process with `npm run test:smoke`, which is what happens when
+the variable is unset or `all`.
+
 ## Checks must be capable of failing
 
 `npm run test:tooling` runs real negative inputs through the actual lint config,

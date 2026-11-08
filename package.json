@@ -32,6 +32,7 @@
     "check": "npm run format:check && npm run lint && npm run check:contracts && npm run check:data-unicode && npm run check:runtime && npm run check:boundaries && npm run check:digests && npm run check:architecture && npm run typecheck && npm run test:tooling && npm run check:rust",
     "cli": "node apps/cli/dist/main.js",
     "test:smoke": "node scripts/smoke.mjs",
+    "test:smoke:parallel": "node scripts/smoke-parallel.mjs",
     "test:outbox": "node scripts/test-outbox.mjs",
     "test:data-upgrade": "node scripts/test-data-upgrade.mjs",
     "lint:code": "oxlint --deny-warnings",
