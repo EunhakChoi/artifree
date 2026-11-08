@@ -4,14 +4,15 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls and R09b2 the bounded upload/delete client calls; the remainder of R09b–R09d is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls and the duplicate `copy_assets` extension is implemented; CLI/MCP asset commands and the remainder of R09b–R09d are proposed**.
 The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
 PNG and JPEG are refused as `asset_type_unsupported` until complete image
 validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). There is no CLI, MCP
-tool, copy extension, management panel, grant or frame access yet. Builds on [0003](0003-local-html-artifact-slice.md),
+tool, management panel, grant or frame access yet. A duplicate copies the
+requesting actor's current asset space only when `copy_assets` is true (rule 10). Builds on [0003](0003-local-html-artifact-slice.md),
 [0012](0012-duplicate-artifacts.md), [0020](0020-runtime-grants.md),
 [0027](0027-backup-restore-and-schema-upgrade.md),
 [0029](0029-retention-and-cleanup.md), [0031](0031-app-data.md),
@@ -84,10 +85,10 @@ each makes one request with the caller's key, requires exactly 201 or 200,
 checks the receipt against the captured request and never retries.
 Direct callers, and callers of those functions, must freeze the identical
 envelope and key themselves after an unknown outcome. CLI/MCP upload and
-delete, `copy_assets` and the unknown-outcome handling of other adapters remain
-R09b.
-No asset change subscription is emitted. Asset copying remains absent and
-existing duplicate requests retain their files/data behavior.
+delete and the unknown-outcome handling of other adapters remain R09b.
+No asset change subscription is emitted. Duplicates copy assets only with the
+`copy_assets` opt-in (see "Implementation notes (copy_assets)" below); requests
+without it keep their files/data behavior and fingerprints.
 
 ## Target rules (partially implemented)
 
@@ -625,3 +626,27 @@ conflict.
   refusals, rejected receipt then same-key replay) plus fake-fetch and
   fake-clock tests of the envelope, receipt, status, size, stall, abort and
   redirect rules. No browser fixture was added, so no browser smoke applies.
+
+## Implementation notes (copy_assets)
+
+Status: **implemented** for HTTP, the TypeScript client, the CLI
+(`--copy-assets`) and the MCP `duplicate_artifact` argument. These notes record
+choices rule 10 left open; the rule wins on any conflict.
+
+- The copy runs inside the duplicate's creating transaction, after the source
+  and optional data copy and before the request key is recorded, so an
+  overflow leaves no artifact, key, association or blob change.
+- Destination checks cover both the space limits (64 files, 25 MiB) and the
+  actor limits (256 files, 100 MiB, trash included), with every copied
+  association charged at full logical size. Overflow is `422
+asset_limit_exceeded` with the same generic message as uploads; it does not
+  say which limit was hit.
+- Copied associations keep the source's asset ID, type, size, digest and
+  `created_at` (metadata is immutable per ID). Only the requesting actor's
+  rows are copied; upload receipts are not. A nonempty copy starts at
+  `asset_version` 1, an empty one writes no space row and reads as 0.
+- `copied` lists `files`, then `data` and `assets` when requested (`assets`
+  also for an empty space); clients treat it as a set. `copy_assets: false`
+  and omission keep the earlier fingerprint; `true` adds a distinct
+  component.
+- The management web duplicate dialog does not offer the copy yet (R09c).

@@ -22,7 +22,7 @@ use artifree_contracts::api::{
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
-    ArtifactError, ArtifactService, MetadataChange, Missing, RevisionExport,
+    ArtifactError, ArtifactService, CopyParts, MetadataChange, Missing, RevisionExport,
 };
 use artifree_core::data::DataMutation;
 use artifree_core::jobs::JobPageSize;
@@ -217,6 +217,11 @@ impl From<ArtifactError> for ApiError {
                 Self::unsatisfiable(size, message)
             }
             ArtifactError::InvalidRange(_) => Self::invalid(message),
+            ArtifactError::AssetLimitExceeded => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::AssetLimitExceeded,
+                message,
+            ),
             ArtifactError::RequestKeyReused => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::RequestKeyReused,
@@ -483,10 +488,13 @@ pub(crate) async fn duplicate(
         .map(|title| title.parse())
         .transpose()
         .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
-    let copy_data = request.copy_data.unwrap_or(false);
+    let parts = CopyParts {
+        data: request.copy_data.unwrap_or(false),
+        assets: request.copy_assets.unwrap_or(false),
+    };
     let receipt = state
         .run(move |artifacts| {
-            artifacts.duplicate(&actor, &key, &id, revision, title.as_ref(), copy_data)
+            artifacts.duplicate(&actor, &key, &id, revision, title.as_ref(), parts)
         })
         .await?;
     let CommitResponse {
@@ -497,11 +505,14 @@ pub(crate) async fn duplicate(
     Ok(DuplicateArtifactResponse {
         artifact,
         revision,
-        copied: if copy_data {
-            vec![CopiedPart::Files, CopiedPart::Data]
-        } else {
-            vec![CopiedPart::Files]
-        },
+        copied: [
+            Some(CopiedPart::Files),
+            parts.data.then_some(CopiedPart::Data),
+            parts.assets.then_some(CopiedPart::Assets),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         replayed,
     })
 }

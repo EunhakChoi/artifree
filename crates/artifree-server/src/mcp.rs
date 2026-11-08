@@ -579,10 +579,15 @@ async fn duplicate_artifact(
         revision,
         title,
         copy_data,
+        copy_assets,
         idempotency_key,
     } = parse(arguments)?;
     let key = operations::request_key("idempotency_key", &idempotency_key)?;
-    let request = DuplicateArtifactRequest { title, copy_data };
+    let request = DuplicateArtifactRequest {
+        title,
+        copy_data,
+        copy_assets,
+    };
     operations::duplicate(state, actor, key, &artifact_id, revision, request).await
 }
 

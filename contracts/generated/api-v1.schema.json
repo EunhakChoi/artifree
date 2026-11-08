@@ -523,6 +523,11 @@
           "const": "data",
           "description": "The source's application data as of the copy, as the copy's own data\nspace. Listed only when the request asked for it; a source whose data\nspace is empty copies nothing, and the copy's data space is then empty.",
           "type": "string"
+        },
+        {
+          "const": "assets",
+          "description": "The caller's uploaded asset space of the source as of the copy, as the\ncopy's own asset space with the same asset IDs. Listed only when the\nrequest asked for it, even when the source had no assets to copy.",
+          "type": "string"
         }
       ]
     },
@@ -809,6 +814,13 @@
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:\ncreates an artifact from the files of that revision.",
       "properties": {
+        "copy_assets": {
+          "description": "Whether the copy also receives a copy of the caller's entire current\nuploaded asset space of the source, unreferenced uploads included, as\nits own independent asset space; independent of `copy_data`. By default\n`false`: no assets are copied. Copied assets keep their IDs, so\nreferences in the copied files and data still resolve, and count in\nfull toward the copy's and the caller's asset limits. A copy that does\nnot fit is refused as a whole with `asset_limit_exceeded`. The assets\ncopied are the source's when the copy commits, whichever revision the\nfiles come from.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "copy_data": {
           "description": "Whether the copy also receives a copy of the source's application\ndata, as its own independent data space. By default `false`: the copy\nreceives files only. The data copied is the source's data when the copy\ncommits, whichever revision the files come from.",
           "type": [
@@ -835,7 +847,7 @@
           "description": "The copy as of the duplicate this request identifies, unpinned and\nwith its own history. On a replay it can be older than the copy's\ncurrent state."
         },
         "copied": {
-          "description": "What the copy received: `files`, and `data` when the request asked for\nit. Uploaded assets do not exist yet and are never copied.",
+          "description": "What the copy received: `files`, then `data` and `assets` when the\nrequest asked for them. Treat it as a set.",
           "items": {
             "$ref": "#/$defs/CopiedPart"
           },

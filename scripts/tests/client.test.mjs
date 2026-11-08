@@ -2290,6 +2290,11 @@ test('A duplicate names the revision and title; a copy must say what it copied',
     'files',
     'data',
   ]);
+  copied = ['files', 'assets'];
+  assert.deepEqual((await duplicate({ copy_assets: true })).copied, [
+    'files',
+    'assets',
+  ]);
   copied = ['files'];
   assert.deepEqual(sent, [
     [
@@ -2304,9 +2309,13 @@ test('A duplicate names the revision and title; a copy must say what it copied',
       `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
       '{"copy_data":true}',
     ],
+    [
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/2/duplicate`,
+      '{"copy_assets":true}',
+    ],
   ]);
   // A part this client does not know could be data it would not report.
-  for (const parts of [undefined, 'files', ['files', 'assets']]) {
+  for (const parts of [undefined, 'files', ['files', 'grants']]) {
     copied = parts;
     const error = await failure(duplicate({}));
     assert.equal(error.code, 'invalid_response', String(parts));

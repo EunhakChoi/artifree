@@ -788,5 +788,9 @@ plain text/CSV uploads are admitted. Valid and invalid PNG/JPEG uploads are
 explicitly unsupported; historical image metadata and matching receipts remain
 decodable and replay before current policy without recreating deleted bytes.
 R09a is incomplete until full PNG and JPEG validation satisfy 0045 rule 3. There
-are no asset UI, client, MCP, CLI, copy or runtime tests because those adapters
-remain R09b–R09d work.
+are no asset UI, MCP asset tool, CLI asset command or runtime tests because those
+adapters remain R09b–R09d work. The duplicate `copy_assets` extension has provider
+tests (`crates/artifree-providers/tests/asset_copy.rs`: full copy, empty space,
+space/actor overflow with no key or partial copy, actor scoping, independence,
+purge of either side) and HTTP, MCP, client and CLI tests of `copied`, the
+fingerprint, overflow and replay after source change or purge.

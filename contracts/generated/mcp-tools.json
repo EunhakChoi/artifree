@@ -2939,7 +2939,7 @@
       "title": "Restore revision"
     },
     {
-      "description": "Create a new artifact you own whose revision 1 has the files of one revision of an artifact, exactly as they were. The copy has its own history, is not pinned, and is named title, or the source's title followed by \" (Copy)\". Later changes to either artifact leave the other as it is. Only files are copied unless copy_data is true, which also gives the copy its own copy of the source's application data (copied lists what was copied). idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
+      "description": "Create a new artifact you own whose revision 1 has the files of one revision of an artifact, exactly as they were. The copy has its own history, is not pinned, and is named title, or the source's title followed by \" (Copy)\". Later changes to either artifact leave the other as it is. By default only files are copied. copy_data true also gives the copy its own copy of the source's application data. copy_assets true also gives the copy its own copy of all your uploaded assets of the source, with the same asset IDs, and is refused as a whole with asset_limit_exceeded when they do not fit your asset limits. copied lists what was copied. idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
       "effect": "commit",
       "inputSchema": {
         "additionalProperties": false,
@@ -2948,6 +2948,13 @@
           "artifact_id": {
             "description": "Artifact identifier of the source.",
             "type": "string"
+          },
+          "copy_assets": {
+            "description": "Whether the copy also receives a copy of your entire uploaded asset\nspace of the source, with the same asset IDs, as its own independent\nasset space; independent of `copy_data`. By default `false`: no assets.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "copy_data": {
             "description": "Whether the copy also receives a copy of the source's application data\nas its own independent data space. By default `false`: files only.",
@@ -3079,7 +3086,7 @@
                 "type": "object"
               },
               "copied": {
-                "description": "What the copy received: `files`, and `data` when the request asked for\nit. Uploaded assets do not exist yet and are never copied.",
+                "description": "What the copy received: `files`, then `data` and `assets` when the\nrequest asked for them. Treat it as a set.",
                 "items": {
                   "description": "A part of an artifact that a duplicate copies.",
                   "oneOf": [
@@ -3091,6 +3098,11 @@
                     {
                       "const": "data",
                       "description": "The source's application data as of the copy, as the copy's own data\nspace. Listed only when the request asked for it; a source whose data\nspace is empty copies nothing, and the copy's data space is then empty.",
+                      "type": "string"
+                    },
+                    {
+                      "const": "assets",
+                      "description": "The caller's uploaded asset space of the source as of the copy, as the\ncopy's own asset space with the same asset IDs. Listed only when the\nrequest asked for it, even when the source had no assets to copy.",
                       "type": "string"
                     }
                   ]

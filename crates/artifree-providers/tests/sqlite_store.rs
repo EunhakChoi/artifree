@@ -1217,6 +1217,7 @@ fn copy_of(
         source: Some(CopySource {
             artifact: &source.artifact.id,
             copy_data: false,
+            copy_assets: false,
         }),
     })
 }

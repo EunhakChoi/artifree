@@ -119,7 +119,11 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
 
 // A record for the same reason as the error codes: a part added later must
 // be accepted here before a copy is reported to callers.
-const COPIED_PARTS: Record<CopiedPart, true> = { files: true, data: true };
+const COPIED_PARTS: Record<CopiedPart, true> = {
+  files: true,
+  data: true,
+  assets: true,
+};
 
 function isCopiedPart(value: unknown): value is CopiedPart {
   return typeof value === 'string' && Object.hasOwn(COPIED_PARTS, value);

@@ -1232,6 +1232,43 @@ test('CLI keeps application data per artifact, with versions, across a restart, 
     assert.deepEqual(copied.value, kept.value);
     assert.equal(copied.data_version, 1);
 
+    // Assets come along only with --copy-assets, under the same IDs.
+    const assetsOf = async (artifactId) => {
+      const response = await fetch(
+        `${second.api_url}/v1/artifacts/${artifactId}/assets`,
+        { headers: { authorization: `Bearer ${second.token}` } },
+      );
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    const uploaded = await fetch(
+      `${second.api_url}/v1/artifacts/${id}/assets`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${second.token}`,
+          'content-type': 'application/json',
+          'idempotency-key': 'cli-asset-upload-1',
+        },
+        body: JSON.stringify({
+          base_asset_version: 0,
+          content_type: 'text/plain',
+          content_base64: Buffer.from('asset bytes').toString('base64'),
+        }),
+      },
+    );
+    assert.equal(uploaded.status, 201);
+    const noAssets = json(cli(second, ['duplicate', id, '1']));
+    assert.deepEqual((await assetsOf(noAssets.artifact.id)).assets, []);
+    const withAssets = json(
+      cli(second, ['duplicate', id, '1', '--copy-data', '--copy-assets']),
+    );
+    assert.deepEqual(withAssets.copied, ['files', 'data', 'assets']);
+    assert.deepEqual(
+      (await assetsOf(withAssets.artifact.id)).assets,
+      (await assetsOf(id)).assets,
+    );
+
     // The copy is its own space.
     json(
       dataCli(second, [

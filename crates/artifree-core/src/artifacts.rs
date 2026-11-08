@@ -9,8 +9,8 @@
 //! the replay of an earlier one included, except the retry of its purge.
 //! Commit success means durable acceptance. Source history is kept
 //! separate from application data (decision 0031, [`crate::data`]) and access
-//! policy. A duplicate copies files, and the data space only when asked;
-//! uploaded assets are separate private state and are not copied yet (0045).
+//! policy. A duplicate copies files, the data space only when asked, and the
+//! uploaded asset space only when asked, independently of the data (0045).
 //! Publishing is not implemented.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -131,6 +131,9 @@ pub enum ArtifactError {
     /// A data path, value, or change breaks the rules of a data space
     /// (decision 0031).
     Data(DataError),
+    /// A duplicate's copied assets would exceed the copy's space limits or the
+    /// actor's asset limits (decision 0045); nothing was written.
+    AssetLimitExceeded,
     /// Storage failed. The request may be retried with the same key.
     Unavailable(String),
 }
@@ -186,6 +189,7 @@ impl fmt::Display for ArtifactError {
                 current.0
             ),
             Self::Data(error) => write!(formatter, "{error}"),
+            Self::AssetLimitExceeded => formatter.write_str("asset limit exceeded"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -223,6 +227,7 @@ impl From<StoreError> for ArtifactError {
             StoreError::ContentChanged => Self::ContentChanged,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
             StoreError::Unchanged => Self::InvalidPackage(PackageError::Unchanged),
+            StoreError::AssetLimitExceeded => Self::AssetLimitExceeded,
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
             other => Self::Unavailable(other.to_string()),
         }
@@ -248,6 +253,18 @@ impl MetadataChange {
             deleted,
         })
     }
+}
+
+/// What a duplicate copies besides the files of the selected revision. Each
+/// part is copied only when asked; both are `false` by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyParts {
+    /// The source's application data (decision 0031), as it is when the copy
+    /// commits.
+    pub data: bool,
+    /// The actor's entire current asset space of the source (decision 0045),
+    /// as it is when the copy commits.
+    pub assets: bool,
 }
 
 /// Application commands for file-package artifacts. HTTP, MCP, and CLI
@@ -526,10 +543,12 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// of `revision` of `id`, byte for byte, with its own history. The title
     /// is `title`, or the source's current title followed by " (Copy)"; the
     /// copy is not pinned. The files are copied; the source's application data
-    /// (decision 0031) is copied only with `copy_data`, as the copy's own
-    /// space, in the same transaction, from the source as it is when the copy
-    /// commits and whatever `revision` is: data has no revisions. The source
-    /// is not touched.
+    /// (decision 0031) is copied only with `parts.data`, and the actor's
+    /// uploaded asset space (decision 0045) only with `parts.assets`, each as
+    /// the copy's own space, in the same transaction, from the source as it is
+    /// when the copy commits and whatever `revision` is: neither has
+    /// revisions. Copied assets keep their IDs, so references to them in the
+    /// copied files and data still resolve. The source is not touched.
     ///
     /// Retrying with the same key returns the original receipt even after
     /// the source was renamed, revised, or purged; the copy has its own
@@ -538,7 +557,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// # Errors
     ///
     /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or
-    /// revision, [`ArtifactError::RequestKeyReused`], or
+    /// revision, [`ArtifactError::AssetLimitExceeded`] when the copied assets
+    /// do not fit (no key is recorded), [`ArtifactError::RequestKeyReused`], or
     /// [`ArtifactError::Unavailable`].
     pub fn duplicate(
         &self,
@@ -547,7 +567,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         id: &ArtifactId,
         revision: SourceRevision,
         title: Option<&Title>,
-        copy_data: bool,
+        parts: CopyParts,
     ) -> Result<CommitReceipt, ArtifactError> {
         let mut hasher = Fingerprint::new("duplicate");
         hasher.field(id.as_str().as_bytes());
@@ -563,8 +583,13 @@ impl<S: ArtifactStore> ArtifactService<S> {
         }
         // Only a copy that takes the data says so: the keys of copies made
         // before application data existed keep their fingerprints.
-        if copy_data {
+        if parts.data {
             hasher.field(b"copy data");
+        }
+        // The same holds for assets: a copy without them keeps the
+        // fingerprint it had before assets could be copied.
+        if parts.assets {
+            hasher.field(b"copy assets");
         }
         let request = RequestIdentity {
             actor,
@@ -592,7 +617,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
             // the trash when the copy commits.
             source: Some(CopySource {
                 artifact: id,
-                copy_data,
+                copy_data: parts.data,
+                copy_assets: parts.assets,
             }),
         })?;
         Ok(receipt)
