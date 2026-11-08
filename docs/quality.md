@@ -686,14 +686,31 @@ CI runs the gate/build on Ubuntu 24.04 with Node 22.12.0 and Windows Server 2025
 with Node 22.22.2. Runner OS labels are fixed instead of following a moving
 `latest` image. GitHub actions run on their supported Node 24 runtime; that is
 separate from the application Node versions under test.
-Another job runs Cargo tests on Rust 1.88.0; regular checks use the pinned Rust
-toolchain. Rust/CLI JSON equivalence and all CLI rejection cases run in the
+Another job runs Cargo tests on Rust 1.88.0 with plain `cargo test`; regular
+checks use the pinned Rust toolchain. Rust/CLI JSON equivalence and all CLI
+rejection cases run in the general
 general gate. Browser jobs use the official Playwright image, pinned by version
 and OCI digest, with browsers and system libraries already installed. They save
 screenshots, a JSON result, and a trace under `.artifree/qa/<browser>-<shard>/`
 (`.artifree/qa/<browser>/` for a local whole-suite run). The image is for trusted scaffold UI tests, not product artifact isolation. Local
 checks do not require Docker. PDF output
 is checked in Chromium; Playwright's Firefox does not implement PDF printing.
+
+### Rust test runner
+
+`npm run check:rust` runs the Rust tests with cargo-nextest and then the
+doctests, because nextest does not run them. The `checks` job installs nextest
+on Linux and Windows from a release archive whose SHA-256 is verified, and
+`.config/nextest.toml` names the version. That version is a minimum for local
+runs, while CI installs exactly it, so the two must be changed together (a
+workflow test checks the agreement). nextest runs the test binaries in
+parallel, which cut the Rust test step from about 59 s to 16 s on a 16-CPU
+sandbox. A test with a wall-clock budget that fails only when the runner is
+busy gets `threads-required` in that file, after it is shown to fail or slow
+down under load. None needed it in three runs on that sandbox; the CI runners
+have fewer CPUs and were not measured, so a flaky test there is handled the
+same way. The Rust 1.88.0 job keeps plain `cargo test` because it verifies the
+minimum toolchain.
 
 Dependency and workflow checks run on pushes, pull requests, manual runs, and a
 weekly schedule. Downloads and advisory database access fail the job if they

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { parse } from 'yaml';
@@ -85,4 +86,169 @@ test('A CI job cannot hold a write token', () => {
   const invalid = structuredClone(workflow);
   invalid.jobs.checks.permissions = { contents: 'write' };
   assert.throws(() => checkWorkflow(invalid), /must not hold a write token/);
+});
+
+const LINUX_NEXTEST = 'Install pinned cargo-nextest (Linux)';
+const WINDOWS_NEXTEST = 'Install pinned cargo-nextest (Windows)';
+const LINUX_VERSION = /^\s*nextest_version=(\S+)$/m;
+const WINDOWS_VERSION = /^\s*\$nextestVersion = '([^']+)'$/m;
+const RUST_CHECKS = /^npm run (?:check|check:rust)$/m;
+const NEXTEST_TOML = new URL('../../.config/nextest.toml', import.meta.url);
+
+function checksStep(name) {
+  const step = workflow.jobs.checks.steps.find(
+    (candidate) => candidate.name === name,
+  );
+  assert.ok(step, `The checks job needs the step "${name}".`);
+  return step;
+}
+
+/** Index of a fragment that the install step must contain. */
+function requiredIndex(text, fragment) {
+  const index = text.indexOf(fragment);
+  assert.notEqual(index, -1, `The install step must contain: ${fragment}`);
+  return index;
+}
+
+function occurrences(text, fragment) {
+  return text.split(fragment).length - 1;
+}
+
+test('The checks job installs cargo-nextest on Linux and Windows before npm run check', () => {
+  const steps = workflow.jobs.checks.steps;
+  const check = steps.findIndex((step) => step.run === 'npm run check');
+  assert.notEqual(check, -1, 'The checks job must run npm run check.');
+  const linux = checksStep(LINUX_NEXTEST);
+  const windows = checksStep(WINDOWS_NEXTEST);
+  assert.equal(linux.if, "${{ runner.os == 'Linux' }}");
+  assert.equal(linux.shell, 'bash');
+  assert.equal(windows.if, "${{ runner.os == 'Windows' }}");
+  assert.equal(windows.shell, 'pwsh');
+  assert.ok(
+    steps.indexOf(linux) < check && steps.indexOf(windows) < check,
+    'cargo-nextest must be installed before npm run check, which runs check:rust.',
+  );
+});
+
+test('The Linux cargo-nextest install fetches over HTTPS, verifies sha256, then extracts', () => {
+  const run = checksStep(LINUX_NEXTEST).run;
+  assert.match(
+    run,
+    /^\s*set -euo pipefail$/m,
+    'A failed checksum must stop the step.',
+  );
+  assert.match(
+    run,
+    /^\s*nextest_sha256=[a-f\d]{64}$/m,
+    'The expected sha256 must be pinned in the step.',
+  );
+  const download = requiredIndex(run, "curl --proto '=https' --tlsv1.2 --fail");
+  const verify = requiredIndex(
+    run,
+    'echo "$nextest_sha256  $nextest_archive" | sha256sum -c -',
+  );
+  const extract = requiredIndex(run, 'tar -xzf "$nextest_archive"');
+  assert.ok(
+    download < verify && verify < extract,
+    'The archive must be downloaded, verified, and only then extracted.',
+  );
+});
+
+test('The Windows cargo-nextest install fetches, verifies sha256, then extracts', () => {
+  const run = checksStep(WINDOWS_NEXTEST).run;
+  assert.match(
+    run,
+    /^\s*\$ErrorActionPreference = 'Stop'$/m,
+    'A failed download or checksum must stop the step.',
+  );
+  assert.match(
+    run,
+    /^\s*\$nextestSha256 = '[a-f\d]{64}'$/m,
+    'The expected sha256 must be pinned in the step.',
+  );
+  const download = requiredIndex(
+    run,
+    'Invoke-WebRequest -Uri "https://github.com/nextest-rs/nextest/releases/download/',
+  );
+  const hash = requiredIndex(
+    run,
+    '(Get-FileHash -Algorithm SHA256 -LiteralPath $nextestArchive).Hash',
+  );
+  const compare = requiredIndex(
+    run,
+    'if ($actualSha256 -ne $nextestSha256) { throw',
+  );
+  const extract = requiredIndex(
+    run,
+    'Expand-Archive -LiteralPath $nextestArchive',
+  );
+  assert.ok(
+    download < hash && hash < compare && compare < extract,
+    'The archive must be downloaded, hashed, compared, and only then extracted.',
+  );
+});
+
+test('Each cargo-nextest install writes its version once, and both platforms agree', () => {
+  const linux = checksStep(LINUX_NEXTEST).run;
+  const windows = checksStep(WINDOWS_NEXTEST).run;
+  const linuxVersion = LINUX_VERSION.exec(linux)?.[1];
+  const windowsVersion = WINDOWS_VERSION.exec(windows)?.[1];
+  assert.match(
+    linuxVersion ?? '',
+    /^\d+\.\d+\.\d+$/,
+    'The Linux install must pin an exact version.',
+  );
+  assert.equal(
+    windowsVersion,
+    linuxVersion,
+    'Linux and Windows must install the same cargo-nextest version.',
+  );
+  assert.equal(occurrences(linux, linuxVersion), 1);
+  assert.equal(occurrences(windows, windowsVersion), 1);
+  const comment = /# Must match nextest-version in \.config\/nextest\.toml\./;
+  assert.match(linux, comment, 'Document the Linux version link.');
+  assert.match(windows, comment, 'Document the Windows version link.');
+});
+
+test('.config/nextest.toml declares the cargo-nextest version that both CI installs pin', async () => {
+  assert.ok(
+    existsSync(NEXTEST_TOML),
+    'The repository must contain .config/nextest.toml, which declares the cargo-nextest version CI installs.',
+  );
+  const toml = await readFile(NEXTEST_TOML, 'utf8');
+  const tomlVersion = /^\s*nextest-version\s*=\s*"([^"]+)"/m.exec(toml)?.[1];
+  assert.match(
+    tomlVersion ?? '',
+    /^\d+\.\d+\.\d+$/,
+    '.config/nextest.toml must declare nextest-version as an exact version.',
+  );
+  assert.equal(
+    tomlVersion,
+    LINUX_VERSION.exec(checksStep(LINUX_NEXTEST).run)?.[1],
+    'The Linux cargo-nextest install must pin the version in .config/nextest.toml.',
+  );
+  assert.equal(
+    tomlVersion,
+    WINDOWS_VERSION.exec(checksStep(WINDOWS_NEXTEST).run)?.[1],
+    'The Windows cargo-nextest install must pin the version in .config/nextest.toml.',
+  );
+});
+
+test('Every job that runs the Rust checks installs cargo-nextest', () => {
+  const missing = Object.entries(workflow.jobs)
+    .filter(([, job]) =>
+      (job.steps ?? []).some((step) => RUST_CHECKS.test(step.run ?? '')),
+    )
+    .filter(
+      ([, job]) =>
+        !(job.steps ?? []).some((step) =>
+          step.name?.startsWith('Install pinned cargo-nextest'),
+        ),
+    )
+    .map(([name]) => name);
+  assert.deepEqual(
+    missing,
+    [],
+    'These jobs run the Rust checks without installing cargo-nextest.',
+  );
 });

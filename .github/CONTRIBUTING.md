@@ -59,6 +59,10 @@ To run Firefox locally anyway, install `firefox` the same way and set
 `ARTIFREE_BROWSER=firefox` (in PowerShell, `$env:ARTIFREE_BROWSER = 'firefox'`,
 then `Remove-Item Env:ARTIFREE_BROWSER` afterwards).
 
+`npm run check` runs the Rust tests with cargo-nextest. Install the version named
+in `.config/nextest.toml` first, with `cargo install cargo-nextest --locked --version
+<that version>` or the release archive the `checks` CI job uses.
+
 Rust and Rust dependency changes must also pass the minimum-version check.
 These are the same installation and test commands as the `msrv` CI job:
 
