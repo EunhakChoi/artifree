@@ -1618,10 +1618,10 @@ async fn refused_uploads_answer_with_their_codes_and_change_nothing() -> TestRes
             "invalid_asset",
         ),
         (
-            "a JPEG",
+            "a bare JPEG signature",
             "image/jpeg",
             STANDARD.encode(b"\xff\xd8\xff\xd9"),
-            "asset_type_unsupported",
+            "invalid_asset",
         ),
         (
             "a GIF",

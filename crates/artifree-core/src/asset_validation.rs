@@ -1,8 +1,8 @@
 //! Current content admission for new private uploads (0045).
 //!
-//! UTF-8 text/plain and text/csv are admitted as opaque text. PNG is admitted
-//! when complete validation passes (`png::validate_png`, decision 0045, rule
-//! 3). JPEG remains unsupported until it satisfies that rule.
+//! UTF-8 text/plain and text/csv are admitted as opaque text. PNG and JPEG are
+//! admitted when complete validation passes (`png::validate_png`,
+//! `jpeg::validate_jpeg`, decision 0045, rule 3).
 //! Call after authority/key/base preflight and outside storage transactions.
 //! Replays bypass current admission, and accepted bytes remain unchanged.
 
@@ -10,19 +10,21 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use artifree_domain::assets::{AssetMediaType, AssetRejection, MAX_ASSET_BYTES};
 
+mod jpeg;
 mod png;
 
-/// Largest accepted PNG width or height, in pixels.
+/// Largest accepted PNG or JPEG width or height, in pixels.
 const MAX_IMAGE_AXIS: u32 = 4096;
 
-/// Largest accepted PNG pixel count, width times height.
+/// Largest accepted PNG or JPEG pixel count, width times height.
 const MAX_IMAGE_PIXELS: u64 = 16_777_216;
 
 /// Byte budget for PNG metadata. The `png` decoder counts its buffered chunks,
 /// including text and `iCCP`, against it. Compressed text is inflated within it too.
 const PNG_METADATA_BUDGET: usize = 16 * 1024 * 1024;
 
-/// Serializes PNG decoding process-wide, so one image is inflated at a time.
+/// Serializes image validation (PNG and JPEG) process-wide, so one image is
+/// decoded at a time.
 ///
 /// The lock guards no data, so a poisoned lock is recovered rather than refused.
 static IMAGE_DECODE: Mutex<()> = Mutex::new(());
@@ -30,22 +32,23 @@ static IMAGE_DECODE: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 pub(crate) mod fixtures;
 
+#[cfg(test)]
+pub(crate) mod jpeg_fixtures;
+
 /// Validates the upload policy for a declared content type.
 ///
 /// Text and CSV stay opaque: markup and formulas are not rewritten. PNG is
-/// checked by `png::validate_png`, which borrows the bytes and never re-encodes
-/// or strips them. JPEG is unsupported for now.
+/// checked by `png::validate_png` and JPEG by `jpeg::validate_jpeg`, which borrow
+/// the bytes and never re-encode or strip them.
 ///
 /// # Errors
-/// `UnsupportedType` for a type outside the allowlist and for `image/jpeg`;
-/// `LimitExceeded` above `MAX_ASSET_BYTES`; `Invalid` for empty bytes, invalid
-/// or control-bearing text, and a PNG that lacks the signature or fails
-/// validation.
+/// `UnsupportedType` for a type outside the allowlist; `LimitExceeded` above
+/// `MAX_ASSET_BYTES`; `Invalid` for empty bytes, invalid or control-bearing text,
+/// and a PNG or JPEG that lacks the signature or fails validation (including a
+/// valid JPEG variant outside the admitted subset).
 pub fn validate(content_type: &AssetMediaType, bytes: &[u8]) -> Result<(), AssetRejection> {
     let kind = content_type.as_str();
-    // image/jpeg stays outside the allowlist until it meets rule 3, so every JPEG
-    // upload, whatever its size or content, is unsupported (not invalid or oversize).
-    if !matches!(kind, "text/plain" | "text/csv" | "image/png") {
+    if !matches!(kind, "text/plain" | "text/csv" | "image/png" | "image/jpeg") {
         return Err(AssetRejection::UnsupportedType);
     }
     if bytes.len() > MAX_ASSET_BYTES {
@@ -56,8 +59,9 @@ pub fn validate(content_type: &AssetMediaType, bytes: &[u8]) -> Result<(), Asset
     }
     match kind {
         "text/plain" | "text/csv" => validate_text(bytes),
-        // Only image/png passes the allowlist above.
-        _ => validate_png_upload(bytes),
+        "image/png" => validate_png_upload(bytes),
+        // Only image/jpeg is left after the allowlist above.
+        _ => validate_jpeg_upload(bytes),
     }
 }
 
@@ -84,6 +88,17 @@ fn validate_png_upload(bytes: &[u8]) -> Result<(), AssetRejection> {
     png::validate_png(bytes)
 }
 
+/// Checks the JPEG signature, then runs the JPEG validator under the decode lock.
+///
+/// The signature check comes first so that non-JPEG bytes never wait for the lock.
+fn validate_jpeg_upload(bytes: &[u8]) -> Result<(), AssetRejection> {
+    if !bytes.starts_with(&jpeg::SIGNATURE) {
+        return Err(AssetRejection::Invalid);
+    }
+    let _decode = lock_image_decode();
+    jpeg::validate_jpeg(bytes)
+}
+
 /// Locks `IMAGE_DECODE`, recovering the guard if an earlier holder panicked.
 fn lock_image_decode() -> MutexGuard<'static, ()> {
     IMAGE_DECODE.lock().unwrap_or_else(PoisonError::into_inner)
@@ -95,19 +110,21 @@ mod tests {
     use std::time::Duration;
 
     use super::fixtures::minimal_png;
+    use super::jpeg_fixtures::minimal_jpeg;
     use super::*;
 
-    // Written out here, so the tests do not reuse the constant that the code under test uses.
+    // Written out here, so the tests do not reuse the constants that the code under test uses.
     const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    const JPEG_SIGNATURE: &[u8] = b"\xff\xd8\xff";
 
     fn check(kind: &str, bytes: &[u8]) -> Result<(), AssetRejection> {
         let media: AssetMediaType = kind.parse().unwrap_or_else(|error| panic!("{error}"));
         validate(&media, bytes)
     }
 
-    /// Returns `length` bytes that start with the PNG signature and are zero after it.
-    fn signature_then_zeros(length: usize) -> Vec<u8> {
-        let mut bytes = PNG_SIGNATURE.to_vec();
+    /// Returns `length` bytes that start with `signature` and are zero after it.
+    fn signature_then_zeros(signature: &[u8], length: usize) -> Vec<u8> {
+        let mut bytes = signature.to_vec();
         bytes.resize(length, 0);
         bytes
     }
@@ -188,44 +205,108 @@ mod tests {
     fn png_over_the_asset_size_limit_is_a_limit_error_before_decoding() {
         // Signature then zeros: the PNG validator refuses this as Invalid, so a
         // LimitExceeded result shows that the size check runs before the PNG branch.
+        let over_limit = signature_then_zeros(PNG_SIGNATURE, MAX_ASSET_BYTES + 1);
         assert_eq!(
-            check("image/png", &signature_then_zeros(MAX_ASSET_BYTES + 1)),
+            check("image/png", &over_limit),
             Err(AssetRejection::LimitExceeded),
             "one byte over the limit"
         );
         // Exactly at the limit the size check passes, and the zeros then fail PNG validation.
+        let at_limit = signature_then_zeros(PNG_SIGNATURE, MAX_ASSET_BYTES);
         assert_eq!(
-            check("image/png", &signature_then_zeros(MAX_ASSET_BYTES)),
+            check("image/png", &at_limit),
             Err(AssetRejection::Invalid),
             "exactly at the limit"
         );
     }
 
     #[test]
-    fn jpeg_stays_unsupported() {
+    fn a_complete_jpeg_is_admitted() {
+        assert_eq!(
+            check("image/jpeg", &minimal_jpeg()),
+            Ok(()),
+            "an 8x8 grayscale JPEG is complete"
+        );
+    }
+
+    #[test]
+    fn jpeg_that_does_not_match_the_declared_type_is_invalid() {
+        let png_bytes = minimal_png();
         for bytes in [
-            b"not an image".as_slice(),
+            png_bytes.as_slice(),
+            b"not an image",
+            b"hello, world\n",
+            // The signature alone is truncated: markers must follow it.
+            JPEG_SIGNATURE,
+            // Start of image and end of image, with no frame or scan between them.
             b"\xff\xd8\xff\xd9",
-            // One byte, the first byte of a PNG signature: only the declared type can refuse it.
-            b"\x89",
         ] {
             assert_eq!(
                 check("image/jpeg", bytes),
-                Err(AssetRejection::UnsupportedType),
+                Err(AssetRejection::Invalid),
                 "image/jpeg over {bytes:?}"
             );
         }
-        // The type check comes first: an empty or oversize JPEG is unsupported too,
-        // never invalid or over the limit, as before PNG admission existed.
+        // A JPEG declared as a PNG has no PNG signature.
         assert_eq!(
-            check("image/jpeg", b""),
-            Err(AssetRejection::UnsupportedType),
-            "empty image/jpeg"
+            check("image/png", &minimal_jpeg()),
+            Err(AssetRejection::Invalid),
+            "a JPEG declared as image/png"
+        );
+        // A JPEG starts with 0xFF, which is not UTF-8, and it contains control bytes.
+        assert_eq!(
+            check("text/plain", &minimal_jpeg()),
+            Err(AssetRejection::Invalid),
+            "a JPEG declared as text/plain"
         );
         assert_eq!(
-            check("image/jpeg", &vec![0_u8; MAX_ASSET_BYTES + 1]),
-            Err(AssetRejection::UnsupportedType),
-            "image/jpeg one byte over the limit"
+            check("image/jpeg", b""),
+            Err(AssetRejection::Invalid),
+            "empty bytes declared as image/jpeg"
+        );
+    }
+
+    #[test]
+    fn jpeg_over_the_asset_size_limit_is_a_limit_error_before_validation() {
+        // Signature then zeros: the JPEG validator refuses this as Invalid, so a LimitExceeded
+        // result shows that the size check runs before the JPEG branch.
+        let over_limit = signature_then_zeros(JPEG_SIGNATURE, MAX_ASSET_BYTES + 1);
+        assert_eq!(
+            check("image/jpeg", &over_limit),
+            Err(AssetRejection::LimitExceeded),
+            "one byte over the limit"
+        );
+        // Exactly at the limit the size check passes, and the zeros then fail JPEG validation.
+        let at_limit = signature_then_zeros(JPEG_SIGNATURE, MAX_ASSET_BYTES);
+        assert_eq!(
+            check("image/jpeg", &at_limit),
+            Err(AssetRejection::Invalid),
+            "exactly at the limit"
+        );
+    }
+
+    #[test]
+    fn a_valid_jpeg_variant_outside_the_admitted_subset_is_invalid() {
+        // Every refused JPEG is `Invalid` (`invalid_asset`), including a valid variant that is
+        // outside the admitted subset. `UnsupportedType` is only for a declared type that is not
+        // on the allowlist.
+        let admitted = minimal_jpeg();
+        assert_eq!(
+            check("image/jpeg", &admitted),
+            Ok(()),
+            "the unchanged file must be admitted, so the refusal below comes from the marker"
+        );
+        // The only edit is the frame marker: SOF0 (0xC0) becomes SOF2 (0xC2), which is progressive.
+        let mut progressive = admitted;
+        let frame = progressive
+            .windows(2)
+            .position(|pair| pair == [0xFF, 0xC0])
+            .unwrap_or_else(|| panic!("the minimal JPEG has an SOF0 marker"));
+        progressive[frame + 1] = 0xC2;
+        assert_eq!(
+            check("image/jpeg", &progressive),
+            Err(AssetRejection::Invalid),
+            "a progressive (SOF2) frame is outside the admitted subset"
         );
     }
 
@@ -247,10 +328,15 @@ mod tests {
     }
 
     #[test]
-    fn other_image_types_are_unsupported_even_with_png_content() {
+    fn other_image_types_are_unsupported_even_with_png_or_jpeg_content() {
         let png_bytes = minimal_png();
+        let jpeg_bytes = minimal_jpeg();
         for kind in ["image/gif", "image/webp", "image/svg+xml", "image/apng"] {
-            for bytes in [b"GIF89a".as_slice(), png_bytes.as_slice()] {
+            for bytes in [
+                b"GIF89a".as_slice(),
+                png_bytes.as_slice(),
+                jpeg_bytes.as_slice(),
+            ] {
                 assert_eq!(
                     check(kind, bytes),
                     Err(AssetRejection::UnsupportedType),
@@ -264,23 +350,33 @@ mod tests {
     fn concurrent_image_validations_do_not_deadlock_or_cross_talk() {
         const WORKERS: usize = 8;
         const ROUNDS: usize = 20;
-        let valid = minimal_png();
+        let valid_png = minimal_png();
         // Flipping the last byte corrupts the CRC of IEND. The signature still matches, so
         // the corrupt image takes the decode lock, as the valid one does, before it is refused.
-        let mut corrupt = minimal_png();
-        if let Some(last) = corrupt.last_mut() {
+        let mut corrupt_png = minimal_png();
+        if let Some(last) = corrupt_png.last_mut() {
             *last ^= 1;
         }
+        let valid_jpeg = minimal_jpeg();
+        // Dropping the final byte leaves the file ending in 0xFF, the first byte of EOI.
+        // The signature still matches, so the truncated image takes the decode lock first.
+        let truncated_jpeg = &valid_jpeg[..valid_jpeg.len() - 1];
         std::thread::scope(|scope| {
             let workers: Vec<_> = (0..WORKERS)
                 .map(|_| {
                     scope.spawn(|| {
                         for _ in 0..ROUNDS {
-                            assert_eq!(check("image/png", &valid), Ok(()), "valid PNG");
+                            assert_eq!(check("image/png", &valid_png), Ok(()), "valid PNG");
                             assert_eq!(
-                                check("image/png", &corrupt),
+                                check("image/png", &corrupt_png),
                                 Err(AssetRejection::Invalid),
                                 "corrupt PNG"
+                            );
+                            assert_eq!(check("image/jpeg", &valid_jpeg), Ok(()), "valid JPEG");
+                            assert_eq!(
+                                check("image/jpeg", truncated_jpeg),
+                                Err(AssetRejection::Invalid),
+                                "truncated JPEG"
                             );
                         }
                     })
@@ -310,6 +406,25 @@ mod tests {
             outcome,
             Ok(Err(AssetRejection::Invalid)),
             "a non-PNG upload waited for the decode lock or was refused differently"
+        );
+    }
+
+    #[test]
+    fn non_jpeg_bytes_are_refused_without_waiting_for_the_decode_lock() {
+        // The decode lock is held while a non-JPEG upload is validated on another thread.
+        // The upload must be refused without the lock, so the result arrives well inside
+        // the timeout. The timeout only bounds the wait when the lock is taken.
+        let decode = lock_image_decode();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            sender.send(check("image/jpeg", b"not an image")).ok();
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(10));
+        drop(decode);
+        assert_eq!(
+            outcome,
+            Ok(Err(AssetRejection::Invalid)),
+            "a non-JPEG upload waited for the decode lock or was refused differently"
         );
     }
 }

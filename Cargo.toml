@@ -36,6 +36,10 @@ base64 = "0.23"
 png = "=0.18.1"
 miniz_oxide = "=0.8.9"
 crc32fast = "1.5"
+# JPEG admission (decision 0045, rule 3): the maintained decoder that runs after
+# the Artifree-owned walker. Pinned exactly, without default features, so
+# unsafe SIMD code stays disabled and a bump is a reviewed change.
+zune-jpeg = { version = "=0.5.15", default-features = false }
 http-body = "1"
 futures-core = "0.3"
 tower = { version = "0.5", default-features = false, features = ["util"] }

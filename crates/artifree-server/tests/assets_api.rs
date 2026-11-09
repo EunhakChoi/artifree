@@ -229,7 +229,7 @@ async fn envelopes_and_content_errors_do_not_consume_a_key() -> TestResult {
             "jpeg",
             upload(0, "image/jpeg", b"\xff\xd8\xff\xd9"),
             422,
-            "asset_type_unsupported",
+            "invalid_asset",
         ),
         (
             "png",
@@ -675,21 +675,93 @@ async fn invalid_png_uploads_are_refused_and_leave_the_key_free() -> TestResult 
     Ok(())
 }
 
+/// A complete 8x8 gray baseline JPEG made with an independent encoder (Pillow
+/// 11.3.0, libjpeg-turbo, quality 75).
+const VALID_JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAIAAgBAREA/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/ADQVt/A3hJtWli3XDfubOMxlhJOVJQNgjC8EnkcA45wD/9k=";
+/// SHA-256 of the decoded `VALID_JPEG`.
+const VALID_JPEG_SHA256: &str = "6de849fcb1f928693b9890581ee1bc1a5ba7c68f6bd49f602e086b3228a25357";
+
 #[tokio::test]
-async fn jpeg_stays_unsupported_even_for_a_complete_looking_file() -> TestResult {
+async fn a_complete_jpeg_is_admitted_and_stored_with_its_exact_bytes() -> TestResult {
     let harness = Harness::new()?;
     let artifact = harness.artifact().await?;
     let path = format!("/v1/artifacts/{artifact}/assets");
-    let refused = harness
+    let jpeg = STANDARD.decode(VALID_JPEG)?;
+    let created = harness
+        .call(
+            "POST",
+            &path,
+            Some("jpeg-admitted"),
+            Some(upload(0, "image/jpeg", &jpeg)),
+        )
+        .await?;
+    secure(&created);
+    assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.json());
+    let receipt = created.json()?;
+    assert_eq!(receipt["asset"]["content_type"], "image/jpeg");
+    assert_eq!(receipt["asset"]["size_bytes"], jpeg.len());
+    assert_eq!(receipt["asset"]["sha256"], VALID_JPEG_SHA256);
+    let id = receipt["asset"]["id"].as_str().ok_or("asset id")?;
+    let content = harness
+        .call("GET", &format!("{path}/{id}/content"), None, None)
+        .await?;
+    assert_eq!(content.headers[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(content.bytes, jpeg, "stored bytes are exactly as sent");
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_jpeg_uploads_are_refused_and_leave_the_key_free() -> TestResult {
+    let harness = Harness::new()?;
+    let artifact = harness.artifact().await?;
+    let path = format!("/v1/artifacts/{artifact}/assets");
+    let valid = STANDARD.decode(VALID_JPEG)?;
+    let truncated = valid[..valid.len() - 1].to_vec();
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    // The same file with its frame marker changed to progressive (SOF2).
+    let mut progressive = valid.clone();
+    let sof = progressive
+        .windows(2)
+        .position(|pair| pair == [0xff, 0xc0])
+        .ok_or("SOF0")?;
+    progressive[sof + 1] = 0xc2;
+    for (what, bytes) in [
+        ("bare signature", b"\xff\xd8\xff\xd9".to_vec()),
+        ("not a JPEG", b"not JPEG".to_vec()),
+        ("empty", Vec::new()),
+        ("truncated", truncated),
+        ("trailing byte", trailing),
+        ("progressive", progressive),
+    ] {
+        let refused = harness
+            .call(
+                "POST",
+                &path,
+                Some("jpeg-policy"),
+                Some(upload(0, "image/jpeg", &bytes)),
+            )
+            .await?;
+        secure(&refused);
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{what}");
+        assert_eq!(refused.json()?["error"]["code"], "invalid_asset", "{what}");
+        let list = harness.call("GET", &path, None, None).await?;
+        assert_eq!(list.json()?["assets"], json!([]), "{what}");
+        assert_eq!(list.json()?["asset_version"], 0, "{what}");
+    }
+    let text = harness
         .call(
             "POST",
             &path,
             Some("jpeg-policy"),
-            Some(upload(0, "image/jpeg", b"\xff\xd8\xff\xd9")),
+            Some(upload(0, "text/plain", b"permitted text")),
         )
         .await?;
-    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(refused.json()?["error"]["code"], "asset_type_unsupported");
+    assert_eq!(
+        text.status,
+        StatusCode::CREATED,
+        "an invalid JPEG must leave the key free"
+    );
     Ok(())
 }
 

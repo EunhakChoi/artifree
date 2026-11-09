@@ -10,8 +10,14 @@ const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==',
   'base64',
 );
-// A type the server does not admit yet; its bytes are never read.
-const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+// An independently authored (Pillow 11.3.0, libjpeg-turbo), complete 8x8 gray
+// baseline JPEG: the server admits it.
+const JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAIAAgBAREA/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/ADQVt/A3hJtWli3XDfubOMxlhJOVJQNgjC8EnkcA45wD/9k=',
+  'base64',
+);
+// A type the server does not admit; its bytes are never read.
+const GIF = Buffer.from('GIF89a');
 
 /**
  * Browser checks for an artifact's assets (decision 0045, rule 11) against a
@@ -203,14 +209,14 @@ export async function checkAssets({
 
     // A type the server does not admit is sent as declared and refused.
     await fileInput.setInputFiles({
-      name: 'pixel.jpg',
-      mimeType: 'image/jpeg',
-      buffer: JPEG,
+      name: 'pixel.gif',
+      mimeType: 'image/gif',
+      buffer: GIF,
     });
-    await expect(declared).toHaveValue('image/jpeg');
+    await expect(declared).toHaveValue('image/gif');
     await uploadButton.click();
     await expect(alert('Not changed')).toContainText(
-      'This file type is not accepted. Uploads accept plain text, CSV and PNG.',
+      'This file type is not accepted. Uploads accept plain text, CSV, PNG and JPEG.',
     );
     let space = await list(artifact.id);
     assert.deepEqual(
@@ -381,6 +387,26 @@ export async function checkAssets({
       'The PNG upload changed more than one asset.',
     );
 
+    // A complete JPEG is listed and downloaded the same way.
+    await upload('photo.jpg', 'image/jpeg', JPEG);
+    await expect(alert('Uploaded')).toBeVisible();
+    await expect(version(8)).toBeVisible();
+    space = await list(artifact.id);
+    const photo = space.assets.find(
+      (asset) => asset.content_type === 'image/jpeg',
+    );
+    assert.ok(photo, 'The JPEG is not listed.');
+    const savingPhoto = tab.waitForEvent('download');
+    await panel
+      .getByRole('button', { name: `Download asset ${prefix(photo)}` })
+      .click();
+    assert.deepEqual(await readFile(await (await savingPhoto).path()), JPEG);
+    assert.deepEqual(
+      [space.asset_version, space.assets.length],
+      [8, 4],
+      'The JPEG upload changed more than one asset.',
+    );
+
     // A full artifact refuses one more byte, and nothing is added.
     await open('Assets full');
     await expect(storage).toHaveAttribute('aria-valuetext', '25 MiB of 25 MiB');
@@ -419,6 +445,7 @@ export async function checkAssets({
         'delete-cancel-confirm',
         'lost-delete-retry',
         'png-upload-download-no-inline',
+        'jpeg-upload-download',
         'quota-refused',
       ],
       apiRequests: { browser: browserRequests, raw: rawRequests },

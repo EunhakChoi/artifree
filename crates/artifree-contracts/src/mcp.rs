@@ -275,7 +275,7 @@ pub struct UploadAssetArguments {
     /// still current.
     pub base_asset_version: u64,
     /// The declared MIME type: lowercase, without parameters, such as
-    /// `text/plain`. Only `text/plain`, `text/csv` and `image/png` are accepted currently.
+    /// `text/plain`. Only `text/plain`, `text/csv`, `image/png` and `image/jpeg` are accepted currently.
     pub content_type: String,
     /// The content as standard padded base64 of its bytes, at most 5 MiB
     /// decoded. Empty content is refused.
@@ -887,13 +887,15 @@ fn asset_tools() -> [ToolDefinition; 4] {
             format!(
                 "Upload one asset to an artifact's asset space. content_base64 holds the bytes \
                  themselves, as strict standard base64, never a host path or URL, and at most \
-                 5 MiB decoded. Only UTF-8 text/plain, text/csv, and complete static non-animated \
-                 image/png (at most 4096 pixels per axis and 16,777,216 pixels) are accepted \
-                 currently. Any other declared type, such as image/jpeg, text/html, or \
+                 5 MiB decoded. Only UTF-8 text/plain, text/csv, complete static non-animated \
+                 image/png, and complete 8-bit sequential (baseline or extended) Huffman image/jpeg with \
+                 one scan (at most 4096 pixels per axis and 16,777,216 pixels) are accepted \
+                 currently. Any other declared type, such as image/gif, text/html, or \
                  image/svg+xml, fails with asset_type_unsupported. Empty content, invalid UTF-8, \
-                 a NUL or control character other than tab, CR, and LF in text, or a PNG that \
-                 is malformed, truncated, animated, oversize, or not what the declared type says \
-                 fails with invalid_asset. More than \
+                 a NUL or control character other than tab, CR, and LF in text, or a PNG or JPEG \
+                 that is malformed, truncated, has bytes after its end, is oversize, is a JPEG \
+                 variant that is not supported (progressive, multi-scan, arithmetic, 12-bit), or \
+                 is not what the declared type says fails with invalid_asset. More than \
                  5 MiB fails with asset_limit_exceeded, as does an upload that would exceed \
                  max_assets or max_bytes from list_assets, or your limits across all your \
                  artifacts, trash included. A refused upload writes nothing. Accepted bytes are \

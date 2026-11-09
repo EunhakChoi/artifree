@@ -27,7 +27,12 @@ import {
 import type { AssetWrites } from './use-asset-writes';
 
 /** The types offered whatever the file reports; the server admits these now. */
-const OFFERED_TYPES = ['text/plain', 'text/csv', 'image/png'] as const;
+const OFFERED_TYPES = [
+  'text/plain',
+  'text/csv',
+  'image/png',
+  'image/jpeg',
+] as const;
 
 /** Whether a new upload or delete may be sent against `base` now. */
 function canWrite(
@@ -108,8 +113,9 @@ function UploadForm({ writes, base, shownResets }: AssetUploadProps) {
             }}
           />
           <FieldDescription>
-            Plain text, CSV and PNG images, up to 5 MiB. Other types are refused
-            by the server. Files are kept and downloaded, never shown here.
+            Plain text, CSV, PNG and JPEG images, up to 5 MiB. Other types are
+            refused by the server. Files are kept and downloaded, never shown
+            here.
           </FieldDescription>
         </Field>
         <Field>

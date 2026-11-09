@@ -16,7 +16,9 @@ import { parseSync } from 'oxc-parser';
 // is already in the dependency tree through Axum (decision 0006). png,
 // miniz_oxide and crc32fast give artifree-core the maintained decoder and the
 // independent exact zlib and CRC checks that decision 0045 rule 3 requires
-// before any PNG upload is admitted; no JPEG decoder is linked yet.
+// before any PNG upload is admitted. zune-jpeg is the maintained JPEG decoder
+// that runs after the Artifree-owned entropy walker for the same rule; the
+// walker, not the decoder, guarantees truncated data is refused.
 const rustEdges = {
   'artifree-domain': [],
   'artifree-ports': ['artifree-domain'],
@@ -27,6 +29,7 @@ const rustEdges = {
     'miniz_oxide',
     'png',
     'sha2',
+    'zune-jpeg',
   ],
   'artifree-providers': [
     'artifree-ports',
