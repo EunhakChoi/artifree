@@ -4,7 +4,7 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); the remainder of R09d (frame upload/delete and device download) is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); R09d2 lets a runtime frame upload and delete its artifact's assets under a separate `assets.write` grant (Chromium; Firefox re-verification pending); the remainder of R09d (device download) is proposed**.
 The current HTTP/storage slice accepts UTF-8 plain text/CSV, complete static
 PNG and complete JPEG of the sequential subset recorded in the R09a image
 validation notes at the end of this record. Other JPEG variants are refused as
@@ -12,7 +12,7 @@ validation notes at the end of this record. Other JPEG variants are refused as
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). The MCP tools `list_assets`, `read_asset`, `upload_asset` and `delete_asset`
-exist (R09b3). The CLI `asset list|upload|read|delete` commands exist (R09b4). There is no grant or frame access yet. A duplicate copies the
+exist (R09b3). The CLI `asset list|upload|read|delete` commands exist (R09b4). A runtime frame lists and reads assets under its own `assets.read` grant (R09d1) and uploads and deletes them under its own `assets.write` grant (R09d2); device download is not implemented. A duplicate copies the
 requesting actor's current asset space only when `copy_assets` is true (rule 10).
 The management web has an Assets tab (R09c: usage, upload, list,
 attachment download, delete, conflict and unknown-outcome retry), and its
@@ -793,7 +793,7 @@ and retry hints go to stderr.
   so an impossible value is a usage error (exit 2) before anything is sent.
 - **Not in this slice:** `asset show`, stdin or `--output -`, content-type
   inference, a CLI allowlist, CLI-side retry or a pending-request file, a typed
-  `currentAssetVersion`, PNG/JPEG admission (R09a), runtime write/download grants (R09d2, R09d3), change
+  `currentAssetVersion`, PNG/JPEG admission (R09a), runtime download grant (R09d3), change
   following, bulk upload.
 
 Verification: real-server CLI tests in `scripts/tests/cli-assets.test.mjs`
@@ -922,5 +922,64 @@ Rule 12's read half is implemented; `assets.write` (R09d2) and `assets.download`
   the repeated read. The asset id, limits and content-type set are repeated in
   the frame SDK, the host and the client, the frame handlers in `http.rs` repeat
   each other, and the capability set is a `u8` with three spare bits.
-- **Still not supported:** frame upload or delete (R09d2), device download
-  (R09d3), S02 shared roles and an offline asset outbox.
+- **Still not supported:** device download (R09d3), S02 shared roles and an
+  offline asset outbox.
+
+## R09d2: runtime `assets.write` (implementation notes)
+
+Rule 12's write half is implemented: a frame can upload and delete assets of its
+own artifact. `assets.download` (R09d3) is not. Chromium is verified; Firefox
+re-verification is pending. No numbered rule changed.
+
+- **Capability.** `assets.write` has its own declaration, support, consent and
+  connection grant. It neither implies nor is implied by `assets.read` or any
+  `source.*` capability; a frame that wants to list and write asks for both. The
+  grant is not spent by a write: because an asset write does not move the source
+  head, one grant allows repeated uploads and deletes until it is revoked, the
+  source changes or the connection ends. Deleted assets cannot be restored, and
+  the consent text says so, including that any asset of the artifact can be
+  deleted, whoever uploaded it.
+- **Routes.** `POST {VIEW}/assets/upload` (body limit shared with the source
+  write route) and `POST {VIEW}/assets/delete`, both answering `200` with the
+  existing upload or delete reply (`replayed` included) and no `Location`.
+  Upload takes `retry_id`, `base_asset_version`, `content_type` and
+  `content_base64`; delete takes `retry_id`, `base_asset_version` and `asset_id`.
+- **Limits.** One upload is at most 1,048,576 decoded bytes in a single call (a
+  frame upload is therefore at most 1 MiB although the store allows 5 MiB), sent
+  as strict base64 of at most 1,398,104 characters, judged before decoding. There
+  is no chunked or staged upload.
+- **Check order.** Binding (`404`), the connection's current grant (`403`), the
+  artifact and its head (`404`, `409` `revision_conflict`) are checked before any
+  argument is judged. The grant and binding are checked once more on the blocking
+  thread immediately before the store is asked, and the head is fenced inside the
+  store's write transaction before the request key is replayed. A grant change
+  that wins first prevents the write; one that lands after the commit withholds
+  the receipt (`403`) but cannot undo the commit.
+- **Keys.** A frame write uses a server-built request key with its own prefix
+  (`rta~`, from the artifact, view, generation and the frame's `retry_id`), which
+  public HTTP, MCP and CLI keys cannot spell and which is disjoint from source
+  write keys. Upload and delete share the prefix; the request fingerprint tells
+  them apart, so reusing one `retry_id` for both is `request_key_reused`.
+- **Base version and unknown outcomes.** The frame supplies the independent asset
+  base on every call: from `assets.list` if it also holds `assets.read`, from a
+  previous receipt, or from the `currentAssetVersion` of a conflict. A stale base
+  is `conflict` (`asset_conflict`). The host keeps no copy of an unknown outcome:
+  the durable receipt and the view-scoped key are the retention, so repeating the
+  identical call with the same `retry_id` through the same still-authorized view
+  replays. A view that ended or a source save that moved the head makes a retry
+  `stale_view`. The SDK never retries a write on its own, not even on
+  `rate_limited`, and does not tell the frame whether a reply was a replay.
+- **Delete.** Deleting an id the artifact no longer has, with a current base,
+  returns `deleted: false` and leaves the version unchanged (rule 6). An id that
+  cannot be parsed is `404`.
+- **Failure codes.** The frame sees one new code, `conflict` (carrying
+  `currentAssetVersion`). Type, content, quota and key-reuse refusals stay
+  `invalid_request`.
+- **Content types.** The SDK and client accept only the four admitted types; the
+  host checks the spelling and the server is authoritative. Frame writes have no
+  history to replay, which is why this differs from the HTTP client's "no client
+  allowlist" rule.
+- **Not changed.** No CSP widening, no `allow-same-origin`, no `allow-downloads`,
+  no asset URL or `Location` and no token for a frame, no change-feed event, no
+  new `ArtifreeClient` method, no change to host frame budgets (each write is one
+  token and one waiting slot), no store or schema change.

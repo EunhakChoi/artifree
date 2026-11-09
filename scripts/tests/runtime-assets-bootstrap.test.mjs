@@ -260,10 +260,15 @@ function listingOf(assets, assetVersion = 3) {
   return { assetVersion, assets };
 }
 
-test('The assets capability offers list and read only, and is frozen', () => {
+test('The assets capability offers list, read, upload and delete, and is frozen', () => {
   const f = frame();
   assert.ok(Object.isFrozen(f.api.assets));
-  assert.deepEqual(Object.keys(f.api.assets).sort(), ['list', 'read']);
+  assert.deepEqual(Object.keys(f.api.assets).sort(), [
+    'delete',
+    'list',
+    'read',
+    'upload',
+  ]);
   f.hangUp();
 });
 

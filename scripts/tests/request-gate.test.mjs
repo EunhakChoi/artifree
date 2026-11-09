@@ -724,3 +724,66 @@ test('A refusal without delay still holds reads and keeps the refused read first
   api.answer(1);
   await refused;
 });
+
+test('Asset uploads and deletes are frame requests under any server path prefix', () => {
+  const route = '/v1/artifacts/a/revisions/2/runtime-views/view/3';
+  for (const base of BASES)
+    for (const tail of ['assets/upload', 'assets/delete'])
+      assert.equal(
+        requestKind('POST', joined(base, `${route}/${tail}`)),
+        'frame',
+        `${base} ${tail}`,
+      );
+});
+
+test('Look-alikes of the asset write routes are not frame requests', () => {
+  const route = '/v1/artifacts/a/revisions/2/runtime-views/view/3';
+  for (const [method, path, kind] of [
+    ['GET', `${route}/assets/upload`, 'read'],
+    ['GET', `${route}/assets/delete`, 'read'],
+    ['PUT', `${route}/assets/upload`, 'write'],
+    ['DELETE', `${route}/assets/delete`, 'write'],
+    ['POST', `${route}/assets/uploads`, 'write'],
+    ['POST', `${route}/assets/deletes`, 'write'],
+    ['POST', `${route}/assets/upload/x`, 'write'],
+    ['POST', `${route}/assets/delete/x`, 'write'],
+    ['POST', `${route}/asset/upload`, 'write'],
+    ['POST', '/v1/artifacts/a/runtime-views/view/3/assets/upload', 'write'],
+    [
+      'POST',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/x/assets/delete',
+      'write',
+    ],
+  ])
+    assert.equal(requestKind(method, path), kind, `${method} ${path}`);
+});
+
+test('An asset upload or delete is sent at once, and its refusal holds no owner read', async () => {
+  const { api, gate } = setup();
+  const route = '/v1/artifacts/a/revisions/2/runtime-views/view/3';
+  const owner = gate.fetch('/v1/artifacts');
+  gate.fetch(`${route}/assets/upload`, { method: 'POST' });
+  gate.fetch(`${route}/assets/delete`, { method: 'POST' });
+  await settle();
+  // The owner's read and both writes went out together.
+  assert.deepEqual(api.paths().sort(), [
+    'GET /v1/artifacts',
+    `POST ${route}/assets/delete`,
+    `POST ${route}/assets/upload`,
+  ]);
+  const at = (path) => api.paths().indexOf(path);
+  // The server limits frames apart from the owner: a 429 for a write made
+  // through a frame must not start the pause that holds every owner read.
+  api.answer(at(`POST ${route}/assets/upload`), limited(30));
+  api.answer(at(`POST ${route}/assets/delete`), limited(30));
+  await settle();
+  api.answer(at('GET /v1/artifacts'), Response.json({ artifacts: [] }));
+  const answered = await owner;
+  assert.equal(answered.status, 200);
+  await answered.json();
+  const next = gate.fetch('/v1/artifacts/b');
+  await settle();
+  assert.equal(api.paths().at(-1), 'GET /v1/artifacts/b');
+  api.answer(api.sent.length - 1);
+  assert.equal((await next).status, 200);
+});

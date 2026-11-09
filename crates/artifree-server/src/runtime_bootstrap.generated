@@ -231,6 +231,7 @@ var __ArtifreeBootstrap = (() => {
     invalid_request: "The runtime request was not valid.",
     denied: "The runtime request was not permitted.",
     stale_view: "The runtime view is out of date.",
+    conflict: "The uploaded assets are not at the version the call named.",
     not_found: "The requested source was not found.",
     rate_limited: "Too many runtime requests.",
     declined: "The user declined the request.",
@@ -239,10 +240,14 @@ var __ArtifreeBootstrap = (() => {
   };
   var RuntimeRequestFailure = class extends Error {
     code;
-    constructor(code, message) {
+    /** On a `conflict`: the version the artifact has now, if it was named. */
+    currentAssetVersion;
+    constructor(code, message, currentAssetVersion) {
       super(message ?? FAILURE_CODES[code]);
       this.name = "RuntimeRequestFailure";
       this.code = code;
+      if (currentAssetVersion !== void 0)
+        this.currentAssetVersion = currentAssetVersion;
     }
   };
   function isFailureCode(value) {
@@ -265,6 +270,9 @@ var __ArtifreeBootstrap = (() => {
   }
   function isAssetType(value) {
     return typeof value === "string" && Object.hasOwn(ASSET_TYPES, value);
+  }
+  function isBaseVersion(value) {
+    return count(value) && value < Number.MAX_SAFE_INTEGER;
   }
   function argument(value, allowed) {
     try {
@@ -404,6 +412,21 @@ var __ArtifreeBootstrap = (() => {
       return void 0;
     return { path, revision, size, sha256: digest };
   }
+  function uploaded(value, sent) {
+    if (!record(value)) return void 0;
+    const { asset, assetVersion } = value;
+    const info = assetInfo(asset);
+    if (info === void 0 || info.contentType !== sent.contentType || info.size !== sent.size || info.sha256 !== sent.sha256 || !count(assetVersion) || assetVersion !== sent.baseAssetVersion + 1)
+      return void 0;
+    return { asset: info, assetVersion };
+  }
+  function removed(value, asked) {
+    if (!record(value)) return void 0;
+    const { assetId, assetVersion, deleted } = value;
+    if (assetId !== asked.assetId || typeof deleted !== "boolean" || !count(assetVersion) || assetVersion !== (deleted ? asked.baseAssetVersion + 1 : asked.baseAssetVersion))
+      return void 0;
+    return { assetId, assetVersion, deleted };
+  }
   function start(config) {
     if (window.artifree !== void 0)
       throw new Error("The Artifree runtime was already installed.");
@@ -425,7 +448,14 @@ var __ArtifreeBootstrap = (() => {
       if (pending === void 0) return;
       if (event.data.ok !== true) {
         const code = isFailureCode(event.data.code) ? event.data.code : "denied";
-        pending.reject(new RuntimeRequestFailure(code, pending.refusal));
+        const version = event.data.currentAssetVersion;
+        pending.reject(
+          new RuntimeRequestFailure(
+            code,
+            pending.refusal,
+            code === "conflict" && count(version) ? version : void 0
+          )
+        );
         return;
       }
       const value = pending.parse(event.data);
@@ -625,6 +655,54 @@ var __ArtifreeBootstrap = (() => {
           sha256: head.sha256,
           bytes: assembled
         };
+      },
+      upload(request) {
+        const fields = argument(request, [
+          "contentType",
+          "content",
+          "baseAssetVersion",
+          "retryId"
+        ]);
+        if (fields === void 0) return invalid();
+        const { contentType, content, baseAssetVersion, retryId } = fields;
+        if (!isAssetType(contentType) || !isBaseVersion(baseAssetVersion) || typeof retryId !== "string" || !RETRY_ID.test(retryId))
+          return invalid();
+        const bytes = fileBytes(content);
+        if (bytes === void 0) return invalid();
+        const sent = {
+          contentType,
+          size: bytes.length,
+          sha256: sha256Hex(bytes),
+          baseAssetVersion
+        };
+        return call(
+          {
+            type: "assets.upload",
+            retryId,
+            baseAssetVersion,
+            contentType,
+            bytes: bytes.buffer
+          },
+          (reply) => uploaded(reply.uploaded, sent),
+          { timeout: WRITE_TIMEOUT_MS, transfer: [bytes.buffer] }
+        );
+      },
+      delete(request) {
+        const fields = argument(request, [
+          "assetId",
+          "baseAssetVersion",
+          "retryId"
+        ]);
+        if (fields === void 0) return invalid();
+        const { assetId, baseAssetVersion, retryId } = fields;
+        if (!isAssetId(assetId) || !isBaseVersion(baseAssetVersion) || typeof retryId !== "string" || !RETRY_ID.test(retryId))
+          return invalid();
+        const asked = { assetId, baseAssetVersion };
+        return call(
+          { type: "assets.delete", retryId, baseAssetVersion, assetId },
+          (reply) => removed(reply.removed, asked),
+          { timeout: WRITE_TIMEOUT_MS }
+        );
       }
     });
     window.artifree = Object.freeze({

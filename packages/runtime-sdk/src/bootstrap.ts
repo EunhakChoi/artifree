@@ -1,8 +1,12 @@
 import type {
   AssetContent,
   AssetContentType,
+  AssetDeleteReceipt,
+  AssetDeleteRequest,
   AssetInfo,
   AssetListing,
+  AssetUploadReceipt,
+  AssetUploadRequest,
   DownloadReceipt,
   RuntimeFailureCode,
   RuntimeMetadata,
@@ -64,6 +68,7 @@ const FAILURE_CODES: Record<RuntimeFailureCode, string> = {
   invalid_request: 'The runtime request was not valid.',
   denied: 'The runtime request was not permitted.',
   stale_view: 'The runtime view is out of date.',
+  conflict: 'The uploaded assets are not at the version the call named.',
   not_found: 'The requested source was not found.',
   rate_limited: 'Too many runtime requests.',
   declined: 'The user declined the request.',
@@ -77,11 +82,19 @@ const FAILURE_CODES: Record<RuntimeFailureCode, string> = {
  */
 class RuntimeRequestFailure extends Error {
   readonly code: RuntimeFailureCode;
+  /** On a `conflict`: the version the artifact has now, if it was named. */
+  readonly currentAssetVersion?: number;
 
-  constructor(code: RuntimeFailureCode, message?: string) {
+  constructor(
+    code: RuntimeFailureCode,
+    message?: string,
+    currentAssetVersion?: number,
+  ) {
     super(message ?? FAILURE_CODES[code]);
     this.name = 'RuntimeRequestFailure';
     this.code = code;
+    if (currentAssetVersion !== undefined)
+      this.currentAssetVersion = currentAssetVersion;
   }
 }
 
@@ -112,6 +125,14 @@ function isAssetId(value: unknown): value is string {
 
 function isAssetType(value: unknown): value is AssetContentType {
   return typeof value === 'string' && Object.hasOwn(ASSET_TYPES, value);
+}
+
+/**
+ * A base version a write may name: a count that one more write still leaves a
+ * safe integer.
+ */
+function isBaseVersion(value: unknown): value is number {
+  return count(value) && value < Number.MAX_SAFE_INTEGER;
 }
 
 /**
@@ -415,6 +436,59 @@ function written(value: unknown, sent: Saved): WriteReceipt | undefined {
   return { path, revision, size, sha256: digest };
 }
 
+/** What an upload must answer, from the call the frame made. */
+interface SentAsset {
+  readonly contentType: AssetContentType;
+  readonly size: number;
+  readonly sha256: string;
+  readonly baseAssetVersion: number;
+}
+
+/**
+ * An upload receipt, checked against the call: the asset has the type, size and
+ * digest of the bytes sent, and the version is the one after the base version.
+ */
+function uploaded(
+  value: unknown,
+  sent: SentAsset,
+): AssetUploadReceipt | undefined {
+  if (!record(value)) return undefined;
+  const { asset, assetVersion } = value;
+  const info = assetInfo(asset);
+  if (
+    info === undefined ||
+    info.contentType !== sent.contentType ||
+    info.size !== sent.size ||
+    info.sha256 !== sent.sha256 ||
+    !count(assetVersion) ||
+    assetVersion !== sent.baseAssetVersion + 1
+  )
+    return undefined;
+  return { asset: info, assetVersion };
+}
+
+/**
+ * A deletion receipt, checked against the call: it names the asset asked for,
+ * and its version is the base version when nothing was deleted, and the one
+ * after it when something was.
+ */
+function removed(
+  value: unknown,
+  asked: { readonly assetId: string; readonly baseAssetVersion: number },
+): AssetDeleteReceipt | undefined {
+  if (!record(value)) return undefined;
+  const { assetId, assetVersion, deleted } = value;
+  if (
+    assetId !== asked.assetId ||
+    typeof deleted !== 'boolean' ||
+    !count(assetVersion) ||
+    assetVersion !==
+      (deleted ? asked.baseAssetVersion + 1 : asked.baseAssetVersion)
+  )
+    return undefined;
+  return { assetId, assetVersion, deleted };
+}
+
 interface Waiting {
   readonly parse: (reply: Record<string, unknown>) => unknown;
   readonly resolve: (value: never) => void;
@@ -448,7 +522,15 @@ export function start(config: RuntimeInitialization): void {
     if (pending === undefined) return;
     if (event.data.ok !== true) {
       const code = isFailureCode(event.data.code) ? event.data.code : 'denied';
-      pending.reject(new RuntimeRequestFailure(code, pending.refusal));
+      // Only a conflict names a version, and only a count is believed.
+      const version = event.data.currentAssetVersion;
+      pending.reject(
+        new RuntimeRequestFailure(
+          code,
+          pending.refusal,
+          code === 'conflict' && count(version) ? version : undefined,
+        ),
+      );
       return;
     }
     const value = pending.parse(event.data);
@@ -716,6 +798,67 @@ export function start(config: RuntimeInitialization): void {
         sha256: head.sha256,
         bytes: assembled,
       };
+    },
+    upload(request: AssetUploadRequest): Promise<AssetUploadReceipt> {
+      const fields = argument(request, [
+        'contentType',
+        'content',
+        'baseAssetVersion',
+        'retryId',
+      ]);
+      if (fields === undefined) return invalid();
+      const { contentType, content, baseAssetVersion, retryId } = fields;
+      if (
+        !isAssetType(contentType) ||
+        !isBaseVersion(baseAssetVersion) ||
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId)
+      )
+        return invalid();
+      const bytes = fileBytes(content);
+      if (bytes === undefined) return invalid();
+      const sent: SentAsset = {
+        contentType,
+        size: bytes.length,
+        sha256: sha256Hex(bytes),
+        baseAssetVersion,
+      };
+      // One attempt. A write is never retried here, since it may already be
+      // stored; the frame retries it with the same retryId.
+      return call(
+        {
+          type: 'assets.upload',
+          retryId,
+          baseAssetVersion,
+          contentType,
+          bytes: bytes.buffer,
+        },
+        (reply) => uploaded(reply.uploaded, sent),
+        { timeout: WRITE_TIMEOUT_MS, transfer: [bytes.buffer] },
+      );
+    },
+    delete(request: AssetDeleteRequest): Promise<AssetDeleteReceipt> {
+      const fields = argument(request, [
+        'assetId',
+        'baseAssetVersion',
+        'retryId',
+      ]);
+      if (fields === undefined) return invalid();
+      const { assetId, baseAssetVersion, retryId } = fields;
+      if (
+        !isAssetId(assetId) ||
+        !isBaseVersion(baseAssetVersion) ||
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId)
+      )
+        return invalid();
+      const asked = { assetId, baseAssetVersion };
+      // One attempt, as for upload.
+      return call(
+        { type: 'assets.delete', retryId, baseAssetVersion, assetId },
+        (reply) => removed(reply.removed, asked),
+        { timeout: WRITE_TIMEOUT_MS },
+      );
     },
   });
 

@@ -305,6 +305,7 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
         declared.supported,
         [
             "assets.read",
+            "assets.write",
             "metadata.read",
             "source.download",
             "source.read",
@@ -347,6 +348,7 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
         omitted.supported,
         [
             "assets.read",
+            "assets.write",
             "metadata.read",
             "source.download",
             "source.read",

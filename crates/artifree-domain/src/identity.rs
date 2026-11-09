@@ -304,9 +304,11 @@ impl fmt::Display for UserLabel {
 /// Keys are scoped to the actor that sent them. A caller-chosen key (an HTTP
 /// `Idempotency-Key`, an MCP argument) is parsed with [`FromStr`], whose
 /// grammar has not changed: 8 to 128 ASCII letters, digits and `-_.:`. The
-/// key of a runtime frame write is built only by
-/// [`RequestKey::runtime_write`] and starts with [`RUNTIME_WRITE_PREFIX`],
-/// which holds a character outside that grammar. No text can therefore parse
+/// keys of runtime frame writes are built only by
+/// [`RequestKey::runtime_write`] (source writes, which start with
+/// [`RUNTIME_WRITE_PREFIX`]) and [`RequestKey::runtime_asset_write`] (asset
+/// uploads and deletes, which start with [`RUNTIME_ASSET_WRITE_PREFIX`]). Both
+/// prefixes hold a character outside that grammar. No text can therefore parse
 /// to a frame's key, a frame's retry identity can never equal, or be made
 /// equal by, a key an agent or the owner's own client sends, and no key that
 /// parsed before the namespace existed is refused now.
@@ -318,10 +320,17 @@ pub struct RequestKey(String);
 /// Do not change it to a character that grammar accepts.
 pub const RUNTIME_WRITE_PREFIX: &str = "rtw~";
 
+/// The start of every key [`RequestKey::runtime_asset_write`] builds. Its `~`
+/// is outside the grammar [`FromStr`] accepts, so no parsed key can contain it.
+/// Do not change it to a character that grammar accepts. It differs from
+/// [`RUNTIME_WRITE_PREFIX`], so an asset write and a source write never share
+/// a key, even with the same retry identity.
+pub const RUNTIME_ASSET_WRITE_PREFIX: &str = "rta~";
+
 /// Longest retry identity a runtime frame supplies, so that the whole key
-/// stays within 128 characters: the prefix, an artifact identifier, a
-/// 32-character view, a generation of at most 16 digits, three separators and
-/// the identity (4 + 36 + 32 + 16 + 3 + 36 = 127).
+/// stays within 128 characters: the prefix (either one is four characters),
+/// an artifact identifier, a 32-character view, a generation of at most 16
+/// digits, three separators and the identity (4 + 36 + 32 + 16 + 3 + 36 = 127).
 pub const MAX_RUNTIME_RETRY_ID: usize = 36;
 
 /// Shortest retry identity a runtime frame supplies.
@@ -353,6 +362,40 @@ impl RequestKey {
         generation: u64,
         retry_id: &str,
     ) -> Result<Self, InvalidValue> {
+        Self::runtime(RUNTIME_WRITE_PREFIX, artifact, view, generation, retry_id)
+    }
+
+    /// The key of one runtime frame asset upload or delete. It has the same
+    /// scope and retry rules as [`RequestKey::runtime_write`], but it starts
+    /// with [`RUNTIME_ASSET_WRITE_PREFIX`], an operation tag disjoint from
+    /// source writes (decision 0045, rule 12), so the two never share a key.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`RequestKey::runtime_write`].
+    pub fn runtime_asset_write(
+        artifact: &ArtifactId,
+        view: &str,
+        generation: u64,
+        retry_id: &str,
+    ) -> Result<Self, InvalidValue> {
+        Self::runtime(
+            RUNTIME_ASSET_WRITE_PREFIX,
+            artifact,
+            view,
+            generation,
+            retry_id,
+        )
+    }
+
+    /// Validates a runtime frame key's parts and joins them after `prefix`.
+    fn runtime(
+        prefix: &str,
+        artifact: &ArtifactId,
+        view: &str,
+        generation: u64,
+        retry_id: &str,
+    ) -> Result<Self, InvalidValue> {
         const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
         let word = |value: &str, min: usize, max: usize, extra: &[u8]| {
             (min..=max).contains(&value.len())
@@ -378,9 +421,8 @@ impl RequestKey {
                 rule: "expected 8-36 ASCII letters, digits, '-' or '_'",
             });
         }
-        Ok(Self(format!(
-            "{RUNTIME_WRITE_PREFIX}{artifact}:{view}:{generation}:{retry_id}"
-        )))
+        let value = format!("{prefix}{artifact}:{view}:{generation}:{retry_id}");
+        Ok(Self(value))
     }
 }
 
@@ -691,5 +733,107 @@ mod tests {
                 "accepted {view:?} {generation} {retry:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_runtime_write_key_keeps_its_existing_spelling() {
+        // Keys already stored for source writes must keep matching their
+        // retries, so this spelling is part of the stored contract.
+        let artifact = ArtifactId::from_random([0xab; 16]);
+        let key = RequestKey::runtime_write(&artifact, "view1", 3, "retry-0001")
+            .map(|key| key.as_str().to_owned());
+        assert_eq!(
+            key,
+            Ok("rtw~art_abababababababababababababababab:view1:3:retry-0001".to_owned())
+        );
+    }
+
+    #[test]
+    fn no_text_parses_to_a_runtime_asset_write_key() {
+        let artifact = ArtifactId::from_random([7; 16]);
+        let built = RequestKey::runtime_asset_write(&artifact, "v", 1, "retry-0001")
+            .unwrap_or_else(|error| panic!("asset key: {error}"))
+            .as_str()
+            .to_owned();
+        assert!(built.starts_with(RUNTIME_ASSET_WRITE_PREFIX), "{built:?}");
+        // The key an asset write has is not accepted back as text, in any
+        // letter case, so no caller can replay or forge it by echoing it.
+        for value in [built.clone(), built.to_uppercase(), built.to_lowercase()] {
+            assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
+        // The prefix itself holds a character the grammar refuses, so no
+        // spelling of it can parse.
+        assert!(
+            RUNTIME_ASSET_WRITE_PREFIX
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))),
+            "{RUNTIME_ASSET_WRITE_PREFIX:?} is inside the public key grammar"
+        );
+        for value in ["rta~request-1", "rta~anything-at-all"] {
+            assert!(value.parse::<RequestKey>().is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn a_runtime_asset_write_key_differs_from_a_source_write_key_for_the_same_parts() {
+        let artifact = ArtifactId::from_random([1; 16]);
+        let asset = RequestKey::runtime_asset_write(&artifact, "view1", 3, "retry-0001")
+            .unwrap_or_else(|error| panic!("asset key: {error}"))
+            .as_str()
+            .to_owned();
+        let source = RequestKey::runtime_write(&artifact, "view1", 3, "retry-0001")
+            .unwrap_or_else(|error| panic!("source key: {error}"))
+            .as_str()
+            .to_owned();
+        assert_ne!(
+            asset, source,
+            "an asset write and a source write share a key"
+        );
+        assert!(asset.starts_with(RUNTIME_ASSET_WRITE_PREFIX), "{asset:?}");
+        assert!(source.starts_with(RUNTIME_WRITE_PREFIX), "{source:?}");
+        // Only the operation tag differs: the scope and the retry identity
+        // are spelled the same way in both keys.
+        assert_eq!(
+            asset.strip_prefix(RUNTIME_ASSET_WRITE_PREFIX),
+            source.strip_prefix(RUNTIME_WRITE_PREFIX),
+        );
+    }
+
+    #[test]
+    fn a_runtime_asset_write_key_refuses_parts_that_could_blur_its_scope() {
+        let artifact = ArtifactId::from_random([1; 16]);
+        // A valid key is accepted; each part outside the grammar is refused.
+        assert!(
+            RequestKey::runtime_asset_write(&artifact, "view", 1, "retry-0001").is_ok(),
+            "refused a valid asset write key"
+        );
+        for (view, generation, retry) in [
+            ("", 1, "retry-0001"),
+            ("vi:ew", 1, "retry-0001"),
+            (&"v".repeat(33), 1, "retry-0001"),
+            ("view", 0, "retry-0001"),
+            ("view", 9_007_199_254_740_992, "retry-0001"),
+            ("view", 1, "short"),
+            ("view", 1, "retry:0001"),
+            ("view", 1, "retry 0001"),
+            ("view", 1, &"r".repeat(MAX_RUNTIME_RETRY_ID + 1)),
+        ] {
+            assert!(
+                RequestKey::runtime_asset_write(&artifact, view, generation, retry).is_err(),
+                "accepted {view:?} {generation} {retry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_longest_runtime_asset_write_key_is_127_characters() {
+        let artifact = ArtifactId::from_random([9; 16]);
+        let longest = RequestKey::runtime_asset_write(
+            &artifact,
+            &"f".repeat(32),
+            9_007_199_254_740_991,
+            &"r".repeat(MAX_RUNTIME_RETRY_ID),
+        );
+        assert_eq!(longest.map(|key| key.as_str().len()), Ok(127));
     }
 }

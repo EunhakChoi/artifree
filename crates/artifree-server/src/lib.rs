@@ -30,6 +30,8 @@ pub mod worker;
 #[cfg(test)]
 mod runtime_asset_tests;
 #[cfg(test)]
+mod runtime_asset_write_tests;
+#[cfg(test)]
 mod runtime_tests;
 
 use std::collections::BTreeMap;

@@ -23,18 +23,20 @@ use std::time::Duration;
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactList, AssetList, CancelJobRequest,
     CancelJobResponse, CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers,
-    DataOutboxBinding, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
-    EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff,
-    HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest,
-    PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
-    RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
-    RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeConnection,
+    DataOutboxBinding, DataWriteResponse, DeleteAssetResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode,
+    ErrorResponse, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
+    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest,
+    RoomJoinRequest, RoomSnapshot, RuntimeAssetDeleteRequest, RuntimeAssetListRequest,
+    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeConnection,
     RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
     RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
     SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest,
     UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    UploadAssetResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::jobs::{Clock, SystemClock};
@@ -606,9 +608,11 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
 const MAX_FRAME_BODY_BYTES: usize = 16 * 1024;
 
 /// Largest body of a frame's write: 1.5 MiB, which holds the base64 of the
-/// largest file (1,398,104 characters, `MAX_RUNTIME_SOURCE_WRITE_BASE64`) and
-/// the small fields around it (decision 0033). Only the write route has this
-/// limit; a test writes a file of the largest size.
+/// largest file (1,398,104 characters, `MAX_RUNTIME_SOURCE_WRITE_BASE64` and
+/// `MAX_RUNTIME_ASSET_UPLOAD_BASE64`) and the small fields around it
+/// (decisions 0033 and 0045). Only the source write and asset upload routes
+/// have this limit; the other frame routes, asset deletion included, keep
+/// [`MAX_FRAME_BODY_BYTES`]. A test writes a file of the largest size.
 const MAX_FRAME_WRITE_BODY_BYTES: usize = 3 * 512 * 1024;
 
 /// Largest body of a room call: a state or an event's text is at most 512
@@ -679,6 +683,15 @@ fn frame_routes(state: &AppState) -> Router<AppState> {
         .route(
             &format!("{VIEW}/assets/read"),
             axum::routing::post(runtime_assets_read),
+        )
+        .route(
+            &format!("{VIEW}/assets/upload"),
+            axum::routing::post(runtime_assets_upload)
+                .layer(DefaultBodyLimit::max(MAX_FRAME_WRITE_BODY_BYTES)),
+        )
+        .route(
+            &format!("{VIEW}/assets/delete"),
+            axum::routing::post(runtime_assets_delete),
         )
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_FRAME_BODY_BYTES))
@@ -2079,6 +2092,50 @@ async fn runtime_assets_read(
         initialization: &request.initialization,
     };
     runtime_assets::read(&state, &call, &request)
+        .await
+        .map(Json)
+}
+
+/// Uploads one asset for the frame (decision 0045, rule 12).
+async fn runtime_assets_upload(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeAssetUploadRequest>, JsonRejection>,
+) -> Result<Json<UploadAssetResponse>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_assets::upload(&state, &call, &request)
+        .await
+        .map(Json)
+}
+
+/// Deletes one asset of the frame's artifact (decision 0045, rule 12).
+async fn runtime_assets_delete(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeAssetDeleteRequest>, JsonRejection>,
+) -> Result<Json<DeleteAssetResponse>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_assets::delete(&state, &call, &request)
         .await
         .map(Json)
 }

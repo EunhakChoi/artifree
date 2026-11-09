@@ -1,6 +1,7 @@
 //! Private uploads share the artifact application boundary (0045).
 
 use crate::artifacts::{ArtifactService, Fingerprint};
+use artifree_domain::SourceRevision;
 use artifree_domain::assets::{AssetId, AssetMediaType, AssetRejection, AssetVersion};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
 use artifree_ports::artifact_store::{ArtifactStore, RequestIdentity};
@@ -20,6 +21,19 @@ pub struct AssetUpload<'a> {
     /// Server time.
     pub now: UnixMillis,
 }
+
+/// One scoped asset association to delete. Like `AssetUpload`, it carries the
+/// base and server time.
+#[derive(Debug, Clone, Copy)]
+pub struct AssetDeletion<'a> {
+    /// Independent base, unrelated to source revisions.
+    pub base: AssetVersion,
+    /// Association to delete from the artifact.
+    pub id: &'a AssetId,
+    /// Server time.
+    pub now: UnixMillis,
+}
+
 impl<S: ArtifactStore + AssetStore> ArtifactService<S> {
     /// Reads one scoped asset snapshot under current authority.
     /// # Errors
@@ -74,6 +88,43 @@ impl<S: ArtifactStore + AssetStore> ArtifactService<S> {
         upload: AssetUpload<'_>,
         validate: impl FnOnce(&AssetMediaType, &[u8]) -> Result<(), AssetRejection>,
     ) -> Result<AssetReceipt, AssetStoreError> {
+        self.upload_fenced(actor, key, artifact, upload, None, validate)
+    }
+    /// Uploads one runtime frame's asset, fenced to the source revision its
+    /// binding pinned. The store checks that head before key replay, so a
+    /// changed source refuses the call instead of replaying an old receipt
+    /// (0045 rule 12).
+    /// # Errors
+    /// The same errors as `upload_asset`, plus
+    /// `AssetStoreError::SourceConflict` when the source head moved.
+    pub fn runtime_upload_asset(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        artifact: &ArtifactId,
+        upload: AssetUpload<'_>,
+        expected_source: SourceRevision,
+    ) -> Result<AssetReceipt, AssetStoreError> {
+        self.upload_fenced(
+            actor,
+            key,
+            artifact,
+            upload,
+            Some(expected_source),
+            crate::asset_validation::validate,
+        )
+    }
+    /// Shared upload path. `expected_source` is the runtime source fence, or
+    /// `None` for a caller that holds no frame.
+    fn upload_fenced(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        artifact: &ArtifactId,
+        upload: AssetUpload<'_>,
+        expected_source: Option<SourceRevision>,
+        validate: impl FnOnce(&AssetMediaType, &[u8]) -> Result<(), AssetRejection>,
+    ) -> Result<AssetReceipt, AssetStoreError> {
         if upload.bytes.len() > artifree_domain::assets::MAX_ASSET_BYTES {
             return Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded));
         }
@@ -90,7 +141,7 @@ impl<S: ArtifactStore + AssetStore> ArtifactService<S> {
             },
             artifact,
             base: upload.base,
-            expected_source: None,
+            expected_source,
             now: upload.now,
         };
         if let Some(receipt) = self.store.preflight_asset(write)? {
@@ -112,6 +163,35 @@ impl<S: ArtifactStore + AssetStore> ArtifactService<S> {
         id: &AssetId,
         now: UnixMillis,
     ) -> Result<AssetReceipt, AssetStoreError> {
+        self.delete_fenced(actor, key, artifact, AssetDeletion { base, id, now }, None)
+    }
+    /// Deletes one runtime frame's asset association, fenced to the source
+    /// revision its binding pinned. The store checks that head before key
+    /// replay, as for uploads (0045 rule 12).
+    /// # Errors
+    /// The same errors as `delete_asset`, plus
+    /// `AssetStoreError::SourceConflict` when the source head moved.
+    pub fn runtime_delete_asset(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        artifact: &ArtifactId,
+        deletion: AssetDeletion<'_>,
+        expected_source: SourceRevision,
+    ) -> Result<AssetReceipt, AssetStoreError> {
+        self.delete_fenced(actor, key, artifact, deletion, Some(expected_source))
+    }
+    /// Shared delete path. `expected_source` is the runtime source fence, or
+    /// `None` for a caller that holds no frame.
+    fn delete_fenced(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        artifact: &ArtifactId,
+        deletion: AssetDeletion<'_>,
+        expected_source: Option<SourceRevision>,
+    ) -> Result<AssetReceipt, AssetStoreError> {
+        let AssetDeletion { base, id, now } = deletion;
         let mut fingerprint = Fingerprint::new("delete_asset");
         fingerprint.field(artifact.as_str().as_bytes());
         fingerprint.field(&base.0.to_be_bytes());
@@ -125,7 +205,7 @@ impl<S: ArtifactStore + AssetStore> ArtifactService<S> {
                 },
                 artifact,
                 base,
-                expected_source: None,
+                expected_source,
                 now,
             },
             id,

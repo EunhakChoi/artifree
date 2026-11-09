@@ -332,7 +332,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -344,7 +344,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -559,6 +559,55 @@ mod tests {
             session.permits(&scope, everything, Capability::SourceRead),
             Err(GrantDenied::Closed),
             "a closed connection is not a revoked grant"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assets_write_is_granted_and_withdrawn_on_its_own() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let actor: ActorId = "local".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|error| format!("{error:?}"))?;
+        let session = sessions
+            .get(&actor, &id)
+            .map_err(|error| format!("{error:?}"))?;
+        let scope = GrantScope::new(
+            ArtifactId::from_random([1; 16]),
+            SourceRevision(1),
+            SourceRevision(1),
+        );
+        let write = session
+            .set_grant(scope.clone(), only("assets.write")?, 0)
+            .map_err(|error| format!("{error:?}"))?;
+        for capability in Capability::ALL {
+            let expected = if capability == Capability::AssetsWrite {
+                Ok(())
+            } else {
+                Err(GrantDenied::NotGranted)
+            };
+            assert_eq!(
+                session.permits(&scope, write, capability),
+                expected,
+                "assets.write alone must permit only itself, checked {capability:?}"
+            );
+        }
+        // Withdrawing assets.write while source.read stays granted withdraws
+        // only writing.
+        let read = session
+            .set_grant(scope.clone(), only("source.read")?, write)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            session.permits(&scope, read, Capability::AssetsWrite),
+            Err(GrantDenied::NotGranted),
+            "withdrawing assets.write must withdraw writing"
+        );
+        assert_eq!(
+            session.permits(&scope, read, Capability::SourceRead),
+            Ok(()),
+            "withdrawing assets.write must leave source.read"
         );
         Ok(())
     }

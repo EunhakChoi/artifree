@@ -40,6 +40,16 @@ const CAPABILITY_CONTROLS = [
     warning:
       "Allowing this gives the app the bytes of this artifact's private uploaded files. The preview is not isolated from the network, so the app could send those bytes elsewhere. Allowing access does not make the files safe to run.",
   },
+  {
+    name: 'assets.write',
+    allow: 'Allow uploaded file changes',
+    revoke: 'Revoke uploaded file changes',
+    // Shown beside the control, because the grant lets the app add and delete
+    // private uploaded files without asking again, and a deletion cannot be
+    // undone (decision 0045).
+    warning:
+      "Allowing this lets the app add files to this artifact's private uploaded files and delete any of them, including files you uploaded, without asking you again until you revoke it or the artifact's source changes. Deleted files cannot be restored. Added files count toward this artifact's upload limits and are checked by type, which does not make them safe to run.",
+  },
 ] as const;
 
 interface RuntimePermissionsProps {

@@ -3,10 +3,11 @@ use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
     DataMembers, DuplicateArtifactResponse, EditFilesRequest, ErrorBody, ErrorResponse,
-    FeedPosition, MAX_DOWNLOAD_NAME, MAX_RUNTIME_ASSET_PART_BYTES, MAX_RUNTIME_SOURCE_PART_BYTES,
-    MAX_RUNTIME_SOURCE_WRITE_BASE64, MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview,
-    PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentResponse, Revision,
-    RevisionList, RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest,
+    FeedPosition, MAX_DOWNLOAD_NAME, MAX_RUNTIME_ASSET_PART_BYTES, MAX_RUNTIME_ASSET_UPLOAD_BASE64,
+    MAX_RUNTIME_ASSET_UPLOAD_BYTES, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64,
+    MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview, PurgeArtifactResponse, ReadDataMembersQuery,
+    RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeAssetDeleteRequest,
+    RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest,
     RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
     RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView,
     SaveRevisionRequest, SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
@@ -339,6 +340,43 @@ fn runtime_asset_part_bounds_are_the_published_ones() -> Result<(), serde_json::
     Ok(())
 }
 
+/// The bounds an asset write states are the ones its schema publishes
+/// (decision 0045 rule 12): an upload's and a delete's `retry_id` is 8 to 36
+/// characters, and the base64 text of an upload is exactly the encoding of the
+/// 1 MiB byte bound.
+#[test]
+fn runtime_asset_write_bounds_are_the_published_ones() -> Result<(), serde_json::Error> {
+    let upload = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<RuntimeAssetUploadRequest>(),
+    )?;
+    let delete = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<RuntimeAssetDeleteRequest>(),
+    )?;
+    assert_eq!(
+        upload["properties"]["content_base64"]["maxLength"], MAX_RUNTIME_ASSET_UPLOAD_BASE64,
+        "the published base64 bound of an upload is the constant"
+    );
+    for (request, schema) in [("upload", &upload), ("delete", &delete)] {
+        assert_eq!(
+            schema["properties"]["retry_id"]["minLength"], 8,
+            "the {request} retry identity's minimum length"
+        );
+        assert_eq!(
+            schema["properties"]["retry_id"]["maxLength"], 36,
+            "the {request} retry identity's maximum length"
+        );
+    }
+    // 1 MiB is 349,525 whole groups of three bytes and one byte over, which
+    // base64 writes as 349,526 groups of four characters with padding.
+    assert_eq!(MAX_RUNTIME_ASSET_UPLOAD_BYTES, 1_048_576);
+    assert_eq!(MAX_RUNTIME_ASSET_UPLOAD_BASE64, 349_526 * 4);
+    Ok(())
+}
+
 /// Asserts that `T` reads `body`, and that the same body with a field nobody
 /// defines is refused, naming that field.
 fn assert_refuses_unknown_field<T>(body: Value)
@@ -371,6 +409,20 @@ fn runtime_asset_bodies_refuse_unknown_fields() {
     assert_refuses_unknown_field::<RuntimeAssetPart>(serde_json::json!({
         "asset_id": "a".repeat(64), "content_type": "text/plain", "offset": 8,
         "next_offset": null, "size": 10, "sha256": "0".repeat(64), "content": "BAU="
+    }));
+}
+
+/// The asset writes refuse a field they do not define, as the other request
+/// bodies do, rather than ignoring it.
+#[test]
+fn runtime_asset_write_bodies_refuse_unknown_fields() {
+    assert_refuses_unknown_field::<RuntimeAssetUploadRequest>(serde_json::json!({
+        "initialization": "secret", "retry_id": "retry-0001", "base_asset_version": 3,
+        "content_type": "text/plain", "content_base64": "aGk="
+    }));
+    assert_refuses_unknown_field::<RuntimeAssetDeleteRequest>(serde_json::json!({
+        "initialization": "secret", "retry_id": "retry-0001", "base_asset_version": 3,
+        "asset_id": "a".repeat(64)
     }));
 }
 

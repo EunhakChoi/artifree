@@ -19,6 +19,7 @@ export type FailureCode =
   | 'invalid_request'
   | 'denied'
   | 'stale_view'
+  | 'conflict'
   | 'not_found'
   | 'rate_limited'
   | 'declined'
@@ -37,7 +38,7 @@ const RETRY_ID = /^[A-Za-z0-9_-]{8,36}$/;
 /** The most bytes a frame may ask for in one part. */
 const MAX_PART = 1_048_576;
 
-/** The most bytes of one file a frame may save in one call. */
+/** The most bytes of one file a frame may save or upload in one call. */
 const MAX_WRITE = 1_048_576;
 
 /** The most bytes of an asset a frame may ask for in one part: 256 KiB. */
@@ -48,6 +49,17 @@ const MAX_ASSET_PART = 262_144;
  * out here, not imported, for the reason RETRY_ID gives (decision 0033).
  */
 const ASSET_ID = /^[0-9a-f]{64}$/;
+
+/**
+ * What a media type spelling looks like: `type/subtype` in lowercase letters,
+ * digits and the punctuation RFC 6838 allows in a name. Only the client knows
+ * which types an asset may have; this keeps the frame's value a spelling. It
+ * is written out here for the reason RETRY_ID gives.
+ */
+const MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+
+/** The most characters a frame may spell a media type with. */
+const MAX_MEDIA_TYPE_LENGTH = 127;
 
 /** A parsed, bounded call. */
 export type FrameCall =
@@ -81,6 +93,22 @@ export type FrameCall =
       readonly offset: number;
       readonly length: number;
     }
+  | {
+      readonly type: 'assets.upload';
+      readonly id: number;
+      readonly retryId: string;
+      readonly baseAssetVersion: number;
+      readonly contentType: string;
+      /** The frame's own copy, transferred to the page. */
+      readonly bytes: ArrayBuffer;
+    }
+  | {
+      readonly type: 'assets.delete';
+      readonly id: number;
+      readonly retryId: string;
+      readonly baseAssetVersion: number;
+      readonly assetId: string;
+    }
   | { readonly type: 'cancel'; readonly id: number };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -100,6 +128,15 @@ const SHAPES: Record<string, readonly string[]> = {
   'source.write': ['type', 'id', 'retryId', 'path', 'bytes'],
   'assets.list': ['type', 'id'],
   'assets.read': ['type', 'id', 'assetId', 'offset', 'length'],
+  'assets.upload': [
+    'type',
+    'id',
+    'retryId',
+    'baseAssetVersion',
+    'contentType',
+    'bytes',
+  ],
+  'assets.delete': ['type', 'id', 'retryId', 'baseAssetVersion', 'assetId'],
   cancel: ['type', 'id'],
 };
 
@@ -120,8 +157,8 @@ export function callId(message: unknown): number | undefined {
  * The call a message is, or undefined. Exactly the keys of its type, a
  * positive safe-integer id, a path the package rules accept, and a part
  * length within its bound: 1 MiB for a source part, 256 KiB for an asset
- * part. A message that is not an object, has another key, or has a value of
- * another type is not a call.
+ * part. A write carries at most 1 MiB of bytes. A message that is not an
+ * object, has another key, or has a value of another type is not a call.
  */
 export function parseCall(message: unknown): FrameCall | undefined {
   if (!isRecord(message)) return undefined;
@@ -189,6 +226,33 @@ export function parseCall(message: unknown): FrameCall | undefined {
         return undefined;
       return { type, id, assetId, offset, length };
     }
+    case 'assets.upload': {
+      const { retryId, baseAssetVersion, contentType, bytes } = message;
+      if (
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId) ||
+        !isCount(baseAssetVersion) ||
+        typeof contentType !== 'string' ||
+        contentType.length > MAX_MEDIA_TYPE_LENGTH ||
+        !MEDIA_TYPE.test(contentType) ||
+        !(bytes instanceof ArrayBuffer) ||
+        bytes.byteLength > MAX_WRITE
+      )
+        return undefined;
+      return { type, id, retryId, baseAssetVersion, contentType, bytes };
+    }
+    case 'assets.delete': {
+      const { retryId, baseAssetVersion, assetId } = message;
+      if (
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId) ||
+        !isCount(baseAssetVersion) ||
+        typeof assetId !== 'string' ||
+        !ASSET_ID.test(assetId)
+      )
+        return undefined;
+      return { type, id, retryId, baseAssetVersion, assetId };
+    }
     default:
       return undefined;
   }
@@ -196,7 +260,8 @@ export function parseCall(message: unknown): FrameCall | undefined {
 
 /**
  * The frame's word for a failure. The frame learns the kind of refusal and
- * nothing else: no server message, status or detail is passed on.
+ * nothing else: no server message, status or detail is passed on, except the
+ * asset version a conflict names (see `failureReply`).
  */
 export function failureCode(error: unknown): FailureCode {
   if (!isRecord(error) && !(error instanceof Error)) return 'unavailable';
@@ -219,7 +284,12 @@ export function failureCode(error: unknown): FailureCode {
     case 403:
       return 'denied';
     case 409:
-      return code === 'revision_conflict' ? 'stale_view' : 'unavailable';
+      if (code === 'revision_conflict') return 'stale_view';
+      // An asset conflict is one the frame can act on only when it names the
+      // version the server holds; without it the frame is told unavailable.
+      if (code === 'asset_conflict' && conflictVersion(error) !== undefined)
+        return 'conflict';
+      return 'unavailable';
     case 429:
       return 'rate_limited';
     case 400:
@@ -230,6 +300,37 @@ export function failureCode(error: unknown): FailureCode {
     default:
       return 'unavailable';
   }
+}
+
+/**
+ * The asset version an `asset_conflict` names. The server answers with
+ * `{ error: { code, current_asset_version } }`; the client keeps that whole
+ * answer as the error's `body`, so the version sits one level down. It is
+ * taken only when it is a count.
+ */
+function conflictVersion(error: unknown): number | undefined {
+  if (!isRecord(error) && !(error instanceof Error)) return undefined;
+  if (!('body' in error)) return undefined;
+  const { body } = error;
+  if (!isRecord(body) || !isRecord(body.error)) return undefined;
+  const version = body.error.current_asset_version;
+  return isCount(version) ? version : undefined;
+}
+
+/**
+ * The reply that ends a call which failed: its word and, for a conflict, the
+ * asset version the server holds, which the frame bases its next attempt on.
+ */
+function failureReply(id: number, error: unknown): FrameReply {
+  const code = failureCode(error);
+  const version = code === 'conflict' ? conflictVersion(error) : undefined;
+  return {
+    message:
+      version === undefined
+        ? { id, ok: false, code }
+        : { id, ok: false, code, currentAssetVersion: version },
+    transfer: [],
+  };
 }
 
 /** A message to the frame. */
@@ -344,10 +445,7 @@ export class FrameRpc {
           if (reply !== undefined) this.#reply(call.id, controller, reply);
         },
         (error: unknown) => {
-          this.#reply(call.id, controller, {
-            message: { id: call.id, ok: false, code: failureCode(error) },
-            transfer: [],
-          });
+          this.#reply(call.id, controller, failureReply(call.id, error));
         },
       )
       .finally(() => {
@@ -495,6 +593,47 @@ export class FrameRpc {
           },
           transfer: [bytes],
         };
+      }
+      case 'assets.upload': {
+        // A frame's bytes are copied once, here; the client reads the copy.
+        const input = {
+          retryId: call.retryId,
+          baseAssetVersion: call.baseAssetVersion,
+          contentType: call.contentType,
+          bytes: new Uint8Array(call.bytes.slice(0)),
+        };
+        const receipt = await client.runtimeCall(view, (source, frame) =>
+          source.uploadRuntimeAsset(frame, view, input, signal),
+        );
+        return ok(call.id, {
+          uploaded: {
+            asset: {
+              id: receipt.asset.id,
+              contentType: receipt.asset.content_type,
+              size: receipt.asset.size_bytes,
+              sha256: receipt.asset.sha256,
+              createdAtMs: receipt.asset.created_at_ms,
+            },
+            assetVersion: receipt.asset_version,
+          },
+        });
+      }
+      case 'assets.delete': {
+        const input = {
+          assetId: call.assetId,
+          retryId: call.retryId,
+          baseAssetVersion: call.baseAssetVersion,
+        };
+        const receipt = await client.runtimeCall(view, (source, frame) =>
+          source.deleteRuntimeAsset(frame, view, input, signal),
+        );
+        return ok(call.id, {
+          removed: {
+            assetId: receipt.asset_id,
+            assetVersion: receipt.asset_version,
+            deleted: receipt.deleted,
+          },
+        });
       }
     }
   }

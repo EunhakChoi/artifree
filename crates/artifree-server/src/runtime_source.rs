@@ -34,7 +34,7 @@ use crate::http::AppState;
 use crate::operations::{
     ApiError, artifact_id, missing_view, package_path, revision_dto, revision_number, validate_view,
 };
-use crate::preview::{RuntimeDenied, ViewKey};
+use crate::preview::{PreviewTickets, RuntimeDenied, ViewKey};
 use crate::runtime_policy::Capability;
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -69,6 +69,13 @@ pub(crate) struct Authorized {
     pinned: SourceRevision,
     /// The artifact's head now.
     current: SourceRevision,
+}
+
+impl Authorized {
+    /// The head the view was pinned to when it was issued.
+    pub(crate) fn pinned(&self) -> SourceRevision {
+        self.pinned
+    }
 }
 
 fn denied(reason: RuntimeDenied) -> ApiError {
@@ -140,6 +147,51 @@ pub(crate) fn still_permitted(
 ) -> Result<(), ApiError> {
     permitted(state, call, &granted.artifact, granted.revision, capability)?;
     Ok(())
+}
+
+/// One authorized call's binding with every part owned. A write checks it
+/// again on the blocking task that commits it, which cannot borrow the
+/// request's parts.
+pub(crate) struct HeldCall {
+    actor: ActorId,
+    artifact: ArtifactId,
+    revision: SourceRevision,
+    view: String,
+    generation: u64,
+    initialization: String,
+}
+
+impl HeldCall {
+    /// The binding of `call` as `granted` checked it.
+    pub(crate) fn new(call: &FrameCall<'_>, granted: &Authorized) -> Self {
+        Self {
+            actor: call.actor.clone(),
+            artifact: granted.artifact.clone(),
+            revision: granted.revision,
+            view: call.view.to_owned(),
+            generation: call.generation,
+            initialization: call.initialization.to_owned(),
+        }
+    }
+
+    /// The binding and the connection's grant of `capability`, checked as
+    /// [`still_permitted`] checks them.
+    pub(crate) fn permitted(
+        &self,
+        previews: &PreviewTickets,
+        capability: Capability,
+    ) -> Result<(), ApiError> {
+        let key = ViewKey {
+            actor: &self.actor,
+            artifact: &self.artifact,
+            revision: self.revision,
+            view_id: &self.view,
+            generation: self.generation,
+            initialization: &self.initialization,
+        };
+        previews.runtime_access(&key, capability).map_err(denied)?;
+        Ok(())
+    }
 }
 
 /// The live check of one call for one capability, without a fence on the
@@ -515,20 +567,34 @@ fn judge(
 }
 
 /// The bytes of a frame's file: standard base64 with padding, of at most
-/// [`MAX_RUNTIME_SOURCE_WRITE_BYTES`] bytes. The route's body limit leaves
-/// room for text longer than that, so the length is judged first and an
-/// over-long text is refused without allocating a buffer for it.
-fn decoded(text: &str) -> Result<Vec<u8>, ApiError> {
-    if text.len() as u64 > MAX_RUNTIME_SOURCE_WRITE_BASE64 {
+/// `max_base64` characters of text and `max_bytes` bytes once decoded. The
+/// route's body limit leaves room for text longer than that, so the length is
+/// judged first and an over-long text is refused without allocating a buffer
+/// for it.
+pub(crate) fn decoded_within(
+    text: &str,
+    max_base64: u64,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ApiError> {
+    if text.len() as u64 > max_base64 {
         return Err(ApiError::invalid("content is larger than the write limit"));
     }
     let bytes = BASE64
         .decode(text)
         .map_err(|_| ApiError::invalid("content is not valid base64"))?;
-    if bytes.len() as u64 > MAX_RUNTIME_SOURCE_WRITE_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(ApiError::invalid("content is larger than the write limit"));
     }
     Ok(bytes)
+}
+
+/// The bytes of a source write, within the source write limits.
+fn decoded(text: &str) -> Result<Vec<u8>, ApiError> {
+    decoded_within(
+        text,
+        MAX_RUNTIME_SOURCE_WRITE_BASE64,
+        MAX_RUNTIME_SOURCE_WRITE_BYTES,
+    )
 }
 
 /// A commit failure, worded without anything the frame supplied: the path is

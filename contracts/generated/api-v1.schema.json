@@ -2429,6 +2429,39 @@
       ],
       "type": "object"
     },
+    "RuntimeAssetDeleteRequest": {
+      "additionalProperties": false,
+      "description": "Deletes one asset of the artifact a runtime view is bound to, on behalf of\nthe frame, and answers with a [`DeleteAssetResponse`]. It needs the\n`assets.write` grant (decision 0045 rule 12). Against the current base, an\nasset the artifact no longer has is not an error: the answer says\n`deleted: false` and the version does not move.",
+      "properties": {
+        "asset_id": {
+          "description": "The asset to delete: the `id` of one asset in the listing, 64 lowercase\nhexadecimal digits.",
+          "type": "string"
+        },
+        "base_asset_version": {
+          "description": "The asset space version the frame last observed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "retry_id": {
+          "description": "The frame's retry identity for this delete, as for an upload: 8 to 36\nASCII letters, digits, `-` or `_`.",
+          "maxLength": 36,
+          "minLength": 8,
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "retry_id",
+        "base_asset_version",
+        "asset_id"
+      ],
+      "type": "object"
+    },
     "RuntimeAssetListRequest": {
       "additionalProperties": false,
       "description": "Proves that the parent is listing the assets of its initialized view, which\nneeds the `assets.read` grant. Assets are not part of a source revision, so\nthe answer, an [`AssetList`], is the artifact's current asset space whatever\nrevision the view shows (decision 0045 rule 12).",
@@ -2527,6 +2560,45 @@
         "asset_id",
         "offset",
         "length"
+      ],
+      "type": "object"
+    },
+    "RuntimeAssetUploadRequest": {
+      "additionalProperties": false,
+      "description": "Uploads one asset to the artifact a runtime view is bound to, on behalf of\nthe frame, and answers with an [`UploadAssetResponse`]. It needs the\n`assets.write` grant (decision 0045 rule 12). Unless `base_asset_version` is\nstill the current asset space version, the upload is refused with\n`asset_conflict` and the current version.",
+      "properties": {
+        "base_asset_version": {
+          "description": "The asset space version the frame last observed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content_base64": {
+          "description": "The file's bytes as strict standard base64, at most 1,048,576 decoded\nbytes.",
+          "maxLength": 1398104,
+          "type": "string"
+        },
+        "content_type": {
+          "description": "The declared MIME type, lowercase and without parameters. New uploads\nadmit only `text/plain`, `text/csv`, `image/png` and `image/jpeg`, and\nthe server checks the bytes against the declared type.",
+          "type": "string"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "retry_id": {
+          "description": "The frame's retry identity for this upload: 8 to 36 ASCII letters,\ndigits, `-` or `_`. The server derives the idempotency key from it, the\nartifact, the view and its generation, so a retry with the same identity\nand request is answered with the first outcome, and the same identity\nwith another request is refused.",
+          "maxLength": 36,
+          "minLength": 8,
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "retry_id",
+        "base_asset_version",
+        "content_type",
+        "content_base64"
       ],
       "type": "object"
     },
@@ -3625,6 +3697,12 @@
     },
     {
       "$ref": "#/$defs/RuntimeAssetPart"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAssetUploadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAssetDeleteRequest"
     },
     {
       "$ref": "#/$defs/RuntimeDownloadRequest"
