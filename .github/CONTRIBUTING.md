@@ -67,8 +67,8 @@ Rust and Rust dependency changes must also pass the minimum-version check.
 These are the same installation and test commands as the `msrv` CI job:
 
 ```sh
-rustup toolchain install 1.88.0 --profile minimal --no-self-update
-cargo +1.88.0 test --workspace --all-features --locked
+rustup toolchain install 1.89.0 --profile minimal --no-self-update
+cargo +1.89.0 test --workspace --all-features --locked
 ```
 
 For dependency or workflow changes, run the corresponding CI tools. The installer
