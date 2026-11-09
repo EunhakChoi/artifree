@@ -43,7 +43,7 @@ a revision or data_version.
 Only text/plain, text/csv, image/png and image/jpeg can be uploaded today; the
 server refuses any other --content-type with asset_type_unsupported and stores
 nothing. A PNG must be complete and static (not animated); a JPEG must be an
-8-bit sequential (baseline) Huffman JPEG with one scan and nothing after its end;
+8-bit sequential (baseline or extended) Huffman JPEG with one scan and nothing after its end;
 progressive, multi-scan, arithmetic-coded and 12-bit JPEGs are refused. Both are at
 most 4096 pixels per axis and 16,777,216 pixels. The server refuses an image that is
 not, or whose bytes do not match the declared type, with invalid_asset. --content-type is required and is

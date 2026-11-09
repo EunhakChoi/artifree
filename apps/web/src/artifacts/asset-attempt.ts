@@ -158,7 +158,7 @@ export function refusalText(error: unknown): string {
     case 'invalid_asset':
       // The server refuses Unicode control characters (U+0000 to U+001F and
       // U+007F to U+009F) other than tab, line feed and carriage return.
-      return 'The file is empty, does not match its declared type, is not valid UTF-8 text, contains control characters other than tab, line feed and carriage return, or is a PNG or JPEG that is incomplete, animated, progressive or otherwise outside the accepted baseline JPEG form, or larger than 4096 pixels per axis or 16,777,216 pixels.';
+      return 'The file is empty, does not match its declared type, is not valid UTF-8 text, contains control characters other than tab, line feed and carriage return, or is a PNG or JPEG that is incomplete, animated, progressive, has bytes after its end (as camera trailers do) or is otherwise outside the accepted sequential JPEG form, or larger than 4096 pixels per axis or 16,777,216 pixels.';
     case 'asset_limit_exceeded':
       return 'Over the asset limit: 5 MiB per file, 64 files and 25 MiB per artifact, 256 files and 100 MiB across your artifacts.';
     case 'request_key_reused':

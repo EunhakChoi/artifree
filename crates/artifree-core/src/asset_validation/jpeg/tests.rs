@@ -14,7 +14,10 @@ use artifree_domain::assets::{AssetRejection, MAX_ASSET_BYTES};
 
 use super::entropy::HuffmanTable;
 use super::scan::walk_scan;
-use super::{Frame, Reader, check_dimensions, decode_with_zune, read_scan_input, validate_jpeg};
+use super::{
+    Frame, Reader, check_dimensions, contain_decoder_panic, decode_with_zune, read_scan_input,
+    validate_jpeg,
+};
 use crate::asset_validation::jpeg_fixtures::{
     AC_CHROMINANCE, AC_LUMINANCE, ComponentSpec, DC_CHROMINANCE, DC_LUMINANCE, HuffmanSpec,
     JpegSpec, Sampling, dht_payload, dqt_payload, encode, eoi, minimal_jpeg, segment, sof_payload,
@@ -1442,4 +1445,18 @@ fn rst_code(index: usize) -> u8 {
     let cycle = u8::try_from(index % 8)
         .unwrap_or_else(|error| panic!("{index} modulo 8 must fit a byte: {error}"));
     RST0 + cycle
+}
+
+#[test]
+fn a_panic_inside_the_decoder_is_refused_as_invalid_and_does_not_unwind() {
+    // zune-jpeg can panic in `decode_into` on some input; a stand-in closure panics the same way.
+    // Mutation check: calling the closure directly in `contain_decoder_panic` lets this unwind.
+    let outcome = contain_decoder_panic(|| panic!("the decoder panicked"));
+    assert_eq!(outcome, Err(AssetRejection::Invalid));
+    // An ordinary result passes through unchanged.
+    assert_eq!(contain_decoder_panic(|| Ok(())), Ok(()));
+    assert_eq!(
+        contain_decoder_panic(|| Err(AssetRejection::Invalid)),
+        Err(AssetRejection::Invalid)
+    );
 }

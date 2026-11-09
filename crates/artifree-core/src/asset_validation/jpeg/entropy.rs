@@ -7,10 +7,10 @@
 use artifree_domain::assets::AssetRejection;
 
 /// The byte that starts every marker. Fill bytes are also `0xFF`.
-const PREFIX: u8 = 0xFF;
+pub(super) const PREFIX: u8 = 0xFF;
 
 /// The byte that follows a `0xFF` data byte in entropy-coded data.
-const STUFF: u8 = 0x00;
+pub(super) const STUFF: u8 = 0x00;
 
 /// Most symbols one table may define: one per byte value.
 const MAX_SYMBOLS: usize = 256;

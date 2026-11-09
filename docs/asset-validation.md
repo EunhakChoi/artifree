@@ -106,12 +106,13 @@ Both the walk and the decoder run under the same process-wide decode lock as PNG
 validated, and are stored as sent. Strict choices of the walk go beyond the
 standard's readers: one-bits are required as padding, a restart marker after the
 last MCU is refused, and a zero-run (ZRL) that lands on coefficient 64 is refused.
-Duplicate symbols in one DHT table are not refused. The corroborating decoder also refuses some structurally valid files that the walk
+A DHT table that defines no symbols is refused even when no scan uses it, and duplicate
+symbols in one table are not refused. The corroborating decoder also refuses some structurally valid files that the walk
 accepts (for example an Adobe APP14 segment after the frame header of a gray frame,
 or a luma sampling factor of 3); they are `invalid_asset`. `zune-jpeg` can panic inside
-`decode_into` on some inputs it accepts the header of; there is no `catch_unwind`,
-so such a request ends as a 500 and the lock is released (a documented limit, not
-a rule 3 guarantee). Admitting progressive files is a recorded non-blocking
+`decode_into` on some inputs it accepts the header of; the decode runs under
+`catch_unwind` and a panic is refused as `invalid_asset`, so it neither unwinds the
+worker nor repeats as a 503. Admitting progressive files is a recorded non-blocking
 follow-up.
 
 Worst case measured (R09a): a 5,081,646-byte 4,096 by 4,096 4:4:4 file with a

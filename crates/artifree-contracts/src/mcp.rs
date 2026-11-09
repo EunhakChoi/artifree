@@ -888,7 +888,7 @@ fn asset_tools() -> [ToolDefinition; 4] {
                 "Upload one asset to an artifact's asset space. content_base64 holds the bytes \
                  themselves, as strict standard base64, never a host path or URL, and at most \
                  5 MiB decoded. Only UTF-8 text/plain, text/csv, complete static non-animated \
-                 image/png, and complete 8-bit sequential (baseline) Huffman image/jpeg with \
+                 image/png, and complete 8-bit sequential (baseline or extended) Huffman image/jpeg with \
                  one scan (at most 4096 pixels per axis and 16,777,216 pixels) are accepted \
                  currently. Any other declared type, such as image/gif, text/html, or \
                  image/svg+xml, fails with asset_type_unsupported. Empty content, invalid UTF-8, \

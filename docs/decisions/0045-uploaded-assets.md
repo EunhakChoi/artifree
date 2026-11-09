@@ -853,7 +853,8 @@ and is not a new decision. The PNG notes come first, the JPEG notes after them.
 - **Known limits.** APPn/COM contents are framed, not validated. The walk is
   stricter than libjpeg in three places (1-bit padding, no restart marker after
   the last MCU, ZRL may not land on coefficient 64). `zune-jpeg` can panic inside
-  `decode_into`; the request then ends as a 500 (no `catch_unwind`). The decoder also refuses a few
+  `decode_into`; the decode runs under `catch_unwind` (containing a dependency fault, not
+  reporting errors) and a panic is `invalid_asset`. The decoder also refuses a few
   files the walk accepts (an Adobe APP14 after a gray frame header, luma factor 3).
 - **Completeness label.** R09a is complete only for this subset. Progressive
   admission is a non-blocking follow-up. Owner questions: whether progressive JPEG

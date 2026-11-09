@@ -13,25 +13,20 @@ mod scan_tests;
 #[cfg(test)]
 mod tests;
 
+use std::panic::AssertUnwindSafe;
+
 use artifree_domain::assets::AssetRejection;
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
 use super::{MAX_IMAGE_AXIS, MAX_IMAGE_PIXELS};
-use entropy::HuffmanTable;
-use scan::{HuffmanTables, ScanPlan};
+use entropy::{HuffmanTable, PREFIX, STUFF};
+use scan::{HuffmanTables, MAX_BLOCKS_PER_MCU, ScanPlan};
 
 /// The first three bytes of every admitted file: the start-of-image marker `FF D8`, then `FF`,
 /// which begins the next marker.
 pub(super) const SIGNATURE: [u8; 3] = [0xFF, 0xD8, 0xFF];
-
-/// The byte that starts every marker. Fill bytes are also `FF`.
-const PREFIX: u8 = 0xFF;
-
-/// The marker code `00`. In entropy-coded data `FF 00` is a stuffed data byte, so this code is
-/// never a marker and is refused.
-const STUFF: u8 = 0x00;
 
 // Marker codes that the header parser reads. Every other marker before the scan is refused.
 const SOF0: u8 = 0xC0;
@@ -49,9 +44,6 @@ const MAX_COMPONENTS: usize = 4;
 
 /// Quantization table slots. The selector `Tq` is at most 3.
 const QUANT_SLOTS: usize = 4;
-
-/// Most blocks in one MCU. The scan walk keeps its own copy of this limit, which is private to it.
-const MAX_BLOCKS_PER_MCU: usize = 10;
 
 /// Largest decoder output that is allowed: four 8-bit channels at the largest admitted size.
 const MAX_DECODED_BYTES: usize = 4096 * 4096 * 4;
@@ -587,11 +579,26 @@ fn take_segment<'a>(reader: &mut Reader<'a>) -> Result<&'a [u8], AssetRejection>
 /// `Invalid` when the decoder refuses the image, reports other dimensions, asks for more than
 /// `MAX_DECODED_BYTES`, or the buffer cannot be allocated.
 ///
-/// # Panics
-/// zune-jpeg is not run under `catch_unwind`. A panic inside the decoder, on input that the walk
-/// accepted, unwinds to the caller. The caller holds the decode lock, which such a panic poisons,
-/// and the lock recovers its guard for the next holder.
+/// A panic inside the decoder is contained and refused as `Invalid`: see `contain_decoder_panic`.
 fn decode_with_zune(bytes: &[u8], width: u32, height: u32) -> Result<(), AssetRejection> {
+    contain_decoder_panic(|| decode_unwinding(bytes, width, height))
+}
+
+/// Runs `decode` and maps a panic inside it to `Invalid`.
+///
+/// This contains a fault in the third-party decoder (zune-jpeg can panic in `decode_into` on some
+/// input). It is not a way to report errors: every ordinary refusal is already a `Result`. Without
+/// it the panic would unwind the blocking worker and surface as an unavailable service, and the
+/// same file could repeat that. The closure only reads shared input and owns its decoder and
+/// buffer, so nothing it leaves behind is observed after an unwind.
+fn contain_decoder_panic(
+    decode: impl FnOnce() -> Result<(), AssetRejection>,
+) -> Result<(), AssetRejection> {
+    std::panic::catch_unwind(AssertUnwindSafe(decode)).unwrap_or(Err(AssetRejection::Invalid))
+}
+
+/// The decode that `decode_with_zune` runs under `contain_decoder_panic`.
+fn decode_unwinding(bytes: &[u8], width: u32, height: u32) -> Result<(), AssetRejection> {
     let max_axis = usize::try_from(MAX_IMAGE_AXIS).map_err(|_| AssetRejection::Invalid)?;
     let options = DecoderOptions::default()
         .set_strict_mode(true)

@@ -11,7 +11,7 @@ use super::entropy::{BitReader, HuffmanTable};
 /// Most blocks in one MCU. With more than one component, the blocks of an MCU are the sum of each
 /// component's horizontal times vertical sampling factor, and that sum is at most 10. A single
 /// component has one block per MCU.
-const MAX_BLOCKS_PER_MCU: usize = 10;
+pub(super) const MAX_BLOCKS_PER_MCU: usize = 10;
 
 /// Coefficients in one block. Index 0 is the DC coefficient, and AC symbols code indices 1 to 63.
 const BLOCK_SIZE: u32 = 64;
