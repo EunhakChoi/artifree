@@ -90,8 +90,8 @@ pub(crate) async fn read(
             "the stored asset is not as its metadata states",
         ));
     };
-    // The final check of the binding, the grant and the head, before the
-    // association lookup that follows it.
+    // The last check of the head and the last asynchronous check of the binding
+    // and the grant, made before the association lookup that follows it.
     authorize(state, call, Capability::AssetsRead).await?;
     // The association lookup is the last store read. Its id and digest must
     // both still match what was read, so bytes go out only for an asset that
