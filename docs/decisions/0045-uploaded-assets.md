@@ -4,7 +4,7 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); the remainder of R09d (frame upload/delete and device download) is proposed**.
 The current HTTP/storage slice accepts UTF-8 plain text/CSV, complete static
 PNG and complete JPEG of the sequential subset recorded in the R09a image
 validation notes at the end of this record. Other JPEG variants are refused as
@@ -733,7 +733,7 @@ those of rules 1-9. What rule 11 left open and this slice fixes:
   tool catalog gets the effect `asset`, whose mutating tools must require
   `idempotency_key`. The two read tools are read-only.
 - Asset writes emit no change-feed event, as over HTTP; MCP has no asset
-  subscription. Assets remain unreadable by a preview (R09d is not started).
+  subscription. A preview reads assets only through the R09d1 `assets.read` bridge below.
 
 Verification: the shared operations keep the existing HTTP asset tests green;
 `crates/artifree-server/tests/mcp_adapter.rs` and `scripts/tests/mcp.test.mjs`
@@ -793,7 +793,7 @@ and retry hints go to stderr.
   so an impossible value is a usage error (exit 2) before anything is sent.
 - **Not in this slice:** `asset show`, stdin or `--output -`, content-type
   inference, a CLI allowlist, CLI-side retry or a pending-request file, a typed
-  `currentAssetVersion`, PNG/JPEG admission (R09a), runtime grants (R09d), change
+  `currentAssetVersion`, PNG/JPEG admission (R09a), runtime write/download grants (R09d2, R09d3), change
   following, bulk upload.
 
 Verification: real-server CLI tests in `scripts/tests/cli-assets.test.mjs`
@@ -870,3 +870,42 @@ and is not a new decision. The PNG notes come first, the JPEG notes after them.
   **still missing** and is tracked in the roadmap R09a row.
 - **Not changed:** the envelope, fingerprints, replay order, schema and every
   client, MCP and CLI contract except their lists of accepted types.
+
+## R09d1: runtime `assets.read` (implementation notes)
+
+Rule 12's read half is implemented; `assets.write` (R09d2) and `assets.download`
+(R09d3) are not. Chromium is verified; Firefox re-verification is pending.
+
+- **Capability.** `assets.read` has its own declaration, support, consent and
+  connection grant, independent of every `source.*` capability. A grant of one
+  never admits the other. The consent text says the app receives the bytes of the
+  artifact's private uploaded files and that the preview is not isolated from the
+  network, so the app could send those bytes elsewhere.
+- **Routes.** `POST {VIEW}/assets/list` and `POST {VIEW}/assets/read` on the bound
+  frame route, with the same admission, no-store and body limit as the source
+  routes. The list returns the artifact's current asset space (assets are not part
+  of a source revision). A read takes `asset_id`, `offset` and `length`.
+- **Parts.** A part is at most 262,144 bytes (`MAX_RUNTIME_ASSET_PART_BYTES`) and
+  carries `asset_id`, `content_type`, `offset`, `next_offset` (null on the last
+  part), the whole asset's `size` and whole-asset `sha256`, and base64 `content`.
+  The digest comes from stored metadata and is not recomputed per part. An offset
+  past the end is `416`; an offset equal to the size reads an empty final part.
+- **Check order.** Binding (`404`), the connection's current grant (`403`) and the
+  artifact's head (`409`) are checked before the arguments are judged, and the
+  grant and head are checked again before the part is returned. A read also
+  confirms that the asset is still associated with the artifact with the same
+  digest, so a deletion that lands before that check releases no bytes (`404`).
+  The residual window is a deletion or grant change that lands after that check
+  and before the response is written; it is not closed, and a result already
+  returned is not recalled.
+- **Frame SDK.** `assets.list()` and `assets.read({ assetId })` return validated
+  listings and the assembled bytes. The SDK reads parts from offset 0, checks each
+  part's echoed identity, type, offsets and size against the first, and verifies
+  the assembled length and whole-asset SHA-256 before returning; a mismatch is
+  `unavailable`. There is no per-part public API.
+- **Not changed.** No CSP widening, no `allow-same-origin`, no `allow-downloads`,
+  no asset URL and no token for a frame. No new `ArtifreeClient` method: the host
+  reaches the routes through the runtime call helper, so the main web bundle does
+  not grow.
+- **Still not supported:** frame upload or delete (R09d2), device download
+  (R09d3), S02 shared roles and an offline asset outbox.

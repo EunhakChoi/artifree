@@ -15,6 +15,7 @@ pub mod preview;
 pub mod proxy;
 mod ranges;
 pub mod rooms;
+mod runtime_assets;
 mod runtime_policy;
 mod runtime_sessions;
 mod runtime_source;
@@ -26,6 +27,8 @@ mod users;
 pub mod web;
 pub mod worker;
 
+#[cfg(test)]
+mod runtime_asset_tests;
 #[cfg(test)]
 mod runtime_tests;
 

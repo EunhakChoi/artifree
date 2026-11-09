@@ -101,7 +101,7 @@ test('Requests are classified by what they change', () => {
     requestKind('POST', '/v1/artifacts/a/revisions/2/runtime-views'),
     'read',
   );
-  // What a runtime frame causes is its own kind (decision 0032).
+  // What a runtime frame causes is its own kind (decisions 0032 and 0045).
   for (const tail of [
     'metadata',
     'source/list',
@@ -109,6 +109,8 @@ test('Requests are classified by what they change', () => {
     'source/offer',
     'source/download',
     'source/write',
+    'assets/list',
+    'assets/read',
   ])
     assert.equal(
       requestKind(
@@ -142,6 +144,25 @@ test('Requests are classified by what they change', () => {
     ['POST', '/v1/artifacts/a/revisions/2/runtime-views/view/3/source/write/x'],
   ])
     assert.notEqual(requestKind(method, path), 'frame', `${method} ${path}`);
+  // The asset calls are frame calls only as a POST of their own routes, under
+  // a revision and a numbered generation. Any other verb, prefix or tail is
+  // what the same shape is for the source routes (decision 0045).
+  const route = '/v1/artifacts/a/revisions/2/runtime-views/view/3';
+  for (const [method, path, kind] of [
+    ['GET', `${route}/assets/list`, 'read'],
+    ['PUT', `${route}/assets/read`, 'write'],
+    ['POST', '/v1/artifacts/a/runtime-views/view/3/assets/read', 'write'],
+    [
+      'POST',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/x/assets/list',
+      'write',
+    ],
+    ['POST', `${route}/assets/read/x`, 'write'],
+    ['POST', `${route}/assets/reads`, 'write'],
+    ['POST', `${route}/assets/write`, 'write'],
+    ['POST', `${route}/assets`, 'write'],
+  ])
+    assert.equal(requestKind(method, path), kind, `${method} ${path}`);
   assert.equal(requestKind('DELETE', '/v1/runtime-views/view/3'), 'write');
   assert.equal(requestKind('POST', '/v1/other/runtime-views'), 'write');
   assert.equal(requestKind('GET', '/v1/changes'), 'stream');
@@ -165,6 +186,8 @@ const FRAME_TAILS = [
   'source/offer',
   'source/download',
   'source/write',
+  'assets/list',
+  'assets/read',
 ];
 
 /** `base` joined with `path` the way the client does. */
@@ -344,6 +367,36 @@ test('A frame call is sent at once, and a refusal of it holds no owner read', as
   // The server limits frames apart from the owner: a 429 for a frame call
   // must not start the pause that holds every owner read.
   api.answer(at(`POST ${frame}`), limited(30));
+  await settle();
+  api.answer(at('GET /v1/artifacts'), Response.json({ artifacts: [] }));
+  const answered = await owner;
+  assert.equal(answered.status, 200);
+  await answered.json();
+  const next = gate.fetch('/v1/artifacts/b');
+  await settle();
+  assert.equal(api.paths().at(-1), 'GET /v1/artifacts/b');
+  api.answer(api.sent.length - 1);
+  assert.equal((await next).status, 200);
+});
+
+test('An asset call is sent at once, and its refusal holds no owner read', async () => {
+  const { api, gate } = setup();
+  const route = '/v1/artifacts/a/revisions/2/runtime-views/view/3';
+  const owner = gate.fetch('/v1/artifacts');
+  gate.fetch(`${route}/assets/list`, { method: 'POST' });
+  gate.fetch(`${route}/assets/read`, { method: 'POST' });
+  await settle();
+  // Both asset calls went out beside the owner's read.
+  assert.deepEqual(api.paths().sort(), [
+    'GET /v1/artifacts',
+    `POST ${route}/assets/list`,
+    `POST ${route}/assets/read`,
+  ]);
+  const at = (path) => api.paths().indexOf(path);
+  // The server limits frames apart from the owner: a 429 for an asset call
+  // must not start the pause that holds every owner read.
+  api.answer(at(`POST ${route}/assets/list`), limited(30));
+  api.answer(at(`POST ${route}/assets/read`), limited(30));
   await settle();
   api.answer(at('GET /v1/artifacts'), Response.json({ artifacts: [] }));
   const answered = await owner;

@@ -25,9 +25,10 @@ use artifree_contracts::api::{
     PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionList, RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest,
-    RoomJoinRequest, RoomSnapshot, RotateTokenResponse, RuntimeConnection, RuntimeDownloadOffer,
-    RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest,
-    RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
+    RoomJoinRequest, RoomSnapshot, RotateTokenResponse, RuntimeAssetListRequest, RuntimeAssetPart,
+    RuntimeAssetReadRequest, RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest,
+    RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeSourceList,
+    RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
     RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest,
     SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo,
     TokenList, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
@@ -35,9 +36,12 @@ use artifree_contracts::api::{
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
+use schemars::{Schema, SchemaGenerator};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut generator = SchemaSettings::draft2020_12().into_generator();
+/// The schemas of the bodies, in the order the API root lists them. It also
+/// registers the query and cancel types for generated clients, without listing
+/// them as bodies.
+fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
     // A vector: Serde serializes arrays of up to 32 elements only.
     let bodies = vec![
         generator.subschema_for::<AssetList>(),
@@ -79,6 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generator.subschema_for::<RuntimeSourceList>(),
         generator.subschema_for::<RuntimeSourceReadRequest>(),
         generator.subschema_for::<RuntimeSourcePart>(),
+        generator.subschema_for::<RuntimeAssetListRequest>(),
+        generator.subschema_for::<RuntimeAssetReadRequest>(),
+        generator.subschema_for::<RuntimeAssetPart>(),
         generator.subschema_for::<RuntimeDownloadRequest>(),
         generator.subschema_for::<RuntimeDownloadOffer>(),
         generator.subschema_for::<RuntimeSourceWriteRequest>(),
@@ -123,6 +130,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     generator.subschema_for::<ReadDataMembersQuery>();
     // The cancel body has no fields, so the root would accept any empty object.
     generator.subschema_for::<CancelJobRequest>();
+    bodies
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut generator = SchemaSettings::draft2020_12().into_generator();
+    let bodies = api_bodies(&mut generator);
     let api = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://artifree.invalid/schemas/api-v1.json",

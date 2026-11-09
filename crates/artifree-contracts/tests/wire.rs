@@ -3,13 +3,13 @@ use artifree_contracts::ServiceDescription;
 use artifree_contracts::api::{
     AppData, Artifact, ArtifactChange, ArtifactList, CommitResponse, CreateArtifactRequest,
     DataMembers, DuplicateArtifactResponse, EditFilesRequest, ErrorBody, ErrorResponse,
-    FeedPosition, MAX_DOWNLOAD_NAME, MAX_RUNTIME_SOURCE_PART_BYTES,
+    FeedPosition, MAX_DOWNLOAD_NAME, MAX_RUNTIME_ASSET_PART_BYTES, MAX_RUNTIME_SOURCE_PART_BYTES,
     MAX_RUNTIME_SOURCE_WRITE_BASE64, MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview,
     PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentResponse, Revision,
-    RevisionList, RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList,
-    RuntimeSourcePart, RuntimeSourceReadRequest, RuntimeSourceWriteReceipt,
-    RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest, SourceExportManifest,
-    UnreferencedContent, UpdateArtifactResponse,
+    RevisionList, RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest,
+    RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
+    RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView,
+    SaveRevisionRequest, SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -201,6 +201,10 @@ fn response_schemas_describe_what_the_server_writes() {
             published_unlike_written::<RuntimeSourcePart>(),
         ),
         (
+            "RuntimeAssetPart",
+            published_unlike_written::<RuntimeAssetPart>(),
+        ),
+        (
             "RuntimeDownloadOffer",
             published_unlike_written::<RuntimeDownloadOffer>(),
         ),
@@ -304,6 +308,111 @@ fn runtime_source_write_bounds_are_the_published_ones() {
     // base64 writes as 349,526 groups of four characters with padding.
     assert_eq!(MAX_RUNTIME_SOURCE_WRITE_BYTES, 1_048_576);
     assert_eq!(MAX_RUNTIME_SOURCE_WRITE_BASE64, 349_526 * 4);
+}
+
+/// The bounds the asset reader applies are the ones the schema publishes
+/// (decision 0045 rule 12): a part is at least one byte and at most
+/// `MAX_RUNTIME_ASSET_PART_BYTES`, which is 256 KiB. The published range refuses
+/// a length of 0 and a length one byte past the largest part.
+#[test]
+fn runtime_asset_part_bounds_are_the_published_ones() -> Result<(), serde_json::Error> {
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<RuntimeAssetReadRequest>(),
+    )?;
+    let length = &schema["properties"]["length"];
+    assert_eq!(MAX_RUNTIME_ASSET_PART_BYTES, 262_144);
+    assert_eq!(length["minimum"], 1);
+    assert_eq!(length["maximum"], MAX_RUNTIME_ASSET_PART_BYTES);
+    // The published bounds are inclusive, so the ends decide: 0 and one byte past
+    // the largest part fail validation, and the two ends are admitted.
+    let minimum = length["minimum"].as_u64().unwrap_or_default();
+    let maximum = length["maximum"].as_u64().unwrap_or_default();
+    for (value, admitted) in [(0, false), (1, true), (262_144, true), (262_145, false)] {
+        assert_eq!(
+            (minimum..=maximum).contains(&value),
+            admitted,
+            "a length of {value} against the published bounds"
+        );
+    }
+    Ok(())
+}
+
+/// Asserts that `T` reads `body`, and that the same body with a field nobody
+/// defines is refused, naming that field.
+fn assert_refuses_unknown_field<T>(body: Value)
+where
+    T: serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let _valid: T = serde_json::from_value(body.clone())
+        .unwrap_or_else(|error| panic!("a body without unknown fields was refused: {error}"));
+    let mut surprised = body;
+    surprised["surprise"] = Value::Bool(true);
+    match serde_json::from_value::<T>(surprised) {
+        Ok(parsed) => panic!("a body with an unknown field was accepted: {parsed:?}"),
+        Err(error) => assert!(
+            error.to_string().contains("unknown field `surprise`"),
+            "the unknown field must be named, got {error}"
+        ),
+    }
+}
+
+/// The asset requests and the part refuse a field they do not define, rather
+/// than ignoring it, as the other wire bodies do.
+#[test]
+fn runtime_asset_bodies_refuse_unknown_fields() {
+    assert_refuses_unknown_field::<RuntimeAssetListRequest>(serde_json::json!({
+        "initialization": "secret"
+    }));
+    assert_refuses_unknown_field::<RuntimeAssetReadRequest>(serde_json::json!({
+        "initialization": "secret", "asset_id": "a".repeat(64), "offset": 0, "length": 1
+    }));
+    assert_refuses_unknown_field::<RuntimeAssetPart>(serde_json::json!({
+        "asset_id": "a".repeat(64), "content_type": "text/plain", "offset": 8,
+        "next_offset": null, "size": 10, "sha256": "0".repeat(64), "content": "BAU="
+    }));
+}
+
+/// One part of a 10-byte asset, as a runtime view receives it.
+fn asset_part(offset: u64, next_offset: Option<u64>, content: &str) -> RuntimeAssetPart {
+    RuntimeAssetPart {
+        asset_id: "a".repeat(64),
+        content_type: "text/plain".into(),
+        offset,
+        next_offset,
+        size: 10,
+        sha256: "0".repeat(64),
+        content: content.into(),
+    }
+}
+
+/// A part writes `next_offset` as a number while more of the asset follows, and
+/// as an explicit `null` on the part that reaches its end (decision 0045 rule
+/// 12). The end part reads back as it was written.
+#[test]
+fn runtime_asset_part_writes_next_offset_as_a_number_or_null() -> Result<(), serde_json::Error> {
+    let middle = asset_part(0, Some(4), "AAECAw==");
+    assert_eq!(
+        serde_json::to_value(&middle)?,
+        serde_json::json!({
+            "asset_id": "a".repeat(64), "content_type": "text/plain", "offset": 0,
+            "next_offset": 4, "size": 10, "sha256": "0".repeat(64), "content": "AAECAw=="
+        })
+    );
+    let last = asset_part(8, None, "BAU=");
+    assert_eq!(
+        serde_json::to_value(&last)?,
+        serde_json::json!({
+            "asset_id": "a".repeat(64), "content_type": "text/plain", "offset": 8,
+            "next_offset": null, "size": 10, "sha256": "0".repeat(64), "content": "BAU="
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeAssetPart>(serde_json::to_value(&last)?)?,
+        last
+    );
+    Ok(())
 }
 
 fn edit_request() -> Value {

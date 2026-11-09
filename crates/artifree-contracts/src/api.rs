@@ -1308,6 +1308,68 @@ pub struct RuntimeSourcePart {
     pub content: String,
 }
 
+/// Most bytes of one asset part a runtime frame reads: 256 KiB. A part travels
+/// as base64 in a JSON body, so this bounds the response too (decision 0045
+/// rule 12).
+pub const MAX_RUNTIME_ASSET_PART_BYTES: u64 = 262_144;
+
+/// Proves that the parent is listing the assets of its initialized view, which
+/// needs the `assets.read` grant. Assets are not part of a source revision, so
+/// the answer, an [`AssetList`], is the artifact's current asset space whatever
+/// revision the view shows (decision 0045 rule 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssetListRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+}
+
+/// Reads one part of one asset of the artifact a runtime view is bound to,
+/// which needs the `assets.read` grant (decision 0045 rule 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssetReadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// The asset to read: the `id` of one asset in the listing, 64 lowercase
+    /// hexadecimal digits.
+    pub asset_id: String,
+    /// The first byte to read, counted from 0. An offset past the end of the
+    /// asset is refused; an offset at the end reads an empty final part.
+    pub offset: u64,
+    /// How many bytes at most, from 1 to 262,144. A part may be shorter at the
+    /// end of the asset. Parts are cut at bytes, not characters.
+    #[schemars(range(min = 1, max = 262_144))]
+    pub length: u64,
+}
+
+/// Exactly the bytes of one part of an asset, with what identifies the whole
+/// asset. The bytes number `next_offset - offset`, or `size - offset` for the
+/// final part. A client checks that before it relies on the other numbers, and
+/// checks the digest of the whole assembled asset before it reports the bytes.
+/// Decision 0045 rule 12.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssetPart {
+    /// Identifier of the asset, as requested.
+    pub asset_id: String,
+    /// The asset's stored MIME type, as [`Asset::content_type`] gives it.
+    pub content_type: String,
+    /// Where `content` starts in the asset, as requested.
+    pub offset: u64,
+    /// Where the next part starts: greater than `offset` and less than `size`.
+    /// Null once `content` reaches the end of the asset.
+    #[schemars(required, extend("type" = ["integer", "null"]))]
+    pub next_offset: Option<u64>,
+    /// The whole asset's size in bytes.
+    pub size: u64,
+    /// The whole asset's SHA-256 digest, as 64 lowercase hex digits. It is the
+    /// digest of the entire asset, not of this part.
+    pub sha256: String,
+    /// The bytes of the part, as base64.
+    pub content: String,
+}
+
 /// What a runtime download offers the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

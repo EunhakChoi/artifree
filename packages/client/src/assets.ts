@@ -39,7 +39,12 @@ function asset(value: unknown): Asset | undefined {
   return { id, content_type, size_bytes, sha256, created_at_ms };
 }
 
-function snapshot(value: unknown): AssetList | undefined {
+/**
+ * Validates an asset listing: the space's version and usage, and at most 64
+ * assets in strictly ascending ID order whose sizes add up to the stated byte
+ * count. Shared by the management listing and the runtime listing.
+ */
+export function parseAssetList(value: unknown): AssetList | undefined {
   if (!isRecord(value)) return undefined;
   const { asset_version, assets, bytes, max_assets, max_bytes } = value;
   if (
@@ -115,7 +120,7 @@ export async function listAssets(
   artifactId: string,
   options: ReadOptions = {},
 ): Promise<AssetList> {
-  return client.json('GET', pathOf(artifactId), snapshot, {
+  return client.json('GET', pathOf(artifactId), parseAssetList, {
     cache: 'no-store',
     redirect: 'error',
     successBodyLimit: 65_536,

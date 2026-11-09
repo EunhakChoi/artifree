@@ -304,6 +304,7 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
     assert_eq!(
         declared.supported,
         [
+            "assets.read",
             "metadata.read",
             "source.download",
             "source.read",
@@ -345,6 +346,7 @@ async fn manifest_snapshot_is_enforced_at_the_real_grant_boundary() -> Result<()
     assert_eq!(
         omitted.supported,
         [
+            "assets.read",
             "metadata.read",
             "source.download",
             "source.read",

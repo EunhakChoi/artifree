@@ -38,7 +38,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/runtime-sdk",
         ComponentStatus::Implemented,
-        "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download, and saves one file per view; each needs its own connection-scoped grant, and other capabilities remain planned.",
+        "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download, saves one file per view, and reads its artifact's uploaded assets; each needs its own connection-scoped grant, and other capabilities remain planned.",
     ),
     (
         "api",
@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset access and publish planned), and a sandboxed preview origin.",
+        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset reading is implemented; asset writing, asset download and publish planned), and a sandboxed preview origin.",
     ),
     (
         "domain",

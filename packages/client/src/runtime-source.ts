@@ -15,6 +15,11 @@ import {
   isRetryId,
   partNumbersFit,
 } from './source-part.js';
+export {
+  listRuntimeAssets,
+  readRuntimeAsset,
+  parseRuntimeAssetPart,
+} from './runtime-assets.js';
 
 /**
  * Checks of what a runtime view's source calls return (decision 0032). They

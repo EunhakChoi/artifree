@@ -1,14 +1,15 @@
 /**
- * Capability names. `metadata.read`, `source.read`, `source.download` and
- * `source.write` are supported (decisions 0020, 0032 and 0033); the others
- * are proposed. A name is not a grant: the user grants each one separately in
- * the workspace.
+ * Capability names. `metadata.read`, `source.read`, `source.download`,
+ * `source.write` and `assets.read` are supported (decisions 0020, 0032, 0033
+ * and 0045); the others are proposed. A name is not a grant: the user grants
+ * each one separately in the workspace.
  */
 export type RuntimeCapability =
   | 'metadata.read'
   | 'source.read'
   | 'source.download'
   | 'source.write'
+  | 'assets.read'
   | 'model.generate'
   | 'data.read'
   | 'data.write'
@@ -154,11 +155,63 @@ export interface SourceRuntime {
   write(request: SourceWriteRequest): Promise<WriteReceipt>;
 }
 
+/** The media types an uploaded asset may have (decision 0045). */
+export type AssetContentType =
+  'text/plain' | 'text/csv' | 'image/png' | 'image/jpeg';
+
+/** One uploaded asset of the artifact, as the workspace lists it. */
+export interface AssetInfo {
+  /** The asset ID: 64 lowercase hexadecimal digits. */
+  readonly id: string;
+  readonly contentType: AssetContentType;
+  /** Bytes in the asset: from 1 to 5 MiB. */
+  readonly size: number;
+  /** SHA-256 of the whole asset, 64 lowercase hex digits. */
+  readonly sha256: string;
+  /** When the asset was uploaded, in milliseconds since the Unix epoch. */
+  readonly createdAtMs: number;
+}
+
+/**
+ * The assets of the artifact and the version of its asset space, which
+ * increases with each upload or deletion.
+ */
+export interface AssetListing {
+  readonly assetVersion: number;
+  /** At most 64 assets, in ascending ID order. */
+  readonly assets: readonly AssetInfo[];
+}
+
+/** The whole content of one asset, verified against its size and digest. */
+export interface AssetContent {
+  readonly assetId: string;
+  readonly contentType: AssetContentType;
+  readonly size: number;
+  readonly sha256: string;
+  readonly bytes: Uint8Array;
+}
+
+/** Operations on the uploaded assets of the artifact (decision 0045). */
+export interface AssetsRuntime {
+  /** Lists the assets; needs the `assets.read` grant. */
+  list(): Promise<AssetListing>;
+  /**
+   * Reads all the bytes of one asset in parts of at most 256 KiB. It resolves
+   * only when the assembled bytes match the asset's size and SHA-256. A
+   * mismatch, or a part that breaks the read rules, rejects with
+   * `unavailable`; a refusal from the workspace keeps its own code. Needs the
+   * `assets.read` grant.
+   */
+  read(request: { readonly assetId: string }): Promise<AssetContent>;
+}
+
 /** What an opted-in frame can do, each operation subject to its own grant. */
 export interface ArtifactRuntime {
   /** Reads current metadata through the workspace's bound runtime view. */
   currentMetadata(): Promise<RuntimeMetadata>;
   readonly source: SourceRuntime;
+  /** Uploaded assets of this artifact (decision 0045). */
+  readonly assets: AssetsRuntime;
 }
 
 declare global {

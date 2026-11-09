@@ -62,8 +62,8 @@ pub(crate) struct Download {
     pub(crate) file_name: String,
 }
 
-struct Authorized {
-    artifact: ArtifactId,
+pub(crate) struct Authorized {
+    pub(crate) artifact: ArtifactId,
     revision: SourceRevision,
     /// The head the view was pinned to when it was issued.
     pinned: SourceRevision,
@@ -160,7 +160,7 @@ async fn live(
 
 /// The full live check of a read: [`live`], and the artifact's head is still
 /// the one the view was pinned to (`409` otherwise).
-async fn authorize(
+pub(crate) async fn authorize(
     state: &AppState,
     call: &FrameCall<'_>,
     capability: Capability,

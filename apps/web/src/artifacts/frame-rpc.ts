@@ -5,12 +5,13 @@ import type { Offer, Outcome } from './offer-desk';
 import { pathError } from './package-path';
 
 /**
- * Serves the calls a runtime frame makes (decisions 0020 and 0032). The frame
- * is untrusted script, so nothing it sends is believed: a message is parsed
- * strictly, charged against a budget before anything else is done, answered
- * from a closed vocabulary of failures, and never echoed. The workspace asks
- * the server on every call, whatever it has seen before. This module has no
- * DOM and no React; the component supplies the port and the prompt.
+ * Serves the calls a runtime frame makes (decisions 0020, 0032, 0033 and
+ * 0045). The frame is untrusted script, so nothing it sends is believed: a
+ * message is parsed strictly, charged against a budget before anything else is
+ * done, answered from a closed vocabulary of failures, and never echoed. The
+ * workspace asks the server on every call, whatever it has seen before. This
+ * module has no DOM and no React; the component supplies the port and the
+ * prompt.
  */
 
 /** Why a call failed, as the frame sees it. */
@@ -39,6 +40,15 @@ const MAX_PART = 1_048_576;
 /** The most bytes of one file a frame may save in one call. */
 const MAX_WRITE = 1_048_576;
 
+/** The most bytes of an asset a frame may ask for in one part: 256 KiB. */
+const MAX_ASSET_PART = 262_144;
+
+/**
+ * What an asset ID looks like: 64 lowercase hexadecimal digits. It is written
+ * out here, not imported, for the reason RETRY_ID gives (decision 0033).
+ */
+const ASSET_ID = /^[0-9a-f]{64}$/;
+
 /** A parsed, bounded call. */
 export type FrameCall =
   | { readonly type: 'metadata'; readonly id: number }
@@ -63,6 +73,14 @@ export type FrameCall =
       /** The frame's own copy, transferred to the page. */
       readonly bytes: ArrayBuffer;
     }
+  | { readonly type: 'assets.list'; readonly id: number }
+  | {
+      readonly type: 'assets.read';
+      readonly id: number;
+      readonly assetId: string;
+      readonly offset: number;
+      readonly length: number;
+    }
   | { readonly type: 'cancel'; readonly id: number };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,6 +98,8 @@ const SHAPES: Record<string, readonly string[]> = {
   'source.read': ['type', 'id', 'path', 'offset', 'length'],
   'source.download': ['type', 'id', 'kind', 'path'],
   'source.write': ['type', 'id', 'retryId', 'path', 'bytes'],
+  'assets.list': ['type', 'id'],
+  'assets.read': ['type', 'id', 'assetId', 'offset', 'length'],
   cancel: ['type', 'id'],
 };
 
@@ -98,9 +118,10 @@ export function callId(message: unknown): number | undefined {
 
 /**
  * The call a message is, or undefined. Exactly the keys of its type, a
- * positive safe-integer id, a path the package rules accept, a part length
- * from 1 to 1 MiB. A message that is not an object, has another key, or has
- * a value of another type is not a call.
+ * positive safe-integer id, a path the package rules accept, and a part
+ * length within its bound: 1 MiB for a source part, 256 KiB for an asset
+ * part. A message that is not an object, has another key, or has a value of
+ * another type is not a call.
  */
 export function parseCall(message: unknown): FrameCall | undefined {
   if (!isRecord(message)) return undefined;
@@ -115,6 +136,7 @@ export function parseCall(message: unknown): FrameCall | undefined {
   switch (type) {
     case 'metadata':
     case 'source.list':
+    case 'assets.list':
     case 'cancel':
       return { type, id };
     case 'source.read': {
@@ -153,6 +175,19 @@ export function parseCall(message: unknown): FrameCall | undefined {
       )
         return undefined;
       return { type, id, retryId, path, bytes };
+    }
+    case 'assets.read': {
+      const { assetId, offset, length } = message;
+      if (
+        typeof assetId !== 'string' ||
+        !ASSET_ID.test(assetId) ||
+        !isCount(offset) ||
+        !isCount(length) ||
+        length < 1 ||
+        length > MAX_ASSET_PART
+      )
+        return undefined;
+      return { type, id, assetId, offset, length };
     }
     default:
       return undefined;
@@ -416,6 +451,50 @@ export class FrameRpc {
             sha256: receipt.sha256,
           },
         });
+      }
+      case 'assets.list': {
+        const result = await client.runtimeCall(view, (source, frame) =>
+          source.listRuntimeAssets(frame, view, signal),
+        );
+        return ok(call.id, {
+          listing: {
+            assetVersion: result.asset_version,
+            assets: result.assets.map((asset) => ({
+              id: asset.id,
+              contentType: asset.content_type,
+              size: asset.size_bytes,
+              sha256: asset.sha256,
+              createdAtMs: asset.created_at_ms,
+            })),
+          },
+        });
+      }
+      case 'assets.read': {
+        const request = {
+          assetId: call.assetId,
+          offset: call.offset,
+          length: call.length,
+        };
+        const part = await client.runtimeCall(view, (source, frame) =>
+          source.readRuntimeAsset(frame, view, request, signal),
+        );
+        const bytes = part.bytes.buffer;
+        return {
+          message: {
+            id: call.id,
+            ok: true,
+            part: {
+              assetId: part.assetId,
+              contentType: part.contentType,
+              offset: part.offset,
+              nextOffset: part.nextOffset,
+              size: part.size,
+              sha256: part.sha256,
+              bytes,
+            },
+          },
+          transfer: [bytes],
+        };
       }
     }
   }
