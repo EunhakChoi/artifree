@@ -4,9 +4,9 @@ Artifree is in early development: local HTML artifacts work end to end
 (decision 0003), including MCP tools for agents (decision 0004), and an
 opted-in preview can read its own metadata, list and read its own pinned
 source, ask the user to save a file, and, under a separate edit grant, save one
-file as a new revision, and, under its own read grant, list and read its own
-uploaded assets, each with its own connection grant (decisions 0019, 0020,
-0032, 0033 and 0045). Tabs can also share an in-memory room for presence and
+file as a new revision, and, under their own grants, list and read, or upload and
+delete, its own uploaded assets, each with its own connection grant (decisions
+0019, 0020, 0032, 0033 and 0045). Tabs can also share an in-memory room for presence and
 ephemeral events through HTTP and the TypeScript client (decision 0034); a
 frame cannot reach it. Other runtime capabilities remain proposed. Keep implemented and proposed behavior
 explicitly separate in code, UI, docs, and completion reports.
@@ -56,8 +56,8 @@ guide for the deadline, verification, and merge requirements.
   (decision 0019). They are isolated from the workspace, not from the
   network: content can navigate its own frame elsewhere (decision 0003).
   Runtime metadata requires an explicit connection grant (decision 0020), and
-  so does reading uploaded assets (`assets.read`, decision 0045); asset
-  writes, asset download and network isolation remain unimplemented.
+  so do reading and writing uploaded assets (`assets.read`, `assets.write`,
+  decision 0045); asset download and network isolation remain unimplemented.
 - Mutations go through `ArtifactService` with a base revision and an
   idempotency key. Do not add a write path that bypasses either.
 

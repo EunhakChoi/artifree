@@ -1829,7 +1829,7 @@ pub(crate) async fn upload_asset(
     request: UploadAssetRequest,
 ) -> Result<UploadAssetResponse, ApiError> {
     let artifact = artifact_id(id)?;
-    let base = base(request.base_asset_version)?;
+    let base = asset_base(request.base_asset_version)?;
     let media: AssetMediaType = request
         .content_type
         .parse()
@@ -1904,7 +1904,7 @@ pub(crate) async fn delete_asset(
 ) -> Result<DeleteAssetResponse, ApiError> {
     let artifact = artifact_id(id)?;
     let asset = asset_id(asset)?;
-    let base = base(request.base_asset_version)?;
+    let base = asset_base(request.base_asset_version)?;
     let now = state.clock().now();
     let receipt = state
         .run_assets(move |service| service.delete_asset(&actor, &key, &artifact, base, &asset, now))
@@ -1931,7 +1931,7 @@ pub(crate) fn asset_dto(metadata: &AssetMetadata) -> Asset {
 
 /// Reads an asset base version. It must be a safe integer, at most 2^53 - 1,
 /// so that a double-precision client holds it exactly.
-fn base(value: u64) -> Result<AssetVersion, ApiError> {
+pub(crate) fn asset_base(value: u64) -> Result<AssetVersion, ApiError> {
     if value > MAX_SAFE_INTEGER {
         return Err(ApiError::invalid(
             "base_asset_version must be a safe unsigned integer",

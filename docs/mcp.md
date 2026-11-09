@@ -313,7 +313,8 @@ An artifact can hold uploaded assets for you: a separate space with its own
 `asset_version` (0 until written) that has nothing to do with its revisions or
 its application data. Assets are not in a revision, a preview, or an export,
 and a page running in a preview can read them only under its own `assets.read`
-grant ([decision 0045](decisions/0045-uploaded-assets.md), rules 11 and 12).
+grant and change them only under its own `assets.write` grant ([decision
+0045](decisions/0045-uploaded-assets.md), rules 11 and 12).
 
 `list_assets` returns the space: its `asset_version`, the `bytes` used, the
 limits `max_assets` and `max_bytes`, and the assets (ID, `content_type`,

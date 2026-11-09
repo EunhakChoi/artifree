@@ -1,8 +1,8 @@
 /**
  * Capability names. `metadata.read`, `source.read`, `source.download`,
- * `source.write` and `assets.read` are supported (decisions 0020, 0032, 0033
- * and 0045); the others are proposed. A name is not a grant: the user grants
- * each one separately in the workspace.
+ * `source.write`, `assets.read` and `assets.write` are supported (decisions
+ * 0020, 0032, 0033 and 0045); the others are proposed. A name is not a grant:
+ * the user grants each one separately in the workspace.
  */
 export type RuntimeCapability =
   | 'metadata.read'
@@ -10,6 +10,7 @@ export type RuntimeCapability =
   | 'source.download'
   | 'source.write'
   | 'assets.read'
+  | 'assets.write'
   | 'model.generate'
   | 'data.read'
   | 'data.write'
@@ -39,14 +40,17 @@ export interface RuntimeMetadata {
  * Why a runtime call failed. The set is closed and carries no server text.
  * `denied`: the capability is not granted. `stale_view`: the artifact has a
  * newer revision than this view; the workspace starts a new view, and the
- * user consents again. `not_found`: the view, the artifact or the file is
- * gone. `declined`: the user did not accept a download, or it was withdrawn.
- * `expired`: this view ended.
+ * user consents again. `conflict`: the uploaded assets changed since the call
+ * named their version; `currentAssetVersion` on the failure names the current
+ * version when the workspace could tell. `not_found`: the view, the artifact or
+ * the file is gone. `declined`: the user did not accept a download, or it was
+ * withdrawn. `expired`: this view ended.
  */
 export type RuntimeFailureCode =
   | 'invalid_request'
   | 'denied'
   | 'stale_view'
+  | 'conflict'
   | 'not_found'
   | 'rate_limited'
   | 'declined'
@@ -56,6 +60,8 @@ export type RuntimeFailureCode =
 /** The error a runtime call rejects with. */
 export interface RuntimeRequestFailure extends Error {
   readonly code: RuntimeFailureCode;
+  /** On a `conflict`: the version the artifact has now, if it was named. */
+  readonly currentAssetVersion?: number;
 }
 
 /** One file of the revision a view is pinned to. */
@@ -191,6 +197,51 @@ export interface AssetContent {
   readonly bytes: Uint8Array;
 }
 
+/**
+ * One asset to add. `content` is text (saved as UTF-8) or bytes, from 1 to
+ * 1,048,576 bytes. `baseAssetVersion` is the asset version the frame last saw,
+ * from `list`, a receipt or a `conflict`. `retryId` is 8 to 36 ASCII letters,
+ * digits, `-` or `_`: choose a new one for each change, and keep it only to
+ * retry the identical call.
+ */
+export interface AssetUploadRequest {
+  readonly contentType: AssetContentType;
+  readonly content: string | Uint8Array;
+  readonly baseAssetVersion: number;
+  readonly retryId: string;
+}
+
+/**
+ * The asset the upload stored, checked against the bytes the frame sent.
+ * `assetVersion` is the version the upload produced: a retry that gets the
+ * first outcome back reports that same version, even if the artifact has moved
+ * on since.
+ */
+export interface AssetUploadReceipt {
+  readonly asset: AssetInfo;
+  readonly assetVersion: number;
+}
+
+/**
+ * One asset to delete, named by its ID. `baseAssetVersion` and `retryId` follow
+ * `AssetUploadRequest`.
+ */
+export interface AssetDeleteRequest {
+  readonly assetId: string;
+  readonly baseAssetVersion: number;
+  readonly retryId: string;
+}
+
+/**
+ * The outcome of a deletion. `deleted` is false when the artifact had no such
+ * asset; the version then does not move.
+ */
+export interface AssetDeleteReceipt {
+  readonly assetId: string;
+  readonly assetVersion: number;
+  readonly deleted: boolean;
+}
+
 /** Operations on the uploaded assets of the artifact (decision 0045). */
 export interface AssetsRuntime {
   /** Lists the assets; needs the `assets.read` grant. */
@@ -203,6 +254,21 @@ export interface AssetsRuntime {
    * `assets.read` grant.
    */
   read(request: { readonly assetId: string }): Promise<AssetContent>;
+  /**
+   * Adds one asset; needs the `assets.write` grant, which does not include
+   * `assets.read`. A new call based on a version other than the current one is
+   * refused with `conflict`, and `currentAssetVersion` names the current one. A
+   * source save since this view was pinned is `stale_view`. The SDK never
+   * retries a write by itself. A retry of the identical call, with the same
+   * `retryId`, gets the first outcome back while this view lives: use it after
+   * an attempt that ended `unavailable`, which may have been applied.
+   */
+  upload(request: AssetUploadRequest): Promise<AssetUploadReceipt>;
+  /**
+   * Deletes one asset, with the rules of `upload`; the stored bytes cannot be
+   * restored. `deleted` is false when the artifact had no such asset.
+   */
+  delete(request: AssetDeleteRequest): Promise<AssetDeleteReceipt>;
 }
 
 /** What an opted-in frame can do, each operation subject to its own grant. */

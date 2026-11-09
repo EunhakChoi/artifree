@@ -265,7 +265,8 @@ only the file you name, never infers a type, and refuses a symbolic link or a fi
 over the limit before sending. After a lost reply, resend the identical command
 with the same key and the same file. MCP agents use `list_assets`, `read_asset`,
 `upload_asset` and `delete_asset`. A page running in a preview can list and read its own artifact's assets only after you grant it
-`assets.read`; it cannot upload, delete or download them.
+`assets.read`, and upload or delete them only after you grant it `assets.write`
+(a deleted asset cannot be restored); it cannot download them.
 
 ## Architecture
 
@@ -418,7 +419,7 @@ workspace, and the frame each check against the bytes they sent. A save moves
 the head, so the workspace shows the next revision in a new view that holds no
 grant: the user consents again for each save. Only the owner exists as a
 principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** data access from a
-preview, subscriptions, uploading, deleting or downloading assets from a preview, replacing a view in place, deleting or
+preview, subscriptions, downloading assets from a preview, replacing a view in place, deleting or
 renaming files, several files in one save, a prompt for each save, roles (a
 viewer is not refused because none exists), and any claim that a preview cannot
 use the network. No MCP tool was added or changed.

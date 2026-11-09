@@ -1466,6 +1466,65 @@ pub struct RuntimeSourceWriteReceipt {
     pub sha256: String,
 }
 
+/// Most decoded bytes one runtime frame call uploads: 1 MiB, within the
+/// ordinary asset limit (decision 0045 rule 12). The bytes travel as base64 in
+/// one JSON body.
+pub const MAX_RUNTIME_ASSET_UPLOAD_BYTES: u64 = 1_048_576;
+
+/// The characters of the base64 text of [`MAX_RUNTIME_ASSET_UPLOAD_BYTES`]
+/// bytes, padding included.
+pub const MAX_RUNTIME_ASSET_UPLOAD_BASE64: u64 = MAX_RUNTIME_ASSET_UPLOAD_BYTES.div_ceil(3) * 4;
+
+/// Uploads one asset to the artifact a runtime view is bound to, on behalf of
+/// the frame, and answers with an [`UploadAssetResponse`]. It needs the
+/// `assets.write` grant (decision 0045 rule 12). Unless `base_asset_version` is
+/// still the current asset space version, the upload is refused with
+/// `asset_conflict` and the current version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssetUploadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// The frame's retry identity for this upload: 8 to 36 ASCII letters,
+    /// digits, `-` or `_`. The server derives the idempotency key from it, the
+    /// artifact, the view and its generation, so a retry with the same identity
+    /// and request is answered with the first outcome, and the same identity
+    /// with another request is refused.
+    #[schemars(length(min = 8, max = 36))]
+    pub retry_id: String,
+    /// The asset space version the frame last observed.
+    pub base_asset_version: u64,
+    /// The declared MIME type, lowercase and without parameters. New uploads
+    /// admit only `text/plain`, `text/csv`, `image/png` and `image/jpeg`, and
+    /// the server checks the bytes against the declared type.
+    pub content_type: String,
+    /// The file's bytes as strict standard base64, at most 1,048,576 decoded
+    /// bytes.
+    #[schemars(length(max = 1_398_104))]
+    pub content_base64: String,
+}
+
+/// Deletes one asset of the artifact a runtime view is bound to, on behalf of
+/// the frame, and answers with a [`DeleteAssetResponse`]. It needs the
+/// `assets.write` grant (decision 0045 rule 12). Against the current base, an
+/// asset the artifact no longer has is not an error: the answer says
+/// `deleted: false` and the version does not move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssetDeleteRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// The frame's retry identity for this delete, as for an upload: 8 to 36
+    /// ASCII letters, digits, `-` or `_`.
+    #[schemars(length(min = 8, max = 36))]
+    pub retry_id: String,
+    /// The asset space version the frame last observed.
+    pub base_asset_version: u64,
+    /// The asset to delete: the `id` of one asset in the listing, 64 lowercase
+    /// hexadecimal digits.
+    pub asset_id: String,
+}
+
 /// Joins the room of an artifact as one participant of the caller's tab, or
 /// resumes the participant that tab already has in `slot` (decision 0034).
 /// The tab is the runtime connection named in the route, never a field.

@@ -46,6 +46,8 @@ export type ApiBody =
   | RuntimeAssetListRequest
   | RuntimeAssetReadRequest
   | RuntimeAssetPart
+  | RuntimeAssetUploadRequest
+  | RuntimeAssetDeleteRequest
   | RuntimeDownloadRequest
   | RuntimeDownloadOffer
   | RuntimeSourceWriteRequest
@@ -1154,6 +1156,69 @@ export interface RuntimeAssetPart {
    * The whole asset's size in bytes.
    */
   size: number;
+}
+/**
+ * Uploads one asset to the artifact a runtime view is bound to, on behalf of
+ * the frame, and answers with an [`UploadAssetResponse`]. It needs the
+ * `assets.write` grant (decision 0045 rule 12). Unless `base_asset_version` is
+ * still the current asset space version, the upload is refused with
+ * `asset_conflict` and the current version.
+ */
+export interface RuntimeAssetUploadRequest {
+  /**
+   * The asset space version the frame last observed.
+   */
+  base_asset_version: number;
+  /**
+   * The file's bytes as strict standard base64, at most 1,048,576 decoded
+   * bytes.
+   */
+  content_base64: string;
+  /**
+   * The declared MIME type, lowercase and without parameters. New uploads
+   * admit only `text/plain`, `text/csv`, `image/png` and `image/jpeg`, and
+   * the server checks the bytes against the declared type.
+   */
+  content_type: string;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * The frame's retry identity for this upload: 8 to 36 ASCII letters,
+   * digits, `-` or `_`. The server derives the idempotency key from it, the
+   * artifact, the view and its generation, so a retry with the same identity
+   * and request is answered with the first outcome, and the same identity
+   * with another request is refused.
+   */
+  retry_id: string;
+}
+/**
+ * Deletes one asset of the artifact a runtime view is bound to, on behalf of
+ * the frame, and answers with a [`DeleteAssetResponse`]. It needs the
+ * `assets.write` grant (decision 0045 rule 12). Against the current base, an
+ * asset the artifact no longer has is not an error: the answer says
+ * `deleted: false` and the version does not move.
+ */
+export interface RuntimeAssetDeleteRequest {
+  /**
+   * The asset to delete: the `id` of one asset in the listing, 64 lowercase
+   * hexadecimal digits.
+   */
+  asset_id: string;
+  /**
+   * The asset space version the frame last observed.
+   */
+  base_asset_version: number;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * The frame's retry identity for this delete, as for an upload: 8 to 36
+   * ASCII letters, digits, `-` or `_`.
+   */
+  retry_id: string;
 }
 /**
  * Asks whether, or asks for, a download of the pinned revision. The same

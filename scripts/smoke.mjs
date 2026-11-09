@@ -30,6 +30,7 @@ import { checkHistory } from './smoke-history.mjs';
 import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
 import { checkRuntimeAssets } from './smoke-runtime-assets.mjs';
+import { checkRuntimeAssetWrites } from './smoke-runtime-asset-writes.mjs';
 import { checkRuntime } from './smoke-runtime.mjs';
 import { checkSource } from './smoke-source.mjs';
 import { checkStaticDefault } from './smoke-static-default.mjs';
@@ -340,6 +341,12 @@ try {
       server: api,
       checkAccessibility,
     });
+    const runtimeAssetWrites = await checkRuntimeAssetWrites({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
     const staticDefault = await checkStaticDefault({
       browser,
       binary: serverBinary,
@@ -523,6 +530,7 @@ try {
       runtime,
       source,
       runtimeAssets,
+      runtimeAssetWrites,
       staticDefault,
       handoff,
       artifactConsole,

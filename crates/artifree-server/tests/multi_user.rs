@@ -47,8 +47,9 @@ const CONTENT_ORIGIN: &str = "http://127.0.0.1:7411";
 const PROTOCOL: &str = "2025-11-25";
 const ENTRY: &str =
     "<!doctype html><html lang=\"en\"><head><!-- artifree-runtime --></head><body>x</body></html>";
-const CAPABILITIES: [&str; 5] = [
+const CAPABILITIES: [&str; 6] = [
     "assets.read",
+    "assets.write",
     "metadata.read",
     "source.read",
     "source.download",
@@ -999,6 +1000,27 @@ fn http_cases() -> Vec<Case> {
             Some(r#"{"initialization":"{init}","asset_id":"{asset}","offset":0,"length":16}"#),
             Succeeds,
         ),
+        // The upload moves the artifact's asset version from 1, the fixture's,
+        // to 2; the owner's upload and delete below name 2 and 3. The delete
+        // names an absent asset, since the owner's delete needs the fixture's.
+        case(
+            "frame assets upload",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/assets/upload",
+            Some(
+                r#"{"initialization":"{init}","retry_id":"asset-upload-0001","base_asset_version":1,"content_type":"text/plain","content_base64":"Yg=="}"#,
+            ),
+            Succeeds,
+        ),
+        case(
+            "frame assets delete",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/assets/delete",
+            Some(
+                r#"{"initialization":"{init}","retry_id":"asset-delete-0001","base_asset_version":2,"asset_id":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
+            ),
+            Succeeds,
+        ),
         case(
             "frame source write",
             "POST",
@@ -1063,14 +1085,14 @@ fn http_cases() -> Vec<Case> {
             "upload asset",
             "POST",
             "/v1/artifacts/{artifact}/assets",
-            Some(r#"{"base_asset_version":1,"content_type":"text/plain","content_base64":"YQ=="}"#),
+            Some(r#"{"base_asset_version":2,"content_type":"text/plain","content_base64":"YQ=="}"#),
             Succeeds,
         ),
         case(
             "delete asset",
             "DELETE",
             "/v1/artifacts/{artifact}/assets/{asset}",
-            Some(r#"{"base_asset_version":2}"#),
+            Some(r#"{"base_asset_version":3}"#),
             Succeeds,
         ),
         case(
