@@ -20,8 +20,12 @@ published for crates in `Cargo.lock`:
 ## Decision
 
 1. `rusqlite` moves to 0.41 (bundled SQLite 3.54) and `rmcp` to 3.9. The
-   lockfile records the resolved versions.
-2. `rusqlite` 0.41 declares Rust 1.89 as its minimum, so the workspace
+   lockfile records the resolved versions. `rmcp` 3.9 also depends on `sha2`
+   unconditionally; the lockfile already held the same `sha2` version, so no
+   crate is added, and the server-side MCP behavior is checked by the
+   existing MCP tests.
+2. `rusqlite` 0.41.1 declares Rust 1.89 as its minimum (`libsqlite3-sys` 0.39.1
+   and `rmcp` 3.9.0 declare 1.88), so the workspace
    `rust-version`, the minimum-version CI job, `CONTRIBUTING.md` and
    `docs/quality.md` move from 1.88 to 1.89. The pinned toolchain
    (`rust-toolchain.toml`) is unchanged.
