@@ -43,6 +43,9 @@ export type ApiBody =
   | RuntimeSourceList
   | RuntimeSourceReadRequest
   | RuntimeSourcePart
+  | RuntimeAssetListRequest
+  | RuntimeAssetReadRequest
+  | RuntimeAssetPart
   | RuntimeDownloadRequest
   | RuntimeDownloadOffer
   | RuntimeSourceWriteRequest
@@ -1073,6 +1076,82 @@ export interface RuntimeSourcePart {
   sha256: string;
   /**
    * The whole file's size in bytes.
+   */
+  size: number;
+}
+/**
+ * Proves that the parent is listing the assets of its initialized view, which
+ * needs the `assets.read` grant. Assets are not part of a source revision, so
+ * the answer, an [`AssetList`], is the artifact's current asset space whatever
+ * revision the view shows (decision 0045 rule 12).
+ */
+export interface RuntimeAssetListRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+}
+/**
+ * Reads one part of one asset of the artifact a runtime view is bound to,
+ * which needs the `assets.read` grant (decision 0045 rule 12).
+ */
+export interface RuntimeAssetReadRequest {
+  /**
+   * The asset to read: the `id` of one asset in the listing, 64 lowercase
+   * hexadecimal digits.
+   */
+  asset_id: string;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * How many bytes at most, from 1 to 262,144. A part may be shorter at the
+   * end of the asset. Parts are cut at bytes, not characters.
+   */
+  length: number;
+  /**
+   * The first byte to read, counted from 0. An offset past the end of the
+   * asset is refused; an offset at the end reads an empty final part.
+   */
+  offset: number;
+}
+/**
+ * Exactly the bytes of one part of an asset, with what identifies the whole
+ * asset. The bytes number `next_offset - offset`, or `size - offset` for the
+ * final part. A client checks that before it relies on the other numbers, and
+ * checks the digest of the whole assembled asset before it reports the bytes.
+ * Decision 0045 rule 12.
+ */
+export interface RuntimeAssetPart {
+  /**
+   * Identifier of the asset, as requested.
+   */
+  asset_id: string;
+  /**
+   * The bytes of the part, as base64.
+   */
+  content: string;
+  /**
+   * The asset's stored MIME type, as [`Asset::content_type`] gives it.
+   */
+  content_type: string;
+  /**
+   * Where the next part starts: greater than `offset` and less than `size`.
+   * Null once `content` reaches the end of the asset.
+   */
+  next_offset: number | null;
+  /**
+   * Where `content` starts in the asset, as requested.
+   */
+  offset: number;
+  /**
+   * The whole asset's SHA-256 digest, as 64 lowercase hex digits. It is the
+   * digest of the entire asset, not of this part.
+   */
+  sha256: string;
+  /**
+   * The whole asset's size in bytes.
    */
   size: number;
 }

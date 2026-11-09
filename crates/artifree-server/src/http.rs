@@ -21,15 +21,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataOutboxBinding,
-    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, EditFilesRequest,
-    EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
-    Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
-    ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
+    AgentSessionList, AppData, Artifact, ArtifactList, AssetList, CancelJobRequest,
+    CancelJobResponse, CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers,
+    DataOutboxBinding, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
+    EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff,
+    HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest,
+    PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
-    RuntimeConnection, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
+    RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeConnection,
+    RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
     RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
     RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
     SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest,
@@ -66,6 +67,7 @@ use crate::origin::normalize_origin;
 use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
+use crate::runtime_assets;
 use crate::runtime_sessions::RuntimeSessions;
 use crate::runtime_source::{self, FrameCall};
 use crate::tokens;
@@ -669,6 +671,14 @@ fn frame_routes(state: &AppState) -> Router<AppState> {
             &format!("{VIEW}/source/write"),
             axum::routing::post(runtime_source_write)
                 .layer(DefaultBodyLimit::max(MAX_FRAME_WRITE_BODY_BYTES)),
+        )
+        .route(
+            &format!("{VIEW}/assets/list"),
+            axum::routing::post(runtime_assets_list),
+        )
+        .route(
+            &format!("{VIEW}/assets/read"),
+            axum::routing::post(runtime_assets_read),
         )
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_FRAME_BODY_BYTES))
@@ -2031,6 +2041,46 @@ async fn runtime_source_download(
         download.bytes,
     )
         .into_response())
+}
+
+async fn runtime_assets_list(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeAssetListRequest>, JsonRejection>,
+) -> Result<Json<AssetList>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_assets::list(&state, &call).await.map(Json)
+}
+
+async fn runtime_assets_read(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeAssetReadRequest>, JsonRejection>,
+) -> Result<Json<RuntimeAssetPart>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_assets::read(&state, &call, &request)
+        .await
+        .map(Json)
 }
 
 async fn close_runtime_view(

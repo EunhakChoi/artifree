@@ -62,8 +62,8 @@ pub(crate) struct Download {
     pub(crate) file_name: String,
 }
 
-struct Authorized {
-    artifact: ArtifactId,
+pub(crate) struct Authorized {
+    pub(crate) artifact: ArtifactId,
     revision: SourceRevision,
     /// The head the view was pinned to when it was issued.
     pinned: SourceRevision,
@@ -129,6 +129,19 @@ fn permitted(
         .map_err(denied)
 }
 
+/// The binding and the connection's grant of `capability`, checked again
+/// without a store read. A call that is already authorized makes this its
+/// last step before the reply, with no `.await` after it.
+pub(crate) fn still_permitted(
+    state: &AppState,
+    call: &FrameCall<'_>,
+    granted: &Authorized,
+    capability: Capability,
+) -> Result<(), ApiError> {
+    permitted(state, call, &granted.artifact, granted.revision, capability)?;
+    Ok(())
+}
+
 /// The live check of one call for one capability, without a fence on the
 /// head: the shape of the route names, the binding, the grant and the
 /// artifact outside the trash, with the binding and grant checked again
@@ -160,7 +173,7 @@ async fn live(
 
 /// The full live check of a read: [`live`], and the artifact's head is still
 /// the one the view was pinned to (`409` otherwise).
-async fn authorize(
+pub(crate) async fn authorize(
     state: &AppState,
     call: &FrameCall<'_>,
     capability: Capability,

@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 
 /**
  * The capabilities a preview can be granted, each with its own control: a
- * grant of one never implies another (decisions 0020 and 0032).
+ * grant of one never implies another (decisions 0020, 0032, 0033 and 0045).
  */
 const CAPABILITY_CONTROLS = [
   {
@@ -29,6 +29,16 @@ const CAPABILITY_CONTROLS = [
     // confirmation of what the app then does by itself (decision 0033).
     warning:
       'Allowing this lets the app change files of this artifact. A save creates a new revision without asking you again; earlier revisions stay and can be restored. After a save this preview is out of date, and you must allow editing again for the next one.',
+  },
+  {
+    name: 'assets.read',
+    allow: 'Allow uploaded file reading',
+    revoke: 'Revoke uploaded file reading',
+    // Shown beside the control, because the grant gives the app private
+    // uploaded bytes and preview network isolation is still absent (decision
+    // 0045, rule 12).
+    warning:
+      "Allowing this gives the app the bytes of this artifact's private uploaded files. The preview is not isolated from the network, so the app could send those bytes elsewhere. Allowing access does not make the files safe to run.",
   },
 ] as const;
 

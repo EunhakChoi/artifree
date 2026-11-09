@@ -332,7 +332,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -344,7 +344,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy

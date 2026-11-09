@@ -212,10 +212,21 @@ var __ArtifreeBootstrap = (() => {
   var MAX_LISTED_FILES = 256;
   var MAX_WRITE_BYTES = 1048576;
   var RETRY_ID = /^[A-Za-z0-9_-]{8,36}$/;
+  var ASSET_ID = /^[0-9a-f]{64}$/;
+  var MAX_ASSET_PART_BYTES = 262144;
+  var MAX_ASSET_BYTES = 5242880;
+  var MAX_LISTED_ASSETS = 64;
+  var ASSET_TYPES = {
+    "text/plain": true,
+    "text/csv": true,
+    "image/png": true,
+    "image/jpeg": true
+  };
   var MAX_PENDING = 64;
   var READ_TIMEOUT_MS = 1e4;
   var DOWNLOAD_TIMEOUT_MS = 12e4;
   var WRITE_TIMEOUT_MS = 3e4;
+  var RATE_LIMIT_BACKOFF_MS = [250, 500, 1e3, 2e3];
   var FAILURE_CODES = {
     invalid_request: "The runtime request was not valid.",
     denied: "The runtime request was not permitted.",
@@ -245,6 +256,15 @@ var __ArtifreeBootstrap = (() => {
   }
   function sha256(value) {
     return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+  }
+  function isAssetSize(value) {
+    return count(value) && value >= 1 && value <= MAX_ASSET_BYTES;
+  }
+  function isAssetId(value) {
+    return typeof value === "string" && ASSET_ID.test(value);
+  }
+  function isAssetType(value) {
+    return typeof value === "string" && Object.hasOwn(ASSET_TYPES, value);
   }
   function argument(value, allowed) {
     try {
@@ -295,22 +315,60 @@ var __ArtifreeBootstrap = (() => {
     }
     return { revision, files: parsed };
   }
-  function part(value, asked) {
+  function assetInfo(value) {
     if (!record(value)) return void 0;
-    const { path, offset, nextOffset, size, sha256: digest, bytes } = value;
-    if (path !== asked.path || offset !== asked.offset || !count(size) || !sha256(digest) || !(bytes instanceof ArrayBuffer) || !(nextOffset === null || count(nextOffset)))
+    const { id, contentType, size, sha256: digest, createdAtMs } = value;
+    if (!isAssetId(id) || !isAssetType(contentType) || !isAssetSize(size) || !sha256(digest) || !count(createdAtMs))
+      return void 0;
+    return { id, contentType, size, sha256: digest, createdAtMs };
+  }
+  function assetListing(value) {
+    if (!record(value)) return void 0;
+    const { assetVersion, assets } = value;
+    if (!count(assetVersion) || !Array.isArray(assets) || assets.length > MAX_LISTED_ASSETS || assets.length > 0 && assetVersion === 0)
+      return void 0;
+    const parsed = [];
+    let previous;
+    for (const asset of assets) {
+      const item = assetInfo(asset);
+      if (item === void 0 || previous !== void 0 && item.id <= previous)
+        return void 0;
+      previous = item.id;
+      parsed.push(item);
+    }
+    return { assetVersion, assets: parsed };
+  }
+  function partFields(value, asked, bound) {
+    const { offset, nextOffset, size, sha256: digest, bytes } = value;
+    if (offset !== asked.offset || !count(size) || !sha256(digest) || !(bytes instanceof ArrayBuffer) || !(nextOffset === null || count(nextOffset)))
       return void 0;
     const received = bytes.byteLength;
-    if (offset > size || received > MAX_PART_BYTES || received > asked.length || (nextOffset === null ? received !== size - offset : nextOffset <= offset || nextOffset >= size || received !== nextOffset - offset || received !== asked.length))
+    if (offset > size || received > bound || received > asked.length || (nextOffset === null ? received !== size - offset : nextOffset <= offset || nextOffset >= size || received !== nextOffset - offset || received !== asked.length))
       return void 0;
     return {
-      path,
       offset,
       nextOffset,
       size,
       sha256: digest,
       bytes: new Uint8Array(bytes)
     };
+  }
+  function part(value, asked) {
+    if (!record(value)) return void 0;
+    const { path } = value;
+    if (path !== asked.path) return void 0;
+    const fields = partFields(value, asked, MAX_PART_BYTES);
+    return fields === void 0 ? void 0 : { path, ...fields };
+  }
+  function assetPart(value, asked, head) {
+    if (!record(value)) return void 0;
+    const { assetId, contentType } = value;
+    if (assetId !== asked.assetId || !isAssetType(contentType)) return void 0;
+    const fields = partFields(value, asked, MAX_ASSET_PART_BYTES);
+    if (fields === void 0 || !isAssetSize(fields.size)) return void 0;
+    if (head !== void 0 && (contentType !== head.contentType || fields.size !== head.size || fields.sha256 !== head.sha256))
+      return void 0;
+    return { assetId, contentType, ...fields };
   }
   function receipt(value) {
     if (!record(value)) return void 0;
@@ -496,6 +554,79 @@ var __ArtifreeBootstrap = (() => {
         );
       }
     });
+    function requestAssetPart(assetId, offset, first) {
+      const asked = {
+        assetId,
+        offset,
+        length: MAX_ASSET_PART_BYTES
+      };
+      return call(
+        { type: "assets.read", assetId, offset, length: MAX_ASSET_PART_BYTES },
+        (reply) => assetPart(reply.part, asked, first),
+        { timeout: READ_TIMEOUT_MS }
+      );
+    }
+    function pause(ms) {
+      return new Promise((resolve) => {
+        window.setTimeout(resolve, ms);
+      });
+    }
+    async function requestAssetPartWithBackoff(assetId, offset, first) {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await requestAssetPart(assetId, offset, first);
+        } catch (error) {
+          const wait = RATE_LIMIT_BACKOFF_MS[attempt];
+          if (wait === void 0 || !(error instanceof RuntimeRequestFailure) || error.code !== "rate_limited")
+            throw error;
+          await pause(wait);
+        }
+      }
+    }
+    const assets = Object.freeze({
+      list() {
+        return call(
+          { type: "assets.list" },
+          (reply) => assetListing(reply.listing),
+          { timeout: READ_TIMEOUT_MS }
+        );
+      },
+      async read(request) {
+        const fields = argument(request, ["assetId"]);
+        if (fields === void 0) return invalid();
+        const { assetId } = fields;
+        if (!isAssetId(assetId)) return invalid();
+        let current = await requestAssetPartWithBackoff(assetId, 0, void 0);
+        const head = {
+          contentType: current.contentType,
+          size: current.size,
+          sha256: current.sha256
+        };
+        const assembled = new Uint8Array(head.size);
+        let filled = 0;
+        for (; ; ) {
+          if (current.offset + current.bytes.length > head.size)
+            throw new RuntimeRequestFailure("unavailable");
+          assembled.set(current.bytes, current.offset);
+          filled += current.bytes.length;
+          if (current.nextOffset === null) break;
+          current = await requestAssetPartWithBackoff(
+            assetId,
+            current.nextOffset,
+            head
+          );
+        }
+        if (filled !== head.size || sha256Hex(assembled) !== head.sha256)
+          throw new RuntimeRequestFailure("unavailable");
+        return {
+          assetId,
+          contentType: head.contentType,
+          size: head.size,
+          sha256: head.sha256,
+          bytes: assembled
+        };
+      }
+    });
     window.artifree = Object.freeze({
       currentMetadata() {
         return call({ type: "metadata" }, (reply) => metadata(reply.metadata), {
@@ -503,7 +634,8 @@ var __ArtifreeBootstrap = (() => {
           refusal: "The runtime metadata request was refused."
         });
       },
-      source
+      source,
+      assets
     });
   }
   return __toCommonJS(bootstrap_exports);

@@ -2429,6 +2429,107 @@
       ],
       "type": "object"
     },
+    "RuntimeAssetListRequest": {
+      "additionalProperties": false,
+      "description": "Proves that the parent is listing the assets of its initialized view, which\nneeds the `assets.read` grant. Assets are not part of a source revision, so\nthe answer, an [`AssetList`], is the artifact's current asset space whatever\nrevision the view shows (decision 0045 rule 12).",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization"
+      ],
+      "type": "object"
+    },
+    "RuntimeAssetPart": {
+      "additionalProperties": false,
+      "description": "Exactly the bytes of one part of an asset, with what identifies the whole\nasset. The bytes number `next_offset - offset`, or `size - offset` for the\nfinal part. A client checks that before it relies on the other numbers, and\nchecks the digest of the whole assembled asset before it reports the bytes.\nDecision 0045 rule 12.",
+      "properties": {
+        "asset_id": {
+          "description": "Identifier of the asset, as requested.",
+          "type": "string"
+        },
+        "content": {
+          "description": "The bytes of the part, as base64.",
+          "type": "string"
+        },
+        "content_type": {
+          "description": "The asset's stored MIME type, as [`Asset::content_type`] gives it.",
+          "type": "string"
+        },
+        "next_offset": {
+          "description": "Where the next part starts: greater than `offset` and less than `size`.\nNull once `content` reaches the end of the asset.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Where `content` starts in the asset, as requested.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "description": "The whole asset's SHA-256 digest, as 64 lowercase hex digits. It is the\ndigest of the entire asset, not of this part.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The whole asset's size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset_id",
+        "content_type",
+        "offset",
+        "next_offset",
+        "size",
+        "sha256",
+        "content"
+      ],
+      "type": "object"
+    },
+    "RuntimeAssetReadRequest": {
+      "additionalProperties": false,
+      "description": "Reads one part of one asset of the artifact a runtime view is bound to,\nwhich needs the `assets.read` grant (decision 0045 rule 12).",
+      "properties": {
+        "asset_id": {
+          "description": "The asset to read: the `id` of one asset in the listing, 64 lowercase\nhexadecimal digits.",
+          "type": "string"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "length": {
+          "description": "How many bytes at most, from 1 to 262,144. A part may be shorter at the\nend of the asset. Parts are cut at bytes, not characters.",
+          "format": "uint64",
+          "maximum": 262144,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "The first byte to read, counted from 0. An offset past the end of the\nasset is refused; an offset at the end reads an empty final part.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "initialization",
+        "asset_id",
+        "offset",
+        "length"
+      ],
+      "type": "object"
+    },
     "RuntimeConnection": {
       "additionalProperties": false,
       "description": "A server-issued ephemeral runtime connection.",
@@ -3515,6 +3616,15 @@
     },
     {
       "$ref": "#/$defs/RuntimeSourcePart"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAssetListRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAssetReadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAssetPart"
     },
     {
       "$ref": "#/$defs/RuntimeDownloadRequest"
