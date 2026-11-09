@@ -23,7 +23,8 @@ refused upload writes nothing and keeps its key free.
    legal bit-depth and color-type pair, compression and filter method 0, and
    interlace 0 or 1. `acTL`, `fcTL` and `fdAT` (animation) are refused, as is any
    unknown critical chunk. IDAT chunks form one run and none is missing; a palette
-   image needs a PLTE of 1 to 256 entries before its first IDAT. IEND is empty and
+   image needs a PLTE of 1 to 2^bit-depth entries before its first IDAT; PLTE is
+   refused for gray and gray-alpha images, after IDAT, and when repeated. IEND is empty and
    ends the file exactly: a trailing byte is refused.
 2. **Exact zlib check** (`miniz_oxide`, independent of the decoder). The IDAT
    payloads are inflated through a 32 KiB window as one stream with the header and

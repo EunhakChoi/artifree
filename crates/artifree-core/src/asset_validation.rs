@@ -146,12 +146,12 @@ mod tests {
 
     #[test]
     fn a_complete_png_is_admitted() {
-        let bytes = minimal_png();
-        let original = bytes.clone();
-        assert_eq!(check("image/png", &bytes), Ok(()), "a 1x1 PNG is complete");
-        // `validate` borrows its input as `&[u8]`, so this comparison cannot fail by
-        // construction. It records that admission leaves the uploaded bytes unchanged.
-        assert_eq!(bytes, original, "validation must not change the bytes");
+        // Byte preservation is guarded by the server test that compares stored bytes.
+        assert_eq!(
+            check("image/png", &minimal_png()),
+            Ok(()),
+            "a 1x1 PNG is complete"
+        );
     }
 
     #[test]

@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, conditional revisions, per-file edits, restores, duplicates (files, and data or uploaded assets when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; separate private UTF-8 text/CSV uploads with atomic quotas and replay, copied into a duplicate on request; publish planned.",
+        "Create, conditional revisions, per-file edits, restores, duplicates (files, and data or uploaded assets when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; separate private UTF-8 text/CSV and static PNG uploads with atomic quotas and replay, copied into a duplicate on request; publish planned.",
     ),
     (
         "policy",

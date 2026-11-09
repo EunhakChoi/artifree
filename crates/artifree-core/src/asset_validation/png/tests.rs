@@ -181,6 +181,28 @@ fn accepts_palette_sizes_from_one_to_256_entries() {
 }
 
 #[test]
+fn accepts_palette_entry_counts_up_to_two_to_the_bit_depth() {
+    for (bit_depth, entries) in [(1_u8, 2_usize), (2, 4), (4, 16), (8, 256)] {
+        assert_accepted(
+            &format!("palette of {entries} entries at bit depth {bit_depth}"),
+            &one_pixel_file(3, bit_depth, vec![plte(entries)]),
+        );
+    }
+}
+
+#[test]
+fn accepts_a_suggested_palette_before_idat_in_rgb_and_rgba_images() {
+    for (name, color_type) in [("RGB 8", 2), ("RGBA 8", 6)] {
+        for entries in [1_usize, 256] {
+            assert_accepted(
+                &format!("{name} with a suggested palette of {entries} entries"),
+                &one_pixel_file(color_type, 8, vec![plte(entries)]),
+            );
+        }
+    }
+}
+
+#[test]
 fn accepts_4096_by_4096_gray8_image() {
     let file = rebuild(
         vec![ihdr(non_interlaced(4096, 4096, 8, 0))],
@@ -526,6 +548,48 @@ fn refuses_plte_payload_that_is_not_one_to_256_three_byte_entries() {
         assert_refused(
             &format!("PLTE of {length} bytes"),
             &palette_1x1_file(&vec![0_u8; length]),
+        );
+    }
+}
+
+#[test]
+fn refuses_plte_in_gray_and_gray_alpha_images() {
+    for (name, color_type) in [("gray 8", 0), ("gray-alpha 8", 4)] {
+        assert_layout_refused(
+            &format!("{name} with a PLTE before IDAT"),
+            &one_pixel_file(color_type, 8, vec![plte(1)]),
+        );
+    }
+}
+
+#[test]
+fn refuses_plte_after_the_idat_run_in_rgb_and_palette_images() {
+    for (name, color_type) in [("RGB 8", 2), ("palette 8", 3)] {
+        let file = rebuild(
+            vec![ihdr(non_interlaced(1, 1, 8, color_type))],
+            &zlib_stored(&raw_scanlines(1, 1, 8, color_type)),
+            vec![plte(1)],
+        );
+        assert_layout_refused(&format!("{name} with a PLTE after the IDAT"), &file);
+    }
+}
+
+#[test]
+fn refuses_a_second_plte_chunk_in_rgb_and_palette_images() {
+    for (name, color_type) in [("RGB 8", 2), ("palette 8", 3)] {
+        assert_layout_refused(
+            &format!("{name} with two PLTE chunks"),
+            &one_pixel_file(color_type, 8, vec![plte(1), plte(1)]),
+        );
+    }
+}
+
+#[test]
+fn refuses_palettes_with_more_entries_than_their_bit_depth_can_index() {
+    for (bit_depth, entries) in [(1_u8, 3_usize), (2, 5), (4, 17)] {
+        assert_layout_refused(
+            &format!("palette of {entries} entries at bit depth {bit_depth}"),
+            &one_pixel_file(3, bit_depth, vec![plte(entries)]),
         );
     }
 }
@@ -1484,6 +1548,15 @@ fn ancillary_chunks() -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("unknown ancillary prVt", chunk(*b"prVt", b"private data")),
     ]
+}
+
+/// A 1x1 file of the given color type and bit depth: IHDR, `before_idat`, one IDAT holding
+/// a blank scanline, and IEND.
+fn one_pixel_file(color_type: u8, bit_depth: u8, before_idat: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut chunks = vec![ihdr(non_interlaced(1, 1, bit_depth, color_type))];
+    chunks.extend(before_idat);
+    let raw = raw_scanlines(1, 1, bit_depth, color_type);
+    rebuild(chunks, &zlib_stored(&raw), vec![])
 }
 
 /// A 1x1 RGBA file: IHDR, `before_idat`, one IDAT holding `raw` as stored zlib, and IEND.

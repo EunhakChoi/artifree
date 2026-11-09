@@ -262,14 +262,29 @@ fn legal_depth(color_type: u8, bit_depth: u8) -> bool {
     }
 }
 
-/// Checks a PLTE payload: one to 256 three-byte entries.
-fn check_palette(data: &[u8]) -> Result<(), AssetRejection> {
-    let len = data.len();
-    if len.is_multiple_of(3) && (3..=MAX_PALETTE_BYTES).contains(&len) {
-        Ok(())
-    } else {
-        Err(AssetRejection::Invalid)
+/// Checks a PLTE payload against the image that it belongs to.
+///
+/// Only RGB, palette and RGBA images may carry a PLTE chunk. Its payload holds one to 256
+/// three-byte entries. A palette image may not have more entries than its bit depth can
+/// address, which is `2^bit_depth`.
+fn check_palette(layout: &PngLayout, data: &[u8]) -> Result<(), AssetRejection> {
+    if !matches!(layout.color_type, RGB | PALETTE | RGBA) {
+        return Err(AssetRejection::Invalid);
     }
+    let len = data.len();
+    if !len.is_multiple_of(3) || !(3..=MAX_PALETTE_BYTES).contains(&len) {
+        return Err(AssetRejection::Invalid);
+    }
+    if layout.color_type == PALETTE {
+        // Each index has `bit_depth` bits, so it can address at most 2^bit_depth entries.
+        let addressable = 1_usize
+            .checked_shl(u32::from(layout.bit_depth))
+            .ok_or(AssetRejection::Invalid)?;
+        if len / 3 > addressable {
+            return Err(AssetRejection::Invalid);
+        }
+    }
+    Ok(())
 }
 
 /// Length of the zlib payload once inflated: a filter byte and the packed pixels
@@ -711,8 +726,7 @@ impl Scan {
         }
         self.close_idat_run();
         if chunk.kind == PLTE {
-            check_palette(chunk.data)?;
-            self.palette_seen = true;
+            self.accept_plte(chunk)?;
         }
         if chunk.kind == ICCP {
             self.accept_iccp()?;
@@ -720,6 +734,17 @@ impl Scan {
         if let Some(stream) = embedded_stream(chunk)? {
             self.layout.compressed_streams.push(stream);
         }
+        Ok(())
+    }
+
+    /// Allows one PLTE chunk, and only before the first IDAT. Its payload is then checked
+    /// against the color type and bit depth from IHDR.
+    fn accept_plte(&mut self, chunk: &Chunk<'_>) -> Result<(), AssetRejection> {
+        if self.palette_seen || !self.layout.idat.is_empty() {
+            return Err(AssetRejection::Invalid);
+        }
+        check_palette(&self.layout, chunk.data)?;
+        self.palette_seen = true;
         Ok(())
     }
 

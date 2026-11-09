@@ -53,7 +53,7 @@ through `ArtifactService`, synchronous ports and SQLite schema 12. Asset bytes
 share `blobs` with source files; both reference types protect reclamation.
 Asset versions, metadata-only receipts, actor-wide keys, atomic logical quotas,
 trash/recovery/purge and backup/restore implement the storage behavior of rules 1–9;
-image admission remains disabled under rule 3. Upload preflight closes
+JPEG admission remains disabled under rule 3. Upload preflight closes
 its read snapshot before content validation, and final immediate settlement
 rechecks authority, key and base before using the saved validation result.
 
@@ -65,7 +65,7 @@ satisfies rule 3; the target allowlist and bounds below are unchanged.
 See the [content policy](../asset-validation.md).
 Stable MIME envelope parsing and historical metadata/receipt decoding still
 accept image type spellings. A currently authorized matching historical upload
-replays before the current text-only admission policy, including after deletion,
+replays before the current admission policy, including after deletion,
 and never recreates the bytes. A fresh image key is refused without a receipt.
 Generated request/response DTOs exist for HTTP. R09b1 supplies read-only
 `listAssets`, `getAsset` and `readAsset` functions using those DTOs, strict
@@ -477,8 +477,9 @@ code PR that follows it for `uploadAsset` and `deleteAsset` in
 tested in `scripts/tests/asset-mutation-client.test.mjs` against the real Rust
 server and bounded HTTP-boundary faults. The existing numbered rules above are
 unchanged. R09a image validation and full R09b (CLI, MCP, `copy_assets`)
-remain incomplete; PNG/JPEG upload is still refused by the server. The
-implementation notes that follow the contract text are marked as such.
+remain incomplete; at the time of R09b2 the server refused PNG/JPEG uploads
+(PNG is admitted since the R09a PNG change recorded at the end of this record;
+JPEG is still refused). The implementation notes that follow the contract text are marked as such.
 
 ### Dependency and scope
 
@@ -491,9 +492,10 @@ existing mutation convention. No new endpoint, database format or server
 application behavior is proposed. Reusing generated DTOs does not authorize a
 request or remove runtime checks.
 
-This is not permission to enable any image upload. New PNG/JPEG uploads remain
-unsupported; historical image envelopes and matching receipts must remain
-replayable under rules 5–7. The client must not substitute today's text-only
+This was not permission to enable any image upload: when R09b2 was written,
+new PNG/JPEG uploads remained unsupported (historical constraint; see the R09a PNG
+notes for the current state). Historical image envelopes and matching receipts must
+remain replayable under rules 5–7. The client must not substitute any current
 allowlist for the server's stable envelope and replay ordering. It performs no
 pixel decoding, content sanitization, MIME sniffing, normalization, remote fetch
 or filesystem access. CLI, MCP, copying, management UI and runtime grants remain
@@ -765,8 +767,9 @@ and retry hints go to stderr.
   same key with other content is `request_key_reused` and never a second write.
 - **Input.** Upload takes only a path the operator names (rule 11); there is no
   stdin. `--content-type` is required and never inferred from the file name; the
-  CLI checks only its spelling, so `image/png` and `text/html` reach the server
-  and are `asset_type_unsupported`. The file must be a regular file: a symbolic
+  CLI checks only its spelling, so `image/jpeg` and `text/html` reach the server
+  and are `asset_type_unsupported`, while `image/png` reaches the PNG validation
+  and is `invalid_asset` unless the file is a complete static PNG. The file must be a regular file: a symbolic
   link or special file is refused; it is opened without following links (where
   the platform has `O_NOFOLLOW`) and its device and inode must match the check
   before opening; a file over 5 MiB is refused before it is read, and a file whose size or modification time changes while it is read is
