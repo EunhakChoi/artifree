@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { afterEach, test } from 'node:test';
+import { afterEach, mock, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
@@ -159,6 +159,7 @@ afterEach(() => {
   current?.listeners.pagehide?.();
   current = undefined;
   delete globalThis.window;
+  mock.timers.reset();
 });
 
 async function code(promise) {
@@ -382,6 +383,11 @@ test('A listed creation time must be a safe integer', async () => {
       String(createdAtMs),
     );
   }
+});
+
+test('A listed creation time is never negative', async () => {
+  const negative = listingOf([entry({ createdAtMs: -1 })]);
+  assertUnavailable(await listWith(negative), 'a negative creation time');
 });
 
 test('A listed asset ID or digest that is not 64 lowercase hexadecimal digits is refused', async () => {
@@ -647,5 +653,120 @@ test('A read with a malformed asset ID or a bad argument is refused before anyth
   }
   await settle();
   assert.deepEqual(f.received, [], 'nothing was sent for a refused read');
+  f.hangUp();
+});
+
+/** Moves the fake clock on by `ms`, then lets the port deliver. */
+async function passTime(ms) {
+  mock.timers.tick(ms);
+  await settle();
+}
+
+test('A part refused once as rate-limited is asked again at the same offset, and the read still succeeds', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const big = asset(bytesOf(614_400));
+  let refusals = 1;
+  const f = frame(CONFIG, (message) => {
+    if (message.offset === PART && refusals > 0) {
+      refusals -= 1;
+      return { id: message.id, ok: false, code: 'rate_limited' };
+    }
+    return { id: message.id, ok: true, part: honestPart(big, message) };
+  });
+  const settled = f.api.assets.read({ assetId: ASSET }).then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  await settle();
+  assert.equal(f.received.length, 2, 'the refused part was sent');
+  await passTime(249);
+  assert.equal(f.received.length, 2, 'no retry before its 250 ms wait ends');
+  mock.timers.tick(1);
+  const outcome = await settled;
+  f.hangUp();
+  assert.equal(outcome.error?.code, undefined, 'the read succeeds');
+  assert.equal(outcome.value.size, 614_400);
+  assert.equal(outcome.value.sha256, big.sha256);
+  assert.ok(
+    Buffer.from(outcome.value.bytes).equals(Buffer.from(big.bytes)),
+    'the assembled bytes differ from the asset',
+  );
+  assert.deepEqual(
+    f.received.map((message) => message.offset),
+    [0, PART, PART, 2 * PART],
+    'the refused part is asked again at its own offset',
+  );
+});
+
+test('A part refused as rate-limited every time is asked five times in all, then the read is refused as rate_limited', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const f = frame(CONFIG, (message) => ({
+    id: message.id,
+    ok: false,
+    code: 'rate_limited',
+  }));
+  // Not awaited: a read that never gives up must fail the assertions below,
+  // not hang the test.
+  let outcome;
+  f.api.assets.read({ assetId: ASSET }).then(
+    (value) => {
+      outcome = { value };
+    },
+    (error) => {
+      outcome = { error };
+    },
+  );
+  await settle();
+  assert.equal(f.received.length, 1, 'the first attempt');
+  // The retries come as their waits end: 250, 500, 1000, then 2000 ms.
+  await passTime(249);
+  assert.equal(f.received.length, 1, 'no retry before 250 ms');
+  await passTime(1);
+  assert.equal(f.received.length, 2, 'the first retry, at 250 ms');
+  await passTime(499);
+  assert.equal(f.received.length, 2, 'no second retry before 750 ms');
+  await passTime(1);
+  assert.equal(f.received.length, 3, 'the second retry, at 750 ms');
+  await passTime(999);
+  assert.equal(f.received.length, 3, 'no third retry before 1750 ms');
+  await passTime(1);
+  assert.equal(f.received.length, 4, 'the third retry, at 1750 ms');
+  await passTime(1999);
+  assert.equal(f.received.length, 4, 'no fourth retry before 3750 ms');
+  await passTime(1);
+  assert.equal(f.received.length, 5, 'the fourth retry, at 3750 ms');
+  assert.deepEqual(
+    f.received.map((message) => message.offset),
+    [0, 0, 0, 0, 0],
+    'every attempt asks for the same offset',
+  );
+  assert.equal(
+    outcome?.error?.code,
+    'rate_limited',
+    'the read is refused after the fifth attempt',
+  );
+  f.hangUp();
+});
+
+test('A refusal that is not rate-limited is not asked again, however long the backoff would have run', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const f = frame(CONFIG, (message) => ({
+    id: message.id,
+    ok: false,
+    code: 'denied',
+  }));
+  let outcome;
+  f.api.assets.read({ assetId: ASSET }).then(
+    (value) => {
+      outcome = { value };
+    },
+    (error) => {
+      outcome = { error };
+    },
+  );
+  await settle();
+  assert.equal(outcome?.error?.code, 'denied', 'the read is refused at once');
+  await passTime(3_750);
+  assert.equal(f.received.length, 1, 'one attempt, and no retry');
   f.hangUp();
 });

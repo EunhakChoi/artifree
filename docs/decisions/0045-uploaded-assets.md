@@ -891,13 +891,23 @@ Rule 12's read half is implemented; `assets.write` (R09d2) and `assets.download`
   The digest comes from stored metadata and is not recomputed per part. An offset
   past the end is `416`; an offset equal to the size reads an empty final part.
 - **Check order.** Binding (`404`), the connection's current grant (`403`) and the
-  artifact's head (`409`) are checked before the arguments are judged, and the
-  grant and head are checked again before the part is returned. A read also
-  confirms that the asset is still associated with the artifact with the same
-  digest, so a deletion that lands before that check releases no bytes (`404`).
-  The residual window is a deletion or grant change that lands after that check
-  and before the response is written; it is not closed, and a result already
-  returned is not recalled.
+  artifact's head (`409`) are checked before the arguments are judged. The grant
+  and head are checked again after the asset is read; then the read confirms that
+  the asset is still associated with the artifact with the same digest (`404`
+  otherwise), and finally re-checks the binding and grant without waiting. A
+  deletion committed before that association lookup releases no bytes, and a
+  grant change, connection close or replacement committed before the final
+  synchronous check releases none either. Two windows stay open: a deletion
+  committed after the lookup has read the store, and a source save committed
+  after the head check (assets do not depend on the source head). A result
+  already returned is not recalled.
+- **Pacing.** Each part is one frame call and spends one token of the host's
+  frame budget (decision 0032), so a 5 MiB asset costs 20 calls. The SDK retries a
+  part answered `rate_limited` up to four times, after 250, 500, 1000 and 2000 ms,
+  and then fails the read with `rate_limited`; any other failure is not retried.
+  The server's frame limit is per actor and shared by all of that user's frames.
+- **Stale views.** A source save moves the artifact head, so an open view's asset
+  calls are `409` until it reloads, as for source reads (rule 12).
 - **Frame SDK.** `assets.list()` and `assets.read({ assetId })` return validated
   listings and the assembled bytes. The SDK reads parts from offset 0, checks each
   part's echoed identity, type, offsets and size against the first, and verifies
@@ -907,5 +917,10 @@ Rule 12's read half is implemented; `assets.write` (R09d2) and `assets.download`
   no asset URL and no token for a frame. No new `ArtifreeClient` method: the host
   reaches the routes through the runtime call helper, so the main web bundle does
   not grow.
+- **Follow-ups (not blocking).** Every part re-reads the whole asset (at most
+  5 MiB) and re-lists the artifact's assets; a ranged store read would remove
+  the repeated read. The asset id, limits and content-type set are repeated in
+  the frame SDK, the host and the client, the frame handlers in `http.rs` repeat
+  each other, and the capability set is a `u8` with three spare bits.
 - **Still not supported:** frame upload or delete (R09d2), device download
   (R09d3), S02 shared roles and an offline asset outbox.

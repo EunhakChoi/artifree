@@ -302,6 +302,30 @@ async fn pause_after_the_store_read<T>(
     Ok(())
 }
 
+/// Drives `request` past its final check and holds it at its association
+/// lookup, its last store read. The lookup waits behind a blocking thread the
+/// test holds, and the caller releases it with the returned sender. Anything
+/// queued behind the lookup runs after the lookup has read the store.
+async fn pause_at_the_association_lookup<T>(
+    request: &mut Pin<Box<impl Future<Output = T>>>,
+) -> Result<(mpsc::Sender<()>, tokio::task::JoinHandle<()>), Box<dyn Error>> {
+    pause_after_the_store_read(request).await?;
+    let (release, blocker) = hold_blocking_thread().await?;
+    assert!(
+        pends(request).await,
+        "the final check's lookup must wait behind the blocker"
+    );
+    release.send(())?;
+    blocker.await?;
+    settle().await?;
+    let (release, blocker) = hold_blocking_thread().await?;
+    assert!(
+        pends(request).await,
+        "the association lookup must wait behind the blocker"
+    );
+    Ok((release, blocker))
+}
+
 /// The refusal the call must give: `status`, and no data with it. A reply
 /// that carries data fails here, whatever the data is.
 fn refusal<T>(
@@ -493,6 +517,222 @@ fn a_listing_whose_grant_is_withdrawn_before_the_reply_releases_no_listing()
         pause_after_the_store_read(&mut request).await?;
         withdraw_grant(&state, &actor, &session, &view).await?;
         refusal(request.await, StatusCode::FORBIDDEN)?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_read_whose_asset_is_deleted_during_the_final_check_releases_no_bytes()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, _session, asset) = granted_view(&state, &actor).await?;
+        let call = frame_call(&actor, &view);
+        assert_unraced_read(&state, &call, &view, &asset).await?;
+        let read = read_request(&view, &asset);
+        let mut request = Box::pin(runtime_assets::read(&state, &call, &read));
+        // The bytes are read here; the final check has not run yet.
+        pause_after_the_store_read(&mut request).await?;
+        // The final check's artifact lookup waits behind a blocking thread the
+        // test holds. The deletion waits behind that lookup, so it commits after
+        // the lookup and before the association lookup runs.
+        let (release, blocker) = hold_blocking_thread().await?;
+        assert!(
+            pends(&mut request).await,
+            "the final check's lookup must wait behind the blocker"
+        );
+        let mut deletion = Box::pin(operations::delete_asset(
+            &state,
+            actor.clone(),
+            "asset-race-delete".parse()?,
+            &view.artifact_id,
+            &asset,
+            DeleteAssetRequest {
+                base_asset_version: 1,
+            },
+        ));
+        assert!(
+            pends(&mut deletion).await,
+            "the deletion must wait behind the final check's lookup"
+        );
+        release.send(())?;
+        blocker.await?;
+        let deleted = deletion.await.map_err(|error| error.body.message)?;
+        assert!(deleted.deleted, "the fixture must delete the asset");
+        let error = refusal(request.await, StatusCode::NOT_FOUND)?;
+        assert_eq!(error.body.message, "asset not found");
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_read_whose_grant_is_withdrawn_during_the_association_lookup_releases_no_bytes()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, session, asset) = granted_view(&state, &actor).await?;
+        let call = frame_call(&actor, &view);
+        assert_unraced_read(&state, &call, &view, &asset).await?;
+        let read = read_request(&view, &asset);
+        let mut request = Box::pin(runtime_assets::read(&state, &call, &read));
+        let (release, blocker) = pause_at_the_association_lookup(&mut request).await?;
+        // The withdrawal waits behind the lookup, so the lookup still finds the
+        // asset and only the synchronous check can refuse the read.
+        let mut withdrawal = Box::pin(withdraw_grant(&state, &actor, &session, &view));
+        assert!(
+            pends(&mut withdrawal).await,
+            "the withdrawal must wait behind the association lookup"
+        );
+        release.send(())?;
+        blocker.await?;
+        withdrawal.await?;
+        refusal(request.await, StatusCode::FORBIDDEN)?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_read_whose_connection_is_revoked_during_the_association_lookup_releases_no_bytes()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, _session, asset) = granted_view(&state, &actor).await?;
+        let call = frame_call(&actor, &view);
+        assert_unraced_read(&state, &call, &view, &asset).await?;
+        let read = read_request(&view, &asset);
+        let mut request = Box::pin(runtime_assets::read(&state, &call, &read));
+        let (release, blocker) = pause_at_the_association_lookup(&mut request).await?;
+        // The revocation lands while the lookup waits. The lookup does not check
+        // the connection, so only the synchronous check can refuse the read.
+        state.revoke_actor(&actor);
+        release.send(())?;
+        blocker.await?;
+        refusal(request.await, StatusCode::NOT_FOUND)?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_read_whose_head_moves_during_the_association_lookup_still_returns_its_bytes()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, _session, asset) = granted_view(&state, &actor).await?;
+        let call = frame_call(&actor, &view);
+        assert_unraced_read(&state, &call, &view, &asset).await?;
+        let read = read_request(&view, &asset);
+        let mut request = Box::pin(runtime_assets::read(&state, &call, &read));
+        let (release, blocker) = pause_at_the_association_lookup(&mut request).await?;
+        // The save waits behind the lookup and commits after it. Assets do not
+        // depend on the source head, so the synchronous check does not refuse.
+        let mut saving = Box::pin(save(
+            &state,
+            &actor,
+            &view.artifact_id,
+            2,
+            "note.txt",
+            "moved",
+        ));
+        assert!(
+            pends(&mut saving).await,
+            "the save must wait behind the association lookup"
+        );
+        release.send(())?;
+        blocker.await?;
+        saving.await?;
+        let part = request.await.map_err(|error| {
+            format!(
+                "the read that raced a save was refused: {} {}",
+                error.status, error.body.message
+            )
+        })?;
+        assert_eq!(part.content, PNG);
+        assert_eq!(part.sha256, PNG_SHA256);
+        assert_eq!(part.size, 106);
+        // The head did move, so a read that starts now is refused as stale.
+        let conflict = refusal(
+            runtime_assets::read(&state, &call, &read).await,
+            StatusCode::CONFLICT,
+        )?;
+        assert_eq!(
+            conflict.body.current_revision,
+            Some(3),
+            "the head must have moved to revision 3"
+        );
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[test]
+fn a_read_whose_asset_is_deleted_during_the_association_lookup_still_returns_its_bytes()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let actor: ActorId = "local".parse()?;
+        let (view, _session, asset) = granted_view(&state, &actor).await?;
+        let call = frame_call(&actor, &view);
+        assert_unraced_read(&state, &call, &view, &asset).await?;
+        let read = read_request(&view, &asset);
+        let mut request = Box::pin(runtime_assets::read(&state, &call, &read));
+        let (release, blocker) = pause_at_the_association_lookup(&mut request).await?;
+        // The deletion waits behind the lookup, which has already read the asset,
+        // so the read is ordered before the deletion and returns the bytes.
+        let mut deletion = Box::pin(operations::delete_asset(
+            &state,
+            actor.clone(),
+            "asset-race-delete".parse()?,
+            &view.artifact_id,
+            &asset,
+            DeleteAssetRequest {
+                base_asset_version: 1,
+            },
+        ));
+        assert!(
+            pends(&mut deletion).await,
+            "the deletion must wait behind the association lookup"
+        );
+        release.send(())?;
+        blocker.await?;
+        let deleted = deletion.await.map_err(|error| error.body.message)?;
+        assert!(deleted.deleted, "the fixture must delete the asset");
+        let part = request.await.map_err(|error| {
+            format!(
+                "the read that raced a deletion was refused: {} {}",
+                error.status, error.body.message
+            )
+        })?;
+        assert_eq!(part.content, PNG);
+        assert_eq!(part.sha256, PNG_SHA256);
+        assert_eq!(part.size, 106);
         Ok::<(), Box<dyn Error>>(())
     })
 }

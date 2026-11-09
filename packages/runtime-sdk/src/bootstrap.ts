@@ -54,6 +54,11 @@ const READ_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 /** A save waits for the commit and its read-back. */
 const WRITE_TIMEOUT_MS = 30_000;
+/**
+ * The waits before the retries of an asset part the workspace refused as
+ * rate-limited, in milliseconds: four retries, so five attempts in all.
+ */
+const RATE_LIMIT_BACKOFF_MS: readonly number[] = [250, 500, 1_000, 2_000];
 
 const FAILURE_CODES: Record<RuntimeFailureCode, string> = {
   invalid_request: 'The runtime request was not valid.',
@@ -94,10 +99,6 @@ function count(value: unknown): value is number {
 
 function sha256(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
-}
-
-function safeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value);
 }
 
 /** An asset's size: from 1 byte to 5 MiB. */
@@ -206,7 +207,7 @@ function assetInfo(value: unknown): AssetInfo | undefined {
     !isAssetType(contentType) ||
     !isAssetSize(size) ||
     !sha256(digest) ||
-    !safeInteger(createdAtMs)
+    !count(createdAtMs)
   )
     return undefined;
   return { id, contentType, size, sha256: digest, createdAtMs };
@@ -634,6 +635,41 @@ export function start(config: RuntimeInitialization): void {
     );
   }
 
+  /** Resolves after `ms`, on the timer the calls use for their timeouts. */
+  function pause(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  /**
+   * One part of an asset, asked again at the same offset while the workspace
+   * refuses it as rate-limited. Each wait in RATE_LIMIT_BACKOFF_MS comes before
+   * a retry; when the waits run out, the last refusal is rethrown, and any other
+   * failure is rethrown at once. Each attempt goes through `call`, so the lease
+   * and a closed view end the read as they end any other call.
+   */
+  async function requestAssetPartWithBackoff(
+    assetId: string,
+    offset: number,
+    first: AssetHead | undefined,
+  ): Promise<AssetPart> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await requestAssetPart(assetId, offset, first);
+      } catch (error: unknown) {
+        const wait = RATE_LIMIT_BACKOFF_MS[attempt];
+        if (
+          wait === undefined ||
+          !(error instanceof RuntimeRequestFailure) ||
+          error.code !== 'rate_limited'
+        )
+          throw error;
+        await pause(wait);
+      }
+    }
+  }
+
   const assets = Object.freeze({
     list(): Promise<AssetListing> {
       return call(
@@ -649,7 +685,7 @@ export function start(config: RuntimeInitialization): void {
       if (!isAssetId(assetId)) return invalid();
       // The first part states the asset's type, size and digest. Every part
       // repeats them, and nothing is returned before the bytes match.
-      let current = await requestAssetPart(assetId, 0, undefined);
+      let current = await requestAssetPartWithBackoff(assetId, 0, undefined);
       const head: AssetHead = {
         contentType: current.contentType,
         size: current.size,
@@ -665,7 +701,11 @@ export function start(config: RuntimeInitialization): void {
         assembled.set(current.bytes, current.offset);
         filled += current.bytes.length;
         if (current.nextOffset === null) break;
-        current = await requestAssetPart(assetId, current.nextOffset, head);
+        current = await requestAssetPartWithBackoff(
+          assetId,
+          current.nextOffset,
+          head,
+        );
       }
       if (filled !== head.size || sha256Hex(assembled) !== head.sha256)
         throw new RuntimeRequestFailure('unavailable');

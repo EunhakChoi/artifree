@@ -2,11 +2,17 @@
 //!
 //! These functions follow the source reads in [`crate::runtime_source`]. Each
 //! one is a frame call: it checks the binding, the connection's current
-//! `assets.read` grant and the artifact's head before any work, and checks
-//! them again after its asynchronous work. A read also checks that its asset
-//! is still associated with the artifact, so a deletion that lands before that
-//! check releases no bytes. A deletion that lands after it, before the reply is
-//! written, is not stopped, and a reply already returned is not recalled.
+//! `assets.read` grant and the artifact's head before any work, and checks the
+//! binding and the grant again after its last store read, with no `.await`
+//! after that check.
+//!
+//! A read's last store read is its association lookup, and its head is checked
+//! before that lookup, not after. A deletion committed before the lookup
+//! releases no bytes, and a grant change, a connection close or a replacement
+//! committed before the synchronous check that follows the lookup releases none
+//! either. Two windows stay open: a deletion committed after the lookup has read
+//! the store, and a source save committed after the head check, since assets do
+//! not depend on the source head. A reply already returned is not recalled.
 
 use artifree_contracts::api::{
     AssetList, ErrorCode, MAX_RUNTIME_ASSET_PART_BYTES, RuntimeAssetPart, RuntimeAssetReadRequest,
@@ -19,7 +25,7 @@ use crate::auth::hex;
 use crate::http::AppState;
 use crate::operations::{ApiError, asset_id, list_assets};
 use crate::runtime_policy::Capability;
-use crate::runtime_source::{FrameCall, authorize};
+use crate::runtime_source::{FrameCall, authorize, still_permitted};
 
 /// The largest offset a frame may name: 2^53 - 1, which a double-precision
 /// client holds exactly (decision 0032).
@@ -27,7 +33,8 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// The asset space of the artifact a view is bound to, with its version and
 /// totals. Assets are not part of a source revision, so the listing is the
-/// artifact's current space whatever revision the view shows.
+/// artifact's current asset space; a view whose artifact head moved past its
+/// pinned revision is still refused as stale (`409`), as for source reads.
 pub(crate) async fn list(state: &AppState, call: &FrameCall<'_>) -> Result<AssetList, ApiError> {
     authorize(state, call, Capability::AssetsRead).await?;
     let listing = list_assets(state, call.actor.clone(), call.artifact).await?;
@@ -83,8 +90,14 @@ pub(crate) async fn read(
             "the stored asset is not as its metadata states",
         ));
     };
-    // A deletion that landed before this check releases no bytes.
-    let (actor, artifact) = (call.actor.clone(), granted.artifact);
+    // The final check of the binding, the grant and the head, before the
+    // association lookup that follows it.
+    authorize(state, call, Capability::AssetsRead).await?;
+    // The association lookup is the last store read. Its id and digest must
+    // both still match what was read, so bytes go out only for an asset that
+    // is still associated. A deletion committed before the lookup releases no
+    // bytes; one committed after it is not stopped (see the module docs).
+    let (actor, artifact) = (call.actor.clone(), granted.artifact.clone());
     let digest = content.metadata.digest;
     let listed = state
         .run_assets(move |service| service.assets(&actor, &artifact))
@@ -96,7 +109,10 @@ pub(crate) async fn read(
     if !associated {
         return Err(ApiError::not_found("asset not found"));
     }
-    authorize(state, call, Capability::AssetsRead).await?;
+    // Synchronous, with no `.await` after it: a grant change, a connection
+    // close or a replacement committed before this check releases no bytes.
+    // The head is not checked again, since assets do not depend on it.
+    still_permitted(state, call, &granted, Capability::AssetsRead)?;
     Ok(RuntimeAssetPart {
         asset_id: asset.as_str().to_owned(),
         content_type: content.metadata.content_type.as_str().to_owned(),

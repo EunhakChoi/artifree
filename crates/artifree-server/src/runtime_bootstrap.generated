@@ -226,6 +226,7 @@ var __ArtifreeBootstrap = (() => {
   var READ_TIMEOUT_MS = 1e4;
   var DOWNLOAD_TIMEOUT_MS = 12e4;
   var WRITE_TIMEOUT_MS = 3e4;
+  var RATE_LIMIT_BACKOFF_MS = [250, 500, 1e3, 2e3];
   var FAILURE_CODES = {
     invalid_request: "The runtime request was not valid.",
     denied: "The runtime request was not permitted.",
@@ -255,9 +256,6 @@ var __ArtifreeBootstrap = (() => {
   }
   function sha256(value) {
     return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-  }
-  function safeInteger(value) {
-    return typeof value === "number" && Number.isSafeInteger(value);
   }
   function isAssetSize(value) {
     return count(value) && value >= 1 && value <= MAX_ASSET_BYTES;
@@ -320,7 +318,7 @@ var __ArtifreeBootstrap = (() => {
   function assetInfo(value) {
     if (!record(value)) return void 0;
     const { id, contentType, size, sha256: digest, createdAtMs } = value;
-    if (!isAssetId(id) || !isAssetType(contentType) || !isAssetSize(size) || !sha256(digest) || !safeInteger(createdAtMs))
+    if (!isAssetId(id) || !isAssetType(contentType) || !isAssetSize(size) || !sha256(digest) || !count(createdAtMs))
       return void 0;
     return { id, contentType, size, sha256: digest, createdAtMs };
   }
@@ -568,6 +566,23 @@ var __ArtifreeBootstrap = (() => {
         { timeout: READ_TIMEOUT_MS }
       );
     }
+    function pause(ms) {
+      return new Promise((resolve) => {
+        window.setTimeout(resolve, ms);
+      });
+    }
+    async function requestAssetPartWithBackoff(assetId, offset, first) {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await requestAssetPart(assetId, offset, first);
+        } catch (error) {
+          const wait = RATE_LIMIT_BACKOFF_MS[attempt];
+          if (wait === void 0 || !(error instanceof RuntimeRequestFailure) || error.code !== "rate_limited")
+            throw error;
+          await pause(wait);
+        }
+      }
+    }
     const assets = Object.freeze({
       list() {
         return call(
@@ -581,7 +596,7 @@ var __ArtifreeBootstrap = (() => {
         if (fields === void 0) return invalid();
         const { assetId } = fields;
         if (!isAssetId(assetId)) return invalid();
-        let current = await requestAssetPart(assetId, 0, void 0);
+        let current = await requestAssetPartWithBackoff(assetId, 0, void 0);
         const head = {
           contentType: current.contentType,
           size: current.size,
@@ -595,7 +610,11 @@ var __ArtifreeBootstrap = (() => {
           assembled.set(current.bytes, current.offset);
           filled += current.bytes.length;
           if (current.nextOffset === null) break;
-          current = await requestAssetPart(assetId, current.nextOffset, head);
+          current = await requestAssetPartWithBackoff(
+            assetId,
+            current.nextOffset,
+            head
+          );
         }
         if (filled !== head.size || sha256Hex(assembled) !== head.sha256)
           throw new RuntimeRequestFailure("unavailable");
