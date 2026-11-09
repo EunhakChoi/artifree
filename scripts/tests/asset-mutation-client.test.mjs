@@ -1685,10 +1685,17 @@ test('real server: key reuse, a stale base, type and quota refusals', async () =
     { code: 'asset_type_unsupported', status: 422 },
   );
   await assert.rejects(
-    uploadAsset(api, id, text('\x89PNG', 'image/png', 1), {
+    uploadAsset(api, id, text('\xff\xd8\xff\xd9', 'image/jpeg', 1), {
       idempotencyKey: fresh('type'),
     }),
     { code: 'asset_type_unsupported', status: 422 },
+  );
+  // A PNG is admitted only when it is complete: a bare signature is refused.
+  await assert.rejects(
+    uploadAsset(api, id, text('\x89PNG', 'image/png', 1), {
+      idempotencyKey: fresh('png'),
+    }),
+    { code: 'invalid_asset', status: 422 },
   );
   await assert.rejects(
     uploadAsset(api, id, text('', 'text/plain', 1), {

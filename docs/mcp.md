@@ -328,10 +328,12 @@ before the 5 MiB asset limit refuses it.
 
 `upload_asset` takes the bytes themselves as strict standard padded base64 in
 `content_base64`: never a host path or URL. One asset is at most 5 MiB decoded.
-Only UTF-8 `text/plain` and `text/csv` are accepted today; every other declared
-type, including `image/png`, `image/jpeg`, `text/html` and `image/svg+xml`, is
-`asset_type_unsupported`. Empty content, invalid UTF-8, or a NUL or control
-character other than tab, CR, and LF is `invalid_asset`; content over 5 MiB,
+Only UTF-8 `text/plain`, `text/csv` and complete static `image/png` (at most
+4096 pixels per axis and 16,777,216 pixels) are accepted today; every other
+declared type, including `image/jpeg`, `text/html` and `image/svg+xml`, is
+`asset_type_unsupported`. Empty content, invalid UTF-8, a NUL or control
+character other than tab, CR, and LF in text, or a PNG that is malformed,
+truncated, animated, oversize or not what the declared type says is `invalid_asset`; content over 5 MiB,
 or an upload that would pass a space or per-user limit, is
 `asset_limit_exceeded`; and malformed base64 or a malformed `content_type` is
 `invalid_request`. A refused upload writes nothing. Send `asset_version` from
@@ -369,8 +371,8 @@ A failed tool call returns `isError: true` with the HTTP API error body:
 | `data_too_large`         | A value, the data, or its nesting is over the limit. Send less.             |
 | `asset_conflict`         | `current_asset_version` is newer. List the assets again, then write on it.  |
 | `asset_limit_exceeded`   | The asset or a space/user limit is over. Send less or delete assets.        |
-| `asset_type_unsupported` | Only UTF-8 `text/plain` and `text/csv` are accepted today.                  |
-| `invalid_asset`          | The bytes break the content rules (empty, not UTF-8, control characters).   |
+| `asset_type_unsupported` | Only `text/plain`, `text/csv` and complete static `image/png` are accepted. |
+| `invalid_asset`          | The bytes break the content rules (empty, not UTF-8, bad or animated PNG).  |
 | `request_key_reused`     | The key was used for different content. Use a new key for a new change.     |
 | `invalid_request`        | Fix the arguments named in the message; the key is not reserved.            |
 | `not_found`              | The artifact, revision, file, asset, or job does not exist or is not yours. |

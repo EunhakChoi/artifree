@@ -1057,7 +1057,7 @@ test('An agent uploads, reads, retries, and deletes an asset; HTTP serves its by
       {
         artifact_id,
         base_asset_version: listed.asset_version,
-        content_type: 'image/png',
+        content_type: 'image/jpeg',
         content_base64: Buffer.from(png).toString('base64'),
         idempotency_key: freshKey(),
       },

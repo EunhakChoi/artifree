@@ -235,7 +235,7 @@ async fn envelopes_and_content_errors_do_not_consume_a_key() -> TestResult {
             "png",
             upload(0, "image/png", b"not png"),
             422,
-            "asset_type_unsupported",
+            "invalid_asset",
         ),
         (
             "mime",
@@ -584,28 +584,73 @@ fn different_byte_concurrent_loser_gets_key_reused_despite_its_policy_rejection(
     Ok(())
 }
 
+/// An independently authored, complete 1x1 RGBA PNG.
+const VALID_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==";
+/// The same image with a tEXt chunk and an unknown ancillary chunk after IHDR,
+/// both with valid CRCs. Stored bytes must keep them: nothing is stripped.
+const PNG_WITH_METADATA: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACnRFWHRDb21tZW50AGhpoqJYZgAAAAJwclZ0enrhbIZhAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==";
+/// SHA-256 of the decoded `PNG_WITH_METADATA`.
+const PNG_WITH_METADATA_SHA256: &str =
+    "3e2841980d3e451678e92cae6fdb667d3d4f3cdec9795fccf19005a3f688fbf7";
+
 #[tokio::test]
-async fn valid_and_invalid_png_uploads_are_unsupported_and_leave_the_key_free() -> TestResult {
+async fn a_complete_png_is_admitted_and_stored_with_its_exact_bytes() -> TestResult {
     let harness = Harness::new()?;
     let artifact = harness.artifact().await?;
     let path = format!("/v1/artifacts/{artifact}/assets");
-    // Independently authored valid 1x1 RGBA PNG. Validity never enables admission.
-    let valid_png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==")?;
-    for bytes in [valid_png.as_slice(), b"not PNG", b""] {
+    let png = STANDARD.decode(PNG_WITH_METADATA)?;
+    let created = harness
+        .call(
+            "POST",
+            &path,
+            Some("png-admitted"),
+            Some(upload(0, "image/png", &png)),
+        )
+        .await?;
+    secure(&created);
+    assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.json());
+    let receipt = created.json()?;
+    assert_eq!(receipt["asset"]["content_type"], "image/png");
+    assert_eq!(receipt["asset"]["size_bytes"], png.len());
+    assert_eq!(receipt["asset"]["sha256"], PNG_WITH_METADATA_SHA256);
+    let id = receipt["asset"]["id"].as_str().ok_or("asset id")?;
+    let content = harness
+        .call("GET", &format!("{path}/{id}/content"), None, None)
+        .await?;
+    assert_eq!(content.headers[header::CONTENT_TYPE], "image/png");
+    assert_eq!(content.bytes, png, "stored bytes are exactly as sent");
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_png_uploads_are_refused_and_leave_the_key_free() -> TestResult {
+    let harness = Harness::new()?;
+    let artifact = harness.artifact().await?;
+    let path = format!("/v1/artifacts/{artifact}/assets");
+    let valid = STANDARD.decode(VALID_PNG)?;
+    let truncated = valid[..valid.len() - 1].to_vec();
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    for (what, bytes) in [
+        ("not a PNG", b"not PNG".to_vec()),
+        ("empty", Vec::new()),
+        ("truncated", truncated),
+        ("trailing byte", trailing),
+    ] {
         let refused = harness
             .call(
                 "POST",
                 &path,
                 Some("image-policy"),
-                Some(upload(0, "image/png", bytes)),
+                Some(upload(0, "image/png", &bytes)),
             )
             .await?;
         secure(&refused);
-        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(refused.json()?["error"]["code"], "asset_type_unsupported");
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{what}");
+        assert_eq!(refused.json()?["error"]["code"], "invalid_asset", "{what}");
         let list = harness.call("GET", &path, None, None).await?;
-        assert_eq!(list.json()?["assets"], json!([]));
-        assert_eq!(list.json()?["asset_version"], 0);
+        assert_eq!(list.json()?["assets"], json!([]), "{what}");
+        assert_eq!(list.json()?["asset_version"], 0, "{what}");
     }
     let text = harness
         .call(
@@ -618,7 +663,7 @@ async fn valid_and_invalid_png_uploads_are_unsupported_and_leave_the_key_free() 
     assert_eq!(
         text.status,
         StatusCode::CREATED,
-        "image rejection must leave the key free"
+        "an invalid image must leave the key free"
     );
     let receipt = text.json()?;
     let id = receipt["asset"]["id"].as_str().ok_or("asset id")?;
@@ -627,6 +672,24 @@ async fn valid_and_invalid_png_uploads_are_unsupported_and_leave_the_key_free() 
         .await?;
     assert_eq!(content.headers[header::CONTENT_TYPE], "text/plain");
     assert_eq!(content.bytes, b"permitted text");
+    Ok(())
+}
+
+#[tokio::test]
+async fn jpeg_stays_unsupported_even_for_a_complete_looking_file() -> TestResult {
+    let harness = Harness::new()?;
+    let artifact = harness.artifact().await?;
+    let path = format!("/v1/artifacts/{artifact}/assets");
+    let refused = harness
+        .call(
+            "POST",
+            &path,
+            Some("jpeg-policy"),
+            Some(upload(0, "image/jpeg", b"\xff\xd8\xff\xd9")),
+        )
+        .await?;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.json()?["error"]["code"], "asset_type_unsupported");
     Ok(())
 }
 
@@ -691,7 +754,8 @@ async fn historical_png_receipts_replay_before_current_policy_without_recreating
     let actor = "local".parse()?;
     let key = "asset-test-historical-png".parse()?;
     let media = "image/png".parse()?;
-    let bytes = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==")?;
+    // Not a PNG: current admission refuses these bytes, so only a replay can reach them.
+    let bytes = b"stored under an earlier policy, not a PNG".to_vec();
     let service = ArtifactService::new(SqliteStore::open(&harness.dir.join("db.sqlite3"))?);
     // Seed a receipt under an earlier trusted policy, not current HTTP admission.
     let original = service.upload_asset_with_validator(
@@ -734,7 +798,7 @@ async fn historical_png_receipts_replay_before_current_policy_without_recreating
         )
         .await?;
     assert_eq!(fresh.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(fresh.json()?["error"]["code"], "asset_type_unsupported");
+    assert_eq!(fresh.json()?["error"]["code"], "invalid_asset");
     let deleted = harness
         .call(
             "DELETE",

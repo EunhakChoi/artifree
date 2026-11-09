@@ -45,7 +45,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (PNG/JPEG unsupported; CLI/MCP asset commands, runtime asset access and publish planned), and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV and static PNG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (JPEG unsupported; runtime asset access and publish planned), and a sandboxed preview origin."
     },
     {
       "id": "domain",
