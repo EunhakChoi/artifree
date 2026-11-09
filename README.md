@@ -265,8 +265,9 @@ only the file you name, never infers a type, and refuses a symbolic link or a fi
 over the limit before sending. After a lost reply, resend the identical command
 with the same key and the same file. MCP agents use `list_assets`, `read_asset`,
 `upload_asset` and `delete_asset`. A page running in a preview can list and read its own artifact's assets only after you grant it
-`assets.read`, and upload or delete them only after you grant it `assets.write`
-(a deleted asset cannot be restored); it cannot download them.
+`assets.read`, upload or delete them only after you grant it `assets.write`
+(a deleted asset cannot be restored), and ask you to save one to your device only
+after you grant it `assets.download` (each save asks you first).
 
 ## Architecture
 

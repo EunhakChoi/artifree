@@ -427,6 +427,13 @@ var __ArtifreeBootstrap = (() => {
       return void 0;
     return { assetId, assetVersion, deleted };
   }
+  function downloaded(value, assetId) {
+    if (!record(value)) return void 0;
+    const { started, assetId: named, bytes } = value;
+    if (started !== true || named !== assetId || !count(bytes) || bytes > MAX_ASSET_BYTES)
+      return void 0;
+    return { started, assetId, bytes };
+  }
   function start(config) {
     if (window.artifree !== void 0)
       throw new Error("The Artifree runtime was already installed.");
@@ -702,6 +709,17 @@ var __ArtifreeBootstrap = (() => {
           { type: "assets.delete", retryId, baseAssetVersion, assetId },
           (reply) => removed(reply.removed, asked),
           { timeout: WRITE_TIMEOUT_MS }
+        );
+      },
+      requestDownload(request) {
+        const fields = argument(request, ["assetId"]);
+        if (fields === void 0) return invalid();
+        const { assetId } = fields;
+        if (!isAssetId(assetId)) return invalid();
+        return call(
+          { type: "assets.download", assetId },
+          (reply) => downloaded(reply.receipt, assetId),
+          { timeout: DOWNLOAD_TIMEOUT_MS }
         );
       }
     });

@@ -50,6 +50,15 @@ const CAPABILITY_CONTROLS = [
     warning:
       "Allowing this lets the app add files to this artifact's private uploaded files and delete any of them, including files you uploaded, without asking you again until you revoke it or the artifact's source changes. Deleted files cannot be restored. Added files count toward this artifact's upload limits and are checked by type, which does not make them safe to run.",
   },
+  {
+    name: 'assets.download',
+    allow: 'Allow uploaded file downloads',
+    revoke: 'Revoke uploaded file downloads',
+    // Shown beside the control, because the grant lets the app ask to save
+    // uploaded files, and a saved file stays uploaded content (decision 0045).
+    warning:
+      'Each download asks you first. Saved files are uploaded content; allowing downloads does not make them safe to open.',
+  },
 ] as const;
 
 interface RuntimePermissionsProps {

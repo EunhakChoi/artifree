@@ -260,13 +260,14 @@ function listingOf(assets, assetVersion = 3) {
   return { assetVersion, assets };
 }
 
-test('The assets capability offers list, read, upload and delete, and is frozen', () => {
+test('The assets capability offers list, read, upload, delete and requestDownload, and is frozen', () => {
   const f = frame();
   assert.ok(Object.isFrozen(f.api.assets));
   assert.deepEqual(Object.keys(f.api.assets).sort(), [
     'delete',
     'list',
     'read',
+    'requestDownload',
     'upload',
   ]);
   f.hangUp();

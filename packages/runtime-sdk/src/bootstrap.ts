@@ -3,6 +3,7 @@ import type {
   AssetContentType,
   AssetDeleteReceipt,
   AssetDeleteRequest,
+  AssetDownloadReceipt,
   AssetInfo,
   AssetListing,
   AssetUploadReceipt,
@@ -489,6 +490,27 @@ function removed(
   return { assetId, assetVersion, deleted };
 }
 
+/**
+ * A download receipt, checked against the request it answers: the download
+ * started, it names the asset asked for, and its byte count is no more than
+ * the largest asset may be.
+ */
+function downloaded(
+  value: unknown,
+  assetId: string,
+): AssetDownloadReceipt | undefined {
+  if (!record(value)) return undefined;
+  const { started, assetId: named, bytes } = value;
+  if (
+    started !== true ||
+    named !== assetId ||
+    !count(bytes) ||
+    bytes > MAX_ASSET_BYTES
+  )
+    return undefined;
+  return { started, assetId, bytes };
+}
+
 interface Waiting {
   readonly parse: (reply: Record<string, unknown>) => unknown;
   readonly resolve: (value: never) => void;
@@ -858,6 +880,20 @@ export function start(config: RuntimeInitialization): void {
         { type: 'assets.delete', retryId, baseAssetVersion, assetId },
         (reply) => removed(reply.removed, asked),
         { timeout: WRITE_TIMEOUT_MS },
+      );
+    },
+    requestDownload(request: {
+      readonly assetId: string;
+    }): Promise<AssetDownloadReceipt> {
+      const fields = argument(request, ['assetId']);
+      if (fields === undefined) return invalid();
+      const { assetId } = fields;
+      if (!isAssetId(assetId)) return invalid();
+      // One attempt. A repeat asks the user again, so the SDK never makes one.
+      return call(
+        { type: 'assets.download', assetId },
+        (reply) => downloaded(reply.receipt, assetId),
+        { timeout: DOWNLOAD_TIMEOUT_MS },
       );
     },
   });

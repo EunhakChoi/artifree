@@ -111,6 +111,8 @@ test('Requests are classified by what they change', () => {
     'source/write',
     'assets/list',
     'assets/read',
+    'assets/offer',
+    'assets/download',
   ])
     assert.equal(
       requestKind(
@@ -188,6 +190,8 @@ const FRAME_TAILS = [
   'source/write',
   'assets/list',
   'assets/read',
+  'assets/offer',
+  'assets/download',
 ];
 
 /** `base` joined with `path` the way the client does. */
@@ -776,6 +780,58 @@ test('An asset upload or delete is sent at once, and its refusal holds no owner 
   // through a frame must not start the pause that holds every owner read.
   api.answer(at(`POST ${route}/assets/upload`), limited(30));
   api.answer(at(`POST ${route}/assets/delete`), limited(30));
+  await settle();
+  api.answer(at('GET /v1/artifacts'), Response.json({ artifacts: [] }));
+  const answered = await owner;
+  assert.equal(answered.status, 200);
+  await answered.json();
+  const next = gate.fetch('/v1/artifacts/b');
+  await settle();
+  assert.equal(api.paths().at(-1), 'GET /v1/artifacts/b');
+  api.answer(api.sent.length - 1);
+  assert.equal((await next).status, 200);
+});
+
+test('Look-alikes of the asset offer and download routes are not frame requests', () => {
+  const route = '/v1/artifacts/a/revisions/2/runtime-views/view/3';
+  for (const [method, path, kind] of [
+    ['GET', `${route}/assets/offer`, 'read'],
+    ['GET', `${route}/assets/download`, 'read'],
+    ['PUT', `${route}/assets/offer`, 'write'],
+    ['DELETE', `${route}/assets/download`, 'write'],
+    ['POST', `${route}/assets/offers`, 'write'],
+    ['POST', `${route}/assets/downloads`, 'write'],
+    ['POST', `${route}/assets/offer/x`, 'write'],
+    ['POST', `${route}/assets/download/x`, 'write'],
+    ['POST', `${route}/asset/download`, 'write'],
+    ['POST', '/v1/artifacts/a/runtime-views/view/3/assets/download', 'write'],
+    [
+      'POST',
+      '/v1/artifacts/a/revisions/2/runtime-views/view/x/assets/offer',
+      'write',
+    ],
+  ])
+    assert.equal(requestKind(method, path), kind, `${method} ${path}`);
+});
+
+test('An asset offer or download is sent at once, and its refusal holds no owner read', async () => {
+  const { api, gate } = setup();
+  const route = '/v1/artifacts/a/revisions/2/runtime-views/view/3';
+  const owner = gate.fetch('/v1/artifacts');
+  gate.fetch(`${route}/assets/offer`, { method: 'POST' });
+  gate.fetch(`${route}/assets/download`, { method: 'POST' });
+  await settle();
+  // The owner's read and both calls went out together.
+  assert.deepEqual(api.paths().sort(), [
+    'GET /v1/artifacts',
+    `POST ${route}/assets/download`,
+    `POST ${route}/assets/offer`,
+  ]);
+  const at = (path) => api.paths().indexOf(path);
+  // The server limits frames apart from the owner: a 429 for an offer or a
+  // download must not start the pause that holds every owner read.
+  api.answer(at(`POST ${route}/assets/offer`), limited(30));
+  api.answer(at(`POST ${route}/assets/download`), limited(30));
   await settle();
   api.answer(at('GET /v1/artifacts'), Response.json({ artifacts: [] }));
   const answered = await owner;

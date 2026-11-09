@@ -56,8 +56,9 @@ guide for the deadline, verification, and merge requirements.
   (decision 0019). They are isolated from the workspace, not from the
   network: content can navigate its own frame elsewhere (decision 0003).
   Runtime metadata requires an explicit connection grant (decision 0020), and
-  so do reading and writing uploaded assets (`assets.read`, `assets.write`,
-  decision 0045); asset download and network isolation remain unimplemented.
+  so do reading, writing and saving uploaded assets (`assets.read`,
+  `assets.write`, `assets.download`, decision 0045); network isolation remains
+  unimplemented.
 - Mutations go through `ArtifactService` with a base revision and an
   idempotency key. Do not add a write path that bypasses either.
 

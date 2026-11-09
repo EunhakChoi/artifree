@@ -1,8 +1,8 @@
 /**
  * Capability names. `metadata.read`, `source.read`, `source.download`,
- * `source.write`, `assets.read` and `assets.write` are supported (decisions
- * 0020, 0032, 0033 and 0045); the others are proposed. A name is not a grant:
- * the user grants each one separately in the workspace.
+ * `source.write`, `assets.read`, `assets.write` and `assets.download` are
+ * supported (decisions 0020, 0032, 0033 and 0045); the others are proposed. A
+ * name is not a grant: the user grants each one separately in the workspace.
  */
 export type RuntimeCapability =
   | 'metadata.read'
@@ -11,6 +11,7 @@ export type RuntimeCapability =
   | 'source.write'
   | 'assets.read'
   | 'assets.write'
+  | 'assets.download'
   | 'model.generate'
   | 'data.read'
   | 'data.write'
@@ -43,8 +44,9 @@ export interface RuntimeMetadata {
  * user consents again. `conflict`: the uploaded assets changed since the call
  * named their version; `currentAssetVersion` on the failure names the current
  * version when the workspace could tell. `not_found`: the view, the artifact or
- * the file is gone. `declined`: the user did not accept a download, or it was
- * withdrawn. `expired`: this view ended.
+ * the file is gone. `declined`: the user did not accept a download. A download
+ * the user withdraws gets no answer: its call fails when its timeout ends.
+ * `expired`: this view ended.
  */
 export type RuntimeFailureCode =
   | 'invalid_request'
@@ -242,6 +244,19 @@ export interface AssetDeleteReceipt {
   readonly deleted: boolean;
 }
 
+/**
+ * The user confirmed and the workspace handed the asset's bytes to the browser
+ * to save. As for `DownloadReceipt`, `started` does not mean the file reached
+ * disk: the browser or the user can still cancel the save.
+ */
+export interface AssetDownloadReceipt {
+  readonly started: true;
+  /** The asset asked for: 64 lowercase hexadecimal digits. */
+  readonly assetId: string;
+  /** The bytes the workspace received and handed over. */
+  readonly bytes: number;
+}
+
 /** Operations on the uploaded assets of the artifact (decision 0045). */
 export interface AssetsRuntime {
   /** Lists the assets; needs the `assets.read` grant. */
@@ -269,6 +284,14 @@ export interface AssetsRuntime {
    * restored. `deleted` is false when the artifact had no such asset.
    */
   delete(request: AssetDeleteRequest): Promise<AssetDeleteReceipt>;
+  /**
+   * Asks the workspace to offer one uploaded asset, named by its ID, for the
+   * user to save. Needs the `assets.download` grant and the user's
+   * confirmation each time. The SDK never retries it: each call asks again.
+   */
+  requestDownload(request: {
+    readonly assetId: string;
+  }): Promise<AssetDownloadReceipt>;
 }
 
 /** What an opted-in frame can do, each operation subject to its own grant. */

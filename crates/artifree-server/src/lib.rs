@@ -28,6 +28,8 @@ pub mod web;
 pub mod worker;
 
 #[cfg(test)]
+mod runtime_asset_download_tests;
+#[cfg(test)]
 mod runtime_asset_tests;
 #[cfg(test)]
 mod runtime_asset_write_tests;

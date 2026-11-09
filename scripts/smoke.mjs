@@ -31,6 +31,7 @@ import { checkLiveUpdates } from './smoke-live.mjs';
 import { checkListAndMetadata } from './smoke-list.mjs';
 import { checkRuntimeAssets } from './smoke-runtime-assets.mjs';
 import { checkRuntimeAssetWrites } from './smoke-runtime-asset-writes.mjs';
+import { checkRuntimeAssetDownloads } from './smoke-runtime-asset-downloads.mjs';
 import { checkRuntime } from './smoke-runtime.mjs';
 import { checkSource } from './smoke-source.mjs';
 import { checkStaticDefault } from './smoke-static-default.mjs';
@@ -347,6 +348,12 @@ try {
       server: api,
       checkAccessibility,
     });
+    const runtimeAssetDownloads = await checkRuntimeAssetDownloads({
+      browser,
+      origin,
+      server: api,
+      checkAccessibility,
+    });
     const staticDefault = await checkStaticDefault({
       browser,
       binary: serverBinary,
@@ -531,6 +538,7 @@ try {
       source,
       runtimeAssets,
       runtimeAssetWrites,
+      runtimeAssetDownloads,
       staticDefault,
       handoff,
       artifactConsole,

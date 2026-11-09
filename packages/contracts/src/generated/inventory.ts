@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.21.0",
+  "contract_version": "0.22.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -36,7 +36,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/runtime-sdk",
       "status": "implemented",
-      "summary": "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download, saves one file per view, and reads and changes its artifact's uploaded assets; each needs its own connection-scoped grant, and other capabilities remain planned."
+      "summary": "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download of its source or of one uploaded asset, saves one file per view, and reads and changes its artifact's uploaded assets; each needs its own connection-scoped grant, and other capabilities remain planned."
     },
     {
       "id": "api",
@@ -45,7 +45,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset reading and writing are implemented; asset download and publish planned), and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset reading, writing and download are implemented; publish planned), and a sandboxed preview origin."
     },
     {
       "id": "domain",

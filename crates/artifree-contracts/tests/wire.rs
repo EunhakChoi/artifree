@@ -7,8 +7,9 @@ use artifree_contracts::api::{
     MAX_RUNTIME_ASSET_UPLOAD_BYTES, MAX_RUNTIME_SOURCE_PART_BYTES, MAX_RUNTIME_SOURCE_WRITE_BASE64,
     MAX_RUNTIME_SOURCE_WRITE_BYTES, Preview, PurgeArtifactResponse, ReadDataMembersQuery,
     RemoveUnreferencedContentResponse, Revision, RevisionList, RuntimeAssetDeleteRequest,
-    RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest,
-    RuntimeConnection, RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
+    RuntimeAssetDownloadOffer, RuntimeAssetDownloadRequest, RuntimeAssetListRequest,
+    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeConnection,
+    RuntimeDownloadOffer, RuntimeGrant, RuntimeSourceList, RuntimeSourcePart,
     RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView,
     SaveRevisionRequest, SourceExportManifest, UnreferencedContent, UpdateArtifactResponse,
 };
@@ -204,6 +205,10 @@ fn response_schemas_describe_what_the_server_writes() {
         (
             "RuntimeAssetPart",
             published_unlike_written::<RuntimeAssetPart>(),
+        ),
+        (
+            "RuntimeAssetDownloadOffer",
+            published_unlike_written::<RuntimeAssetDownloadOffer>(),
         ),
         (
             "RuntimeDownloadOffer",
@@ -424,6 +429,70 @@ fn runtime_asset_write_bodies_refuse_unknown_fields() {
         "initialization": "secret", "retry_id": "retry-0001", "base_asset_version": 3,
         "asset_id": "a".repeat(64)
     }));
+}
+
+/// A download request for one asset, as a frame sends it.
+fn download_request() -> Value {
+    serde_json::json!({ "initialization": "secret", "asset_id": "a".repeat(64) })
+}
+
+/// The offer for a 10-byte PNG asset, named as the server names it:
+/// `asset-` and the identifier, with the extension of the stored type.
+fn download_offer() -> Value {
+    serde_json::json!({
+        "asset_id": "a".repeat(64),
+        "file_name": format!("asset-{}.png", "a".repeat(64)),
+        "size": 10,
+        "sha256": "0".repeat(64)
+    })
+}
+
+/// The download request reads the fields its wire names and writes them back
+/// as they were read (decision 0045 rule 12).
+#[test]
+fn runtime_asset_download_request_round_trips() -> Result<(), serde_json::Error> {
+    let expected = download_request();
+    let parsed: RuntimeAssetDownloadRequest = serde_json::from_value(expected.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, expected);
+    Ok(())
+}
+
+/// The offer reads the fields its wire names and writes them back as they were
+/// read (decision 0045 rule 12).
+#[test]
+fn runtime_asset_download_offer_round_trips() -> Result<(), serde_json::Error> {
+    let expected = download_offer();
+    let parsed: RuntimeAssetDownloadOffer = serde_json::from_value(expected.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, expected);
+    Ok(())
+}
+
+/// The download request and the offer refuse a field they do not define, as the
+/// other asset bodies do (decision 0045 rule 12).
+#[test]
+fn runtime_asset_download_bodies_refuse_unknown_fields() {
+    assert_refuses_unknown_field::<RuntimeAssetDownloadRequest>(download_request());
+    assert_refuses_unknown_field::<RuntimeAssetDownloadOffer>(download_offer());
+}
+
+/// The offer's name is published with the bound a download name has: at most
+/// `MAX_DOWNLOAD_NAME`, which is 100 characters (decision 0045 rule 12).
+#[test]
+fn runtime_asset_download_offer_bounds_are_the_published_ones() -> Result<(), serde_json::Error> {
+    let offer = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<RuntimeAssetDownloadOffer>(),
+    )?;
+    assert_eq!(
+        offer["properties"]["file_name"]["maxLength"], 100,
+        "the published bound of a download name is 100 characters"
+    );
+    assert_eq!(
+        offer["properties"]["file_name"]["maxLength"],
+        MAX_DOWNLOAD_NAME
+    );
+    Ok(())
 }
 
 /// One part of a 10-byte asset, as a runtime view receives it.

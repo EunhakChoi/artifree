@@ -1525,6 +1525,40 @@ pub struct RuntimeAssetDeleteRequest {
     pub asset_id: String,
 }
 
+/// Asks whether, or asks for, a download of one asset of the artifact a runtime
+/// view is bound to, which needs the `assets.download` grant (decision 0045
+/// rule 12). The offer route and the download route both take this body. The
+/// same body is used to check that an offer is allowed and, after the user
+/// confirmed, to fetch the bytes; the server decides afresh each time. The
+/// offer route answers with a [`RuntimeAssetDownloadOffer`]; the download route
+/// answers with the asset's bytes, not with JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssetDownloadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// The asset to download: the `id` of one asset of the artifact, 64
+    /// lowercase hexadecimal digits.
+    pub asset_id: String,
+}
+
+/// What a download of one asset would hand over, without any of its bytes. The
+/// workspace shows it to the user before they confirm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAssetDownloadOffer {
+    /// Identifier of the asset, as requested.
+    pub asset_id: String,
+    /// The name to save under: at most 100 characters of
+    /// `A-Z a-z 0-9 . _ -`, not starting with a dot.
+    #[schemars(length(max = 100))]
+    pub file_name: String,
+    /// The asset's size in bytes.
+    pub size: u64,
+    /// The whole asset's SHA-256 digest, as 64 lowercase hex digits.
+    pub sha256: String,
+}
+
 /// Joins the room of an artifact as one participant of the caller's tab, or
 /// resumes the participant that tab already has in `slot` (decision 0034).
 /// The tab is the runtime connection named in the route, never a field.

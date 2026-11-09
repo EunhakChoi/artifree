@@ -1,19 +1,22 @@
-//! Asset listing, reads and writes for runtime frames (decision 0045, rule 12).
+//! Asset listing, reads, downloads and writes for runtime frames (decision
+//! 0045, rule 12).
 //!
 //! These functions follow the source reads in [`crate::runtime_source`]. Each
 //! one is a frame call: it checks the binding, the connection's current grant
 //! of its capability and the artifact's head before any work, and checks the
 //! binding and the grant again after its last store access, with no `.await`
-//! after that check. Reads need `assets.read`; uploads and deletions need
-//! `assets.write`. Neither grant implies the other.
+//! after that check. Reads need `assets.read`, downloads need `assets.download`,
+//! and uploads and deletions need `assets.write`. No one of these grants implies
+//! another.
 //!
-//! A read's last store read is its association lookup, and its head is checked
-//! before that lookup, not after. A deletion committed before the lookup
-//! releases no bytes, and a grant change, a connection close or a replacement
-//! committed before the synchronous check that follows the lookup releases none
-//! either. Two windows stay open: a deletion committed after the lookup has read
-//! the store, and a source save committed after the head check, since assets do
-//! not depend on the source head. A reply already returned is not recalled.
+//! A read's and a download's last store read is its association lookup, and its
+//! head is checked before that lookup, not after. A deletion committed before
+//! the lookup releases no bytes, and a grant change, a connection close or a
+//! replacement committed before the synchronous check that follows the lookup
+//! releases none either. Two windows stay open: a deletion committed after the
+//! lookup has read the store, and a source save committed after the head check,
+//! since assets do not depend on the source head. A reply already returned is
+//! not recalled.
 //!
 //! A write is fenced on the source head its view pinned. The store checks that
 //! head before it replays the retry key, so a source that moved refuses the
@@ -28,12 +31,13 @@
 use artifree_contracts::api::{
     AssetList, DeleteAssetResponse, ErrorCode, MAX_RUNTIME_ASSET_PART_BYTES,
     MAX_RUNTIME_ASSET_UPLOAD_BASE64, MAX_RUNTIME_ASSET_UPLOAD_BYTES, RuntimeAssetDeleteRequest,
-    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, UploadAssetResponse,
+    RuntimeAssetDownloadOffer, RuntimeAssetDownloadRequest, RuntimeAssetPart,
+    RuntimeAssetReadRequest, RuntimeAssetUploadRequest, UploadAssetResponse,
 };
 use artifree_core::artifacts::ArtifactService;
 use artifree_core::assets::{AssetDeletion, AssetUpload};
-use artifree_domain::assets::AssetMediaType;
-use artifree_domain::identity::RequestKey;
+use artifree_domain::assets::{AssetId, AssetMediaType, AssetMetadata};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey};
 use artifree_ports::artifact_store::Delivery;
 use artifree_ports::asset_store::{AssetReceipt, AssetStoreError};
 use artifree_providers::storage::SqliteStore;
@@ -45,7 +49,9 @@ use crate::auth::hex;
 use crate::http::AppState;
 use crate::operations::{ApiError, asset_base, asset_dto, asset_id, list_assets};
 use crate::runtime_policy::Capability;
-use crate::runtime_source::{FrameCall, HeldCall, authorize, decoded_within, still_permitted};
+use crate::runtime_source::{
+    Download, FrameCall, HeldCall, authorize, busy, decoded_within, safe_name, still_permitted,
+};
 
 /// The largest offset a frame may name: 2^53 - 1, which a double-precision
 /// client holds exactly (decision 0032).
@@ -117,16 +123,9 @@ pub(crate) async fn read(
     // both still match what was read, so bytes go out only for an asset that
     // is still associated. A deletion committed before the lookup releases no
     // bytes; one committed after it is not stopped (see the module docs).
-    let (actor, artifact) = (call.actor.clone(), granted.artifact.clone());
     let digest = content.metadata.digest;
-    let listed = state
-        .run_assets(move |service| service.assets(&actor, &artifact))
-        .await?;
-    let associated = listed
-        .assets
-        .iter()
-        .any(|entry| entry.id == asset && entry.digest == digest);
-    if !associated {
+    let listed = associated_asset(state, call.actor, &granted.artifact, &asset).await?;
+    if listed.digest != digest {
         return Err(ApiError::not_found("asset not found"));
     }
     // Synchronous, with no `.await` after it: a grant change, a connection
@@ -154,6 +153,120 @@ fn stored_part(stored: &[u8], size: u64, start: u64, end: u64) -> Option<&[u8]> 
     let start = usize::try_from(start).ok()?;
     let end = usize::try_from(end).ok()?;
     stored.get(start..end)
+}
+
+/// What a download of one asset of the artifact a view is bound to would be
+/// named and how large it is, without any of its bytes. The binding, the grant
+/// and the head are checked before the identifier is parsed, and the grant and
+/// the head again after the lookup. An asset the artifact does not hold is `404`.
+pub(crate) async fn offer(
+    state: &AppState,
+    call: &FrameCall<'_>,
+    request: &RuntimeAssetDownloadRequest,
+) -> Result<RuntimeAssetDownloadOffer, ApiError> {
+    let granted = authorize(state, call, Capability::AssetsDownload).await?;
+    let asset = asset_id(&request.asset_id)?;
+    let metadata = associated_asset(state, call.actor, &granted.artifact, &asset).await?;
+    let offer = RuntimeAssetDownloadOffer {
+        asset_id: asset.as_str().to_owned(),
+        file_name: asset_file_name(&asset, metadata.content_type.as_str()),
+        size: metadata.size,
+        sha256: hex(&metadata.digest),
+    };
+    authorize(state, call, Capability::AssetsDownload).await?;
+    Ok(offer)
+}
+
+/// The bytes of one asset of the artifact a view is bound to, as stored, under
+/// the name [`asset_file_name`] gives. The download takes one of the slots that
+/// source downloads share. The bytes are handed over only when the asset is
+/// still associated with the artifact, with the id, digest and size they were
+/// read with (decision 0045, rule 12).
+pub(crate) async fn download(
+    state: &AppState,
+    call: &FrameCall<'_>,
+    request: &RuntimeAssetDownloadRequest,
+) -> Result<Download, ApiError> {
+    let granted = authorize(state, call, Capability::AssetsDownload).await?;
+    let asset = asset_id(&request.asset_id)?;
+    // Held until the bytes are returned or the work fails, as a source download
+    // holds its slot. Taken after the identifier is parsed, so an identifier
+    // that names no asset holds none.
+    let _build = state
+        .download_builds()
+        .take(call.actor)
+        .map_err(|_| busy())?;
+    let (actor, artifact, wanted) = (call.actor.clone(), granted.artifact.clone(), asset.clone());
+    let content = state
+        .run_assets(move |service| service.asset_content(&actor, &artifact, &wanted))
+        .await?;
+    let size = content.metadata.size;
+    // `stored_part` also checks that the bytes are exactly as many as the
+    // metadata states.
+    if stored_part(&content.bytes, size, 0, size).is_none() {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            "the stored asset is not as its metadata states",
+        ));
+    }
+    // The last check of the head and the last asynchronous check of the binding
+    // and the grant, made before the association lookup that follows it.
+    authorize(state, call, Capability::AssetsDownload).await?;
+    // The association lookup is the last store read. The asset must still be
+    // listed with the id, digest and size that the bytes were read with.
+    let listed = associated_asset(state, call.actor, &granted.artifact, &asset).await?;
+    if content.metadata.id != asset
+        || listed.digest != content.metadata.digest
+        || listed.size != size
+    {
+        return Err(ApiError::not_found("asset not found"));
+    }
+    // Synchronous, with no `.await` after it: a grant change, a connection
+    // close or a replacement committed before this check releases no bytes.
+    still_permitted(state, call, &granted, Capability::AssetsDownload)?;
+    Ok(Download {
+        file_name: asset_file_name(&asset, content.metadata.content_type.as_str()),
+        bytes: content.bytes,
+        content_type: "application/octet-stream",
+    })
+}
+
+/// The metadata of `asset` in the artifact's current assets, or `404` when the
+/// artifact does not hold it. The lookup reads one store snapshot; each caller
+/// places it where the module docs require its association check.
+async fn associated_asset(
+    state: &AppState,
+    actor: &ActorId,
+    artifact: &ArtifactId,
+    asset: &AssetId,
+) -> Result<AssetMetadata, ApiError> {
+    let (actor, artifact) = (actor.clone(), artifact.clone());
+    let listed = state
+        .run_assets(move |service| service.assets(&actor, &artifact))
+        .await?;
+    // Identifiers are unique within one artifact's space (the table's primary
+    // key), so the first match is the only match.
+    listed
+        .assets
+        .into_iter()
+        .find(|entry| entry.id == *asset)
+        .ok_or_else(|| ApiError::not_found("asset not found"))
+}
+
+/// The name an asset downloads under: `asset-` and its identifier, with the
+/// extension of its stored type. The four types the upload validator admits
+/// have one; any other stored spelling gets none rather than a guessed one. The
+/// longest name is 74 characters, so [`safe_name`] never shortens it.
+fn asset_file_name(id: &AssetId, stored_content_type: &str) -> String {
+    let extension = match stored_content_type {
+        "text/plain" => ".txt",
+        "text/csv" => ".csv",
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        _ => "",
+    };
+    safe_name(&format!("asset-{}{extension}", id.as_str()))
 }
 
 /// Uploads one asset to the artifact a view is bound to, for the frame, and

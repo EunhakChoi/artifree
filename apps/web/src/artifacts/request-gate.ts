@@ -24,15 +24,16 @@ const CHANGE_FEED = /\/v1\/changes$/;
 // Group 1 is set for `previews` and a bare `runtime-views`, which issue a
 // preview or a view; a longer tail below `runtime-views` is a frame call.
 const REVISION_ROUTE =
-  /\/v1\/artifacts\/[^/]+\/revisions\/\d+\/(?:(previews|runtime-views)|runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download|write)|assets\/(?:list|read|upload|delete)))$/;
+  /\/v1\/artifacts\/[^/]+\/revisions\/\d+\/(?:(previews|runtime-views)|runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download|write)|assets\/(?:list|read|upload|delete|offer|download)))$/;
 
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a
  * preview or runtime view. The feed is one long request. A runtime frame's
  * calls (metadata, source, download, `assets/list`, `assets/read`,
- * `assets/upload` and `assets/delete`), which the workspace sends on its
- * behalf, are `frame` requests. Everything else, including closing a runtime
- * view, writes. `url` may carry the server's path prefix.
+ * `assets/upload`, `assets/delete`, `assets/offer` and `assets/download`),
+ * which the workspace sends on its behalf, are `frame` requests. Everything
+ * else, including closing a runtime view, writes. `url` may carry the server's
+ * path prefix.
  */
 export function requestKind(method: string, url: string): RequestKind {
   const { pathname } = new URL(url, 'http://gate.invalid');
