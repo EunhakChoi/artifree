@@ -4,7 +4,7 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); R09d2 lets a runtime frame upload and delete its artifact's assets under a separate `assets.write` grant (Chromium; Firefox re-verification pending); the remainder of R09d (device download) is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); R09d2 lets a runtime frame upload and delete its artifact's assets under a separate `assets.write` grant (Chromium; Firefox re-verification pending); R09d3 lets a runtime frame ask the user to save one of its artifact's uploaded assets to their device under a separate `assets.download` grant (Chromium; Firefox re-verification pending), which completes R09d apart from that Firefox re-verification**.
 The current HTTP/storage slice accepts UTF-8 plain text/CSV, complete static
 PNG and complete JPEG of the sequential subset recorded in the R09a image
 validation notes at the end of this record. Other JPEG variants are refused as
@@ -12,7 +12,7 @@ validation notes at the end of this record. Other JPEG variants are refused as
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). The MCP tools `list_assets`, `read_asset`, `upload_asset` and `delete_asset`
-exist (R09b3). The CLI `asset list|upload|read|delete` commands exist (R09b4). A runtime frame lists and reads assets under its own `assets.read` grant (R09d1) and uploads and deletes them under its own `assets.write` grant (R09d2); device download is not implemented. A duplicate copies the
+exist (R09b3). The CLI `asset list|upload|read|delete` commands exist (R09b4). A runtime frame lists and reads assets under its own `assets.read` grant (R09d1) uploads and deletes them under its own `assets.write` grant (R09d2), and asks the user to save one to their device under its own `assets.download` grant (R09d3). A duplicate copies the
 requesting actor's current asset space only when `copy_assets` is true (rule 10).
 The management web has an Assets tab (R09c: usage, upload, list,
 attachment download, delete, conflict and unknown-outcome retry), and its
@@ -873,8 +873,9 @@ and is not a new decision. The PNG notes come first, the JPEG notes after them.
 
 ## R09d1: runtime `assets.read` (implementation notes)
 
-Rule 12's read half is implemented; `assets.write` (R09d2) and `assets.download`
-(R09d3) are not. Chromium is verified; Firefox re-verification is pending.
+Rule 12's read half is implemented here; `assets.write` is implemented in R09d2
+and `assets.download` in R09d3 (notes below). Chromium is verified; Firefox
+re-verification is pending.
 
 - **Capability.** `assets.read` has its own declaration, support, consent and
   connection grant, independent of every `source.*` capability. A grant of one
@@ -922,13 +923,12 @@ Rule 12's read half is implemented; `assets.write` (R09d2) and `assets.download`
   the repeated read. The asset id, limits and content-type set are repeated in
   the frame SDK, the host and the client, the frame handlers in `http.rs` repeat
   each other, and the capability set is a `u8` with three spare bits.
-- **Still not supported:** device download (R09d3), S02 shared roles and an
-  offline asset outbox.
+- **Still not supported:** S02 shared roles and an offline asset outbox.
 
 ## R09d2: runtime `assets.write` (implementation notes)
 
 Rule 12's write half is implemented: a frame can upload and delete assets of its
-own artifact. `assets.download` (R09d3) is not. Chromium is verified; Firefox
+own artifact. `assets.download` is implemented in R09d3 (notes below). Chromium is verified; Firefox
 re-verification is pending. No numbered rule changed.
 
 - **Capability.** `assets.write` has its own declaration, support, consent and
@@ -983,3 +983,56 @@ re-verification is pending. No numbered rule changed.
   no asset URL or `Location` and no token for a frame, no change-feed event, no
   new `ArtifreeClient` method, no change to host frame budgets (each write is one
   token and one waiting slot), no store or schema change.
+
+## R09d3: runtime `assets.download` (implementation notes)
+
+Rule 12's download half is implemented: a frame can ask the user to save one of
+its artifact's uploaded assets to the device, and the user decides each time.
+This completes R09d. Chromium is verified; Firefox re-verification is pending
+(R09d1, R09d2 and R09d3). No numbered rule changed.
+
+- **Capability.** `assets.download` has its own declaration, support, consent and
+  connection grant. It neither implies nor is implied by `assets.read`,
+  `assets.write` or any `source.*` capability, so a frame holding only this grant
+  cannot list assets; it learns an asset ID from a receipt, from `assets.read` or
+  from its own bytes. The grant is permission to ask, not a confirmation: every
+  download is offered to the user first, and one grant is not spent by a download.
+  The consent text says that each download asks first and that a saved file is
+  uploaded content that the grant does not make safe to open.
+- **Routes and steps.** `POST {VIEW}/assets/offer` answers `200` with the asset
+  ID, a file name, the size and the SHA-256 (the stored bytes' digest) and shows
+  nothing to the user. `POST {VIEW}/assets/download` answers `200` with the raw
+  bytes. The host asks for the offer first, so a refusal is never preceded by a
+  prompt, shows the user the file name and size, and fetches the bytes only after
+  the user accepts; it verifies the size and SHA-256 against the offer, hands
+  the bytes to the browser as a file and reports `started`, which means handed to
+  the browser. The frame receives `{ started, assetId, bytes }`; the source
+  download receipt is unchanged. The prompt, its arming delay, one-at-a-time rule
+  and cooldown are those of decision 0032.
+- **Check order.** Binding (`404`), the connection's current grant (`403`), the
+  artifact and its head (`404`, `409`), then the asset ID (unparseable `404`) and
+  the live association (`404`) are checked before any byte is read. After the
+  bytes are read the authority and the association are checked again and a
+  synchronous grant check ends the call, so a deletion, revoke, source save or
+  connection close that lands first releases no bytes. A deletion that commits
+  after the association lookup can still be released, the same window R09d1
+  documents.
+- **The saved file.** The wire type is always `application/octet-stream`, whatever
+  the stored type, with `Content-Disposition: attachment`, `nosniff`, the
+  sandboxing response CSP and no caching, like a source download. The file name
+  is `asset-<id>` plus `.txt`, `.csv`, `.png` or `.jpg` by stored type (no
+  extension for an unknown stored spelling), at most 74 characters. Because the
+  type is octet-stream, the operating system chooses the application that opens
+  the file from the extension alone.
+- **Budgets.** A download takes one of the build slots that source downloads share
+  (`429` when none is free) and the frame limiter's ordinary token. The size cap
+  is the store's 5 MiB. As for source downloads, the client reads the whole
+  response before comparing its length with the offer; a ranged or length-first
+  read is a follow-up.
+- **Not changed.** No CSP widening, no `allow-same-origin`, no `allow-downloads`
+  (the existing sandbox flag keeps its decision 0032 meaning), no asset URL or
+  token for a frame, no new `ArtifreeClient` method, no store or schema change
+  and no new frame failure code. Contract version 0.22.0.
+- **Follow-ups (not blocking).** The capability set is a `u8` with one spare bit.
+  The offer-outcome block in the host repeats the source download's. The client
+  parser closes its key set although neighbouring parsers ignore extra keys.

@@ -109,6 +109,11 @@ export type FrameCall =
       readonly baseAssetVersion: number;
       readonly assetId: string;
     }
+  | {
+      readonly type: 'assets.download';
+      readonly id: number;
+      readonly assetId: string;
+    }
   | { readonly type: 'cancel'; readonly id: number };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -137,6 +142,7 @@ const SHAPES: Record<string, readonly string[]> = {
     'bytes',
   ],
   'assets.delete': ['type', 'id', 'retryId', 'baseAssetVersion', 'assetId'],
+  'assets.download': ['type', 'id', 'assetId'],
   cancel: ['type', 'id'],
 };
 
@@ -252,6 +258,12 @@ export function parseCall(message: unknown): FrameCall | undefined {
       )
         return undefined;
       return { type, id, retryId, baseAssetVersion, assetId };
+    }
+    case 'assets.download': {
+      const { assetId } = message;
+      if (typeof assetId !== 'string' || !ASSET_ID.test(assetId))
+        return undefined;
+      return { type, id, assetId };
     }
     default:
       return undefined;
@@ -635,6 +647,8 @@ export class FrameRpc {
           },
         });
       }
+      case 'assets.download':
+        return this.#assetDownload(call.id, call.assetId, signal);
     }
   }
 
@@ -679,6 +693,42 @@ export class FrameRpc {
     );
     return ok(id, {
       receipt: { started: true, kind: offer.kind, bytes: bytes.length },
+    });
+  }
+
+  /**
+   * The server is asked first, as for a source download: a prompt never shows
+   * an asset the server would refuse, because the grant is missing, the view
+   * is outdated, or the asset is gone. Only the user's accept makes the
+   * workspace fetch the bytes, and the server checks again.
+   */
+  async #assetDownload(
+    id: number,
+    assetId: string,
+    signal: AbortSignal,
+  ): Promise<FrameReply | undefined> {
+    const { client, view } = this.#deps;
+    const offer = await client.runtimeCall(view, (source, frame) =>
+      source.offerRuntimeAssetDownload(frame, view, assetId, signal),
+    );
+    const outcome = await this.#deps.ask(
+      { kind: 'asset', fileName: offer.fileName, bytes: offer.size },
+      signal,
+    );
+    if (signal.aborted) return undefined;
+    if (outcome !== 'accepted') {
+      const code = OUTCOME_CODE[outcome];
+      return code === null
+        ? undefined
+        : { message: { id, ok: false, code }, transfer: [] };
+    }
+    const bytes = await client.runtimeCall(view, (source, frame) =>
+      source.fetchRuntimeAssetDownload(frame, view, offer, signal),
+    );
+    if (signal.aborted) return undefined;
+    this.#deps.save(bytes, offer.fileName, 'application/octet-stream');
+    return ok(id, {
+      receipt: { started: true, assetId: offer.assetId, bytes: bytes.length },
     });
   }
 }

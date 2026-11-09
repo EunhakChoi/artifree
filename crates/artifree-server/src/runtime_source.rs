@@ -104,7 +104,7 @@ fn stale(current: SourceRevision) -> ApiError {
 }
 
 /// Too many of the actor's downloads are being built.
-fn busy() -> ApiError {
+pub(crate) fn busy() -> ApiError {
     ApiError::new(
         StatusCode::TOO_MANY_REQUESTS,
         ErrorCode::RateLimited,
@@ -640,7 +640,7 @@ fn file_name(path: &PackagePath) -> String {
 /// segment already is all of that, so this never shortens a name the store
 /// accepted; it stays because a response header is no place to trust a rule
 /// that is enforced somewhere else.
-fn safe_name(segment: &str) -> String {
+pub(crate) fn safe_name(segment: &str) -> String {
     let mut name: String = segment
         .chars()
         .map(|c| {

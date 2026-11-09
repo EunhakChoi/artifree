@@ -48,6 +48,8 @@ export type ApiBody =
   | RuntimeAssetPart
   | RuntimeAssetUploadRequest
   | RuntimeAssetDeleteRequest
+  | RuntimeAssetDownloadRequest
+  | RuntimeAssetDownloadOffer
   | RuntimeDownloadRequest
   | RuntimeDownloadOffer
   | RuntimeSourceWriteRequest
@@ -1219,6 +1221,49 @@ export interface RuntimeAssetDeleteRequest {
    * ASCII letters, digits, `-` or `_`.
    */
   retry_id: string;
+}
+/**
+ * Asks whether, or asks for, a download of one asset of the artifact a runtime
+ * view is bound to, which needs the `assets.download` grant (decision 0045
+ * rule 12). The offer route and the download route both take this body. The
+ * same body is used to check that an offer is allowed and, after the user
+ * confirmed, to fetch the bytes; the server decides afresh each time. The
+ * offer route answers with a [`RuntimeAssetDownloadOffer`]; the download route
+ * answers with the asset's bytes, not with JSON.
+ */
+export interface RuntimeAssetDownloadRequest {
+  /**
+   * The asset to download: the `id` of one asset of the artifact, 64
+   * lowercase hexadecimal digits.
+   */
+  asset_id: string;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+}
+/**
+ * What a download of one asset would hand over, without any of its bytes. The
+ * workspace shows it to the user before they confirm.
+ */
+export interface RuntimeAssetDownloadOffer {
+  /**
+   * Identifier of the asset, as requested.
+   */
+  asset_id: string;
+  /**
+   * The name to save under: at most 100 characters of
+   * `A-Z a-z 0-9 . _ -`, not starting with a dot.
+   */
+  file_name: string;
+  /**
+   * The whole asset's SHA-256 digest, as 64 lowercase hex digits.
+   */
+  sha256: string;
+  /**
+   * The asset's size in bytes.
+   */
+  size: number;
 }
 /**
  * Asks whether, or asks for, a download of the pinned revision. The same

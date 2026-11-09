@@ -1,8 +1,8 @@
 /**
  * The desk that decides when a frame's download request becomes a prompt for
- * the user, and when the user's answer counts (decision 0032). It holds no DOM
- * and no React: a component only shows `snapshot()` and forwards presses, and
- * every rule is tested here with an injected clock.
+ * the user, and when the user's answer counts (decisions 0032 and 0045). It
+ * holds no DOM and no React: a component only shows `snapshot()` and forwards
+ * presses, and every rule is tested here with an injected clock.
  *
  * A frame is untrusted script that can ask at any moment, possibly while the
  * user is about to click something else. So: one offer at a time; the accept
@@ -33,13 +33,26 @@ export const systemClock: DeskClock = {
   },
 };
 
-/** What the server said it would hand over; the desk shows exactly this. */
-export interface Offer {
+/** A source file or archive of a revision, as the server described it. */
+interface SourceOffer {
   readonly kind: 'file' | 'archive';
   readonly path: string | null;
   readonly fileName: string;
   readonly size: number | null;
 }
+
+/** An uploaded file of this artifact, as the server described it. */
+interface AssetOffer {
+  readonly kind: 'asset';
+  readonly fileName: string;
+  readonly bytes: number;
+}
+
+/**
+ * What the server said it would hand over; the desk shows exactly this. The
+ * variants carry different fields, so check `kind` before reading one.
+ */
+export type Offer = SourceOffer | AssetOffer;
 
 /**
  * `accepted`: the user pressed accept after the delay. `declined`: the user

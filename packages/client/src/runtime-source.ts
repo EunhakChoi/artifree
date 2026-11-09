@@ -21,6 +21,8 @@ export {
   parseRuntimeAssetPart,
   uploadRuntimeAsset,
   deleteRuntimeAsset,
+  offerRuntimeAssetDownload,
+  fetchRuntimeAssetDownload,
 } from './runtime-assets.js';
 
 /**

@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 pub(crate) const MANIFEST_PATH: &str = "artifree-runtime.json";
 pub(crate) const SDK_PIN: &str = "artifree.app.v1";
+pub(crate) const ASSETS_DOWNLOAD: &str = "assets.download";
 pub(crate) const ASSETS_READ: &str = "assets.read";
 pub(crate) const ASSETS_WRITE: &str = "assets.write";
 pub(crate) const METADATA_READ: &str = "metadata.read";
@@ -20,6 +21,11 @@ const MAX_CAPABILITY_BYTES: usize = 64;
 /// and grants nothing (decision 0020).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capability {
+    /// Saving one of an artifact's uploaded assets to the device after the user
+    /// confirms each download (decision 0045, rule 12). The asset download
+    /// frame routes check it. Its own consent: it neither implies nor is
+    /// implied by `assets.read`, `assets.write` or any `source.*` capability.
+    AssetsDownload,
     /// Listing an artifact's assets and reading their metadata and bytes
     /// (decision 0045, rule 12). The asset list and read frame routes check it.
     /// Its own consent: it neither implies nor is implied by any `source.*`
@@ -40,7 +46,8 @@ pub(crate) enum Capability {
 
 impl Capability {
     /// Every supported capability, in name order.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
+        Self::AssetsDownload,
         Self::AssetsRead,
         Self::AssetsWrite,
         Self::MetadataRead,
@@ -51,6 +58,7 @@ impl Capability {
 
     pub(crate) fn name(self) -> &'static str {
         match self {
+            Self::AssetsDownload => ASSETS_DOWNLOAD,
             Self::AssetsRead => ASSETS_READ,
             Self::AssetsWrite => ASSETS_WRITE,
             Self::MetadataRead => METADATA_READ,
@@ -66,6 +74,7 @@ impl Capability {
 
     fn bit(self) -> u8 {
         match self {
+            Self::AssetsDownload => 64,
             Self::AssetsRead => 16,
             Self::AssetsWrite => 32,
             Self::MetadataRead => 1,
@@ -179,8 +188,8 @@ fn valid_capability(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASSETS_READ, ASSETS_WRITE, Capability, CapabilitySet, METADATA_READ, RuntimePolicy,
-        SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE,
+        ASSETS_DOWNLOAD, ASSETS_READ, ASSETS_WRITE, Capability, CapabilitySet, METADATA_READ,
+        RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE,
     };
 
     #[test]
@@ -224,6 +233,7 @@ mod tests {
         assert_eq!(
             RuntimePolicy::supported(),
             [
+                ASSETS_DOWNLOAD,
                 ASSETS_READ,
                 ASSETS_WRITE,
                 METADATA_READ,
@@ -545,11 +555,164 @@ mod tests {
     }
 
     #[test]
+    fn assets_download_is_declared_only_by_its_own_name() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let others = RuntimePolicy::from_source(
+            true,
+            Some(
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","assets.write","source.download","source.read","source.write"]}"#,
+            ),
+        )?;
+        assert_eq!(
+            others.declared(),
+            [
+                ASSETS_READ,
+                ASSETS_WRITE,
+                SOURCE_DOWNLOAD,
+                SOURCE_READ,
+                SOURCE_WRITE
+            ]
+        );
+        assert!(
+            others.grant_of(&[ASSETS_DOWNLOAD.to_owned()]).is_none(),
+            "declaring assets.read, assets.write and source.* must not declare assets.download"
+        );
+        let own = RuntimePolicy::from_source(
+            true,
+            Some(br#"{"sdk":"artifree.app.v1","capabilities":["assets.download"]}"#),
+        )?;
+        assert_eq!(own.declared(), [ASSETS_DOWNLOAD]);
+        for other in [
+            ASSETS_READ,
+            ASSETS_WRITE,
+            METADATA_READ,
+            SOURCE_DOWNLOAD,
+            SOURCE_READ,
+            SOURCE_WRITE,
+        ] {
+            assert!(
+                own.grant_of(&[other.to_owned()]).is_none(),
+                "{other} is undeclared beside assets.download and must not be grantable"
+            );
+        }
+        let legacy = RuntimePolicy::from_source(true, None)?;
+        assert!(legacy.grant_of(&[ASSETS_DOWNLOAD.to_owned()]).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn assets_download_is_granted_and_withdrawn_independently_of_every_other_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policy = RuntimePolicy::from_source(
+            true,
+            Some(
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
+            ),
+        )?;
+        let download = grant(&policy, &[ASSETS_DOWNLOAD])?;
+        assert_eq!(
+            download.names(),
+            [ASSETS_DOWNLOAD],
+            "assets.download alone must grant only itself"
+        );
+        for (name, capability) in [
+            (ASSETS_READ, Capability::AssetsRead),
+            (ASSETS_WRITE, Capability::AssetsWrite),
+            (METADATA_READ, Capability::MetadataRead),
+            (SOURCE_DOWNLOAD, Capability::SourceDownload),
+            (SOURCE_READ, Capability::SourceRead),
+            (SOURCE_WRITE, Capability::SourceWrite),
+        ] {
+            // Without assets.download, this capability alone grants only itself.
+            let alone = grant(&policy, &[name])?;
+            assert_eq!(alone.names(), [name], "{name} alone must grant only itself");
+            assert!(
+                !alone.contains(Capability::AssetsDownload),
+                "{name} must not grant assets.download"
+            );
+            // Granted together, each keeps its own consent and implies nothing
+            // else. Withdrawing either one from the pair leaves the other alone.
+            let both = grant(&policy, &[ASSETS_DOWNLOAD, name])?;
+            assert!(
+                both.contains(Capability::AssetsDownload) && both.contains(capability),
+                "assets.download beside {name} must grant both, got {:?}",
+                both.names()
+            );
+            assert_eq!(
+                both.names().len(),
+                2,
+                "assets.download beside {name} must grant exactly two, got {:?}",
+                both.names()
+            );
+            assert_eq!(
+                grant(&policy, &[ASSETS_DOWNLOAD])?.names(),
+                [ASSETS_DOWNLOAD],
+                "withdrawing {name} must leave assets.download"
+            );
+        }
+        let others = grant(
+            &policy,
+            &[
+                ASSETS_READ,
+                ASSETS_WRITE,
+                METADATA_READ,
+                SOURCE_DOWNLOAD,
+                SOURCE_READ,
+                SOURCE_WRITE,
+            ],
+        )?;
+        assert_eq!(
+            others.names(),
+            [
+                ASSETS_READ,
+                ASSETS_WRITE,
+                METADATA_READ,
+                SOURCE_DOWNLOAD,
+                SOURCE_READ,
+                SOURCE_WRITE
+            ],
+            "withdrawing assets.download must leave every other capability"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assets_download_round_trips_through_its_name_and_its_bit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policy = RuntimePolicy::from_source(
+            true,
+            Some(br#"{"sdk":"artifree.app.v1","capabilities":["assets.download"]}"#),
+        )?;
+        let granted = grant(&policy, &[ASSETS_DOWNLOAD])?;
+        assert_eq!(granted.names(), [ASSETS_DOWNLOAD]);
+        assert_eq!(
+            policy.grant_of(&granted.names()),
+            Some(granted),
+            "the names of a grant must grant the same set again"
+        );
+        assert_eq!(
+            Capability::parse(ASSETS_DOWNLOAD),
+            Some(Capability::AssetsDownload)
+        );
+        assert_eq!(
+            Capability::AssetsDownload.bit(),
+            64,
+            "assets.download must be bit 64"
+        );
+        assert_eq!(
+            CapabilitySet(64).names(),
+            [ASSETS_DOWNLOAD],
+            "bit 64 must name only assets.download"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn near_assets_names_name_no_capability_and_grant_nothing()
     -> Result<(), Box<dyn std::error::Error>> {
         for near in [
             "assets",
-            "assets.download",
+            "assets.downloads",
             "assets.reads",
             "asset.read",
             "Assets.read",
@@ -564,12 +727,12 @@ mod tests {
         // A well-formed but unknown name may be declared (decision 0020) and still grants nothing.
         let policy = RuntimePolicy::from_source(
             true,
-            Some(br#"{"sdk":"artifree.app.v1","capabilities":["assets.download"]}"#),
+            Some(br#"{"sdk":"artifree.app.v1","capabilities":["assets.downloads"]}"#),
         )?;
-        assert_eq!(policy.declared(), ["assets.download"]);
+        assert_eq!(policy.declared(), ["assets.downloads"]);
         assert!(
-            policy.grant_of(&["assets.download".to_owned()]).is_none(),
-            "assets.download is not a capability and must not be grantable"
+            policy.grant_of(&["assets.downloads".to_owned()]).is_none(),
+            "assets.downloads is not a capability and must not be grantable"
         );
         Ok(())
     }

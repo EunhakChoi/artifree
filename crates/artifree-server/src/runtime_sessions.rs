@@ -332,7 +332,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -344,7 +344,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -609,6 +609,91 @@ mod tests {
             Ok(()),
             "withdrawing assets.write must leave source.read"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn assets_download_is_granted_and_withdrawn_on_its_own()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|error| format!("{error:?}"))?;
+        let session = sessions
+            .get(&actor, &id)
+            .map_err(|error| format!("{error:?}"))?;
+        let scope = GrantScope::new(
+            ArtifactId::from_random([1; 16]),
+            SourceRevision(1),
+            SourceRevision(1),
+        );
+        let download = session
+            .set_grant(scope.clone(), only("assets.download")?, 0)
+            .map_err(|error| format!("{error:?}"))?;
+        for capability in Capability::ALL {
+            let expected = if capability == Capability::AssetsDownload {
+                Ok(())
+            } else {
+                Err(GrantDenied::NotGranted)
+            };
+            assert_eq!(
+                session.permits(&scope, download, capability),
+                expected,
+                "assets.download alone must permit only itself, checked {capability:?}"
+            );
+        }
+        // Withdrawing assets.download while source.read stays granted withdraws
+        // only the download.
+        let read = session
+            .set_grant(scope.clone(), only("source.read")?, download)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            session.permits(&scope, read, Capability::AssetsDownload),
+            Err(GrantDenied::NotGranted),
+            "withdrawing assets.download must withdraw downloading"
+        );
+        assert_eq!(
+            session.permits(&scope, read, Capability::SourceRead),
+            Ok(()),
+            "withdrawing assets.download must leave source.read"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_other_capability_alone_permits_downloading() -> Result<(), Box<dyn std::error::Error>> {
+        let actor: ActorId = "local".parse()?;
+        let sessions = RuntimeSessions::new(Duration::from_secs(60));
+        let id = sessions
+            .create(&actor, None)
+            .map_err(|error| format!("{error:?}"))?;
+        let session = sessions
+            .get(&actor, &id)
+            .map_err(|error| format!("{error:?}"))?;
+        let scope = GrantScope::new(
+            ArtifactId::from_random([1; 16]),
+            SourceRevision(1),
+            SourceRevision(1),
+        );
+        let mut version = 0;
+        for other in [
+            "assets.read",
+            "assets.write",
+            "metadata.read",
+            "source.download",
+            "source.read",
+            "source.write",
+        ] {
+            version = session
+                .set_grant(scope.clone(), only(other)?, version)
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(
+                session.permits(&scope, version, Capability::AssetsDownload),
+                Err(GrantDenied::NotGranted),
+                "{other} alone must not permit downloading"
+            );
+        }
         Ok(())
     }
 

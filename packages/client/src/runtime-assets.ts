@@ -2,6 +2,7 @@ import type {
   AssetList,
   DeleteAssetResponse,
   RuntimeAssetDeleteRequest,
+  RuntimeAssetDownloadRequest,
   RuntimeAssetReadRequest,
   RuntimeAssetUploadRequest,
   RuntimeView,
@@ -16,13 +17,18 @@ import {
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord } from './responses.js';
-import { decodeBase64, isRetryId, partNumbersFit } from './source-part.js';
+import {
+  decodeBase64,
+  isDownloadName,
+  isRetryId,
+  partNumbersFit,
+} from './source-part.js';
 
 /**
- * Calls and checks for the uploaded assets a runtime view may read and change
- * (decision 0045, rule 12). Like runtime-source, this module is meant to be
- * reached only from the on-demand runtime-source module, so the main client
- * bundle does not grow (decision 0033).
+ * Calls and checks for the uploaded assets a runtime view may read, change,
+ * and download (decision 0045, rule 12). Like runtime-source, this module is
+ * meant to be reached only from the on-demand runtime-source module, so the
+ * main client bundle does not grow (decision 0033).
  */
 
 /** Most bytes in one part of an asset a read may ask for: 256 KiB. */
@@ -84,17 +90,29 @@ export interface RuntimeAssetPartBytes {
 
 /**
  * What the calls below need from the frame: its JSON call, which refuses once
- * the view's runtime connection has ended (see `FrameTransport` in
+ * the view's runtime connection has ended, and for a download its POST, its
+ * byte read and that connection check (see `FrameTransport` in
  * runtime-source). It is typed structurally here so that this module imports
  * nothing from runtime-source.
  */
 export interface RuntimeAssetsFrame {
+  /** Fails if the runtime connection of the view was closed or replaced. */
+  readonly check: () => void;
   readonly json: <T>(
     path: string,
     body: Record<string, unknown>,
     parse: (value: unknown) => T | undefined,
     signal: AbortSignal | undefined,
   ) => Promise<T>;
+  readonly post: (
+    path: string,
+    body: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ) => Promise<Response>;
+  readonly bytes: (
+    response: Response,
+    what: string,
+  ) => Promise<Uint8Array<ArrayBuffer>>;
 }
 
 /**
@@ -413,4 +431,176 @@ export async function deleteRuntimeAsset(
     (value) => parseRuntimeAssetDeleteReceipt(value, wanted),
     signal,
   );
+}
+
+/** Most characters in the name an offer states (decision 0045, rule 12). */
+const MAX_OFFER_NAME_CHARS = 100;
+
+/** The fields an offer carries; the contract defines no others. */
+const OFFER_FIELDS: readonly string[] = [
+  'asset_id',
+  'file_name',
+  'size',
+  'sha256',
+];
+
+/** What a download of one asset would hand over, as the client states it. */
+export interface RuntimeAssetOffer {
+  /** The asset's ID: 64 lowercase hexadecimal digits. */
+  readonly assetId: string;
+  /**
+   * The name to save under: 1 to 100 characters of `A-Z a-z 0-9 . _ -`, not
+   * starting with a dot.
+   */
+  readonly fileName: string;
+  /** The asset's size in bytes: at most 5 MiB. */
+  readonly size: number;
+  /** The asset's SHA-256 digest, as 64 lowercase hexadecimal digits. */
+  readonly sha256: string;
+}
+
+/** Whether `value` is a file name an offer can state. */
+function isOfferName(value: unknown): value is string {
+  return isDownloadName(value) && value.length <= MAX_OFFER_NAME_CHARS;
+}
+
+/** Whether an offer's fields hold values an offer can state. */
+function isAssetOffer(offer: RuntimeAssetOffer): boolean {
+  return (
+    ASSET_ID.test(offer.assetId) &&
+    isOfferName(offer.fileName) &&
+    isCount(offer.size) &&
+    offer.size <= MAX_ASSET_BYTES &&
+    ASSET_ID.test(offer.sha256)
+  );
+}
+
+/**
+ * Validates an offer against the asset it was asked for: it must name that
+ * asset, state a name, size and digest that an offer can state, and carry no
+ * field the contract does not define.
+ */
+export function parseRuntimeAssetOffer(
+  value: unknown,
+  assetId: string,
+): RuntimeAssetOffer | undefined {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((key) => !OFFER_FIELDS.includes(key))
+  )
+    return undefined;
+  const { asset_id, file_name, size, sha256 } = value;
+  if (
+    asset_id !== assetId ||
+    typeof file_name !== 'string' ||
+    typeof size !== 'number' ||
+    typeof sha256 !== 'string'
+  )
+    return undefined;
+  const offer: RuntimeAssetOffer = {
+    assetId,
+    fileName: file_name,
+    size,
+    sha256,
+  };
+  return isAssetOffer(offer) ? offer : undefined;
+}
+
+/** The refusal of a page that cannot compute the digest a download checks. */
+function digestUnavailable(status: number, cause?: unknown): ArtifreeApiError {
+  return new ArtifreeApiError(
+    'This page cannot compute the digest that checks a download.',
+    { status, code: 'unavailable', cause },
+  );
+}
+
+/**
+ * Whether the SHA-256 of `bytes` is `expected`. A digest that cannot be
+ * computed is reported as that, never as a mismatch.
+ */
+async function digestMatches(
+  bytes: Uint8Array<ArrayBuffer>,
+  expected: string,
+  status: number,
+): Promise<boolean> {
+  try {
+    return (await sha256Hex(bytes)) === expected;
+  } catch (cause: unknown) {
+    throw digestUnavailable(status, cause);
+  }
+}
+
+/**
+ * Asks whether the view's artifact may offer one of its assets for download,
+ * and what the download would be, before the user confirms it. Nothing is
+ * handed over, and the server decides afresh on each call (decision 0045,
+ * rule 12).
+ */
+export async function offerRuntimeAssetDownload(
+  frame: RuntimeAssetsFrame,
+  view: RuntimeView,
+  assetId: string,
+  signal: AbortSignal | undefined,
+): Promise<RuntimeAssetOffer> {
+  if (typeof assetId !== 'string' || !ASSET_ID.test(assetId))
+    throw new ArtifreeApiError('The asset download was not valid.', {
+      status: 0,
+      code: 'invalid_request',
+    });
+  const body: Omit<RuntimeAssetDownloadRequest, 'initialization'> = {
+    asset_id: assetId,
+  };
+  return frame.json(
+    frameRoute(view, 'assets/offer'),
+    frameBody(view, body),
+    (value) => parseRuntimeAssetOffer(value, assetId),
+    signal,
+  );
+}
+
+/**
+ * The bytes of a download the user confirmed. It resolves only when the
+ * response is the attachment `offer` names, with the closed content type, and
+ * the bytes are the size and digest the offer states. A page without Web
+ * Crypto is refused before anything is requested.
+ */
+export async function fetchRuntimeAssetDownload(
+  frame: RuntimeAssetsFrame,
+  view: RuntimeView,
+  offer: RuntimeAssetOffer,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array<ArrayBuffer>> {
+  if (!isAssetOffer(offer))
+    throw new ArtifreeApiError('The asset download was not valid.', {
+      status: 0,
+      code: 'invalid_request',
+    });
+  if (globalThis.crypto?.subtle === undefined) throw digestUnavailable(0);
+  const path = frameRoute(view, 'assets/download');
+  const body: Omit<RuntimeAssetDownloadRequest, 'initialization'> = {
+    asset_id: offer.assetId,
+  };
+  const response = await frame.post(path, frameBody(view, body), signal);
+  const type = response.headers.get('content-type')?.trim().toLowerCase();
+  const disposition = response.headers.get('content-disposition');
+  const refuse = async (): Promise<never> => {
+    // Only frees the connection; a body that was already read cannot be.
+    await response.body?.cancel().catch(() => undefined);
+    throw new ArtifreeApiError(
+      `POST ${path} did not return the attachment that was offered.`,
+      { status: response.status, code: 'invalid_response' },
+    );
+  };
+  if (
+    type !== 'application/octet-stream' ||
+    disposition !== `attachment; filename="${offer.fileName}"`
+  )
+    return refuse();
+  const bytes = await frame.bytes(response, offer.fileName);
+  const matches =
+    bytes.length === offer.size &&
+    (await digestMatches(bytes, offer.sha256, response.status));
+  frame.check();
+  if (!matches) return refuse();
+  return bytes;
 }

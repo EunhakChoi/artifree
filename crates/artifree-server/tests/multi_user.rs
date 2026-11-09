@@ -47,7 +47,8 @@ const CONTENT_ORIGIN: &str = "http://127.0.0.1:7411";
 const PROTOCOL: &str = "2025-11-25";
 const ENTRY: &str =
     "<!doctype html><html lang=\"en\"><head><!-- artifree-runtime --></head><body>x</body></html>";
-const CAPABILITIES: [&str; 6] = [
+const CAPABILITIES: [&str; 7] = [
+    "assets.download",
     "assets.read",
     "assets.write",
     "metadata.read",
@@ -1000,6 +1001,22 @@ fn http_cases() -> Vec<Case> {
             Some(r#"{"initialization":"{init}","asset_id":"{asset}","offset":0,"length":16}"#),
             Succeeds,
         ),
+        // The offer and the download only read the fixture's asset, so they come
+        // before the upload and the delete below, which move and remove it.
+        case(
+            "frame assets offer",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/assets/offer",
+            Some(r#"{"initialization":"{init}","asset_id":"{asset}"}"#),
+            Succeeds,
+        ),
+        case(
+            "frame assets download",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/assets/download",
+            Some(r#"{"initialization":"{init}","asset_id":"{asset}"}"#),
+            Succeeds,
+        ),
         // The upload moves the artifact's asset version from 1, the fixture's,
         // to 2; the owner's upload and delete below name 2 and 3. The delete
         // names an absent asset, since the owner's delete needs the fixture's.
@@ -1182,6 +1199,29 @@ fn http_cases() -> Vec<Case> {
             Closes,
         ),
     ]
+}
+
+/// Sends the table's case `name` with `ids` filled in, as `token`. A case that
+/// was renamed fails here, rather than passing with nothing sent.
+async fn send_case(
+    harness: &Harness,
+    name: &str,
+    ids: &Ids,
+    token: &str,
+) -> Result<Reply, TestError> {
+    let case = http_cases()
+        .into_iter()
+        .find(|case| case.name == name)
+        .ok_or_else(|| format!("no isolation case named {name:?}"))?;
+    harness
+        .send(
+            case.method,
+            &ids.fill(case.route),
+            Some(token),
+            None,
+            case.body.map(|body| ids.fill(body)),
+        )
+        .await
 }
 
 /// Routes that name no artifact. Each has its own caller-scoped or
@@ -2704,8 +2744,18 @@ async fn a_disabled_user_loses_every_way_in() -> TestResult {
     let again = set_disabled(&harness, &alice.id, true).await?;
     assert_eq!(again.disabled_at, Some(stamp), "the first time is kept");
 
-    // Every credential of the user is refused, on every surface.
+    // Every credential of the user is refused, on every surface. The frame's
+    // asset calls are refused by the token, before their connection is read.
     for token in [&alice.secret, &second.secret] {
+        for name in ["frame assets offer", "frame assets download"] {
+            let reply = send_case(&harness, name, &ids, token).await?;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNAUTHORIZED,
+                "{name}: {}",
+                reply.text
+            );
+        }
         for (method, path) in [
             ("GET", "/v1/artifacts"),
             ("POST", "/v1/runtime-sessions"),
@@ -2822,6 +2872,15 @@ async fn enabling_restores_only_the_tokens_not_what_was_closed() -> TestResult {
             .await?,
         200
     );
+    for name in ["frame assets offer", "frame assets download"] {
+        let reply = send_case(&harness, name, &ids, &alice.secret).await?;
+        assert_eq!(
+            reply.status,
+            StatusCode::NOT_FOUND,
+            "the connection outlived the disabling: {name}: {}",
+            reply.text
+        );
+    }
     let rejoin = harness
         .send(
             "POST",

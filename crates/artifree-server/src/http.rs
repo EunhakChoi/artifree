@@ -29,14 +29,14 @@ use artifree_contracts::api::{
     PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionList, RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest,
-    RoomJoinRequest, RoomSnapshot, RuntimeAssetDeleteRequest, RuntimeAssetListRequest,
-    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeConnection,
-    RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata,
-    RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
-    RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
-    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest,
-    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
-    UploadAssetResponse,
+    RoomJoinRequest, RoomSnapshot, RuntimeAssetDeleteRequest, RuntimeAssetDownloadOffer,
+    RuntimeAssetDownloadRequest, RuntimeAssetListRequest, RuntimeAssetPart,
+    RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeConnection, RuntimeDownloadOffer,
+    RuntimeDownloadRequest, RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest,
+    RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
+    RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, SaveRevisionRequest, SetDataRequest,
+    SetRuntimeGrantRequest, StageHandoffRequest, UnreferencedContent, UpdateArtifactRequest,
+    UpdateArtifactResponse, UpdateDataRequest, UploadAssetResponse,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_core::jobs::{Clock, SystemClock};
@@ -71,7 +71,7 @@ use crate::ranges::{self, Requested};
 use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
 use crate::runtime_assets;
 use crate::runtime_sessions::RuntimeSessions;
-use crate::runtime_source::{self, FrameCall};
+use crate::runtime_source::{self, Download, FrameCall};
 use crate::tokens;
 use crate::users;
 use crate::web::WebAssets;
@@ -683,6 +683,14 @@ fn frame_routes(state: &AppState) -> Router<AppState> {
         .route(
             &format!("{VIEW}/assets/read"),
             axum::routing::post(runtime_assets_read),
+        )
+        .route(
+            &format!("{VIEW}/assets/offer"),
+            axum::routing::post(runtime_assets_offer),
+        )
+        .route(
+            &format!("{VIEW}/assets/download"),
+            axum::routing::post(runtime_assets_download),
         )
         .route(
             &format!("{VIEW}/assets/upload"),
@@ -2005,9 +2013,7 @@ async fn runtime_source_write(
         .map(Json)
 }
 
-/// The bytes of a download the user confirmed, as an attachment that no
-/// browser renders: a closed content type, `nosniff`, and a sandbox policy
-/// that also holds if the response is ever opened as a document. It is a
+/// The bytes of a source download the user confirmed (decision 0032). It is a
 /// `POST` so that no link or navigation can reach it.
 async fn runtime_source_download(
     State(state): State<AppState>,
@@ -2026,16 +2032,25 @@ async fn runtime_source_download(
         initialization: &request.initialization,
     };
     let download = runtime_source::download(&state, &call, &request).await?;
-    let disposition =
+    Ok(attachment_response(download))
+}
+
+/// The bytes of a download the user confirmed, as an attachment that no
+/// browser renders: a closed content type, `nosniff`, and a sandbox policy
+/// that also holds if the response is ever opened as a document. Source and
+/// asset downloads answer with it.
+fn attachment_response(download: Download) -> Response {
+    let Ok(disposition) =
         HeaderValue::from_str(&format!("attachment; filename=\"{}\"", download.file_name))
-            .map_err(|_| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ErrorCode::Internal,
-                    "the download name is not a header value",
-                )
-            })?;
-    Ok((
+    else {
+        return ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            "the download name is not a header value",
+        )
+        .into_response();
+    };
+    (
         [
             (
                 header::CONTENT_TYPE,
@@ -2053,7 +2068,7 @@ async fn runtime_source_download(
         ],
         download.bytes,
     )
-        .into_response())
+        .into_response()
 }
 
 async fn runtime_assets_list(
@@ -2094,6 +2109,52 @@ async fn runtime_assets_read(
     runtime_assets::read(&state, &call, &request)
         .await
         .map(Json)
+}
+
+/// What a download of one asset would be named and how large it is, before any
+/// of its bytes are read (decision 0045, rule 12).
+async fn runtime_assets_offer(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeAssetDownloadRequest>, JsonRejection>,
+) -> Result<Json<RuntimeAssetDownloadOffer>, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    runtime_assets::offer(&state, &call, &request)
+        .await
+        .map(Json)
+}
+
+/// The bytes of one asset of the frame's artifact, once the user confirmed the
+/// download (decision 0045, rule 12). It is a `POST` so that no link or
+/// navigation can reach it.
+async fn runtime_assets_download(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeAssetDownloadRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision, view, generation)) = path?;
+    let Json(request) = body.map_err(|rejection| frame_body_error(&rejection))?;
+    let call = FrameCall {
+        actor: &actor,
+        artifact: &id,
+        revision,
+        view: &view,
+        generation,
+        initialization: &request.initialization,
+    };
+    let download = runtime_assets::download(&state, &call, &request).await?;
+    Ok(attachment_response(download))
 }
 
 /// Uploads one asset for the frame (decision 0045, rule 12).

@@ -136,44 +136,50 @@ in the Rust core.
 
 ## HTTP API v1
 
-| Method and path                                                                    | Purpose                                           |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `GET /v1/artifacts`                                                                | Owned artifacts: search, pin filter, order, pages |
-| `POST /v1/artifacts`                                                               | Create revision 1 (`Idempotency-Key`)             |
-| `GET /v1/artifacts/{id}`                                                           | Metadata and current revision                     |
-| `PATCH /v1/artifacts/{id}`                                                         | Conditional rename or pin (`Idempotency-Key`)     |
-| `GET /v1/artifacts/{id}/revisions`                                                 | History, newest first                             |
-| `POST /v1/artifacts/{id}/revisions`                                                | Conditional commit (`Idempotency-Key`)            |
-| `POST /v1/artifacts/{id}/edits`                                                    | Per-file conditional commit (`Idempotency-Key`)   |
-| `GET /v1/artifacts/{id}/revisions/{n}`                                             | One revision manifest                             |
-| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}`                                | Raw bytes of a pinned file, or one `Range`        |
-| `POST /v1/artifacts/{id}/revisions/{n}/previews`                                   | Short-lived preview URL on the content origin     |
-| `POST /v1/artifacts/{id}/revisions/{n}/runtime-views`                              | Issue a bound, short-lived runtime view           |
-| `POST /v1/artifacts/{id}/revisions/{n}/runtime-views/{view}/{generation}/metadata` | Read the view's current metadata                  |
-| `POST .../runtime-views/{view}/{generation}/source/list`                           | List the pinned revision's files (`source.read`)  |
-| `POST .../runtime-views/{view}/{generation}/source/read`                           | Read one part of a file (`source.read`)           |
-| `POST .../runtime-views/{view}/{generation}/source/offer`                          | Ask what a download would be (`source.download`)  |
-| `POST .../runtime-views/{view}/{generation}/source/download`                       | The bytes of a confirmed download                 |
-| `DELETE /v1/runtime-views/{view}/{generation}`                                     | Close one runtime view generation                 |
-| `POST /v1/runtime-sessions`                                                        | Open an ephemeral runtime connection              |
-| `DELETE /v1/runtime-sessions/{session}`                                            | Close the connection and revoke its grants        |
-| `PUT /v1/runtime-sessions/{session}/artifacts/{id}/revisions/{n}/grant`            | Replace an observed connection grant              |
-| `GET /v1/agent-sessions`                                                           | List the actor's registered inboxes               |
-| `POST /v1/handoffs`                                                                | Stage a pinned source selection                   |
-| `GET /v1/handoffs/{id}`                                                            | Read a handoff's state                            |
-| `POST /v1/handoffs/{id}/send`                                                      | Confirm sending the staged delivery               |
-| `POST /v1/handoffs/{id}/cancel`                                                    | Cancel before the agent may have received it      |
-| `GET /v1/changes`                                                                  | Committed changes as server-sent events           |
-| `POST /v1/artifacts/{id}/jobs`                                                     | Queue a `verify_revision` job (`Idempotency-Key`) |
-| `GET /v1/artifacts/{id}/jobs`                                                      | One artifact's jobs, newest first, pages          |
-| `GET /v1/jobs`                                                                     | The actor's jobs, newest first, pages             |
-| `GET /v1/jobs/{id}`                                                                | One job: state, attempts, result or failure       |
-| `POST /v1/jobs/{id}/cancel`                                                        | Stop a job (`Idempotency-Key`); not a rollback    |
-| `GET /v1/artifacts/{id}/data`                                                      | Read your application data at a `?path=`          |
-| `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version) |
-| `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)           |
-| `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)     |
-| `GET /v1/artifacts/{id}/data/members`                                              | One page of an object's member names (`?path=`)   |
+| Method and path                                                                    | Purpose                                                 |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `GET /v1/artifacts`                                                                | Owned artifacts: search, pin filter, order, pages       |
+| `POST /v1/artifacts`                                                               | Create revision 1 (`Idempotency-Key`)                   |
+| `GET /v1/artifacts/{id}`                                                           | Metadata and current revision                           |
+| `PATCH /v1/artifacts/{id}`                                                         | Conditional rename or pin (`Idempotency-Key`)           |
+| `GET /v1/artifacts/{id}/revisions`                                                 | History, newest first                                   |
+| `POST /v1/artifacts/{id}/revisions`                                                | Conditional commit (`Idempotency-Key`)                  |
+| `POST /v1/artifacts/{id}/edits`                                                    | Per-file conditional commit (`Idempotency-Key`)         |
+| `GET /v1/artifacts/{id}/revisions/{n}`                                             | One revision manifest                                   |
+| `GET /v1/artifacts/{id}/revisions/{n}/files/{path}`                                | Raw bytes of a pinned file, or one `Range`              |
+| `POST /v1/artifacts/{id}/revisions/{n}/previews`                                   | Short-lived preview URL on the content origin           |
+| `POST /v1/artifacts/{id}/revisions/{n}/runtime-views`                              | Issue a bound, short-lived runtime view                 |
+| `POST /v1/artifacts/{id}/revisions/{n}/runtime-views/{view}/{generation}/metadata` | Read the view's current metadata                        |
+| `POST .../runtime-views/{view}/{generation}/source/list`                           | List the pinned revision's files (`source.read`)        |
+| `POST .../runtime-views/{view}/{generation}/source/read`                           | Read one part of a file (`source.read`)                 |
+| `POST .../runtime-views/{view}/{generation}/source/offer`                          | Ask what a download would be (`source.download`)        |
+| `POST .../runtime-views/{view}/{generation}/source/download`                       | The bytes of a confirmed download                       |
+| `POST .../runtime-views/{view}/{generation}/assets/list`                           | List the artifact's assets (`assets.read`)              |
+| `POST .../runtime-views/{view}/{generation}/assets/read`                           | Read one part of an asset (`assets.read`)               |
+| `POST .../runtime-views/{view}/{generation}/assets/upload`                         | Upload one asset (`assets.write`)                       |
+| `POST .../runtime-views/{view}/{generation}/assets/delete`                         | Delete one asset (`assets.write`)                       |
+| `POST .../runtime-views/{view}/{generation}/assets/offer`                          | Ask what an asset download would be (`assets.download`) |
+| `POST .../runtime-views/{view}/{generation}/assets/download`                       | The bytes of a confirmed asset download                 |
+| `DELETE /v1/runtime-views/{view}/{generation}`                                     | Close one runtime view generation                       |
+| `POST /v1/runtime-sessions`                                                        | Open an ephemeral runtime connection                    |
+| `DELETE /v1/runtime-sessions/{session}`                                            | Close the connection and revoke its grants              |
+| `PUT /v1/runtime-sessions/{session}/artifacts/{id}/revisions/{n}/grant`            | Replace an observed connection grant                    |
+| `GET /v1/agent-sessions`                                                           | List the actor's registered inboxes                     |
+| `POST /v1/handoffs`                                                                | Stage a pinned source selection                         |
+| `GET /v1/handoffs/{id}`                                                            | Read a handoff's state                                  |
+| `POST /v1/handoffs/{id}/send`                                                      | Confirm sending the staged delivery                     |
+| `POST /v1/handoffs/{id}/cancel`                                                    | Cancel before the agent may have received it            |
+| `GET /v1/changes`                                                                  | Committed changes as server-sent events                 |
+| `POST /v1/artifacts/{id}/jobs`                                                     | Queue a `verify_revision` job (`Idempotency-Key`)       |
+| `GET /v1/artifacts/{id}/jobs`                                                      | One artifact's jobs, newest first, pages                |
+| `GET /v1/jobs`                                                                     | The actor's jobs, newest first, pages                   |
+| `GET /v1/jobs/{id}`                                                                | One job: state, attempts, result or failure             |
+| `POST /v1/jobs/{id}/cancel`                                                        | Stop a job (`Idempotency-Key`); not a rollback          |
+| `GET /v1/artifacts/{id}/data`                                                      | Read your application data at a `?path=`                |
+| `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version)       |
+| `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)                 |
+| `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)           |
+| `GET /v1/artifacts/{id}/data/members`                                              | One page of an object's member names (`?path=`)         |
 
 Private upload HTTP routes (0045, partial R09a): `GET/POST
 /v1/artifacts/{id}/assets`, `GET/DELETE /v1/artifacts/{id}/assets/{asset_id}`,

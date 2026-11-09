@@ -2462,6 +2462,57 @@
       ],
       "type": "object"
     },
+    "RuntimeAssetDownloadOffer": {
+      "additionalProperties": false,
+      "description": "What a download of one asset would hand over, without any of its bytes. The\nworkspace shows it to the user before they confirm.",
+      "properties": {
+        "asset_id": {
+          "description": "Identifier of the asset, as requested.",
+          "type": "string"
+        },
+        "file_name": {
+          "description": "The name to save under: at most 100 characters of\n`A-Z a-z 0-9 . _ -`, not starting with a dot.",
+          "maxLength": 100,
+          "type": "string"
+        },
+        "sha256": {
+          "description": "The whole asset's SHA-256 digest, as 64 lowercase hex digits.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The asset's size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset_id",
+        "file_name",
+        "size",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "RuntimeAssetDownloadRequest": {
+      "additionalProperties": false,
+      "description": "Asks whether, or asks for, a download of one asset of the artifact a runtime\nview is bound to, which needs the `assets.download` grant (decision 0045\nrule 12). The offer route and the download route both take this body. The\nsame body is used to check that an offer is allowed and, after the user\nconfirmed, to fetch the bytes; the server decides afresh each time. The\noffer route answers with a [`RuntimeAssetDownloadOffer`]; the download route\nanswers with the asset's bytes, not with JSON.",
+      "properties": {
+        "asset_id": {
+          "description": "The asset to download: the `id` of one asset of the artifact, 64\nlowercase hexadecimal digits.",
+          "type": "string"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "asset_id"
+      ],
+      "type": "object"
+    },
     "RuntimeAssetListRequest": {
       "additionalProperties": false,
       "description": "Proves that the parent is listing the assets of its initialized view, which\nneeds the `assets.read` grant. Assets are not part of a source revision, so\nthe answer, an [`AssetList`], is the artifact's current asset space whatever\nrevision the view shows (decision 0045 rule 12).",
@@ -3703,6 +3754,12 @@
     },
     {
       "$ref": "#/$defs/RuntimeAssetDeleteRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAssetDownloadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAssetDownloadOffer"
     },
     {
       "$ref": "#/$defs/RuntimeDownloadRequest"
