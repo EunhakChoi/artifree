@@ -8,6 +8,7 @@ import {
   checkRustPackages,
   checkClientImport,
   checkClientManifest,
+  checkPanicStrategy,
   moduleSpecifiers,
 } from '../lib/boundaries.mjs';
 
@@ -263,4 +264,15 @@ test('Rust storage provider cannot reach the HTTP framework', () => {
     () => checkRustPackages(packages),
     /artifree-providers cannot depend on axum/,
   );
+});
+
+test('a workspace profile may not abort on panic', () => {
+  checkPanicStrategy('[profile.release]\nopt-level = 3\n');
+  checkPanicStrategy('# panic = "abort" is documented here\n');
+  for (const text of [
+    '[profile.release]\npanic = "abort"\n',
+    '[profile.dev]\n  panic="abort"\n',
+    "[profile.release]\npanic = 'abort'\n",
+  ])
+    assert.throws(() => checkPanicStrategy(text), /panic = "abort"/);
 });

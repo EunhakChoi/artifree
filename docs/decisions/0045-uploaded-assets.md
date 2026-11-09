@@ -4,7 +4,7 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; whether that satisfies the R09 target is an owner question); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
+Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
 The current HTTP/storage slice accepts UTF-8 plain text/CSV, complete static
 PNG and complete JPEG of the sequential subset recorded in the R09a image
 validation notes at the end of this record. Other JPEG variants are refused as
@@ -859,14 +859,14 @@ and is not a new decision. The PNG notes come first, the JPEG notes after them.
 - **Completeness label.** R09a is complete only for this subset. Progressive
   admission and trailer-bearing JPEGs (camera trailers, Motion Photo, SEFT, MPF) are
   recorded as non-blocking follow-ups; the validator is not relaxed, and a client that
-  re-encodes or strips a trailer before upload is the suggested route. The owner
-  directed that the Opus recommendation (accept this, record the follow-ups) be
-  followed. Still open: whether a limit specific to asset validation belongs in S02,
-  and whether rule 3 requires ancillary PNG chunk content validation.
-- **Decoder panic containment.** The first plan accepted a zune-jpeg panic as a 500.
-  Review showed it surfaces as a repeatable 503, so the decode now runs under
-  `catch_unwind` and a panic is `invalid_asset`. This reverses the plan, was decided
-  after review, and is recorded here for that reason. A regression fixture should be
-  added once a real input that makes zune panic is known.
+  re-encodes or strips a trailer before upload is a suggested route that is not
+  implemented. Decided 2026-11-09 (rationale: progressive and trailer files stay
+  refused and the validator is not relaxed, so rule 3 is not weakened). Still open:
+  whether a limit specific to asset validation belongs in S02, and whether rule 3
+  requires ancillary PNG chunk content validation.
+- **Decoder panic containment.** An uncontained zune-jpeg panic surfaces as a
+  repeatable 503, so the decode runs under `catch_unwind` (see Known limits). The
+  test uses a stand-in closure; a regression fixture from a real zune panic input is
+  **still missing** and is tracked in the roadmap R09a row.
 - **Not changed:** the envelope, fingerprints, replay order, schema and every
   client, MCP and CLI contract except their lists of accepted types.

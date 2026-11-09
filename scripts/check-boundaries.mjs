@@ -8,6 +8,7 @@ import {
   checkInventory,
   checkClientImport,
   checkClientManifest,
+  checkPanicStrategy,
   moduleSpecifiers,
 } from './lib/boundaries.mjs';
 
@@ -20,6 +21,7 @@ const metadata = JSON.parse(
   ),
 );
 checkRustPackages(metadata.packages);
+checkPanicStrategy(await readFile(join(root, 'Cargo.toml'), 'utf8'));
 const inventory = JSON.parse(
   await readFile(
     new URL('../contracts/generated/scaffold-inventory.json', import.meta.url),

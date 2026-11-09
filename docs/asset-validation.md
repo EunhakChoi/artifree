@@ -112,9 +112,15 @@ accepts (for example an Adobe APP14 segment after the frame header of a gray fra
 or a luma sampling factor of 3); they are `invalid_asset`. `zune-jpeg` can panic inside
 `decode_into` on some inputs it accepts the header of; the decode runs under
 `catch_unwind` and a panic is refused as `invalid_asset`, so it neither unwinds the
-worker nor repeats as a 503. This containment relies on the default `panic = "unwind"`:
-no profile may set `panic = "abort"`, or a decoder panic would end the process. Admitting progressive files is a recorded non-blocking
-follow-up.
+worker nor repeats as a 503.
+Admitting progressive files and trailer-bearing files (camera trailers, Motion Photo,
+SEFT, MPF) are recorded non-blocking follow-ups; the validator is not relaxed for
+them. A client that re-encodes or strips a trailer before upload is a suggested route
+that is **not implemented**: today both are plain `invalid_asset`.
+
+Panic containment relies on the default `panic = "unwind"`. `npm run check`
+rejects `panic = "abort"` in the workspace manifest (`checkPanicStrategy`), because
+under `abort` a decoder panic would end the process.
 
 Worst case measured (R09a): a 5,081,646-byte 4,096 by 4,096 4:4:4 file with a
 restart marker after every MCU is admitted. In a release build the walk takes
