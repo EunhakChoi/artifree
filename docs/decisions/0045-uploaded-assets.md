@@ -12,7 +12,7 @@ validation notes at the end of this record. Other JPEG variants are refused as
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). The MCP tools `list_assets`, `read_asset`, `upload_asset` and `delete_asset`
-exist (R09b3). The CLI `asset list|upload|read|delete` commands exist (R09b4). There is no grant or frame access yet. A duplicate copies the
+exist (R09b3). The CLI `asset list|upload|read|delete` commands exist (R09b4). A runtime frame lists and reads assets under its own `assets.read` grant (R09d1) and uploads and deletes them under its own `assets.write` grant (R09d2); device download is not implemented. A duplicate copies the
 requesting actor's current asset space only when `copy_assets` is true (rule 10).
 The management web has an Assets tab (R09c: usage, upload, list,
 attachment download, delete, conflict and unknown-outcome retry), and its
@@ -922,8 +922,8 @@ Rule 12's read half is implemented; `assets.write` (R09d2) and `assets.download`
   the repeated read. The asset id, limits and content-type set are repeated in
   the frame SDK, the host and the client, the frame handlers in `http.rs` repeat
   each other, and the capability set is a `u8` with three spare bits.
-- **Still not supported:** frame upload or delete (R09d2, implemented below),
-  device download (R09d3), S02 shared roles and an offline asset outbox.
+- **Still not supported:** device download (R09d3), S02 shared roles and an
+  offline asset outbox.
 
 ## R09d2: runtime `assets.write` (implementation notes)
 

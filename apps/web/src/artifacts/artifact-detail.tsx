@@ -520,7 +520,8 @@ function PreviewPanel({
         this page, the API, or other artifacts, and loads and connects only to
         its own origin. Scripts can still navigate the frame to another site, so
         treat what you type into an untrusted artifact as visible to its author.
-        Data, model, and file capabilities are not available yet.
+        Data and model capabilities are not available yet. Source and uploaded
+        file access need your permission when the artifact asks for it.
       </p>
     </div>
   );
