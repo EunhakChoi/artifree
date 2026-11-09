@@ -4,10 +4,10 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete; R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
-The current HTTP/storage slice accepts only UTF-8 plain text/CSV.
-PNG and JPEG are refused as `asset_type_unsupported` until complete image
-validation satisfies rule 3. A narrower PNG subset does not satisfy that gate.
+Date: 2026-11-06. Status: partially implemented; **R09a is incomplete (new PNG uploads are admitted under complete validation; JPEG is not); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
+The current HTTP/storage slice accepts UTF-8 plain text/CSV and complete static
+PNG. JPEG is refused as `asset_type_unsupported` until complete image
+validation satisfies rule 3. A narrower image subset does not satisfy that gate.
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). The MCP tools `list_assets`, `read_asset`, `upload_asset` and `delete_asset`
@@ -53,18 +53,19 @@ through `ArtifactService`, synchronous ports and SQLite schema 12. Asset bytes
 share `blobs` with source files; both reference types protect reclamation.
 Asset versions, metadata-only receipts, actor-wide keys, atomic logical quotas,
 trash/recovery/purge and backup/restore implement the storage behavior of rules 1–9;
-image admission remains disabled under rule 3. Upload preflight closes
+JPEG admission remains disabled under rule 3. Upload preflight closes
 its read snapshot before content validation, and final immediate settlement
 rechecks authority, key and base before using the saved validation result.
 
-Only `text/plain` and `text/csv` currently pass new-upload admission. All PNG
-and JPEG uploads, valid or malformed, are `asset_type_unsupported`. No image
-decoder is linked. R09a remains incomplete until PNG and JPEG full-format
-validation satisfies rule 3; the target allowlist and bounds below are unchanged.
+Only `text/plain`, `text/csv` and `image/png` currently pass new-upload admission.
+Every JPEG upload, valid or malformed, is `asset_type_unsupported`; a PNG is
+admitted only after the complete validation recorded in the R09a PNG notes at the
+end of this record. R09a remains incomplete until JPEG full-format validation
+satisfies rule 3; the target allowlist and bounds below are unchanged.
 See the [content policy](../asset-validation.md).
 Stable MIME envelope parsing and historical metadata/receipt decoding still
 accept image type spellings. A currently authorized matching historical upload
-replays before the current text-only admission policy, including after deletion,
+replays before the current admission policy, including after deletion,
 and never recreates the bytes. A fresh image key is refused without a receipt.
 Generated request/response DTOs exist for HTTP. R09b1 supplies read-only
 `listAssets`, `getAsset` and `readAsset` functions using those DTOs, strict
@@ -476,8 +477,9 @@ code PR that follows it for `uploadAsset` and `deleteAsset` in
 tested in `scripts/tests/asset-mutation-client.test.mjs` against the real Rust
 server and bounded HTTP-boundary faults. The existing numbered rules above are
 unchanged. R09a image validation and full R09b (CLI, MCP, `copy_assets`)
-remain incomplete; PNG/JPEG upload is still refused by the server. The
-implementation notes that follow the contract text are marked as such.
+remain incomplete; at the time of R09b2 the server refused PNG/JPEG uploads
+(PNG is admitted since the R09a PNG change recorded at the end of this record;
+JPEG is still refused). The implementation notes that follow the contract text are marked as such.
 
 ### Dependency and scope
 
@@ -490,9 +492,10 @@ existing mutation convention. No new endpoint, database format or server
 application behavior is proposed. Reusing generated DTOs does not authorize a
 request or remove runtime checks.
 
-This is not permission to enable any image upload. New PNG/JPEG uploads remain
-unsupported; historical image envelopes and matching receipts must remain
-replayable under rules 5–7. The client must not substitute today's text-only
+This was not permission to enable any image upload: when R09b2 was written,
+new PNG/JPEG uploads remained unsupported (historical constraint; see the R09a PNG
+notes for the current state). Historical image envelopes and matching receipts must
+remain replayable under rules 5–7. The client must not substitute any current
 allowlist for the server's stable envelope and replay ordering. It performs no
 pixel decoding, content sanitization, MIME sniffing, normalization, remote fetch
 or filesystem access. CLI, MCP, copying, management UI and runtime grants remain
@@ -764,8 +767,9 @@ and retry hints go to stderr.
   same key with other content is `request_key_reused` and never a second write.
 - **Input.** Upload takes only a path the operator names (rule 11); there is no
   stdin. `--content-type` is required and never inferred from the file name; the
-  CLI checks only its spelling, so `image/png` and `text/html` reach the server
-  and are `asset_type_unsupported`. The file must be a regular file: a symbolic
+  CLI checks only its spelling, so `image/jpeg` and `text/html` reach the server
+  and are `asset_type_unsupported`, while `image/png` reaches the PNG validation
+  and is `invalid_asset` unless the file is a complete static PNG. The file must be a regular file: a symbolic
   link or special file is refused; it is opened without following links (where
   the platform has `O_NOFOLLOW`) and its device and inode must match the check
   before opening; a file over 5 MiB is refused before it is read, and a file whose size or modification time changes while it is read is
@@ -796,3 +800,34 @@ Verification: real-server CLI tests in `scripts/tests/cli-assets.test.mjs`
 refusals), `cli-assets-local.test.mjs` (nothing sent) and
 `cli-assets-outcome.test.mjs` (lost reply through a proxy, corrupted read), with
 guard mutations for each rule above.
+
+## R09a PNG validation (implementation notes)
+
+Status: **implemented** for `image/png` only; JPEG remains refused. The numbered
+rules above are unchanged: this section records how rule 3 is met for PNG and is
+not a new decision.
+
+- **Decoder and checks.** `artifree-core` links `png` 0.18.1, `miniz_oxide` 0.8.9
+  and `crc32fast` 1.5 (boundary edges recorded in `scripts/lib/boundaries.mjs`).
+  Validation runs three layers: a container scan of every chunk, an independent
+  exact zlib check of the IDAT stream and of every compressed ancillary stream,
+  and a full `png` decode with CRC and Adler-32 checks on. Details and the
+  dependency review are in the [content policy](../asset-validation.md).
+- **Known limit.** Ancillary chunks that the decoder ignores when malformed
+  (such as `pHYs`, `gAMA` or a `tEXt` keyword) are checked for framing and CRC
+  only; their content is not validated beyond the compressed `zTXt`, `iTXt` and
+  `iCCP` streams. Whether rule 3's "complete format validation" requires more is
+  an owner question recorded with the R09a PNG change.
+- **Bounds.** At most 4,096 pixels per axis and 16,777,216 pixels; the decoded
+  upload is at most 5 MiB; one 16 MiB budget bounds ancillary buffering and
+  inflated text; decoding is serialized process-wide.
+- **Refused as `invalid_asset`:** a declared type that does not match the
+  signature, empty content, malformed or truncated chunks or zlib data, a CRC or
+  Adler-32 mismatch, extra bytes after IEND or after a zlib stream, zero or
+  oversize dimensions, and animation (`acTL`, `fcTL`, `fdAT`). Bytes are stored
+  exactly as sent: nothing is re-encoded or stripped.
+- **JPEG.** The decoders reviewed zero-fill truncated entropy data, so complete
+  JPEG validation would need an Artifree-owned entropy-segment check. JPEG stays
+  `asset_type_unsupported` until that is decided; R09a is not complete before it.
+- **Not changed:** the envelope, fingerprints, replay order, schema and every
+  client, MCP and CLI contract except their lists of accepted types.

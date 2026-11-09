@@ -1612,9 +1612,21 @@ async fn refused_uploads_answer_with_their_codes_and_change_nothing() -> TestRes
     let over_limit = vec![b'a'; 5 * 1024 * 1024 + 1];
     for (what, content_type, content, code) in [
         (
-            "an image",
+            "a truncated PNG",
             "image/png",
             STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+            "invalid_asset",
+        ),
+        (
+            "a JPEG",
+            "image/jpeg",
+            STANDARD.encode(b"\xff\xd8\xff\xd9"),
+            "asset_type_unsupported",
+        ),
+        (
+            "a GIF",
+            "image/gif",
+            STANDARD.encode(b"GIF89a"),
             "asset_type_unsupported",
         ),
         ("empty text", "text/plain", String::new(), "invalid_asset"),

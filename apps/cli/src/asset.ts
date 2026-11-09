@@ -40,10 +40,12 @@ changes the space. Saving or restoring a revision, changing metadata, and
 writing application data do not change it, and uploads and deletes never need
 a revision or data_version.
 
-Only text/plain and text/csv can be uploaded today; the server refuses any other
---content-type with asset_type_unsupported and stores nothing. --content-type is
-required and is never inferred from the file name. Each asset is at most 5 MiB
-(5242880 bytes).
+Only text/plain, text/csv and image/png can be uploaded today; the server refuses
+any other --content-type with asset_type_unsupported and stores nothing. A PNG
+must be complete, static (not animated) and at most 4096 pixels per axis and
+16,777,216 pixels; the server refuses one that is not, or whose bytes do not
+match the declared type, with invalid_asset. --content-type is required and is
+never inferred from the file name. Each asset is at most 5 MiB (5242880 bytes).
 
 upload reads --file, which must be a regular file. A symbolic link, a directory,
 or another special file is refused and nothing is sent. --file - is a usage

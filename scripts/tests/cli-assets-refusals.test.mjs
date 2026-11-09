@@ -122,9 +122,24 @@ test('a stale base refuses an upload and a delete with asset_conflict and the cu
   });
 });
 
-test('image/png is refused by the server with asset_type_unsupported and stores nothing', async () => {
+test('image/jpeg is refused by the server with asset_type_unsupported and stores nothing', async () => {
   const artifactId = await createArtifact(server, scratch, 'Image type');
   // Plain text declared as a picture: the CLI sends the declared type as given.
+  const file = await writeTestFile(scratch, 'picture.txt', 'plain text\n');
+  const result = await runCli(
+    server,
+    uploadArgs(artifactId, file, {
+      contentType: 'image/jpeg',
+      base: 0,
+      key: 'refusal-image-jpeg',
+    }),
+  );
+  assertRefused(result, 'asset_type_unsupported');
+  assert.deepEqual(await listSpace(artifactId), EMPTY_SPACE);
+});
+
+test('plain text declared as image/png is refused by the server with invalid_asset and stores nothing', async () => {
+  const artifactId = await createArtifact(server, scratch, 'Image mismatch');
   const file = await writeTestFile(scratch, 'picture.txt', 'plain text\n');
   const result = await runCli(
     server,
@@ -134,7 +149,7 @@ test('image/png is refused by the server with asset_type_unsupported and stores 
       key: 'refusal-image-png',
     }),
   );
-  assertRefused(result, 'asset_type_unsupported');
+  assertRefused(result, 'invalid_asset');
   assert.deepEqual(await listSpace(artifactId), EMPTY_SPACE);
 });
 

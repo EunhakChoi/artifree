@@ -13,11 +13,21 @@ import { parseSync } from 'oxc-parser';
 // the official MCP SDK serving the inbound MCP adapter, and serde parses its
 // tool arguments into contract DTOs (decision 0004). futures-core provides
 // only the Stream trait that Axum's server-sent events response consumes; it
-// is already in the dependency tree through Axum (decision 0006).
+// is already in the dependency tree through Axum (decision 0006). png,
+// miniz_oxide and crc32fast give artifree-core the maintained decoder and the
+// independent exact zlib and CRC checks that decision 0045 rule 3 requires
+// before any PNG upload is admitted; no JPEG decoder is linked yet.
 const rustEdges = {
   'artifree-domain': [],
   'artifree-ports': ['artifree-domain'],
-  'artifree-core': ['artifree-domain', 'artifree-ports', 'sha2'],
+  'artifree-core': [
+    'artifree-domain',
+    'artifree-ports',
+    'crc32fast',
+    'miniz_oxide',
+    'png',
+    'sha2',
+  ],
   'artifree-providers': [
     'artifree-ports',
     'artifree-domain',

@@ -8510,7 +8510,7 @@
                   "description": "Immutable private upload metadata (0045).",
                   "properties": {
                     "content_type": {
-                      "description": "Stored MIME type, including historical image spellings. New uploads admit only UTF-8 plain text/CSV; PNG and JPEG are unsupported pending complete validation.",
+                      "description": "Stored MIME type, including historical image spellings. New uploads admit UTF-8 plain text/CSV and complete static PNG images; JPEG is unsupported pending complete validation.",
                       "type": "string"
                     },
                     "created_at_ms": {
@@ -8841,7 +8841,7 @@
                 "description": "Immutable metadata; `size_bytes` and `sha256` describe the decoded\nbytes.",
                 "properties": {
                   "content_type": {
-                    "description": "Stored MIME type, including historical image spellings. New uploads admit only UTF-8 plain text/CSV; PNG and JPEG are unsupported pending complete validation.",
+                    "description": "Stored MIME type, including historical image spellings. New uploads admit UTF-8 plain text/CSV and complete static PNG images; JPEG is unsupported pending complete validation.",
                     "type": "string"
                   },
                   "created_at_ms": {
@@ -9127,7 +9127,7 @@
       "title": "Read asset"
     },
     {
-      "description": "Upload one asset to an artifact's asset space. content_base64 holds the bytes themselves, as strict standard base64, never a host path or URL, and at most 5 MiB decoded. Only UTF-8 text/plain and text/csv are accepted currently. Any other declared type, such as image/png, image/jpeg, text/html, or image/svg+xml, fails with asset_type_unsupported. Empty content, invalid UTF-8, or a NUL or control character other than tab, CR, and LF fails with invalid_asset. More than 5 MiB fails with asset_limit_exceeded, as does an upload that would exceed max_assets or max_bytes from list_assets, or your limits across all your artifacts, trash included. A refused upload writes nothing. Accepted bytes are kept exactly as sent, and equal bytes uploaded again under another key create another asset. The result gives the asset's ID and the new asset_version. A stale base_asset_version fails with asset_conflict and current_asset_version. A same-key retry returns the original result with replayed true, even when base_asset_version is no longer current, and creates no second asset. idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
+      "description": "Upload one asset to an artifact's asset space. content_base64 holds the bytes themselves, as strict standard base64, never a host path or URL, and at most 5 MiB decoded. Only UTF-8 text/plain, text/csv, and complete static non-animated image/png (at most 4096 pixels per axis and 16,777,216 pixels) are accepted currently. Any other declared type, such as image/jpeg, text/html, or image/svg+xml, fails with asset_type_unsupported. Empty content, invalid UTF-8, a NUL or control character other than tab, CR, and LF in text, or a PNG that is malformed, truncated, animated, oversize, or not what the declared type says fails with invalid_asset. More than 5 MiB fails with asset_limit_exceeded, as does an upload that would exceed max_assets or max_bytes from list_assets, or your limits across all your artifacts, trash included. A refused upload writes nothing. Accepted bytes are kept exactly as sent, and equal bytes uploaded again under another key create another asset. The result gives the asset's ID and the new asset_version. A stale base_asset_version fails with asset_conflict and current_asset_version. A same-key retry returns the original result with replayed true, even when base_asset_version is no longer current, and creates no second asset. idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
       "effect": "asset",
       "inputSchema": {
         "additionalProperties": false,
@@ -9147,7 +9147,7 @@
             "type": "string"
           },
           "content_type": {
-            "description": "The declared MIME type: lowercase, without parameters, such as\n`text/plain`. Only `text/plain` and `text/csv` are accepted currently.",
+            "description": "The declared MIME type: lowercase, without parameters, such as\n`text/plain`. Only `text/plain`, `text/csv` and `image/png` are accepted currently.",
             "type": "string"
           },
           "idempotency_key": {
@@ -9177,7 +9177,7 @@
                 "description": "Original metadata.",
                 "properties": {
                   "content_type": {
-                    "description": "Stored MIME type, including historical image spellings. New uploads admit only UTF-8 plain text/CSV; PNG and JPEG are unsupported pending complete validation.",
+                    "description": "Stored MIME type, including historical image spellings. New uploads admit UTF-8 plain text/CSV and complete static PNG images; JPEG is unsupported pending complete validation.",
                     "type": "string"
                   },
                   "created_at_ms": {

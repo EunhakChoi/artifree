@@ -819,10 +819,14 @@ upgrade and rejection, and backup/restore. HTTP tests cover stable envelopes,
 security headers, 1-byte and exact 5-MiB text, oversized/empty/invalid content,
 unknown outcomes and asset route isolation. Content policy validation happens
 outside database transactions and replay skips changed policy. Only UTF-8
-plain text/CSV uploads are admitted. Valid and invalid PNG/JPEG uploads are
-explicitly unsupported; historical image metadata and matching receipts remain
-decodable and replay before current policy without recreating deleted bytes.
-R09a is incomplete until full PNG and JPEG validation satisfy 0045 rule 3. The
+plain text/CSV and complete static PNG uploads are admitted. PNG validation has
+unit tests per layer (`artifree-core` `asset_validation/png/tests.rs`: accept and
+refusal tables, every strict prefix, decompression bombs, window-boundary sizes,
+embedded zlib streams) with guard mutations, and server tests for exact stored
+bytes and refusals that keep the key free. JPEG uploads are explicitly
+unsupported; historical image metadata and matching receipts remain decodable and
+replay before current policy without recreating deleted bytes. R09a is incomplete
+until JPEG validation satisfies 0045 rule 3. The
 TypeScript client has real-server tests (R09b2), the panel's frozen-attempt
 rules have Node tests (`scripts/tests/asset-attempt.test.mjs`) and the
 management assets panel has a real-server Chromium smoke

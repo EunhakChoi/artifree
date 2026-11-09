@@ -5,9 +5,13 @@ import { api, raw } from './smoke-workspace.mjs';
 
 const MIB = 1024 * 1024;
 const FILE_LIMIT = 5 * MIB;
-const PNG = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
-]);
+// An independently authored, complete 1x1 RGBA PNG: the server admits it.
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaPjPAAADgwGAJwGhsAAAAABJRU5ErkJggg==',
+  'base64',
+);
+// A type the server does not admit yet; its bytes are never read.
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 
 /**
  * Browser checks for an artifact's assets (decision 0045, rule 11) against a
@@ -199,14 +203,14 @@ export async function checkAssets({
 
     // A type the server does not admit is sent as declared and refused.
     await fileInput.setInputFiles({
-      name: 'pixel.png',
-      mimeType: 'image/png',
-      buffer: PNG,
+      name: 'pixel.jpg',
+      mimeType: 'image/jpeg',
+      buffer: JPEG,
     });
-    await expect(declared).toHaveValue('image/png');
+    await expect(declared).toHaveValue('image/jpeg');
     await uploadButton.click();
     await expect(alert('Not changed')).toContainText(
-      'This file type is not accepted. Uploads accept plain text and CSV.',
+      'This file type is not accepted. Uploads accept plain text, CSV and PNG.',
     );
     let space = await list(artifact.id);
     assert.deepEqual(
@@ -351,6 +355,32 @@ export async function checkAssets({
       'The retried delete was made twice.',
     );
 
+    // A complete PNG is listed and downloaded like any other asset: the page
+    // keeps its bytes and never renders them.
+    await upload('pixel.png', 'image/png', PNG);
+    await expect(alert('Uploaded')).toBeVisible();
+    await expect(version(7)).toBeVisible();
+    space = await list(artifact.id);
+    const pixel = space.assets.find(
+      (asset) => asset.content_type === 'image/png',
+    );
+    assert.ok(pixel, 'The PNG is not listed.');
+    const savingPixel = tab.waitForEvent('download');
+    await panel
+      .getByRole('button', { name: `Download asset ${prefix(pixel)}` })
+      .click();
+    assert.deepEqual(await readFile(await (await savingPixel).path()), PNG);
+    assert.equal(
+      await panel.locator('img, picture, canvas').count(),
+      0,
+      'The assets panel renders the image.',
+    );
+    assert.deepEqual(
+      [space.asset_version, space.assets.length],
+      [7, 3],
+      'The PNG upload changed more than one asset.',
+    );
+
     // A full artifact refuses one more byte, and nothing is added.
     await open('Assets full');
     await expect(storage).toHaveAttribute('aria-valuetext', '25 MiB of 25 MiB');
@@ -388,6 +418,7 @@ export async function checkAssets({
         'lost-upload-retry',
         'delete-cancel-confirm',
         'lost-delete-retry',
+        'png-upload-download-no-inline',
         'quota-refused',
       ],
       apiRequests: { browser: browserRequests, raw: rawRequests },
