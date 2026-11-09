@@ -1,12 +1,10 @@
 # Private upload content policy
 
-New uploads admit UTF-8 `text/plain`, `text/csv` and complete static `image/png`
-(decision 0045, rule 3). **`image/jpeg` is still `asset_type_unsupported`, valid
-files included**, so R09a is not complete: no JPEG decoder satisfies rule 3
-without an Artifree-owned entropy-segment check, and a weaker check is not
-enabled. SVG, GIF, WebP and every other type are `asset_type_unsupported`. There
-is no SVG sanitizer, thumbnail, re-encoding or metadata stripping: admitted bytes
-are stored exactly as sent.
+New uploads admit UTF-8 `text/plain`, `text/csv`, complete static `image/png` and
+complete `image/jpeg` of the sequential subset named below (decision 0045, rule
+3). SVG, GIF, WebP and every other type are `asset_type_unsupported`. There is no
+SVG sanitizer, thumbnail, re-encoding or metadata stripping: admitted bytes are
+stored exactly as sent.
 
 ## PNG admission
 
@@ -60,13 +58,75 @@ question for multi-user sharing (S02).
 This validation is for admission only. It does not make a PNG safe to render, and
 the management UI downloads assets rather than showing them.
 
-## Dependency review (R09a, PNG)
+## JPEG admission
+
+Order is the same as for PNG: type allowlist, decoded size (5 MiB,
+`asset_limit_exceeded`), empty content, the `FF D8 FF` signature, then the checks
+below. **Every refused JPEG is `invalid_asset`, valid files outside the admitted
+subset included**: the subset is a content policy, not a statement that the file is
+broken.
+
+**Admitted subset.** Baseline or extended sequential Huffman frames (SOF0 or SOF1)
+with 8-bit samples, one, three or four components, and exactly one scan that
+contains every component (spectral selection 0 to 63, no successive
+approximation). Width and height are 1 to 4,096 and at most 16,777,216 pixels.
+Sampling factors are 1 to 4, each maximum is a multiple of the component's factor,
+and a multi-component MCU has at most 10 blocks. DRI restart intervals, APPn and
+COM segments and fill bytes before markers are allowed. **Refused as
+`invalid_asset`:** progressive (SOF2), lossless, hierarchical, arithmetic-coded
+and 12-bit frames, DNL, a second scan or frame, restart markers outside the scan,
+EOI before the scan, any byte before SOI, and **any byte after EOI**. Camera
+trailers and multi-picture (MPF) files are therefore refused as trailing bytes.
+
+1. **Header parser** (allocation-free, before any data-dependent work). Every
+   segment length is checked against the file. DQT must be 8-bit with values 1 to
+   255 and fill its segment exactly; DHT tables go through the canonical
+   builder below; the scan header must name every component in frame order and
+   reference tables that are defined. The frame size is checked before it is used.
+2. **Entropy walk** (Artifree-owned, `jpeg/entropy.rs` and `jpeg/scan.rs`). The
+   canonical Huffman builder refuses oversubscribed tables and the reserved
+   all-ones code. The bit reader loads one byte at a time and never zero-fills:
+   `FF 00` is a data byte, and any other marker or the end of the file while a bit
+   is still needed is refused, so **a truncated scan cannot pass**. The walk
+   decodes every block's symbols (DC category at most 11, AC size at most 10,
+   no run past coefficient 63, ZRL only where it fits), requires the unused bits
+   at the end of each restart interval and of the scan to be 1, requires restart
+   markers `RST0..RST7` in sequence at exactly each interval and none after the
+   last MCU, and requires the final marker to be EOI at the last two bytes. It
+   computes no coefficients or pixels and uses constant memory.
+3. **Maintained decoder** (`zune-jpeg` 0.5.15, strict mode, at most 4,096 by
+   4,096, output at most 64 MiB reserved with `try_reserve_exact`). It decodes the
+   whole image after the walk and its dimensions must equal the header's. It is a
+   corroborating check only: measured against the fixtures it accepts truncated
+   entropy data and trailing bytes, so it is never relied on for either.
+
+Both the walk and the decoder run under the same process-wide decode lock as PNG.
+
+**Known limits.** APPn and COM contents (EXIF, ICC, thumbnails) are framed but not
+validated, and are stored as sent. Strict choices of the walk go beyond the
+standard's readers: one-bits are required as padding, a restart marker after the
+last MCU is refused, and a zero-run (ZRL) that lands on coefficient 64 is refused.
+Duplicate symbols in one DHT table are not refused. The corroborating decoder also refuses some structurally valid files that the walk
+accepts (for example an Adobe APP14 segment after the frame header of a gray frame,
+or a luma sampling factor of 3); they are `invalid_asset`. `zune-jpeg` can panic inside
+`decode_into` on some inputs it accepts the header of; there is no `catch_unwind`,
+so such a request ends as a 500 and the lock is released (a documented limit, not
+a rule 3 guarantee). Admitting progressive files is a recorded non-blocking
+follow-up.
+
+Worst case measured (R09a): a 5,081,646-byte 4,096 by 4,096 4:4:4 file with a
+restart marker after every MCU is admitted. In a release build the walk takes
+about 33 ms and the whole validation about 140 ms; in a debug build the
+test that also encodes it takes about 5.3 s.
+
+## Dependency review (R09a)
 
 | Crate (version)     | Purpose                                        | Result on 2026-11-09                                   |
 | ------------------- | ---------------------------------------------- | ------------------------------------------------------ |
 | `png` 0.18.1        | Maintained decoder with complete format checks | `cargo deny` advisories, bans, licenses and sources ok |
 | `miniz_oxide` 0.8.9 | Independent exact zlib/Adler-32 check          | same                                                   |
 | `crc32fast` 1.5     | Chunk CRC-32 in the container scan             | same                                                   |
+| `zune-jpeg` 0.5.15  | Maintained JPEG decoder (corroborating check)  | same, with `zune-core` 0.5.3 (default features off)    |
 
 `flate2` is locked at 1.1.9 (a transitive dependency of `png`) in `Cargo.lock`
 only: 1.1.11 pulls a second `miniz_oxide` (0.9.1) and `multiple-versions =
@@ -91,7 +151,7 @@ Historical image MIME spellings remain accepted by the envelope and by stored
 metadata/receipt decoding. After current authority checks, a matching historical
 upload replays its metadata-only receipt before current admission is consulted,
 even after the asset was deleted. Replay never recreates its bytes. A new refused
-upload (an invalid PNG, a JPEG, another type) reserves no key, blob, association or quota.
+upload (an invalid PNG or JPEG, another type) reserves no key, blob, association or quota.
 
 Content validation still runs after read-only authority/key/base preflight and
 outside all database transactions. Final immediate settlement rechecks authority,

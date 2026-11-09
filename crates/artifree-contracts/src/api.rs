@@ -1966,7 +1966,7 @@ pub struct ErrorResponse {
 pub struct Asset {
     /// Opaque identifier interpreted within its actor/artifact space.
     pub id: String,
-    /// Stored MIME type, including historical image spellings. New uploads admit UTF-8 plain text/CSV and complete static PNG images; JPEG is unsupported pending complete validation.
+    /// Stored MIME type, including historical image spellings. New uploads admit UTF-8 plain text/CSV and complete static PNG images and complete 8-bit sequential JPEG images.
     pub content_type: String,
     /// Exact immutable byte count.
     pub size_bytes: u64,

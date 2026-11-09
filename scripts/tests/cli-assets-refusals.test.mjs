@@ -122,16 +122,16 @@ test('a stale base refuses an upload and a delete with asset_conflict and the cu
   });
 });
 
-test('image/jpeg is refused by the server with asset_type_unsupported and stores nothing', async () => {
+test('image/gif is refused by the server with asset_type_unsupported and stores nothing', async () => {
   const artifactId = await createArtifact(server, scratch, 'Image type');
   // Plain text declared as a picture: the CLI sends the declared type as given.
   const file = await writeTestFile(scratch, 'picture.txt', 'plain text\n');
   const result = await runCli(
     server,
     uploadArgs(artifactId, file, {
-      contentType: 'image/jpeg',
+      contentType: 'image/gif',
       base: 0,
-      key: 'refusal-image-jpeg',
+      key: 'refusal-image-gif',
     }),
   );
   assertRefused(result, 'asset_type_unsupported');
@@ -147,6 +147,21 @@ test('plain text declared as image/png is refused by the server with invalid_ass
       contentType: 'image/png',
       base: 0,
       key: 'refusal-image-png',
+    }),
+  );
+  assertRefused(result, 'invalid_asset');
+  assert.deepEqual(await listSpace(artifactId), EMPTY_SPACE);
+});
+
+test('plain text declared as image/jpeg is refused by the server with invalid_asset and stores nothing', async () => {
+  const artifactId = await createArtifact(server, scratch, 'JPEG mismatch');
+  const file = await writeTestFile(scratch, 'photo.txt', 'plain text\n');
+  const result = await runCli(
+    server,
+    uploadArgs(artifactId, file, {
+      contentType: 'image/jpeg',
+      base: 0,
+      key: 'refusal-image-jpeg',
     }),
   );
   assertRefused(result, 'invalid_asset');

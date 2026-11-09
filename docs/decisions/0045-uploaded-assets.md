@@ -4,10 +4,11 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a is incomplete (new PNG uploads are admitted under complete validation; JPEG is not); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
-The current HTTP/storage slice accepts UTF-8 plain text/CSV and complete static
-PNG. JPEG is refused as `asset_type_unsupported` until complete image
-validation satisfies rule 3. A narrower image subset does not satisfy that gate.
+Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; whether that satisfies the R09 target is an owner question); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; the remainder of R09b–R09d is proposed**.
+The current HTTP/storage slice accepts UTF-8 plain text/CSV, complete static
+PNG and complete JPEG of the sequential subset recorded in the R09a image
+validation notes at the end of this record. Other JPEG variants are refused as
+`invalid_asset`.
 The four-type target below remains unchanged. The read-only TypeScript client
 lists assets, reads metadata and verifies bounded content; `uploadAsset` and
 `deleteAsset` perform one explicit mutation each (R09b2). The MCP tools `list_assets`, `read_asset`, `upload_asset` and `delete_asset`
@@ -53,15 +54,15 @@ through `ArtifactService`, synchronous ports and SQLite schema 12. Asset bytes
 share `blobs` with source files; both reference types protect reclamation.
 Asset versions, metadata-only receipts, actor-wide keys, atomic logical quotas,
 trash/recovery/purge and backup/restore implement the storage behavior of rules 1–9;
-JPEG admission remains disabled under rule 3. Upload preflight closes
+image admission follows rule 3 as recorded in the R09a image validation notes. Upload preflight closes
 its read snapshot before content validation, and final immediate settlement
 rechecks authority, key and base before using the saved validation result.
 
-Only `text/plain`, `text/csv` and `image/png` currently pass new-upload admission.
-Every JPEG upload, valid or malformed, is `asset_type_unsupported`; a PNG is
-admitted only after the complete validation recorded in the R09a PNG notes at the
-end of this record. R09a remains incomplete until JPEG full-format validation
-satisfies rule 3; the target allowlist and bounds below are unchanged.
+Only `text/plain`, `text/csv`, `image/png` and `image/jpeg` currently pass
+new-upload admission. A PNG or JPEG is admitted only after the complete
+validation recorded in the R09a image validation notes at the end of this
+record; every refused JPEG, valid but unsupported variants included, is
+`invalid_asset`. The target allowlist and bounds below are unchanged.
 See the [content policy](../asset-validation.md).
 Stable MIME envelope parsing and historical metadata/receipt decoding still
 accept image type spellings. A currently authorized matching historical upload
@@ -478,8 +479,8 @@ tested in `scripts/tests/asset-mutation-client.test.mjs` against the real Rust
 server and bounded HTTP-boundary faults. The existing numbered rules above are
 unchanged. R09a image validation and full R09b (CLI, MCP, `copy_assets`)
 remain incomplete; at the time of R09b2 the server refused PNG/JPEG uploads
-(PNG is admitted since the R09a PNG change recorded at the end of this record;
-JPEG is still refused). The implementation notes that follow the contract text are marked as such.
+(PNG and the JPEG subset are admitted since the R09a image changes recorded at the
+end of this record). The implementation notes that follow the contract text are marked as such.
 
 ### Dependency and scope
 
@@ -493,8 +494,8 @@ application behavior is proposed. Reusing generated DTOs does not authorize a
 request or remove runtime checks.
 
 This was not permission to enable any image upload: when R09b2 was written,
-new PNG/JPEG uploads remained unsupported (historical constraint; see the R09a PNG
-notes for the current state). Historical image envelopes and matching receipts must
+new PNG/JPEG uploads remained unsupported (historical constraint; see the R09a image
+validation notes for the current state). Historical image envelopes and matching receipts must
 remain replayable under rules 5–7. The client must not substitute any current
 allowlist for the server's stable envelope and replay ordering. It performs no
 pixel decoding, content sanitization, MIME sniffing, normalization, remote fetch
@@ -767,9 +768,9 @@ and retry hints go to stderr.
   same key with other content is `request_key_reused` and never a second write.
 - **Input.** Upload takes only a path the operator names (rule 11); there is no
   stdin. `--content-type` is required and never inferred from the file name; the
-  CLI checks only its spelling, so `image/jpeg` and `text/html` reach the server
-  and are `asset_type_unsupported`, while `image/png` reaches the PNG validation
-  and is `invalid_asset` unless the file is a complete static PNG. The file must be a regular file: a symbolic
+  CLI checks only its spelling, so `image/gif` and `text/html` reach the server
+  and are `asset_type_unsupported`, while `image/png` and `image/jpeg` reach their
+  validation and are `invalid_asset` unless the file is complete. The file must be a regular file: a symbolic
   link or special file is refused; it is opened without following links (where
   the platform has `O_NOFOLLOW`) and its device and inode must match the check
   before opening; a file over 5 MiB is refused before it is read, and a file whose size or modification time changes while it is read is
@@ -801,11 +802,11 @@ refusals), `cli-assets-local.test.mjs` (nothing sent) and
 `cli-assets-outcome.test.mjs` (lost reply through a proxy, corrupted read), with
 guard mutations for each rule above.
 
-## R09a PNG validation (implementation notes)
+## R09a image validation (implementation notes)
 
-Status: **implemented** for `image/png` only; JPEG remains refused. The numbered
-rules above are unchanged: this section records how rule 3 is met for PNG and is
-not a new decision.
+Status: **implemented** for `image/png` and for the `image/jpeg` subset below.
+The numbered rules above are unchanged: this section records how rule 3 is met
+and is not a new decision. The PNG notes come first, the JPEG notes after them.
 
 - **Decoder and checks.** `artifree-core` links `png` 0.18.1, `miniz_oxide` 0.8.9
   and `crc32fast` 1.5 (boundary edges recorded in `scripts/lib/boundaries.mjs`).
@@ -826,8 +827,38 @@ not a new decision.
   Adler-32 mismatch, extra bytes after IEND or after a zlib stream, zero or
   oversize dimensions, and animation (`acTL`, `fcTL`, `fdAT`). Bytes are stored
   exactly as sent: nothing is re-encoded or stripped.
-- **JPEG.** The decoders reviewed zero-fill truncated entropy data, so complete
-  JPEG validation would need an Artifree-owned entropy-segment check. JPEG stays
-  `asset_type_unsupported` until that is decided; R09a is not complete before it.
+- **JPEG decoders reviewed.** `zune-jpeg` 0.5.15 does not check the length of
+  the entropy-coded data: it decodes files whose entropy bytes were removed, and
+  it accepts bytes after EOI. Complete validation therefore uses an Artifree-owned
+  entropy walk.
+
+**JPEG (R09a, second change).** Status: **implemented for the named subset only.**
+
+- **Layers.** A header parser, an Artifree-owned entropy walk (canonical Huffman
+  builder, byte-at-a-time bit reader with no zero-fill, strict padding, restart
+  sequence, EOI as the last two bytes) and then `zune-jpeg` 0.5.15 (default
+  features off, strict mode, 4,096 per axis, output at most 64 MiB) as a
+  corroborating decode. The walk guarantees truncation is refused; the decoder is
+  never relied on for it. Dependency edge and review: `scripts/lib/boundaries.mjs`
+  and the [content policy](../asset-validation.md).
+- **Admitted subset.** SOF0/SOF1, 8-bit, one, three or four components, exactly one
+  scan with every component, optional DRI, APPn/COM and fill bytes. Bounds are the
+  PNG bounds (4,096 per axis, 16,777,216 pixels, 5 MiB, one decode lock).
+- **Refused as `invalid_asset`** (valid unsupported variants included, so a
+  caller cannot tell "broken" from "outside the subset" by the code): progressive,
+  lossless, hierarchical, arithmetic and 12-bit frames, multi-scan sequential,
+  DNL, bytes before SOI, restart markers outside the scan, and any byte after EOI
+  (camera trailers and MPF are refused). Stored bytes are exact; nothing is
+  re-encoded or stripped.
+- **Known limits.** APPn/COM contents are framed, not validated. The walk is
+  stricter than libjpeg in three places (1-bit padding, no restart marker after
+  the last MCU, ZRL may not land on coefficient 64). `zune-jpeg` can panic inside
+  `decode_into`; the request then ends as a 500 (no `catch_unwind`). The decoder also refuses a few
+  files the walk accepts (an Adobe APP14 after a gray frame header, luma factor 3).
+- **Completeness label.** R09a is complete only for this subset. Progressive
+  admission is a non-blocking follow-up. Owner questions: whether progressive JPEG
+  is required before R09 counts as complete, whether camera trailers and MPF
+  should be admitted, whether a limit specific to asset validation belongs in S02,
+  and whether rule 3 requires ancillary PNG chunk content validation.
 - **Not changed:** the envelope, fingerprints, replay order, schema and every
   client, MCP and CLI contract except their lists of accepted types.

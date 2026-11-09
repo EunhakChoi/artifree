@@ -328,12 +328,13 @@ before the 5 MiB asset limit refuses it.
 
 `upload_asset` takes the bytes themselves as strict standard padded base64 in
 `content_base64`: never a host path or URL. One asset is at most 5 MiB decoded.
-Only UTF-8 `text/plain`, `text/csv` and complete static `image/png` (at most
-4096 pixels per axis and 16,777,216 pixels) are accepted today; every other
-declared type, including `image/jpeg`, `text/html` and `image/svg+xml`, is
+Only UTF-8 `text/plain`, `text/csv`, complete static `image/png` and complete
+sequential `image/jpeg` (baseline or extended, one scan; at most 4096 pixels per
+axis and 16,777,216 pixels) are accepted today; every other declared type,
+including `image/gif`, `text/html` and `image/svg+xml`, is
 `asset_type_unsupported`. Empty content, invalid UTF-8, a NUL or control
-character other than tab, CR, and LF in text, or a PNG that is malformed,
-truncated, animated, oversize or not what the declared type says is `invalid_asset`; content over 5 MiB,
+character other than tab, CR, and LF in text, or a PNG or JPEG that is malformed,
+truncated, animated, progressive, oversize or not what the declared type says is `invalid_asset`; content over 5 MiB,
 or an upload that would pass a space or per-user limit, is
 `asset_limit_exceeded`; and malformed base64 or a malformed `content_type` is
 `invalid_request`. A refused upload writes nothing. Send `asset_version` from

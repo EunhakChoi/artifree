@@ -259,8 +259,8 @@ Each artifact can also keep uploaded assets, a separate space with its own
 optional `--idempotency-key`, and a stale base fails with `asset_conflict` and
 `current_asset_version`. `asset read <id> <asset-id> --output <file>` writes the
 verified bytes to a new file and never replaces an existing one. Only UTF-8
-`text/plain`, `text/csv` and complete static `image/png` (at most 4096 pixels per
-axis) are accepted today, at most 5 MiB each; the CLI sends
+`text/plain`, `text/csv`, complete static `image/png` and complete sequential
+`image/jpeg` (at most 4096 pixels per axis) are accepted today, at most 5 MiB each; the CLI sends
 only the file you name, never infers a type, and refuses a symbolic link or a file
 over the limit before sending. After a lost reply, resend the identical command
 with the same key and the same file. MCP agents use `list_assets`, `read_asset`,
