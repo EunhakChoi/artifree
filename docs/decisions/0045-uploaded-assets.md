@@ -1034,5 +1034,10 @@ This completes R09d. Chromium is verified; Firefox re-verification is pending
   token for a frame, no new `ArtifreeClient` method, no store or schema change
   and no new frame failure code. Contract version 0.22.0.
 - **Follow-ups (not blocking).** The capability set is a `u8` with one spare bit.
-  The offer-outcome block in the host repeats the source download's. The client
-  parser closes its key set although neighbouring parsers ignore extra keys.
+  The offer-outcome block in the host repeats the source download's and so does
+  the prompt's per-kind wording. The client's `RuntimeAssetsFrame` repeats the
+  shape of the source `FrameTransport`. A length-first or capped read of the
+  download response (a `Content-Length` check, or a limit in the client's byte
+  read) would bound memory before the size comparison. The server lists the
+  whole asset space to find one asset for an offer or a download, as `assets.read`
+  does; a by-id store lookup would avoid that.

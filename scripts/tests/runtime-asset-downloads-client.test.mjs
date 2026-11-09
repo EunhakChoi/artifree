@@ -192,6 +192,11 @@ const acceptedOffers = [
     { size: FIVE_MIB },
     { assetId: ASSET, fileName: FILE_NAME, size: FIVE_MIB, sha256: DIGEST },
   ],
+  [
+    'a field the contract does not define',
+    { extra: true },
+    { assetId: ASSET, fileName: FILE_NAME, size: 5, sha256: DIGEST },
+  ],
 ];
 
 for (const [name, changes, expected] of acceptedOffers)
@@ -214,7 +219,6 @@ const refusedOffers = [
   ['a name with a space', { file_name: 'my file.txt' }],
   ['a name that starts with a dot', { file_name: '.hidden.txt' }],
   ['an empty name', { file_name: '' }],
-  ['a field the contract does not define', { extra: true }],
 ];
 
 for (const [name, changes] of refusedOffers)

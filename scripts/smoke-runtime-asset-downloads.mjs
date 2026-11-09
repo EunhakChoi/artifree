@@ -209,6 +209,9 @@ async function requests(opened, seen, count) {
  * names the file and its size, and it must not move the preview.
  */
 async function waitForPrompt(opened, file, size) {
+  // Bring the whole preview into view first: a click that has to scroll the
+  // page would move the preview and be mistaken for the prompt moving it.
+  await opened.element.scrollIntoViewIfNeeded();
   const box = await opened.element.boundingBox();
   const result = await press(opened);
   const dialog = opened.page.getByRole('dialog', { name: PROMPT });

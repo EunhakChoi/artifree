@@ -436,14 +436,6 @@ export async function deleteRuntimeAsset(
 /** Most characters in the name an offer states (decision 0045, rule 12). */
 const MAX_OFFER_NAME_CHARS = 100;
 
-/** The fields an offer carries; the contract defines no others. */
-const OFFER_FIELDS: readonly string[] = [
-  'asset_id',
-  'file_name',
-  'size',
-  'sha256',
-];
-
 /** What a download of one asset would hand over, as the client states it. */
 export interface RuntimeAssetOffer {
   /** The asset's ID: 64 lowercase hexadecimal digits. */
@@ -477,18 +469,15 @@ function isAssetOffer(offer: RuntimeAssetOffer): boolean {
 
 /**
  * Validates an offer against the asset it was asked for: it must name that
- * asset, state a name, size and digest that an offer can state, and carry no
- * field the contract does not define.
+ * asset, and state a name, size and digest that an offer can state. Unknown
+ * fields are ignored, as the neighbouring response parsers ignore them, so a
+ * field the server adds later does not refuse an offer.
  */
 export function parseRuntimeAssetOffer(
   value: unknown,
   assetId: string,
 ): RuntimeAssetOffer | undefined {
-  if (
-    !isRecord(value) ||
-    Object.keys(value).some((key) => !OFFER_FIELDS.includes(key))
-  )
-    return undefined;
+  if (!isRecord(value)) return undefined;
   const { asset_id, file_name, size, sha256 } = value;
   if (
     asset_id !== assetId ||
