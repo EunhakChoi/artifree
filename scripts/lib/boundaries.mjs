@@ -255,3 +255,16 @@ export function checkClientManifest(manifest) {
       );
   }
 }
+
+/**
+ * Rejects `panic = "abort"` in any profile of the workspace manifest. JPEG validation contains a
+ * decoder panic with `catch_unwind` (docs/asset-validation.md); under `abort` that containment
+ * does nothing and one crafted upload ends the process.
+ */
+export function checkPanicStrategy(manifestText) {
+  const abort = /^\s*panic\s*=\s*["']abort["']/m;
+  assert.ok(
+    !abort.test(manifestText),
+    'Cargo.toml sets panic = "abort": JPEG decoder panic containment needs unwinding.',
+  );
+}
