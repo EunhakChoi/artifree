@@ -686,7 +686,7 @@ CI runs the gate/build on Ubuntu 24.04 with Node 22.12.0 and Windows Server 2025
 with Node 22.22.2. Runner OS labels are fixed instead of following a moving
 `latest` image. GitHub actions run on their supported Node 24 runtime; that is
 separate from the application Node versions under test.
-Another job runs Cargo tests on Rust 1.88.0 with plain `cargo test`; regular
+Another job runs Cargo tests on Rust 1.89.0 with plain `cargo test`; regular
 checks use the pinned Rust toolchain. Rust/CLI JSON equivalence and all CLI
 rejection cases run in the general
 general gate. Browser jobs use the official Playwright image, pinned by version
@@ -709,7 +709,7 @@ sandbox. A test with a wall-clock budget that fails only when the runner is
 busy gets `threads-required` in that file, after it is shown to fail or slow
 down under load. None needed it in three runs on that sandbox; the CI runners
 have fewer CPUs and were not measured, so a flaky test there is handled the
-same way. The Rust 1.88.0 job keeps plain `cargo test` because it verifies the
+same way. The Rust 1.89.0 job keeps plain `cargo test` because it verifies the
 minimum toolchain.
 
 Dependency and workflow checks run on pushes, pull requests, manual runs, and a
@@ -723,7 +723,7 @@ Actions. Minor and patch updates are grouped per ecosystem; majors arrive one
 at a time. Every update must pass the full gate before it is merged.
 `@types/node` majors are ignored because Node types must match the oldest
 supported runtime in `engines`; nothing else would catch code that uses APIs
-missing from Node 22. Rust needs no such rule: the Rust 1.88.0 job rejects
+missing from Node 22. Rust needs no such rule: the Rust 1.89.0 job rejects
 crates that raise the minimum version.
 
 ## Cleanup after verification and merge
