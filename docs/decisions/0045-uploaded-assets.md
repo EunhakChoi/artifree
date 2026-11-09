@@ -857,9 +857,16 @@ and is not a new decision. The PNG notes come first, the JPEG notes after them.
   reporting errors) and a panic is `invalid_asset`. The decoder also refuses a few
   files the walk accepts (an Adobe APP14 after a gray frame header, luma factor 3).
 - **Completeness label.** R09a is complete only for this subset. Progressive
-  admission is a non-blocking follow-up. Owner questions: whether progressive JPEG
-  is required before R09 counts as complete, whether camera trailers and MPF
-  should be admitted, whether a limit specific to asset validation belongs in S02,
+  admission and trailer-bearing JPEGs (camera trailers, Motion Photo, SEFT, MPF) are
+  recorded as non-blocking follow-ups; the validator is not relaxed, and a client that
+  re-encodes or strips a trailer before upload is the suggested route. The owner
+  directed that the Opus recommendation (accept this, record the follow-ups) be
+  followed. Still open: whether a limit specific to asset validation belongs in S02,
   and whether rule 3 requires ancillary PNG chunk content validation.
+- **Decoder panic containment.** The first plan accepted a zune-jpeg panic as a 500.
+  Review showed it surfaces as a repeatable 503, so the decode now runs under
+  `catch_unwind` and a panic is `invalid_asset`. This reverses the plan, was decided
+  after review, and is recorded here for that reason. A regression fixture should be
+  added once a real input that makes zune panic is known.
 - **Not changed:** the envelope, fingerprints, replay order, schema and every
   client, MCP and CLI contract except their lists of accepted types.
