@@ -110,7 +110,8 @@ interface CallHead<T extends string> {
 }
 
 /** One parsed, bounded call of type `T` with the fields `F` its parser kept. */
-export type Call<T extends string, F extends object> = CallHead<T> & F;
+export type Call<T extends string, F extends object> = CallHead<T> &
+  Readonly<F>;
 
 /**
  * How one call type is told apart and served. The type is named here and
@@ -162,7 +163,9 @@ export function defineCall<T extends string, F extends object>(
     parse(message, id) {
       const fields = descriptor.parse(message);
       if (fields === undefined) return undefined;
-      const call: Call<T, F> = { type: descriptor.type, id, ...fields };
+      // The envelope's type and id go last, so a parser's field cannot
+      // replace either.
+      const call: Call<T, F> = { ...fields, type: descriptor.type, id };
       return {
         call,
         serve: (deps, signal) => descriptor.serve(call, deps, signal),

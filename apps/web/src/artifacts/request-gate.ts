@@ -25,6 +25,7 @@ export type RequestKind = 'read' | 'stream' | 'write' | 'frame';
  * cannot make one request look like another.
  */
 const CHANGE_FEED = /\/v1\/changes$/;
+
 /** `text` as a pattern that matches only itself. */
 function literal(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -40,9 +41,8 @@ const REVISION_ROUTE = new RegExp(
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a
  * preview or runtime view. The feed is one long request. A runtime frame's
- * calls (metadata, source, download, `assets/list`, `assets/read`,
- * `assets/upload`, `assets/delete`, `assets/offer` and `assets/download`),
- * which the workspace sends on its behalf, are `frame` requests. Everything
+ * calls (the client's frame route tails), which the workspace sends on its
+ * behalf, are `frame` requests. Everything
  * else, including closing a runtime view, writes. `url` may carry the server's
  * path prefix.
  */

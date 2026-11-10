@@ -84,7 +84,7 @@ const OTHER_REQUESTS = [
     kind: 'read',
   },
   {
-    name: 'closing a runtime view',
+    name: 'a view path with no tail, which is not a frame route',
     method: 'POST',
     path: `${revisionPath}/runtime-views/${view.view_id}/${view.generation}`,
     kind: 'write',

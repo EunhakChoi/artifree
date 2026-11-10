@@ -123,3 +123,24 @@ test('Only the host envelope imports the frame call modules', async () => {
   );
   assert.ok(importers.includes(ENVELOPE), 'the envelope imports the calls');
 });
+
+// The envelope carries the registry with it, so a value import of the envelope
+// from an entry module would move every call module into the entry bundle.
+test('Only the on-demand host imports the envelope as a value', async () => {
+  const sourceRoot = fileURLToPath(
+    new URL('../../apps/web/src/', import.meta.url),
+  );
+  // A static value import or a re-export of `./frame-rpc`; `import type` and
+  // `export type` carry no code.
+  const valueImport =
+    /(?:import|export)\s+(?!type\b)[^;]*?from\s+['"][^'"]*\/frame-rpc['"]/;
+  const dynamicImport = /import\s*\(\s*['"][^'"]*\/frame-rpc['"]/;
+  const importers = [];
+  for (const file of await typeScriptFiles(sourceRoot)) {
+    const text = await readFile(file, 'utf8');
+    if (valueImport.test(text) || dynamicImport.test(text)) {
+      importers.push(relative(sourceRoot, file).split(sep).join('/'));
+    }
+  }
+  assert.deepEqual(importers.sort(), ['artifacts/runtime-host.ts']);
+});

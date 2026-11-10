@@ -251,8 +251,15 @@ export class FrameRpc {
       return this.#fail(call.id, 'rate_limited');
     const controller = new AbortController();
     this.#pending.set(call.id, controller);
-    void parsed
-      .serve(this.#deps, controller.signal)
+    // A serve that throws before it returns a promise fails the call like a
+    // rejection, so the pending slot is always released below.
+    let served: Promise<FrameReply | undefined>;
+    try {
+      served = parsed.serve(this.#deps, controller.signal);
+    } catch (error: unknown) {
+      served = Promise.reject(error);
+    }
+    void served
       .then(
         (reply) => {
           if (reply !== undefined) this.#reply(call.id, controller, reply);
