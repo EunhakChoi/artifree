@@ -57,7 +57,10 @@ product is claimed for them.
    set's current eight bits; `data.write` is the ninth, so the slice that adds
    it (R14b) widens the set to hold at least sixteen. This is internal: the
    wire carries capability names.
-3. The consent control for `data.write` says, beside the control, that changes
+3. The consent control for `data.read` says, beside the control, that the page
+   can read the application data saved for this artifact and that a preview is
+   not isolated from the network, so a page can send what it reads elsewhere.
+   The consent control for `data.write` says, beside the control, that changes
    replace saved application data, cannot be undone, can be read by the user's
    agents, and that the page can tell whether something it writes was already
    stored. A grant is not spent by a write: it lasts until it is revoked, the
@@ -157,7 +160,11 @@ product is claimed for them.
     connection holds `data.read`, it sends the frame one message with no call
     id, `{ type: 'event', event: 'data.changed', dataVersion }`, the first
     message the host sends that is not a reply. The SDK hands `dataVersion` to
-    its listeners and ignores an event it does not know. The frame reads the
+    its listeners and ignores an event it does not know. `onChange` returns a
+    function that removes that listener; registering the same function twice
+    registers it twice; a listener that throws does not stop the others, and
+    its error is not passed to the host. Listeners are called with one
+    argument, `{ dataVersion }`. The frame reads the
     value with `data.get`, which the server checks as always. The message is a
     hint: it can be missed (a reload, a lost connection) or arrive for a
     version the frame already has, and the frame must not treat its absence as
