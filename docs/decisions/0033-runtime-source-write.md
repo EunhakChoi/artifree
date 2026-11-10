@@ -175,8 +175,9 @@ revision_conflict` with `current_revision`; bytes equal to the file's
   import a value from the client, because a module shared by two on-demand
   chunks would put its preload list in the main bundle. A test holds the host's
   retry rule and the client's to the same answers.
-- **Not implemented:** replacing a view in place after a save (R10: the
-  workspace loads a new view and the frame's state is lost); subscriptions to
+- **Not implemented:** replacing a view in place after a save (R10, proposed in
+  [0054](0054-runtime-view-adoption.md): the workspace loads a new view and
+  the frame's state is lost); subscriptions to
   changes (R07: a frame cannot learn of a commit except by its own receipt);
   frame identity or per-frame permissions beyond the connection (S01); viewer
   or editor roles (S02); deleting or renaming a file, saving several files in
