@@ -207,7 +207,7 @@ test('The entry modules reach the on-demand runtime modules by type or on demand
   // A static value import of either module from the client class or the index
   // would carry the byte comparison into the entry bundle with it.
   const statement =
-    /(?:import|export)\s+(type\s+)?[^;]*?from\s+'\.\/runtime-(?:source|assets)\.js'/g;
+    /(?:import|export)\s+(type\s+)?[^;]*?from\s+'\.\/runtime-(?:source|assets|data)\.js'/g;
   for (const name of ['client.ts', 'index.ts']) {
     const source = await readFile(new URL(name, CLIENT_SOURCE), 'utf8');
     const statements = [...source.matchAll(statement)];

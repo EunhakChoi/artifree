@@ -1559,6 +1559,10 @@ pub struct RuntimeAssetDownloadOffer {
     pub sha256: String,
 }
 
+/// Most bytes of JSON text one runtime data read answers: one data space
+/// (decision 0053, rule 11; the space limit of decision 0031).
+pub const MAX_RUNTIME_DATA_READ_BYTES: u64 = 1_048_576;
+
 /// Reads the value at one path of the calling user's application data for the
 /// artifact a runtime view is bound to, which needs the `data.read` grant
 /// (decision 0053, rule 4). The answer is a [`RuntimeDataValue`].
@@ -1592,8 +1596,10 @@ pub struct RuntimeDataValue {
     /// Whether anything is at the path. The root always exists.
     pub exists: bool,
     /// The canonical JSON text of the value at the path, present only when
-    /// `exists` is true. A stored `null` is the text `null`.
+    /// `exists` is true. A stored `null` is the text `null`. At most
+    /// [`MAX_RUNTIME_DATA_READ_BYTES`] bytes, so at most that many characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1_048_576))]
     pub value: Option<String>,
 }
 

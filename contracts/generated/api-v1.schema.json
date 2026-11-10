@@ -2709,7 +2709,8 @@
           "type": "string"
         },
         "value": {
-          "description": "The canonical JSON text of the value at the path, present only when\n`exists` is true. A stored `null` is the text `null`.",
+          "description": "The canonical JSON text of the value at the path, present only when\n`exists` is true. A stored `null` is the text `null`. At most\n[`MAX_RUNTIME_DATA_READ_BYTES`] bytes, so at most that many characters.",
+          "maxLength": 1048576,
           "type": [
             "string",
             "null"

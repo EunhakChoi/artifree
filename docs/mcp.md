@@ -265,9 +265,10 @@ cancel of a finished job is `job_ended` (409).
 An artifact can keep one JSON object of data for you, with its own
 `data_version` (0 until written) that has nothing to do with its revisions: saving
 or restoring a revision does not change it, and it is not in a revision, a
-preview, or an export. **A page running in a preview cannot read or write it.**
-Only these tools, HTTP, and the CLI can ([decision
-0031](decisions/0031-app-data.md)).
+preview, or an export. **A page running in a preview cannot write it, and can read
+it only after the user grants it `data.read`** ([decision
+0053](decisions/0053-runtime-app-data.md)). Otherwise only these tools, HTTP,
+and the CLI reach it ([decision 0031](decisions/0031-app-data.md)).
 
 `get_data` reads the value at a `path`: up to 16 segments of 1-64 UTF-8 bytes,
 using the Unicode 16.0.0 [data path grammar](data-paths.md), separated by `/`,

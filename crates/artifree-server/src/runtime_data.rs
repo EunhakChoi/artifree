@@ -31,14 +31,17 @@ pub(crate) async fn read(
     let path = data_path("path", &request.path)?;
     let wire_path = path.to_string();
     let (actor, artifact) = (call.actor.clone(), granted.artifact.clone());
-    let read = state
-        .run(move |artifacts| artifacts.data(&actor, &artifact, &path))
+    // The canonical text is written on the blocking thread, with the read.
+    let (version, text) = state
+        .run(move |artifacts| {
+            let read = artifacts.data(&actor, &artifact, &path)?;
+            Ok((read.version, read.value.map(|value| value.to_canonical())))
+        })
         .await?;
-    let text = read.value.map(|value| value.to_canonical());
     let answer = RuntimeDataValue {
         artifact_id: granted.artifact.to_string(),
         path: wire_path,
-        data_version: read.version.0,
+        data_version: version.0,
         exists: text.is_some(),
         value: text,
     };

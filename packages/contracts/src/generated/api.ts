@@ -1312,7 +1312,8 @@ export interface RuntimeDataValue {
   path: string;
   /**
    * The canonical JSON text of the value at the path, present only when
-   * `exists` is true. A stored `null` is the text `null`.
+   * `exists` is true. A stored `null` is the text `null`. At most
+   * [`MAX_RUNTIME_DATA_READ_BYTES`] bytes, so at most that many characters.
    */
   value?: string | null;
 }

@@ -13,13 +13,11 @@ const MAX_DATA_PATH_CHARS = 1_039;
  * never parses a value (decision 0053, rule 5).
  */
 function isReadText(text: unknown): text is string {
-  // A UTF-16 length never exceeds the UTF-8 length, so the length check refuses
-  // only what the byte count would refuse too, without encoding the text first.
-  return (
-    typeof text === 'string' &&
-    text.length <= MAX_DATA_READ &&
-    new TextEncoder().encode(text).byteLength <= MAX_DATA_READ
-  );
+  // A UTF-16 unit takes one to three UTF-8 bytes, so most texts are settled by
+  // their length and only one in the range between is encoded to be counted.
+  if (typeof text !== 'string' || text.length > MAX_DATA_READ) return false;
+  if (text.length * 3 <= MAX_DATA_READ) return true;
+  return new TextEncoder().encode(text).byteLength <= MAX_DATA_READ;
 }
 
 /** The application data calls of a runtime view (decision 0053). */
@@ -53,9 +51,9 @@ export const DATA_CALLS = [
           path: read.path,
           dataVersion: read.data_version,
           exists: read.exists,
-          value: value ?? null,
+          value,
         },
       });
     },
   }),
-];
+] as const;

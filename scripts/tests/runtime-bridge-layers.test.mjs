@@ -74,6 +74,18 @@ test('Each host call type is sent by an SDK method', () => {
   assert.equal(FRAME_CALL_TYPES.length, 11);
 });
 
+test('Each call the SDK sends is one the host serves', () => {
+  // A message the SDK builds for a call names its type as `type: 'family.verb'`.
+  const sent = [...bootstrap.matchAll(/type: '([a-z]+\.[A-Za-z]+)'/g)].map(
+    ([, type]) => type,
+  );
+  assert.ok(sent.length > 0, 'the SDK sends calls');
+  assert.deepEqual(
+    sent.filter((type) => !FRAME_CALL_TYPES.includes(type)),
+    [],
+  );
+});
+
 const policy = await readSource(
   '../../crates/artifree-server/src/runtime_policy.rs',
 );

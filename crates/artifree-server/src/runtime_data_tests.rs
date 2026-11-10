@@ -490,3 +490,12 @@ fn a_read_whose_connection_is_revoked_after_its_store_read_releases_no_value()
 fn a_read_whose_head_moves_after_its_store_read_releases_no_value() -> Result<(), Box<dyn Error>> {
     run_race(Race::HeadMove)
 }
+
+/// The read bound the layers apply is the size of one data space.
+#[test]
+fn the_read_bound_is_the_space_limit() {
+    assert_eq!(
+        usize::try_from(artifree_contracts::api::MAX_RUNTIME_DATA_READ_BYTES).ok(),
+        Some(artifree_domain::data::MAX_SPACE_BYTES)
+    );
+}

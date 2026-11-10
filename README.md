@@ -430,7 +430,7 @@ back, and returns the path, revision, size, and SHA-256, which the client, the
 workspace, and the frame each check against the bytes they sent. A save moves
 the head, so the workspace shows the next revision in a new view that holds no
 grant: the user consents again for each save. Only the owner exists as a
-principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** data access from a
+principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** writing application data from a
 preview, subscriptions, replacing a view in place, deleting or
 renaming files, several files in one save, a prompt for each save, roles (a
 viewer is not refused because none exists), and any claim that a preview cannot

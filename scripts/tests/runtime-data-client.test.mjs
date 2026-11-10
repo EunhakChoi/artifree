@@ -210,11 +210,6 @@ const refusedAnswers = [
     'member',
     { ...absent('member'), value: '{"a":1}' },
   ],
-  [
-    'exists false and a null value',
-    'member',
-    { ...absent('member'), value: null },
-  ],
   ['the root reported as absent', '', absent('')],
   ['a root whose text is an array', '', stored('', '[]')],
   [
@@ -243,3 +238,12 @@ for (const [name, path, answer] of refusedAnswers)
     assert.equal(error.code, 'invalid_response');
     assert.equal(error.status, 200);
   });
+
+// The server omits the value where nothing is at the path; the contract also
+// allows null there, and both read as "no value".
+test('A read accepts a null value for a path with nothing at it', async () => {
+  const { client } = await clientWith(() =>
+    Response.json({ ...absent('member'), value: null }),
+  );
+  assert.deepEqual(await readData(client, 'member'), absent('member'));
+});

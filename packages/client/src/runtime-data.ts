@@ -15,12 +15,19 @@ import { MAX_DATA_READ_BYTES } from './runtime-limits.js';
  * and for the root, an object. A text longer than the bound in UTF-16 units is
  * refused before it is encoded, since each unit takes at least one byte.
  */
+/**
+ * Whether `text` takes at most `bound` UTF-8 bytes. A UTF-16 unit takes one to
+ * three bytes, so most texts are settled by their length and only one in the
+ * range between is encoded to be counted.
+ */
+function withinBytes(text: string, bound: number): boolean {
+  if (text.length > bound) return false;
+  if (text.length * 3 <= bound) return true;
+  return new TextEncoder().encode(text).byteLength <= bound;
+}
+
 function isDataText(text: string, root: boolean): boolean {
-  if (
-    text.length > MAX_DATA_READ_BYTES ||
-    new TextEncoder().encode(text).byteLength > MAX_DATA_READ_BYTES
-  )
-    return false;
+  if (!withinBytes(text, MAX_DATA_READ_BYTES)) return false;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -34,9 +41,9 @@ function isDataText(text: string, root: boolean): boolean {
  * Validates a data read against what was asked. The artifact and the path must
  * be echoed, the version must be a safe integer, and a value that exists must
  * be JSON text within the read bound, an object when it is the root. Where
- * nothing is at the path there is no value, so an answer that carries one is
- * refused; the root always exists, so an answer that says it does not is
- * refused too.
+ * nothing is at the path there is no value: the server omits it, the contract
+ * also allows `null`, and an answer that carries a text there is refused. The
+ * root always exists, so an answer that says it does not is refused too.
  */
 export function parseRuntimeDataValue(
   value: unknown,
@@ -53,8 +60,10 @@ export function parseRuntimeDataValue(
   )
     return undefined;
   const base = { artifact_id: artifactId, path, data_version, exists };
-  if (!exists)
-    return path === '' || Object.hasOwn(value, 'value') ? undefined : base;
+  if (!exists) {
+    const none = value.value === undefined || value.value === null;
+    return path === '' || !none ? undefined : base;
+  }
   const text: unknown = value.value;
   if (typeof text !== 'string' || !isDataText(text, path === ''))
     return undefined;
