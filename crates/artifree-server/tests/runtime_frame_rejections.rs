@@ -1,7 +1,7 @@
-//! Frame call refusals (decisions 0019, 0032, 0033 and 0045). A frame route
-//! refuses a bad path before a bad body, a malformed body, a body over its
-//! limit, and any method other than POST. Every refusal happens before an
-//! artifact is looked up, so this harness creates no artifact.
+//! Frame call refusals (decisions 0019, 0032, 0033, 0045 and 0053). A frame
+//! route refuses a bad path before a bad body, a body of the wrong shape, a
+//! body over its limit, and any method other than POST. Every refusal happens
+//! before an artifact is looked up, so this harness creates no artifact.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -26,7 +26,7 @@ const CONTENT_ORIGIN: &str = "http://127.0.0.1:7411";
 /// A well-formed view identifier, so that only the case's own fault is refused.
 const VIEW: &str = "0123456789abcdef0123456789abcdef";
 /// Every frame route, by its path after the view and the generation.
-const TAILS: [&str; 13] = [
+const TAILS: [&str; 16] = [
     "metadata",
     "source/list",
     "source/read",
@@ -40,12 +40,34 @@ const TAILS: [&str; 13] = [
     "assets/upload",
     "assets/delete",
     "data/read",
+    "data/set",
+    "data/update",
+    "data/delete",
 ];
-/// The two routes with the larger write limit (1.5 MiB). A body over the frame
+/// The five routes with the larger write limit (1.5 MiB). A body over the frame
 /// limit is accepted there and refused for the fields it lacks.
-const WRITE_TAILS: [&str; 2] = ["source/write", "assets/upload"];
+const WRITE_TAILS: [&str; 5] = [
+    "source/write",
+    "assets/upload",
+    "data/set",
+    "data/update",
+    "data/delete",
+];
 /// Above the 16 KiB frame body limit and below the 1.5 MiB write limit.
 const OVERSIZED_INITIALIZATION_BYTES: usize = 20_000;
+/// The frame source write's body limit, 1.5 MiB, which the data write routes
+/// share (decision 0053, rule 11).
+const WRITE_BODY_LIMIT_BYTES: usize = 1_572_864;
+/// Bodies of the wrong shape (decision 0053, rule 8): text that is not JSON,
+/// JSON that is not an object, an object missing its fields, a field of the
+/// wrong type, and an unknown field.
+const NOT_A_FRAME_CALL_BODIES: [&str; 5] = [
+    "{",
+    "[]",
+    "{}",
+    r#"{"initialization":5}"#,
+    r#"{"initialization":"x","unknown":true}"#,
+];
 const INVALID_FRAME_CALL: &str = "the frame call is not a valid request";
 const FRAME_CALL_TOO_LARGE: &str = "the frame call is too large";
 
@@ -198,19 +220,21 @@ async fn bad_path_is_refused_before_body(harness: &Harness, tail: &str) -> TestR
     Ok(())
 }
 
-/// A body that is not JSON, on a well-formed path, is refused as an invalid
-/// frame call.
-async fn malformed_body_is_refused(harness: &Harness, tail: &str) -> TestResult {
-    let reply = harness
-        .send(post_raw(&frame_path("1", tail), "{".to_owned())?)
-        .await?;
-    assert_refused(
-        tail,
-        &reply,
-        StatusCode::BAD_REQUEST,
-        "invalid_request",
-        INVALID_FRAME_CALL,
-    );
+/// A body of the wrong shape, on a well-formed path, is refused as an invalid
+/// frame call whatever the fault (decision 0053, rule 8).
+async fn wrong_shape_body_is_refused(harness: &Harness, tail: &str) -> TestResult {
+    for body in NOT_A_FRAME_CALL_BODIES {
+        let reply = harness
+            .send(post_raw(&frame_path("1", tail), body.to_owned())?)
+            .await?;
+        assert_refused(
+            &format!("{tail} with the body {body}"),
+            &reply,
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            INVALID_FRAME_CALL,
+        );
+    }
     Ok(())
 }
 
@@ -243,6 +267,47 @@ async fn oversized_body_is_refused(harness: &Harness, tail: &str) -> TestResult 
     Ok(())
 }
 
+/// A JSON body of exactly `bytes` bytes, whose `initialization` is a run of
+/// zeros. It is valid JSON that lacks the fields a write route requires.
+fn padded_body(bytes: usize) -> String {
+    let envelope = r#"{"initialization":""}"#.len();
+    let zeros = "0".repeat(bytes - envelope);
+    format!("{{\"initialization\":\"{zeros}\"}}")
+}
+
+/// A write route accepts a body of exactly the write limit and refuses one byte
+/// more as too large. An accepted body is read, then refused for the fields it
+/// lacks.
+async fn write_limit_is_exact(harness: &Harness, tail: &str) -> TestResult {
+    let at_limit = harness
+        .send(post_raw(
+            &frame_path("1", tail),
+            padded_body(WRITE_BODY_LIMIT_BYTES),
+        )?)
+        .await?;
+    assert_refused(
+        &format!("{tail} with a body at the write limit"),
+        &at_limit,
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        INVALID_FRAME_CALL,
+    );
+    let over_limit = harness
+        .send(post_raw(
+            &frame_path("1", tail),
+            padded_body(WRITE_BODY_LIMIT_BYTES + 1),
+        )?)
+        .await?;
+    assert_refused(
+        &format!("{tail} with a body one byte over the write limit"),
+        &over_limit,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        FRAME_CALL_TOO_LARGE,
+    );
+    Ok(())
+}
+
 /// A GET on a frame route is refused with 405, as the route accepts only POST.
 async fn other_methods_are_refused(harness: &Harness, tail: &str) -> TestResult {
     let request = authorized(Request::get(frame_path("1", tail))).body(Body::empty())?;
@@ -266,9 +331,18 @@ async fn frame_routes_refuse_a_bad_path_first_then_a_bad_body_size_and_method() 
     let harness = Harness::new();
     for tail in TAILS {
         bad_path_is_refused_before_body(&harness, tail).await?;
-        malformed_body_is_refused(&harness, tail).await?;
+        wrong_shape_body_is_refused(&harness, tail).await?;
         oversized_body_is_refused(&harness, tail).await?;
         other_methods_are_refused(&harness, tail).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_routes_take_the_write_limit_exactly() -> TestResult {
+    let harness = Harness::new();
+    for tail in WRITE_TAILS {
+        write_limit_is_exact(&harness, tail).await?;
     }
     Ok(())
 }

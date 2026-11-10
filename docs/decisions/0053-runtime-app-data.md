@@ -5,8 +5,9 @@
 > re-verification ([quality](../quality.md#browser-engines)).
 
 Date: 2026-11-11. Status: **partially implemented**: R14a (`data.read` and
-`data.get`) is implemented in Chromium, Firefox pending re-verification; R14b
-and R14c are proposed and have no code.
+`data.get`) and R14b (`data.write`, `data.set`, `data.update` and
+`data.remove`) are implemented in Chromium, Firefox pending re-verification;
+R14c is proposed and has no code.
 Amends rule 6 of [0040](0040-data-changes-and-member-listing.md) when R14c
 merges (rule 17).
 Roadmap: R14. Builds on [0020](0020-runtime-grants.md),
@@ -230,7 +231,7 @@ product is claimed for them.
 | R14b  | The wider set, `data.write` and the three writes, end to end | 1 to 5, 8 to 15, 23     |
 | R14c  | The change hint and `onChange`                               | 16, 17                  |
 
-The cross-layer test of rule 21 lands with R14a and grows with R14b.
+The cross-layer test of rule 21 landed with R14a and grew with R14b.
 
 ## Alternatives considered
 

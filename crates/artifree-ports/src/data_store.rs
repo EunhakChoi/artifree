@@ -3,7 +3,8 @@
 //! One data space exists per actor and artifact. Its version is separate from
 //! the artifact's source revision and metadata revision: a write that changes
 //! the space raises it by one, and nothing else does. An implementation must
-//! make each write atomic: the artifact check, the key lookup, the base
+//! make each write atomic: the artifact check, a frame write's source check
+//! (decision 0053), the key lookup, the base
 //! version check, the change, the version, and the key record all happen in one
 //! step that reads the state it decides on, so two writers cannot both pass a
 //! base check.
@@ -11,6 +12,7 @@
 use std::fmt;
 
 use artifree_domain::AppDataVersion;
+use artifree_domain::SourceRevision;
 use artifree_domain::change::FeedId;
 use artifree_domain::data::{DataChange, DataError, DataSpace};
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration, UnixMillis};
@@ -92,6 +94,12 @@ pub enum DataStoreError {
         /// The version it is at.
         current: AppDataVersion,
     },
+    /// A runtime view's pinned source revision is not the artifact's head any
+    /// more (decision 0053, rule 10); nothing was written and no key was looked at.
+    SourceConflict {
+        /// The artifact's current source revision.
+        current: SourceRevision,
+    },
     /// The change is refused by the rules of the space (decision 0031);
     /// nothing was written and no key was recorded.
     Rejected(DataError),
@@ -109,6 +117,13 @@ impl fmt::Display for DataStoreError {
             }
             Self::VersionConflict { current } => {
                 write!(formatter, "the data is at version {}", current.0)
+            }
+            Self::SourceConflict { current } => {
+                write!(
+                    formatter,
+                    "source changed; current revision is {}",
+                    current.0
+                )
             }
             Self::Rejected(error) => write!(formatter, "{error}"),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
@@ -182,4 +197,19 @@ pub trait DataStore {
     /// [`DataStoreError::VersionConflict`], [`DataStoreError::Rejected`], or
     /// [`DataStoreError::Unavailable`].
     fn write_data(&self, request: DataWrite<'_>) -> Result<DataReceipt, DataStoreError>;
+
+    /// [`Self::write_data`] for a runtime frame, fenced to the source revision its
+    /// view was pinned to. In the same step, after the artifact check and before
+    /// the outbox fence and the key, the artifact's current source revision must be
+    /// `expected_source`; otherwise [`DataStoreError::SourceConflict`], so a retry
+    /// after the head moved is refused, not replayed (decision 0053, rule 10).
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::write_data`], plus [`DataStoreError::SourceConflict`].
+    fn write_runtime_data(
+        &self,
+        request: DataWrite<'_>,
+        expected_source: SourceRevision,
+    ) -> Result<DataReceipt, DataStoreError>;
 }

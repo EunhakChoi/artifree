@@ -12,6 +12,10 @@ export const FRAME_BURST = 30;
 export const FRAME_PER_MINUTE = 600;
 /** Frame calls waiting for the server at once. */
 export const FRAME_PENDING_CAP = 16;
+/** Data writes one view may make in a burst (decision 0053, rule 23). */
+export const DATA_WRITE_BURST = 10;
+/** Data writes refilled each minute for one view (decision 0053, rule 23). */
+export const DATA_WRITE_PER_MINUTE = 60;
 
 /** A token bucket over an injectable clock, in milliseconds. */
 export class TokenBucket {

@@ -47,6 +47,13 @@ export const MAX_ASSET_PART = 262_144;
 export const MAX_DATA_READ = 1_048_576;
 
 /**
+ * The most bytes of JSON text one data write carries from a frame: 256 KiB
+ * (decision 0053, rule 15). Written out here for the reason RETRY_ID gives; a
+ * test pins it to the client's MAX_DATA_WRITE_BYTES.
+ */
+export const MAX_DATA_WRITE = 262_144;
+
+/**
  * What an asset ID looks like: 64 lowercase hexadecimal digits. It is written
  * out here, not imported, for the reason RETRY_ID gives (decision 0033).
  */
@@ -105,6 +112,11 @@ export interface CallDeps {
     fileName: string,
     type: string,
   ) => void;
+  /**
+   * Takes one token of the view's data write budget (decision 0053, rule 23):
+   * false when the frame has used its burst of 10 and its 60 a minute.
+   */
+  readonly takeDataWrite: () => boolean;
 }
 
 /** A message from the frame, already known to be a plain object. */

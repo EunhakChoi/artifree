@@ -70,6 +70,16 @@ const CAPABILITY_CONTROLS = [
     warning:
       'Allowing this lets the app read the application data saved for this artifact. The preview is not isolated from the network, so the app could send what it reads elsewhere.',
   },
+  {
+    name: 'data.write',
+    allow: 'Allow app data changes',
+    revoke: 'Revoke app data changes',
+    // Shown beside the control, because a write replaces saved data without
+    // asking again and the page learns whether a value was already stored
+    // (decision 0053, rules 1 and 3).
+    warning:
+      "Allowing this lets the app replace and remove the application data saved for this artifact without asking you again, until you revoke it or the artifact's source changes. Changes cannot be undone. Your agents can read what the app saves, and the app can tell whether something it writes was already saved.",
+  },
 ] as const;
 
 interface RuntimePermissionsProps {

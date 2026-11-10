@@ -1567,9 +1567,11 @@ pub(crate) fn data_path(field: &str, value: &str) -> Result<DataPath, ApiError> 
         .map_err(|error: DataError| ApiError::unprocessable(format!("{field}: {error}")))
 }
 
-/// Applies the rules of application data to a value as it was sent.
-fn data_value(field: &str, value: &JsonValue) -> Result<DataValue, ApiError> {
-    DataValue::parse(value.get()).map_err(|error| match error {
+/// Applies the rules of application data to JSON text as it was sent. A
+/// frame's value arrives as text (decision 0053, rule 5). Text over the value
+/// limit is refused as `data_too_large`; any other refusal is unprocessable.
+pub(crate) fn data_text(field: &str, text: &str) -> Result<DataValue, ApiError> {
+    DataValue::parse(text).map_err(|error| match error {
         DataError::TooLarge(_) => ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::DataTooLarge,
@@ -1577,6 +1579,11 @@ fn data_value(field: &str, value: &JsonValue) -> Result<DataValue, ApiError> {
         ),
         _ => ApiError::unprocessable(format!("{field}: {error}")),
     })
+}
+
+/// Applies the rules of application data to a value as it was sent.
+fn data_value(field: &str, value: &JsonValue) -> Result<DataValue, ApiError> {
+    data_text(field, value.get())
 }
 
 /// The value at a path of the actor's data space of an artifact.
@@ -1938,6 +1945,17 @@ pub(crate) fn asset_base(value: u64) -> Result<AssetVersion, ApiError> {
         ));
     }
     Ok(AssetVersion(value))
+}
+
+/// Reads a data base version. It must be a safe integer, at most 2^53 - 1, so
+/// that a double-precision client holds it exactly.
+pub(crate) fn data_base(value: u64) -> Result<AppDataVersion, ApiError> {
+    if value > MAX_SAFE_INTEGER {
+        return Err(ApiError::invalid(
+            "base_data_version must be a safe unsigned integer",
+        ));
+    }
+    Ok(AppDataVersion(value))
 }
 
 fn job_dto(record: &JobRecord) -> WireJob {

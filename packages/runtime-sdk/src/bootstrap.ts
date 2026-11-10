@@ -1,3 +1,4 @@
+import { dataText } from './data-text.js';
 import type {
   AssetContent,
   AssetContentType,
@@ -8,7 +9,11 @@ import type {
   AssetListing,
   AssetUploadReceipt,
   AssetUploadRequest,
+  DataRemoveRequest,
+  DataSetRequest,
+  DataUpdateRequest,
   DataValue,
+  DataWriteReceipt,
   DownloadReceipt,
   RuntimeFailureCode,
   RuntimeMetadata,
@@ -48,6 +53,8 @@ const MAX_ASSET_BYTES = 5_242_880;
 const MAX_LISTED_ASSETS = 64;
 /** The most bytes of JSON text one data read returns, 1 MiB (decision 0053, rule 15). */
 const MAX_DATA_READ_BYTES = 1_048_576;
+/** The most bytes of JSON text one data write carries, 256 KiB (decision 0053, rule 15). */
+const MAX_DATA_WRITE_BYTES = 262_144;
 /** The media types an asset may have (decision 0045, rule 3). */
 const ASSET_TYPES: Record<AssetContentType, true> = {
   'text/plain': true,
@@ -80,6 +87,10 @@ const FAILURE_CODES: Record<RuntimeFailureCode, string> = {
   expired: 'The runtime view has expired.',
 };
 
+/** What a data write's `conflict` says; the version it names is the data space's. */
+const DATA_CONFLICT_MESSAGE =
+  'The application data is not at the version the call named.';
+
 /**
  * The only way a runtime call fails. The message and code come from a closed
  * set; nothing the server or the workspace said is passed on.
@@ -88,17 +99,22 @@ class RuntimeRequestFailure extends Error {
   readonly code: RuntimeFailureCode;
   /** On a `conflict`: the version the artifact has now, if it was named. */
   readonly currentAssetVersion?: number;
+  /** On a data write's `conflict`: the data version now, if it was named. */
+  readonly currentDataVersion?: number;
 
   constructor(
     code: RuntimeFailureCode,
     message?: string,
     currentAssetVersion?: number,
+    currentDataVersion?: number,
   ) {
     super(message ?? FAILURE_CODES[code]);
     this.name = 'RuntimeRequestFailure';
     this.code = code;
     if (currentAssetVersion !== undefined)
       this.currentAssetVersion = currentAssetVersion;
+    if (currentDataVersion !== undefined)
+      this.currentDataVersion = currentDataVersion;
   }
 }
 
@@ -546,6 +562,46 @@ function dataValue(value: unknown, path: string): DataValue | undefined {
   return { path, dataVersion, exists, value: parsed };
 }
 
+/**
+ * The JSON text of a value a write sends, or undefined when the SDK refuses it:
+ * a value that JSON.stringify would change, or text over the write bound
+ * (decision 0053, rules 5 and 15).
+ */
+function dataWriteText(value: unknown): string | undefined {
+  const text = dataText(value);
+  // Each UTF-16 unit encodes to at least one byte, so a longer text is refused
+  // before it is encoded to count its bytes.
+  if (
+    text === undefined ||
+    text.length > MAX_DATA_WRITE_BYTES ||
+    new TextEncoder().encode(text).byteLength > MAX_DATA_WRITE_BYTES
+  )
+    return undefined;
+  return text;
+}
+
+/**
+ * A data write's receipt, checked against the call: the path is the one named,
+ * the version is the base when nothing changed and one more than the base when
+ * something did (decision 0053, rule 13).
+ */
+function dataWritten(
+  value: unknown,
+  path: string,
+  base: number,
+): DataWriteReceipt | undefined {
+  if (!record(value)) return undefined;
+  const { path: echoed, dataVersion, changed } = value;
+  if (
+    echoed !== path ||
+    !count(dataVersion) ||
+    typeof changed !== 'boolean' ||
+    dataVersion !== (changed ? base + 1 : base)
+  )
+    return undefined;
+  return { path, dataVersion, changed };
+}
+
 interface Waiting {
   readonly parse: (reply: Record<string, unknown>) => unknown;
   readonly resolve: (value: never) => void;
@@ -580,12 +636,24 @@ export function start(config: RuntimeInitialization): void {
     if (event.data.ok !== true) {
       const code = isFailureCode(event.data.code) ? event.data.code : 'denied';
       // Only a conflict names a version, and only a count is believed.
-      const version = event.data.currentAssetVersion;
+      const dataVersion = event.data.currentDataVersion;
+      if (code === 'conflict' && count(dataVersion)) {
+        pending.reject(
+          new RuntimeRequestFailure(
+            code,
+            DATA_CONFLICT_MESSAGE,
+            undefined,
+            dataVersion,
+          ),
+        );
+        return;
+      }
+      const assetVersion = event.data.currentAssetVersion;
       pending.reject(
         new RuntimeRequestFailure(
           code,
           pending.refusal,
-          code === 'conflict' && count(version) ? version : undefined,
+          code === 'conflict' && count(assetVersion) ? assetVersion : undefined,
         ),
       );
       return;
@@ -943,6 +1011,75 @@ export function start(config: RuntimeInitialization): void {
         { type: 'data.get', path },
         (reply) => dataValue(reply.data, path),
         { timeout: READ_TIMEOUT_MS },
+      );
+    },
+    set(request: DataSetRequest): Promise<DataWriteReceipt> {
+      const fields = argument(request, [
+        'path',
+        'value',
+        'baseDataVersion',
+        'retryId',
+      ]);
+      if (fields === undefined) return invalid();
+      const { path, value, baseDataVersion, retryId } = fields;
+      if (
+        typeof path !== 'string' ||
+        !isBaseVersion(baseDataVersion) ||
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId)
+      )
+        return invalid();
+      const text = dataWriteText(value);
+      if (text === undefined) return invalid();
+      // One attempt. Writes are not retried automatically: the frame retries
+      // with the same retryId.
+      return call(
+        { type: 'data.set', path, value: text, baseDataVersion, retryId },
+        (reply) => dataWritten(reply.written, path, baseDataVersion),
+        { timeout: WRITE_TIMEOUT_MS },
+      );
+    },
+    update(request: DataUpdateRequest): Promise<DataWriteReceipt> {
+      const fields = argument(request, [
+        'path',
+        'patch',
+        'baseDataVersion',
+        'retryId',
+      ]);
+      if (fields === undefined) return invalid();
+      const { path, patch, baseDataVersion, retryId } = fields;
+      if (
+        typeof path !== 'string' ||
+        !isBaseVersion(baseDataVersion) ||
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId)
+      )
+        return invalid();
+      const text = dataWriteText(patch);
+      if (text === undefined) return invalid();
+      // One attempt, as for set.
+      return call(
+        { type: 'data.update', path, patch: text, baseDataVersion, retryId },
+        (reply) => dataWritten(reply.written, path, baseDataVersion),
+        { timeout: WRITE_TIMEOUT_MS },
+      );
+    },
+    remove(request: DataRemoveRequest): Promise<DataWriteReceipt> {
+      const fields = argument(request, ['path', 'baseDataVersion', 'retryId']);
+      if (fields === undefined) return invalid();
+      const { path, baseDataVersion, retryId } = fields;
+      if (
+        typeof path !== 'string' ||
+        !isBaseVersion(baseDataVersion) ||
+        typeof retryId !== 'string' ||
+        !RETRY_ID.test(retryId)
+      )
+        return invalid();
+      // One attempt, as for set.
+      return call(
+        { type: 'data.remove', path, baseDataVersion, retryId },
+        (reply) => dataWritten(reply.written, path, baseDataVersion),
+        { timeout: WRITE_TIMEOUT_MS },
       );
     },
   });

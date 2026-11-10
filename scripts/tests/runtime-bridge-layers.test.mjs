@@ -37,9 +37,10 @@ test('Each client route tail is a route the server registers, and the reverse', 
   assert.deepEqual(absentFrom(clientTails, serverTails), []);
   assert.deepEqual(absentFrom(serverTails, clientTails), []);
   assert.deepEqual(serverTails, clientTails);
-  // Thirteen in R14a: the twelve of R13 and data/read. The count keeps two
-  // empty lists from agreeing.
-  assert.equal(clientTails.length, 13);
+  // Sixteen in R14b: the twelve of R13, data/read of R14a, and data/set,
+  // data/update and data/delete of R14b. The count keeps two empty lists from
+  // agreeing.
+  assert.equal(clientTails.length, 16);
 });
 
 // The host's call registry, bundled as the web app ships it, the way the
@@ -69,9 +70,10 @@ test('Each host call type is sent by an SDK method', () => {
     (type) => !bootstrap.includes(`type: '${type}'`),
   );
   assert.deepEqual(unsent, []);
-  // Ten calls of decision 0052 and data.get of decision 0053 (R14a). The count
-  // keeps an empty registry from passing.
-  assert.equal(FRAME_CALL_TYPES.length, 11);
+  // Ten calls of decision 0052, data.get of decision 0053 (R14a), and
+  // data.set, data.update and data.remove of R14b. The count keeps an empty
+  // registry from passing.
+  assert.equal(FRAME_CALL_TYPES.length, 14);
 });
 
 test('Each call the SDK sends is one the host serves', () => {
@@ -140,6 +142,7 @@ test('Each supported capability has a permission control, and each control is a 
   assert.deepEqual(absentFrom(capabilities, controls), []);
   assert.deepEqual(absentFrom(controls, capabilities), []);
   assert.deepEqual([...controls].sort(), [...capabilities].sort());
-  // Eight in R14a: the seven of R13 and data.read.
-  assert.equal(capabilities.length, 8);
+  // Nine in R14b: the seven of R13, data.read of R14a, and data.write of R14b.
+  // The count keeps two empty lists from agreeing.
+  assert.equal(capabilities.length, 9);
 });

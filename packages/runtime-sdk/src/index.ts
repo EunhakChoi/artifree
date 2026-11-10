@@ -1,9 +1,9 @@
 /**
  * Capability names. `metadata.read`, `source.read`, `source.download`,
- * `source.write`, `assets.read`, `assets.write`, `assets.download` and
- * `data.read` are supported (decisions 0020, 0032, 0033, 0045 and 0053); the
- * others are proposed. A name is not a grant: the user grants each one
- * separately in the workspace.
+ * `source.write`, `assets.read`, `assets.write`, `assets.download`,
+ * `data.read` and `data.write` are supported (decisions 0020, 0032, 0033,
+ * 0045 and 0053); the others are proposed. A name is not a grant: the user
+ * grants each one separately in the workspace.
  */
 export type RuntimeCapability =
   | 'metadata.read'
@@ -42,8 +42,9 @@ export interface RuntimeMetadata {
  * Why a runtime call failed. The set is closed and carries no server text.
  * `denied`: the capability is not granted. `stale_view`: the artifact has a
  * newer revision than this view; the workspace starts a new view, and the
- * user consents again. `conflict`: the uploaded assets changed since the call
- * named their version; `currentAssetVersion` on the failure names the current
+ * user consents again. `conflict`: the uploaded assets or the application
+ * data changed since the call named their version; `currentAssetVersion`
+ * (assets) or `currentDataVersion` (data) on the failure names the current
  * version when the workspace could tell. `not_found`: the view, the artifact or
  * the file is gone. `declined`: the user did not accept a download. A download
  * the user withdraws gets no answer: its call fails when its timeout ends.
@@ -63,8 +64,12 @@ export type RuntimeFailureCode =
 /** The error a runtime call rejects with. */
 export interface RuntimeRequestFailure extends Error {
   readonly code: RuntimeFailureCode;
-  /** On a `conflict`: the version the artifact has now, if it was named. */
+  /**
+   * On an asset `conflict`: the version the artifact has now, if it was named.
+   */
   readonly currentAssetVersion?: number;
+  /** On a data write's `conflict`: the data version now, if it was named. */
+  readonly currentDataVersion?: number;
 }
 
 /** One file of the revision a view is pinned to. */
@@ -313,7 +318,58 @@ export interface DataValue {
   readonly value: unknown;
 }
 
-/** The application data the user saved for this artifact (decision 0053). */
+/**
+ * The outcome of a data write. `path` is the one named. `dataVersion` is the
+ * version of the data space after the write: one more than the base when
+ * `changed` is true, and the base when it is false. A write that changes
+ * nothing keeps the version, so a `set` of a value already stored answers
+ * `changed: false`.
+ */
+export interface DataWriteReceipt {
+  readonly path: string;
+  readonly dataVersion: number;
+  readonly changed: boolean;
+}
+
+/**
+ * One value to store at `path`, in the data path grammar (decision 0046); the
+ * empty path is the root. `baseDataVersion` is the data version the frame last
+ * saw, from `get`, a receipt or a `conflict`. `retryId` is 8 to 36 ASCII
+ * letters, digits, `-` or `_`: choose a new one for each change, and keep it
+ * only to retry the identical call.
+ */
+export interface DataSetRequest {
+  readonly path: string;
+  readonly value: unknown;
+  readonly baseDataVersion: number;
+  readonly retryId: string;
+}
+
+/**
+ * The JSON Merge Patch (RFC 7396) to apply at `path`, with the rules of
+ * `DataSetRequest`.
+ */
+export interface DataUpdateRequest {
+  readonly path: string;
+  readonly patch: unknown;
+  readonly baseDataVersion: number;
+  readonly retryId: string;
+}
+
+/** The value at `path` to remove, with the rules of `DataSetRequest`. */
+export interface DataRemoveRequest {
+  readonly path: string;
+  readonly baseDataVersion: number;
+  readonly retryId: string;
+}
+
+/**
+ * The application data the user saved for this artifact (decision 0053). A
+ * write that changes nothing keeps the data version. Writes are not retried
+ * automatically: to retry one that went unanswered, send the identical call
+ * with the same `retryId`, which gets the first receipt back when that write
+ * was applied.
+ */
 export interface DataRuntime {
   /**
    * Reads the value at `path`; needs the `data.read` grant. A path the server
@@ -321,6 +377,26 @@ export interface DataRuntime {
    * value is not JSON text within 1 MiB, rejects with `unavailable`.
    */
   get(request: { readonly path: string }): Promise<DataValue>;
+  /**
+   * Replaces the value at `path` with `value`; needs the `data.write` grant.
+   * `set` can store `null`. A value that `JSON.stringify` would change silently
+   * is refused with `invalid_request` before anything is sent. A stale base is
+   * `conflict` with `currentDataVersion`.
+   */
+  set(request: DataSetRequest): Promise<DataWriteReceipt>;
+  /**
+   * Merges `patch` into the value at `path` as a JSON Merge Patch; needs the
+   * `data.write` grant. A patch that `JSON.stringify` would change silently is
+   * refused with `invalid_request`, as for `set`. A stale base is `conflict`
+   * with `currentDataVersion`.
+   */
+  update(request: DataUpdateRequest): Promise<DataWriteReceipt>;
+  /**
+   * Removes the value at `path`; needs the `data.write` grant. `remove` of a
+   * missing path changes nothing. A stale base is `conflict` with
+   * `currentDataVersion`.
+   */
+  remove(request: DataRemoveRequest): Promise<DataWriteReceipt>;
 }
 
 /** What an opted-in frame can do, each operation subject to its own grant. */

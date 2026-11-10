@@ -22,9 +22,10 @@ const { FRAME_CALL_TYPES, callId, parseCall } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
-// The eleven calls the records name: the ten that rule 6 of decision 0052 names,
-// and data.get, which decision 0053 adds. They are written out here, not read
-// from the registry, so that the registry is checked against the record.
+// The fourteen calls the records name: the ten that rule 6 of decision 0052
+// names, and the four data calls that rule 4 of decision 0053 names. They are
+// written out here, not read from the registry, so that the registry is
+// checked against the record.
 const RECORDED_CALLS = [
   'metadata',
   'source.list',
@@ -37,6 +38,9 @@ const RECORDED_CALLS = [
   'assets.delete',
   'assets.download',
   'data.get',
+  'data.set',
+  'data.update',
+  'data.remove',
 ];
 
 // Names that are not calls: near misses of the recorded ones, the offer steps
@@ -48,6 +52,8 @@ const NOT_CALLS = [
   'assets.rename',
   'source.delete',
   'data.read',
+  'data.write',
+  'data.delete',
   'data',
   'Metadata',
   'metadata ',
@@ -80,7 +86,7 @@ async function typeScriptFiles(directory) {
   return files;
 }
 
-test('The registry serves exactly the eleven recorded call types', () => {
+test('The registry serves exactly the fourteen recorded call types', () => {
   assert.equal(FRAME_CALL_TYPES.length, RECORDED_CALLS.length);
   assert.deepEqual([...FRAME_CALL_TYPES].sort(), [...RECORDED_CALLS].sort());
 });

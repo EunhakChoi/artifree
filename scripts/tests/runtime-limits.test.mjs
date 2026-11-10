@@ -29,6 +29,7 @@ const PINNED_LIMITS = {
   MAX_LISTED_FILES: 256,
   MAX_LISTED_ASSETS: 64,
   MAX_DATA_READ_BYTES: 1_048_576,
+  MAX_DATA_WRITE_BYTES: 262_144,
 };
 
 // A limit as a comparable value: a regular expression is its source text.
@@ -78,6 +79,9 @@ const RETRY_ID_DEFS = [
   'RuntimeSourceWriteRequest',
   'RuntimeAssetUploadRequest',
   'RuntimeAssetDeleteRequest',
+  'RuntimeDataSetRequest',
+  'RuntimeDataUpdateRequest',
+  'RuntimeDataDeleteRequest',
 ];
 
 // Each bound the schema states: the path to it below `$defs` and the value the
@@ -97,6 +101,16 @@ const SCHEMA_ROWS = [
     name: 'data read',
     path: ['RuntimeDataValue', 'properties', 'value', 'maxLength'],
     expected: () => client.MAX_DATA_READ_BYTES,
+  },
+  {
+    name: 'data set value',
+    path: ['RuntimeDataSetRequest', 'properties', 'value', 'maxLength'],
+    expected: () => client.MAX_DATA_WRITE_BYTES,
+  },
+  {
+    name: 'data update patch',
+    path: ['RuntimeDataUpdateRequest', 'properties', 'patch', 'maxLength'],
+    expected: () => client.MAX_DATA_WRITE_BYTES,
   },
   {
     name: 'listed assets',
@@ -165,6 +179,7 @@ const SDK_PAIRS = [
   ['MAX_LISTED_FILES', 'MAX_LISTED_FILES'],
   ['MAX_LISTED_ASSETS', 'MAX_LISTED_ASSETS'],
   ['MAX_DATA_READ_BYTES', 'MAX_DATA_READ_BYTES'],
+  ['MAX_DATA_WRITE_BYTES', 'MAX_DATA_WRITE_BYTES'],
 ];
 
 for (const [sdkName, clientName] of SDK_PAIRS) {
@@ -204,6 +219,7 @@ const HOST_PAIRS = [
   ['MAX_WRITE', 'MAX_ASSET_UPLOAD_BYTES'],
   ['MAX_ASSET_PART', 'MAX_ASSET_PART_BYTES'],
   ['MAX_DATA_READ', 'MAX_DATA_READ_BYTES'],
+  ['MAX_DATA_WRITE', 'MAX_DATA_WRITE_BYTES'],
 ];
 
 for (const [hostName, clientName] of HOST_PAIRS) {

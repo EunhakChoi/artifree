@@ -98,9 +98,9 @@ function parseMessage(
  * The call a message is, or undefined. Exactly the keys of its type, a
  * positive safe-integer id, a path its type's parser accepts (a package path,
  * or a data path within its bound), and a part length within its bound: 1 MiB
- * for a source part, 256 KiB for an asset part. A write carries at most 1 MiB
- * of bytes. A message that is not an object, has another key, or has a value
- * of another type is not a call.
+ * for a source part, 256 KiB for an asset part. A file write carries at most
+ * 1 MiB of bytes, a data write at most 256 KiB of text. A message that is not
+ * an object, has another key, or has a value of another type is not a call.
  */
 export function parseCall(message: unknown): FrameCall | undefined {
   const parsed = parseMessage(message);
@@ -111,7 +111,7 @@ export function parseCall(message: unknown): FrameCall | undefined {
 /**
  * The frame's word for a failure. The frame learns the kind of refusal and
  * nothing else: no server message, status or detail is passed on, except the
- * asset version a conflict names (see `failureReply`).
+ * version a conflict names (see `failureReply`).
  */
 export function failureCode(error: unknown): FailureCode {
   if (!isRecord(error) && !(error instanceof Error)) return 'unavailable';
@@ -135,10 +135,21 @@ export function failureCode(error: unknown): FailureCode {
       return 'denied';
     case 409:
       if (code === 'revision_conflict') return 'stale_view';
-      // An asset conflict is one the frame can act on only when it names the
-      // version the server holds; without it the frame is told unavailable.
-      if (code === 'asset_conflict' && conflictVersion(error) !== undefined)
+      // A conflict is one the frame can act on only when it names the version
+      // the server holds; without it the frame is told unavailable.
+      if (
+        code === 'asset_conflict' &&
+        conflictVersion(error, 'current_asset_version') !== undefined
+      )
         return 'conflict';
+      if (
+        code === 'data_conflict' &&
+        conflictVersion(error, 'current_data_version') !== undefined
+      )
+        return 'conflict';
+      // Decision 0053, rule 14: a path through a value that is not an object
+      // is a bad request.
+      if (code === 'data_path_conflict') return 'invalid_request';
       return 'unavailable';
     case 429:
       return 'rate_limited';
@@ -153,32 +164,52 @@ export function failureCode(error: unknown): FailureCode {
 }
 
 /**
- * The asset version an `asset_conflict` names. The server answers with
- * `{ error: { code, current_asset_version } }`; the client keeps that whole
- * answer as the error's `body`, so the version sits one level down. It is
- * taken only when it is a count.
+ * The version a conflict names under `field`: the asset version of an
+ * `asset_conflict` or the data version of a `data_conflict`. The server
+ * answers with `{ error: { code, current_asset_version } }` (or with
+ * `current_data_version`); the client keeps that whole answer as the error's
+ * `body`, so the version sits one level down. It is taken only when it is a
+ * count.
  */
-function conflictVersion(error: unknown): number | undefined {
+function conflictVersion(
+  error: unknown,
+  field: 'current_asset_version' | 'current_data_version',
+): number | undefined {
   if (!isRecord(error) && !(error instanceof Error)) return undefined;
   if (!('body' in error)) return undefined;
   const { body } = error;
   if (!isRecord(body) || !isRecord(body.error)) return undefined;
-  const version = body.error.current_asset_version;
+  const version = body.error[field];
   return isCount(version) ? version : undefined;
+}
+
+/** The server's error code of a failed request, when it has one. */
+function serverCode(error: unknown): unknown {
+  if (!isRecord(error) && !(error instanceof Error)) return undefined;
+  return 'code' in error ? error.code : undefined;
 }
 
 /**
  * The reply that ends a call which failed: its word and, for a conflict, the
- * asset version the server holds, which the frame bases its next attempt on.
+ * version the server holds, which the frame bases its next attempt on. A data
+ * conflict names the data version; any other conflict names the asset version.
  */
 function failureReply(id: number, error: unknown): FrameReply {
   const code = failureCode(error);
-  const version = code === 'conflict' ? conflictVersion(error) : undefined;
+  const dataConflict = serverCode(error) === 'data_conflict';
+  const version =
+    code === 'conflict'
+      ? conflictVersion(
+          error,
+          dataConflict ? 'current_data_version' : 'current_asset_version',
+        )
+      : undefined;
+  if (version === undefined)
+    return { message: { id, ok: false, code }, transfer: [] };
   return {
-    message:
-      version === undefined
-        ? { id, ok: false, code }
-        : { id, ok: false, code, currentAssetVersion: version },
+    message: dataConflict
+      ? { id, ok: false, code, currentDataVersion: version }
+      : { id, ok: false, code, currentAssetVersion: version },
     transfer: [],
   };
 }

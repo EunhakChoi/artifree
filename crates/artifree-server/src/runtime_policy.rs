@@ -10,6 +10,7 @@ pub(crate) const ASSETS_DOWNLOAD: &str = "assets.download";
 pub(crate) const ASSETS_READ: &str = "assets.read";
 pub(crate) const ASSETS_WRITE: &str = "assets.write";
 pub(crate) const DATA_READ: &str = "data.read";
+pub(crate) const DATA_WRITE: &str = "data.write";
 pub(crate) const METADATA_READ: &str = "metadata.read";
 pub(crate) const SOURCE_READ: &str = "source.read";
 pub(crate) const SOURCE_DOWNLOAD: &str = "source.download";
@@ -42,6 +43,12 @@ pub(crate) enum Capability {
     /// Its own consent: it neither implies nor is implied by any `metadata`,
     /// `source` or `assets` capability.
     DataRead,
+    /// Replacing, merging into and removing the calling user's application data
+    /// for the artifact a view is bound to (decision 0053, rule 1). The data set,
+    /// update and delete frame routes check it. Its own consent: it neither
+    /// implies nor is implied by `data.read` or any `metadata`, `source` or
+    /// `assets` capability.
+    DataWrite,
     MetadataRead,
     SourceDownload,
     SourceRead,
@@ -52,11 +59,12 @@ pub(crate) enum Capability {
 
 impl Capability {
     /// Every supported capability, in name order.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::AssetsDownload,
         Self::AssetsRead,
         Self::AssetsWrite,
         Self::DataRead,
+        Self::DataWrite,
         Self::MetadataRead,
         Self::SourceDownload,
         Self::SourceRead,
@@ -69,6 +77,7 @@ impl Capability {
             Self::AssetsRead => ASSETS_READ,
             Self::AssetsWrite => ASSETS_WRITE,
             Self::DataRead => DATA_READ,
+            Self::DataWrite => DATA_WRITE,
             Self::MetadataRead => METADATA_READ,
             Self::SourceDownload => SOURCE_DOWNLOAD,
             Self::SourceRead => SOURCE_READ,
@@ -80,12 +89,13 @@ impl Capability {
         Self::ALL.into_iter().find(|known| known.name() == name)
     }
 
-    fn bit(self) -> u8 {
+    fn bit(self) -> u16 {
         match self {
             Self::AssetsDownload => 64,
             Self::AssetsRead => 16,
             Self::AssetsWrite => 32,
             Self::DataRead => 128,
+            Self::DataWrite => 256,
             Self::MetadataRead => 1,
             Self::SourceDownload => 2,
             Self::SourceRead => 4,
@@ -96,7 +106,7 @@ impl Capability {
 
 /// A set of granted capabilities. Each capability is its own consent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct CapabilitySet(u8);
+pub(crate) struct CapabilitySet(u16);
 
 impl CapabilitySet {
     pub(crate) fn contains(self, capability: Capability) -> bool {
@@ -198,7 +208,7 @@ fn valid_capability(name: &str) -> bool {
 mod tests {
     use super::{
         ASSETS_DOWNLOAD, ASSETS_READ, ASSETS_WRITE, Capability, CapabilitySet, DATA_READ,
-        METADATA_READ, RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE,
+        DATA_WRITE, METADATA_READ, RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE,
     };
 
     #[test]
@@ -246,6 +256,7 @@ mod tests {
                 ASSETS_READ,
                 ASSETS_WRITE,
                 DATA_READ,
+                DATA_WRITE,
                 METADATA_READ,
                 SOURCE_DOWNLOAD,
                 SOURCE_READ,

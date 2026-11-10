@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.23.0",
+  "contract_version": "0.24.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -36,7 +36,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "packages/runtime-sdk",
       "status": "implemented",
-      "summary": "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download of its source or of one uploaded asset, saves one file per view, reads and changes its artifact's uploaded assets, and reads its artifact's application data; each needs its own connection-scoped grant, and other capabilities remain planned."
+      "summary": "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download of its source or of one uploaded asset, saves one file per view, reads and changes its artifact's uploaded assets, and reads and changes its artifact's application data; each needs its own connection-scoped grant, and other capabilities remain planned."
     },
     {
       "id": "api",
@@ -81,7 +81,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/data.rs",
       "status": "implemented",
-      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. A granted content runtime can read it; writes from the content runtime, structured edits, and queries are planned."
+      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. A content runtime with the read grant can read it, and one with the write grant can set, merge-patch, and delete it; structured edits and queries are planned."
     },
     {
       "id": "jobs",
