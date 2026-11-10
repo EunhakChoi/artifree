@@ -3,8 +3,9 @@
 Status: R08b local-storage implementation ([0044](decisions/0044-browser-outbox-local.md)).
 R08 as a whole remains partially implemented; public delivery and native-process recovery remain proposed.
 No shipped feature writes application data from a page yet, so the roadmap orders
-the remaining delivery work after the frame data bridge (R14); whether it is
-paused until then is undecided ([decision 0051](decisions/0051-roadmap-and-architecture-review.md)).
+pauses the remaining delivery work until a specification needs a page to queue
+application-data writes for later delivery; the frame data bridge (R14) writes
+directly. This entry point, its tests and its smoke shard stay ([decision 0051](decisions/0051-roadmap-and-architecture-review.md)).
 The browser entry point `@artifree/client/outbox` is opt-in. It does not prepare,
 transmit, replay, acknowledge, trim, retry delivery, or activate management UI
 or runtime-frame access. Existing direct clients are unchanged. R08a supplies
