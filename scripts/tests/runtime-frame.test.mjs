@@ -217,8 +217,8 @@ test('The entry modules reach the on-demand runtime modules by type or on demand
 });
 
 test('The request gate treats every named frame route as a frame call', async () => {
-  // Until the gate builds its pattern from this list (decision 0052, rule 9),
-  // this holds its own pattern to the same twelve tails.
+  // The gate builds its pattern from this list (decision 0052, rule 9); this
+  // holds the two together.
   const bundle = await build({
     entryPoints: [
       fileURLToPath(

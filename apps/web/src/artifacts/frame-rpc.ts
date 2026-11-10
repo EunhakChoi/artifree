@@ -1,8 +1,19 @@
-import type { ArtifreeClient } from '@artifree/client';
-import type { RuntimeView } from '@artifree/contracts';
 import { FRAME_PENDING_CAP } from './frame-budget';
-import type { Offer, Outcome } from './offer-desk';
-import { pathError } from './package-path';
+import { ASSET_CALLS } from './frame-calls/assets';
+import {
+  type CallDeps,
+  type CallEntry,
+  type CallOf,
+  type FailureCode,
+  type FrameReply,
+  type ParsedCall,
+  isCount,
+  isRecord,
+} from './frame-calls/call';
+import { METADATA_CALLS } from './frame-calls/metadata';
+import { SOURCE_CALLS } from './frame-calls/source';
+
+export type { FailureCode, FrameReply } from './frame-calls/call';
 
 /**
  * Serves the calls a runtime frame makes (decisions 0020, 0032, 0033 and
@@ -11,140 +22,42 @@ import { pathError } from './package-path';
  * done, answered from a closed vocabulary of failures, and never echoed. The
  * workspace asks the server on every call, whatever it has seen before. This
  * module has no DOM and no React; the component supplies the port and the
- * prompt.
+ * prompt. Each call type is described once, in `frame-calls/` (decision 0052,
+ * rule 6); this module is the envelope around them.
  */
 
-/** Why a call failed, as the frame sees it. */
-export type FailureCode =
-  | 'invalid_request'
-  | 'denied'
-  | 'stale_view'
-  | 'conflict'
-  | 'not_found'
-  | 'rate_limited'
-  | 'declined'
-  | 'unavailable'
-  | 'expired';
+/** Every call the frame may make, in the order the families are listed. */
+const CALLS = [...METADATA_CALLS, ...SOURCE_CALLS, ...ASSET_CALLS];
 
-/**
- * What a retry identity looks like: the client and the server judge the same
- * rule. It is written out here, not imported, because importing a value from
- * the client would put a module shared by two on-demand chunks into the
- * entry bundle's preload list, which has no room (decision 0033). A test
- * holds this and the client's check to the same answers.
- */
-const RETRY_ID = /^[A-Za-z0-9_-]{8,36}$/;
+/** A call the registry serves. */
+type ServedCall = CallOf<(typeof CALLS)[number]>;
 
-/** The most bytes a frame may ask for in one part. */
-const MAX_PART = 1_048_576;
-
-/** The most bytes of one file a frame may save or upload in one call. */
-const MAX_WRITE = 1_048_576;
-
-/** The most bytes of an asset a frame may ask for in one part: 256 KiB. */
-const MAX_ASSET_PART = 262_144;
-
-/**
- * What an asset ID looks like: 64 lowercase hexadecimal digits. It is written
- * out here, not imported, for the reason RETRY_ID gives (decision 0033).
- */
-const ASSET_ID = /^[0-9a-f]{64}$/;
-
-/**
- * What a media type spelling looks like: `type/subtype` in lowercase letters,
- * digits and the punctuation RFC 6838 allows in a name. Only the client knows
- * which types an asset may have; this keeps the frame's value a spelling. It
- * is written out here for the reason RETRY_ID gives.
- */
-const MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
-
-/** The most characters a frame may spell a media type with. */
-const MAX_MEDIA_TYPE_LENGTH = 127;
+/** The envelope's own message: it ends a waiting call and is never served. */
+interface CancelCall {
+  readonly type: 'cancel';
+  readonly id: number;
+}
 
 /** A parsed, bounded call. */
-export type FrameCall =
-  | { readonly type: 'metadata'; readonly id: number }
-  | { readonly type: 'source.list'; readonly id: number }
-  | {
-      readonly type: 'source.read';
-      readonly id: number;
-      readonly path: string;
-      readonly offset: number;
-      readonly length: number;
-    }
-  | {
-      readonly type: 'source.download';
-      readonly id: number;
-      readonly path: string | null;
-    }
-  | {
-      readonly type: 'source.write';
-      readonly id: number;
-      readonly retryId: string;
-      readonly path: string;
-      /** The frame's own copy, transferred to the page. */
-      readonly bytes: ArrayBuffer;
-    }
-  | { readonly type: 'assets.list'; readonly id: number }
-  | {
-      readonly type: 'assets.read';
-      readonly id: number;
-      readonly assetId: string;
-      readonly offset: number;
-      readonly length: number;
-    }
-  | {
-      readonly type: 'assets.upload';
-      readonly id: number;
-      readonly retryId: string;
-      readonly baseAssetVersion: number;
-      readonly contentType: string;
-      /** The frame's own copy, transferred to the page. */
-      readonly bytes: ArrayBuffer;
-    }
-  | {
-      readonly type: 'assets.delete';
-      readonly id: number;
-      readonly retryId: string;
-      readonly baseAssetVersion: number;
-      readonly assetId: string;
-    }
-  | {
-      readonly type: 'assets.download';
-      readonly id: number;
-      readonly assetId: string;
-    }
-  | { readonly type: 'cancel'; readonly id: number };
+export type FrameCall = ServedCall | CancelCall;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+/** The registry of calls by type (decision 0052, rule 6). */
+const REGISTRY: ReadonlyMap<string, CallEntry<ServedCall>> = new Map(
+  CALLS.map((entry): [string, CallEntry<ServedCall>] => [entry.type, entry]),
+);
+
+/** The call types the registry serves, in its order. */
+export const FRAME_CALL_TYPES: readonly string[] = CALLS.map(
+  (entry) => entry.type,
+);
+
+/** The keys a cancel carries, and no others. */
+const CANCEL_KEYS: readonly string[] = ['type', 'id'];
+
+/** The keys a message of `type` carries, or undefined for an unknown type. */
+function keysOf(type: string): readonly string[] | undefined {
+  return type === 'cancel' ? CANCEL_KEYS : REGISTRY.get(type)?.keys;
 }
-
-function isCount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-/** The keys a message of each type carries, and no others. */
-const SHAPES: Record<string, readonly string[]> = {
-  metadata: ['type', 'id'],
-  'source.list': ['type', 'id'],
-  'source.read': ['type', 'id', 'path', 'offset', 'length'],
-  'source.download': ['type', 'id', 'kind', 'path'],
-  'source.write': ['type', 'id', 'retryId', 'path', 'bytes'],
-  'assets.list': ['type', 'id'],
-  'assets.read': ['type', 'id', 'assetId', 'offset', 'length'],
-  'assets.upload': [
-    'type',
-    'id',
-    'retryId',
-    'baseAssetVersion',
-    'contentType',
-    'bytes',
-  ],
-  'assets.delete': ['type', 'id', 'retryId', 'baseAssetVersion', 'assetId'],
-  'assets.download': ['type', 'id', 'assetId'],
-  cancel: ['type', 'id'],
-};
 
 /**
  * The id a message asks to be answered under: a positive safe integer on an
@@ -154,9 +67,25 @@ const SHAPES: Record<string, readonly string[]> = {
 export function callId(message: unknown): number | undefined {
   if (!isRecord(message)) return undefined;
   const { type, id } = message;
-  if (typeof type !== 'string' || !Object.hasOwn(SHAPES, type))
-    return undefined;
+  if (typeof type !== 'string' || keysOf(type) === undefined) return undefined;
   return isCount(id) && id >= 1 ? id : undefined;
+}
+
+/** A message as a served call and what serves it, a cancel, or undefined. */
+function parseMessage(
+  message: unknown,
+): ParsedCall<ServedCall> | CancelCall | undefined {
+  if (!isRecord(message)) return undefined;
+  const { type, id } = message;
+  if (typeof type !== 'string') return undefined;
+  const shape = keysOf(type);
+  if (shape === undefined) return undefined;
+  const keys = Object.keys(message);
+  if (keys.length !== shape.length || !keys.every((key) => shape.includes(key)))
+    return undefined;
+  if (!isCount(id) || id < 1) return undefined;
+  if (type === 'cancel') return { type, id };
+  return REGISTRY.get(type)?.parse(message, id);
 }
 
 /**
@@ -167,107 +96,9 @@ export function callId(message: unknown): number | undefined {
  * object, has another key, or has a value of another type is not a call.
  */
 export function parseCall(message: unknown): FrameCall | undefined {
-  if (!isRecord(message)) return undefined;
-  const { type, id } = message;
-  if (typeof type !== 'string' || !Object.hasOwn(SHAPES, type))
-    return undefined;
-  const keys = Object.keys(message);
-  const shape = SHAPES[type] ?? [];
-  if (keys.length !== shape.length || !keys.every((key) => shape.includes(key)))
-    return undefined;
-  if (!isCount(id) || id < 1) return undefined;
-  switch (type) {
-    case 'metadata':
-    case 'source.list':
-    case 'assets.list':
-    case 'cancel':
-      return { type, id };
-    case 'source.read': {
-      const { path, offset, length } = message;
-      if (
-        typeof path !== 'string' ||
-        pathError(path) !== undefined ||
-        !isCount(offset) ||
-        !isCount(length) ||
-        length < 1 ||
-        length > MAX_PART
-      )
-        return undefined;
-      return { type, id, path, offset, length };
-    }
-    case 'source.download': {
-      const { kind, path } = message;
-      if (kind === 'archive' && path === null) return { type, id, path: null };
-      if (
-        kind === 'file' &&
-        typeof path === 'string' &&
-        pathError(path) === undefined
-      )
-        return { type, id, path };
-      return undefined;
-    }
-    case 'source.write': {
-      const { retryId, path, bytes } = message;
-      if (
-        typeof retryId !== 'string' ||
-        !RETRY_ID.test(retryId) ||
-        typeof path !== 'string' ||
-        pathError(path) !== undefined ||
-        !(bytes instanceof ArrayBuffer) ||
-        bytes.byteLength > MAX_WRITE
-      )
-        return undefined;
-      return { type, id, retryId, path, bytes };
-    }
-    case 'assets.read': {
-      const { assetId, offset, length } = message;
-      if (
-        typeof assetId !== 'string' ||
-        !ASSET_ID.test(assetId) ||
-        !isCount(offset) ||
-        !isCount(length) ||
-        length < 1 ||
-        length > MAX_ASSET_PART
-      )
-        return undefined;
-      return { type, id, assetId, offset, length };
-    }
-    case 'assets.upload': {
-      const { retryId, baseAssetVersion, contentType, bytes } = message;
-      if (
-        typeof retryId !== 'string' ||
-        !RETRY_ID.test(retryId) ||
-        !isCount(baseAssetVersion) ||
-        typeof contentType !== 'string' ||
-        contentType.length > MAX_MEDIA_TYPE_LENGTH ||
-        !MEDIA_TYPE.test(contentType) ||
-        !(bytes instanceof ArrayBuffer) ||
-        bytes.byteLength > MAX_WRITE
-      )
-        return undefined;
-      return { type, id, retryId, baseAssetVersion, contentType, bytes };
-    }
-    case 'assets.delete': {
-      const { retryId, baseAssetVersion, assetId } = message;
-      if (
-        typeof retryId !== 'string' ||
-        !RETRY_ID.test(retryId) ||
-        !isCount(baseAssetVersion) ||
-        typeof assetId !== 'string' ||
-        !ASSET_ID.test(assetId)
-      )
-        return undefined;
-      return { type, id, retryId, baseAssetVersion, assetId };
-    }
-    case 'assets.download': {
-      const { assetId } = message;
-      if (typeof assetId !== 'string' || !ASSET_ID.test(assetId))
-        return undefined;
-      return { type, id, assetId };
-    }
-    default:
-      return undefined;
-  }
+  const parsed = parseMessage(message);
+  if (parsed === undefined) return undefined;
+  return 'serve' in parsed ? parsed.call : parsed;
 }
 
 /**
@@ -345,32 +176,8 @@ function failureReply(id: number, error: unknown): FrameReply {
   };
 }
 
-/** A message to the frame. */
-export interface FrameReply {
-  readonly message: Record<string, unknown>;
-  readonly transfer: Transferable[];
-}
-
 /** What the rpc needs; the component supplies the port and the prompt. */
-export interface FrameRpcDeps {
-  readonly client: Pick<
-    ArtifreeClient,
-    | 'runtimeMetadata'
-    | 'runtimeSourceList'
-    | 'runtimeSourceRead'
-    | 'runtimeSourceOffer'
-    | 'runtimeSourceDownload'
-    | 'runtimeCall'
-  >;
-  readonly view: RuntimeView;
-  /** Shows a prompt; resolves with the user's answer. */
-  readonly ask: (offer: Offer, signal: AbortSignal) => Promise<Outcome>;
-  /** Hands the confirmed bytes to the browser. */
-  readonly save: (
-    bytes: Uint8Array<ArrayBuffer>,
-    fileName: string,
-    type: string,
-  ) => void;
+export interface FrameRpcDeps extends CallDeps {
   /** Takes one token of the frame's budget. */
   readonly take: () => boolean;
   /** Monotonic milliseconds. */
@@ -382,14 +189,6 @@ export interface FrameRpcDeps {
     transfer: Transferable[],
   ) => void;
 }
-
-const OUTCOME_CODE: Record<Exclude<Outcome, 'accepted'>, FailureCode | null> = {
-  declined: 'declined',
-  // The frame is told nothing about a withdrawn offer: it is gone or gave up.
-  withdrawn: null,
-  busy: 'rate_limited',
-  cooling: 'rate_limited',
-};
 
 /** One frame's calls. */
 export class FrameRpc {
@@ -425,8 +224,8 @@ export class FrameRpc {
 
   #handle(message: unknown): void {
     if (this.#closed) return;
-    const call = parseCall(message);
-    if (call === undefined) {
+    const parsed = parseMessage(message);
+    if (parsed === undefined) {
       // Not a call. It still costs a token, so a flood of noise is bounded.
       const taken = this.#deps.take();
       // A message the frame can wait on is answered at once, so a bad one
@@ -437,11 +236,12 @@ export class FrameRpc {
         this.#fail(id, taken ? 'invalid_request' : 'rate_limited');
       return;
     }
-    if (call.type === 'cancel') {
-      this.#pending.get(call.id)?.abort();
-      this.#pending.delete(call.id);
+    if (!('serve' in parsed)) {
+      this.#pending.get(parsed.id)?.abort();
+      this.#pending.delete(parsed.id);
       return;
     }
+    const { call } = parsed;
     // After the lease the frame is told nothing: it keeps the same deadline
     // and refuses on its own, and a late reply must not reach it.
     if (this.#deps.now() >= this.#deps.deadline) return;
@@ -451,7 +251,15 @@ export class FrameRpc {
       return this.#fail(call.id, 'rate_limited');
     const controller = new AbortController();
     this.#pending.set(call.id, controller);
-    void this.#serve(call, controller.signal)
+    // A serve that throws before it returns a promise fails the call like a
+    // rejection, so the pending slot is always released below.
+    let served: Promise<FrameReply | undefined>;
+    try {
+      served = parsed.serve(this.#deps, controller.signal);
+    } catch (error: unknown) {
+      served = Promise.reject(error);
+    }
+    void served
       .then(
         (reply) => {
           if (reply !== undefined) this.#reply(call.id, controller, reply);
@@ -485,254 +293,4 @@ export class FrameRpc {
   #fail(id: number, code: FailureCode): void {
     this.#deps.send({ id, ok: false, code }, []);
   }
-
-  async #serve(
-    call: Exclude<FrameCall, { type: 'cancel' }>,
-    signal: AbortSignal,
-  ): Promise<FrameReply | undefined> {
-    const { client, view } = this.#deps;
-    const options = { signal };
-    switch (call.type) {
-      case 'metadata': {
-        const result = await client.runtimeMetadata(view, options);
-        return ok(call.id, {
-          metadata: {
-            artifactId: result.artifact_id,
-            title: result.title,
-            currentRevision: result.current_revision,
-            metadataRevision: result.metadata_revision,
-          },
-        });
-      }
-      case 'source.list': {
-        const result = await client.runtimeSourceList(view, options);
-        return ok(call.id, {
-          listing: {
-            revision: result.revision,
-            files: result.files.map((file) => ({
-              path: file.path,
-              size: file.size,
-              sha256: file.sha256,
-              mediaType: file.media_type,
-            })),
-          },
-        });
-      }
-      case 'source.read': {
-        const part = await client.runtimeSourceRead(
-          view,
-          { path: call.path, offset: call.offset, length: call.length },
-          options,
-        );
-        const bytes = part.bytes.buffer;
-        return {
-          message: {
-            id: call.id,
-            ok: true,
-            part: {
-              path: part.path,
-              offset: part.offset,
-              nextOffset: part.nextOffset,
-              size: part.size,
-              sha256: part.sha256,
-              bytes,
-            },
-          },
-          transfer: [bytes],
-        };
-      }
-      case 'source.download':
-        return this.#download(call.id, call.path, signal);
-      case 'source.write': {
-        // A frame's bytes are copied once, here; the client reads the copy.
-        const input = {
-          path: call.path,
-          retryId: call.retryId,
-          bytes: new Uint8Array(call.bytes.slice(0)),
-        };
-        const receipt = await client.runtimeCall(view, (source, frame) =>
-          source.writeSource(frame, view, input, signal),
-        );
-        return ok(call.id, {
-          written: {
-            path: receipt.path,
-            revision: receipt.revision,
-            size: receipt.size,
-            sha256: receipt.sha256,
-          },
-        });
-      }
-      case 'assets.list': {
-        const result = await client.runtimeCall(view, (source, frame) =>
-          source.listRuntimeAssets(frame, view, signal),
-        );
-        return ok(call.id, {
-          listing: {
-            assetVersion: result.asset_version,
-            assets: result.assets.map((asset) => ({
-              id: asset.id,
-              contentType: asset.content_type,
-              size: asset.size_bytes,
-              sha256: asset.sha256,
-              createdAtMs: asset.created_at_ms,
-            })),
-          },
-        });
-      }
-      case 'assets.read': {
-        const request = {
-          assetId: call.assetId,
-          offset: call.offset,
-          length: call.length,
-        };
-        const part = await client.runtimeCall(view, (source, frame) =>
-          source.readRuntimeAsset(frame, view, request, signal),
-        );
-        const bytes = part.bytes.buffer;
-        return {
-          message: {
-            id: call.id,
-            ok: true,
-            part: {
-              assetId: part.assetId,
-              contentType: part.contentType,
-              offset: part.offset,
-              nextOffset: part.nextOffset,
-              size: part.size,
-              sha256: part.sha256,
-              bytes,
-            },
-          },
-          transfer: [bytes],
-        };
-      }
-      case 'assets.upload': {
-        // A frame's bytes are copied once, here; the client reads the copy.
-        const input = {
-          retryId: call.retryId,
-          baseAssetVersion: call.baseAssetVersion,
-          contentType: call.contentType,
-          bytes: new Uint8Array(call.bytes.slice(0)),
-        };
-        const receipt = await client.runtimeCall(view, (source, frame) =>
-          source.uploadRuntimeAsset(frame, view, input, signal),
-        );
-        return ok(call.id, {
-          uploaded: {
-            asset: {
-              id: receipt.asset.id,
-              contentType: receipt.asset.content_type,
-              size: receipt.asset.size_bytes,
-              sha256: receipt.asset.sha256,
-              createdAtMs: receipt.asset.created_at_ms,
-            },
-            assetVersion: receipt.asset_version,
-          },
-        });
-      }
-      case 'assets.delete': {
-        const input = {
-          assetId: call.assetId,
-          retryId: call.retryId,
-          baseAssetVersion: call.baseAssetVersion,
-        };
-        const receipt = await client.runtimeCall(view, (source, frame) =>
-          source.deleteRuntimeAsset(frame, view, input, signal),
-        );
-        return ok(call.id, {
-          removed: {
-            assetId: receipt.asset_id,
-            assetVersion: receipt.asset_version,
-            deleted: receipt.deleted,
-          },
-        });
-      }
-      case 'assets.download':
-        return this.#assetDownload(call.id, call.assetId, signal);
-    }
-  }
-
-  /**
-   * The server is asked first, so a prompt never shows an offer the server
-   * would refuse: no grant, an old head, a missing file. Only the user's
-   * accept makes the workspace fetch the bytes, and the server checks again.
-   */
-  async #download(
-    id: number,
-    path: string | null,
-    signal: AbortSignal,
-  ): Promise<FrameReply | undefined> {
-    const { client, view } = this.#deps;
-    const target =
-      path === null
-        ? ({ kind: 'archive' } as const)
-        : ({ kind: 'file', path } as const);
-    const offer = await client.runtimeSourceOffer(view, target, { signal });
-    const outcome = await this.#deps.ask(
-      {
-        kind: offer.kind,
-        path: offer.path,
-        fileName: offer.file_name,
-        size: offer.size,
-      },
-      signal,
-    );
-    if (signal.aborted) return undefined;
-    if (outcome !== 'accepted') {
-      const code = OUTCOME_CODE[outcome];
-      return code === null
-        ? undefined
-        : { message: { id, ok: false, code }, transfer: [] };
-    }
-    const bytes = await client.runtimeSourceDownload(view, offer, { signal });
-    if (signal.aborted) return undefined;
-    this.#deps.save(
-      bytes,
-      offer.file_name,
-      offer.kind === 'file' ? 'application/octet-stream' : 'application/zip',
-    );
-    return ok(id, {
-      receipt: { started: true, kind: offer.kind, bytes: bytes.length },
-    });
-  }
-
-  /**
-   * The server is asked first, as for a source download: a prompt never shows
-   * an asset the server would refuse, because the grant is missing, the view
-   * is outdated, or the asset is gone. Only the user's accept makes the
-   * workspace fetch the bytes, and the server checks again.
-   */
-  async #assetDownload(
-    id: number,
-    assetId: string,
-    signal: AbortSignal,
-  ): Promise<FrameReply | undefined> {
-    const { client, view } = this.#deps;
-    const offer = await client.runtimeCall(view, (source, frame) =>
-      source.offerRuntimeAssetDownload(frame, view, assetId, signal),
-    );
-    const outcome = await this.#deps.ask(
-      { kind: 'asset', fileName: offer.fileName, bytes: offer.size },
-      signal,
-    );
-    if (signal.aborted) return undefined;
-    if (outcome !== 'accepted') {
-      const code = OUTCOME_CODE[outcome];
-      return code === null
-        ? undefined
-        : { message: { id, ok: false, code }, transfer: [] };
-    }
-    const bytes = await client.runtimeCall(view, (source, frame) =>
-      source.fetchRuntimeAssetDownload(frame, view, offer, signal),
-    );
-    if (signal.aborted) return undefined;
-    this.#deps.save(bytes, offer.fileName, 'application/octet-stream');
-    return ok(id, {
-      receipt: { started: true, assetId: offer.assetId, bytes: bytes.length },
-    });
-  }
-}
-
-function ok(id: number, body: Record<string, unknown>): FrameReply {
-  return { message: { id, ok: true, ...body }, transfer: [] };
 }
