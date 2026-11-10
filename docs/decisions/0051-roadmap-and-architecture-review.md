@@ -51,8 +51,9 @@ Structure:
    frame transport, repeated download flow, per-kind prompt branches, an
    eight-bit capability set with seven bits used) have the same cause. Seven
    capabilities exist; data, rooms and the P rows add at least seven more.
-6. Every user-owned state is keyed by actor and artifact: application data,
-   assets, rooms, request keys, jobs and the per-user change sequence. Access
+6. Every user-owned state is scoped to one actor: application data, assets
+   and rooms by actor and artifact; request keys (cleanup runs included), jobs
+   and the change sequence by actor alone. Access
    is "the artifact's own user", decided in `policy::may_access` and in the
    change feed's storage query. Sharing (S02) must decide, for each of those
    states, whether it is per user or shared. A frame data capability fixes
@@ -75,36 +76,53 @@ Structure:
 
 ## Decisions
 
-1. **The track cut is unchanged** (A, O, R, P, T, S, X). No hardening or
+1. **The track cut is unchanged** (A, O, R, P, T, S, X). A row is the starting
+   point of its work, not a fixed pull request boundary: the split into pull
+   requests is decided when a track starts and may change while it runs. No hardening or
    release track is added: Firefox returns before the first public release by
    the existing policy, and review follow-ups stay in the decision record of
    the slice that produced them.
 2. **R10 no longer waits for R08.** R10 needs R08 only to cross-check queued
    outbox writes, and none exist while the public sender is off. That check
-   moves to the change that turns the sender on. R10's prerequisites are R05
-   and R11b.
+   moves to the change that turns the sender on, and the R08c row now says
+   so. R10's prerequisites are R05 and R11b. If R14 is implemented first, as
+   ordered below, R10 also cross-checks `data.write` and data subscriptions;
+   the R10 row names them.
 3. **S02 no longer waits for R10.** Revocation closes open views, which S01
    already does when a user is disabled; adopting a replacement view is not
    needed for it.
 4. **T01 is split.** T01a is the type catalog (descriptor, required files,
    guide, contract pin, creation path) and T01b is the first React template.
-   Only T01b needs R03. T02, T07, T09, T11 and T13 depend on T01a.
+   Only T01b needs R03. T02, T07, T09, T11 and T13 depend on T01a. T12 keeps
+   its own R03 prerequisite and depends on T01a for the catalog. No other
+   prerequisite of a T row changes.
 5. **R03 still waits for R02.** [0042](0042-linux-untrusted-execution.md)
    states that R02 establishes the execution boundary before React builds. A
    narrower threat model for a first build would amend 0042 and is not made
    here.
-6. **T03b depends on S02, not only S01.** Two users cannot reach one artifact
-   until sharing exists, so "two users changing one document" cannot be
-   checked on S01 alone. Two tabs of one user remain checkable.
+6. **T03b's two-user check moves to S02.** Two users cannot reach one
+   artifact until sharing exists, so "two users changing one document" cannot
+   be checked on S01 alone. T03b keeps its prerequisites and is checked with
+   two tabs of one user; S02 runs the two-user check if T03b exists by then.
+   Making all of T03b wait for S02 would also make the document exports
+   behind it wait for sharing.
 7. **New roadmap rows**, each proposed and without a specification yet:
    - R13, a behavior-preserving consolidation of the runtime bridge before the
      next capability (finding 5). The three independent checks (client, host,
-     frame) stay.
-   - R14, a frame's access to application data. It widens the capability set.
+     frame) stay. It is an exception to the roadmap's entry rule 6 (one
+     observable result per change), accepted because the result is checkable:
+     the existing unit, integration and smoke checks pass unchanged, the diff
+     removes repetition, and it adds no empty port or general wrapper. It is
+     not the "move for its own sake" that decision 8 rules out; that concerns
+     moving modules between crates.
+   - R14, a frame's access to application data. It adds the ninth capability,
+     so it widens the capability set.
    - R15, a frame's access to rooms.
-   - R01b, the operation of background work: a scheduler and an injectable
-     clock inside the server, worker supervision, job changes in the change
-     feed and a job view. O05b's automatic purge, R02b and R03 share it.
+   - R01b, the operation of background work: a scheduler inside the server,
+     worker supervision, job changes in the change feed and a job view. It
+     reuses the existing injectable clock (`artifree_core::jobs::Clock`).
+     O05b's automatic purge, R02b and R03 share it and name it as a
+     prerequisite.
    - S02s, the access model as a documentation-only decision (finding 6),
      ahead of S02's implementation and together with R14's specification.
    - O08, Firefox back in the CI matrix with every pending Firefox acceptance
@@ -130,8 +148,8 @@ Structure:
 4. The remainder of R08 once R14 exists and it is decided whether a frame's
    writes use the outbox.
 
-O05b's web purge can be done at any time. O08 and O03c come before the first
-public release.
+O05b's web purge can be done at any time, and R15 at any time after R13. O08
+and O03c come before the first public release.
 
 ## Open decisions
 

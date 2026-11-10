@@ -3,7 +3,7 @@
 Status: O04, implemented ([decision 0027](decisions/0027-backup-restore-and-schema-upgrade.md)).
 Everything the server persists is in one SQLite file, `artifree.sqlite3`, in
 the `--data-dir`: artifacts, revisions and file bytes, request keys, the change
-feed, titles, pins and the trash, application data (decision 0031), private upload bytes/metadata/versions/receipts (partial R09a, decision 0045), and the access token records. `backup` copies
+feed, titles, pins and the trash, application data (decision 0031), private upload bytes/metadata/versions/receipts (R09a, decision 0045), and the access token records. `backup` copies
 that file consistently; `restore` builds a new data directory from the copy.
 
 A backup holds what the database held when it was taken. **A purge (decision 0029) does not reach earlier backups:** an artifact removed for good is still

@@ -4,7 +4,7 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-06. Status: partially implemented; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); R09d2 lets a runtime frame upload and delete its artifact's assets under a separate `assets.write` grant (Chromium; Firefox re-verification pending); R09d3 lets a runtime frame ask the user to save one of its artifact's uploaded assets to their device under a separate `assets.download` grant (Chromium; Firefox re-verification pending), which completes R09d apart from that Firefox re-verification**.
+Date: 2026-11-06. Status: implemented for R09a–R09d in Chromium, with Firefox re-verification pending and the JPEG subset named here; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); R09d2 lets a runtime frame upload and delete its artifact's assets under a separate `assets.write` grant (Chromium; Firefox re-verification pending); R09d3 lets a runtime frame ask the user to save one of its artifact's uploaded assets to their device under a separate `assets.download` grant (Chromium; Firefox re-verification pending), which completes R09d apart from that Firefox re-verification**.
 The current HTTP/storage slice accepts UTF-8 plain text/CSV, complete static
 PNG and complete JPEG of the sequential subset recorded in the R09a image
 validation notes at the end of this record. Other JPEG variants are refused as
@@ -1041,7 +1041,8 @@ This completes R09d. Chromium is verified; Firefox re-verification is pending
   read) would bound memory before the size comparison. The server lists the
   whole asset space to find one asset for an offer or a download, as `assets.read`
   does; a by-id store lookup would avoid that.
-  The roadmap's R13 row takes up the repeated bridge code and the capability
-  set width before the next capability is added
+  The roadmap's R13 row takes up the repeated bridge code before the next
+  capability is added, and the row that adds the ninth capability (R14 in the
+  recommended order) widens the capability set
   ([0051](0051-roadmap-and-architecture-review.md)); the capped read and the
   by-id lookup stay follow-ups of this record.

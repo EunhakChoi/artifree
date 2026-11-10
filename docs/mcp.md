@@ -374,8 +374,8 @@ A failed tool call returns `isError: true` with the HTTP API error body:
 | `data_too_large`         | A value, the data, or its nesting is over the limit. Send less.             |
 | `asset_conflict`         | `current_asset_version` is newer. List the assets again, then write on it.  |
 | `asset_limit_exceeded`   | The asset or a space/user limit is over. Send less or delete assets.        |
-| `asset_type_unsupported` | Only `text/plain`, `text/csv`, static PNG and sequential JPEG are accepted. |
-| `invalid_asset`          | The bytes break the content rules (empty, not UTF-8, bad PNG or JPEG).      |
+| `asset_type_unsupported` | Only `text/plain`, `text/csv`, `image/png` and `image/jpeg` are accepted.   |
+| `invalid_asset`          | The bytes break the content rules (not UTF-8, bad PNG, unsupported JPEG).   |
 | `request_key_reused`     | The key was used for different content. Use a new key for a new change.     |
 | `invalid_request`        | Fix the arguments named in the message; the key is not reserved.            |
 | `not_found`              | The artifact, revision, file, asset, or job does not exist or is not yours. |

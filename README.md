@@ -500,7 +500,7 @@ compiled into the server.
 ## Planned deployment profiles
 
 - **Local temporary:** a process-local session and temporary files.
-- **Local persistent (implemented, single user):** SQLite and a local data
+- **Local persistent (implemented, one server process):** SQLite and a local data
   directory.
 - **Self-hosted:** a Rust API, separate workers, and local or external storage.
 - **Hosted web:** static UI on Vercel or another host, with a separately deployed

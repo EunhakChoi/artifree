@@ -309,11 +309,12 @@ migration.
   bootstrap. The client, the host and the frame each check what they receive on
   purpose; the repetition around those checks is not on purpose. R13
   consolidates it before the next capability.
-- **Every user-owned state is keyed by actor and artifact**: application data,
-  assets, rooms, request keys, jobs and the per-user change sequence. Access is
+- **Every user-owned state is scoped to one actor**: application data, assets
+  and rooms by actor and artifact; request keys, jobs and the change sequence
+  by actor. Access is
   the artifact's own user, decided in `core/policy.rs` and in the change feed's
   storage query. Sharing has to decide for each state whether it is per user or
-  shared (S02s) before more state is built on that key.
+  shared (S02s) before more state is built on that scope.
 - **Background work has no owner in the server process.** The worker is a
   subcommand that opens the database directly and nothing starts or supervises
   it; job changes are not in the change feed. Builds, the execution supervisor

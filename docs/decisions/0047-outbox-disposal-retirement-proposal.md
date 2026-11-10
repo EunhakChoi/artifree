@@ -8,9 +8,8 @@ Status: **Accepted contract; partially implemented.** Acceptance took effect
 when this separate documentation-only approval change was reviewed and merged
 (#126); the first internal slice of R08c-2c followed it (#125) and the rest of
 the contract is not implemented.
-It accepts the additive contract below for a subsequent implementation PR;
-it introduces no executable behavior and does not claim the implementation is
-complete. The numbered rules of [0041](0041-browser-data-outbox.md) and rules 1–7
+This record accepts the additive contract below; the record itself introduced
+no executable behavior and does not claim the implementation is complete. The numbered rules of [0041](0041-browser-data-outbox.md) and rules 1–7
 below remain unchanged. R08 remains partially implemented; the public browser
 handle remains local-only and public delivery remains disabled.
 

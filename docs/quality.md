@@ -813,15 +813,15 @@ readiness.
 The review after R09 ([decision 0051](decisions/0051-roadmap-and-architecture-review.md))
 did not recompute the score. It kept the layering and recorded where the code
 is under strain: one runtime capability is spread over about twelve
-hand-written files, every user-owned state is keyed by actor and artifact
-ahead of a sharing model, background work has no owner in the server process,
+hand-written files, every user-owned state is scoped to one actor ahead of a
+sharing model, background work has no owner in the server process,
 framework-free state machines sit in the server crate while two core modules
 are still "planned" stubs, and four files of over two thousand lines change
 with almost every feature. The [architecture document](architecture.md#structural-notes)
-lists them with the roadmap row that addresses each. They are guidance for new
+lists them and names the roadmap row that addresses one where a row exists. They are guidance for new
 work, not a migration, and no check enforces them yet.
 
-Private upload coverage (partial R09a, 0045): provider asset tests exercise
+Private upload coverage (R09a, 0045): provider asset tests exercise
 exact-byte reopening, equal-byte logical charges, independent versions,
 authority/key/base precedence, concurrent last-slot admission, metadata-only
 replay after deletion, no-op deletion, late receipt rollback, trash/recover/purge,
