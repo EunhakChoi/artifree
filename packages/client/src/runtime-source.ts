@@ -5,6 +5,7 @@ import type {
   RuntimeSourceWriteReceipt,
   RuntimeView,
 } from '@artifree/contracts';
+import { sha256Hex } from './assets.js';
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord, list, revisionFile } from './responses.js';
@@ -140,24 +141,6 @@ export function parseRuntimeDownloadOffer(
     /^[0-9a-f]{64}$/.test(sha256)
     ? { kind: 'file', path, file_name, size, sha256 }
     : undefined;
-}
-
-/**
- * The SHA-256 of `bytes` in lowercase hex, or `undefined` when the platform
- * cannot compute it (no `crypto.subtle`, as on a page that is not a secure
- * context, or a digest that fails). Callers treat `undefined` as a mismatch.
- */
-async function sha256Hex(
-  bytes: Uint8Array<ArrayBuffer>,
-): Promise<string | undefined> {
-  try {
-    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-    return Array.from(new Uint8Array(digest), (byte) =>
-      byte.toString(16).padStart(2, '0'),
-    ).join('');
-  } catch {
-    return undefined;
-  }
 }
 
 /**
@@ -322,12 +305,17 @@ export async function writeSource(
       status: 0,
       code: 'invalid_request',
     });
-  const digest = await sha256Hex(input.bytes);
-  if (digest === undefined)
+  let digest: string;
+  try {
+    digest = await sha256Hex(input.bytes);
+  } catch {
+    // No `crypto.subtle`, as on a page that is not a secure context, or a
+    // digest that fails. The cause is not passed on, as before.
     throw new ArtifreeApiError(
       'This page cannot compute the digest that checks a save.',
       { status: 0, code: 'unavailable' },
     );
+  }
   return frame.json(
     frameRoute(view, FRAME_ROUTES.sourceWrite),
     frameBody(view, {
