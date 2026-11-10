@@ -8,14 +8,21 @@ Date: 2026-11-11. Status: **implemented** in Chromium, Firefox pending re-verifi
 (`data.read` and `data.get`), R14b (`data.write`, `data.set`, `data.update`
 and `data.remove`) and R14c (the change hint and `data.onChange`).
 Amends rule 6 of [0040](0040-data-changes-and-member-listing.md) (rule 17).
-Rules 1, 11, 14, 17 and 23 were reworded after the implementation, where the
-reviews found them open to two readings; the code did not change with them.
 Roadmap: R14. Builds on [0020](0020-runtime-grants.md),
 [0031](0031-app-data.md), [0033](0033-runtime-source-write.md),
 [0040](0040-data-changes-and-member-listing.md),
 [0045](0045-uploaded-assets.md) (rule 12, the frame's asset writes),
 [0051](0051-roadmap-and-architecture-review.md) (Q3 and Q4) and
 [0052](0052-runtime-bridge-consolidation.md).
+
+> Amended 2026-11-11 (documentation pull request), after the implementation;
+> the code did not change. Rule 1 lists everything a write reveals and says
+> which part the consent text states. Rule 11 says which layer enforces which
+> limit. Rule 14 no longer calls a `remove` or a `null` patch through a value
+> that is not an object a failure: it changes nothing, as 0031 defines, which
+> is what the code does. Rule 17 defines "the grant is held" and "the view is
+> current". Rule 23 says a data write takes from both budgets. The section
+> "Known limit" is new.
 
 ## Context
 
@@ -50,13 +57,16 @@ product is claimed for them.
    workspace and its own connection grant. Neither implies the other, and
    neither implies or is implied by any `metadata`, `source` or `assets`
    capability. `data.write` does not return a stored value, but it is not
-   blind: a conditional write tells its caller the current `data_version` on a
-   stale base, whether the write changed anything (so a `set` of a guessed
-   value reveals whether that value was already stored), and, for a `set` or
-   a patch that is not `null`, whether a path runs through a value that is
-   not an object. The consent text of rule 3 names the second of these, the
-   one that reveals a stored value; a page that must learn nothing about the
-   data must not be granted `data.write`.
+   blind. A conditional write tells its caller the current `data_version` on
+   a stale base; whether the write changed anything, so a `set` of a guessed
+   value reveals whether that value was already stored; for a `set` or a
+   patch that is not `null`, whether its path runs through a stored value
+   that is not an object; and, by being refused or not, whether the stored
+   space would pass a limit of 0031 with the new value, which says something
+   of its size, its number of values and its depth. The consent text of rule
+   3 tells the user the second of these in words and does not list the
+   others. A page that must learn nothing about the data must not be granted
+   `data.write`.
 2. Seven capabilities exist. `data.read` is the eighth and still fits the
    set's current eight bits; `data.write` is the ninth, so the slice that adds
    it (R14b) widens the set to hold at least sixteen. This is internal: the
@@ -127,10 +137,13 @@ product is claimed for them.
     after the commit withholds the receipt; the commit stands.
 11. A stale base is `409 data_conflict` with the current `data_version`. The
     limits of 0031 apply unchanged (256 KiB a value, 1 MiB a space, 10,000
-    values, 32 levels). The server is what enforces them: the client and the
-    SDK refuse before sending only what their serializer refuses (a cycle, a
-    value JSON would change, nesting deeper than 64), so a value nested 33 to
-    64 deep is sent and refused by the server with the same `invalid_request`.
+    values, 32 levels). The server enforces the limits of a space. Before
+    anything is sent, every layer refuses a text over the write bound (rule
+    15), the client and the SDK refuse a text that is not JSON, and their
+    serializer refuses a cycle, a value JSON would change and nesting deeper
+    than 64. A value nested 33 to 64 deep is therefore sent; the server
+    answers `422 data_too_large`, which the frame sees as `invalid_request`
+    (rule 14).
     The request body limit of a write route, `data/delete` included, is the
     one the frame's source write has. A read answers at most one space, so its value
     text is at most 1 MiB (1,048,576 bytes), in one reply; no parts.
@@ -182,14 +195,16 @@ product is claimed for them.
     "nothing changed".
 17. The workspace sends the hint only while its own record says the grant is
     held and the view is current, and never to a frame without `data.read`.
-    The grant is held when the view the frame connected with was issued with
-    `data.read`; a grant change gives a new view. The view is current while
-    that frame's connection is open, its lease has not ended, and the change's
-    revision is the head the view was issued for: a view whose source moved
-    gets no hint. The frame that made a write is told of it like any other.
-    It sends a view only versions higher than the last one it sent that view,
-    and at most one hint in 250 ms, keeping the highest version that arrived
-    meanwhile, so a replayed stretch of the feed is one hint. No new server
+    The workspace sends a view only versions higher than the last one it
+    sent that view, and at most one hint in 250 ms, keeping the highest
+    version that arrived meanwhile, so a replayed stretch of the feed is one
+    hint. The grant is held when the generation of the view that the frame
+    connected with was issued with `data.read`; a grant change gives the view
+    a new generation and a new frame. The view is current while that frame's
+    connection is open, its lease has not ended, and the change's revision is
+    the head the view was issued for: a view whose source moved gets no hint.
+    A frame that holds `data.read` is told of its own write like any other
+    change; one that holds only `data.write` is told of nothing. No new server
     route or stream is added. This amends rule 6 of
     [0040](0040-data-changes-and-member-listing.md) ("the web workspace
     ignores it"): the workspace still does not change its own state for
@@ -200,7 +215,7 @@ product is claimed for them.
 23. A frame's writes are bounded apart from its other calls: the host admits
     at most 60 data writes a minute for one view, with a burst of 10, and
     answers `rate_limited` beyond that. A changing write rewrites the space
-    row, adds a change row that stays until retention, and wakes the user's
+    row, adds a change row, which 0006 rule 11 keeps indefinitely, and wakes the user's
     streams, and unlike a source write it does not end the view, so the
     general frame budget (600 calls a minute) is too wide for it. A data write
     takes from both budgets. The server's frame budget is unchanged.
@@ -238,13 +253,16 @@ product is claimed for them.
 
 ### Known limit
 
-Every frame write that is accepted, one that changes nothing included,
-records its request key so that a retry can be answered (rule 9), as a
-frame's source and asset writes do, and nothing removes those rows; a purge
-clears their fingerprints only. At the host's rate a granted page can add about 86,000
-rows a day for each open view. The rows are small and hold no value. Removing
-old keys is not part of R14; it belongs with a retention rule for request keys
-of every kind.
+A frame's writes add rows that nothing removes. Every write that is accepted,
+one that changes nothing included, records its request key so that a retry
+can be answered (rule 9), as a frame's source and asset writes do; request
+keys do not expire ([0029](0029-retention-and-cleanup.md), decision 11), and a
+purge clears their fingerprints only. Every write that changes the space also
+adds a change row, which is kept indefinitely
+([0006](0006-change-feed.md), rule 11). At the host's rate a granted page can
+add about 86,000 rows of each kind a day for each open view. The rows are
+small and hold no value. Removing them is not part of R14: it needs the
+retention records that 0006 and 0029 name.
 
 ### Slices
 
