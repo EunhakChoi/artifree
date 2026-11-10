@@ -101,6 +101,10 @@ frames or previews; MCP tools for listing or following (MCP has no stream,
    web workspace ignores it, never as unknown or as a new revision; this
    amends 0007 decision 4. The amended records (0006, 0007, 0031) already
    carry notes marked "proposed; takes effect when the slice merges".
+   (Proposed; takes effect when R14c merges:
+   [0053](0053-runtime-app-data.md), rule 17, has the workspace forward a
+   version-only hint to a frame that holds `data.read`; its own state still
+   ignores the kind.)
 
 ### Member listing (R07b)
 
