@@ -1,4 +1,8 @@
-import { notifyRequestDispatched, parseRetryAfter } from '@artifree/client';
+import {
+  FRAME_ROUTE_TAILS,
+  notifyRequestDispatched,
+  parseRetryAfter,
+} from '@artifree/client';
 
 /** Whether the page is visible, and a way to hear when that changes. */
 export interface Visibility {
@@ -21,10 +25,17 @@ export type RequestKind = 'read' | 'stream' | 'write' | 'frame';
  * cannot make one request look like another.
  */
 const CHANGE_FEED = /\/v1\/changes$/;
+/** `text` as a pattern that matches only itself. */
+function literal(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Group 1 is set for `previews` and a bare `runtime-views`, which issue a
-// preview or a view; a longer tail below `runtime-views` is a frame call.
-const REVISION_ROUTE =
-  /\/v1\/artifacts\/[^/]+\/revisions\/\d+\/(?:(previews|runtime-views)|runtime-views\/[^/]+\/\d+\/(?:metadata|source\/(?:list|read|offer|download|write)|assets\/(?:list|read|upload|delete|offer|download)))$/;
+// preview or a view; a longer tail below `runtime-views` is a frame call
+// when it is one of the client's frame route tails (decision 0052, rule 9).
+const REVISION_ROUTE = new RegExp(
+  `/v1/artifacts/[^/]+/revisions/\\d+/(?:(previews|runtime-views)|runtime-views/[^/]+/\\d+/(?:${FRAME_ROUTE_TAILS.map((tail) => literal(tail)).join('|')}))$`,
+);
 
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a

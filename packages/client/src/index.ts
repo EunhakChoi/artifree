@@ -27,6 +27,7 @@ export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
 export { MAX_ASSET_BYTES, getAsset, listAssets, readAsset } from './assets.js';
 export { toBase64 } from './base64.js';
+export { FRAME_ROUTE_TAILS } from './runtime-frame.js';
 export type { AssetBytes } from './assets.js';
 export {
   deleteAsset,

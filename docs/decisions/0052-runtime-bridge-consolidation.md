@@ -4,8 +4,9 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-10. Status: **partially implemented**: R13a (rule 5) is
-implemented; R13b to R13e (rules 6 to 11) are proposed and have no code.
+Date: 2026-11-10. Status: **partially implemented**: R13a (rule 5) and R13b
+(rules 6, 7 and 9) are implemented; R13c to R13e (rules 8, 10 and 11) are
+proposed and have no code.
 Roadmap: R13. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md),
 [0032](0032-runtime-source-read-and-download.md),

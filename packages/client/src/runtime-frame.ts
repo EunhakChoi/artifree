@@ -5,7 +5,7 @@ import type { RuntimeView } from '@artifree/contracts';
  * rule 5): the transport the client lends a call, the route and body of a
  * frame request, and the names of the frame routes. The client itself builds
  * the metadata route here, so this module, with all twelve route names, is in
- * the main bundle; the workspace's request gate is to read the names there
+ * the main bundle; the workspace's request gate reads the names there
  * (rule 9). The comparison of received bytes is kept out of it, in the
  * on-demand `runtime-bytes` module.
  */
@@ -38,9 +38,8 @@ export interface FrameTransport {
 /**
  * The tail of every frame route, below a view's generation. Each is named
  * once in the client, and the calls build their route from these names. The
- * workspace's request gate still writes the same tails out in its own
- * pattern; decision 0052, rule 9 (not yet implemented) has it build that
- * pattern from this list.
+ * workspace's request gate builds its pattern of frame routes from this list
+ * (decision 0052, rule 9).
  */
 export const FRAME_ROUTES = {
   metadata: 'metadata',
