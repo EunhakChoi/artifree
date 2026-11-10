@@ -1,5 +1,6 @@
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
+import type { DataChanges } from './data-changes';
 import { createDataHintSender, type DataHint } from './data-hint';
 import {
   DATA_WRITE_BURST,
@@ -11,7 +12,6 @@ import { OfferDesk } from './offer-desk';
 import { pageSaver } from './save-blob';
 
 export { DownloadPrompt } from './download-prompt';
-export type { DataHint } from './data-hint';
 
 /**
  * What a runtime frame's calls need on the workspace side (decision 0032):
@@ -77,4 +77,36 @@ export function createDataHint(
       return () => clearTimeout(timer);
     },
   });
+}
+
+/**
+ * Forwards the change hint to one connected frame for as long as rule 17 of
+ * decision 0053 allows, and returns the function that ends it. Nothing is
+ * forwarded unless the view holds `data.read`. A change is forwarded only
+ * while the artifact's source is still the one the view was issued for (a
+ * view whose source moved has lost its grant and its reads are refused), and
+ * nothing is sent once the lease has ended, as for a reply.
+ */
+export function followDataHints(options: {
+  readonly view: RuntimeView;
+  readonly dataChanges: DataChanges;
+  /** The end of the view's lease on the `performance.now()` clock. */
+  readonly deadline: number;
+  readonly send: (message: Record<string, unknown>) => void;
+}): () => void {
+  const { view, dataChanges, deadline, send } = options;
+  if (!view.granted.includes('data.read')) return () => undefined;
+  const hint = createDataHint((message) => {
+    if (performance.now() < deadline) send(message);
+  });
+  const unsubscribe = dataChanges.subscribe(
+    view.artifact_id,
+    (dataVersion, revision) => {
+      if (revision === view.head_revision) hint.offer(dataVersion);
+    },
+  );
+  return () => {
+    unsubscribe();
+    hint.close();
+  };
 }

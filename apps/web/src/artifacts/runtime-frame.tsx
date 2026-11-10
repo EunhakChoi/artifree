@@ -128,19 +128,16 @@ export function RuntimeFrame({
       candidate.onmessage = (message: MessageEvent<unknown>) => {
         if (active) served.handle(message.data);
       };
-      // The change hint (decision 0053, rules 16 and 17): only a view that
-      // holds data.read is told, and only while this connection lasts. A
-      // grant change or a new source replaces the view and this component.
-      if (view.granted.includes('data.read')) {
-        const hint = host.createDataHint((message) => {
+      // The change hint (decision 0053, rules 16 and 17), only while this
+      // connection lasts.
+      stopHints = host.followDataHints({
+        view,
+        dataChanges,
+        deadline,
+        send: (message) => {
           if (active) candidate.postMessage(message);
-        });
-        const unsubscribe = dataChanges.subscribe(view.artifact_id, hint.offer);
-        stopHints = () => {
-          unsubscribe();
-          hint.close();
-        };
-      }
+        },
+      });
     };
     window.addEventListener('message', connect);
     const expiry = window.setTimeout(

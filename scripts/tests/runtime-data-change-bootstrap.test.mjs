@@ -34,10 +34,13 @@ let current;
 
 /**
  * Starts the script on a stand-in window; the test plays the workspace. Each
- * message the frame sends is recorded, and the test sends one with `reply`.
+ * message the frame sends over the port is recorded in `received`, and the
+ * test sends one with `reply`. `toParent` records each message posted to the
+ * parent window, starting with the connect message.
  */
 function frame() {
   const listeners = {};
+  const toParent = [];
   const received = [];
   let port;
   const window = {
@@ -47,7 +50,8 @@ function frame() {
     },
     setTimeout: (run, ms) => setTimeout(run, ms),
     parent: {
-      postMessage: (_message, _origin, ports) => {
+      postMessage: (message, _origin, ports) => {
+        toParent.push(message);
         port = ports[0];
         port.onmessage = (event) => {
           received.push(event.data);
@@ -62,6 +66,7 @@ function frame() {
     api: window.artifree,
     received,
     reply: (message) => port.postMessage(message),
+    toParent,
   };
 }
 
@@ -129,12 +134,10 @@ const NOT_LISTENERS = [
 
 test('registering a data change listener sends nothing to the host', async () => {
   const f = frame();
-  const { calls, listener } = recorder();
-  f.api.data.onChange(listener);
-  f.reply(hint(7));
+  f.api.data.onChange(() => {});
   await settle();
-  assert.deepEqual(calls, [[{ dataVersion: 7 }]], 'the listener is called');
-  assert.deepEqual(f.received, [], 'nothing is sent to the host');
+  assert.equal(f.toParent.length, 1, 'only the connect message was posted');
+  assert.deepEqual(f.received, [], 'nothing is sent over the port');
 });
 
 test('a data change hint calls the listener once, with one argument', async () => {
@@ -143,8 +146,13 @@ test('a data change hint calls the listener once, with one argument', async () =
   f.api.data.onChange(listener);
   f.reply(hint(7));
   await settle();
-  assert.deepEqual(calls, [[{ dataVersion: 7 }]]);
-  assert.deepEqual(f.received, [], 'nothing is sent to the host');
+  assert.equal(calls.length, 1, 'the listener is called once');
+  assert.equal(calls[0].length, 1, 'with exactly one argument');
+  assert.deepEqual(
+    calls[0][0],
+    { dataVersion: 7 },
+    'that argument is the change',
+  );
 });
 
 test('the same function registered twice is called twice for one hint', async () => {
@@ -215,6 +223,49 @@ test('a listener that throws does not stop the others, and nothing is sent to th
   );
   assert.equal(logged.length, 1, 'the failure is logged once');
   assert.deepEqual(f.received, [], 'nothing is sent to the host');
+});
+
+test('a listener removed during a dispatch is not called for that hint, and later listeners still are', async () => {
+  const f = frame();
+  const removed = recorder();
+  const later = recorder();
+  // The first listener removes the second while the hint is being delivered,
+  // so the second is skipped for that hint.
+  let removeSecond;
+  f.api.data.onChange(() => {
+    removeSecond();
+  });
+  removeSecond = f.api.data.onChange(removed.listener);
+  f.api.data.onChange(later.listener);
+  f.reply(hint(7));
+  await settle();
+  assert.deepEqual(removed.calls, [], 'the removed listener is not called');
+  assert.deepEqual(
+    later.calls,
+    [[{ dataVersion: 7 }]],
+    'the listener after it is called',
+  );
+});
+
+test('a listener added during a dispatch is not called for that hint, but is for the next', async () => {
+  const f = frame();
+  const added = recorder();
+  // The adder registers one listener on the first hint. It is removed before
+  // the next hint, so that hint does not register another.
+  const removeAdder = f.api.data.onChange(() => {
+    f.api.data.onChange(added.listener);
+  });
+  f.reply(hint(7));
+  await settle();
+  assert.deepEqual(added.calls, [], 'not called for this hint');
+  removeAdder();
+  f.reply(hint(8));
+  await settle();
+  assert.deepEqual(
+    added.calls,
+    [[{ dataVersion: 8 }]],
+    'called once for the next hint',
+  );
 });
 
 test('a data change hint does not settle a pending data.get', async () => {

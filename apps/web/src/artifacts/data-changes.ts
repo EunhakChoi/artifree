@@ -1,7 +1,13 @@
 import type { ChangeFeedEvent } from '@artifree/client';
 
-/** Receives the `data_version` a data write left an artifact's space at. */
-export type DataChangeListener = (dataVersion: number) => void;
+/**
+ * Receives the `data_version` a data write left an artifact's space at, and
+ * the artifact's source revision at that write.
+ */
+export type DataChangeListener = (
+  dataVersion: number,
+  revision: number,
+) => void;
 
 /**
  * Where the workspace reports the `data_changed` changes of its change feed,
@@ -48,10 +54,23 @@ export class DataChangeHub implements DataChanges {
    */
   readonly follow = (event: ChangeFeedEvent): void => {
     if (event.type !== 'change') return;
-    const { artifact_id: id, change, data_version: dataVersion } = event.change;
+    const {
+      artifact_id: id,
+      change,
+      data_version: dataVersion,
+      revision,
+    } = event.change;
     if (change !== 'data_changed' || dataVersion === undefined) return;
     const entries = this.#listeners.get(id);
     if (entries === undefined) return;
-    for (const { listener } of Array.from(entries)) listener(dataVersion);
+    for (const { listener } of Array.from(entries)) {
+      // A preview's listener must not stop the page's change feed, whose
+      // handler this runs in, or the listeners after it.
+      try {
+        listener(dataVersion, revision);
+      } catch (error: unknown) {
+        console.error('A data change listener failed.', error);
+      }
+    }
   };
 }

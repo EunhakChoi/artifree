@@ -56,8 +56,9 @@ const QUIET_MS = 2_000;
 
 /**
  * The page that is told of changes. It registers its listener at load, appends
- * each `dataVersion` it is told of to #changes, and reads `notes` with data.get at
- * load and again on each change, showing the answer in #told. "Set notes" reads
+ * each `dataVersion` it is told of to #changes, and reads `notes` with data.get on
+ * each change (never at load: an ungranted read is a 403 that every workspace
+ * showing this artifact would log), showing the answer in #told. "Set notes" reads
  * the space's version with data.get and stores NOTES with data.set at that base,
  * so the set names the version it was based on. "Read notes" reads `notes` into
  * #result. Each answer, or the refusal's code, is written to its output as JSON.
@@ -84,7 +85,6 @@ window.artifree.data.onChange(({ dataVersion }) => {
   shown('changes', changes);
   showTold();
 });
-showTold();
 document.querySelector('#set').addEventListener('click', () => {
   attempts += 1;
   const retryId = nonce + '-' + attempts;
@@ -279,9 +279,9 @@ export async function checkRuntimeDataChanges({
     await expect(
       tabB.frame.getByRole('heading', { name: PROBE_HEADING }),
     ).toBeVisible();
-    await expect
-      .poll(() => output(tabB, 'told'), { timeout: DELIVERY_MS })
-      .toEqual({ error: 'denied' });
+    assert.deepEqual((await press(tabB, 'Read notes', 'data/read')).answer, {
+      error: 'denied',
+    });
 
     // Nothing is granted to tab B, so the owner's change must not reach its frame.
     await expectVisible(tabB);
@@ -306,27 +306,23 @@ export async function checkRuntimeDataChanges({
 
     // Once tab B may read, its frame reads the value the owner stored, at that version.
     await change(tabB, ALLOW_READ, 'data.read');
-    await expect
-      .poll(() => output(tabB, 'told'), { timeout: DELIVERY_MS })
-      .toEqual({
-        path: 'notes',
-        dataVersion: OWNER_VERSION,
-        exists: true,
-        value: OWNER_NOTES,
-      });
+    assert.deepEqual((await press(tabB, 'Read notes', 'data/read')).answer, {
+      path: 'notes',
+      dataVersion: OWNER_VERSION,
+      exists: true,
+      value: OWNER_NOTES,
+    });
 
     // Tab A holds both grants, and its set stores NOTES at the version after the owner's.
     tabA = await open(browser, origin, server, artifact);
     await change(tabA, ALLOW_READ, 'data.read');
     await change(tabA, ALLOW_WRITE, DECLARED);
-    await expect
-      .poll(() => output(tabA, 'told'), { timeout: DELIVERY_MS })
-      .toEqual({
-        path: 'notes',
-        dataVersion: OWNER_VERSION,
-        exists: true,
-        value: OWNER_NOTES,
-      });
+    assert.deepEqual((await press(tabA, 'Read notes', 'data/read')).answer, {
+      path: 'notes',
+      dataVersion: OWNER_VERSION,
+      exists: true,
+      value: OWNER_NOTES,
+    });
     await expectVisible(tabB);
     const stored = await press(tabA, 'Set notes', 'data/set');
     assert.deepEqual(
@@ -370,14 +366,12 @@ export async function checkRuntimeDataChanges({
       tabA.permissions.getByText('Granted: none', { exact: true }),
     ).toBeVisible();
     await change(tabA, ALLOW_READ, 'data.read');
-    await expect
-      .poll(() => output(tabA, 'told'), { timeout: DELIVERY_MS })
-      .toEqual({
-        path: 'notes',
-        dataVersion: SET_VERSION,
-        exists: true,
-        value: NOTES,
-      });
+    assert.deepEqual((await press(tabA, 'Read notes', 'data/read')).answer, {
+      path: 'notes',
+      dataVersion: SET_VERSION,
+      exists: true,
+      value: NOTES,
+    });
     const readBack = await press(tabA, 'Read notes', 'data/read');
     assert.deepEqual(
       readBack.answer,

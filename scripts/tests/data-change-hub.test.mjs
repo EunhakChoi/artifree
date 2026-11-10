@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
@@ -65,6 +65,25 @@ function recorder(hub, artifactId) {
   return { heard, remove };
 }
 
+// Captured once, before any test replaces it.
+const realConsoleError = console.error;
+
+/**
+ * Replaces console.error for the running test and returns the argument list
+ * of each call; afterEach puts the real one back.
+ */
+function captureConsoleError() {
+  const calls = [];
+  console.error = (...args) => {
+    calls.push(args);
+  };
+  return calls;
+}
+
+afterEach(() => {
+  console.error = realConsoleError;
+});
+
 test('delivers a data_changed change to the listeners of its artifact only, with its version', () => {
   const hub = new DataChangeHub();
   const own = recorder(hub, ARTIFACT);
@@ -72,6 +91,18 @@ test('delivers a data_changed change to the listeners of its artifact only, with
   hub.follow(dataChanged(ARTIFACT, 5));
   assert.deepEqual(own.heard, [5]);
   assert.deepEqual(other.heard, []);
+});
+
+test('passes the change revision to a listener as its second argument', () => {
+  const hub = new DataChangeHub();
+  const heard = [];
+  hub.subscribe(ARTIFACT, (dataVersion, revision) => {
+    heard.push({ dataVersion, revision });
+  });
+  hub.follow(
+    change(ARTIFACT, 'data_changed', { data_version: 5, revision: 9 }),
+  );
+  assert.deepEqual(heard, [{ dataVersion: 5, revision: 9 }]);
 });
 
 // The kind alone must decide: the second form carries a version, which the
@@ -168,4 +199,37 @@ test('a listener that removes another during a change does not break the dispatc
   assert.deepEqual(first, [5, 6]);
   assert.deepEqual(second, [5]);
   assert.deepEqual(third, [5, 6]);
+});
+
+test('a listener that throws does not stop a later listener of the artifact', () => {
+  const hub = new DataChangeHub();
+  captureConsoleError();
+  hub.subscribe(ARTIFACT, () => {
+    throw new Error('listener failed');
+  });
+  const later = recorder(hub, ARTIFACT);
+  hub.follow(dataChanged(ARTIFACT, 5));
+  assert.deepEqual(later.heard, [5]);
+});
+
+test('follow() does not throw when a listener throws', () => {
+  const hub = new DataChangeHub();
+  captureConsoleError();
+  hub.subscribe(ARTIFACT, () => {
+    throw new Error('listener failed');
+  });
+  assert.doesNotThrow(() => hub.follow(dataChanged(ARTIFACT, 5)));
+});
+
+test('reports a listener that throws once to console.error, with its error', () => {
+  const hub = new DataChangeHub();
+  const failure = new Error('listener failed');
+  hub.subscribe(ARTIFACT, () => {
+    throw failure;
+  });
+  const reported = captureConsoleError();
+  hub.follow(dataChanged(ARTIFACT, 5));
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0][0], 'A data change listener failed.');
+  assert.equal(reported[0][1], failure);
 });
