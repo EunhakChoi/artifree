@@ -9,6 +9,7 @@ pub(crate) const SDK_PIN: &str = "artifree.app.v1";
 pub(crate) const ASSETS_DOWNLOAD: &str = "assets.download";
 pub(crate) const ASSETS_READ: &str = "assets.read";
 pub(crate) const ASSETS_WRITE: &str = "assets.write";
+pub(crate) const DATA_READ: &str = "data.read";
 pub(crate) const METADATA_READ: &str = "metadata.read";
 pub(crate) const SOURCE_READ: &str = "source.read";
 pub(crate) const SOURCE_DOWNLOAD: &str = "source.download";
@@ -36,6 +37,11 @@ pub(crate) enum Capability {
     /// consent: it neither implies nor is implied by `assets.read` or any
     /// `source.*` capability.
     AssetsWrite,
+    /// Reading the calling user's application data for the artifact a view is
+    /// bound to (decision 0053, rule 1). The data read frame route checks it.
+    /// Its own consent: it neither implies nor is implied by any `metadata`,
+    /// `source` or `assets` capability.
+    DataRead,
     MetadataRead,
     SourceDownload,
     SourceRead,
@@ -46,10 +52,11 @@ pub(crate) enum Capability {
 
 impl Capability {
     /// Every supported capability, in name order.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::AssetsDownload,
         Self::AssetsRead,
         Self::AssetsWrite,
+        Self::DataRead,
         Self::MetadataRead,
         Self::SourceDownload,
         Self::SourceRead,
@@ -61,6 +68,7 @@ impl Capability {
             Self::AssetsDownload => ASSETS_DOWNLOAD,
             Self::AssetsRead => ASSETS_READ,
             Self::AssetsWrite => ASSETS_WRITE,
+            Self::DataRead => DATA_READ,
             Self::MetadataRead => METADATA_READ,
             Self::SourceDownload => SOURCE_DOWNLOAD,
             Self::SourceRead => SOURCE_READ,
@@ -77,6 +85,7 @@ impl Capability {
             Self::AssetsDownload => 64,
             Self::AssetsRead => 16,
             Self::AssetsWrite => 32,
+            Self::DataRead => 128,
             Self::MetadataRead => 1,
             Self::SourceDownload => 2,
             Self::SourceRead => 4,
@@ -188,8 +197,8 @@ fn valid_capability(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASSETS_DOWNLOAD, ASSETS_READ, ASSETS_WRITE, Capability, CapabilitySet, METADATA_READ,
-        RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE,
+        ASSETS_DOWNLOAD, ASSETS_READ, ASSETS_WRITE, Capability, CapabilitySet, DATA_READ,
+        METADATA_READ, RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE,
     };
 
     #[test]
@@ -236,6 +245,7 @@ mod tests {
                 ASSETS_DOWNLOAD,
                 ASSETS_READ,
                 ASSETS_WRITE,
+                DATA_READ,
                 METADATA_READ,
                 SOURCE_DOWNLOAD,
                 SOURCE_READ,
@@ -585,6 +595,7 @@ mod tests {
         for other in [
             ASSETS_READ,
             ASSETS_WRITE,
+            DATA_READ,
             METADATA_READ,
             SOURCE_DOWNLOAD,
             SOURCE_READ,
@@ -606,7 +617,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","data.read","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         let download = grant(&policy, &[ASSETS_DOWNLOAD])?;
@@ -618,6 +629,7 @@ mod tests {
         for (name, capability) in [
             (ASSETS_READ, Capability::AssetsRead),
             (ASSETS_WRITE, Capability::AssetsWrite),
+            (DATA_READ, Capability::DataRead),
             (METADATA_READ, Capability::MetadataRead),
             (SOURCE_DOWNLOAD, Capability::SourceDownload),
             (SOURCE_READ, Capability::SourceRead),
@@ -655,6 +667,7 @@ mod tests {
             &[
                 ASSETS_READ,
                 ASSETS_WRITE,
+                DATA_READ,
                 METADATA_READ,
                 SOURCE_DOWNLOAD,
                 SOURCE_READ,
@@ -666,6 +679,7 @@ mod tests {
             [
                 ASSETS_READ,
                 ASSETS_WRITE,
+                DATA_READ,
                 METADATA_READ,
                 SOURCE_DOWNLOAD,
                 SOURCE_READ,

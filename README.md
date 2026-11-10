@@ -17,7 +17,8 @@ preview may read its own artifact metadata, list and read the files of its
 pinned revision, ask the user to save one of them or the source archive, save
 one file as a new revision, and list, read, upload, delete, or ask the user to
 save its artifact's uploaded assets, each through a bound bridge after its own
-connection-scoped user grant; it cannot reach application data. One persistent job, `verify_revision`, re-checks a revision's stored files
+connection-scoped user grant; with its own grant it can also read, but not
+write, its artifact's application data. One persistent job, `verify_revision`, re-checks a revision's stored files
 against their digests in a separate worker process the operator starts
 (`artifree-server worker run`). Publishing, roles and sharing, build and
 conversion workers, sandboxed execution of untrusted code, and external
@@ -161,8 +162,10 @@ restoring a revision does not change the data, and `artifact duplicate
 --copy-data` gives a copy its own copy of it. Issued agent tokens and MCP tools
 (`get_data`, `set_data`, `update_data`, `delete_data`) may read and write it;
 there is no history, so an overwrite cannot be undone, and a purge erases it.
-**A page running in a preview cannot read or write this data** (the runtime
-bridge has no data capability), and it is not in a revision or an export.
+A page running in a preview can read this data only after you grant it
+`data.read` (`window.artifree.data.get({ path })`,
+[decision 0053](docs/decisions/0053-runtime-app-data.md)); **it cannot write
+it**. The data is not in a revision or an export.
 CLI and MCP users can poll `data get` or `get_data`
 and compare versions. HTTP and TypeScript clients can instead follow changes and
 list object member names ([decision 0040](docs/decisions/0040-data-changes-and-member-listing.md)).

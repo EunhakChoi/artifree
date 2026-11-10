@@ -332,7 +332,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","data.read","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -344,7 +344,7 @@ mod tests {
         let policy = RuntimePolicy::from_source(
             true,
             Some(
-                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","metadata.read","source.download","source.read","source.write"]}"#,
+                br#"{"sdk":"artifree.app.v1","capabilities":["assets.download","assets.read","assets.write","data.read","metadata.read","source.download","source.read","source.write"]}"#,
             ),
         )?;
         policy
@@ -680,6 +680,7 @@ mod tests {
         for other in [
             "assets.read",
             "assets.write",
+            "data.read",
             "metadata.read",
             "source.download",
             "source.read",

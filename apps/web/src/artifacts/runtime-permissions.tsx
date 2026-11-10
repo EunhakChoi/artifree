@@ -3,7 +3,8 @@ import { Button } from '@/components/ui/button';
 
 /**
  * The capabilities a preview can be granted, each with its own control: a
- * grant of one never implies another (decisions 0020, 0032, 0033 and 0045).
+ * grant of one never implies another (decisions 0020, 0032, 0033, 0045 and
+ * 0053).
  */
 const CAPABILITY_CONTROLS = [
   {
@@ -58,6 +59,16 @@ const CAPABILITY_CONTROLS = [
     // uploaded files, and a saved file stays uploaded content (decision 0045).
     warning:
       'Each download asks you first. Saved files are uploaded content; allowing downloads does not make them safe to open.',
+  },
+  {
+    name: 'data.read',
+    allow: 'Allow app data reading',
+    revoke: 'Revoke app data reading',
+    // Shown beside the control, because the grant gives the app the saved
+    // application data and preview network isolation is still absent
+    // (decision 0053, rule 3).
+    warning:
+      'Allowing this lets the app read the application data saved for this artifact. The preview is not isolated from the network, so the app could send what it reads elsewhere.',
   },
 ] as const;
 

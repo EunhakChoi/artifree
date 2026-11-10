@@ -25,7 +25,7 @@ const { requestKind } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
-/** The twelve frame route tails the client names, in their order. */
+/** The thirteen frame route tails the client names, in their order. */
 const EXPECTED_TAILS = [
   'metadata',
   'source/list',
@@ -39,11 +39,12 @@ const EXPECTED_TAILS = [
   'assets/delete',
   'assets/offer',
   'assets/download',
+  'data/read',
 ];
 
 /**
- * Tails that are not frame routes: a thirteenth name, and near misses of the
- * twelve, such as a longer tail, a shorter one, or one sharing a prefix.
+ * Tails that are not frame routes: a fourteenth name, and near misses of the
+ * thirteen, such as a longer tail, a shorter one, or one sharing a prefix.
  */
 const NON_FRAME_TAILS = [
   'assets/rename',
@@ -53,6 +54,9 @@ const NON_FRAME_TAILS = [
   'source',
   'source/list/x',
   'assets/listx',
+  'data',
+  'data/reads',
+  'data/read/x',
 ];
 
 /** The configured server address, without and with a path prefix. */
@@ -104,7 +108,7 @@ const HOST_MODULE =
 const GATE = 'apps/web/src/artifacts/request-gate.ts';
 const CLIENT_ROUTES = 'packages/client/dist/runtime-frame.js';
 
-it('The client names exactly the twelve recorded frame route tails', () => {
+it('The client names exactly the thirteen recorded frame route tails', () => {
   assert.deepEqual([...FRAME_ROUTE_TAILS], EXPECTED_TAILS);
 });
 

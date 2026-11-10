@@ -4,7 +4,7 @@ import type { RuntimeView } from '@artifree/contracts';
  * What every call a runtime view makes for its frame shares (decision 0052,
  * rule 5): the transport the client lends a call, the route and body of a
  * frame request, and the names of the frame routes. The client itself builds
- * the metadata route here, so this module, with all twelve route names, is in
+ * the metadata route here, so this module, with all thirteen route names, is in
  * the main bundle; the workspace's request gate reads the names there
  * (rule 9). The comparison of received bytes is kept out of it, in the
  * on-demand `runtime-bytes` module.
@@ -54,6 +54,7 @@ export const FRAME_ROUTES = {
   assetsDelete: 'assets/delete',
   assetsOffer: 'assets/offer',
   assetsDownload: 'assets/download',
+  dataRead: 'data/read',
 } as const;
 
 /** The tail of one frame route. */

@@ -28,6 +28,7 @@ const PINNED_LIMITS = {
   MAX_ASSET_BYTES: 5_242_880,
   MAX_LISTED_FILES: 256,
   MAX_LISTED_ASSETS: 64,
+  MAX_DATA_READ_BYTES: 1_048_576,
 };
 
 // A limit as a comparable value: a regular expression is its source text.
@@ -158,6 +159,7 @@ const SDK_PAIRS = [
   ['MAX_ASSET_BYTES', 'MAX_ASSET_BYTES'],
   ['MAX_LISTED_FILES', 'MAX_LISTED_FILES'],
   ['MAX_LISTED_ASSETS', 'MAX_LISTED_ASSETS'],
+  ['MAX_DATA_READ_BYTES', 'MAX_DATA_READ_BYTES'],
 ];
 
 for (const [sdkName, clientName] of SDK_PAIRS) {
@@ -196,6 +198,7 @@ const HOST_PAIRS = [
   ['MAX_WRITE', 'MAX_SOURCE_WRITE_BYTES'],
   ['MAX_WRITE', 'MAX_ASSET_UPLOAD_BYTES'],
   ['MAX_ASSET_PART', 'MAX_ASSET_PART_BYTES'],
+  ['MAX_DATA_READ', 'MAX_DATA_READ_BYTES'],
 ];
 
 for (const [hostName, clientName] of HOST_PAIRS) {
@@ -238,7 +241,8 @@ const OTHER_HOST_FILES = (await readdir(FRAME_CALLS))
 test('The host frame calls other than call.ts are scanned', () => {
   assert.ok(
     OTHER_HOST_FILES.includes('source.ts') &&
-      OTHER_HOST_FILES.includes('assets.ts'),
+      OTHER_HOST_FILES.includes('assets.ts') &&
+      OTHER_HOST_FILES.includes('data.ts'),
     `scanned: ${OTHER_HOST_FILES.join(', ')}`,
   );
 });

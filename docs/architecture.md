@@ -18,7 +18,7 @@ its requests through one gate that holds every read for a `429`'s
 `Retry-After` ([decision 0007](decisions/0007-live-web-workspace.md)). On the
 same store and service there are also application data, uploaded assets,
 persistent jobs with a worker process, user-isolated access for several users,
-and a runtime bridge through which an opted-in preview frame uses seven
+and a runtime bridge through which an opted-in preview frame uses eight
 separately granted capabilities; see [Implemented areas](#implemented-areas).
 
 ## Repository map
@@ -127,8 +127,10 @@ under a 15 s lease, and the server computes `isMe` and `sameTab` from the
 connection it issued. Events are ephemeral and never replayed to a late joiner;
 a restart empties every room; a frame cannot reach one yet (R15), and there
 are no roles
-([0034](decisions/0034-room-and-presence.md)). A frame cannot reach application
-data either (R14); the other capabilities remain proposed
+([0034](decisions/0034-room-and-presence.md)). With its own `data.read` grant a frame reads the
+application data of its artifact, as JSON text the host never parses
+([0053](decisions/0053-runtime-app-data.md)); it cannot write it yet (R14b).
+The other capabilities remain proposed
 ([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
@@ -172,6 +174,7 @@ in the Rust core.
 | `POST .../runtime-views/{view}/{generation}/assets/delete`                         | Delete one asset (`assets.write`)                       |
 | `POST .../runtime-views/{view}/{generation}/assets/offer`                          | Ask what an asset download would be (`assets.download`) |
 | `POST .../runtime-views/{view}/{generation}/assets/download`                       | The bytes of a confirmed asset download                 |
+| `POST .../runtime-views/{view}/{generation}/data/read`                             | Read the application data at a path (`data.read`)       |
 | `DELETE /v1/runtime-views/{view}/{generation}`                                     | Close one runtime view generation                       |
 | `POST /v1/runtime-sessions`                                                        | Open an ephemeral runtime connection                    |
 | `DELETE /v1/runtime-sessions/{session}`                                            | Close the connection and revoke its grants              |
@@ -307,7 +310,7 @@ migration.
   `http/runtime.rs`, the client's family module, re-export list and route
   name, the host's descriptor in `frame-calls/`, and the SDK's types and
   bootstrap. A new capability also needs its entry in `runtime_policy.rs`
-  (`CapabilitySet` holds eight bits and seven are used), its descriptors
+  (`CapabilitySet` holds eight bits and all eight are used; R14b widens it), its descriptors
   registered in `frame-rpc.ts`, the permission control, and the prompt if it
   hands the user a file. The client, the host and the frame each check what
   they receive on purpose. R13

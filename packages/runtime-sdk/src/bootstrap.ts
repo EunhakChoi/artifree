@@ -8,6 +8,7 @@ import type {
   AssetListing,
   AssetUploadReceipt,
   AssetUploadRequest,
+  DataValue,
   DownloadReceipt,
   RuntimeFailureCode,
   RuntimeMetadata,
@@ -45,6 +46,8 @@ const MAX_ASSET_PART_BYTES = 262_144;
 const MAX_ASSET_BYTES = 5_242_880;
 /** The most assets in one space (decision 0045, rule 4). */
 const MAX_LISTED_ASSETS = 64;
+/** The most bytes of JSON text one data read returns, 1 MiB (decision 0053, rule 15). */
+const MAX_DATA_READ_BYTES = 1_048_576;
 /** The media types an asset may have (decision 0045, rule 3). */
 const ASSET_TYPES: Record<AssetContentType, true> = {
   'text/plain': true,
@@ -511,6 +514,38 @@ function downloaded(
   return { started, assetId, bytes };
 }
 
+/**
+ * A data read's answer for `path`: the path echoed, a safe-integer version, and
+ * for a value that exists, JSON text within the read bound, parsed here; the
+ * root must exist and be an object (decision 0053, rules 5 and 13).
+ */
+function dataValue(value: unknown, path: string): DataValue | undefined {
+  if (!record(value)) return undefined;
+  const { path: echoed, dataVersion, exists, value: text } = value;
+  if (echoed !== path || !count(dataVersion) || typeof exists !== 'boolean')
+    return undefined;
+  if (!exists)
+    return path === '' || text !== null
+      ? undefined
+      : { path, dataVersion, exists, value: undefined };
+  // Each UTF-16 unit encodes to at least one byte, so a longer text is refused
+  // before it is encoded to count its bytes.
+  if (
+    typeof text !== 'string' ||
+    text.length > MAX_DATA_READ_BYTES ||
+    new TextEncoder().encode(text).byteLength > MAX_DATA_READ_BYTES
+  )
+    return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (path === '' && !record(parsed)) return undefined;
+  return { path, dataVersion, exists, value: parsed };
+}
+
 interface Waiting {
   readonly parse: (reply: Record<string, unknown>) => unknown;
   readonly resolve: (value: never) => void;
@@ -898,6 +933,20 @@ export function start(config: RuntimeInitialization): void {
     },
   });
 
+  const data = Object.freeze({
+    get(request: { readonly path: string }): Promise<DataValue> {
+      const fields = argument(request, ['path']);
+      if (fields === undefined) return invalid();
+      const { path } = fields;
+      if (typeof path !== 'string') return invalid();
+      return call(
+        { type: 'data.get', path },
+        (reply) => dataValue(reply.data, path),
+        { timeout: READ_TIMEOUT_MS },
+      );
+    },
+  });
+
   window.artifree = Object.freeze({
     currentMetadata(): Promise<RuntimeMetadata> {
       return call({ type: 'metadata' }, (reply) => metadata(reply.metadata), {
@@ -907,5 +956,6 @@ export function start(config: RuntimeInitialization): void {
     },
     source,
     assets,
+    data,
   });
 }
