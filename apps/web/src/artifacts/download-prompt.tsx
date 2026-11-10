@@ -9,9 +9,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import type { OfferDesk } from './offer-desk';
-
-/** The longest stretch of frame-supplied path text shown. */
-const SHOWN_PATH_CHARS = 80;
+import { offerText } from './offer-text';
 
 interface DownloadPromptProps {
   readonly desk: OfferDesk;
@@ -31,14 +29,8 @@ export function DownloadPrompt({ desk }: DownloadPromptProps) {
     desk.snapshot,
   );
   const decline = useRef<HTMLButtonElement>(null);
-  const sourcePath = offer?.kind === 'asset' ? undefined : offer?.path;
-  const shown =
-    sourcePath === undefined || sourcePath === null
-      ? undefined
-      : sourcePath.length > SHOWN_PATH_CHARS
-        ? `${sourcePath.slice(0, SHOWN_PATH_CHARS)}…`
-        : sourcePath;
-  const size = offer?.kind === 'asset' ? offer.bytes : offer?.size;
+  const text = offerText(offer);
+  const { sourcePath, size } = text;
   return (
     <Dialog
       open={offer !== undefined}
@@ -48,44 +40,24 @@ export function DownloadPrompt({ desk }: DownloadPromptProps) {
     >
       <DialogContent showCloseButton={false} initialFocus={decline}>
         <DialogHeader>
-          <DialogTitle>
-            {offer?.kind === 'asset'
-              ? 'Save uploaded file?'
-              : 'Save a file from this preview?'}
-          </DialogTitle>
-          <DialogDescription>
-            {offer?.kind === 'asset' ? (
-              <>
-                The preview asked to save a file uploaded to this artifact.
-                Saving it does not make it safe to open. Nothing is saved unless
-                you accept.
-              </>
-            ) : (
-              <>
-                The preview asked to save{' '}
-                {offer?.kind === 'archive'
-                  ? 'the source files of this revision as a ZIP archive'
-                  : 'a source file of this revision'}
-                . Nothing is saved unless you accept.
-              </>
-            )}
-          </DialogDescription>
+          <DialogTitle>{text.title}</DialogTitle>
+          <DialogDescription>{text.description}</DialogDescription>
         </DialogHeader>
         <dl className="grid gap-1 text-sm">
           <dt className="text-muted-foreground">Saved as</dt>
-          <dd className="truncate font-mono">{offer?.fileName}</dd>
-          {shown === undefined ? null : (
+          <dd className="truncate font-mono">{text.fileName}</dd>
+          {sourcePath === undefined ? null : (
             <>
               <dt className="text-muted-foreground">Source path</dt>
               <dd>
-                <code className="block truncate font-mono">{shown}</code>
+                <code className="block truncate font-mono">{sourcePath}</code>
               </dd>
             </>
           )}
-          {size === undefined || size === null ? null : (
+          {size === undefined ? null : (
             <>
               <dt className="text-muted-foreground">Size</dt>
-              <dd>{size} bytes</dd>
+              <dd>{size}</dd>
             </>
           )}
         </dl>
