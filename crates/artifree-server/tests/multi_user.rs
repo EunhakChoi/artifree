@@ -1268,6 +1268,7 @@ fn declared_routes() -> BTreeSet<String> {
     for source in [
         include_str!("../src/http.rs"),
         include_str!("../src/http/assets.rs"),
+        include_str!("../src/http/runtime.rs"),
         include_str!("../src/tokens.rs"),
         include_str!("../src/users.rs"),
     ] {
@@ -3072,6 +3073,7 @@ fn request_handlers_open_connections_and_inboxes_only_through_the_confirmed_func
     // registering. The registering functions alone do not.
     for (file, source) in [
         ("http.rs", include_str!("../src/http.rs")),
+        ("http/runtime.rs", include_str!("../src/http/runtime.rs")),
         ("mcp.rs", include_str!("../src/mcp.rs")),
     ] {
         for primitive in [
@@ -3101,6 +3103,7 @@ fn every_registration_that_outlives_a_request_is_confirmed_against_the_generatio
     assert_eq!(confirmations(include_str!("../src/changes.rs")), 1);
     for (file, source) in [
         ("http.rs", include_str!("../src/http.rs")),
+        ("http/runtime.rs", include_str!("../src/http/runtime.rs")),
         ("mcp.rs", include_str!("../src/mcp.rs")),
         ("operations.rs", include_str!("../src/operations.rs")),
         ("changes.rs", include_str!("../src/changes.rs")),
