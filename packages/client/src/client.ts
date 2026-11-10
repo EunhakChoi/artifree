@@ -64,6 +64,8 @@ import {
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError, RuntimeConnectionReplacedError } from './errors.js';
 import type * as RuntimeSource from './runtime-source.js';
+import { FRAME_ROUTES, frameBody, frameRoute } from './runtime-frame.js';
+import type { FrameTransport } from './runtime-frame.js';
 import type { FollowDataOptions } from './follow-data.js';
 import type {
   RuntimeDownloadTarget,
@@ -1746,9 +1748,9 @@ export class ArtifreeClient {
     this.requireViewSession(view);
     const metadata = await this.json(
       'POST',
-      `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/metadata`,
+      frameRoute(view, FRAME_ROUTES.metadata),
       parseRuntimeMetadata,
-      { body: { initialization: view.initialization }, signal: options.signal },
+      { body: frameBody(view, {}), signal: options.signal },
     );
     this.requireViewSession(view);
     if (metadata.artifact_id !== view.artifact_id)
@@ -1775,10 +1777,7 @@ export class ArtifreeClient {
    */
   async runtimeCall<T>(
     view: Pick<RuntimeView, 'session_id'>,
-    run: (
-      source: typeof RuntimeSource,
-      frame: RuntimeSource.FrameTransport,
-    ) => Promise<T>,
+    run: (source: typeof RuntimeSource, frame: FrameTransport) => Promise<T>,
   ): Promise<T> {
     this.requireViewSession(view);
     let source: typeof RuntimeSource;

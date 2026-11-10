@@ -2,7 +2,7 @@ import type { RoomEvent, RoomMember, RoomSnapshot } from '@artifree/contracts';
 import type { ArtifreeClient } from './client.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord } from './responses.js';
-import type { FrameTransport } from './runtime-source.js';
+import type { FrameTransport } from './runtime-frame.js';
 
 /**
  * Rooms and presence (decision 0034). A room belongs to one artifact and
