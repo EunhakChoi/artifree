@@ -151,25 +151,31 @@ the next call has fewer places to touch.
 
 ### Limits
 
-10. Shared limits are pinned, not copied by hand. The bounds that more than
-    one layer writes out are: the retry id pattern (8 to 36 characters of
-    `A-Z a-z 0-9 _ -`), the asset id pattern (64 lowercase hexadecimal
-    digits), the source part size (1,048,576 bytes), the source write size
-    (1,048,576), the asset part size (262,144), the frame asset upload size
-    (1,048,576), the asset size (5,242,880), the listed file count (256) and
-    the listed asset count (64). Their values stay today's.
+10. Shared limits cannot drift. The bounds that more than one layer writes
+    out are: the retry id pattern (8 to 36 characters of `A-Z a-z 0-9 _ -`),
+    the asset id pattern (64 lowercase hexadecimal digits), the source part
+    size (1,048,576 bytes), the source write size (1,048,576), the asset part
+    size (262,144), the frame asset upload size (1,048,576), the asset size
+    (5,242,880), the listed file count (256) and the listed asset count (64).
+    Their values stay today's.
     - The client defines each once in `packages/client/src/runtime-limits.ts`
       and exports it; the client's own modules use that definition.
-    - The host and the SDK bootstrap keep their literals (rule 2). The host
-      does not import a value from the client: a value shared by the host
-      chunk and the client's runtime chunk makes the bundler split a shared
-      chunk that every page preloads, as
-      [0033](0033-runtime-source-write.md) records.
+    - The on-demand host modules (`frame-rpc.ts` and `frame-calls/`) keep
+      their literals and import no limit from the client. Each still applies
+      its bound itself. The reason is the bundle, not rule 2: with the import
+      the build gained a chunk that `index.html` preloads (the measurement is
+      under "Alternatives considered"). The request gate's import of the
+      route tails (rule 9) is entry code and is not affected.
+    - The SDK bootstrap keeps its literals (rule 2).
     - A test compares every client constant, every host literal and every SDK
-      literal with the bound in the generated API schema where the schema states it (a
-      `maximum`, a `maxLength`, a `maxItems`), and with each other where it
-      does not; the pull request lists which is which. A changed value in any
-      one place fails the test.
+      literal with the bound in the generated API schema where the schema
+      states it (a `maximum`, a `maxLength`, a `maxItems`), and with the
+      client's constant where it does not; the pull request lists which is
+      which. A changed value in any one place fails the test.
+    - This slice does not reduce the places a new limit is written: the host
+      and the SDK each keep a copy. It removes the client's scattered copies
+      and makes a mismatch between the three layers fail a test. Rule 13's
+      count says so.
     - Not shared, because they differ by design: the two download name bounds
       (128 in the source client, 100 in the asset client and the server), the
       media type length the host applies, and each layer's pending cap and
@@ -200,9 +206,11 @@ the next call has fewer places to touch.
       thirteenth as before; the prompt strings equal the recorded ones for the
       three kinds; each limit equals its pinned value; and `runtime-bytes.ts`
       is imported only by the two modules rule 5 names and is not exported
-      from the package index.
-    - The slice removes repetition and adds no empty port and no general
-      wrapper with a single user. The pull request reports the lines removed
+      from the package index; and no on-demand host module imports a limit
+      from the client (rule 10).
+    - The slice removes repetition, or for R13d makes the remaining copies
+      unable to drift, and adds no empty port and no general wrapper with a
+      single user. The pull request reports the lines removed
       and added outside tests.
     - The size of the web entry bundle, of the on-demand host chunk, of the
       client's on-demand runtime chunk and of the generated bootstrap is
@@ -241,7 +249,16 @@ noted.
   bounds, which is enough to pin them.
 - **Let the host trust the client's checks.** Rejected by rule 2.
 - **Import the limits into the host from the client.** Rejected after
-  measuring it: the build gained a shared chunk preloaded by every page.
+  measuring the R13d implementation (built files, bytes). On `main` the web
+  entry bundle was 543,902 and `index.html` preloaded no chunk. With
+  `frame-calls/source.ts` and `frame-calls/assets.ts` importing the limits
+  from `@artifree/client`, the entry bundle was 543,557 and the build gained
+  `errors-*.js` (598), preloaded by `index.html`: 253 bytes more in total and
+  one more request on every load. With the host keeping its literals the entry
+  bundle is 543,939 and no chunk is added. [0033](0033-runtime-source-write.md)
+  already kept the host from importing a value from the client for the bundle's
+  sake. Why this import moves the error module, and whether another placement
+  of the limits would avoid it, was not investigated.
 - **Import the limits into the SDK bootstrap.** Rejected: the bootstrap is
   embedded in every opted-in preview and stays self-contained; a test can pin
   its literals.
