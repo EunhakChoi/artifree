@@ -16,6 +16,9 @@ Roadmap: R13. Builds on [0019](0019-runtime-metadata-bridge.md),
 > Amended 2026-11-10 (documentation pull request): rule 5 puts the byte
 > comparison in its own on-demand module, and rule 12 records the client's
 > on-demand chunk and guards that module's importers.
+>
+> Amended 2026-11-11 (documentation pull request): in rule 10 the host keeps
+> its literals, pinned by the test, instead of importing them from the client.
 
 ## Context
 
@@ -156,11 +159,14 @@ the next call has fewer places to touch.
     (1,048,576), the asset size (5,242,880), the listed file count (256) and
     the listed asset count (64). Their values stay today's.
     - The client defines each once in `packages/client/src/runtime-limits.ts`
-      and exports it; the host imports it instead of repeating the literal.
-      The host still applies the bound itself (rule 2).
-    - The SDK bootstrap keeps its literals (rule 2).
-    - A test compares every client constant and every SDK literal with the
-      bound in the generated API schema where the schema states it (a
+      and exports it; the client's own modules use that definition.
+    - The host and the SDK bootstrap keep their literals (rule 2). The host
+      does not import a value from the client: a value shared by the host
+      chunk and the client's runtime chunk makes the bundler split a shared
+      chunk that every page preloads, as
+      [0033](0033-runtime-source-write.md) records.
+    - A test compares every client constant, every host literal and every SDK
+      literal with the bound in the generated API schema where the schema states it (a
       `maximum`, a `maxLength`, a `maxItems`), and with each other where it
       does not; the pull request lists which is which. A changed value in any
       one place fails the test.
@@ -217,7 +223,7 @@ noted.
 | R13a  | Client: one frame transport, route tails and digest comparison              | 5       |
 | R13b  | Host: the call registry, one download flow, the gate's pattern (after R13a) | 6, 7, 9 |
 | R13c  | Host: one offer description for the prompt                                  | 8       |
-| R13d  | Limits defined once in the client, imported by the host, pinned by a test   | 10      |
+| R13d  | Limits defined once in the client; host and SDK literals pinned by a test   | 10      |
 | R13e  | Server: frame handlers in their own module with one call builder            | 11      |
 
 ## Alternatives considered
@@ -234,6 +240,8 @@ noted.
   rules already carry. The generated API schema already states most of the
   bounds, which is enough to pin them.
 - **Let the host trust the client's checks.** Rejected by rule 2.
+- **Import the limits into the host from the client.** Rejected after
+  measuring it: the build gained a shared chunk preloaded by every page.
 - **Import the limits into the SDK bootstrap.** Rejected: the bootstrap is
   embedded in every opted-in preview and stays self-contained; a test can pin
   its literals.
