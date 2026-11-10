@@ -5,13 +5,15 @@
 > re-verification ([quality](../quality.md#browser-engines)).
 
 Date: 2026-11-10. Status: **proposed** (specification only; no code).
-Rule 5 was amended before any code merged: the byte comparison moved to its
-own on-demand module.
 Roadmap: R13. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md),
 [0032](0032-runtime-source-read-and-download.md),
 [0033](0033-runtime-source-write.md), [0045](0045-uploaded-assets.md) and
 [0051](0051-roadmap-and-architecture-review.md).
+
+> Amended 2026-11-10 (documentation pull request): rule 5 puts the byte
+> comparison in its own on-demand module, and rule 12 records the client's
+> on-demand chunk and guards that module's importers.
 
 ## Context
 
@@ -85,21 +87,26 @@ the next call has fewer places to touch.
 
 ### Client
 
-5. One frame transport. `FrameTransport`, one route builder and one body
-   builder live in a new `packages/client/src/runtime-frame.ts`. The same
-   module names each of the twelve frame route tails once. One function that
-   compares received bytes with a stated size and SHA-256 lives in
-   `packages/client/src/runtime-bytes.ts`, which only the on-demand runtime
-   modules import: `runtime-frame.ts` is imported by the client class and so
-   sits in the entry bundle, and the first implementation measured about 300
-   bytes of on-demand comparison code there, which rule 12 does not allow.
-   `runtime-source.ts`,
-   `runtime-assets.ts` and the metadata read in `client.ts` build their routes
-   and bodies with it and no longer write them out; `RuntimeAssetsFrame` is
-   removed. Everything the package index exports keeps its name, signature and
-   behavior, including `MAX_DOWNLOAD_NAME_CHARS` (128, looser than the
-   server's 100 on purpose). A digest that cannot be computed still refuses
-   the bytes in both families, with the errors each family produces today.
+5. One frame transport, in two modules.
+   - `packages/client/src/runtime-frame.ts` holds `FrameTransport`, one route
+     builder, one body builder and the name of each of the twelve frame route
+     tails. `runtime-source.ts`, `runtime-assets.ts` and the metadata read in
+     `client.ts` build their routes and bodies with `runtime-frame.ts` and no
+     longer write them out. The client class imports this module, so it is in
+     the web entry bundle. The tails are there on purpose: the request gate
+     of rule 9 reads them in the entry bundle. Until R13b removes the gate's
+     own pattern, the entry bundle carries both; that growth is the explained
+     kind of rule 12.
+   - `packages/client/src/runtime-bytes.ts` holds one function that compares
+     received bytes with a stated size and SHA-256, using the client's
+     existing `sha256Hex`. Only `runtime-source.ts` and `runtime-assets.ts`
+     import it; `client.ts` does not, and the package index does not export
+     it, so the comparison stays out of the entry bundle.
+   - `RuntimeAssetsFrame` is removed. Everything the package index exports
+     keeps its name, signature and behavior, including
+     `MAX_DOWNLOAD_NAME_CHARS` (128, looser than the server's 100 on purpose).
+     A digest that cannot be computed still refuses the bytes in both
+     families, with the errors each family produces today.
 
 ### Host
 
@@ -183,12 +190,15 @@ the next call has fewer places to touch.
       the existing host tests; the registry's set of call types equals the
       recorded ten; the gate accepts exactly the twelve tails and classifies a
       thirteenth as before; the prompt strings equal the recorded ones for the
-      three kinds; and each limit equals its pinned value.
+      three kinds; each limit equals its pinned value; and `runtime-bytes.ts`
+      is imported only by the two modules rule 5 names and is not exported
+      from the package index.
     - The slice removes repetition and adds no empty port and no general
       wrapper with a single user. The pull request reports the lines removed
       and added outside tests.
-    - The size of the web entry bundle, of the on-demand host chunk and of the
-      generated bootstrap is recorded before and after. The entry bundle does
+    - The size of the web entry bundle, of the on-demand host chunk, of the
+      client's on-demand runtime chunk and of the generated bootstrap is
+      recorded before and after, as built file sizes in bytes. The entry bundle does
       not grow because of on-demand code; any growth is explained.
 13. When R13 is complete, this record states how many hand-written files a new
     call in an existing family and a new family touch, measured on the code,
@@ -225,6 +235,9 @@ noted.
 - **Import the limits into the SDK bootstrap.** Rejected: the bootstrap is
   embedded in every opted-in preview and stays self-contained; a test can pin
   its literals.
+- **Keep the byte comparison in `runtime-frame.ts`.** Rejected: that module
+  is in the entry bundle, and the comparison is used only when a runtime view
+  downloads something.
 - **Derive the gate's pattern from the host registry.** Rejected: the gate is
   in the entry bundle and the registry is loaded on demand.
 
