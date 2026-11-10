@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import type { DataChanges } from './data-changes';
 import type { FrameRpc } from './frame-rpc';
 import type * as RuntimeHost from './runtime-host';
 
@@ -15,6 +16,11 @@ const PREVIEW_SANDBOX =
 interface RuntimeFrameProps {
   readonly client: ArtifreeClient;
   readonly view: RuntimeView;
+  /**
+   * The feed's data changes; a view holding `data.read` forwards them (0053,
+   * rule 16).
+   */
+  readonly dataChanges: DataChanges;
   /** Local monotonic deadline, conservatively measured from dispatch. */
   readonly deadline: number;
   readonly onClose: () => void;
@@ -37,6 +43,7 @@ function record(value: unknown): value is Record<string, unknown> {
 export function RuntimeFrame({
   client,
   view,
+  dataChanges,
   deadline,
   onClose,
   title,
@@ -73,11 +80,13 @@ export function RuntimeFrame({
     let active = true;
     let port: MessagePort | undefined;
     let rpc: FrameRpc | undefined;
+    let stopHints: (() => void) | undefined;
     const stop = (): void => {
       if (!active) return;
       active = false;
       port?.close();
       rpc?.close();
+      stopHints?.();
       desk?.withdraw();
     };
     close.current = stop;
@@ -119,6 +128,19 @@ export function RuntimeFrame({
       candidate.onmessage = (message: MessageEvent<unknown>) => {
         if (active) served.handle(message.data);
       };
+      // The change hint (decision 0053, rules 16 and 17): only a view that
+      // holds data.read is told, and only while this connection lasts. A
+      // grant change or a new source replaces the view and this component.
+      if (view.granted.includes('data.read')) {
+        const hint = host.createDataHint((message) => {
+          if (active) candidate.postMessage(message);
+        });
+        const unsubscribe = dataChanges.subscribe(view.artifact_id, hint.offer);
+        stopHints = () => {
+          unsubscribe();
+          hint.close();
+        };
+      }
     };
     window.addEventListener('message', connect);
     const expiry = window.setTimeout(
@@ -131,7 +153,7 @@ export function RuntimeFrame({
       stop();
       revokeTimer.current = window.setTimeout(onClose, 0);
     };
-  }, [client, view, deadline, onClose, host, desk]);
+  }, [client, view, deadline, onClose, host, desk, dataChanges]);
 
   if (view.enabled && hostFailed)
     return (

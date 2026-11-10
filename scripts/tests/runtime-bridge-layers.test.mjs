@@ -9,8 +9,8 @@ import { build } from 'esbuild';
 // of what the bridge carries, and these tests compare those lists.
 //
 // Rule 21 also pairs the events the host can send with the events the SDK
-// handles. The frame bridge carries no event before R14c, so there is nothing
-// to pair yet and no event test is written here; R14c adds that comparison.
+// handles. R14c adds that event pairing below, with data.changed as the one
+// event the frame bridge carries.
 
 const readSource = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
@@ -86,6 +86,51 @@ test('Each call the SDK sends is one the host serves', () => {
     sent.filter((type) => !FRAME_CALL_TYPES.includes(type)),
     [],
   );
+});
+
+// The change hint module, bundled as the web app ships it: the events the host
+// sends a frame and the sender of its change hints.
+const hints = await build({
+  entryPoints: [
+    fileURLToPath(
+      new URL('../../apps/web/src/artifacts/data-hint.ts', import.meta.url),
+    ),
+  ],
+  bundle: true,
+  format: 'esm',
+  platform: 'neutral',
+  write: false,
+});
+const { FRAME_EVENTS, createDataHintSender } = await import(
+  `data:text/javascript;base64,${Buffer.from(hints.outputFiles[0].text).toString('base64')}`
+);
+
+test('Each event the host can send is one the SDK handles, and the reverse', () => {
+  // The SDK's guards compare an event name as `event.data.event === 'name'`.
+  const handled = [
+    ...bootstrap.matchAll(/event\.data\.event === '([a-z]+\.[A-Za-z]+)'/g),
+  ].map(([, event]) => event);
+  assert.deepEqual(absentFrom(FRAME_EVENTS, handled), []);
+  assert.deepEqual(absentFrom(handled, FRAME_EVENTS), []);
+  // data.changed of R14c. The count keeps two empty lists from agreeing.
+  assert.equal(FRAME_EVENTS.length, 1);
+
+  // The hint the host sends names one of those events. The schedule runs its
+  // callback at once, so the single offer is sent without waiting.
+  const sent = [];
+  const sender = createDataHintSender({
+    send: (message) => {
+      sent.push(message);
+    },
+    schedule: (run) => {
+      run();
+      return () => {};
+    },
+  });
+  sender.offer(1);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, 'event');
+  assert.deepEqual(absentFrom([sent[0].event], FRAME_EVENTS), []);
 });
 
 const policy = await readSource(

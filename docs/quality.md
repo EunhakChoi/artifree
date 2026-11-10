@@ -790,7 +790,7 @@ scaffold's automated accessibility checks cannot establish every accessibility
 requirement. Npm/Cargo advisory scans detect known reports, not all vulnerabilities.
 
 Not yet covered, because the behavior does not exist: multi-user roles and
-revocation (a viewer's refused save included), a frame's notice of application data changes, its access to rooms, view replacement, publishing, and resource limits for artifact
+revocation (a viewer's refused save included), a frame's access to rooms, view replacement, publishing, and resource limits for artifact
 scripts. Agent runs with Codex and Pi are manual checks, not CI: they need an
 agent account and model calls. Multi-user isolation is tested with the owner and two registered users in process (decision 0036); OAuth, roles, sharing, and an identity provider are not tested because they do not exist. The
 crash test kills the process after a commit; it does not simulate power loss

@@ -9,6 +9,7 @@ import {
 import { cursorOf } from '@artifree/client';
 import type { ArtifreeClient, ChangeFeedEvent } from '@artifree/client';
 import type { Artifact } from '@artifree/contracts';
+import { DataChangeHub, type DataChanges } from './data-changes';
 import { usePageVisible } from './page-visibility';
 
 /** Whether commits made elsewhere reach this page. */
@@ -241,6 +242,11 @@ export interface LiveWorkspace extends Knowledge {
    * an answer that settles in between is not taken as current.
    */
   readonly isCurrent: (epoch: number) => boolean;
+  /**
+   * The feed's `data_changed` changes, per artifact, which a preview forwards
+   * to its frame (decision 0053, rule 16). The page's own state ignores them.
+   */
+  readonly dataChanges: DataChanges;
 }
 
 /**
@@ -256,10 +262,12 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
   // The epoch as of the last event received, which the reducer reaches
   // once it has applied every event dispatched so far.
   const epochNow = useRef(START.epoch);
+  const [dataChanges] = useState(() => new DataChangeHub());
   const feed = useChangeFeed(client, visible, {
     onEvent: (event) => {
       epochNow.current = epochAfter(epochNow.current, event);
       learn({ type: 'event', event });
+      dataChanges.follow(event);
     },
     onTrouble: () => learn({ type: 'read anyway' }),
   });
@@ -287,7 +295,14 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
     (epoch: number) => epoch === epochNow.current,
     [],
   );
-  return { ...state, feed, learn: learnRead, learnInTrash, isCurrent };
+  return {
+    ...state,
+    feed,
+    learn: learnRead,
+    learnInTrash,
+    isCurrent,
+    dataChanges,
+  };
 }
 
 interface FeedHandlers {

@@ -42,6 +42,7 @@ import {
 } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import type { DataChanges } from './data-changes';
 import { toEditable } from './editable-text';
 import type { EditableText } from './editable-text';
 import { HandoffDialog } from './handoff-dialog';
@@ -113,6 +114,8 @@ type Kind = 'text' | 'paths';
 
 interface SourcePanelProps {
   client: ArtifreeClient;
+  /** The feed's data changes, forwarded by the saved preview. */
+  dataChanges: DataChanges;
   read: SourceRead;
   /** The page's reset count now. */
   resets: number;
@@ -155,6 +158,7 @@ type EndAction =
  */
 export function SourcePanel({
   client,
+  dataChanges,
   read,
   resets,
   isCurrent,
@@ -594,6 +598,7 @@ export function SourcePanel({
           {showPreview && !replaced && !inTrash ? (
             <PreviewFrame
               client={client}
+              dataChanges={dataChanges}
               artifactId={artifact.id}
               revision={made}
               epoch={baseEpoch}

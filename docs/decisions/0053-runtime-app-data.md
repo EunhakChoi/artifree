@@ -4,12 +4,10 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-11. Status: **partially implemented**: R14a (`data.read` and
-`data.get`) and R14b (`data.write`, `data.set`, `data.update` and
-`data.remove`) are implemented in Chromium, Firefox pending re-verification;
-R14c is proposed and has no code.
-Amends rule 6 of [0040](0040-data-changes-and-member-listing.md) when R14c
-merges (rule 17).
+Date: 2026-11-11. Status: **implemented** in Chromium, Firefox pending re-verification: R14a
+(`data.read` and `data.get`), R14b (`data.write`, `data.set`, `data.update`
+and `data.remove`) and R14c (the change hint and `data.onChange`).
+Amends rule 6 of [0040](0040-data-changes-and-member-listing.md) (rule 17).
 Roadmap: R14. Builds on [0020](0020-runtime-grants.md),
 [0031](0031-app-data.md), [0033](0033-runtime-source-write.md),
 [0040](0040-data-changes-and-member-listing.md),

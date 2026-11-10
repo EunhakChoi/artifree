@@ -1,5 +1,6 @@
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
+import { createDataHintSender, type DataHint } from './data-hint';
 import {
   DATA_WRITE_BURST,
   DATA_WRITE_PER_MINUTE,
@@ -10,6 +11,7 @@ import { OfferDesk } from './offer-desk';
 import { pageSaver } from './save-blob';
 
 export { DownloadPrompt } from './download-prompt';
+export type { DataHint } from './data-hint';
 
 /**
  * What a runtime frame's calls need on the workspace side (decision 0032):
@@ -57,5 +59,22 @@ export function createRpc(options: {
     now: () => performance.now(),
     deadline: options.deadline,
     send: options.send,
+  });
+}
+
+/**
+ * The change hints of one frame whose view holds `data.read` (decision 0053,
+ * rules 16 and 17). The timer is the global `setTimeout`, so a test can
+ * replace it.
+ */
+export function createDataHint(
+  send: (message: Record<string, unknown>) => void,
+): DataHint {
+  return createDataHintSender({
+    send,
+    schedule: (callback, delayMs) => {
+      const timer = setTimeout(callback, delayMs);
+      return () => clearTimeout(timer);
+    },
   });
 }

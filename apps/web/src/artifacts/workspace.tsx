@@ -516,6 +516,7 @@ function WorkspaceBody({
               <ArtifactDetail
                 key={selectedId}
                 client={client}
+                dataChanges={live.dataChanges}
                 artifactId={selectedId}
                 epoch={epoch}
                 resets={resets}
