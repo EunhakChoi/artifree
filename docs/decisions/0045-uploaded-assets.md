@@ -1041,3 +1041,7 @@ This completes R09d. Chromium is verified; Firefox re-verification is pending
   read) would bound memory before the size comparison. The server lists the
   whole asset space to find one asset for an offer or a download, as `assets.read`
   does; a by-id store lookup would avoid that.
+  The roadmap's R13 row takes up the repeated bridge code and the capability
+  set width before the next capability is added
+  ([0051](0051-roadmap-and-architecture-review.md)); the capped read and the
+  by-id lookup stay follow-ups of this record.

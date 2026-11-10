@@ -4,16 +4,18 @@ Artifree is in early development: local HTML artifacts work end to end
 (decision 0003), including MCP tools for agents (decision 0004), and an
 opted-in preview can read its own metadata, list and read its own pinned
 source, ask the user to save a file, and, under a separate edit grant, save one
-file as a new revision, and, under their own grants, list and read, or upload and
-delete, its own uploaded assets, each with its own connection grant (decisions
+file as a new revision, and, under their own grants, list and read, upload and
+delete, or ask the user to save, its own uploaded assets, each with its own connection grant (decisions
 0019, 0020, 0032, 0033 and 0045). Tabs can also share an in-memory room for presence and
 ephemeral events through HTTP and the TypeScript client (decision 0034); a
-frame cannot reach it. Other runtime capabilities remain proposed. Keep implemented and proposed behavior
+frame cannot reach it or application data. Other runtime capabilities remain proposed. Keep implemented and proposed behavior
 explicitly separate in code, UI, docs, and completion reports.
 
 Read `docs/roadmap.md` before starting the next feature. It records PR-sized
-scope, dependencies, acceptance checks, and the requirement to trace relevant
-analysis back to original evidence. Keep private evidence outside public files.
+scope, dependencies, acceptance checks, the recommended order, and the
+requirement to trace relevant analysis back to original evidence.
+`docs/architecture.md` describes the structure and where new code belongs
+(decision 0051). Keep private evidence outside public files.
 
 Follow [the contribution guide](.github/CONTRIBUTING.md) for the verification
 workflow and PR review rules, and use `.github/PULL_REQUEST_TEMPLATE.md`.

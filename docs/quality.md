@@ -786,7 +786,7 @@ scaffold's automated accessibility checks cannot establish every accessibility
 requirement. Npm/Cargo advisory scans detect known reports, not all vulnerabilities.
 
 Not yet covered, because the behavior does not exist: multi-user roles and
-revocation (a viewer's refused save included), broader runtime capabilities, publishing, and resource limits for artifact
+revocation (a viewer's refused save included), a frame's access to application data and rooms, view replacement, publishing, and resource limits for artifact
 scripts. Agent runs with Codex and Pi are manual checks, not CI: they need an
 agent account and model calls. Multi-user isolation is tested with the owner and two registered users in process (decision 0036); OAuth, roles, sharing, and an identity provider are not tested because they do not exist. The
 crash test kills the process after a commit; it does not simulate power loss
@@ -804,11 +804,22 @@ HTTP, CLI, and web share one client contract and one application service.
 
 The remaining diagnostic is that every module hides a design decision: the
 documents, models, tools, build, and export modules are still
-placeholders; jobs and application data have their first behavior (decisions 0030 and 0031). The `ArtifactStore` port also deliberately exposes request
+placeholders; jobs, application data and uploaded assets have their first behavior (decisions 0030, 0031 and 0045). The `ArtifactStore` port also deliberately exposes request
 fingerprints, because replay must commit atomically with the revision. Reach
 10/10 by giving each placeholder a narrow behavioral interface only when its
 first behavior is implemented. This score describes design, not production
 readiness.
+
+The review after R09 ([decision 0051](decisions/0051-roadmap-and-architecture-review.md))
+did not recompute the score. It kept the layering and recorded where the code
+is under strain: one runtime capability is spread over about twelve
+hand-written files, every user-owned state is keyed by actor and artifact
+ahead of a sharing model, background work has no owner in the server process,
+framework-free state machines sit in the server crate while two core modules
+are still "planned" stubs, and four files of over two thousand lines change
+with almost every feature. The [architecture document](architecture.md#structural-notes)
+lists them with the roadmap row that addresses each. They are guidance for new
+work, not a migration, and no check enforces them yet.
 
 Private upload coverage (partial R09a, 0045): provider asset tests exercise
 exact-byte reopening, equal-byte logical charges, independent versions,

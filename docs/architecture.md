@@ -1,7 +1,9 @@
 # Artifree architecture
 
-Status: early development, 2026-10-31. Local HTML artifacts work end to end;
-see [decision 0003](decisions/0003-local-html-artifact-slice.md).
+Status: early development, 2026-11-10. Local HTML artifacts work end to end;
+see [decision 0003](decisions/0003-local-html-artifact-slice.md). This document
+describes structure. What each slice implemented and what remains is recorded in
+the [roadmap](roadmap.md) and the [decision records](decisions/).
 
 The [interactive HTML design](architecture.html) maps the design to actual source
 paths and marks each module and flow step as working, scaffold, or planned.
@@ -13,7 +15,11 @@ workspace, stored in local SQLite. Clients can follow committed changes as an
 event stream ([decision 0006](decisions/0006-change-feed.md)), and the web
 workspace follows it, keeping pinned previews and unsaved drafts, and sends
 its requests through one gate that holds every read for a `429`'s
-`Retry-After` ([decision 0007](decisions/0007-live-web-workspace.md)).
+`Retry-After` ([decision 0007](decisions/0007-live-web-workspace.md)). On the
+same store and service there are also application data, uploaded assets,
+persistent jobs with a worker process, user-isolated access for several users,
+and a runtime bridge through which an opted-in preview frame uses seven
+separately granted capabilities; see [Implemented areas](#implemented-areas).
 
 ## Repository map
 
@@ -23,13 +29,13 @@ apps/
   cli/                 TypeScript · artifact commands and describe
 packages/
   contracts/           generated TypeScript wire types and build inventory
-  client/              HTTP API v1 client with runtime response checks
-  runtime-sdk/         bound metadata, source list/read and download request; other capabilities proposed
+  client/              HTTP API v1 client with runtime response checks; opt-in outbox entry point
+  runtime-sdk/         frame side of the runtime bridge: metadata, source and uploaded assets; data and rooms proposed
 crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
-  artifree-core/       artifact service, owner policy, job and worker logic; documents planned
-  artifree-ports/      artifact and job store contracts; other families planned
-  artifree-providers/  SQLite artifact store, ZIP source archives; models, tools, build, export planned
+  artifree-core/       artifact, data and asset services, asset validation, rooms, jobs and worker logic; documents planned
+  artifree-ports/      artifact, data, asset, job, token and user store contracts
+  artifree-providers/  SQLite stores, backup and restore, ZIP source archives, execution-host inspection; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
   artifree-server/     composition root, Axum HTTP API, MCP endpoint, preview origin
 contracts/generated/  generated JSON Schemas (descriptor, API v1), MCP tool catalog, inventory snapshot
@@ -109,15 +115,21 @@ artifact service with the view's revision as the base and a key in a namespace
 only a frame can produce, reads the new revision back, and every side compares
 the receipt with the bytes it sent. The save moves the head, so the next view
 needs a new grant
-([0033](decisions/0033-runtime-source-write.md)). R12 adds rooms, which
+([0033](decisions/0033-runtime-source-write.md)). R09d adds `assets.read`,
+`assets.write` and `assets.download` in the same way, each its own declaration,
+consent and grant: reads are assembled from parts and verified by digest,
+writes carry the frame's own asset base and a key only a frame can produce, and
+a download asks the server for an offer before the user is prompted
+([0045](decisions/0045-uploaded-assets.md)). R12 adds rooms, which
 are not a capability and not storage: an in-memory, bounded room per actor and
 artifact, where each runtime connection (a tab) joins as named participants
 under a 15 s lease, and the server computes `isMe` and `sameTab` from the
 connection it issued. Events are ephemeral and never replayed to a late joiner;
-a restart empties every room; a frame cannot reach one yet, and there are no
-roles or users
-([0034](decisions/0034-room-and-presence.md)). The other capabilities
-remain proposed ([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
+a restart empties every room; a frame cannot reach one yet (R15), and there
+are no roles
+([0034](decisions/0034-room-and-presence.md)). A frame cannot reach application
+data either (R14); the other capabilities remain proposed
+([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
 ## Local and server operation
@@ -181,7 +193,12 @@ in the Rust core.
 | `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)           |
 | `GET /v1/artifacts/{id}/data/members`                                              | One page of an object's member names (`?path=`)         |
 
-Private upload HTTP routes (0045, partial R09a): `GET/POST
+The table lists the main routes. The contract in
+`crates/artifree-contracts/src/api.rs` and the generated schema are
+authoritative; restore, duplicate, export, purge, content cleanup, users,
+tokens, rooms and the outbox binding are described in their decision records.
+
+Private upload HTTP routes (0045): `GET/POST
 /v1/artifacts/{id}/assets`, `GET/DELETE /v1/artifacts/{id}/assets/{asset_id}`,
 and `GET /v1/artifacts/{id}/assets/{asset_id}/content`. Upload and delete require
 an `Idempotency-Key` and `base_asset_version`. UTF-8 plain text/CSV and
@@ -190,8 +207,9 @@ complete sequential JPEG (an Artifree entropy walk, then `zune-jpeg`) are
 admitted; other JPEG variants are `invalid_asset` (decision 0045, rule 3). Historical
 MIME metadata and matching receipts remain readable/replayable before current
 admission policy. Reads are authenticated scoped attachments with
-no-store/nosniff; there is no public URL or frame access. The client calls, the MCP tools, the CLI
-commands and the duplicate asset copy do exist. The [content policy](asset-validation.md) records these limits.
+no-store/nosniff; there is no public URL, and a frame reaches assets only through
+the runtime view routes above. The client calls, the MCP tools, the CLI
+commands, the web panel and the duplicate asset copy exist. The [content policy](asset-validation.md) records these limits.
 SQLite schema 12 keeps immutable bytes, independent versions, receipts and
 logical quotas in the same database as source files. Source and asset
 associations both protect shared blobs from purge and cleanup.
@@ -245,118 +263,78 @@ Pi configuration. The three handoff tools register an agent inbox,
 poll it, and acknowledge a delivered selection. They are not page callbacks;
 an agent has to poll. All these are agent tools, not page capabilities.
 
-## Next implementation slices
+## Implemented areas
 
-The [PR roadmap](roadmap.md) is the implementation plan. A01 (committed
-change notifications and the deferred CLI retry diagnostic) and A02 (the web
-workspace following committed changes) are implemented, and A03 adds renaming,
-pins, search, order, and pages to the API, MCP, client, CLI
-([0008](decisions/0008-artifact-metadata-and-lists.md)), and web workspace
-([0009](decisions/0009-web-list-and-metadata.md)). A04a adds restoring an
-earlier revision and file digests to the API, MCP, client, and CLI
-([0010](decisions/0010-revision-restore-and-digests.md)), and A04b compares
-and restores revisions in the web workspace, preparing no conditional write
-from a version older than the page has learned of and reading nothing for
-data that may have been replaced
-([0011](decisions/0011-web-history-and-restore.md)). A05 duplicates a
-revision's files into a new artifact with its own history through the API,
-MCP, client, CLI, and web workspace
-([0012](decisions/0012-duplicate-artifacts.md)). A06a deletes artifacts to a
-trash and recovers them through the API, MCP, client, and CLI: deleting is a
-conditional metadata update, and an artifact in the trash answers every
-other request as an unknown one, except the replay of a request made before
-the delete ([0013](decisions/0013-deleting-artifacts-and-the-trash.md)). A07
-exports one revision's files as a deterministic, uncompressed ZIP archive
-whose first entry is a manifest of paths, sizes, digests, and media types,
-through the API, client, CLI, and web workspace; it is a read with the
-access and trash rules of every read
-([0015](decisions/0015-source-exports.md)). A11 reads part of a pinned
-file: one byte range over HTTP, served by one parser of the `Range` field;
-parts cut between characters over MCP, with the next offset and the whole
-file's size and SHA-256; and a client that accepts only the exact part it
-asked for ([0016](decisions/0016-bounded-file-reads.md)). A06b adds the
-trash to the web workspace: the open artifact moves there after a
-confirmation, the trash is shown from the list and recovered from, and
-moves made elsewhere close the open artifact unless a draft holds it, which
-nothing then reads for; what the page knows of the trash, like the versions
-it knows, lasts one feed epoch, and answers to writes from an earlier epoch
-move nothing ([0014](decisions/0014-web-trash.md)). A09 edits an
-artifact's files in the web workspace: a draft spans files, adds, renames,
-and deletes them, and is saved as one revision against its base or not at
-all; every change passes one write point that decides by the state it
-lands in, renames carry the bytes they move, and paths are checked with
-the package rules the build inventory carries
-([0017](decisions/0017-code-workspace.md)). A10 keeps that draft in the
-browser's IndexedDB: the page starts claiming a tab owner id and its Web
-Lock before anything renders and orders each artifact's writes, the source
-view offers a kept draft for recovery or discard before the editor
-starts, a recovered draft counts as written on its revision only if the
-server lists it with the same digests, and a save whose answer was lost
-replays with its kept key. Without Web Locks, draft reads and writes are
-refused with an explicit warning to protect other tabs' records
-([0018](decisions/0018-source-draft-recovery.md)).
-R04 adds the first bound runtime metadata read ([0019](decisions/0019-runtime-metadata-bridge.md)),
-and R05 adds connection-scoped metadata consent and grants
-([0020](decisions/0020-runtime-grants.md)). A08 stages a saved source
-selection and, after user confirmation, delivers it to an explicitly registered
-MCP inbox ([0021](decisions/0021-agent-selection-handoff.md)). Its receipt
-acknowledgement is separate from model work and its state is process-local.
-O05 removes an artifact in the trash for good (`POST
-/v1/artifacts/{id}/purge`, the administrative credential or a token issued to another user
-for that user's own trash, conditional on its metadata revision and
-retryable by key) and deletes file content no revision file refers to
-(`GET` for the dry run and its set digest, `DELETE` conditional on that digest
-and retryable by key, `/v1/content/unreferenced`). A purge keeps a tombstone so that
-request keys, change feed sequences, and foreign keys stay valid, and it has no
-MCP tool, because an agent could not undo it
-([0029](decisions/0029-retention-and-cleanup.md)).
-R01 adds persistent jobs and a worker process
-([0030](decisions/0030-persistent-jobs-and-worker.md)). One job kind,
-`verify_revision`, pins an actor, artifact, revision, and request key, and
-recomputes the digest and size of each file of the revision from the store.
-The job states and the lease live in SQLite (schema 8); a worker claims a job
-under a lease and a fence that rises on every claim, so a worker that stalled
-and was replaced cannot write a result. Execution is at least once; one result
-is recorded. `artifree-server worker run` is a subcommand of the server binary
-that opens the database directly (no HTTP, no credential); nothing starts it.
-The job runs trusted code in that process: it is not R02's isolated execution,
-and no builds, models, or untrusted code run. Job changes are not in the change
-feed, and the web workspace has no job view. Agent tokens may enqueue, read,
-list, and cancel jobs (the four MCP tools), at most 16 open jobs per actor.
-R02 has a **proposed specification only**
-([0042](decisions/0042-linux-untrusted-execution.md)): Linux-host untrusted
-execution with a trusted supervisor, enforced limits, descendant cleanup and
-fenced output admission. No such provider or untrusted job exists yet. The
-proposal preserves Windows server and trusted verification support; Linux is
-the proposed execution-host restriction, not a remote client restriction.
-R06 adds application data ([0031](decisions/0031-app-data.md)): one JSON
-object per actor and artifact with its own `data_version` (schema 9),
-unrelated to the source revision and untouched by saving or restoring one.
-Paths are `/`-separated segments that address object members; values are strict
-JSON (numbers of magnitude at most 2^53−1 in any spelling), canonicalized, and limited (256 KiB per value, 1 MiB and 10,000 values per
-space, 32 levels). A write is conditional on `base_data_version` and keyed, in
-the key space shared with artifact, cleanup, and job requests; a write that
-changes nothing keeps the version. `update` is an RFC 7396 merge patch, `set`
-can store `null`, and a path through a value that is not an object is
-`data_path_conflict`. HTTP, the MCP tools, the client, and the CLI share one
-core service, and issued agent tokens may use them. `DELETE` carries a JSON
-body; a proxy that strips it gets `400`, never a deletion (below the root,
-`update` with a `null` patch is the alternative; the root is emptied with `set`
-of `{}`). The client refuses a JavaScript value that `JSON.stringify` would
-change silently (`NaN`, holes, getters, a `Date`, a `toJSON` function) and sends a
-checked copy; `JsonText` sends exact text. A duplicate copies the
-data only with `copy_data`. A write that changes it appends a `data_changed` change (version and
-positions, no path or value) to the writer's change feed (0040); data is not in a revision or an
-export, a purge erases it, and **no page can read or write it: the runtime
-bridge has no data capability** (it grants `metadata.read`, `source.read`, and
-`source.download`). A paged listing of the member names of one object exists
-over HTTP only, `GET /v1/artifacts/{id}/data/members` (decision 0040, R07b); the
-client, the CLI, and MCP have no listing yet. A client routine that follows data
-(R07c) and assets (R09) are not implemented.
+The [PR roadmap](roadmap.md) is the implementation plan and holds the detail of
+every slice. This table only points from an area to its records.
 
-The roadmap separately covers artifact management, local/server deployment,
-isolated builds, the runtime SDK and app data, optional providers, structured
-artifact types and conversions, and multi-user sharing/publication. Publishing
-must choose and document whether its address follows the head or a pinned
-revision. PostgreSQL and external object storage are conditional extensions;
-single-owner hosting can keep SQLite.
+| Area                          | Roadmap             | Decisions                    | Where                                                                       |
+| ----------------------------- | ------------------- | ---------------------------- | --------------------------------------------------------------------------- |
+| Artifacts and revisions       | A03–A07, A11, X01   | 0003, 0008–0016, 0035        | `core/artifacts.rs`, `providers/storage.rs`                                 |
+| Change feed and live web      | A01, A02            | 0006, 0007                   | `server/changes.rs`, `client/change-feed.ts`, `apps/web`                    |
+| Code workspace and drafts     | A09, A10            | 0017, 0018                   | `apps/web/src/artifacts`                                                    |
+| Agent tools and handoff       | A08                 | 0004, 0021                   | `server/mcp.rs`, `server/handoffs.rs`                                       |
+| Request limits                | O07                 | 0005, 0048                   | `server/limits.rs`, `server/http/unread.rs`                                 |
+| Serving, access and tokens    | O01, O02, O03d      | 0022–0024, 0028              | `server/serve.rs`, `server/proxy.rs`, `server/origin.rs`                    |
+| Packages and container        | O03a–O03c           | 0025, 0026, 0037             | `scripts/package-release.mjs`, `deploy/`                                    |
+| Backup, retention, one-shot   | O04, O05, O06       | 0027, 0029, 0039             | `providers/backup.rs`, `server/maintenance.rs`, `server/one_shot.rs`        |
+| Jobs and worker               | R01                 | 0030                         | `core/jobs.rs`, `core/worker.rs`, `providers/storage/jobs.rs`               |
+| Application data              | R06, R06b, R07      | 0031, 0040, 0046             | `domain/data.rs`, `core/data.rs`, `providers/storage/data.rs`               |
+| Browser data outbox (partial) | R08a–R08c           | 0041, 0043, 0044, 0047, 0049 | `client/outbox/` (its own entry point; the public sender is off)            |
+| Uploaded assets               | R09                 | 0045                         | `core/assets.rs`, `core/asset_validation/`, `providers/storage/assets.rs`   |
+| Runtime bridge                | R04, R05, R11, R09d | 0019, 0020, 0032, 0033, 0045 | `server/runtime_*.rs`, `web/artifacts/frame-rpc.ts`, `packages/runtime-sdk` |
+| Rooms                         | R12                 | 0034                         | `core/room.rs`, `server/rooms.rs`, `client/room.ts`                         |
+| Users                         | S01                 | 0036                         | `ports/user_store.rs`, `providers/users.rs`, `server/users.rs`              |
+
+Proposed and not implemented: untrusted execution
+([0042](decisions/0042-linux-untrusted-execution.md) is a proposed boundary
+with read-only host inspection only), React builds, view replacement, frame
+access to application data and rooms, model and connector providers, structured
+document types and conversions, roles and sharing, publishing, PostgreSQL and
+external object storage. The module inventory in
+`crates/artifree-server/src/inventory.rs` marks the same split and is a
+build-time snapshot, not a health response.
+
+## Structural notes
+
+[Decision 0051](decisions/0051-roadmap-and-architecture-review.md) reviewed the
+structure after R09. The layering above is kept. These notes describe where the
+code is under strain and what new work should do about it; none of them is a
+migration.
+
+- **One capability, many places.** A runtime capability is spread over the
+  contract, the capability set (`CapabilitySet` holds eight bits and seven are
+  used), a server module and its routes, the client, the host's frame dispatch,
+  the request gate, the prompt, the permission control, and the SDK's types and
+  bootstrap. The client, the host and the frame each check what they receive on
+  purpose; the repetition around those checks is not on purpose. R13
+  consolidates it before the next capability.
+- **Every user-owned state is keyed by actor and artifact**: application data,
+  assets, rooms, request keys, jobs and the per-user change sequence. Access is
+  the artifact's own user, decided in `core/policy.rs` and in the change feed's
+  storage query. Sharing has to decide for each state whether it is per user or
+  shared (S02s) before more state is built on that key.
+- **Background work has no owner in the server process.** The worker is a
+  subcommand that opens the database directly and nothing starts or supervises
+  it; job changes are not in the change feed. Builds, the execution supervisor
+  and automatic purge need the same scheduler, clock and supervision (R01b).
+- **Application logic in the server crate.** The runtime sessions, policy,
+  source and asset modules, preview tickets and handoffs are state machines
+  that need no HTTP framework but live in `artifree-server` and depend on its
+  state and on `SqliteStore`. Rooms show the intended arrangement: logic in
+  `core/room.rs`, a thin adapter in `server/rooms.rs`. New framework-free logic
+  follows rooms; existing modules are not moved for their own sake.
+  `core/agent_handoff.rs` and `core/documents.rs` are still short "planned"
+  modules, although handoffs are implemented in the server (0021).
+- **Four files change with almost every feature** and are over two thousand
+  lines each: `server/http.rs`, `server/operations.rs`,
+  `contracts/src/api.rs` and `client/src/client.ts`. They are split by resource
+  family when a change touches that family.
+- **A new aggregate gets its own port and service module.** Data, assets and
+  jobs did; documents and builds should, rather than widening `ArtifactStore`.
+- **State in process memory**: runtime views and connections, grants, rooms,
+  handoff inboxes, preview tickets and request budgets. A restart empties them
+  and several instances cannot share them (X04).
+- **One SQLite file, one connection per call.** A commit, its request key and
+  its change row are one transaction. This is the design for a single server;
+  PostgreSQL and object storage stay conditional extensions (X02, X03).

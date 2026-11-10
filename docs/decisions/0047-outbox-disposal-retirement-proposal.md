@@ -4,8 +4,10 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Status: **Accepted contract; implementation pending.** Acceptance takes effect
-when this separate documentation-only approval change is reviewed and merged.
+Status: **Accepted contract; partially implemented.** Acceptance took effect
+when this separate documentation-only approval change was reviewed and merged
+(#126); the first internal slice of R08c-2c followed it (#125) and the rest of
+the contract is not implemented.
 It accepts the additive contract below for a subsequent implementation PR;
 it introduces no executable behavior and does not claim the implementation is
 complete. The numbered rules of [0041](0041-browser-data-outbox.md) and rules 1–7
