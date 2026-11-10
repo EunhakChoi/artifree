@@ -30,7 +30,7 @@ apps/
 packages/
   contracts/           generated TypeScript wire types and build inventory
   client/              HTTP API v1 client with runtime response checks; opt-in outbox entry point
-  runtime-sdk/         frame side of the runtime bridge: metadata, source and uploaded assets; data and rooms proposed
+  runtime-sdk/         frame side of the runtime bridge: metadata, source, uploaded assets and application data; rooms proposed
 crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
   artifree-core/       artifact, data and asset services, asset validation, rooms, jobs and worker logic; documents planned

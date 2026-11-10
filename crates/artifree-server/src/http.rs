@@ -604,9 +604,10 @@ const MAX_FRAME_BODY_BYTES: usize = 16 * 1024;
 /// Largest body of a frame's write: 1.5 MiB, which holds the base64 of the
 /// largest file (1,398,104 characters, `MAX_RUNTIME_SOURCE_WRITE_BASE64` and
 /// `MAX_RUNTIME_ASSET_UPLOAD_BASE64`) and the small fields around it
-/// (decisions 0033 and 0045). Only the source write and asset upload routes
-/// have this limit; the other frame routes, asset deletion included, keep
-/// [`MAX_FRAME_BODY_BYTES`]. A test writes a file of the largest size.
+/// (decisions 0033 and 0045). The source write, the asset upload and the three
+/// data write routes have this limit (decision 0053, rule 11, gives a data
+/// write route the source write's limit); the other frame routes, asset
+/// deletion included, keep [`MAX_FRAME_BODY_BYTES`]. A test writes a file of the largest size.
 const MAX_FRAME_WRITE_BODY_BYTES: usize = 3 * 512 * 1024;
 
 /// Largest body of a room call: a state or an event's text is at most 512
