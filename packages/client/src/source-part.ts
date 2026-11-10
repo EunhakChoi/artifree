@@ -5,15 +5,11 @@
  * again by the frame's own script. Nothing here trusts an advertised value.
  */
 
-/** Most bytes in one part of a file, as the server's contract states. */
-export const MAX_SOURCE_PART_BYTES = 1_048_576;
-
-/** Most bytes in one file a frame saves, as the server's contract states. */
-export const MAX_SOURCE_WRITE_BYTES = 1_048_576;
+import { MAX_SOURCE_PART_BYTES, RETRY_ID } from './runtime-limits.js';
 
 /** Whether `value` can be a frame's retry identity: 8 to 36 of `A-Za-z0-9_-`. */
 export function isRetryId(value: unknown): value is string {
-  return typeof value === 'string' && /^[A-Za-z0-9_-]{8,36}$/.test(value);
+  return typeof value === 'string' && RETRY_ID.test(value);
 }
 
 /**

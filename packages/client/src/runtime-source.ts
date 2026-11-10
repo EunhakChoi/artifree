@@ -12,8 +12,8 @@ import { isCount, isRecord, list, revisionFile } from './responses.js';
 import { compareBytes } from './runtime-bytes.js';
 import { FRAME_ROUTES, frameBody, frameRoute } from './runtime-frame.js';
 import type { FrameTransport } from './runtime-frame.js';
+import { MAX_LISTED_FILES, MAX_SOURCE_WRITE_BYTES } from './runtime-limits.js';
 import {
-  MAX_SOURCE_WRITE_BYTES,
   decodeBase64,
   isDownloadName,
   isRetryId,
@@ -35,8 +35,6 @@ export {
  * runtime view needs them: the client loads this module on the first such
  * call, so a page that never does carries none of it.
  */
-
-const MAX_LISTED_FILES = 256;
 
 /** Validates the files a runtime view lists: each path once. */
 export function parseRuntimeSourceList(
