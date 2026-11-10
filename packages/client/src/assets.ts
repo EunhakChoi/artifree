@@ -8,8 +8,6 @@ import {
   MAX_LISTED_ASSETS,
 } from './runtime-limits.js';
 
-export { ASSET_ID, MAX_ASSET_BYTES } from './runtime-limits.js';
-
 const MAX_SPACE_BYTES = 25 * 1024 * 1024;
 const ARTIFACT_ID = /^art_[0-9a-f]{32}$/;
 

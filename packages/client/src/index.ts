@@ -44,15 +44,9 @@ export {
 } from './source-part.js';
 export type { PartNumbers } from './source-part.js';
 export {
-  ASSET_ID,
   MAX_ASSET_BYTES,
-  MAX_ASSET_PART_BYTES,
-  MAX_ASSET_UPLOAD_BYTES,
-  MAX_LISTED_ASSETS,
-  MAX_LISTED_FILES,
   MAX_SOURCE_PART_BYTES,
   MAX_SOURCE_WRITE_BYTES,
-  RETRY_ID,
 } from './runtime-limits.js';
 export type {
   RuntimeDownloadTarget,

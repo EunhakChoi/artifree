@@ -3,7 +3,12 @@ import { readdir, readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import * as client from '../../packages/client/dist/index.js';
+
+// A plain copy of what the client's limits module exports, so a limit is read
+// by name.
+const client = {
+  ...(await import('../../packages/client/dist/runtime-limits.js')),
+};
 
 // The bounds that more than one layer applies to what a runtime frame sends or
 // receives (decision 0052, rule 10). The client defines each one once. The SDK
@@ -29,6 +34,13 @@ const PINNED_LIMITS = {
 function limitValue(value) {
   return value instanceof RegExp ? value.source : value;
 }
+
+test('The client limits module exports exactly the pinned limits', () => {
+  assert.deepEqual(
+    Object.keys(client).sort(),
+    Object.keys(PINNED_LIMITS).sort(),
+  );
+});
 
 test('Each client limit equals its pinned value', () => {
   const actual = Object.fromEntries(
@@ -116,7 +128,7 @@ const SCHEMA_ROWS = [
 
 for (const row of SCHEMA_ROWS) {
   test(`The schema states ${row.name}`, () => {
-    assert.equal(row.expected(), schemaAt(row.path));
+    assert.equal(schemaAt(row.path), row.expected());
   });
 }
 
@@ -217,7 +229,7 @@ const FRAME_CALLS = new URL(
 // The sizes, the retry identity's length bounds and the asset ID's digits as a
 // host module would spell them.
 const SHARED_LITERAL =
-  /1_?048_?576|262_?144|5_?242_?880|\{8,36\}|\[0-9a-f\]\{64\}/;
+  /1_?048_?576|262_?144|5_?242_?880|1024 \* 1024|256 \* 1024|\{8,36\}|\[0-9a-f\]\{64\}/;
 
 const OTHER_HOST_FILES = (await readdir(FRAME_CALLS))
   .filter((name) => /\.tsx?$/.test(name) && name !== 'call.ts')
@@ -245,7 +257,7 @@ const HOST_ENVELOPE = new URL(
   import.meta.url,
 );
 
-test('No on-demand host module imports a limit from the client', async () => {
+test('No on-demand host module imports a value from the client', async () => {
   const sources = [
     ['frame-rpc.ts', await readFile(HOST_ENVELOPE, 'utf8')],
     ...(await Promise.all(
@@ -257,14 +269,14 @@ test('No on-demand host module imports a limit from the client', async () => {
         ]),
     )),
   ];
-  const clientImport = /import\s+(?!type\b)([^;]*?)from\s+'@artifree\/client'/g;
-  for (const [name, text] of sources) {
-    for (const [, names] of text.matchAll(clientImport)) {
-      for (const limit of Object.keys(PINNED_LIMITS))
-        assert.ok(
-          !new RegExp(`\\b${limit}\\b`).test(names),
-          `${name} imports ${limit} from the client`,
-        );
-    }
-  }
+  // A static import or re-export that is not type-only, or a dynamic import.
+  const valueImport =
+    /(?:import|export)\s+(?!type\b)[^;]*?from\s+'@artifree\/client'|import\s*\(\s*'@artifree\/client'/;
+  for (const [name, text] of sources)
+    assert.equal(valueImport.exec(text)?.[0], undefined, name);
+});
+
+test('The host envelope repeats none of the shared literals', async () => {
+  const text = await readFile(HOST_ENVELOPE, 'utf8');
+  assert.equal(SHARED_LITERAL.exec(text)?.[0], undefined);
 });
