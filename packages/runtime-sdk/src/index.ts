@@ -1,8 +1,9 @@
 /**
  * Capability names. `metadata.read`, `source.read`, `source.download`,
- * `source.write`, `assets.read`, `assets.write` and `assets.download` are
- * supported (decisions 0020, 0032, 0033 and 0045); the others are proposed. A
- * name is not a grant: the user grants each one separately in the workspace.
+ * `source.write`, `assets.read`, `assets.write`, `assets.download` and
+ * `data.read` are supported (decisions 0020, 0032, 0033, 0045 and 0053); the
+ * others are proposed. A name is not a grant: the user grants each one
+ * separately in the workspace.
  */
 export type RuntimeCapability =
   | 'metadata.read'
@@ -294,6 +295,34 @@ export interface AssetsRuntime {
   }): Promise<AssetDownloadReceipt>;
 }
 
+/**
+ * The value at one path of the application data saved for this artifact
+ * (decision 0053).
+ */
+export interface DataValue {
+  /** The path read, as sent; the empty path is the root. */
+  readonly path: string;
+  /** The version of the data space. */
+  readonly dataVersion: number;
+  /** Whether anything is at the path. The root always exists. */
+  readonly exists: boolean;
+  /**
+   * The parsed value; `undefined` when nothing is at the path. A stored `null`
+   * is `null`.
+   */
+  readonly value: unknown;
+}
+
+/** The application data the user saved for this artifact (decision 0053). */
+export interface DataRuntime {
+  /**
+   * Reads the value at `path`; needs the `data.read` grant. A path the server
+   * refuses is `invalid_request`. An answer that is not for `path`, or whose
+   * value is not JSON text within 1 MiB, rejects with `unavailable`.
+   */
+  get(request: { readonly path: string }): Promise<DataValue>;
+}
+
 /** What an opted-in frame can do, each operation subject to its own grant. */
 export interface ArtifactRuntime {
   /** Reads current metadata through the workspace's bound runtime view. */
@@ -301,6 +330,8 @@ export interface ArtifactRuntime {
   readonly source: SourceRuntime;
   /** Uploaded assets of this artifact (decision 0045). */
   readonly assets: AssetsRuntime;
+  /** Application data saved for this artifact (decision 0053). */
+  readonly data: DataRuntime;
 }
 
 declare global {

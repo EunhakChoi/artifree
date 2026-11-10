@@ -16,6 +16,7 @@ pub mod proxy;
 mod ranges;
 pub mod rooms;
 mod runtime_assets;
+mod runtime_data;
 mod runtime_policy;
 mod runtime_sessions;
 mod runtime_source;
@@ -33,6 +34,8 @@ mod runtime_asset_download_tests;
 mod runtime_asset_tests;
 #[cfg(test)]
 mod runtime_asset_write_tests;
+#[cfg(test)]
+mod runtime_data_tests;
 #[cfg(test)]
 mod runtime_tests;
 

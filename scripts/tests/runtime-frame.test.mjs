@@ -71,7 +71,7 @@ function compareHelloWithCrypto(replacement) {
 
 // ---- the route tails ----
 
-test('The frame route tails are the twelve recorded tails, in order, each named once', () => {
+test('The frame route tails are the thirteen recorded tails, in order, each named once', () => {
   const recorded = [
     'metadata',
     'source/list',
@@ -85,9 +85,10 @@ test('The frame route tails are the twelve recorded tails, in order, each named 
     'assets/delete',
     'assets/offer',
     'assets/download',
+    'data/read',
   ];
   assert.deepEqual([...FRAME_ROUTE_TAILS], recorded);
-  assert.equal(new Set(FRAME_ROUTE_TAILS).size, 12);
+  assert.equal(new Set(FRAME_ROUTE_TAILS).size, 13);
   assert.deepEqual(Object.values(FRAME_ROUTES), recorded);
 });
 
@@ -206,7 +207,7 @@ test('The entry modules reach the on-demand runtime modules by type or on demand
   // A static value import of either module from the client class or the index
   // would carry the byte comparison into the entry bundle with it.
   const statement =
-    /(?:import|export)\s+(type\s+)?[^;]*?from\s+'\.\/runtime-(?:source|assets)\.js'/g;
+    /(?:import|export)\s+(type\s+)?[^;]*?from\s+'\.\/runtime-(?:source|assets|data)\.js'/g;
   for (const name of ['client.ts', 'index.ts']) {
     const source = await readFile(new URL(name, CLIENT_SOURCE), 'utf8');
     const statements = [...source.matchAll(statement)];

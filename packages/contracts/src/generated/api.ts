@@ -50,6 +50,8 @@ export type ApiBody =
   | RuntimeAssetDeleteRequest
   | RuntimeAssetDownloadRequest
   | RuntimeAssetDownloadOffer
+  | RuntimeDataReadRequest
+  | RuntimeDataValue
   | RuntimeDownloadRequest
   | RuntimeDownloadOffer
   | RuntimeSourceWriteRequest
@@ -1264,6 +1266,56 @@ export interface RuntimeAssetDownloadOffer {
    * The asset's size in bytes.
    */
   size: number;
+}
+/**
+ * Reads the value at one path of the calling user's application data for the
+ * artifact a runtime view is bound to, which needs the `data.read` grant
+ * (decision 0053, rule 4). The answer is a [`RuntimeDataValue`].
+ */
+export interface RuntimeDataReadRequest {
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * The path to read, in the data path grammar (decision 0046); the empty
+   * string is the root. It is judged only after the binding, the grant and
+   * the artifact's head (decision 0053, rule 8).
+   */
+  path: string;
+}
+/**
+ * The value at one path of the calling user's application data for the
+ * artifact a runtime view is bound to (decision 0053, rule 4). "A value and a
+ * patch travel as JSON text, in both directions and through every layer"
+ * (rule 5), so `value` is the stored canonical JSON text, not a parsed value.
+ * A read answers at most one space, so the text is at most 1,048,576 bytes
+ * (rule 11).
+ */
+export interface RuntimeDataValue {
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The version of the data space: the `base_data_version` of the next
+   * write. 0 for a space nobody wrote.
+   */
+  data_version: number;
+  /**
+   * Whether anything is at the path. The root always exists.
+   */
+  exists: boolean;
+  /**
+   * The path that was read, as parsed.
+   */
+  path: string;
+  /**
+   * The canonical JSON text of the value at the path, present only when
+   * `exists` is true. A stored `null` is the text `null`. At most
+   * [`MAX_RUNTIME_DATA_READ_BYTES`] bytes, so at most that many characters.
+   */
+  value?: string | null;
 }
 /**
  * Asks whether, or asks for, a download of the pinned revision. The same

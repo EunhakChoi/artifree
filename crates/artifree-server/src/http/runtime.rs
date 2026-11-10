@@ -1,7 +1,7 @@
-//! Frame call HTTP adapters (decisions 0019, 0032, 0033 and 0045): the routes
-//! a runtime frame reaches through the workspace page, admitted under the
-//! frame budget. Authorization and behavior live in `runtime_source`,
-//! `runtime_assets` and `operations`.
+//! Frame call HTTP adapters (decisions 0019, 0032, 0033, 0045 and 0053): the
+//! routes a runtime frame reaches through the workspace page, admitted under
+//! the frame budget. Authorization and behavior live in `runtime_source`,
+//! `runtime_assets`, `runtime_data` and `operations`.
 
 use super::{
     AppState, Authenticated, MAX_FRAME_BODY_BYTES, MAX_FRAME_WRITE_BODY_BYTES, admit_frame,
@@ -9,14 +9,16 @@ use super::{
 };
 use crate::operations::{self, ApiError};
 use crate::runtime_assets;
+use crate::runtime_data;
 use crate::runtime_source::{self, Download, FrameCall};
 use artifree_contracts::api::{
     AssetList, DeleteAssetResponse, ErrorCode, RuntimeAssetDeleteRequest,
     RuntimeAssetDownloadOffer, RuntimeAssetDownloadRequest, RuntimeAssetListRequest,
-    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeDownloadOffer,
-    RuntimeDownloadRequest, RuntimeMetadata, RuntimeMetadataRequest, RuntimeSourceList,
-    RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
-    RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, UploadAssetResponse,
+    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeDataReadRequest,
+    RuntimeDataValue, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeMetadata,
+    RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
+    RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
+    UploadAssetResponse,
 };
 use artifree_domain::identity::ActorId;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -83,6 +85,10 @@ pub(super) fn routes(state: &AppState) -> Router<AppState> {
         .route(
             &format!("{VIEW}/assets/delete"),
             axum::routing::post(runtime_assets_delete),
+        )
+        .route(
+            &format!("{VIEW}/data/read"),
+            axum::routing::post(runtime_data_read),
         )
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_FRAME_BODY_BYTES))
@@ -341,6 +347,21 @@ async fn runtime_assets_delete(
     let frame = Frame::parse(path, body)?;
     let call = frame.call(&actor, &frame.request.initialization);
     runtime_assets::delete(&state, &call, &frame.request)
+        .await
+        .map(Json)
+}
+
+/// The value at one path of the caller's application data for the artifact a
+/// view is bound to, as JSON text (decision 0053, rules 4 and 5).
+async fn runtime_data_read(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeDataReadRequest>, JsonRejection>,
+) -> Result<Json<RuntimeDataValue>, ApiError> {
+    let frame = Frame::parse(path, body)?;
+    let call = frame.call(&actor, &frame.request.initialization);
+    runtime_data::read(&state, &call, &frame.request)
         .await
         .map(Json)
 }

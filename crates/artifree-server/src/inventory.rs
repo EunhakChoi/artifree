@@ -38,7 +38,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "packages/runtime-sdk",
         ComponentStatus::Implemented,
-        "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download of its source or of one uploaded asset, saves one file per view, and reads and changes its artifact's uploaded assets; each needs its own connection-scoped grant, and other capabilities remain planned.",
+        "An opted-in sandboxed frame reads its own artifact metadata and pinned-revision files, asks for a user-confirmed download of its source or of one uploaded asset, saves one file per view, reads and changes its artifact's uploaded assets, and reads its artifact's application data; each needs its own connection-scoped grant, and other capabilities remain planned.",
     ),
     (
         "api",
@@ -83,7 +83,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/data.rs",
         ComponentStatus::Implemented,
-        "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. Structured edits, change subscriptions, queries, and access from the content runtime are planned.",
+        "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. A granted content runtime can read it; writes from the content runtime, structured edits, and queries are planned.",
     ),
     (
         "jobs",

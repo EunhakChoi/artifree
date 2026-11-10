@@ -10,14 +10,15 @@ import {
   isCount,
   isRecord,
 } from './frame-calls/call';
+import { DATA_CALLS } from './frame-calls/data';
 import { METADATA_CALLS } from './frame-calls/metadata';
 import { SOURCE_CALLS } from './frame-calls/source';
 
 export type { FailureCode, FrameReply } from './frame-calls/call';
 
 /**
- * Serves the calls a runtime frame makes (decisions 0020, 0032, 0033 and
- * 0045). The frame is untrusted script, so nothing it sends is believed: a
+ * Serves the calls a runtime frame makes (decisions 0020, 0032, 0033, 0045
+ * and 0053). The frame is untrusted script, so nothing it sends is believed: a
  * message is parsed strictly, charged against a budget before anything else is
  * done, answered from a closed vocabulary of failures, and never echoed. The
  * workspace asks the server on every call, whatever it has seen before. This
@@ -27,7 +28,12 @@ export type { FailureCode, FrameReply } from './frame-calls/call';
  */
 
 /** Every call the frame may make, in the order the families are listed. */
-const CALLS = [...METADATA_CALLS, ...SOURCE_CALLS, ...ASSET_CALLS];
+const CALLS = [
+  ...METADATA_CALLS,
+  ...SOURCE_CALLS,
+  ...ASSET_CALLS,
+  ...DATA_CALLS,
+];
 
 /** A call the registry serves. */
 type ServedCall = CallOf<(typeof CALLS)[number]>;
@@ -90,10 +96,11 @@ function parseMessage(
 
 /**
  * The call a message is, or undefined. Exactly the keys of its type, a
- * positive safe-integer id, a path the package rules accept, and a part
- * length within its bound: 1 MiB for a source part, 256 KiB for an asset
- * part. A write carries at most 1 MiB of bytes. A message that is not an
- * object, has another key, or has a value of another type is not a call.
+ * positive safe-integer id, a path its type's parser accepts (a package path,
+ * or a data path within its bound), and a part length within its bound: 1 MiB
+ * for a source part, 256 KiB for an asset part. A write carries at most 1 MiB
+ * of bytes. A message that is not an object, has another key, or has a value
+ * of another type is not a call.
  */
 export function parseCall(message: unknown): FrameCall | undefined {
   const parsed = parseMessage(message);

@@ -33,3 +33,9 @@ export const MAX_LISTED_FILES = 256;
 
 /** Most assets one space holds and one listing names (decision 0045, rules 4 and 7). */
 export const MAX_LISTED_ASSETS = 64;
+
+/**
+ * Most bytes of the JSON text one data read returns: one whole data space,
+ * 1 MiB (decision 0053, rules 11 and 15).
+ */
+export const MAX_DATA_READ_BYTES = 1_048_576;

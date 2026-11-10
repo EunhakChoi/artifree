@@ -26,7 +26,7 @@ const CONTENT_ORIGIN: &str = "http://127.0.0.1:7411";
 /// A well-formed view identifier, so that only the case's own fault is refused.
 const VIEW: &str = "0123456789abcdef0123456789abcdef";
 /// Every frame route, by its path after the view and the generation.
-const TAILS: [&str; 12] = [
+const TAILS: [&str; 13] = [
     "metadata",
     "source/list",
     "source/read",
@@ -39,6 +39,7 @@ const TAILS: [&str; 12] = [
     "assets/download",
     "assets/upload",
     "assets/delete",
+    "data/read",
 ];
 /// The two routes with the larger write limit (1.5 MiB). A body over the frame
 /// limit is accepted there and refused for the fields it lacks.

@@ -47,10 +47,11 @@ const CONTENT_ORIGIN: &str = "http://127.0.0.1:7411";
 const PROTOCOL: &str = "2025-11-25";
 const ENTRY: &str =
     "<!doctype html><html lang=\"en\"><head><!-- artifree-runtime --></head><body>x</body></html>";
-const CAPABILITIES: [&str; 7] = [
+const CAPABILITIES: [&str; 8] = [
     "assets.download",
     "assets.read",
     "assets.write",
+    "data.read",
     "metadata.read",
     "source.read",
     "source.download",
@@ -992,6 +993,13 @@ fn http_cases() -> Vec<Case> {
             "POST",
             "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/assets/list",
             Some(r#"{"initialization":"{init}"}"#),
+            Succeeds,
+        ),
+        case(
+            "frame data read",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/data/read",
+            Some(r#"{"initialization":"{init}","path":""}"#),
             Succeeds,
         ),
         case(

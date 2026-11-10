@@ -216,6 +216,7 @@ var __ArtifreeBootstrap = (() => {
   var MAX_ASSET_PART_BYTES = 262144;
   var MAX_ASSET_BYTES = 5242880;
   var MAX_LISTED_ASSETS = 64;
+  var MAX_DATA_READ_BYTES = 1048576;
   var ASSET_TYPES = {
     "text/plain": true,
     "text/csv": true,
@@ -433,6 +434,24 @@ var __ArtifreeBootstrap = (() => {
     if (started !== true || named !== assetId || !count(bytes) || bytes > MAX_ASSET_BYTES)
       return void 0;
     return { started, assetId, bytes };
+  }
+  function dataValue(value, path) {
+    if (!record(value)) return void 0;
+    const { path: echoed, dataVersion, exists, value: text } = value;
+    if (echoed !== path || !count(dataVersion) || typeof exists !== "boolean")
+      return void 0;
+    if (!exists)
+      return path === "" || text !== null ? void 0 : { path, dataVersion, exists, value: void 0 };
+    if (typeof text !== "string" || text.length > MAX_DATA_READ_BYTES || new TextEncoder().encode(text).byteLength > MAX_DATA_READ_BYTES)
+      return void 0;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return void 0;
+    }
+    if (path === "" && !record(parsed)) return void 0;
+    return { path, dataVersion, exists, value: parsed };
   }
   function start(config) {
     if (window.artifree !== void 0)
@@ -723,6 +742,19 @@ var __ArtifreeBootstrap = (() => {
         );
       }
     });
+    const data = Object.freeze({
+      get(request) {
+        const fields = argument(request, ["path"]);
+        if (fields === void 0) return invalid();
+        const { path } = fields;
+        if (typeof path !== "string") return invalid();
+        return call(
+          { type: "data.get", path },
+          (reply) => dataValue(reply.data, path),
+          { timeout: READ_TIMEOUT_MS }
+        );
+      }
+    });
     window.artifree = Object.freeze({
       currentMetadata() {
         return call({ type: "metadata" }, (reply) => metadata(reply.metadata), {
@@ -731,7 +763,8 @@ var __ArtifreeBootstrap = (() => {
         });
       },
       source,
-      assets
+      assets,
+      data
     });
   }
   return __toCommonJS(bootstrap_exports);

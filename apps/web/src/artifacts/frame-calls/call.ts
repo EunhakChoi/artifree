@@ -40,6 +40,13 @@ export const MAX_WRITE = 1_048_576;
 export const MAX_ASSET_PART = 262_144;
 
 /**
+ * The most bytes of JSON text one data read hands to a frame: one whole data
+ * space, 1 MiB (decision 0053, rule 15). Written out here for the reason
+ * RETRY_ID gives; a test pins it to the client's MAX_DATA_READ_BYTES.
+ */
+export const MAX_DATA_READ = 1_048_576;
+
+/**
  * What an asset ID looks like: 64 lowercase hexadecimal digits. It is written
  * out here, not imported, for the reason RETRY_ID gives (decision 0033).
  */

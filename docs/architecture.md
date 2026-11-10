@@ -18,7 +18,7 @@ its requests through one gate that holds every read for a `429`'s
 `Retry-After` ([decision 0007](decisions/0007-live-web-workspace.md)). On the
 same store and service there are also application data, uploaded assets,
 persistent jobs with a worker process, user-isolated access for several users,
-and a runtime bridge through which an opted-in preview frame uses seven
+and a runtime bridge through which an opted-in preview frame uses eight
 separately granted capabilities; see [Implemented areas](#implemented-areas).
 
 ## Repository map
@@ -127,8 +127,10 @@ under a 15 s lease, and the server computes `isMe` and `sameTab` from the
 connection it issued. Events are ephemeral and never replayed to a late joiner;
 a restart empties every room; a frame cannot reach one yet (R15), and there
 are no roles
-([0034](decisions/0034-room-and-presence.md)). A frame cannot reach application
-data either (R14); the other capabilities remain proposed
+([0034](decisions/0034-room-and-presence.md)). With its own `data.read` grant a frame reads the
+application data of its artifact, as JSON text the host never parses
+([0053](decisions/0053-runtime-app-data.md)); it cannot write it yet (R14b).
+The other capabilities remain proposed
 ([0020](decisions/0020-runtime-grants.md)). Separate ports alone do not isolate cookie
 scope. Public hosting needs an explicit origin, credential, and sandbox policy.
 
@@ -172,6 +174,7 @@ in the Rust core.
 | `POST .../runtime-views/{view}/{generation}/assets/delete`                         | Delete one asset (`assets.write`)                       |
 | `POST .../runtime-views/{view}/{generation}/assets/offer`                          | Ask what an asset download would be (`assets.download`) |
 | `POST .../runtime-views/{view}/{generation}/assets/download`                       | The bytes of a confirmed asset download                 |
+| `POST .../runtime-views/{view}/{generation}/data/read`                             | Read the application data at a path (`data.read`)       |
 | `DELETE /v1/runtime-views/{view}/{generation}`                                     | Close one runtime view generation                       |
 | `POST /v1/runtime-sessions`                                                        | Open an ephemeral runtime connection                    |
 | `DELETE /v1/runtime-sessions/{session}`                                            | Close the connection and revoke its grants              |
@@ -268,28 +271,28 @@ an agent has to poll. All these are agent tools, not page capabilities.
 The [PR roadmap](roadmap.md) is the implementation plan and holds the detail of
 every slice. This table only points from an area to its records.
 
-| Area                          | Roadmap                  | Decisions                          | Where                                                                                                                                                      |
-| ----------------------------- | ------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Artifacts and revisions       | A03–A07, A11, X01        | 0003, 0008–0016, 0035              | `core/artifacts.rs`, `providers/storage.rs`                                                                                                                |
-| Change feed and live web      | A01, A02                 | 0006, 0007                         | `server/changes.rs`, `client/change-feed.ts`, `apps/web`                                                                                                   |
-| Code workspace and drafts     | A09, A10                 | 0017, 0018                         | `apps/web/src/artifacts`                                                                                                                                   |
-| Agent tools and handoff       | A08                      | 0004, 0021                         | `server/mcp.rs`, `server/handoffs.rs`                                                                                                                      |
-| Request limits                | O07                      | 0005, 0048                         | `server/limits.rs`, `server/http/unread.rs`                                                                                                                |
-| Serving, access and tokens    | O01, O02, O03d           | 0022–0024, 0028                    | `server/serve.rs`, `server/proxy.rs`, `server/origin.rs`                                                                                                   |
-| Packages and container        | O03a–O03c                | 0025, 0026, 0037                   | `scripts/package-release.mjs`, `deploy/`                                                                                                                   |
-| Backup, retention, one-shot   | O04, O05, O06            | 0027, 0029, 0039                   | `providers/backup.rs`, `server/maintenance.rs`, `server/one_shot.rs`                                                                                       |
-| Jobs and worker               | R01                      | 0030                               | `core/jobs.rs`, `core/worker.rs`, `providers/storage/jobs.rs`                                                                                              |
-| Application data              | R06, R06b, R07           | 0031, 0040, 0046                   | `domain/data.rs`, `core/data.rs`, `providers/storage/data.rs`                                                                                              |
-| Browser data outbox (partial) | R08a–R08c                | 0041, 0043, 0044, 0047, 0049       | `client/outbox/` (its own entry point; the public sender is off)                                                                                           |
-| Uploaded assets               | R09                      | 0045                               | `core/assets.rs`, `core/asset_validation/`, `providers/storage/assets.rs`                                                                                  |
-| Runtime bridge                | R04, R05, R11, R09d, R13 | 0019, 0020, 0032, 0033, 0045, 0052 | `server/runtime_*.rs`, `server/http/runtime.rs`, `client/runtime-*.ts`, `web/artifacts/frame-rpc.ts`, `web/artifacts/frame-calls/`, `packages/runtime-sdk` |
-| Rooms                         | R12                      | 0034                               | `core/room.rs`, `server/rooms.rs`, `client/room.ts`                                                                                                        |
-| Users                         | S01                      | 0036                               | `ports/user_store.rs`, `providers/users.rs`, `server/users.rs`                                                                                             |
+| Area                          | Roadmap                        | Decisions                                | Where                                                                                                                                                      |
+| ----------------------------- | ------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Artifacts and revisions       | A03–A07, A11, X01              | 0003, 0008–0016, 0035                    | `core/artifacts.rs`, `providers/storage.rs`                                                                                                                |
+| Change feed and live web      | A01, A02                       | 0006, 0007                               | `server/changes.rs`, `client/change-feed.ts`, `apps/web`                                                                                                   |
+| Code workspace and drafts     | A09, A10                       | 0017, 0018                               | `apps/web/src/artifacts`                                                                                                                                   |
+| Agent tools and handoff       | A08                            | 0004, 0021                               | `server/mcp.rs`, `server/handoffs.rs`                                                                                                                      |
+| Request limits                | O07                            | 0005, 0048                               | `server/limits.rs`, `server/http/unread.rs`                                                                                                                |
+| Serving, access and tokens    | O01, O02, O03d                 | 0022–0024, 0028                          | `server/serve.rs`, `server/proxy.rs`, `server/origin.rs`                                                                                                   |
+| Packages and container        | O03a–O03c                      | 0025, 0026, 0037                         | `scripts/package-release.mjs`, `deploy/`                                                                                                                   |
+| Backup, retention, one-shot   | O04, O05, O06                  | 0027, 0029, 0039                         | `providers/backup.rs`, `server/maintenance.rs`, `server/one_shot.rs`                                                                                       |
+| Jobs and worker               | R01                            | 0030                                     | `core/jobs.rs`, `core/worker.rs`, `providers/storage/jobs.rs`                                                                                              |
+| Application data              | R06, R06b, R07                 | 0031, 0040, 0046                         | `domain/data.rs`, `core/data.rs`, `providers/storage/data.rs`                                                                                              |
+| Browser data outbox (partial) | R08a–R08c                      | 0041, 0043, 0044, 0047, 0049             | `client/outbox/` (its own entry point; the public sender is off)                                                                                           |
+| Uploaded assets               | R09                            | 0045                                     | `core/assets.rs`, `core/asset_validation/`, `providers/storage/assets.rs`                                                                                  |
+| Runtime bridge                | R04, R05, R11, R09d, R13, R14a | 0019, 0020, 0032, 0033, 0045, 0052, 0053 | `server/runtime_*.rs`, `server/http/runtime.rs`, `client/runtime-*.ts`, `web/artifacts/frame-rpc.ts`, `web/artifacts/frame-calls/`, `packages/runtime-sdk` |
+| Rooms                         | R12                            | 0034                                     | `core/room.rs`, `server/rooms.rs`, `client/room.ts`                                                                                                        |
+| Users                         | S01                            | 0036                                     | `ports/user_store.rs`, `providers/users.rs`, `server/users.rs`                                                                                             |
 
 Proposed and not implemented: untrusted execution
 ([0042](decisions/0042-linux-untrusted-execution.md) is a proposed boundary
-with read-only host inspection only), React builds, view replacement, frame
-access to application data and rooms, model and connector providers, structured
+with read-only host inspection only), React builds, view replacement, a frame's
+writes to application data and its access to rooms, model and connector providers, structured
 document types and conversions, roles and sharing, publishing, PostgreSQL and
 external object storage. The module inventory in
 `crates/artifree-server/src/inventory.rs` marks the same split and is a
@@ -307,7 +310,7 @@ migration.
   `http/runtime.rs`, the client's family module, re-export list and route
   name, the host's descriptor in `frame-calls/`, and the SDK's types and
   bootstrap. A new capability also needs its entry in `runtime_policy.rs`
-  (`CapabilitySet` holds eight bits and seven are used), its descriptors
+  (`CapabilitySet` holds eight bits and all eight are used; R14b widens it), its descriptors
   registered in `frame-rpc.ts`, the permission control, and the prompt if it
   hands the user a file. The client, the host and the frame each check what
   they receive on purpose. R13

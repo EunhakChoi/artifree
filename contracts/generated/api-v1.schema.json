@@ -2667,6 +2667,64 @@
       ],
       "type": "object"
     },
+    "RuntimeDataReadRequest": {
+      "additionalProperties": false,
+      "description": "Reads the value at one path of the calling user's application data for the\nartifact a runtime view is bound to, which needs the `data.read` grant\n(decision 0053, rule 4). The answer is a [`RuntimeDataValue`].",
+      "properties": {
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The path to read, in the data path grammar (decision 0046); the empty\nstring is the root. It is judged only after the binding, the grant and\nthe artifact's head (decision 0053, rule 8).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "path"
+      ],
+      "type": "object"
+    },
+    "RuntimeDataValue": {
+      "additionalProperties": false,
+      "description": "The value at one path of the calling user's application data for the\nartifact a runtime view is bound to (decision 0053, rule 4). \"A value and a\npatch travel as JSON text, in both directions and through every layer\"\n(rule 5), so `value` is the stored canonical JSON text, not a parsed value.\nA read answers at most one space, so the text is at most 1,048,576 bytes\n(rule 11).",
+      "properties": {
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "data_version": {
+          "description": "The version of the data space: the `base_data_version` of the next\nwrite. 0 for a space nobody wrote.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exists": {
+          "description": "Whether anything is at the path. The root always exists.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The path that was read, as parsed.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The canonical JSON text of the value at the path, present only when\n`exists` is true. A stored `null` is the text `null`. At most\n[`MAX_RUNTIME_DATA_READ_BYTES`] bytes, so at most that many characters.",
+          "maxLength": 1048576,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "artifact_id",
+        "path",
+        "data_version",
+        "exists"
+      ],
+      "type": "object"
+    },
     "RuntimeDownloadKind": {
       "description": "What a runtime download offers the user.",
       "oneOf": [
@@ -3760,6 +3818,12 @@
     },
     {
       "$ref": "#/$defs/RuntimeAssetDownloadOffer"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDataReadRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDataValue"
     },
     {
       "$ref": "#/$defs/RuntimeDownloadRequest"

@@ -1559,6 +1559,50 @@ pub struct RuntimeAssetDownloadOffer {
     pub sha256: String,
 }
 
+/// Most bytes of JSON text one runtime data read answers: one data space
+/// (decision 0053, rule 11; the space limit of decision 0031).
+pub const MAX_RUNTIME_DATA_READ_BYTES: u64 = 1_048_576;
+
+/// Reads the value at one path of the calling user's application data for the
+/// artifact a runtime view is bound to, which needs the `data.read` grant
+/// (decision 0053, rule 4). The answer is a [`RuntimeDataValue`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDataReadRequest {
+    /// Initialization secret issued with that view, never an account token.
+    pub initialization: String,
+    /// The path to read, in the data path grammar (decision 0046); the empty
+    /// string is the root. It is judged only after the binding, the grant and
+    /// the artifact's head (decision 0053, rule 8).
+    pub path: String,
+}
+
+/// The value at one path of the calling user's application data for the
+/// artifact a runtime view is bound to (decision 0053, rule 4). "A value and a
+/// patch travel as JSON text, in both directions and through every layer"
+/// (rule 5), so `value` is the stored canonical JSON text, not a parsed value.
+/// A read answers at most one space, so the text is at most 1,048,576 bytes
+/// (rule 11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDataValue {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The path that was read, as parsed.
+    pub path: String,
+    /// The version of the data space: the `base_data_version` of the next
+    /// write. 0 for a space nobody wrote.
+    pub data_version: u64,
+    /// Whether anything is at the path. The root always exists.
+    pub exists: bool,
+    /// The canonical JSON text of the value at the path, present only when
+    /// `exists` is true. A stored `null` is the text `null`. At most
+    /// [`MAX_RUNTIME_DATA_READ_BYTES`] bytes, so at most that many characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1_048_576))]
+    pub value: Option<String>,
+}
+
 /// Joins the room of an artifact as one participant of the caller's tab, or
 /// resumes the participant that tab already has in `slot` (decision 0034).
 /// The tab is the runtime connection named in the route, never a field.

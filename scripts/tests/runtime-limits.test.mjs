@@ -28,6 +28,7 @@ const PINNED_LIMITS = {
   MAX_ASSET_BYTES: 5_242_880,
   MAX_LISTED_FILES: 256,
   MAX_LISTED_ASSETS: 64,
+  MAX_DATA_READ_BYTES: 1_048_576,
 };
 
 // A limit as a comparable value: a regular expression is its source text.
@@ -91,6 +92,11 @@ const SCHEMA_ROWS = [
     name: 'asset part',
     path: ['RuntimeAssetReadRequest', 'properties', 'length', 'maximum'],
     expected: () => client.MAX_ASSET_PART_BYTES,
+  },
+  {
+    name: 'data read',
+    path: ['RuntimeDataValue', 'properties', 'value', 'maxLength'],
+    expected: () => client.MAX_DATA_READ_BYTES,
   },
   {
     name: 'listed assets',
@@ -158,6 +164,7 @@ const SDK_PAIRS = [
   ['MAX_ASSET_BYTES', 'MAX_ASSET_BYTES'],
   ['MAX_LISTED_FILES', 'MAX_LISTED_FILES'],
   ['MAX_LISTED_ASSETS', 'MAX_LISTED_ASSETS'],
+  ['MAX_DATA_READ_BYTES', 'MAX_DATA_READ_BYTES'],
 ];
 
 for (const [sdkName, clientName] of SDK_PAIRS) {
@@ -196,6 +203,7 @@ const HOST_PAIRS = [
   ['MAX_WRITE', 'MAX_SOURCE_WRITE_BYTES'],
   ['MAX_WRITE', 'MAX_ASSET_UPLOAD_BYTES'],
   ['MAX_ASSET_PART', 'MAX_ASSET_PART_BYTES'],
+  ['MAX_DATA_READ', 'MAX_DATA_READ_BYTES'],
 ];
 
 for (const [hostName, clientName] of HOST_PAIRS) {
@@ -238,7 +246,8 @@ const OTHER_HOST_FILES = (await readdir(FRAME_CALLS))
 test('The host frame calls other than call.ts are scanned', () => {
   assert.ok(
     OTHER_HOST_FILES.includes('source.ts') &&
-      OTHER_HOST_FILES.includes('assets.ts'),
+      OTHER_HOST_FILES.includes('assets.ts') &&
+      OTHER_HOST_FILES.includes('data.ts'),
     `scanned: ${OTHER_HOST_FILES.join(', ')}`,
   );
 });
@@ -279,4 +288,27 @@ test('No on-demand host module imports a value from the client', async () => {
 test('The host envelope repeats none of the shared literals', async () => {
   const text = await readFile(HOST_ENVELOPE, 'utf8');
   assert.equal(SHARED_LITERAL.exec(text)?.[0], undefined);
+});
+
+// The host bounds a data path's length before it asks the server. The bound is
+// the longest path the grammar allows, so it follows the domain's two limits.
+test("The host's data path bound is the longest path the domain allows", async () => {
+  const domain = await readFile(
+    new URL('../../crates/artifree-domain/src/data.rs', import.meta.url),
+    'utf8',
+  );
+  const limit = (name) => {
+    const match = new RegExp(`pub const ${name}: usize = (\\d+);`).exec(domain);
+    assert.ok(match, `${name} is written in the domain`);
+    return Number(match[1]);
+  };
+  const depth = limit('MAX_PATH_DEPTH');
+  const segment = limit('MAX_SEGMENT_BYTES');
+  const host = await readFile(new URL('data.ts', FRAME_CALLS), 'utf8');
+  const bound = /const MAX_DATA_PATH_CHARS = ([0-9_]+);/.exec(host);
+  assert.ok(bound, 'the host writes MAX_DATA_PATH_CHARS');
+  assert.equal(
+    Number(bound[1].replaceAll('_', '')),
+    depth * segment + depth - 1,
+  );
 });
