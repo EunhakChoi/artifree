@@ -167,8 +167,10 @@ A page running in a preview can read this data only after you grant it
 you grant it `data.write` (`data.set`, `data.update`, `data.remove`, each with
 the `baseDataVersion` it last saw and a `retryId`;
 [decision 0053](docs/decisions/0053-runtime-app-data.md)). A granted page
-writes without asking again, at most 60 times a minute, and **it is not told
-when the data changes**. The data is not in a revision or an export.
+writes without asking again, at most 60 times a minute. A page with
+`data.read` can register `data.onChange(listener)`: while its preview is open
+in the workspace it is told the new `dataVersion` when the data changes, as a
+hint that can be missed, and reads the value with `data.get`. The data is not in a revision or an export.
 CLI and MCP users can poll `data get` or `get_data`
 and compare versions. HTTP and TypeScript clients can instead follow changes and
 list object member names ([decision 0040](docs/decisions/0040-data-changes-and-member-listing.md)).

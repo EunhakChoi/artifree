@@ -363,6 +363,15 @@ export interface DataRemoveRequest {
   readonly retryId: string;
 }
 
+/** What a data change listener is told (decision 0053, rule 16). */
+export interface DataChange {
+  /** The version a write left the data space at; read the value with `get`. */
+  readonly dataVersion: number;
+}
+
+/** A listener registered with `data.onChange`. */
+export type DataChangeListener = (change: DataChange) => void;
+
 /**
  * The application data the user saved for this artifact (decision 0053). A
  * write that changes nothing keeps the data version. Writes are not retried
@@ -397,6 +406,17 @@ export interface DataRuntime {
    * `currentDataVersion`.
    */
   remove(request: DataRemoveRequest): Promise<DataWriteReceipt>;
+  /**
+   * Registers `listener` to be told when this artifact's data changes. The
+   * workspace sends this hint only to a frame that holds the `data.read`
+   * grant; registering sends nothing and needs no grant. Each registration is
+   * called with one argument, `{ dataVersion }`, and the same function
+   * registered twice is called twice. A listener that throws does not stop the
+   * others. The hint can be missed (a reload, a lost connection) or name a
+   * version the frame already has, so its absence does not mean that nothing
+   * changed. Returns a function that removes this registration.
+   */
+  onChange(listener: DataChangeListener): () => void;
 }
 
 /** What an opted-in frame can do, each operation subject to its own grant. */

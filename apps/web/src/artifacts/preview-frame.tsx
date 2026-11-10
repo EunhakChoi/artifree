@@ -3,6 +3,7 @@ import type { ArtifreeClient } from '@artifree/client';
 import { lazy, Suspense, useRef, useState, useSyncExternalStore } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import type { DataChanges } from './data-changes';
 import { describeFailure, useRequest } from './use-request';
 
 // The runtime permission controls, and the frame component with the
@@ -26,6 +27,8 @@ const RuntimeFrame = lazy(() =>
 
 interface PreviewFrameProps {
   client: ArtifreeClient;
+  /** The feed's data changes, forwarded to a frame that holds data.read. */
+  dataChanges: DataChanges;
   artifactId: string;
   revision: number;
   /** The feed epoch the revision was read in; a new one prepares again. */
@@ -42,6 +45,7 @@ interface PreviewFrameProps {
 /** A pinned revision, prepared as a preview and shown in its sandbox. */
 export function PreviewFrame({
   client,
+  dataChanges,
   artifactId,
   revision,
   epoch,
@@ -165,6 +169,7 @@ export function PreviewFrame({
           <RuntimeFrame
             key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
             client={client}
+            dataChanges={dataChanges}
             view={preview.value.view}
             deadline={preview.value.deadline}
             onClose={preview.value.close}

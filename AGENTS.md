@@ -8,7 +8,7 @@ file as a new revision, and, under their own grants, list and read, upload and
 delete, or ask the user to save, its own uploaded assets, each with its own connection grant (decisions
 0019, 0020, 0032, 0033 and 0045). Tabs can also share an in-memory room for presence and
 ephemeral events through HTTP and the TypeScript client (decision 0034); a
-frame cannot reach it. With their own grants a frame reads and writes its artifact's application data (decision 0053); it is not told when that data changes. Other runtime capabilities remain proposed. Keep implemented and proposed behavior
+frame cannot reach it. With their own grants a frame reads and writes its artifact's application data (decision 0053), and a frame that reads it is sent a version-only hint when it changes. Other runtime capabilities remain proposed. Keep implemented and proposed behavior
 explicitly separate in code, UI, docs, and completion reports.
 
 Read `docs/roadmap.md` before starting the next feature. It records PR-sized

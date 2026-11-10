@@ -531,6 +531,18 @@ var __ArtifreeBootstrap = (() => {
     const waiting = /* @__PURE__ */ new Map();
     let next = 0;
     let closed = false;
+    const changeListeners = [];
+    const notifyChange = (dataVersion) => {
+      const change = Object.freeze({ dataVersion });
+      for (const entry of changeListeners.slice()) {
+        if (!changeListeners.includes(entry)) continue;
+        try {
+          entry.listener(change);
+        } catch (error) {
+          console.error("An Artifree data change listener failed.", error);
+        }
+      }
+    };
     const settle = (id) => {
       const pending = waiting.get(id);
       if (pending === void 0) return void 0;
@@ -539,7 +551,14 @@ var __ArtifreeBootstrap = (() => {
       return pending;
     };
     channel.port1.onmessage = (event) => {
-      if (!record(event.data) || !count(event.data.id)) return;
+      if (!record(event.data)) return;
+      if (event.data.type === "event" && event.data.id === void 0) {
+        if (event.data.event === "data.changed" && count(event.data.dataVersion)) {
+          notifyChange(event.data.dataVersion);
+        }
+        return;
+      }
+      if (!count(event.data.id)) return;
       const pending = settle(event.data.id);
       if (pending === void 0) return;
       if (event.data.ok !== true) {
@@ -885,6 +904,17 @@ var __ArtifreeBootstrap = (() => {
           (reply) => dataWritten(reply.written, path, baseDataVersion),
           { timeout: WRITE_TIMEOUT_MS }
         );
+      },
+      onChange(listener) {
+        if (typeof listener !== "function") {
+          throw new TypeError("A data change listener must be a function.");
+        }
+        const entry = { listener };
+        changeListeners.push(entry);
+        return () => {
+          const index = changeListeners.indexOf(entry);
+          if (index !== -1) changeListeners.splice(index, 1);
+        };
       }
     });
     window.artifree = Object.freeze({

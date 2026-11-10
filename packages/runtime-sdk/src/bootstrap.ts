@@ -9,6 +9,8 @@ import type {
   AssetListing,
   AssetUploadReceipt,
   AssetUploadRequest,
+  DataChange,
+  DataChangeListener,
   DataRemoveRequest,
   DataSetRequest,
   DataUpdateRequest,
@@ -620,6 +622,22 @@ export function start(config: RuntimeInitialization): void {
   const waiting = new Map<number, Waiting>();
   let next = 0;
   let closed = false;
+  // Listeners of the change hint (decision 0053, rule 16). Each entry is one
+  // registration, so the same function registered twice is called twice.
+  const changeListeners: Array<{ readonly listener: DataChangeListener }> = [];
+  const notifyChange = (dataVersion: number): void => {
+    const change: DataChange = Object.freeze({ dataVersion });
+    for (const entry of changeListeners.slice()) {
+      // A registration removed by an earlier listener is not called.
+      if (!changeListeners.includes(entry)) continue;
+      try {
+        entry.listener(change);
+      } catch (error: unknown) {
+        // The error stays in this frame; nothing is sent to the host.
+        console.error('An Artifree data change listener failed.', error);
+      }
+    }
+  };
 
   const settle = (id: number): Waiting | undefined => {
     const pending = waiting.get(id);
@@ -630,7 +648,20 @@ export function start(config: RuntimeInitialization): void {
   };
 
   channel.port1.onmessage = (event: MessageEvent<unknown>) => {
-    if (!record(event.data) || !count(event.data.id)) return;
+    if (!record(event.data)) return;
+    // A message with no call id is an event, not a reply (decision 0053,
+    // rule 16). An event this SDK does not know is ignored, and so is a
+    // version that is not a safe non-negative integer.
+    if (event.data.type === 'event' && event.data.id === undefined) {
+      if (
+        event.data.event === 'data.changed' &&
+        count(event.data.dataVersion)
+      ) {
+        notifyChange(event.data.dataVersion);
+      }
+      return;
+    }
+    if (!count(event.data.id)) return;
     const pending = settle(event.data.id);
     if (pending === undefined) return;
     if (event.data.ok !== true) {
@@ -1081,6 +1112,18 @@ export function start(config: RuntimeInitialization): void {
         (reply) => dataWritten(reply.written, path, baseDataVersion),
         { timeout: WRITE_TIMEOUT_MS },
       );
+    },
+    onChange(listener: DataChangeListener): () => void {
+      if (typeof listener !== 'function') {
+        throw new TypeError('A data change listener must be a function.');
+      }
+      // Registering sends nothing to the host (decision 0053, rule 16).
+      const entry = { listener };
+      changeListeners.push(entry);
+      return () => {
+        const index = changeListeners.indexOf(entry);
+        if (index !== -1) changeListeners.splice(index, 1);
+      };
     },
   });
 

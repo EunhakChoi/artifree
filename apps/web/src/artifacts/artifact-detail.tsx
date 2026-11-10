@@ -22,6 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { AssetPanel } from './asset-panel';
 import { AssetOutcome } from './asset-writes-view';
 import { refusedFloor, useWriteGate } from './conditional-write';
+import type { DataChanges } from './data-changes';
 import { DuplicateDialog } from './duplicate-dialog';
 import { DataPanel } from './data-panel';
 import { ExportButton } from './export-button';
@@ -52,6 +53,11 @@ interface Loaded {
 
 interface ArtifactDetailProps {
   client: ArtifreeClient;
+  /**
+   * The feed's data changes, which a preview forwards to its frame (decision
+   * 0053, rule 16).
+   */
+  dataChanges: DataChanges;
   artifactId: string;
   /** The page's feed epoch; a new one reads everything again. */
   epoch: number;
@@ -100,6 +106,7 @@ interface ArtifactDetailProps {
 /** Preview and source editing for one artifact. */
 export function ArtifactDetail({
   client,
+  dataChanges,
   artifactId,
   epoch,
   resets,
@@ -332,6 +339,7 @@ export function ArtifactDetail({
               ) : (
                 <PreviewPanel
                   client={client}
+                  dataChanges={dataChanges}
                   artifact={artifact}
                   revisions={revisions}
                   epoch={shown.epoch}
@@ -401,6 +409,7 @@ export function ArtifactDetail({
                   <SourcePanel
                     keeping={keeping}
                     client={client}
+                    dataChanges={dataChanges}
                     read={shown}
                     resets={resets}
                     isCurrent={isCurrent}
@@ -456,6 +465,7 @@ function keptChoice(
 
 interface PreviewPanelProps {
   client: ArtifreeClient;
+  dataChanges: DataChanges;
   artifact: Artifact;
   revisions: Revision[];
   epoch: number;
@@ -468,6 +478,7 @@ interface PreviewPanelProps {
 
 function PreviewPanel({
   client,
+  dataChanges,
   artifact,
   revisions,
   epoch,
@@ -508,6 +519,7 @@ function PreviewPanel({
       </FieldGroup>
       <PreviewFrame
         client={client}
+        dataChanges={dataChanges}
         artifactId={artifact.id}
         revision={revision}
         epoch={epoch}
