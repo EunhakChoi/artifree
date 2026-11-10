@@ -42,9 +42,9 @@ planned feature set is complete, because the time cost is high and current use
 is almost entirely Chromium. Before the first public release it returns to the
 CI matrix and every Firefox-specific acceptance is re-run at once.
 [Decision 0051](decisions/0051-roadmap-and-architecture-review.md) sets that
-point: the planned feature set ends at R10 of the roadmap, Firefox returns
-after it (O08), the first release follows (O03c), and Firefox then stays in the
-matrix. Until then:
+point: the planned feature set is the roadmap rows R13, R14 and R10; when all
+three are done Firefox returns (O08), the first release can follow (O03c), and
+Firefox then stays in the matrix. Until then:
 
 - A specification or roadmap acceptance that names "Chromium and Firefox" is
   met in Chromium. The completion report says Firefox is pending re-verification.

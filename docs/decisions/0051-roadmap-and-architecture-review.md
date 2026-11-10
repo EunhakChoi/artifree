@@ -1,10 +1,12 @@
 # 0051: Roadmap and architecture review after R09
 
-Date: 2026-11-10. Status: **accepted for the documentation changes below**
-(made by the change that adds this record). It adds no executable behavior,
-contract, schema or dependency and changes no numbered rule of another record.
-The four questions it first left open were decided on 2026-11-10; see
-"Decisions on the open questions".
+Date: 2026-11-10. Status: **accepted**. The documentation changes under
+"Decisions" were made by the change that added this record. The four questions
+it first left open were decided the same day by a second documentation change;
+they are numbered Q1 to Q4 under "Decisions on the open questions" so that a
+citation of "decision N" always means the first list. The record adds no
+executable behavior, contract, schema or dependency and changes no numbered
+rule of another record.
 
 ## Context
 
@@ -124,8 +126,7 @@ Structure:
      O05b's automatic purge, R02b and R03 share it and name it as a
      prerequisite.
    - S02s, the access model as a documentation-only decision (finding 6),
-     ahead of S02's implementation. Its direction is decision 4 under
-     "Decisions on the open questions".
+     ahead of S02's implementation. Its direction is Q4.
    - O08, Firefox back in the CI matrix with every pending Firefox acceptance
      re-run, a prerequisite of O03c's first publication.
 8. **Guidance for new code**, not a migration:
@@ -145,12 +146,19 @@ Structure:
 
 1. The R13 consolidation.
 2. R14, then R10.
-3. O08, then O03c: Firefox returns and the first public release is made.
-4. R01b, R02, R03, then T01a and T01b.
+3. O08: Firefox returns to CI. O03c, the first public release, follows when
+   the owner's repository settings exist.
+4. R01b, R02, R03, then T01b. T01a has no prerequisite in this list and can be
+   done at any time before T01b.
 
 O05b's web purge can be done at any time, and R15 at any time after R13. S02s
 and S02 follow when sharing is taken up; P and X start on demand. The remainder
-of R08 is paused (decision 3 below).
+of R08 is paused (Q3).
+
+The prerequisite columns of the roadmap record what a row technically needs.
+This order adds one constraint they do not show: step 3's O08 is done before
+any row of step 4 starts. O03c does not block step 4, because it needs settings
+only the owner can make.
 
 ## Decisions on the open questions
 
@@ -158,37 +166,46 @@ The first version of this record left four questions open. The project owner
 delegated them, and they were decided on 2026-11-10 as follows. Each is a plan,
 not an implementation, and a later documentation change can reverse it.
 
-1. **The direction after R10 is untrusted execution and React builds**: R01b,
-   R02, R03, then T01a and T01b. It is the roadmap's stated next capability
-   and unblocks the most rows (every conversion and the React template). It is
-   also the longest stretch before a visible result and needs verification on
-   a real Linux host; that cost is accepted. Sharing (S02) and structured
-   documents (T02) follow it and are not started in parallel.
-2. **"The planned feature set" ends at R10.** Firefox returns to the CI matrix
-   (O08) after R13, R14 and R10, and the first public release (O03c) follows
-   it, before R02 starts. The reasons: the pending Firefox acceptances are all
-   in the runtime bridge and the outbox, which use engine-specific APIs, so
-   the cost of a late failure grows with every slice; R13, R14 and R10 finish
-   the browser-facing bridge work, after which the next stretch is mostly
-   server-side; and the product at that point (HTML artifacts with their own
-   data and assets, agents through MCP, isolated users, backups) is coherent
-   enough to publish. Firefox then stays in the matrix, because a release tag
-   requires it. O03c still needs the repository settings only the owner can
-   make.
-3. **The remainder of R08 is paused** after R08c-3b. It resumes when R14
-   exists and R14's specification decides that a frame's writes go through
-   the outbox, or when another feature writes application data from a page.
-   Nothing is removed: the internal scheduler, its tests and the outbox smoke
-   shard stay and keep running in CI.
-4. **Shared artifacts keep per-user state by default.** Application data,
-   assets and rooms stay scoped to the user who reaches the artifact; sharing
-   an artifact shares its source and nothing else. State that several users
-   see is a separate space the artifact declares, specified in S02s together
-   with roles, change delivery and revocation. This keeps the current schema
-   and isolation tests and does not open every state at once. It also means
-   R14 does not wait for S02s: `data.read` and `data.write` address the calling
-   user's own space, as the HTTP and MCP data routes do today, and a shared
-   space would be a later, separately declared capability.
+- **Q1. The direction after R10 is untrusted execution and React builds**:
+  R01b, R02, R03, then T01b. It is the roadmap's stated next capability and
+  unblocks the most rows (every conversion and the React template). It is also
+  the longest stretch before a visible result and needs verification on a real
+  Linux host; that cost is accepted. Sharing (S02) and structured documents
+  (T02 onward) follow it and are not started in parallel. T01a, the catalog,
+  is not part of that stretch and keeps the freedom decision 4 gave it.
+- **Q2. "The planned feature set" is R13, R14 and R10.** When those three rows
+  are done, Firefox returns to the CI matrix (O08) and the first public
+  release (O03c) can follow. The reasons: the pending Firefox acceptances are
+  in the asset screen (R09c), the runtime bridge (R09d1 to R09d3) and the
+  outbox, which use engine-specific APIs, so the cost of a late failure grows
+  with every browser-facing slice; R13, R14 and R10 change the bridge that
+  most of those acceptances run through, so re-running them earlier would be
+  repeated; and the product at that point (HTML artifacts with their own data
+  and assets, agents through MCP, isolated users, backups) is coherent enough
+  to publish. Firefox then stays in the matrix, because a release tag requires
+  it, so later browser work (R15, further capabilities, a resumed outbox) is
+  checked in both engines as it lands. O08 re-runs every pending Firefox
+  acceptance, the management screens included.
+- **Q3. The remainder of R08 is paused** after R08c-3b. R14 writes directly:
+  a conditional write with `base_data_version` and a key only a frame can
+  produce, as `source.write` and `assets.write` do, and does not use the
+  outbox. The remainder resumes when a specification is accepted that needs a
+  page to queue application-data writes for later delivery, such as a frame's
+  offline writes or a write surface in the web workspace. Nothing is removed:
+  the internal scheduler, its tests and the outbox smoke shard stay and keep
+  running in CI.
+- **Q4. Shared artifacts keep per-user application data and assets by
+  default.** Sharing an artifact shares its source; each user who reaches it
+  has their own data and asset space, as now. State that several users see is
+  a separate space the artifact declares, specified in S02s together with
+  roles, change delivery and revocation. This keeps the current schema and
+  isolation tests and does not open every state at once. Two consequences are
+  accepted until S02s: an artifact that reads its owner's uploaded assets
+  shows an empty asset space to another user, and R14 addresses the calling
+  user's own space, as the HTTP and MCP data routes do, so it does not wait
+  for S02s. Rooms are not covered by this default: a room limited to one user
+  cannot show another user's presence, so the scope of rooms under sharing is
+  left to S02s, and R15 exposes only the room that exists today.
 
 ## What this record does not do
 

@@ -315,8 +315,9 @@ migration.
   the artifact's own user, decided in `core/policy.rs` and in the change feed's
   storage query. Sharing has to decide for each state whether it is per user or
   shared (S02s) before more state is built on that scope. Decision 0051 sets
-  the direction: per user by default, shared only in a space the artifact
-  declares.
+  the direction for application data and assets: per user by default, shared
+  only in a space the artifact declares. The scope of rooms under sharing is
+  left to S02s.
 - **Background work has no owner in the server process.** The worker is a
   subcommand that opens the database directly and nothing starts or supervises
   it; job changes are not in the change feed. Builds, the execution supervisor
