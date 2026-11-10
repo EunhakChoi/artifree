@@ -4,9 +4,8 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-10. Status: **partially implemented**: R13a (rule 5), R13b
-(rules 6, 7 and 9) and R13c (rule 8) are implemented; R13d and R13e (rules 10
-and 11) are proposed and have no code.
+Date: 2026-11-10. Status: **implemented** (R13a to R13e, rules 5 to 11). What
+it achieved and what it did not is under "Result".
 Roadmap: R13. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md),
 [0032](0032-runtime-source-read-and-download.md),
@@ -233,6 +232,49 @@ noted.
 | R13c  | Host: one offer description for the prompt                                  | 8       |
 | R13d  | Limits defined once in the client; host and SDK literals pinned by a test   | 10      |
 | R13e  | Server: frame handlers in their own module with one call builder            | 11      |
+
+## Result
+
+Rule 13 asks for the number of hand-written files a new call touches, beside
+the count from 0051. Measured on the code by listing the non-generated,
+non-test files that name one existing call (`assets.delete`) before R13
+(commit `0026c7f`) and after it.
+
+|                                                | Before R13                                            | After R13          |
+| ---------------------------------------------- | ----------------------------------------------------- | ------------------ |
+| Files a new call in an existing family touches | 10                                                    | 10                 |
+| Places in the host that name the call          | 6 (five in `frame-rpc.ts`, one in the gate's pattern) | 2 (its descriptor) |
+
+- **Before**: the contract (`api.rs` and the schema exporter), the server
+  module, `http.rs`, the client family module and its re-export list,
+  `frame-rpc.ts`, `request-gate.ts`, the SDK's types and its bootstrap.
+- **After**: the contract (the same two), the server module,
+  `http/runtime.rs`, the client family module and its re-export list, the
+  route name in `runtime-frame.ts`, the family's descriptor module, the SDK's
+  types and its bootstrap.
+- **A new family** still adds its own files on top: the capability in
+  `runtime_policy.rs`, a server module, a client module, a host descriptor
+  module with one line in `frame-rpc.ts`, and the permission control. That is
+  about as many as before.
+
+**The file count did not fall.** 0051 counted "about twelve hand-written files
+in five packages" as the cost to reduce, but most of those files are one per
+layer and a consolidation does not remove a layer. What R13 changed:
+
+- A call is named once in the host instead of three times in one file, and the
+  request gate needs no edit.
+- The two download flows, the two frame transports, the two byte comparisons
+  and the prompt's five kind checks are one each.
+- Mistakes that used to pass silently now fail a test: a route the gate does
+  not know, a limit that differs between the client, the host, the SDK and
+  the schema, a prompt string that changed, on-demand code reaching the entry
+  bundle, a handler module the isolation scan does not read, a frame route
+  that reads its body before its path.
+- The limits are still written three times (client, host, SDK), by rule 10 as
+  amended.
+
+Production lines outside tests and generated files, from the commit before
+R13a to the last slice: +1,371 / -1,129.
 
 ## Alternatives considered
 
