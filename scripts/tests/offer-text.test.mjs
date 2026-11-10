@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -123,4 +124,23 @@ test('a source path of 81 characters is shown as 80 characters and an ellipsis',
   const path = `${'a'.repeat(79)}bc`;
   const text = offerText({ kind: 'file', path, fileName: 'x', size: 1 });
   assert.equal(text.sourcePath, `${'a'.repeat(79)}b…`);
+});
+
+test('the prompt component shows the text without reading the offer kind', async () => {
+  const source = await readFile(
+    new URL(
+      '../../apps/web/src/artifacts/download-prompt.tsx',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.ok(!/\bkind\b/.test(source), 'download-prompt.tsx reads no kind');
+  for (const field of [
+    'text.title',
+    'text.description',
+    'text.fileName',
+    'sourcePath',
+    'size',
+  ])
+    assert.ok(source.includes(`{${field}}`), `the prompt renders ${field}`);
 });

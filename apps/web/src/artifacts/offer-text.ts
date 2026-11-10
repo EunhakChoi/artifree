@@ -3,8 +3,11 @@ import type { Offer } from './offer-desk';
 /** The longest stretch of frame-supplied path text shown. */
 const SHOWN_PATH_CHARS = 80;
 
-/** What a source file offer is called in the description. */
-const SOURCE_FILE = 'a source file of this revision';
+/** What each kind of source offer is called in the description. */
+const SOURCE_WORDING = {
+  file: 'a source file of this revision',
+  archive: 'the source files of this revision as a ZIP archive',
+} as const;
 
 /** The strings the download prompt shows for one offer (decision 0052, rule 8). */
 export interface OfferText {
@@ -27,35 +30,39 @@ export interface OfferText {
  * the prompt chose its own text.
  */
 export function offerText(offer: Offer | undefined): OfferText {
-  if (offer === undefined) {
-    return {
-      title: 'Save a file from this preview?',
-      description: `The preview asked to save ${SOURCE_FILE}. Nothing is saved unless you accept.`,
-      fileName: undefined,
-      sourcePath: undefined,
-      size: undefined,
-    };
+  if (offer === undefined) return sourceText(SOURCE_WORDING.file);
+  switch (offer.kind) {
+    case 'asset':
+      return {
+        title: 'Save uploaded file?',
+        description:
+          'The preview asked to save a file uploaded to this artifact. Saving it does not make it safe to open. Nothing is saved unless you accept.',
+        fileName: offer.fileName,
+        sourcePath: undefined,
+        size: `${offer.bytes} bytes`,
+      };
+    case 'file':
+    case 'archive':
+      return {
+        ...sourceText(SOURCE_WORDING[offer.kind]),
+        fileName: offer.fileName,
+        sourcePath: offer.path === null ? undefined : shorten(offer.path),
+        size: offer.size === null ? undefined : `${offer.size} bytes`,
+      };
+    default:
+      // A kind added to `Offer` without wording here fails the typecheck.
+      return offer satisfies never;
   }
-  if (offer.kind === 'asset') {
-    return {
-      title: 'Save uploaded file?',
-      description:
-        'The preview asked to save a file uploaded to this artifact. Saving it does not make it safe to open. Nothing is saved unless you accept.',
-      fileName: offer.fileName,
-      sourcePath: undefined,
-      size: `${offer.bytes} bytes`,
-    };
-  }
-  const what =
-    offer.kind === 'archive'
-      ? 'the source files of this revision as a ZIP archive'
-      : SOURCE_FILE;
+}
+
+/** The text every source offer shares, with no details. */
+function sourceText(what: string): OfferText {
   return {
     title: 'Save a file from this preview?',
     description: `The preview asked to save ${what}. Nothing is saved unless you accept.`,
-    fileName: offer.fileName,
-    sourcePath: offer.path === null ? undefined : shorten(offer.path),
-    size: offer.size === null ? undefined : `${offer.size} bytes`,
+    fileName: undefined,
+    sourcePath: undefined,
+    size: undefined,
   };
 }
 

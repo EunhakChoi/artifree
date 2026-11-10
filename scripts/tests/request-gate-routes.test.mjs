@@ -98,7 +98,8 @@ const OTHER_REQUESTS = [
 ];
 
 /** Host module paths; the gate bundle must not contain them (rule 9). */
-const HOST_MODULE = /frame-rpc|frame-calls|runtime-host|offer-desk/;
+const HOST_MODULE =
+  /frame-rpc|frame-calls|runtime-host|offer-desk|offer-text|download-prompt/;
 /** The gate, and the client module that names its routes. */
 const GATE = 'apps/web/src/artifacts/request-gate.ts';
 const CLIENT_ROUTES = 'packages/client/dist/runtime-frame.js';
