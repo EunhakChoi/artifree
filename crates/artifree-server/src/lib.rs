@@ -37,6 +37,8 @@ mod runtime_asset_write_tests;
 #[cfg(test)]
 mod runtime_data_tests;
 #[cfg(test)]
+mod runtime_data_write_tests;
+#[cfg(test)]
 mod runtime_tests;
 
 use std::collections::BTreeMap;

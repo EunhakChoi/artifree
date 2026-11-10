@@ -2667,6 +2667,39 @@
       ],
       "type": "object"
     },
+    "RuntimeDataDeleteRequest": {
+      "additionalProperties": false,
+      "description": "Removes the value at one path of the calling user's application data for the\nartifact a runtime view is bound to, which needs the `data.write` grant\n(decision 0053, rule 4). The answer is a [`DataWriteResponse`]. `remove` of a\nmissing path changes nothing.",
+      "properties": {
+        "base_data_version": {
+          "description": "The version of the data space the frame last observed. A stale one is\nrefused with `data_conflict` and the current version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The path to remove, in the data path grammar (decision 0046); the empty\nstring is the root and empties the space. It is judged only after the\nbinding, the grant and the artifact's head (decision 0053, rule 8).",
+          "type": "string"
+        },
+        "retry_id": {
+          "description": "The frame's retry identity for this write: 8 to 36 ASCII letters,\ndigits, `-` or `_`. The server derives the idempotency key from it, the\nartifact, the view and its generation, so a retry with the same identity\nand request returns the first receipt, and the same identity with\nanother request is refused (decision 0053, rule 9).",
+          "maxLength": 36,
+          "minLength": 8,
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "retry_id",
+        "base_data_version",
+        "path"
+      ],
+      "type": "object"
+    },
     "RuntimeDataReadRequest": {
       "additionalProperties": false,
       "description": "Reads the value at one path of the calling user's application data for the\nartifact a runtime view is bound to, which needs the `data.read` grant\n(decision 0053, rule 4). The answer is a [`RuntimeDataValue`].",
@@ -2683,6 +2716,84 @@
       "required": [
         "initialization",
         "path"
+      ],
+      "type": "object"
+    },
+    "RuntimeDataSetRequest": {
+      "additionalProperties": false,
+      "description": "Replaces the value at one path of the calling user's application data for\nthe artifact a runtime view is bound to, which needs the `data.write` grant\n(decision 0053, rule 4). The answer is a [`DataWriteResponse`]. Its meaning\nis that of the owner's routes (0031): `set` replaces a value and can store\n`null`.",
+      "properties": {
+        "base_data_version": {
+          "description": "The version of the data space the frame last observed. A stale one is\nrefused with `data_conflict` and the current version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The path to write, in the data path grammar (decision 0046); the empty\nstring is the root. It is judged only after the binding, the grant and\nthe artifact's head (decision 0053, rule 8).",
+          "type": "string"
+        },
+        "retry_id": {
+          "description": "The frame's retry identity for this write: 8 to 36 ASCII letters,\ndigits, `-` or `_`. The server derives the idempotency key from it, the\nartifact, the view and its generation, so a retry with the same identity\nand request returns the first receipt, and the same identity with\nanother request is refused (decision 0053, rule 9).",
+          "maxLength": 36,
+          "minLength": 8,
+          "type": "string"
+        },
+        "value": {
+          "description": "The new value as JSON text. A value and a patch travel as JSON text, in\nboth directions and through every layer (decision 0053, rule 5), and\nare at most [`MAX_RUNTIME_DATA_WRITE_BYTES`] bytes, so at most that many\ncharacters.",
+          "maxLength": 262144,
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "retry_id",
+        "base_data_version",
+        "path",
+        "value"
+      ],
+      "type": "object"
+    },
+    "RuntimeDataUpdateRequest": {
+      "additionalProperties": false,
+      "description": "Applies a JSON Merge Patch at one path of the calling user's application\ndata for the artifact a runtime view is bound to, which needs the\n`data.write` grant (decision 0053, rule 4). The answer is a\n[`DataWriteResponse`]. Its meaning is that of the owner's routes (0031).",
+      "properties": {
+        "base_data_version": {
+          "description": "The version of the data space the frame last observed. A stale one is\nrefused with `data_conflict` and the current version.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initialization": {
+          "description": "Initialization secret issued with that view, never an account token.",
+          "type": "string"
+        },
+        "patch": {
+          "description": "The JSON Merge Patch (RFC 7396) as JSON text, at most\n[`MAX_RUNTIME_DATA_WRITE_BYTES`] bytes, so at most that many characters.\nA `null` patch at a path removes what is there, and a merge patch cannot\nstore `null` in an object; `set` does that.",
+          "maxLength": 262144,
+          "type": "string"
+        },
+        "path": {
+          "description": "The path to patch, in the data path grammar (decision 0046); the empty\nstring is the root. It is judged only after the binding, the grant and\nthe artifact's head (decision 0053, rule 8).",
+          "type": "string"
+        },
+        "retry_id": {
+          "description": "The frame's retry identity for this write: 8 to 36 ASCII letters,\ndigits, `-` or `_`. The server derives the idempotency key from it, the\nartifact, the view and its generation, so a retry with the same identity\nand request returns the first receipt, and the same identity with\nanother request is refused (decision 0053, rule 9).",
+          "maxLength": 36,
+          "minLength": 8,
+          "type": "string"
+        }
+      },
+      "required": [
+        "initialization",
+        "retry_id",
+        "base_data_version",
+        "path",
+        "patch"
       ],
       "type": "object"
     },
@@ -3824,6 +3935,15 @@
     },
     {
       "$ref": "#/$defs/RuntimeDataValue"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDataSetRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDataUpdateRequest"
+    },
+    {
+      "$ref": "#/$defs/RuntimeDataDeleteRequest"
     },
     {
       "$ref": "#/$defs/RuntimeDownloadRequest"

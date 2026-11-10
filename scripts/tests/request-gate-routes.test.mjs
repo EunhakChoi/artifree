@@ -25,7 +25,7 @@ const { requestKind } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
-/** The thirteen frame route tails the client names, in their order. */
+/** The sixteen frame route tails the client names, in their order. */
 const EXPECTED_TAILS = [
   'metadata',
   'source/list',
@@ -40,11 +40,15 @@ const EXPECTED_TAILS = [
   'assets/offer',
   'assets/download',
   'data/read',
+  'data/set',
+  'data/update',
+  'data/delete',
 ];
 
 /**
- * Tails that are not frame routes: a fourteenth name, and near misses of the
- * thirteen, such as a longer tail, a shorter one, or one sharing a prefix.
+ * Tails that are not frame routes: names the client does not list, and near
+ * misses of the sixteen, such as a longer tail, a shorter one, or one sharing
+ * a prefix.
  */
 const NON_FRAME_TAILS = [
   'assets/rename',
@@ -57,6 +61,15 @@ const NON_FRAME_TAILS = [
   'data',
   'data/reads',
   'data/read/x',
+  'data/sets',
+  'data/set/x',
+  'data/set/',
+  'data/updates',
+  'data/update/x',
+  'data/deletes',
+  'data/delete/x',
+  'data/remove',
+  'data/write',
 ];
 
 /** The configured server address, without and with a path prefix. */
@@ -99,6 +112,18 @@ const OTHER_REQUESTS = [
     path: frameRoute(view, 'metadata'),
     kind: 'write',
   },
+  {
+    name: 'a data set route with no view generation',
+    method: 'POST',
+    path: `${revisionPath}/runtime-views/${view.view_id}/data/set`,
+    kind: 'write',
+  },
+  {
+    name: 'a data delete route under the revision, not under a view',
+    method: 'POST',
+    path: `${revisionPath}/data/delete`,
+    kind: 'write',
+  },
 ];
 
 /** Host module paths; the gate bundle must not contain them (rule 9). */
@@ -108,7 +133,7 @@ const HOST_MODULE =
 const GATE = 'apps/web/src/artifacts/request-gate.ts';
 const CLIENT_ROUTES = 'packages/client/dist/runtime-frame.js';
 
-it('The client names exactly the thirteen recorded frame route tails', () => {
+it('The client names exactly the sixteen recorded frame route tails', () => {
   assert.deepEqual([...FRAME_ROUTE_TAILS], EXPECTED_TAILS);
 });
 

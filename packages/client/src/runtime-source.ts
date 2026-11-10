@@ -28,7 +28,14 @@ export {
   offerRuntimeAssetDownload,
   fetchRuntimeAssetDownload,
 } from './runtime-assets.js';
-export { readRuntimeData, parseRuntimeDataValue } from './runtime-data.js';
+export {
+  readRuntimeData,
+  parseRuntimeDataValue,
+  setRuntimeData,
+  updateRuntimeData,
+  removeRuntimeData,
+  parseRuntimeDataWriteReceipt,
+} from './runtime-data.js';
 
 /**
  * Checks of what a runtime view's source calls return (decision 0032). They

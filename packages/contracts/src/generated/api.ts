@@ -52,6 +52,9 @@ export type ApiBody =
   | RuntimeAssetDownloadOffer
   | RuntimeDataReadRequest
   | RuntimeDataValue
+  | RuntimeDataSetRequest
+  | RuntimeDataUpdateRequest
+  | RuntimeDataDeleteRequest
   | RuntimeDownloadRequest
   | RuntimeDownloadOffer
   | RuntimeSourceWriteRequest
@@ -1316,6 +1319,114 @@ export interface RuntimeDataValue {
    * [`MAX_RUNTIME_DATA_READ_BYTES`] bytes, so at most that many characters.
    */
   value?: string | null;
+}
+/**
+ * Replaces the value at one path of the calling user's application data for
+ * the artifact a runtime view is bound to, which needs the `data.write` grant
+ * (decision 0053, rule 4). The answer is a [`DataWriteResponse`]. Its meaning
+ * is that of the owner's routes (0031): `set` replaces a value and can store
+ * `null`.
+ */
+export interface RuntimeDataSetRequest {
+  /**
+   * The version of the data space the frame last observed. A stale one is
+   * refused with `data_conflict` and the current version.
+   */
+  base_data_version: number;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * The path to write, in the data path grammar (decision 0046); the empty
+   * string is the root. It is judged only after the binding, the grant and
+   * the artifact's head (decision 0053, rule 8).
+   */
+  path: string;
+  /**
+   * The frame's retry identity for this write: 8 to 36 ASCII letters,
+   * digits, `-` or `_`. The server derives the idempotency key from it, the
+   * artifact, the view and its generation, so a retry with the same identity
+   * and request returns the first receipt, and the same identity with
+   * another request is refused (decision 0053, rule 9).
+   */
+  retry_id: string;
+  /**
+   * The new value as JSON text. A value and a patch travel as JSON text, in
+   * both directions and through every layer (decision 0053, rule 5), and
+   * are at most [`MAX_RUNTIME_DATA_WRITE_BYTES`] bytes, so at most that many
+   * characters.
+   */
+  value: string;
+}
+/**
+ * Applies a JSON Merge Patch at one path of the calling user's application
+ * data for the artifact a runtime view is bound to, which needs the
+ * `data.write` grant (decision 0053, rule 4). The answer is a
+ * [`DataWriteResponse`]. Its meaning is that of the owner's routes (0031).
+ */
+export interface RuntimeDataUpdateRequest {
+  /**
+   * The version of the data space the frame last observed. A stale one is
+   * refused with `data_conflict` and the current version.
+   */
+  base_data_version: number;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * The JSON Merge Patch (RFC 7396) as JSON text, at most
+   * [`MAX_RUNTIME_DATA_WRITE_BYTES`] bytes, so at most that many characters.
+   * A `null` patch at a path removes what is there, and a merge patch cannot
+   * store `null` in an object; `set` does that.
+   */
+  patch: string;
+  /**
+   * The path to patch, in the data path grammar (decision 0046); the empty
+   * string is the root. It is judged only after the binding, the grant and
+   * the artifact's head (decision 0053, rule 8).
+   */
+  path: string;
+  /**
+   * The frame's retry identity for this write: 8 to 36 ASCII letters,
+   * digits, `-` or `_`. The server derives the idempotency key from it, the
+   * artifact, the view and its generation, so a retry with the same identity
+   * and request returns the first receipt, and the same identity with
+   * another request is refused (decision 0053, rule 9).
+   */
+  retry_id: string;
+}
+/**
+ * Removes the value at one path of the calling user's application data for the
+ * artifact a runtime view is bound to, which needs the `data.write` grant
+ * (decision 0053, rule 4). The answer is a [`DataWriteResponse`]. `remove` of a
+ * missing path changes nothing.
+ */
+export interface RuntimeDataDeleteRequest {
+  /**
+   * The version of the data space the frame last observed. A stale one is
+   * refused with `data_conflict` and the current version.
+   */
+  base_data_version: number;
+  /**
+   * Initialization secret issued with that view, never an account token.
+   */
+  initialization: string;
+  /**
+   * The path to remove, in the data path grammar (decision 0046); the empty
+   * string is the root and empties the space. It is judged only after the
+   * binding, the grant and the artifact's head (decision 0053, rule 8).
+   */
+  path: string;
+  /**
+   * The frame's retry identity for this write: 8 to 36 ASCII letters,
+   * digits, `-` or `_`. The server derives the idempotency key from it, the
+   * artifact, the view and its generation, so a retry with the same identity
+   * and request returns the first receipt, and the same identity with
+   * another request is refused (decision 0053, rule 9).
+   */
+  retry_id: string;
 }
 /**
  * Asks whether, or asks for, a download of the pinned revision. The same

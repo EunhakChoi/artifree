@@ -47,11 +47,12 @@ const CONTENT_ORIGIN: &str = "http://127.0.0.1:7411";
 const PROTOCOL: &str = "2025-11-25";
 const ENTRY: &str =
     "<!doctype html><html lang=\"en\"><head><!-- artifree-runtime --></head><body>x</body></html>";
-const CAPABILITIES: [&str; 8] = [
+const CAPABILITIES: [&str; 9] = [
     "assets.download",
     "assets.read",
     "assets.write",
     "data.read",
+    "data.write",
     "metadata.read",
     "source.read",
     "source.download",
@@ -1002,6 +1003,37 @@ fn http_cases() -> Vec<Case> {
             Some(r#"{"initialization":"{init}","path":""}"#),
             Succeeds,
         ),
+        // The three frame writes below change nothing: the fixture stores this
+        // value at `notes`, the patch is empty, and the removal names an absent
+        // path. So the data version stays 1 for the artifact-level writes below,
+        // which name versions 1, 2 and 3.
+        case(
+            "frame data set",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/data/set",
+            Some(
+                r#"{"initialization":"{init}","retry_id":"data-set-0001","base_data_version":1,"path":"notes","value":"{\"private\":\"alice-data\"}"}"#,
+            ),
+            Succeeds,
+        ),
+        case(
+            "frame data update",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/data/update",
+            Some(
+                r#"{"initialization":"{init}","retry_id":"data-update-0001","base_data_version":1,"path":"notes","patch":"{}"}"#,
+            ),
+            Succeeds,
+        ),
+        case(
+            "frame data delete",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/runtime-views/{view}/1/data/delete",
+            Some(
+                r#"{"initialization":"{init}","retry_id":"data-delete-0001","base_data_version":1,"path":"absent"}"#,
+            ),
+            Succeeds,
+        ),
         case(
             "frame assets read",
             "POST",
@@ -1482,7 +1514,19 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
 
 #[tokio::test]
 async fn nobody_else_can_reach_what_a_user_holds_over_http() -> TestResult {
-    let harness = Harness::new();
+    // The walk sends each frame case with Alice's names and with absent names,
+    // once as the owner and once as the owner's agent. Those two credentials
+    // spend one frame budget: 64 calls against the default of 60 at once
+    // (decision 0032), so the last cases would get 429 instead of the answer
+    // under test. The budget is not what this test compares, so it is raised as
+    // the general one is.
+    let harness = Harness::with(|settings| {
+        settings.frame_limits = RequestLimits {
+            burst: 100_000,
+            per_minute: 6_000_000,
+            concurrent: 64,
+        };
+    });
     let alice = harness.person("alice").await?;
     let bob = harness.person("bob").await?;
     let agent = harness.issue(None, "owner agent").await?;

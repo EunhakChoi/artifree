@@ -306,12 +306,14 @@ impl fmt::Display for UserLabel {
 /// grammar has not changed: 8 to 128 ASCII letters, digits and `-_.:`. The
 /// keys of runtime frame writes are built only by
 /// [`RequestKey::runtime_write`] (source writes, which start with
-/// [`RUNTIME_WRITE_PREFIX`]) and [`RequestKey::runtime_asset_write`] (asset
-/// uploads and deletes, which start with [`RUNTIME_ASSET_WRITE_PREFIX`]). Both
-/// prefixes hold a character outside that grammar. No text can therefore parse
-/// to a frame's key, a frame's retry identity can never equal, or be made
-/// equal by, a key an agent or the owner's own client sends, and no key that
-/// parsed before the namespace existed is refused now.
+/// [`RUNTIME_WRITE_PREFIX`]), [`RequestKey::runtime_asset_write`] (asset
+/// uploads and deletes, which start with [`RUNTIME_ASSET_WRITE_PREFIX`]) and
+/// [`RequestKey::runtime_data_write`] (application data writes, which start
+/// with [`RUNTIME_DATA_WRITE_PREFIX`]). All three prefixes hold a character
+/// outside that grammar. No text can therefore parse to a frame's key, a
+/// frame's retry identity can never equal, or be made equal by, a key an agent
+/// or the owner's own client sends, and no key that parsed before the namespace
+/// existed is refused now.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestKey(String);
 
@@ -327,8 +329,16 @@ pub const RUNTIME_WRITE_PREFIX: &str = "rtw~";
 /// a key, even with the same retry identity.
 pub const RUNTIME_ASSET_WRITE_PREFIX: &str = "rta~";
 
+/// The start of every key [`RequestKey::runtime_data_write`] builds. Its `~`
+/// is outside the grammar [`FromStr`] accepts, so no parsed key can contain it.
+/// Do not change it to a character that grammar accepts. It differs from
+/// [`RUNTIME_WRITE_PREFIX`] and [`RUNTIME_ASSET_WRITE_PREFIX`], so a data write
+/// never shares a key with a source or asset write, even with the same retry
+/// identity (decision 0053, rule 9).
+pub const RUNTIME_DATA_WRITE_PREFIX: &str = "rtd~";
+
 /// Longest retry identity a runtime frame supplies, so that the whole key
-/// stays within 128 characters: the prefix (either one is four characters),
+/// stays within 128 characters: the prefix (each is four characters),
 /// an artifact identifier, a 32-character view, a generation of at most 16
 /// digits, three separators and the identity (4 + 36 + 32 + 16 + 3 + 36 = 127).
 pub const MAX_RUNTIME_RETRY_ID: usize = 36;
@@ -381,6 +391,29 @@ impl RequestKey {
     ) -> Result<Self, InvalidValue> {
         Self::runtime(
             RUNTIME_ASSET_WRITE_PREFIX,
+            artifact,
+            view,
+            generation,
+            retry_id,
+        )
+    }
+
+    /// The key of one runtime frame data write (`data.set`, `data.update` or
+    /// `data.remove`). It has the same scope and retry rules as
+    /// [`RequestKey::runtime_write`], but it starts with
+    /// [`RUNTIME_DATA_WRITE_PREFIX`] (decision 0053, rule 9).
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`RequestKey::runtime_write`].
+    pub fn runtime_data_write(
+        artifact: &ArtifactId,
+        view: &str,
+        generation: u64,
+        retry_id: &str,
+    ) -> Result<Self, InvalidValue> {
+        Self::runtime(
+            RUNTIME_DATA_WRITE_PREFIX,
             artifact,
             view,
             generation,

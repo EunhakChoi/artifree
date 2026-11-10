@@ -12,13 +12,13 @@ use crate::runtime_assets;
 use crate::runtime_data;
 use crate::runtime_source::{self, Download, FrameCall};
 use artifree_contracts::api::{
-    AssetList, DeleteAssetResponse, ErrorCode, RuntimeAssetDeleteRequest,
+    AssetList, DataWriteResponse, DeleteAssetResponse, ErrorCode, RuntimeAssetDeleteRequest,
     RuntimeAssetDownloadOffer, RuntimeAssetDownloadRequest, RuntimeAssetListRequest,
-    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeDataReadRequest,
-    RuntimeDataValue, RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeMetadata,
-    RuntimeMetadataRequest, RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart,
-    RuntimeSourceReadRequest, RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest,
-    UploadAssetResponse,
+    RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeDataDeleteRequest,
+    RuntimeDataReadRequest, RuntimeDataSetRequest, RuntimeDataUpdateRequest, RuntimeDataValue,
+    RuntimeDownloadOffer, RuntimeDownloadRequest, RuntimeMetadata, RuntimeMetadataRequest,
+    RuntimeSourceList, RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
+    RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, UploadAssetResponse,
 };
 use artifree_domain::identity::ActorId;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -89,6 +89,21 @@ pub(super) fn routes(state: &AppState) -> Router<AppState> {
         .route(
             &format!("{VIEW}/data/read"),
             axum::routing::post(runtime_data_read),
+        )
+        .route(
+            &format!("{VIEW}/data/set"),
+            axum::routing::post(runtime_data_set)
+                .layer(DefaultBodyLimit::max(MAX_FRAME_WRITE_BODY_BYTES)),
+        )
+        .route(
+            &format!("{VIEW}/data/update"),
+            axum::routing::post(runtime_data_update)
+                .layer(DefaultBodyLimit::max(MAX_FRAME_WRITE_BODY_BYTES)),
+        )
+        .route(
+            &format!("{VIEW}/data/delete"),
+            axum::routing::post(runtime_data_delete)
+                .layer(DefaultBodyLimit::max(MAX_FRAME_WRITE_BODY_BYTES)),
         )
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_FRAME_BODY_BYTES))
@@ -362,6 +377,54 @@ async fn runtime_data_read(
     let frame = Frame::parse(path, body)?;
     let call = frame.call(&actor, &frame.request.initialization);
     runtime_data::read(&state, &call, &frame.request)
+        .await
+        .map(Json)
+}
+
+/// Replaces the value at one path of the calling user's application data for
+/// the artifact a view is bound to, given as JSON text, or stores `null` there
+/// (decision 0053, rules 4 and 5). The write needs the `data.write` grant.
+async fn runtime_data_set(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeDataSetRequest>, JsonRejection>,
+) -> Result<Json<DataWriteResponse>, ApiError> {
+    let frame = Frame::parse(path, body)?;
+    let call = frame.call(&actor, &frame.request.initialization);
+    runtime_data::set(&state, &call, &frame.request)
+        .await
+        .map(Json)
+}
+
+/// Applies a JSON Merge Patch, given as JSON text, at one path of the calling
+/// user's application data for the artifact a view is bound to (decision 0053,
+/// rules 4 and 5). The write needs the `data.write` grant.
+async fn runtime_data_update(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeDataUpdateRequest>, JsonRejection>,
+) -> Result<Json<DataWriteResponse>, ApiError> {
+    let frame = Frame::parse(path, body)?;
+    let call = frame.call(&actor, &frame.request.initialization);
+    runtime_data::update(&state, &call, &frame.request)
+        .await
+        .map(Json)
+}
+
+/// Removes the value at one path of the calling user's application data for
+/// the artifact a view is bound to; a missing path changes nothing (decision
+/// 0053, rule 4). The write needs the `data.write` grant.
+async fn runtime_data_delete(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: FramePath,
+    body: Result<Json<RuntimeDataDeleteRequest>, JsonRejection>,
+) -> Result<Json<DataWriteResponse>, ApiError> {
+    let frame = Frame::parse(path, body)?;
+    let call = frame.call(&actor, &frame.request.initialization);
+    runtime_data::remove(&state, &call, &frame.request)
         .await
         .map(Json)
 }

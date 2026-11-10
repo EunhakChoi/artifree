@@ -29,11 +29,12 @@ const ENTRY: &str =
 /// The capability this file grants and withholds.
 const DATA_READ: &str = "data.read";
 /// Every capability name, in name order.
-const ALL_CAPABILITIES: [&str; 8] = [
+const ALL_CAPABILITIES: [&str; 9] = [
     "assets.download",
     "assets.read",
     "assets.write",
     "data.read",
+    "data.write",
     "metadata.read",
     "source.download",
     "source.read",

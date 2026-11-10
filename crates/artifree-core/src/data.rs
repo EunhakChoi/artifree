@@ -9,6 +9,7 @@
 //! restore does not touch it.
 
 use artifree_domain::AppDataVersion;
+use artifree_domain::SourceRevision;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue, MemberPage, Members};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, UnixMillis};
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
@@ -215,6 +216,39 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
         id: &ArtifactId,
         mutation: DataMutation<'_>,
     ) -> Result<DataWriteOutcome, ArtifactError> {
+        self.write_fenced(actor, key, id, mutation, None)
+    }
+
+    /// Applies `mutation` for a runtime frame whose view is pinned to
+    /// `expected_source` (decision 0053, rules 9 and 10). The store checks that
+    /// head inside the write transaction before the key, so a write or a retry
+    /// after the head moved is refused, not replayed.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::write_data`], plus [`ArtifactError::RevisionConflict`]
+    /// with the current revision when the head moved.
+    pub fn runtime_write_data(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        mutation: DataMutation<'_>,
+        expected_source: SourceRevision,
+    ) -> Result<DataWriteOutcome, ArtifactError> {
+        self.write_fenced(actor, key, id, mutation, Some(expected_source))
+    }
+
+    /// Shared body of the keyed data writes. `expected_source` is set only for a
+    /// runtime frame; the store then checks the source head inside the transaction.
+    fn write_fenced(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        mutation: DataMutation<'_>,
+        expected_source: Option<SourceRevision>,
+    ) -> Result<DataWriteOutcome, ArtifactError> {
         let DataMutation {
             base,
             change,
@@ -240,25 +274,27 @@ impl<S: ArtifactStore + DataStore> ArtifactService<S> {
             }
             DataChange::Remove { path } => hasher.field(path.to_string().as_bytes()),
         }
+        let write = DataWrite {
+            fence,
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
+            },
+            artifact: id,
+            base,
+            change,
+            now,
+        };
         let DataReceipt {
             version,
             changed,
             delivery,
-        } = self
-            .store
-            .write_data(DataWrite {
-                fence,
-                request: RequestIdentity {
-                    actor,
-                    key,
-                    fingerprint: hasher.finish(),
-                },
-                artifact: id,
-                base,
-                change,
-                now,
-            })
-            .map_err(data_error)?;
+        } = match expected_source {
+            Some(source) => self.store.write_runtime_data(write, source),
+            None => self.store.write_data(write),
+        }
+        .map_err(data_error)?;
         Ok(DataWriteOutcome {
             version,
             changed,
@@ -273,6 +309,7 @@ fn data_error(error: DataStoreError) -> ArtifactError {
         DataStoreError::NotFound => ArtifactError::NotFound(Missing::Artifact),
         DataStoreError::RequestKeyReused => ArtifactError::RequestKeyReused,
         DataStoreError::VersionConflict { current } => ArtifactError::DataConflict { current },
+        DataStoreError::SourceConflict { current } => ArtifactError::RevisionConflict { current },
         DataStoreError::Rejected(error) => ArtifactError::Data(error),
         DataStoreError::Unavailable(reason) => ArtifactError::Unavailable(reason),
         other => ArtifactError::Unavailable(other.to_string()),
@@ -353,6 +390,14 @@ mod tests {
         }
 
         fn write_data(&self, _: DataWrite<'_>) -> Result<DataReceipt, DataStoreError> {
+            Err(DataStoreError::Unavailable("unused".into()))
+        }
+
+        fn write_runtime_data(
+            &self,
+            _: DataWrite<'_>,
+            _: SourceRevision,
+        ) -> Result<DataReceipt, DataStoreError> {
             Err(DataStoreError::Unavailable("unused".into()))
         }
     }

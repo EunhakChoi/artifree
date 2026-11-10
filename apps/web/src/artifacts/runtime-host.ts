@@ -1,6 +1,10 @@
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
-import { TokenBucket } from './frame-budget';
+import {
+  DATA_WRITE_BURST,
+  DATA_WRITE_PER_MINUTE,
+  TokenBucket,
+} from './frame-budget';
 import { FrameRpc } from './frame-rpc';
 import { OfferDesk } from './offer-desk';
 import { pageSaver } from './save-blob';
@@ -20,7 +24,10 @@ export function createDesk(): OfferDesk {
   return new OfferDesk();
 }
 
-/** The rpc for one frame, with the budget of that frame alone. */
+/**
+ * The rpc for one frame, with the budget of that frame alone and a separate
+ * budget for its data writes (decision 0053, rule 23).
+ */
 export function createRpc(options: {
   readonly client: ArtifreeClient;
   readonly view: RuntimeView;
@@ -33,6 +40,11 @@ export function createRpc(options: {
   ) => void;
 }): FrameRpc {
   const bucket = new TokenBucket(() => performance.now());
+  const writes = new TokenBucket(
+    () => performance.now(),
+    DATA_WRITE_BURST,
+    DATA_WRITE_PER_MINUTE,
+  );
   return new FrameRpc({
     client: options.client,
     view: options.view,
@@ -41,6 +53,7 @@ export function createRpc(options: {
       pageSaver.save(bytes, fileName, type);
     },
     take: () => bucket.take(),
+    takeDataWrite: () => writes.take(),
     now: () => performance.now(),
     deadline: options.deadline,
     send: options.send,

@@ -39,3 +39,9 @@ export const MAX_LISTED_ASSETS = 64;
  * 1 MiB (decision 0053, rules 11 and 15).
  */
 export const MAX_DATA_READ_BYTES = 1_048_576;
+
+/**
+ * Most bytes of the JSON text one data write carries as its value or patch:
+ * 256 KiB, the value limit of decision 0031 (decision 0053, rules 11 and 15).
+ */
+export const MAX_DATA_WRITE_BYTES = 262_144;

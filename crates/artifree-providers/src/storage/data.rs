@@ -2,7 +2,8 @@
 //!
 //! A space is one row of `app_data` per artifact and actor: its canonical JSON
 //! text and its version. A write is one `BEGIN IMMEDIATE` transaction that
-//! checks the artifact, looks up the key, compares the base version, applies the
+//! checks the artifact, then, for a runtime frame, the source revision its view
+//! was pinned to, then looks up the key, compares the base version, applies the
 //! change to the space it just read, writes the row, and records the key, so
 //! two connections cannot both pass the same base version. A space nobody wrote
 //! has no row and is at version 0.
@@ -15,6 +16,7 @@
 //! the purge transaction and with `secure_delete` on.
 
 use artifree_domain::AppDataVersion;
+use artifree_domain::SourceRevision;
 use artifree_domain::change::FeedId;
 use artifree_domain::data::DataSpace;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
@@ -116,14 +118,39 @@ fn key_of(connection: &Connection, request: RequestIdentity<'_>) -> Result<Key, 
     Ok(Key::Unused)
 }
 
+/// The artifact's current source revision, read in the caller's transaction.
+fn source_head(
+    connection: &Connection,
+    artifact: &ArtifactId,
+) -> Result<SourceRevision, StoreError> {
+    let head: i64 = connection
+        .query_row(
+            "SELECT current_revision FROM artifacts WHERE id = ?1",
+            [artifact.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    Ok(SourceRevision(u64::try_from(head).map_err(corrupt)?))
+}
+
 fn write(
     transaction: &Transaction<'_>,
     request: DataWrite<'_>,
+    expected_source: Option<SourceRevision>,
 ) -> Result<DataReceipt, DataStoreError> {
     // The target first, as every write does (decision 0013): data of an
     // artifact in the trash or purged is not found, a retry included.
     if !artifact_in_place(transaction, request.artifact)? {
         return Err(DataStoreError::NotFound);
+    }
+    // A runtime frame's write is fenced to its view's head before the key is
+    // looked at, so a retry after the head moved is refused, not replayed
+    // (decision 0053, rule 10).
+    if let Some(expected) = expected_source {
+        let current = source_head(transaction, request.artifact)?;
+        if current != expected {
+            return Err(DataStoreError::SourceConflict { current });
+        }
     }
     if let Some(fence) = request.fence {
         let current = binding(transaction, request.request.actor)?;
@@ -288,6 +315,14 @@ impl DataStore for SqliteStore {
         // Erasing: a value that a write replaces or removes is overwritten in
         // the file's free pages as it goes, not left there until they are
         // reused (decision 0031).
-        self.write_erasing(|transaction| write(transaction, request))
+        self.write_erasing(|transaction| write(transaction, request, None))
+    }
+
+    fn write_runtime_data(
+        &self,
+        request: DataWrite<'_>,
+        expected_source: SourceRevision,
+    ) -> Result<DataReceipt, DataStoreError> {
+        self.write_erasing(|transaction| write(transaction, request, Some(expected_source)))
     }
 }

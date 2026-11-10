@@ -17,8 +17,8 @@ preview may read its own artifact metadata, list and read the files of its
 pinned revision, ask the user to save one of them or the source archive, save
 one file as a new revision, and list, read, upload, delete, or ask the user to
 save its artifact's uploaded assets, each through a bound bridge after its own
-connection-scoped user grant; with its own grant it can also read, but not
-write, its artifact's application data. One persistent job, `verify_revision`, re-checks a revision's stored files
+connection-scoped user grant; with their own grants it can also read and
+write its artifact's application data. One persistent job, `verify_revision`, re-checks a revision's stored files
 against their digests in a separate worker process the operator starts
 (`artifree-server worker run`). Publishing, roles and sharing, build and
 conversion workers, sandboxed execution of untrusted code, and external
@@ -163,9 +163,12 @@ restoring a revision does not change the data, and `artifact duplicate
 (`get_data`, `set_data`, `update_data`, `delete_data`) may read and write it;
 there is no history, so an overwrite cannot be undone, and a purge erases it.
 A page running in a preview can read this data only after you grant it
-`data.read` (`window.artifree.data.get({ path })`,
-[decision 0053](docs/decisions/0053-runtime-app-data.md)); **it cannot write
-it**. The data is not in a revision or an export.
+`data.read` (`window.artifree.data.get({ path })`) and change it only after
+you grant it `data.write` (`data.set`, `data.update`, `data.remove`, each with
+the `baseDataVersion` it last saw and a `retryId`;
+[decision 0053](docs/decisions/0053-runtime-app-data.md)). A granted page
+writes without asking again, at most 60 times a minute, and **it is not told
+when the data changes**. The data is not in a revision or an export.
 CLI and MCP users can poll `data get` or `get_data`
 and compare versions. HTTP and TypeScript clients can instead follow changes and
 list object member names ([decision 0040](docs/decisions/0040-data-changes-and-member-listing.md)).
@@ -430,8 +433,8 @@ back, and returns the path, revision, size, and SHA-256, which the client, the
 workspace, and the frame each check against the bytes they sent. A save moves
 the head, so the workspace shows the next revision in a new view that holds no
 grant: the user consents again for each save. Only the owner exists as a
-principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** writing application data from a
-preview, subscriptions, replacing a view in place, deleting or
+principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** telling a preview that application data changed,
+subscriptions, replacing a view in place, deleting or
 renaming files, several files in one save, a prompt for each save, roles (a
 viewer is not refused because none exists), and any claim that a preview cannot
 use the network. No MCP tool was added or changed.

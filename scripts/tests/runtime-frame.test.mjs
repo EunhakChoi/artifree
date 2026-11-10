@@ -71,7 +71,7 @@ function compareHelloWithCrypto(replacement) {
 
 // ---- the route tails ----
 
-test('The frame route tails are the thirteen recorded tails, in order, each named once', () => {
+test('The frame route tails are the sixteen recorded tails, in order, each named once', () => {
   const recorded = [
     'metadata',
     'source/list',
@@ -86,9 +86,12 @@ test('The frame route tails are the thirteen recorded tails, in order, each name
     'assets/offer',
     'assets/download',
     'data/read',
+    'data/set',
+    'data/update',
+    'data/delete',
   ];
   assert.deepEqual([...FRAME_ROUTE_TAILS], recorded);
-  assert.equal(new Set(FRAME_ROUTE_TAILS).size, 13);
+  assert.equal(new Set(FRAME_ROUTE_TAILS).size, 16);
   assert.deepEqual(Object.values(FRAME_ROUTES), recorded);
 });
 
