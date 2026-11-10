@@ -4,9 +4,8 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-10. Status: **partially implemented**: R13a (rule 5), R13b
-(rules 6, 7 and 9) and R13c (rule 8) are implemented; R13d and R13e (rules 10
-and 11) are proposed and have no code.
+Date: 2026-11-10. Status: **implemented** (R13a to R13e, rules 5 to 11). What
+it achieved and what it did not is under "Result".
 Roadmap: R13. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md),
 [0032](0032-runtime-source-read-and-download.md),
@@ -233,6 +232,62 @@ noted.
 | R13c  | Host: one offer description for the prompt                                  | 8       |
 | R13d  | Limits defined once in the client; host and SDK literals pinned by a test   | 10      |
 | R13e  | Server: frame handlers in their own module with one call builder            | 11      |
+
+## Result
+
+Rule 13 asks for the number of hand-written files a new call and a new family
+touch, beside the count from 0051. Measured on the code by listing the
+non-generated, non-test files that name one existing write call
+(`assets.delete`) before R13 (commit `0026c7f`) and after it.
+
+|                                                | Before R13 | After R13 |
+| ---------------------------------------------- | ---------- | --------- |
+| Files a new call in an existing family touches | 11         | 11        |
+| Files a new family touches                     | 13         | 14        |
+| Places in the host that name the call          | 6          | 2         |
+
+- **A call, before**: the contract (`api.rs` and the schema exporter), the
+  core service (`core/assets.rs`, for a write), the server module, `http.rs`,
+  the client family module and its re-export list, `frame-rpc.ts`,
+  `request-gate.ts`, the SDK's types and its bootstrap.
+- **A call, after**: the contract (the same two), the core service, the server
+  module, `http/runtime.rs`, the client family module and its re-export list,
+  the route name in `runtime-frame.ts`, the family's descriptor module, the
+  SDK's types and its bootstrap.
+- **A family** adds the capability in `runtime_policy.rs` and the permission
+  control, and its server, client and host modules are new files. After R13 it
+  also adds one line in `frame-rpc.ts` to register its descriptors, which is
+  why the count is one higher.
+- **Places in the host**: before, four `'assets.delete'` literals and the
+  client call in `frame-rpc.ts`, and the tail in the gate's pattern; after,
+  one literal and the client call in the descriptor.
+
+**The file count did not fall; for a new family it rose by one.** 0051 counted
+"about twelve hand-written files in five packages" as the cost to reduce, but
+most of those files are one per layer and a consolidation does not remove a
+layer. What R13 changed:
+
+- A call's type is written once in the host instead of four times, and the
+  request gate needs no edit.
+- The two download flows, the two frame transports, the two byte comparisons
+  and the prompt's five kind checks are one each.
+- Some mistakes that used to pass silently now fail a test: a route name the
+  gate does not classify as a frame call, a limit that differs between the
+  client, the host, the SDK and the schema, a changed prompt string, on-demand
+  code reaching the entry bundle, a frame route that reads its body before
+  its path.
+- **Not guarded**: a layer left out of a new call. The tests pin the set of
+  call types, the set of route names and the set of server routes to written
+  lists, so they fail when a list changes without them, but no test compares
+  the server's routes, the client's route names, the host registry and the
+  SDK bootstrap with each other. A call missing its host descriptor or its
+  SDK method fails only at run time. The isolation test's lists of handler
+  modules are also kept by hand and pass when a module is missing.
+- The limits are still written three times (client, host, SDK), by rule 10 as
+  amended.
+
+Production lines outside tests and generated files, from the commit before
+R13a to the last slice: +1,371 / -1,129.
 
 ## Alternatives considered
 
