@@ -8,6 +8,8 @@ Date: 2026-11-11. Status: **implemented** in Chromium, Firefox pending re-verifi
 (`data.read` and `data.get`), R14b (`data.write`, `data.set`, `data.update`
 and `data.remove`) and R14c (the change hint and `data.onChange`).
 Amends rule 6 of [0040](0040-data-changes-and-member-listing.md) (rule 17).
+Rules 1, 11, 14, 17 and 23 were reworded after the implementation, where the
+reviews found them open to two readings; the code did not change with them.
 Roadmap: R14. Builds on [0020](0020-runtime-grants.md),
 [0031](0031-app-data.md), [0033](0033-runtime-source-write.md),
 [0040](0040-data-changes-and-member-listing.md),
@@ -50,10 +52,11 @@ product is claimed for them.
    capability. `data.write` does not return a stored value, but it is not
    blind: a conditional write tells its caller the current `data_version` on a
    stale base, whether the write changed anything (so a `set` of a guessed
-   value reveals whether that value was already stored), and whether a path
-   runs through a value that is not an object. The consent text of rule 3 says
-   so; a page that must learn nothing about the data must not be granted
-   `data.write`.
+   value reveals whether that value was already stored), and, for a `set` or
+   a patch that is not `null`, whether a path runs through a value that is
+   not an object. The consent text of rule 3 names the second of these, the
+   one that reveals a stored value; a page that must learn nothing about the
+   data must not be granted `data.write`.
 2. Seven capabilities exist. `data.read` is the eighth and still fits the
    set's current eight bits; `data.write` is the ninth, so the slice that adds
    it (R14b) widens the set to hold at least sixteen. This is internal: the
@@ -124,8 +127,12 @@ product is claimed for them.
     after the commit withholds the receipt; the commit stands.
 11. A stale base is `409 data_conflict` with the current `data_version`. The
     limits of 0031 apply unchanged (256 KiB a value, 1 MiB a space, 10,000
-    values, 32 levels). The request body limit of a write route is the one the
-    frame's source write has. A read answers at most one space, so its value
+    values, 32 levels). The server is what enforces them: the client and the
+    SDK refuse before sending only what their serializer refuses (a cycle, a
+    value JSON would change, nesting deeper than 64), so a value nested 33 to
+    64 deep is sent and refused by the server with the same `invalid_request`.
+    The request body limit of a write route, `data/delete` included, is the
+    one the frame's source write has. A read answers at most one space, so its value
     text is at most 1 MiB (1,048,576 bytes), in one reply; no parts.
 12. A write that changes the space records `data_changed` in the user's change
     feed exactly as an owner's write does (0040). Nothing else is recorded,
@@ -145,8 +152,11 @@ product is claimed for them.
     are not retried automatically.
 14. Frame failures use the existing closed vocabulary. A stale base is
     `conflict` and carries the current `data_version`. A value the rules of a
-    space refuse, a path through a value that is not an object, and a text
-    that is not JSON are `invalid_request`.
+    space refuse, a `set` or a patch that is not `null` whose path runs
+    through a value that is not an object, and a text that is not JSON are
+    `invalid_request`. A `remove`, or a `null` patch, at such a path changes
+    nothing and is not a failure, as 0031 defines for a path that is not
+    there.
 15. The bounds the layers share follow 0052 rule 10: defined once in the
     client, literals in the host and the SDK, pinned by the limits test. They
     are the write value size (262,144 bytes of text), the read value size
@@ -172,6 +182,11 @@ product is claimed for them.
     "nothing changed".
 17. The workspace sends the hint only while its own record says the grant is
     held and the view is current, and never to a frame without `data.read`.
+    The grant is held when the view the frame connected with was issued with
+    `data.read`; a grant change gives a new view. The view is current while
+    that frame's connection is open, its lease has not ended, and the change's
+    revision is the head the view was issued for: a view whose source moved
+    gets no hint. The frame that made a write is told of it like any other.
     It sends a view only versions higher than the last one it sent that view,
     and at most one hint in 250 ms, keeping the highest version that arrived
     meanwhile, so a replayed stretch of the feed is one hint. No new server
@@ -187,8 +202,8 @@ product is claimed for them.
     answers `rate_limited` beyond that. A changing write rewrites the space
     row, adds a change row that stays until retention, and wakes the user's
     streams, and unlike a source write it does not end the view, so the
-    general frame budget (600 calls a minute) is too wide for it. The server's
-    frame budget is unchanged.
+    general frame budget (600 calls a minute) is too wide for it. A data write
+    takes from both budgets. The server's frame budget is unchanged.
 
 ### What does not change
 
@@ -220,6 +235,16 @@ product is claimed for them.
     permission control. 0052's result named this gap.
 22. `npm run check`, `npm run build`, the bundle sizes of 0052 rule 12, and no
     growth of the web entry bundle from on-demand code.
+
+### Known limit
+
+Every frame write that is accepted, one that changes nothing included,
+records its request key so that a retry can be answered (rule 9), as a
+frame's source and asset writes do, and nothing removes those rows; a purge
+clears their fingerprints only. At the host's rate a granted page can add about 86,000
+rows a day for each open view. The rows are small and hold no value. Removing
+old keys is not part of R14; it belongs with a retention rule for request keys
+of every kind.
 
 ### Slices
 
