@@ -5,6 +5,8 @@
 > re-verification ([quality](../quality.md#browser-engines)).
 
 Date: 2026-11-10. Status: **proposed** (specification only; no code).
+Rule 5 was amended before any code merged: the byte comparison moved to its
+own on-demand module.
 Roadmap: R13. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md),
 [0032](0032-runtime-source-read-and-download.md),
@@ -83,10 +85,15 @@ the next call has fewer places to touch.
 
 ### Client
 
-5. One frame transport. `FrameTransport`, one route builder, one body builder
-   and one function that compares received bytes with a stated size and
-   SHA-256 live in a new `packages/client/src/runtime-frame.ts`. The same
-   module names each of the twelve frame route tails once. `runtime-source.ts`,
+5. One frame transport. `FrameTransport`, one route builder and one body
+   builder live in a new `packages/client/src/runtime-frame.ts`. The same
+   module names each of the twelve frame route tails once. One function that
+   compares received bytes with a stated size and SHA-256 lives in
+   `packages/client/src/runtime-bytes.ts`, which only the on-demand runtime
+   modules import: `runtime-frame.ts` is imported by the client class and so
+   sits in the entry bundle, and the first implementation measured about 300
+   bytes of on-demand comparison code there, which rule 12 does not allow.
+   `runtime-source.ts`,
    `runtime-assets.ts` and the metadata read in `client.ts` build their routes
    and bodies with it and no longer write them out; `RuntimeAssetsFrame` is
    removed. Everything the package index exports keeps its name, signature and
