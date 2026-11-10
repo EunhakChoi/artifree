@@ -3066,16 +3066,28 @@ async fn a_user_disabled_and_enabled_again_registers_through_every_route_with_it
     Ok(())
 }
 
+/// Every module that holds HTTP handlers. The scans below pass when a file is
+/// missing from their list, so a module split out of `http.rs` is added here.
+const HTTP_SOURCES: [(&str, &str); 5] = [
+    ("http.rs", include_str!("../src/http.rs")),
+    ("http/assets.rs", include_str!("../src/http/assets.rs")),
+    (
+        "http/data_query.rs",
+        include_str!("../src/http/data_query.rs"),
+    ),
+    ("http/runtime.rs", include_str!("../src/http/runtime.rs")),
+    ("http/unread.rs", include_str!("../src/http/unread.rs")),
+];
+
 #[test]
 fn request_handlers_open_connections_and_inboxes_only_through_the_confirmed_functions() {
     // A connection and an inbox outlive the request that opens them, so a
     // handler that authenticated before a disable must confirm the user after
     // registering. The registering functions alone do not.
-    for (file, source) in [
-        ("http.rs", include_str!("../src/http.rs")),
-        ("http/runtime.rs", include_str!("../src/http/runtime.rs")),
-        ("mcp.rs", include_str!("../src/mcp.rs")),
-    ] {
+    for (file, source) in [("mcp.rs", include_str!("../src/mcp.rs"))]
+        .into_iter()
+        .chain(HTTP_SOURCES)
+    {
         for primitive in [
             "operations::open_runtime_session(",
             "operations::register_handoff_session(",
@@ -3102,12 +3114,13 @@ fn every_registration_that_outlives_a_request_is_confirmed_against_the_generatio
     assert_eq!(confirmations(include_str!("../src/operations.rs")), 4);
     assert_eq!(confirmations(include_str!("../src/changes.rs")), 1);
     for (file, source) in [
-        ("http.rs", include_str!("../src/http.rs")),
-        ("http/runtime.rs", include_str!("../src/http/runtime.rs")),
         ("mcp.rs", include_str!("../src/mcp.rs")),
         ("operations.rs", include_str!("../src/operations.rs")),
         ("changes.rs", include_str!("../src/changes.rs")),
-    ] {
+    ]
+    .into_iter()
+    .chain(HTTP_SOURCES)
+    {
         assert!(
             !source.contains("ensure_enabled("),
             "{file} confirms that the user is enabled now, which a disable and an enable undoes"

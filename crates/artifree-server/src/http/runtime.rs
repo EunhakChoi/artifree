@@ -126,7 +126,7 @@ fn frame_body_error(rejection: &JsonRejection) -> ApiError {
     ApiError::invalid("the frame call is not a valid request")
 }
 
-/// A frame call's route names and body, read with today's rejections: a bad
+/// A frame call's route names and body, read with these rejections: a bad
 /// path is refused first, then a bad body through [`frame_body_error`].
 struct Frame<R> {
     artifact: String,
