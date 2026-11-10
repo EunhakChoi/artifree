@@ -10,15 +10,18 @@ server and use it from a browser, CLI, HTTP API, or MCP-capable agent.
 file-package artifacts are created, saved as immutable revisions with conflict
 detection and safe retries, and previewed in a sandbox on a separate origin —
 through the HTTP API, MCP tools for agents, the CLI, and the web workspace,
-stored in a local SQLite file. It is single-user and listens on loopback by
-default. A runtime preview may read its own artifact metadata, list and read
-the files of its pinned revision, and ask the user to save one of them or the
-source archive, each through a bound bridge after its own connection-scoped
-user grant; it cannot change anything. One persistent job, `verify_revision`, re-checks a revision's stored files
+stored in a local SQLite file. It listens on loopback by default; the owner
+can register further users, each isolated from the others
+([decision 0036](docs/decisions/0036-multi-user-identity.md)). A runtime
+preview may read its own artifact metadata, list and read the files of its
+pinned revision, ask the user to save one of them or the source archive, save
+one file as a new revision, and list, read, upload, delete, or ask the user to
+save its artifact's uploaded assets, each through a bound bridge after its own
+connection-scoped user grant; it cannot reach application data. One persistent job, `verify_revision`, re-checks a revision's stored files
 against their digests in a separate worker process the operator starts
-(`artifree-server worker run`). Publishing, sharing, build and conversion
-workers, sandboxed execution of untrusted code, and multi-user authentication
-are not implemented. The module inventory shown by the UI and
+(`artifree-server worker run`). Publishing, roles and sharing, build and
+conversion workers, sandboxed execution of untrusted code, and external
+identity (OAuth, passwords, login sessions) are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
 
 ## Quick start
@@ -319,8 +322,11 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0033](docs/decisions/0033-runtime-source-write.md),
 [0034](docs/decisions/0034-room-and-presence.md),
 [0035](docs/decisions/0035-per-file-conditional-edit.md),
-[0036](docs/decisions/0036-multi-user-identity.md), and
-[0037](docs/decisions/0037-release-publishing-and-supply-chain.md)).
+[0036](docs/decisions/0036-multi-user-identity.md),
+[0037](docs/decisions/0037-release-publishing-and-supply-chain.md), and the
+later records in [docs/decisions](docs/decisions/), up to
+[0051](docs/decisions/0051-roadmap-and-architecture-review.md), which reviews
+the remaining roadmap and the structure).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 
@@ -340,8 +346,9 @@ the browser must provide Web Locks to keep drafts safely. R04 adds the first
 runtime metadata read, R05 adds an explicit connection-scoped metadata grant,
 R11a adds read-only source listing and reading and user-confirmed download
 requests with their own grants, R11b lets a preview save one file under a
-separate edit grant, and R12 adds an in-memory room per artifact for presence and
-ephemeral events (HTTP and the TypeScript client only).
+separate edit grant, R12 adds an in-memory room per artifact for presence and
+ephemeral events (HTTP and the TypeScript client only), and R09 adds uploaded
+assets through the API, MCP, CLI, web workspace, and a preview's own grants.
 The source editor can stage a saved selection and, after review, send it to a
 registered MCP agent inbox (A08). The agent must poll and acknowledge; receipt
 does not establish that a model completed the requested work.
@@ -420,7 +427,7 @@ workspace, and the frame each check against the bytes they sent. A save moves
 the head, so the workspace shows the next revision in a new view that holds no
 grant: the user consents again for each save. Only the owner exists as a
 principal who can save a given artifact (its own user); there are no viewer roles. **Not implemented:** data access from a
-preview, subscriptions, downloading assets from a preview, replacing a view in place, deleting or
+preview, subscriptions, replacing a view in place, deleting or
 renaming files, several files in one save, a prompt for each save, roles (a
 viewer is not refused because none exists), and any claim that a preview cannot
 use the network. No MCP tool was added or changed.
@@ -493,7 +500,7 @@ compiled into the server.
 ## Planned deployment profiles
 
 - **Local temporary:** a process-local session and temporary files.
-- **Local persistent (implemented, single user):** SQLite and a local data
+- **Local persistent (implemented, one server process):** SQLite and a local data
   directory.
 - **Self-hosted:** a Rust API, separate workers, and local or external storage.
 - **Hosted web:** static UI on Vercel or another host, with a separately deployed
