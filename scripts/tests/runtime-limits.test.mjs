@@ -237,3 +237,34 @@ for (const name of OTHER_HOST_FILES) {
     assert.equal(SHARED_LITERAL.exec(text)?.[0], undefined);
   });
 }
+
+// The on-demand host modules keep their own literals: a limit imported from
+// the client made the build split a chunk that the page preloads (rule 10).
+const HOST_ENVELOPE = new URL(
+  '../../apps/web/src/artifacts/frame-rpc.ts',
+  import.meta.url,
+);
+
+test('No on-demand host module imports a limit from the client', async () => {
+  const sources = [
+    ['frame-rpc.ts', await readFile(HOST_ENVELOPE, 'utf8')],
+    ...(await Promise.all(
+      (await readdir(FRAME_CALLS))
+        .filter((name) => /\.tsx?$/.test(name))
+        .map(async (name) => [
+          `frame-calls/${name}`,
+          await readFile(new URL(name, FRAME_CALLS), 'utf8'),
+        ]),
+    )),
+  ];
+  const clientImport = /import\s+(?!type\b)([^;]*?)from\s+'@artifree\/client'/g;
+  for (const [name, text] of sources) {
+    for (const [, names] of text.matchAll(clientImport)) {
+      for (const limit of Object.keys(PINNED_LIMITS))
+        assert.ok(
+          !new RegExp(`\\b${limit}\\b`).test(names),
+          `${name} imports ${limit} from the client`,
+        );
+    }
+  }
+});
