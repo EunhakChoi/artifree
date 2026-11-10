@@ -325,8 +325,9 @@ See the [architecture document](docs/architecture.md), the interactive Korean
 [0036](docs/decisions/0036-multi-user-identity.md),
 [0037](docs/decisions/0037-release-publishing-and-supply-chain.md), and the
 later records in [docs/decisions](docs/decisions/), up to
-[0051](docs/decisions/0051-roadmap-and-architecture-review.md), which reviews
-the remaining roadmap and the structure).
+[0052](docs/decisions/0052-runtime-bridge-consolidation.md);
+[0051](docs/decisions/0051-roadmap-and-architecture-review.md) reviews the
+remaining roadmap and the structure).
 Download `docs/architecture.html` and open it in a browser; it is standalone and
 loads no external resources. Its TypeScript source is in `docs/architecture/`.
 

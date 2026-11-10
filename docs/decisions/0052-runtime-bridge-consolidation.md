@@ -16,28 +16,32 @@ Roadmap: R13. Builds on [0019](0019-runtime-metadata-bridge.md),
 The runtime bridge carries a call from a sandboxed frame to the store through
 four places: the frame's SDK, the workspace page that hosts the frame, the
 TypeScript client, and the server. Seven capabilities, ten frame calls and
-twelve frame routes exist. They were added one slice at a time, each copying the shape of the one
-before, and the review in 0051 found that one more capability touches about
-twelve hand-written files in five packages. The next rows add more (R14, R15,
-then the P rows), so the repetition is removed first.
+twelve frame routes exist. They were added one slice at a time, each copying
+the shape of the one before, and the review in 0051 found that one more
+capability touches about twelve hand-written files in five packages. The next
+rows add more (R14, R15, then the P rows), so the repetition is removed first.
 
 What repeats today, read from the code on `main`:
 
 - **Client.** `runtime-source.ts` defines `FrameTransport`; `runtime-assets.ts`
   defines `RuntimeAssetsFrame` with the same four members. Each file has its
-  own `frameRoute` and `frameBody`, and its own comparison of received bytes
-  with a stated SHA-256.
+  own `frameRoute` and `frameBody` and its own comparison of received bytes
+  with a stated SHA-256, and `client.ts` builds the metadata route and body a
+  third time.
 - **Host.** `frame-rpc.ts` names every call type three times: in the `SHAPES`
   table of allowed keys, in the `parseCall` switch, and in the `#serve`
   switch. `#download` and `#assetDownload` are the same sequence (offer, ask
   the user, fetch, hand to the browser, receipt) written twice.
   `download-prompt.tsx` branches on the offer's kind in five places. The
-  request gate spells every frame route tail in one regular expression.
+  request gate spells every frame route tail in one regular expression, apart
+  from the client functions that build those routes.
 - **Limits.** The retry id pattern, the asset id pattern and the part, write
   and upload sizes are written out in the host, in the SDK bootstrap and, in
-  part, in the client. The server holds the values that are enforced.
-- **Server.** The twelve frame handlers in `http.rs` each rebuild the same
-  `FrameCall` from the path and the body's `initialization`. The checks
+  part, in the client. Nothing compares them with each other or with the
+  bounds the server enforces.
+- **Server.** Eleven of the twelve frame handlers in `http.rs` rebuild the
+  same `FrameCall` from the path and the body's `initialization`; the metadata
+  handler passes the same values to its operation one by one. The checks
   themselves (`authorize`, `HeldCall`, `still_permitted`) are already shared
   between `runtime_source.rs` and `runtime_assets.rs`.
 
@@ -47,9 +51,9 @@ of them trusts the next (0032). What is removed is the repetition around those
 checks.
 
 This is an exception to the roadmap's entry rule 6 (one observable result per
-change); 0051 records why it is accepted. Its result is checkable: the
-existing checks pass unchanged and the next call has fewer places to touch
-(rule 12).
+change); 0051 records why it is accepted and on what conditions. Rule 12
+carries those conditions, and rule 13 states the result that can be checked:
+the next call has fewer places to touch.
 
 ## Decision
 
@@ -62,17 +66,16 @@ existing checks pass unchanged and the next call has fewer places to touch
    of the server's checks (binding `404`, grant `403`, head `409`, argument
    checks after them, the re-check before returning) and the final synchronous
    grant check, every limit's value, the prompt's text and the order in which
-   an offer is asked for and shown, the permission controls' text, the frame
-   budget and pending cap, timeouts, and the absence of automatic retries for
-   writes.
-2. **The three checks stay independent.** A layer may share definitions with
-   code in its own package. No layer stops checking a value because another
-   layer checked it. The SDK bootstrap stays a self-contained bundle and
-   imports nothing from the contracts package at run time, as
+   an offer is asked for and shown, the object the host hands to the prompt
+   desk, the permission controls' text, the frame budget and pending caps,
+   timeouts, and the absence of automatic retries for writes.
+2. **The three checks stay independent.** No layer stops checking a value
+   because another layer checked it. The SDK bootstrap stays a self-contained
+   bundle and imports nothing from another package at run time, as
    `package-path.ts` already explains for the path rules.
-3. **No contract of a frame or a route changes**, and no schema, dependency,
-   CSP, sandbox flag or token handling changes. The single contract change is
-   the additive inventory field of rule 9, with a minor contract version.
+3. **No contract changes at all**: no frame message, route, body, generated
+   schema, contract version, database schema, dependency, CSP, sandbox flag or
+   token handling changes.
 4. **Out of scope**: widening the capability set (R14 does it with the ninth
    capability), any new capability or call, the by-id asset lookup and the
    capped download read (follow-ups of 0045), moving the runtime modules from
@@ -80,85 +83,106 @@ existing checks pass unchanged and the next call has fewer places to touch
 
 ### Client
 
-5. One frame transport. `FrameTransport`, the route builder, the body builder
+5. One frame transport. `FrameTransport`, one route builder, one body builder
    and one function that compares received bytes with a stated size and
-   SHA-256 live in a new `packages/client/src/runtime-frame.ts`.
-   `runtime-source.ts` and `runtime-assets.ts` import them and no longer define
-   their own; `RuntimeAssetsFrame` is removed. Everything the package index
-   exports keeps its name, signature and behavior. A digest that cannot be
-   computed still refuses the bytes in both families, with the errors each
-   family produces today.
+   SHA-256 live in a new `packages/client/src/runtime-frame.ts`. The same
+   module names each of the twelve frame route tails once. `runtime-source.ts`,
+   `runtime-assets.ts` and the metadata read in `client.ts` build their routes
+   and bodies with it and no longer write them out; `RuntimeAssetsFrame` is
+   removed. Everything the package index exports keeps its name, signature and
+   behavior, including `MAX_DOWNLOAD_NAME_CHARS` (128, looser than the
+   server's 100 on purpose). A digest that cannot be computed still refuses
+   the bytes in both families, with the errors each family produces today.
 
 ### Host
 
-6. One registry of frame calls. Each call has one descriptor that holds its
-   type name, the exact keys a message may carry, the parser that turns a
-   message into a bounded call, and the function that serves it. Descriptors
-   are grouped by family in their own modules (`metadata`, `source`, `assets`).
-   `frame-rpc.ts` keeps the envelope only: the lease, the budget, the pending
-   map, cancellation, replies and the mapping of errors to failure codes. The
-   table of keys, the parser and the dispatch are derived from the registry;
-   no call type is named anywhere else in the host. The module keeps exporting
-   `FrameRpc`, `parseCall`, `callId`, `failureCode`, `FrameCall` and
-   `FrameReply` with the behavior they have today.
+6. One registry of frame calls. Each of the ten calls has one descriptor that
+   holds its type name, the exact keys a message may carry, the parser that
+   turns a message into a bounded call, and the function that serves it.
+   Descriptors are grouped by family in their own modules (`metadata`,
+   `source`, `assets`). `frame-rpc.ts` keeps the envelope only: the lease, the
+   budget, the pending map, cancellation, replies and the mapping of errors to
+   failure codes. `cancel` is an envelope message, not a call, and stays in
+   the envelope. The table of keys, the parser and the dispatch are built from
+   the registry, so that on the path from a message to a reply a call type is
+   named once, in its descriptor. The module keeps exporting `FrameRpc`,
+   `parseCall`, `callId`, `failureCode`, `FrameCall` and `FrameReply` with the
+   behavior they have today; `FrameCall` may be derived from the descriptors.
+   Capability names in the permission control are not call types and are not
+   touched.
 7. One download flow. A single function runs offer, ask, fetch, save and
    receipt for both the source and the asset download. It asks the server for
-   the offer before it asks the user, returns nothing when the call was
-   aborted, maps a declined or busy prompt to the same failure codes, fetches
-   only after an accept, and replies with the receipt shape of its family
-   (`{started, kind, bytes}` for source, `{started, assetId, bytes}` for an
-   asset).
-8. One description of an offer for the prompt. Each family turns its offer
-   into the strings the prompt shows; `download-prompt.tsx` renders them and no
-   longer branches on the kind. The rendered text for a file, an archive and an
-   asset is identical to today's, character for character. `OfferDesk`'s rules
-   (one prompt at a time, the arming delay, the cooldown after a decline) are
-   untouched.
-9. The request gate classifies a frame call from the registry's route tails.
-   The set of tails is the same twelve as today; a path with any other tail is
-   classified as it is today.
+   the offer before it asks the user, hands the prompt desk the same object as
+   today, returns nothing when the call was aborted, maps a declined or busy
+   prompt to the same failure codes, fetches only after an accept, and replies
+   with the receipt shape of its family (`{started, kind, bytes}` for source,
+   `{started, assetId, bytes}` for an asset).
+8. One description of an offer for the prompt. One function maps an offer to
+   the strings the prompt shows, and `download-prompt.tsx` renders those
+   strings without looking at the offer's kind. The offer objects, the object
+   passed to the desk and the desk's snapshot are unchanged. The rendered text
+   for a file, an archive and an asset is identical to today's, character for
+   character. `OfferDesk`'s rules (one prompt at a time, the arming delay, the
+   cooldown after a decline) are untouched.
+9. The request gate builds its frame route pattern from the client's list of
+   route tails (rule 5). It does not import the host registry, which is loaded
+   on demand, so no on-demand code moves into the entry bundle. The gate
+   classifies every path as it does today: the twelve tails as frame calls,
+   and any other tail as it is classified now.
 
 ### Limits
 
-10. One source for the limits the layers share. The server's enforced values
-    are published in the build inventory as an additive `runtime_limits`
-    object beside `package_rules`, filled from the constants the domain and
-    the contract already define: the source part size (1,048,576 bytes), the
-    source write size (1,048,576), the asset part size (262,144), the frame
-    asset upload size (1,048,576), the asset size (5,242,880), the listed file
-    count (256), the listed asset count (64), the retry id length range (8 to
-    36), the media type length (127) and the offer name length (100). The
-    values are today's. The host and the client read them from the generated
-    inventory. The SDK bootstrap keeps its literals, and a test compares each
-    with the inventory so that they cannot drift, as one already does for the
-    path rules. The character classes of the retry id and asset id patterns
-    stay written where they are used; only their length bounds come from the
-    inventory. The inventory is a build-time snapshot and no route serves a
-    different value.
+10. Shared limits are pinned, not copied by hand. The bounds that more than
+    one layer writes out are: the retry id pattern (8 to 36 characters of
+    `A-Z a-z 0-9 _ -`), the asset id pattern (64 lowercase hexadecimal
+    digits), the source part size (1,048,576 bytes), the source write size
+    (1,048,576), the asset part size (262,144), the frame asset upload size
+    (1,048,576), the asset size (5,242,880), the listed file count (256) and
+    the listed asset count (64). Their values stay today's.
+    - The client defines each once in `packages/client/src/runtime-limits.ts`
+      and exports it; the host imports it instead of repeating the literal.
+      The host still applies the bound itself (rule 2).
+    - The SDK bootstrap keeps its literals (rule 2).
+    - A test compares every client constant and every SDK literal with the
+      bound in the generated API schema where the schema states it (a
+      `maximum`, a `maxLength`, a `maxItems`), and with each other where it
+      does not; the pull request lists which is which. A changed value in any
+      one place fails the test.
+    - Not shared, because they differ by design: the two download name bounds
+      (128 in the source client, 100 in the asset client and the server), the
+      media type length the host applies, and each layer's pending cap and
+      timeouts.
 
 ### Server
 
-11. One way to build a frame call. The frame handlers move from `http.rs` to
-    `http/runtime.rs`, and a single helper builds the `FrameCall` from the
-    path and the body's `initialization`, with today's rejections for a bad
-    path or body. The routes, their methods, the middleware in front of them
-    and its order are unchanged. `runtime_source.rs` and `runtime_assets.rs`
-    change only in what they import.
+11. One way to build a frame call. The twelve frame handlers move from
+    `http.rs` to `http/runtime.rs`. The eleven that build a `FrameCall` do so
+    through one helper that takes the path and the body's `initialization`,
+    with today's rejections for a bad path or body. The metadata handler moves
+    with them and keeps calling its operation as it does now. The routes,
+    their methods, the middleware in front of them and its order are
+    unchanged. `runtime_source.rs`, `runtime_assets.rs` and `operations.rs`
+    change only in what they import or in visibility that the move requires.
 
 ### Acceptance
 
 12. For every slice:
     - `npm run check`, `npm run build` and the Chromium smoke pass.
-    - No existing assertion is removed or weakened. A test file changes only
-      where a moved symbol or a new import path requires it, and the change is
-      listed in the pull request.
-    - Each new guard is proved by mutation: the registry is the only place a
-      call type is named (a call added to the dispatch but not to the registry
-      fails a test), the gate's tails equal the registry's, the prompt strings
-      equal the recorded ones, and each SDK literal equals the inventory's
-      value.
-    - The size of the web bundle and of the generated bootstrap is recorded
-      before and after; a growth is explained.
+    - No existing assertion is removed or weakened. An existing test changes
+      only where a moved symbol or a new import path requires it, and each
+      such change is listed in the pull request. New tests may be added.
+    - Each new guard is proved by mutation, in a copy and never in the
+      worktree: a descriptor whose keys or parser differ from today's fails
+      the existing host tests; the registry's set of call types equals the
+      recorded ten; the gate accepts exactly the twelve tails and classifies a
+      thirteenth as before; the prompt strings equal the recorded ones for the
+      three kinds; and each limit equals its pinned value.
+    - The slice removes repetition and adds no empty port and no general
+      wrapper with a single user. The pull request reports the lines removed
+      and added outside tests.
+    - The size of the web entry bundle, of the on-demand host chunk and of the
+      generated bootstrap is recorded before and after. The entry bundle does
+      not grow because of on-demand code; any growth is explained.
 13. When R13 is complete, this record states how many hand-written files a new
     call in an existing family and a new family touch, measured on the code,
     beside the count from 0051.
@@ -169,13 +193,13 @@ Each is one pull request unless a review finds it too large. They are listed in
 the order they are expected to land; none depends on another except where
 noted.
 
-| Slice | Scope                                                                 | Rules   |
-| ----- | --------------------------------------------------------------------- | ------- |
-| R13a  | Client: one frame transport and digest comparison                     | 5       |
-| R13b  | Host: the call registry, the derived gate tails and one download flow | 6, 7, 9 |
-| R13c  | Host: one offer description for the prompt (after R13b)               | 8       |
-| R13d  | Limits in the build inventory, read by the host and client, SDK test  | 10      |
-| R13e  | Server: frame handlers in their own module with one call builder      | 11      |
+| Slice | Scope                                                                       | Rules   |
+| ----- | --------------------------------------------------------------------------- | ------- |
+| R13a  | Client: one frame transport, route tails and digest comparison              | 5       |
+| R13b  | Host: the call registry, one download flow, the gate's pattern (after R13a) | 6, 7, 9 |
+| R13c  | Host: one offer description for the prompt                                  | 8       |
+| R13d  | Limits defined once in the client, imported by the host, pinned by a test   | 10      |
+| R13e  | Server: frame handlers in their own module with one call builder            | 11      |
 
 ## Alternatives considered
 
@@ -185,10 +209,17 @@ noted.
 - **Generate the host and SDK code from the contract.** Rejected for now: the
   frame messages are not wire DTOs, and a generator would be a larger new
   mechanism than the repetition it removes.
+- **Publish the limits in the build inventory.** Rejected: the service
+  description refuses unknown fields, so a new field is a contract change that
+  older strict readers reject, and it would publish again a value the package
+  rules already carry. The generated API schema already states most of the
+  bounds, which is enough to pin them.
 - **Let the host trust the client's checks.** Rejected by rule 2.
 - **Import the limits into the SDK bootstrap.** Rejected: the bootstrap is
-  embedded in every opted-in preview, and bundling the inventory into it would
-  grow it for values a test can pin.
+  embedded in every opted-in preview and stays self-contained; a test can pin
+  its literals.
+- **Derive the gate's pattern from the host registry.** Rejected: the gate is
+  in the entry bundle and the registry is loaded on demand.
 
 ## Not decided here
 
