@@ -8,18 +8,19 @@ import type {
   RuntimeView,
   UploadAssetResponse,
 } from '@artifree/contracts';
-import {
-  ASSET_ID,
-  MAX_ASSET_BYTES,
-  parseAssetList,
-  sha256Hex,
-} from './assets.js';
+import { parseAssetList, sha256Hex } from './assets.js';
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord } from './responses.js';
 import { compareBytes } from './runtime-bytes.js';
 import { FRAME_ROUTES, frameBody, frameRoute } from './runtime-frame.js';
 import type { FrameTransport } from './runtime-frame.js';
+import {
+  ASSET_ID,
+  MAX_ASSET_BYTES,
+  MAX_ASSET_PART_BYTES,
+  MAX_ASSET_UPLOAD_BYTES,
+} from './runtime-limits.js';
 import {
   decodeBase64,
   isDownloadName,
@@ -33,12 +34,6 @@ import {
  * meant to be reached only from the on-demand runtime-source module, so the
  * main client bundle does not grow (decision 0033).
  */
-
-/** Most bytes in one part of an asset a read may ask for: 256 KiB. */
-const MAX_ASSET_PART_BYTES = 256 * 1024;
-
-/** Most bytes one asset upload may carry: 1 MiB (decision 0045, rule 12). */
-const MAX_ASSET_UPLOAD_BYTES = 1_048_576;
 
 /** The media types an asset may be stored as (decision 0045, rule 3). */
 type AssetContentType = 'text/plain' | 'text/csv' | 'image/png' | 'image/jpeg';

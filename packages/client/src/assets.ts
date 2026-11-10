@@ -2,12 +2,13 @@ import type { Asset, AssetList, AssetResponse } from '@artifree/contracts';
 import type { ArtifreeClient, ReadOptions } from './client.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord } from './responses.js';
+import {
+  ASSET_ID,
+  MAX_ASSET_BYTES,
+  MAX_LISTED_ASSETS,
+} from './runtime-limits.js';
 
-/** One asset's decoded bytes are at most 5 MiB (decision 0045 rule 4). */
-export const MAX_ASSET_BYTES = 5 * 1024 * 1024;
 const MAX_SPACE_BYTES = 25 * 1024 * 1024;
-const MAX_SPACE_ASSETS = 64;
-export const ASSET_ID = /^[0-9a-f]{64}$/;
 const ARTIFACT_ID = /^art_[0-9a-f]{32}$/;
 
 function mediaType(value: unknown): value is string {
@@ -50,10 +51,10 @@ export function parseAssetList(value: unknown): AssetList | undefined {
   if (
     !isCount(asset_version) ||
     !Array.isArray(assets) ||
-    assets.length > MAX_SPACE_ASSETS ||
+    assets.length > MAX_LISTED_ASSETS ||
     !isCount(bytes) ||
     bytes > MAX_SPACE_BYTES ||
-    max_assets !== MAX_SPACE_ASSETS ||
+    max_assets !== MAX_LISTED_ASSETS ||
     max_bytes !== MAX_SPACE_BYTES
   )
     return undefined;

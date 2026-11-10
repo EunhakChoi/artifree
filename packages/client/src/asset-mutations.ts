@@ -6,7 +6,8 @@ import type {
 } from '@artifree/contracts';
 import type { ArtifreeClient, MutationOptions, ReadOptions } from './client.js';
 import { ArtifreeApiError } from './errors.js';
-import { ASSET_ID, MAX_ASSET_BYTES, pathOf, sha256Hex } from './assets.js';
+import { pathOf, sha256Hex } from './assets.js';
+import { ASSET_ID, MAX_ASSET_BYTES } from './runtime-limits.js';
 import { isCount, isRecord } from './responses.js';
 
 /** The stable upload envelope spelling of a MIME declaration, not a policy. */

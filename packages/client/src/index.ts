@@ -25,7 +25,7 @@ export type { Clock } from './transport.js';
 export type { DataEvent, FollowDataOptions } from './follow-data.js';
 export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
-export { MAX_ASSET_BYTES, getAsset, listAssets, readAsset } from './assets.js';
+export { getAsset, listAssets, readAsset } from './assets.js';
 export { toBase64 } from './base64.js';
 export { FRAME_ROUTE_TAILS } from './runtime-frame.js';
 export type { AssetBytes } from './assets.js';
@@ -37,14 +37,17 @@ export {
 export type { AssetMutationOptions } from './asset-mutations.js';
 export {
   MAX_DOWNLOAD_NAME_CHARS,
-  MAX_SOURCE_PART_BYTES,
-  MAX_SOURCE_WRITE_BYTES,
   decodeBase64,
   isDownloadName,
   isRetryId,
   partNumbersFit,
 } from './source-part.js';
 export type { PartNumbers } from './source-part.js';
+export {
+  MAX_ASSET_BYTES,
+  MAX_SOURCE_PART_BYTES,
+  MAX_SOURCE_WRITE_BYTES,
+} from './runtime-limits.js';
 export type {
   RuntimeDownloadTarget,
   RuntimeSourcePartBytes,
