@@ -8,6 +8,9 @@ import type {
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord, list, revisionFile } from './responses.js';
+import { compareBytes } from './runtime-bytes.js';
+import { FRAME_ROUTES, frameBody, frameRoute } from './runtime-frame.js';
+import type { FrameTransport } from './runtime-frame.js';
 import {
   MAX_SOURCE_WRITE_BYTES,
   decodeBase64,
@@ -168,46 +171,9 @@ export async function downloadMatches(
   offer: RuntimeDownloadOffer,
 ): Promise<boolean> {
   if (offer.size === null) return true;
-  if (bytes.length !== offer.size) return false;
-  return offer.sha256 === null || (await sha256Hex(bytes)) === offer.sha256;
-}
-
-/**
- * What the calls below need from the client. Every request is sent as the
- * workspace on the frame's behalf; `check` fails with the client's own error
- * once the view's connection ended, and `json` checks before and after.
- */
-export interface FrameTransport {
-  /** Fails if the runtime connection of the view was closed or replaced. */
-  readonly check: () => void;
-  readonly json: <T>(
-    path: string,
-    body: Record<string, unknown>,
-    parse: (value: unknown) => T | undefined,
-    signal: AbortSignal | undefined,
-  ) => Promise<T>;
-  readonly post: (
-    path: string,
-    body: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-  ) => Promise<Response>;
-  readonly bytes: (
-    response: Response,
-    what: string,
-  ) => Promise<Uint8Array<ArrayBuffer>>;
-}
-
-/** The path of one of a view's frame routes. */
-function frameRoute(view: RuntimeView, tail: string): string {
-  return `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/${tail}`;
-}
-
-/** A request body: the view's secret, then what the call adds. */
-function frameBody(
-  view: RuntimeView,
-  rest: Record<string, unknown>,
-): Record<string, unknown> {
-  return { initialization: view.initialization, ...rest };
+  if (offer.sha256 === null) return bytes.length === offer.size;
+  const compared = await compareBytes(bytes, offer.size, offer.sha256);
+  return compared.outcome === 'match';
 }
 
 /** The files of the revision a view is pinned to. */
@@ -217,7 +183,7 @@ export function listSource(
   signal: AbortSignal | undefined,
 ): Promise<RuntimeSourceList> {
   return frame.json(
-    frameRoute(view, 'source/list'),
+    frameRoute(view, FRAME_ROUTES.sourceList),
     frameBody(view, {}),
     (value) => parseRuntimeSourceList(value, view.revision),
     signal,
@@ -232,7 +198,7 @@ export function readSource(
   signal: AbortSignal | undefined,
 ): Promise<RuntimeSourcePartBytes> {
   return frame.json(
-    frameRoute(view, 'source/read'),
+    frameRoute(view, FRAME_ROUTES.sourceRead),
     frameBody(view, {
       path: request.path,
       offset: request.offset,
@@ -251,7 +217,7 @@ export function offerDownload(
   signal: AbortSignal | undefined,
 ): Promise<RuntimeDownloadOffer> {
   return frame.json(
-    frameRoute(view, 'source/offer'),
+    frameRoute(view, FRAME_ROUTES.sourceOffer),
     frameBody(view, {
       kind: target.kind,
       path: target.kind === 'file' ? target.path : null,
@@ -272,7 +238,7 @@ export async function fetchDownload(
   offer: RuntimeDownloadOffer,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const path = frameRoute(view, 'source/download');
+  const path = frameRoute(view, FRAME_ROUTES.sourceDownload);
   const response = await frame.post(
     path,
     frameBody(view, { kind: offer.kind, path: offer.path }),
@@ -363,7 +329,7 @@ export async function writeSource(
       { status: 0, code: 'unavailable' },
     );
   return frame.json(
-    frameRoute(view, 'source/write'),
+    frameRoute(view, FRAME_ROUTES.sourceWrite),
     frameBody(view, {
       retry_id: input.retryId,
       path: input.path,

@@ -17,6 +17,9 @@ import {
 import { toBase64 } from './base64.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord } from './responses.js';
+import { compareBytes } from './runtime-bytes.js';
+import { FRAME_ROUTES, frameBody, frameRoute } from './runtime-frame.js';
+import type { FrameTransport } from './runtime-frame.js';
 import {
   decodeBase64,
   isDownloadName,
@@ -89,33 +92,6 @@ export interface RuntimeAssetPartBytes {
 }
 
 /**
- * What the calls below need from the frame: its JSON call, which refuses once
- * the view's runtime connection has ended, and for a download its POST, its
- * byte read and that connection check (see `FrameTransport` in
- * runtime-source). It is typed structurally here so that this module imports
- * nothing from runtime-source.
- */
-export interface RuntimeAssetsFrame {
-  /** Fails if the runtime connection of the view was closed or replaced. */
-  readonly check: () => void;
-  readonly json: <T>(
-    path: string,
-    body: Record<string, unknown>,
-    parse: (value: unknown) => T | undefined,
-    signal: AbortSignal | undefined,
-  ) => Promise<T>;
-  readonly post: (
-    path: string,
-    body: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-  ) => Promise<Response>;
-  readonly bytes: (
-    response: Response,
-    what: string,
-  ) => Promise<Uint8Array<ArrayBuffer>>;
-}
-
-/**
  * Validates a part against the request it answers. The part must echo the
  * asset ID and the offset, state a media type from the closed set, a size from
  * 1 byte to 5 MiB and a digest of 64 lowercase hexadecimal digits, carry
@@ -164,19 +140,6 @@ export function parseRuntimeAssetPart(
   };
 }
 
-/** The path of one of a view's frame routes. */
-function frameRoute(view: RuntimeView, tail: string): string {
-  return `/v1/artifacts/${encodeURIComponent(view.artifact_id)}/revisions/${view.revision}/runtime-views/${view.view_id}/${view.generation}/${tail}`;
-}
-
-/** A request body: the view's secret, then what the call adds. */
-function frameBody(
-  view: RuntimeView,
-  rest: Record<string, unknown>,
-): Record<string, unknown> {
-  return { initialization: view.initialization, ...rest };
-}
-
 /** Whether a read asks for an asset ID and a part the client can send. */
 function isPartRequest(request: RuntimeAssetPartRequest): boolean {
   return (
@@ -193,12 +156,12 @@ function isPartRequest(request: RuntimeAssetPartRequest): boolean {
  * revision the view shows (decision 0045, rule 12).
  */
 export function listRuntimeAssets(
-  frame: RuntimeAssetsFrame,
+  frame: FrameTransport,
   view: RuntimeView,
   signal: AbortSignal | undefined,
 ): Promise<AssetList> {
   return frame.json(
-    frameRoute(view, 'assets/list'),
+    frameRoute(view, FRAME_ROUTES.assetsList),
     frameBody(view, {}),
     parseAssetList,
     signal,
@@ -212,7 +175,7 @@ export function listRuntimeAssets(
  * were checked are the values sent and the values compared.
  */
 export async function readRuntimeAsset(
-  frame: RuntimeAssetsFrame,
+  frame: FrameTransport,
   view: RuntimeView,
   request: RuntimeAssetPartRequest,
   signal: AbortSignal | undefined,
@@ -233,7 +196,7 @@ export async function readRuntimeAsset(
     length: wanted.length,
   };
   return frame.json(
-    frameRoute(view, 'assets/read'),
+    frameRoute(view, FRAME_ROUTES.assetsRead),
     frameBody(view, body),
     (value) => parseRuntimeAssetPart(value, wanted),
     signal,
@@ -356,7 +319,7 @@ export function parseRuntimeAssetDeleteReceipt(
  * the retry identity for the identical upload.
  */
 export async function uploadRuntimeAsset(
-  frame: RuntimeAssetsFrame,
+  frame: FrameTransport,
   view: RuntimeView,
   input: RuntimeAssetUploadInput,
   signal: AbortSignal | undefined,
@@ -391,7 +354,7 @@ export async function uploadRuntimeAsset(
     content_base64: toBase64(wanted.bytes),
   };
   return frame.json(
-    frameRoute(view, 'assets/upload'),
+    frameRoute(view, FRAME_ROUTES.assetsUpload),
     frameBody(view, body),
     (value) => parseRuntimeAssetUploadReceipt(value, wanted, digest),
     signal,
@@ -405,7 +368,7 @@ export async function uploadRuntimeAsset(
  * `deleted: false`, and the version does not move. Nothing here retries it.
  */
 export async function deleteRuntimeAsset(
-  frame: RuntimeAssetsFrame,
+  frame: FrameTransport,
   view: RuntimeView,
   input: RuntimeAssetDeleteInput,
   signal: AbortSignal | undefined,
@@ -426,7 +389,7 @@ export async function deleteRuntimeAsset(
     retry_id: wanted.retryId,
   };
   return frame.json(
-    frameRoute(view, 'assets/delete'),
+    frameRoute(view, FRAME_ROUTES.assetsDelete),
     frameBody(view, body),
     (value) => parseRuntimeAssetDeleteReceipt(value, wanted),
     signal,
@@ -504,29 +467,13 @@ function digestUnavailable(status: number, cause?: unknown): ArtifreeApiError {
 }
 
 /**
- * Whether the SHA-256 of `bytes` is `expected`. A digest that cannot be
- * computed is reported as that, never as a mismatch.
- */
-async function digestMatches(
-  bytes: Uint8Array<ArrayBuffer>,
-  expected: string,
-  status: number,
-): Promise<boolean> {
-  try {
-    return (await sha256Hex(bytes)) === expected;
-  } catch (cause: unknown) {
-    throw digestUnavailable(status, cause);
-  }
-}
-
-/**
  * Asks whether the view's artifact may offer one of its assets for download,
  * and what the download would be, before the user confirms it. Nothing is
  * handed over, and the server decides afresh on each call (decision 0045,
  * rule 12).
  */
 export async function offerRuntimeAssetDownload(
-  frame: RuntimeAssetsFrame,
+  frame: FrameTransport,
   view: RuntimeView,
   assetId: string,
   signal: AbortSignal | undefined,
@@ -540,7 +487,7 @@ export async function offerRuntimeAssetDownload(
     asset_id: assetId,
   };
   return frame.json(
-    frameRoute(view, 'assets/offer'),
+    frameRoute(view, FRAME_ROUTES.assetsOffer),
     frameBody(view, body),
     (value) => parseRuntimeAssetOffer(value, assetId),
     signal,
@@ -554,7 +501,7 @@ export async function offerRuntimeAssetDownload(
  * Crypto is refused before anything is requested.
  */
 export async function fetchRuntimeAssetDownload(
-  frame: RuntimeAssetsFrame,
+  frame: FrameTransport,
   view: RuntimeView,
   offer: RuntimeAssetOffer,
   signal: AbortSignal | undefined,
@@ -565,7 +512,7 @@ export async function fetchRuntimeAssetDownload(
       code: 'invalid_request',
     });
   if (globalThis.crypto?.subtle === undefined) throw digestUnavailable(0);
-  const path = frameRoute(view, 'assets/download');
+  const path = frameRoute(view, FRAME_ROUTES.assetsDownload);
   const body: Omit<RuntimeAssetDownloadRequest, 'initialization'> = {
     asset_id: offer.assetId,
   };
@@ -586,9 +533,10 @@ export async function fetchRuntimeAssetDownload(
   )
     return refuse();
   const bytes = await frame.bytes(response, offer.fileName);
-  const matches =
-    bytes.length === offer.size &&
-    (await digestMatches(bytes, offer.sha256, response.status));
+  const compared = await compareBytes(bytes, offer.size, offer.sha256);
+  if (compared.outcome === 'unavailable')
+    throw digestUnavailable(response.status, compared.cause);
+  const matches = compared.outcome === 'match';
   frame.check();
   if (!matches) return refuse();
   return bytes;
