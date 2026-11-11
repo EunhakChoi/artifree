@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use artifree_contracts::api::RuntimeLifecycle;
 use serde::Deserialize;
 
 pub(crate) const MANIFEST_PATH: &str = "artifree-runtime.json";
@@ -146,6 +147,15 @@ impl TryFrom<String> for Lifecycle {
             "restart" => Ok(Self::Restart),
             "adopt" => Ok(Self::Adopt),
             _ => Err("unknown runtime lifecycle"),
+        }
+    }
+}
+
+impl From<Lifecycle> for RuntimeLifecycle {
+    fn from(lifecycle: Lifecycle) -> Self {
+        match lifecycle {
+            Lifecycle::Restart => Self::Restart,
+            Lifecycle::Adopt => Self::Adopt,
         }
     }
 }

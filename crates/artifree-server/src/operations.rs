@@ -16,7 +16,7 @@ use artifree_contracts::api::{
     ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
     PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeLifecycle, RuntimeMetadata, RuntimeView,
+    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
     SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
     SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
@@ -62,7 +62,7 @@ use crate::changes::Feed;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
 use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey};
-use crate::runtime_policy::{Capability, Lifecycle, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
+use crate::runtime_policy::{Capability, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
 use crate::runtime_sessions::{GrantScope, SessionError};
 
 /// A failed operation: the HTTP status and the contract error body. MCP
@@ -1316,6 +1316,12 @@ pub(crate) async fn create_runtime_view(
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
     let owner = actor.clone();
     let lifecycle = policy.lifecycle();
+    if request.adopt.is_some() {
+        // An adoption changes a live view, so a request that cannot be
+        // confirmed is refused before it changes one; the confirmation after
+        // the registration stays, as for a new view.
+        state.ensure_current(&owner, generation).await?;
+    }
     let adoption = request.adopt.map(|adopt| preview::Adoption {
         generation: adopt.generation,
         session: session.clone(),
@@ -1358,10 +1364,7 @@ pub(crate) async fn create_runtime_view(
             ticket.preview.secret
         ),
         enabled,
-        lifecycle: match lifecycle {
-            Lifecycle::Adopt => RuntimeLifecycle::Adopt,
-            Lifecycle::Restart => RuntimeLifecycle::Restart,
-        },
+        lifecycle: lifecycle.into(),
         session_id: request.session_id,
         artifact_id: id.to_string(),
         revision: revision.0,

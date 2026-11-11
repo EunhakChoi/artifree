@@ -870,12 +870,7 @@ export interface HandoffSelection {
  * Requests a preview view whose frame can read its artifact metadata.
  */
 export interface CreateRuntimeViewRequest {
-  /**
-   * Present to adopt the live frame of an older generation of this view
-   * instead of loading a new document (decision 0054, rule 3). Absent for
-   * a new view; clients that omit it send no field, never `null`.
-   */
-  adopt?: AdoptRuntimeView | null;
+  adopt?: AdoptRuntimeView;
   /**
    * A positive, increasing generation within this view.
    */

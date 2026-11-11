@@ -3161,9 +3161,11 @@ fn every_registration_that_outlives_a_request_is_confirmed_against_the_generatio
     // The registrations that outlive their request: a stream, a preview link,
     // a runtime view, a connection, an inbox. Each confirms the generation
     // its request authenticated under. A new registration must do the same,
-    // and this count is where it is noticed.
+    // and this count is where it is noticed. A runtime view is confirmed
+    // twice: an adoption changes a live view, so it is also confirmed before
+    // it does (decision 0054, rule 4).
     let confirmations = |source: &str| source.matches(".ensure_current(").count();
-    assert_eq!(confirmations(include_str!("../src/operations.rs")), 4);
+    assert_eq!(confirmations(include_str!("../src/operations.rs")), 5);
     assert_eq!(confirmations(include_str!("../src/changes.rs")), 1);
     for (file, source) in [
         ("mcp.rs", include_str!("../src/mcp.rs")),

@@ -1143,6 +1143,16 @@ pub struct HandoffActionRequest {
     pub workspace_session_id: String,
 }
 
+/// Reads a field that may be absent but, when present, must hold a value:
+/// `null` is an error instead of `None`.
+fn not_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 /// The live generation whose frame an adoption keeps (decision 0054, rule 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1177,8 +1187,14 @@ pub struct CreateRuntimeViewRequest {
     pub generation: u64,
     /// Present to adopt the live frame of an older generation of this view
     /// instead of loading a new document (decision 0054, rule 3). Absent for
-    /// a new view; clients that omit it send no field, never `null`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// a new view; clients that omit it send no field. `null` is refused: read
+    /// as absent it would replace the live frame the request meant to keep.
+    #[serde(
+        default,
+        deserialize_with = "not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "AdoptRuntimeView")]
     pub adopt: Option<AdoptRuntimeView>,
 }
 

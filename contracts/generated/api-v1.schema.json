@@ -574,15 +574,8 @@
       "description": "Requests a preview view whose frame can read its artifact metadata.",
       "properties": {
         "adopt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AdoptRuntimeView"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Present to adopt the live frame of an older generation of this view\ninstead of loading a new document (decision 0054, rule 3). Absent for\na new view; clients that omit it send no field, never `null`."
+          "$ref": "#/$defs/AdoptRuntimeView",
+          "description": "Present to adopt the live frame of an older generation of this view\ninstead of loading a new document (decision 0054, rule 3). Absent for\na new view; clients that omit it send no field. `null` is refused: read\nas absent it would replace the live frame the request meant to keep."
         },
         "generation": {
           "description": "A positive, increasing generation within this view.",

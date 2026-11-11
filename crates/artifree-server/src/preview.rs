@@ -185,6 +185,8 @@ struct TicketRegistry {
 /// What an adoption writes into the view it advances.
 struct Advance<'a> {
     actor: &'a ActorId,
+    /// The token of the adopting request: the lease it renews ends with it.
+    token_id: &'a Option<TokenId>,
     artifact: &'a ArtifactId,
     view_id: &'a str,
     revision: SourceRevision,
@@ -294,25 +296,21 @@ impl TicketRegistry {
                             || view.written == Some(advance.revision))
                 })
         };
-        let secret = self
+        let (secret, ticket) = self
             .live
-            .iter()
+            .iter_mut()
             .find(|(_, ticket)| adoptable(ticket))
-            .map(|(secret, _)| secret.clone())
             .ok_or(RuntimeIssueError::NotAdoptable)?;
-        let ticket = self
-            .live
-            .get_mut(&secret)
-            .ok_or(RuntimeIssueError::NotAdoptable)?;
+        let secret = secret.clone();
         let view = ticket
             .runtime
             .as_mut()
             .ok_or(RuntimeIssueError::NotAdoptable)?;
+        ticket.token_id.clone_from(advance.token_id);
         ticket.expires = advance.expires;
         view.generation = advance.generation;
         advance.initialization.clone_into(&mut view.initialization);
         view.head_revision = advance.head_revision;
-        view.lifecycle = advance.lifecycle;
         view.authority = None;
         if view.pinned != advance.revision {
             view.pinned = advance.revision;
@@ -461,7 +459,12 @@ impl PreviewTickets {
             lifecycle,
             adopt,
         } = request;
-        let secret = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
+        // An adoption keeps the ticket's secret, so it draws none.
+        let secret = if adopt.is_some() {
+            None
+        } else {
+            Some(random_secret().ok_or(RuntimeIssueError::Unavailable)?)
+        };
         let initialization = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
         let (lease_ms, now, expires, expires_at_ms) = runtime_expiries(self.ttl)?;
         let mut registry = self
@@ -476,6 +479,7 @@ impl PreviewTickets {
                 &adoption,
                 &Advance {
                     actor: &actor,
+                    token_id: &token_id,
                     artifact: &artifact,
                     view_id: &view_id,
                     revision,
@@ -488,6 +492,7 @@ impl PreviewTickets {
                 },
             )?
         } else {
+            let secret = secret.ok_or(RuntimeIssueError::Unavailable)?;
             if registry.live_of(&actor) >= MAX_LIVE_TICKETS
                 && !registry
                     .live

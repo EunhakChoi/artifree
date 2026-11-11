@@ -864,6 +864,7 @@ async fn adoption_onto_the_own_save_after_another_writer() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
 async fn closed_generation_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
@@ -880,6 +881,7 @@ async fn closed_generation_is_refused() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
 async fn unserved_document_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let id = create_artifact(&harness, &manifest(SDK, Some("adopt"))).await?;
@@ -915,6 +917,7 @@ async fn unserved_document_is_refused() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
 async fn generation_that_is_not_live_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
@@ -934,6 +937,7 @@ async fn generation_that_is_not_live_is_refused() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
 async fn other_connection_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
@@ -951,6 +955,7 @@ async fn other_connection_is_refused() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
 async fn other_artifact_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
@@ -968,6 +973,7 @@ async fn other_artifact_is_refused() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
 async fn restart_view_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, None), &EDITING).await?;
@@ -992,6 +998,7 @@ async fn restart_view_is_refused() -> TestResult {
 /// The view was issued as restart. The frame later saves a revision whose
 /// manifest says adopt, and that revision is refused for the view's own
 /// lifecycle.
+#[tokio::test]
 async fn saved_adopt_manifest_does_not_adopt_a_restart_view() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, None), &EDITING).await?;
@@ -1012,6 +1019,7 @@ async fn saved_adopt_manifest_does_not_adopt_a_restart_view() -> TestResult {
 
 /// The view was issued as adopt. The frame later saves a revision whose
 /// manifest says restart, and that revision is refused for its own lifecycle.
+#[tokio::test]
 async fn saved_restart_manifest_does_not_keep_an_adopt_view() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
@@ -1040,6 +1048,7 @@ async fn saved_restart_manifest_does_not_keep_an_adopt_view() -> TestResult {
 /// A saved revision whose SDK pin differs from this server's is not adoptable,
 /// and the refusal is `409`, not the `422` that reading the revision gives
 /// (decision 0054, rule 16).
+#[tokio::test]
 async fn changed_sdk_pin_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
@@ -1058,6 +1067,7 @@ async fn changed_sdk_pin_is_refused() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
 async fn unpinned_unwritten_revision_is_refused() -> TestResult {
     let harness = Harness::new()?;
     let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
@@ -1075,20 +1085,40 @@ async fn unpinned_unwritten_revision_is_refused() -> TestResult {
     Ok(())
 }
 
-/// Decision 0054, rule 4: every refusal answers `409 invalid_request` and
-/// leaves the view it refused as it was. Each case builds its own server.
+/// A `null` for `adopt` is a malformed body, not an absent field: the request
+/// answers `400 invalid_request`, and the live view it meant to keep is as it
+/// was. The contract refuses `null` (`not_null` on `CreateRuntimeViewRequest`).
 #[tokio::test]
-async fn every_refusal_leaves_the_old_view_as_it_was() -> TestResult {
-    closed_generation_is_refused().await?;
-    unserved_document_is_refused().await?;
-    generation_that_is_not_live_is_refused().await?;
-    other_connection_is_refused().await?;
-    other_artifact_is_refused().await?;
-    restart_view_is_refused().await?;
-    saved_adopt_manifest_does_not_adopt_a_restart_view().await?;
-    saved_restart_manifest_does_not_keep_an_adopt_view().await?;
-    changed_sdk_pin_is_refused().await?;
-    unpinned_unwritten_revision_is_refused().await
+async fn a_null_adoption_is_refused_and_keeps_the_live_view() -> TestResult {
+    let harness = Harness::new()?;
+    let first = start(&harness, &manifest(SDK, Some("adopt")), &EDITING).await?;
+    let body = json!({
+        "session_id": first.session,
+        "view_id": VIEW,
+        "generation": 2,
+        "adopt": null
+    });
+    let reply = harness
+        .send(post(
+            &format!("/v1/artifacts/{}/revisions/1/runtime-views", first.id),
+            &body,
+        )?)
+        .await?;
+    assert_eq!(
+        reply.status,
+        StatusCode::BAD_REQUEST,
+        "a null adoption is malformed: {}",
+        reply.code()
+    );
+    assert_eq!(reply.code(), "invalid_request");
+    let kept = read(&harness, &first, "notes.txt").await?;
+    assert_eq!(
+        kept.status,
+        StatusCode::OK,
+        "the old generation still answers after the refusal: {}",
+        kept.code()
+    );
+    Ok(())
 }
 
 /// An expired generation cannot be adopted, and the expired view answers

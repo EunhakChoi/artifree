@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use artifree_domain::SourceRevision;
-use artifree_domain::identity::{ActorId, ArtifactId};
+use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
 
 use super::{
     Adoption, IssuedRuntimeTicket, PreviewTickets, RuntimeAuthority, RuntimeIssueError,
@@ -453,5 +453,45 @@ fn adoption_needs_adopt_on_both_sides() -> TestResult {
             "a refused adoption from {old:?} to {new:?} leaves the view bound"
         );
     }
+    Ok(())
+}
+
+/// Decision 0054, rule 5: an adopted view takes the token of the adopting
+/// request, so its lease ends with that token and not with the token that
+/// opened it.
+#[test]
+fn an_adopted_view_ends_with_the_token_that_adopted_it() -> TestResult {
+    let registry = Registry::new();
+    let local: ActorId = "local".parse()?;
+    let opening = TokenId::from_random([1; 16]);
+    let adopting_token = TokenId::from_random([2; 16]);
+    let session = registry.connect(&local)?;
+    let first = registry.open(RuntimeTicketRequest {
+        token_id: Some(opening.clone()),
+        ..registry.view(&local, 1, 1, 1, Lifecycle::Adopt)
+    })?;
+    registry.bind(&first.preview.secret, &session, 1, 1)?;
+    registry.serve(&first.preview.secret)?;
+
+    let adopted = registry.open(adopting(
+        RuntimeTicketRequest {
+            token_id: Some(adopting_token.clone()),
+            ..registry.view(&local, 2, 1, 3, Lifecycle::Adopt)
+        },
+        1,
+        &session,
+    ))?;
+    let secret = adopted.preview.secret;
+
+    registry.tickets.revoke_token(&opening);
+    assert!(
+        registry.tickets.resolve(&secret).is_some(),
+        "revoking the token that opened the view must not end the view that an adoption under another token renewed"
+    );
+    registry.tickets.revoke_token(&adopting_token);
+    assert!(
+        registry.tickets.resolve(&secret).is_none(),
+        "revoking the token that adopted the view must end it"
+    );
     Ok(())
 }
