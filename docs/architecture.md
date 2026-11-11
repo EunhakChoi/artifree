@@ -334,9 +334,10 @@ migration.
   the direction for application data and assets: per user by default, shared
   only in a space the artifact declares. The scope of rooms under sharing is
   left to S02s.
-- **Background work has no owner in the server process.** The worker is a
-  subcommand that opens the database directly and nothing starts or supervises
-  it; job changes are not in the change feed. Builds, the execution supervisor
+- **Background work is only partly owned by the server process.** A
+  persistent server starts and restarts one worker child and reports it
+  (`GET /v1/background`, decision 0055, R01ba); job changes are not in the
+  change feed yet (R01bb), and no scheduler exists. Builds, the execution supervisor
   and automatic purge need the same scheduler, clock and supervision (R01b).
 - **Application logic in the server crate.** The runtime sessions, policy,
   source and asset modules, preview tickets and handoffs are state machines

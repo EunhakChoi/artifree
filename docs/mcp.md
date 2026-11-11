@@ -242,8 +242,10 @@ A typical sequence of `tools/call` parameters:
 `enqueue_job` queues a `verify_revision` job: a worker re-reads every file of
 that revision from the database and compares its SHA-256 and size with the
 stored listing ([decision 0030](decisions/0030-persistent-jobs-and-worker.md)).
-**It only queues.** The server does not start a worker; a job stays `queued`
-until an operator runs `artifree-server worker run`, and `get_job` is how an
+**It only queues.** A persistent server starts its own worker
+([decision 0055](decisions/0055-operating-background-work.md)); on a server
+started with `--no-worker`, or a one-shot session, a job stays `queued` until
+an operator runs `artifree-server worker run`. `get_job` is how an
 agent learns the outcome (job changes are not pushed). A finished job has
 `state: "succeeded"` with a `verdict` of `ok` or `mismatch` (a mismatch is a
 result, not a failure; up to 50 findings with artifact-relative paths, never

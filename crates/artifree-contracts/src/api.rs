@@ -714,6 +714,79 @@ pub struct JobList {
     pub next_page_token: Option<String>,
 }
 
+/// Response of `GET /v1/background` (decision 0055, rule 5). It describes the
+/// server and carries nothing of any user: no worker output, no path, and no
+/// process identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundStatus {
+    /// The worker the server starts and watches.
+    pub worker: WorkerStatus,
+}
+
+/// The server's own worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerStatus {
+    /// `supervised` or `none`.
+    pub mode: WorkerMode,
+    /// `running` says that the process exists, not that it makes progress.
+    pub state: WorkerState,
+    /// The start attempts after the first since the server started; a failed
+    /// start is an attempt.
+    pub restarts: u64,
+    /// The last exit or failed start; absent before any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit: Option<WorkerExit>,
+    /// Lines of the worker's standard output that could not be parsed or were
+    /// longer than 64 KiB.
+    pub dropped_lines: u64,
+}
+
+/// How the server runs its worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerMode {
+    /// The server starts a worker.
+    Supervised,
+    /// No worker (`--no-worker`, or a one-shot server).
+    None,
+}
+
+/// What the server's worker is doing now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerState {
+    /// A worker process exists.
+    Running,
+    /// Between an exit or a failed start and the next start.
+    Restarting,
+    /// Mode `none`, or shutting down.
+    Stopped,
+}
+
+/// An exit of the server's worker, or a start that failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerExit {
+    /// When it happened, Unix milliseconds.
+    pub at_ms: i64,
+    /// How it ended.
+    pub outcome: WorkerExitOutcome,
+}
+
+/// How an exit of the server's worker ended, or why no process started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerExitOutcome {
+    /// Status 0.
+    Clean,
+    /// Any other status, or ended by a signal.
+    Failed,
+    /// The process could not be started.
+    NotStarted,
+}
+
 /// A JSON value of any shape, kept as the text it arrived as so that the server
 /// applies the rules of application data (decision 0031) to what was sent:
 /// duplicate member names, numbers beyond what a double holds exactly, and

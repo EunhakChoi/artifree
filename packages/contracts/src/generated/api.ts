@@ -81,6 +81,7 @@ export type ApiBody =
   | CancelJobResponse
   | Job
   | JobList
+  | BackgroundStatus
   | AppData
   | DataMembers
   | SetDataRequest
@@ -240,6 +241,18 @@ export type JobVerdict = 'ok' | 'mismatch';
  * terminal: a job there never changes again.
  */
 export type JobState = 'queued' | 'running' | 'retry_scheduled' | 'succeeded' | 'failed' | 'cancelled';
+/**
+ * How an exit of the server's worker ended, or why no process started.
+ */
+export type WorkerExitOutcome = 'clean' | 'failed' | 'not_started';
+/**
+ * How the server runs its worker.
+ */
+export type WorkerMode = 'supervised' | 'none';
+/**
+ * What the server's worker is doing now.
+ */
+export type WorkerState = 'running' | 'restarting' | 'stopped';
 /**
  * Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers, and a number too small for a double (0.1e-400) is stored as 0; 1e999 is refused as not finite.
  */
@@ -2150,6 +2163,45 @@ export interface JobList {
    * Pass as `page_token` to read the next page; absent on the last page.
    */
   next_page_token?: string | null;
+}
+/**
+ * Response of `GET /v1/background` (decision 0055, rule 5). It describes the
+ * server and carries nothing of any user: no worker output, no path, and no
+ * process identifier.
+ */
+export interface BackgroundStatus {
+  worker: WorkerStatus;
+}
+/**
+ * The server's own worker.
+ */
+export interface WorkerStatus {
+  /**
+   * Lines of the worker's standard output that could not be parsed or were
+   * longer than 64 KiB.
+   */
+  dropped_lines: number;
+  /**
+   * The last exit or failed start; absent before any.
+   */
+  last_exit?: WorkerExit | null;
+  mode: WorkerMode;
+  /**
+   * The start attempts after the first since the server started; a failed
+   * start is an attempt.
+   */
+  restarts: number;
+  state: WorkerState;
+}
+/**
+ * An exit of the server's worker, or a start that failed.
+ */
+export interface WorkerExit {
+  /**
+   * When it happened, Unix milliseconds.
+   */
+  at_ms: number;
+  outcome: WorkerExitOutcome;
 }
 /**
  * Response of `GET /v1/artifacts/{id}/data`: the value at a path of the

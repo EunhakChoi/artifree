@@ -29,7 +29,7 @@ sha2 = "0.11"
 rusqlite = { version = "0.41", features = ["bundled"] }
 getrandom = "0.4"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "macros", "sync", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "macros", "sync", "time", "fs", "io-util", "process"] }
 base64 = "0.23"
 # The PNG validator depends on exact decoder and inflater behavior (decision 0045,
 # rule 3), so these two are pinned exactly: a bump is a reviewed change.

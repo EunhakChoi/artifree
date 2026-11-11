@@ -16,7 +16,7 @@
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactChange, ArtifactList, AssetList, AssetResponse,
-    CancelJobRequest, CancelJobResponse, CommitResponse, CreateArtifactRequest,
+    BackgroundStatus, CancelJobRequest, CancelJobResponse, CommitResponse, CreateArtifactRequest,
     CreateRuntimeViewRequest, CreateTokenRequest, CreateTokenResponse, CreateUserRequest,
     DataMembers, DataOutboxBinding, DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse,
     DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
@@ -124,6 +124,7 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
         generator.subschema_for::<CancelJobResponse>(),
         generator.subschema_for::<Job>(),
         generator.subschema_for::<JobList>(),
+        generator.subschema_for::<BackgroundStatus>(),
         generator.subschema_for::<AppData>(),
         generator.subschema_for::<DataMembers>(),
         generator.subschema_for::<SetDataRequest>(),

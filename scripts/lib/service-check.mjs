@@ -8,9 +8,10 @@ import { CLI_PATH } from './release-layout.mjs';
  * The operator-visible behavior every packaged form of Artifree must show,
  * independent of how the server process was started (unpacked archive in
  * decision 0025, container in decision 0026): health, the packaged web page,
- * create and save with the packaged CLI, a sandboxed preview, and the
- * revision after a restart. Callers own the process lifecycle; this module
- * only talks to a running server from outside.
+ * create and save with the packaged CLI, a sandboxed preview, a verification
+ * that the server's own worker ends (decision 0055), and the revision after a
+ * restart. Callers own the process lifecycle; this module only talks to a
+ * running server from outside.
  */
 
 /** Runs the packaged CLI with `env` and returns its parsed JSON output. */
@@ -118,4 +119,40 @@ export async function expectSavedRevision({ packageDir, cliEnv, artifactId }) {
     2,
     'The saved revision must survive a restart.',
   );
+}
+
+/**
+ * Asks the running server for a verification of `revision` and waits until its
+ * own worker ends it. The job must end succeeded with verdict ok (decision
+ * 0055, acceptance 21); a job still open after `patienceMs` fails the check.
+ */
+export async function expectJobRuns({
+  packageDir,
+  cliEnv,
+  artifactId,
+  revision,
+  patienceMs = 60_000,
+}) {
+  const queued = await runCli(packageDir, cliEnv, [
+    'job',
+    'enqueue',
+    artifactId,
+    '--revision',
+    String(revision),
+    '--idempotency-key',
+    `container-job-${artifactId}`,
+  ]);
+  const deadline = Date.now() + patienceMs;
+  let job = queued.job;
+  while (!['succeeded', 'failed', 'cancelled'].includes(job.state)) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `No worker ended the job within ${patienceMs} ms; it is ${job.state}.`,
+      );
+    }
+    await new Promise((done) => setTimeout(done, 250));
+    job = await runCli(packageDir, cliEnv, ['job', 'show', job.id]);
+  }
+  assert.equal(job.state, 'succeeded');
+  assert.equal(job.result?.verdict, 'ok');
 }

@@ -20,13 +20,13 @@ Connection:
 
 enqueue queues a verification job for one revision of an artifact: a worker
 re-reads every file of that revision and compares each SHA-256 digest and size
-with the stored listing. It only queues the job. Nothing runs it unless an
-artifree-server worker process is running on the same data directory
-(artifree-server worker run --data-dir <dir>), and nothing tells you when it
-ends: run show again. A job that succeeded with verdict mismatch found a
-difference; the job itself worked. The job lists at most 50 mismatched package
-paths and the full mismatch_count. Jobs run trusted verification code only;
-they do not run the artifact's code and are not a sandbox.
+with the stored listing. It only queues the job. The server's own worker runs it
+(artifree-server serve starts one unless started with --no-worker or as a
+one-shot session), and nothing tells you when it ends: run show again. A job
+that succeeded with verdict mismatch found a difference; the job itself worked.
+The job lists at most 50 mismatched package paths and the full mismatch_count.
+Jobs run trusted verification code only; they do not run the artifact's code and
+are not a sandbox.
 cancel asks a job to stop. A job that has not started ends cancelled at once.
 A running one shows cancel_requested until its worker stops at its next
 checkpoint. Cancelling stops work and undoes nothing. A job that already ended

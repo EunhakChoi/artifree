@@ -22,11 +22,13 @@ mod runtime_sessions;
 mod runtime_source;
 pub mod serve;
 pub mod session_sweep;
-mod shutdown;
+pub mod shutdown;
+pub mod supervisor;
 pub mod tokens;
 mod users;
 pub mod web;
 pub mod worker;
+pub mod worker_lines;
 
 #[cfg(test)]
 mod runtime_asset_download_tests;

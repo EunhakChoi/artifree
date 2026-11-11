@@ -992,7 +992,7 @@ test('CLI queues a verification job that a separate worker process finishes', as
   const site = await freshDirectory('cli-jobs-site');
   await writeFile(join(site, 'index.html'), '<p>verify me</p>');
   await writeFile(join(site, 'app.js'), 'let a = 1;');
-  const server = await startServer(binary, data);
+  const server = await startServer(binary, data, ['--no-worker']);
   try {
     const id = json(cli(server, ['create', '--title', 'Jobs', '--dir', site]))
       .artifact.id;
@@ -1010,7 +1010,7 @@ test('CLI queues a verification job that a separate worker process finishes', as
     const jobId = queued.job.id;
     assert.equal(json(jobCli(server, enqueue)).replayed, true);
 
-    // Nothing runs the job by itself.
+    // With --no-worker nothing runs the job by itself.
     assert.equal(json(jobCli(server, ['show', jobId])).state, 'queued');
 
     // A worker process on the same data directory, beside the running server.

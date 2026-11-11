@@ -19,8 +19,8 @@ one file as a new revision, and list, read, upload, delete, or ask the user to
 save its artifact's uploaded assets, each through a bound bridge after its own
 connection-scoped user grant; with their own grants it can also read and
 write its artifact's application data. One persistent job, `verify_revision`, re-checks a revision's stored files
-against their digests in a separate worker process the operator starts
-(`artifree-server worker run`). Publishing, roles and sharing, build and
+against their digests in a separate worker process that a persistent server
+starts and restarts by itself (`--no-worker` turns that off). Publishing, roles and sharing, build and
 conversion workers, sandboxed execution of untrusted code, and external
 identity (OAuth, passwords, login sessions) are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
@@ -132,10 +132,12 @@ Jobs are the first background work ([decision 0030](docs/decisions/0030-persiste
 `verify_revision` job, which recomputes the SHA-256 and size of every file of
 that revision from the database and reports `ok` or the first 50 mismatches;
 `job show`, `job list`, and `job cancel <job> --idempotency-key <key>` follow
-and stop it. Nothing starts a worker: the server does not, and the container
-runs only the server, so a job stays `queued` until an operator runs
-`artifree-server worker run --data-dir <dir>` (`--once` stops when nothing is
-due). A job runs trusted server code, with no sandbox, and it uses no network; it is
+and stop it. A persistent `serve` starts one worker process and starts it again when
+it exits ([decision 0055](docs/decisions/0055-operating-background-work.md));
+`GET /v1/background` says whether it runs. With `--no-worker` (or
+`ARTIFREE_NO_WORKER=1`), and in a one-shot session, a job stays `queued` until
+an operator runs `artifree-server worker run --data-dir <dir>` (`--once` stops
+when nothing is due). A job runs trusted server code, with no sandbox, and it uses no network; it is
 not the isolated execution that builds of React sources or model calls will
 need. Cancelling stops work and never rolls anything back. Job changes are
 not in the change feed and the web workspace has no job view; poll `job show`.

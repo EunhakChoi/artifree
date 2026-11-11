@@ -4,6 +4,7 @@ import type {
   Artifact,
   ArtifactKind,
   ArtifactList,
+  BackgroundStatus,
   ChangeKind,
   CommitResponse,
   CopiedPart,
@@ -42,6 +43,11 @@ import type {
   TokenList,
   UnreferencedContent,
   UpdateArtifactResponse,
+  WorkerExit,
+  WorkerExitOutcome,
+  WorkerMode,
+  WorkerState,
+  WorkerStatus,
 } from '@artifree/contracts';
 import type { FeedChange } from './change-feed.js';
 
@@ -737,6 +743,20 @@ const JOB_PROBLEMS: readonly JobProblem[] = [
 ];
 const JOB_VERDICTS: readonly JobVerdict[] = ['ok', 'mismatch'];
 
+// Worker vocabularies are closed like the job ones, so an unknown value makes
+// the response invalid.
+const WORKER_MODES: readonly WorkerMode[] = ['supervised', 'none'];
+const WORKER_STATES: readonly WorkerState[] = [
+  'running',
+  'restarting',
+  'stopped',
+];
+const WORKER_EXIT_OUTCOMES: readonly WorkerExitOutcome[] = [
+  'clean',
+  'failed',
+  'not_started',
+];
+
 function oneOf<T extends string>(
   values: readonly T[],
   value: unknown,
@@ -876,6 +896,39 @@ export function parseJobList(value: unknown): JobList | undefined {
   return typeof next_page_token === 'string'
     ? { jobs, next_page_token }
     : undefined;
+}
+
+function workerExit(value: unknown): WorkerExit | undefined {
+  if (!isRecord(value)) return undefined;
+  const outcome = oneOf(WORKER_EXIT_OUTCOMES, value.outcome);
+  return isTime(value.at_ms) && outcome !== undefined
+    ? { at_ms: value.at_ms, outcome }
+    : undefined;
+}
+
+/** Parses `GET /v1/background` (decision 0055). */
+export function parseBackground(value: unknown): BackgroundStatus | undefined {
+  if (!isRecord(value) || !isRecord(value.worker)) return undefined;
+  const worker = value.worker;
+  const mode = oneOf(WORKER_MODES, worker.mode);
+  const state = oneOf(WORKER_STATES, worker.state);
+  const lastExit = optional(worker.last_exit, workerExit);
+  if (
+    mode === undefined ||
+    state === undefined ||
+    lastExit === undefined ||
+    !isCount(worker.restarts) ||
+    !isCount(worker.dropped_lines)
+  )
+    return undefined;
+  const parsed: WorkerStatus = {
+    mode,
+    state,
+    restarts: worker.restarts,
+    dropped_lines: worker.dropped_lines,
+  };
+  if (lastExit.set !== undefined) parsed.last_exit = lastExit.set;
+  return { worker: parsed };
 }
 
 /** Parses a non-2xx JSON body. */

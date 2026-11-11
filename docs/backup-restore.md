@@ -131,8 +131,9 @@ artifree-server serve --data-dir /path/to/new-data ...
   job that was `running` has its lease set to expired in the restored copy: the
   lease belonged to a worker of the original machine, and a worker of the
   restored directory runs the job again under a new fence (decision 0030). A
-  worker process is never part of a backup; start one on the restored directory
-  if you want queued jobs to run.
+  worker process is never part of a backup; a server started on the restored
+  directory starts its own worker (decision 0055), and with `--no-worker` you
+  start one yourself if you want queued jobs to run.
 - Application data is restored whole, with its versions: a client that read
   `data_version` 7 after the backup was taken sees an older version and
   value, and its write against 7 is refused as `data_conflict`.

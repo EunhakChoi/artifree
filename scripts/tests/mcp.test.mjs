@@ -35,9 +35,11 @@ before(async () => {
   scratch = await mkdtemp(join(tmpdir(), 'artifree-mcp-test-'));
   // One actor makes every request of this suite, more at once than the
   // default burst allows; limits.test.mjs checks the limits themselves.
+  // No worker: the job assertions compare a job that must stay queued.
   server = await startServer(binary, join(scratch, 'data'), [
     '--request-burst',
     '1000',
+    '--no-worker',
   ]);
   catalog = JSON.parse(
     await readFile(join(root, 'contracts/generated/mcp-tools.json'), 'utf8'),

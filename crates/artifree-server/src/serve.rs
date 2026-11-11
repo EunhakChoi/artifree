@@ -1,5 +1,6 @@
-//! Local server process: one data directory, an API listener, and a separate
-//! preview content listener.
+//! Local server process: one data directory, an API listener, a separate
+//! preview content listener, and, unless disabled, a supervised worker
+//! process (decision 0055).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -9,12 +10,14 @@ use artifree_providers::data_dir;
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use artifree_providers::tokens::SqliteTokenStore;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
 use crate::auth::AccessToken;
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
 use crate::preview;
 use crate::shutdown::StopLatch;
+use crate::supervisor::{self, ProcessLauncher, WorkerStatusHandle};
 use crate::web::WebAssets;
 
 /// Default API address; loopback only.
@@ -63,6 +66,12 @@ pub struct ServeOptions {
     pub allowed_origins: Vec<String>,
     /// Whether remote MCP access is permitted.
     pub allow_remote_mcp: bool,
+    /// Whether `run` starts and supervises a worker: this executable run as
+    /// `worker run --data-dir <dir> --supervised` (decision 0055, rule 1). A
+    /// one-shot session never starts one. A library caller other than the
+    /// server binary must leave it false, since the worker is the current
+    /// executable.
+    pub worker: bool,
 }
 
 /// Addresses reported once both listeners accept connections.
@@ -83,7 +92,9 @@ pub struct Ready {
 }
 
 /// Opens storage, binds both listeners, reports readiness, and serves until
-/// interrupted (Ctrl+C, or SIGTERM on Unix).
+/// interrupted (Ctrl+C, or SIGTERM on Unix). With `options.worker` set, it starts
+/// the worker before readiness is reported and stops it after every listener has
+/// stopped (decision 0055, rules 1 and 2).
 ///
 /// # Errors
 ///
@@ -140,7 +151,11 @@ async fn serve_listeners(
         None => format!("http://{}", local_address(&content)?),
     };
 
-    let settings = build_settings(&options, local_address(&api)?, content_origin.clone());
+    let mut settings = build_settings(&options, local_address(&api)?, content_origin.clone());
+    if options.worker {
+        // build_settings also serves one-shot sessions, which never report a worker.
+        settings.worker_status = WorkerStatusHandle::supervised();
+    }
     let state = AppState::new(store, token_store, token, settings)?;
     let web_assets = options.web_dir.as_deref().map(WebAssets::new).transpose()?;
     let web_url = if web_assets.is_some() {
@@ -152,6 +167,10 @@ async fn serve_listeners(
     // same stop request even when their shutdown futures start after it.
     let stop = StopLatch::new();
     install_stop_sources(&stop)?;
+    // Rule 1 of decision 0055: the worker starts before the ready line. It has its
+    // own latch, which is set only after every listener has stopped (rule 2).
+    let worker_stop = StopLatch::new();
+    let worker_task = start_worker(&options, &state, stop.clone(), worker_stop.clone());
     on_ready(&Ready {
         api_url,
         web_url,
@@ -189,7 +208,7 @@ async fn serve_listeners(
         preview::router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(on_stop(&stop));
-    tokio::try_join!(
+    let served = tokio::try_join!(
         async {
             api_server
                 .await
@@ -209,8 +228,45 @@ async fn serve_listeners(
                 Ok(())
             }
         },
-    )?;
+    );
+    // The worker also stops when a listener failed, so it never outlives the server.
+    stop_worker(&worker_stop, worker_task).await;
+    served?;
     Ok(())
+}
+
+/// Starts the worker of a persistent server when `options.worker` is set, as the
+/// supervised child of this executable (decision 0055, rule 1). The supervisor
+/// writes the status that `state` reports and stamps exits with its clock.
+fn start_worker(
+    options: &ServeOptions,
+    state: &AppState,
+    draining: StopLatch,
+    stop: StopLatch,
+) -> Option<JoinHandle<()>> {
+    options.worker.then(|| {
+        let settings = state.settings();
+        supervisor::start(
+            ProcessLauncher::new(options.data_dir.clone()),
+            settings.worker_status.clone(),
+            std::sync::Arc::clone(&settings.clock),
+            draining,
+            stop,
+        )
+    })
+}
+
+/// Asks the worker to stop and waits until its supervisor has ended (decision 0055,
+/// rule 2). The caller stops the listeners first. The supervisor then closes the
+/// worker's standard input, waits for the worker for at most five seconds and then
+/// kills it.
+async fn stop_worker(stop: &StopLatch, worker_task: Option<JoinHandle<()>>) {
+    stop.set();
+    if let Some(task) = worker_task {
+        // The supervisor reports through the worker status. A panic in it has
+        // already reached the panic hook, so the join result adds nothing.
+        drop(task.await);
+    }
 }
 
 pub(crate) fn build_settings(
@@ -241,6 +297,7 @@ pub(crate) fn build_settings(
         allowed_origins: options.allowed_origins.clone(),
         allow_remote_mcp: options.allow_remote_mcp,
         clock: std::sync::Arc::new(artifree_core::jobs::SystemClock),
+        worker_status: WorkerStatusHandle::default(),
     }
 }
 
