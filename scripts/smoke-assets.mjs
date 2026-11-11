@@ -63,7 +63,13 @@ export async function checkAssets({
   const seed = (title) =>
     api(server, 'POST', '/v1/artifacts', {
       title,
-      files: [{ path: 'index.html', encoding: 'utf8', content: '<p>a</p>' }],
+      files: [
+        {
+          path: 'index.html',
+          encoding: 'utf8',
+          content: '<!doctype html><p>a</p>',
+        },
+      ],
     });
   const { artifact } = await seed('Assets demo');
   const { artifact: full } = await seed('Assets full');

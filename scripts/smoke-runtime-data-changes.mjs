@@ -24,8 +24,8 @@ import { api } from './smoke-workspace.mjs';
  * Tab B is the frame that is told. Tab A holds both grants and stores the value;
  * a reload ends its grants, so it allows reading again and reads the value back.
  *
- * Chromium only. Firefox is suspended in CI (docs/quality.md, "Browser
- * engines"), so this file has no Firefox path. Run this check alone with
+ * Run alone, this file uses Chromium; the suite (scripts/smoke.mjs) runs it in
+ * the engine that ARTIFREE_BROWSER names. Run this check alone with
  * `npm run build`, then `node scripts/smoke-runtime-data-changes.mjs`.
  */
 

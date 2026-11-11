@@ -133,10 +133,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Firefox is suspended until the planned feature set is complete; see
-        # docs/quality.md "Browser engines". The scripts still accept
-        # ARTIFREE_BROWSER=firefox for local runs.
-        browser: [chromium]
+        # Both engines, see docs/quality.md "Browser engines". The release
+        # workflow refuses a tag when Firefox is missing from this list.
+        browser: [chromium, firefox]
         # The two shards of scripts/smoke.mjs; together they run the whole suite.
         shard: [outbox, ui]
     env:

@@ -22,8 +22,8 @@ import { api } from './smoke-workspace.mjs';
  * writer. Beside such a preview the workspace shows the notices that rules 8 and 12
  * call for. A page that does not opt in is reloaded by a permission change, as before.
  *
- * Chromium only. Firefox is suspended in CI (docs/quality.md, "Browser engines"),
- * so this file has no Firefox path. Run this check alone with `npm run build`,
+ * Run alone, this file uses Chromium; the suite (scripts/smoke.mjs) runs it in
+ * the engine that ARTIFREE_BROWSER names. Run this check alone with `npm run build`,
  * then `node scripts/smoke-runtime-adoption.mjs`.
  */
 

@@ -52,8 +52,8 @@ jobs:
         run: node scripts/release-assets.mjs check-ci "$GITHUB_SHA"
       - name: Firefox is back in the CI browser matrix
         if: ${{ github.ref_type == 'tag' }}
-        # docs/quality.md "Browser engines": Firefox is suspended in CI until the
-        # feature set is complete and must return before the first release.
+        # docs/quality.md "Browser engines": a release is checked in both
+        # engines, so a tag is refused if Firefox left the matrix again.
         run: |
           grep -Eq '^\s*browser: \[[^]]*firefox' .github/workflows/ci.yml
 

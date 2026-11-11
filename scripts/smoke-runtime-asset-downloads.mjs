@@ -24,8 +24,8 @@ import { api, raw } from './smoke-workspace.mjs';
  * saves the file under the offered name, and the bytes are equal. A declined
  * save fetches and saves nothing.
  *
- * Chromium only. Firefox is suspended in CI (docs/quality.md, "Browser
- * engines"), so this file has no Firefox path. Run this check alone with
+ * Run alone, this file uses Chromium; the suite (scripts/smoke.mjs) runs it in
+ * the engine that ARTIFREE_BROWSER names. Run this check alone with
  * `npm run build`, then `node scripts/smoke-runtime-asset-downloads.mjs`.
  */
 

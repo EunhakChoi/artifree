@@ -1,8 +1,9 @@
 # 0054: Keeping a runtime frame alive across a change of its view
 
-> Browser engines: Firefox is suspended in CI until the planned feature set is
-> complete. A Firefox acceptance below is met in Chromium and reported as pending
-> re-verification ([quality](../quality.md#browser-engines)).
+> Browser engines: this record was written while Firefox was suspended in CI,
+> and its Firefox acceptances were first met in Chromium only. They were re-run
+> on 2026-11-11 (O08): the whole smoke suite passes in Firefox, which is back in
+> CI ([quality](../quality.md#browser-engines)).
 
 Date: 2026-11-11. Status: **implemented** (R10a, R10b and R10c). The
 workspace adopts the frame of a page that opted in; every other page is

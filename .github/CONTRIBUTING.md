@@ -46,7 +46,7 @@ are written and how heavy commands are isolated is in
 [testing practice](../docs/testing-practice.md).
 
 For web UI or standalone HTML changes, run the real-server smoke suite in
-Chromium. Firefox is suspended in CI until the planned feature set is complete
+Chromium; CI also runs it in Firefox
 (see [quality](../docs/quality.md#browser-engines)). If browser binaries are
 absent, install them through the locked local Playwright package:
 
@@ -55,7 +55,7 @@ npx --no-install playwright install chromium
 npm run test:smoke
 ```
 
-To run Firefox locally anyway, install `firefox` the same way and set
+To run Firefox locally, as a change to engine-specific APIs needs, install `firefox` the same way and set
 `ARTIFREE_BROWSER=firefox` (in PowerShell, `$env:ARTIFREE_BROWSER = 'firefox'`,
 then `Remove-Item Env:ARTIFREE_BROWSER` afterwards).
 

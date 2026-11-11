@@ -1,8 +1,9 @@
 # Browser-local outbox ownership and durable admission
 
-> Browser engines: Firefox is suspended in CI until the planned feature set is
-> complete. A Firefox acceptance below is met in Chromium and reported as pending
-> re-verification ([quality](../quality.md#browser-engines)).
+> Browser engines: this record was written while Firefox was suspended in CI,
+> and its Firefox acceptances were first met in Chromium only. They were re-run
+> on 2026-11-11 (O08): the whole smoke suite passes in Firefox, which is back in
+> CI ([quality](../quality.md#browser-engines)).
 
 Status: implemented R08b local-only slice of [0041](0041-browser-data-outbox.md).
 R08a is [0043](0043-data-outbox-binding.md). R08 as a whole remains partial:

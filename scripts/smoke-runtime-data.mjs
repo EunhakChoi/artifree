@@ -23,8 +23,8 @@ import { api, raw } from './smoke-workspace.mjs';
  * compared with what the owner wrote, and its version with the one the owner's
  * own read reports.
  *
- * Chromium only. Firefox is suspended in CI (docs/quality.md, "Browser
- * engines"), so this file has no Firefox path. Run this check alone with
+ * Run alone, this file uses Chromium; the suite (scripts/smoke.mjs) runs it in
+ * the engine that ARTIFREE_BROWSER names. Run this check alone with
  * `npm run build`, then `node scripts/smoke-runtime-data.mjs`.
  */
 

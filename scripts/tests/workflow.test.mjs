@@ -30,13 +30,14 @@ test('Browser container user matches the GitHub-mounted home owner', () => {
   assert.match(
     workflow.jobs.browsers.container.options,
     /(?:^|\s)--user\s+1001(?:\s|$)/,
-    'Firefox requires the process user to own the mounted home directory; keep it for when Firefox returns.',
+    'Firefox requires the process user to own the mounted home directory; keep it.',
   );
 });
-test('Browser jobs run Chromium while Firefox is suspended', () => {
-  assert.ok(
-    workflow.jobs.browsers.strategy.matrix.browser.includes('chromium'),
-    'docs/quality.md "Browser engines": CI must keep Chromium.',
+test('Browser jobs run Chromium and Firefox', () => {
+  assert.deepEqual(
+    [...workflow.jobs.browsers.strategy.matrix.browser].sort(),
+    ['chromium', 'firefox'],
+    'docs/quality.md "Browser engines": CI runs the smoke in both engines.',
   );
 });
 test('Browser jobs run both smoke shards', () => {
