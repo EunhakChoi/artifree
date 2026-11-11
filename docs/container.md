@@ -89,14 +89,15 @@ docker exec artifree cat /data/access-token      # paste into http://127.0.0.1:7
 Every setting the container needs can be passed with `docker run --env` (or an
 env file) instead of arguments after the image name:
 
-| Variable                                                                         | Same as              | Notes                                                                             |
-| -------------------------------------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------- |
-| `ARTIFREE_CONTENT_ORIGIN`                                                        | `--content-origin`   | Public preview origin. Required in practice (see above).                          |
-| `ARTIFREE_FRAME_ANCESTORS`                                                       | `--frame-ancestors`  | Space-separated CSP sources allowed to embed previews. Replaces the default list. |
-| `ARTIFREE_API_ORIGIN`                                                            | `--api-origin`       | Public API and web origin behind a proxy.                                         |
-| `ARTIFREE_ALLOWED_HOSTS`, `ARTIFREE_ALLOWED_ORIGINS`, `ARTIFREE_TRUSTED_PROXIES` | the repeated flags   | Comma-separated. Added to anything the flags give.                                |
-| `ARTIFREE_ALLOW_REMOTE_MCP`                                                      | `--allow-remote-mcp` | `true` or `1`. Read the MCP section first.                                        |
-| `ARTIFREE_LAN`, `ARTIFREE_LOOPBACK_LISTEN`, `ARTIFREE_WEB_DIR`                   | the matching flags   | The image's fixed `--web-dir` and listen flags win over them.                     |
+| Variable                                                                         | Same as              | Notes                                                                                     |
+| -------------------------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------- |
+| `ARTIFREE_CONTENT_ORIGIN`                                                        | `--content-origin`   | Public preview origin. Required in practice (see above).                                  |
+| `ARTIFREE_FRAME_ANCESTORS`                                                       | `--frame-ancestors`  | Space-separated CSP sources allowed to embed previews. Replaces the default list.         |
+| `ARTIFREE_API_ORIGIN`                                                            | `--api-origin`       | Public API and web origin behind a proxy.                                                 |
+| `ARTIFREE_ALLOWED_HOSTS`, `ARTIFREE_ALLOWED_ORIGINS`, `ARTIFREE_TRUSTED_PROXIES` | the repeated flags   | Comma-separated. Added to anything the flags give.                                        |
+| `ARTIFREE_ALLOW_REMOTE_MCP`                                                      | `--allow-remote-mcp` | `true` or `1`. Read the MCP section first.                                                |
+| `ARTIFREE_NO_WORKER`                                                             | `--no-worker`        | `true` or `1`: no worker, jobs stay queued. Another value than `false` or `0` is refused. |
+| `ARTIFREE_LAN`, `ARTIFREE_LOOPBACK_LISTEN`, `ARTIFREE_WEB_DIR`                   | the matching flags   | The image's fixed `--web-dir` and listen flags win over them.                             |
 
 ```sh
 docker run -d --name artifree --platform linux/amd64 --read-only \

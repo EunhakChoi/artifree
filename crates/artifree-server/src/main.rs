@@ -313,10 +313,18 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeCommand, Str
         || env
             .text(serve_env::ALLOW_REMOTE_MCP)
             .is_some_and(|v| v == "true" || v == "1");
-    let no_worker = flags.cli_no_worker
-        || env
-            .text(serve_env::NO_WORKER)
-            .is_some_and(|v| v == "true" || v == "1");
+    // Unlike the setting above, a value that is not understood here would start
+    // a worker the operator asked not to have, so it is refused.
+    let no_worker = match env.text(serve_env::NO_WORKER) {
+        None | Some("false" | "0") => flags.cli_no_worker,
+        Some("true" | "1") => true,
+        Some(_) => {
+            return Err(format!(
+                "{} must be 1, true, 0 or false",
+                serve_env::NO_WORKER
+            ));
+        }
+    };
 
     let frame_ancestors = resolve_frame_ancestors(
         env,
@@ -1198,6 +1206,26 @@ mod tests {
         // An empty or false-looking value does not enable remote MCP.
         let off = parse_with(&ServeEnv::default().with(ALLOW_REMOTE_MCP, "yes"), &[])?;
         assert!(!off.allow_remote_mcp);
+        Ok(())
+    }
+
+    #[test]
+    fn a_no_worker_value_that_is_not_understood_is_refused() -> Result<(), String> {
+        use serve_env::NO_WORKER;
+        for off in ["1", "true"] {
+            assert!(!parse_with(&ServeEnv::default().with(NO_WORKER, off), &[])?.worker);
+        }
+        for on in ["0", "false"] {
+            assert!(parse_with(&ServeEnv::default().with(NO_WORKER, on), &[])?.worker);
+            // The flag still wins over a value that asks for nothing.
+            let flagged = parse_with(&ServeEnv::default().with(NO_WORKER, on), &["--no-worker"])?;
+            assert!(!flagged.worker);
+        }
+        // Starting a worker the operator tried to turn off would be the wrong guess.
+        for unknown in ["TRUE", "yes", "2"] {
+            let refused = parse_with(&ServeEnv::default().with(NO_WORKER, unknown), &[]);
+            assert!(refused.is_err_and(|error| error.contains(NO_WORKER)));
+        }
         Ok(())
     }
 

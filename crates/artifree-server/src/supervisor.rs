@@ -230,7 +230,8 @@ fn launch<L: Launcher>(
         status.update(|s| s.state = WorkerState::Running);
         Some(child)
     } else {
-        // The error text is not kept: rule 5 reports only that the start failed.
+        // The error text is not kept: rule 5 reports only that the start failed,
+        // and the library prints nothing by itself.
         status.update(|s| {
             s.state = WorkerState::Restarting;
             s.last_exit = Some(WorkerExit {
