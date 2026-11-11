@@ -39,6 +39,21 @@ because a scheduler with nothing to run would be a placeholder.
 
 ## Decisions
 
+> **Note of 2026-11-11, from the implementation of R01ba (#181).** Three
+> points the rules below left open were settled in code and are part of this
+> record now. (a) Rule 3: once the server has begun to stop, a worker that
+> exits is not started again, although the pipe of rule 2 is not closed yet. A
+> signal sent to the whole process group (Ctrl+C in a terminal) reaches the
+> worker too, and a new worker would take a job only to give it back. (b) Rule
+> 5: `stopped` is reported from the moment the server asks the worker to stop,
+> not after the 5 seconds of rule 2. (c) Rule 1: `ARTIFREE_NO_WORKER` accepts
+> `1` and `true`; `0`, `false` and an empty value change nothing; any other
+> value is refused at start, because guessing would start a worker the
+> operator tried to turn off. Also recorded: the Linux binary keeps the glibc
+> floor of [0037](0037-release-publishing-and-supply-chain.md) through
+> `crates/artifree-server/build.rs`, since starting a process would otherwise
+> record a glibc 2.39 requirement.
+
 ### Starting and supervising a worker
 
 1. **`serve` starts one worker.** A persistent server starts one child
