@@ -574,12 +574,29 @@ fn assert_data_works_beside_old_keys(store: &SqliteStore, version: i64) -> TestR
     Ok(())
 }
 
-/// The feed head never moves back through an upgrade; the data write of
-/// [`assert_data_works_beside_old_keys`] is the one change after it, and is
-/// recorded as a data change (decision 0040).
+/// The feed head never moves back through an upgrade. Two changes follow it: the
+/// job accepted by [`assert_jobs_work_beside_old_keys`], recorded as a job change
+/// (decision 0055, rule 7), and the data write of
+/// [`assert_data_works_beside_old_keys`], recorded as a data change (decision
+/// 0040).
 fn assert_feed_head_and_data_change(store: &SqliteStore, version: i64) -> TestResult {
     let page = store.changes(&actor("owner"), ChangeSequence(0), 100)?;
-    assert_eq!(page.head, ChangeSequence(if version >= 2 { 6 } else { 1 }));
+    assert_eq!(page.head, ChangeSequence(if version >= 2 { 7 } else { 2 }));
+    let accepted = page
+        .changes
+        .iter()
+        .rev()
+        .nth(1)
+        .ok_or("the accepted job was not recorded")?;
+    assert_eq!(
+        (
+            accepted.kind,
+            accepted.job_id.is_some(),
+            accepted.data_version
+        ),
+        (ChangeKind::JobChanged, true, None),
+        "version {version}"
+    );
     let written = page
         .changes
         .last()
@@ -617,8 +634,8 @@ fn purge_the_trashed_artifact(store: &SqliteStore, version: i64) -> TestResult {
     let page = store.changes(&owner, ChangeSequence(0), 100)?;
     assert_eq!(
         page.head,
-        ChangeSequence(7),
-        "the head continues from 5 after the data write and the purge"
+        ChangeSequence(8),
+        "the head continues from 5 after the accepted job, the data write and the purge"
     );
     Ok(())
 }

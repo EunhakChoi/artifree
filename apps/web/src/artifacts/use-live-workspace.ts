@@ -69,7 +69,7 @@ function epochAfter(epoch: number, event: ChangeFeedEvent): number {
 }
 
 /** What the page knows from the change feed. */
-interface Knowledge {
+export interface Knowledge {
   /** False until the page may read for the first time. */
   readonly canRead: boolean;
   /**
@@ -95,7 +95,12 @@ interface Knowledge {
   readonly trash: Readonly<Record<string, TrashState>>;
 }
 
-type Learned =
+/**
+ * What the page learns, for `learnFrom`: a change feed event, artifacts it
+ * read, an artifact it saw in the trash, or the end of its wait for the
+ * stream, after which it may read.
+ */
+export type Learned =
   | { readonly type: 'event'; readonly event: ChangeFeedEvent }
   | {
       readonly type: 'read';
@@ -110,7 +115,8 @@ type Learned =
     }
   | { readonly type: 'read anyway' };
 
-const START: Knowledge = {
+/** What the page knows before it has learned anything. */
+export const START: Knowledge = {
   canRead: false,
   epoch: 0,
   resets: 0,
@@ -123,7 +129,12 @@ const START: Knowledge = {
 /** How long a visible page waits for the stream before reading anyway. */
 const FIRST_READ_WAIT_MS = 2_000;
 
-function learnFrom(state: Knowledge, learned: Learned): Knowledge {
+/**
+ * Applies `learned` to `state`. A pure reducer for `useReducer`: it never
+ * changes `state`, and it returns `state` itself when nothing it tracks
+ * changes.
+ */
+export function learnFrom(state: Knowledge, learned: Learned): Knowledge {
   switch (learned.type) {
     case 'read anyway':
       return state.canRead ? state : { ...state, canRead: true };
@@ -176,6 +187,10 @@ function learnFrom(state: Knowledge, learned: Learned): Knowledge {
       // any artifact, listed, open, or not yet listed, and it is not a revision
       // (decisions 0007 and 0040).
       if (change === 'data_changed') return state;
+      // A job's change names a job and changes no source and no metadata of
+      // its artifact: the workspace leaves its state as it is (decision 0055,
+      // rule 11), as for a data change.
+      if (change === 'job_changed') return state;
       // A kind added after this client may change anything about it.
       if (change === 'unknown')
         return {

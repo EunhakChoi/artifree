@@ -50,6 +50,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::schema;
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
+use artifree_domain::job::JobId;
 use artifree_domain::package::{FilePackage, PackageError, PackagePath};
 use artifree_domain::{AppDataVersion, ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
@@ -728,7 +729,7 @@ impl ArtifactStore for SqliteStore {
         let mut statement = snapshot
             .prepare(
                 "SELECT c.actor_seq, c.artifact_id, c.kind, c.revision, c.metadata_revision,
-                     c.data_version, c.committed_at
+                     c.data_version, c.job_id, c.committed_at
                  FROM changes c
                  WHERE c.actor = ?2 AND c.actor_seq > ?1
                  ORDER BY c.actor_seq LIMIT ?3",
@@ -749,14 +750,15 @@ impl ArtifactStore for SqliteStore {
                         row.get::<_, i64>(3)?,
                         row.get::<_, i64>(4)?,
                         row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 },
             )
             .map_err(unavailable)?;
         let mut changes = Vec::new();
         for row in rows {
-            let (sequence, artifact, kind, revision, metadata, data_version, committed_at) =
+            let (sequence, artifact, kind, revision, metadata, data_version, job_id, committed_at) =
                 row.map_err(unavailable)?;
             changes.push(ChangeRecord {
                 sequence: stored_sequence(sequence)?,
@@ -769,12 +771,16 @@ impl ArtifactStore for SqliteStore {
                     "recovered" => ChangeKind::Recovered,
                     "purged" => ChangeKind::Purged,
                     "data_changed" => ChangeKind::DataChanged,
+                    "job_changed" => ChangeKind::JobChanged,
                     other => return Err(corrupt(format!("change kind {other}"))),
                 },
                 revision: stored_revision(revision)?,
                 metadata_revision: stored_metadata(metadata)?,
                 data_version: data_version
                     .map(|version| u64::try_from(version).map(AppDataVersion).map_err(corrupt))
+                    .transpose()?,
+                job_id: job_id
+                    .map(|id| id.parse::<JobId>().map_err(corrupt))
                     .transpose()?,
                 committed_at: UnixMillis(committed_at),
             });
@@ -1177,7 +1183,15 @@ fn record_change(
             |row| row.get(0),
         )
         .map_err(unavailable)?;
-    append_change(transaction, &owner, id, kind, None, position, now)
+    append_change(
+        transaction,
+        &owner,
+        id,
+        kind,
+        ChangeDetail::None,
+        position,
+        now,
+    )
 }
 
 /// Appends the data change of a write that left `actor`'s space of the
@@ -1207,10 +1221,61 @@ fn record_data_change(
         actor.as_str(),
         id,
         ChangeKind::DataChanged,
-        Some(version),
+        ChangeDetail::Data(version),
         position,
         now,
     )
+}
+
+/// Appends the change of a job that the caller's transaction created, or whose
+/// state or `cancel_requested` it changed (decision 0055, rule 7). The row goes
+/// to the feed of the job's owner and names the artifact's current revision and
+/// metadata revision (rule 8). A job of an artifact in the trash or purged gets
+/// none, because nothing of it is readable (rule 9).
+fn record_job_change(transaction: &Transaction<'_>, job: &JobId) -> Result<(), StoreError> {
+    let (actor, artifact_id, revision, metadata, in_trash): (String, String, i64, i64, bool) =
+        transaction
+            .query_row(
+                "SELECT j.actor, j.artifact_id, a.current_revision, a.metadata_revision,
+                     a.deleted_at IS NOT NULL OR a.purged_at IS NOT NULL
+                 FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
+                 WHERE j.id = ?1",
+                [job.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .map_err(unavailable)?;
+    if in_trash {
+        return Ok(());
+    }
+    let artifact: ArtifactId = artifact_id.parse().map_err(corrupt)?;
+    let now = commit_time(transaction)?;
+    let position = (stored_revision(revision)?, stored_metadata(metadata)?);
+    append_change(
+        transaction,
+        &actor,
+        &artifact,
+        ChangeKind::JobChanged,
+        ChangeDetail::Job(job),
+        position,
+        now,
+    )
+}
+
+/// What a change row carries beyond its position: nothing, the data version of
+/// a data change, or the job of a job change.
+#[derive(Clone, Copy)]
+enum ChangeDetail<'a> {
+    None,
+    Data(AppDataVersion),
+    Job(&'a JobId),
 }
 
 /// Takes the next number of `actor`'s feed (decision 0036) and writes the
@@ -1221,7 +1286,7 @@ fn append_change(
     actor: &str,
     id: &ArtifactId,
     kind: ChangeKind,
-    data_version: Option<AppDataVersion>,
+    detail: ChangeDetail<'_>,
     (revision, metadata): Position,
     now: UnixMillis,
 ) -> Result<(), StoreError> {
@@ -1233,15 +1298,18 @@ fn append_change(
         ChangeKind::Recovered => "recovered",
         ChangeKind::Purged => "purged",
         ChangeKind::DataChanged => "data_changed",
+        ChangeKind::JobChanged => "job_changed",
         _ => {
             return Err(StoreError::Unavailable(
                 "this store cannot record that change".into(),
             ));
         }
     };
-    let data_version = data_version
-        .map(|version| i64::try_from(version.0).map_err(corrupt))
-        .transpose()?;
+    let (data_version, job_id) = match detail {
+        ChangeDetail::None => (None, None),
+        ChangeDetail::Data(version) => (Some(i64::try_from(version.0).map_err(corrupt)?), None),
+        ChangeDetail::Job(job) => (None, Some(job.as_str())),
+    };
     let sequence: i64 = transaction
         .query_row(
             "INSERT INTO actor_feeds (actor, head) VALUES (?1, 1)
@@ -1255,8 +1323,8 @@ fn append_change(
         .execute(
             "INSERT INTO changes
                  (actor, actor_seq, artifact_id, kind, revision, metadata_revision, data_version,
-                  committed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  job_id, committed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 actor,
                 sequence,
@@ -1265,6 +1333,7 @@ fn append_change(
                 sql_revision(revision)?,
                 sql_metadata(metadata)?,
                 data_version,
+                job_id,
                 now.0
             ],
         )

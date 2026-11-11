@@ -1017,13 +1017,14 @@ test('CLI queues a verification job that a separate worker process finishes', as
     const events = drainJobs(data);
     assert.deepEqual(
       events.map((event) => event.event),
-      ['ready', 'job', 'stopped'],
+      ['ready', 'claimed', 'job', 'stopped'],
     );
+    assert.equal(events[1].job, jobId);
     assert.deepEqual(
-      [events[1].job, events[1].state, events[1].verified],
+      [events[2].job, events[2].state, events[2].verified],
       [jobId, 'succeeded', true],
     );
-    assert.equal(events[2].reason, 'drained');
+    assert.equal(events[3].reason, 'drained');
 
     const shown = json(jobCli(server, ['show', jobId]));
     assert.equal(shown.state, 'succeeded');

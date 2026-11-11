@@ -121,6 +121,7 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   recovered: true,
   purged: true,
   data_changed: true,
+  job_changed: true,
 };
 
 // A record for the same reason as the error codes: a part added later must
@@ -141,6 +142,14 @@ function isCopiedPart(value: unknown): value is CopiedPart {
  */
 function isCursor(value: unknown): value is string {
   return typeof value === 'string' && /^[\x21-\x7e]{1,256}$/.test(value);
+}
+
+/**
+ * A job identifier as the wire spells it: `job_` and 32 lowercase hex
+ * digits.
+ */
+function isJobId(value: unknown): value is string {
+  return typeof value === 'string' && /^job_[0-9a-f]{32}$/.test(value);
 }
 
 function isChangeKind(value: string): value is ChangeKind {
@@ -676,10 +685,13 @@ export function parseFeedPosition(value: unknown): FeedPosition | undefined {
 
 /**
  * Parses the data of a `change` feed event. A `data_changed` change carries a
- * `data_version` that is a safe integer of at least 1, and a change of any
- * other known kind carries none; either breach makes the whole event invalid
- * (decision 0040, rule 12). A kind this client does not know is reported as
- * `unknown`, and fields it has beyond the contract are not read, as before.
+ * `data_version` that is a safe integer of at least 1, and a `job_changed`
+ * change carries a `job_id` that is `job_` and 32 lowercase hex digits. Each
+ * of those two kinds refuses the other's field, and a change of any other
+ * known kind carries neither; any breach makes the whole event invalid
+ * (decision 0040, rule 12; decision 0055, rule 8). A kind this client does
+ * not know is reported as `unknown`, and fields it has beyond the contract
+ * are not read, as before.
  */
 export function parseFeedChange(value: unknown): FeedChange | undefined {
   if (!isRecord(value)) return undefined;
@@ -690,6 +702,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     revision: number,
     metadata_revision,
     data_version,
+    job_id,
     committed_at_ms,
   } = value;
   if (
@@ -709,6 +722,12 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     committed_at_ms,
   };
   if (!isChangeKind(change)) return { ...feedChange, change: 'unknown' };
+  if (change === 'job_changed') {
+    return Object.hasOwn(value, 'data_version') || !isJobId(job_id)
+      ? undefined
+      : { ...feedChange, change, job_id };
+  }
+  if (Object.hasOwn(value, 'job_id')) return undefined;
   if (change !== 'data_changed')
     return Object.hasOwn(value, 'data_version')
       ? undefined

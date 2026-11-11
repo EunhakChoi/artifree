@@ -28,7 +28,9 @@ use artifree_ports::job_store::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use super::{SqliteStore, corrupt, key_used_elsewhere, random_bytes, unavailable};
+use super::{
+    SqliteStore, corrupt, key_used_elsewhere, random_bytes, record_job_change, unavailable,
+};
 
 /// The columns of a job row, in the order [`RawJob::from_row`] reads them.
 const COLUMNS: &str = "id, actor, artifact_id, revision, kind, state, cancel_requested, attempts,
@@ -293,6 +295,7 @@ fn enqueue(
         )
         .map_err(unavailable)?;
     record_key(transaction, request.request, &id, request.now)?;
+    record_job_change(transaction, &id)?;
     Ok(JobReceipt {
         job: written(transaction, &id)?,
         delivery: Delivery::Committed,
@@ -319,7 +322,7 @@ fn cancel(
         Key::Reused => return Err(JobStoreError::RequestKeyReused),
         Key::Unused => {}
     }
-    match job.state {
+    let changed = match job.state {
         JobState::Queued | JobState::RetryScheduled => {
             transaction
                 .execute(
@@ -327,6 +330,7 @@ fn cancel(
                     params![request.job.as_str(), request.now.0],
                 )
                 .map_err(unavailable)?;
+            true
         }
         JobState::Running => {
             transaction
@@ -335,12 +339,17 @@ fn cancel(
                     [request.job.as_str()],
                 )
                 .map_err(unavailable)?;
+            // The flag changes only on the first cancel request (decision 0055, rule 7).
+            !job.cancel_requested
         }
         state @ (JobState::Succeeded | JobState::Failed | JobState::Cancelled) => {
             return Err(JobStoreError::Conflict(state));
         }
-    }
+    };
     record_key(transaction, request.request, request.job, request.now)?;
+    if changed {
+        record_job_change(transaction, request.job)?;
+    }
     Ok(JobReceipt {
         job: written(transaction, request.job)?,
         delivery: Delivery::Committed,
@@ -452,6 +461,7 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
         if due.running && due.cancel_requested {
             // The worker that was asked to stop is gone; nothing is left to run.
             end(transaction, &due.id, JobState::Cancelled, None, claim.now)?;
+            record_job_change(transaction, &due.id)?;
             settled.push(written(transaction, &due.id)?);
             continue;
         }
@@ -463,6 +473,7 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
                 Some(JobFailure::LeaseExpired),
                 claim.now,
             )?;
+            record_job_change(transaction, &due.id)?;
             settled.push(written(transaction, &due.id)?);
             continue;
         }
@@ -474,6 +485,7 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
                 params![due.id.as_str(), claim.worker.as_str(), expires, claim.now.0],
             )
             .map_err(unavailable)?;
+        record_job_change(transaction, &due.id)?;
         let job = written(transaction, &due.id)?;
         let fence: i64 = transaction
             .query_row(
@@ -556,6 +568,7 @@ fn complete(
         // A cancel came in before the result was written: the job is
         // cancelled and the result is not kept.
         end(transaction, &lease.job, JobState::Cancelled, None, now)?;
+        record_job_change(transaction, &lease.job)?;
         return Ok(written(transaction, &lease.job)?);
     }
     let count = |value: u64| i64::try_from(value).map_err(corrupt);
@@ -586,6 +599,7 @@ fn complete(
             )
             .map_err(unavailable)?;
     }
+    record_job_change(transaction, &lease.job)?;
     Ok(written(transaction, &lease.job)?)
 }
 
@@ -598,6 +612,7 @@ fn fail(
 ) -> Result<JobRecord, JobStoreError> {
     if held(transaction, lease)? {
         end(transaction, &lease.job, JobState::Cancelled, None, now)?;
+        record_job_change(transaction, &lease.job)?;
         return Ok(written(transaction, &lease.job)?);
     }
     let (attempts, max_attempts): (i64, i64) = transaction
@@ -628,6 +643,7 @@ fn fail(
             )?;
         }
     }
+    record_job_change(transaction, &lease.job)?;
     Ok(written(transaction, &lease.job)?)
 }
 
@@ -640,6 +656,7 @@ fn confirm_cancel(
         return Err(JobStoreError::Conflict(JobState::Running));
     }
     end(transaction, &lease.job, JobState::Cancelled, None, now)?;
+    record_job_change(transaction, &lease.job)?;
     Ok(written(transaction, &lease.job)?)
 }
 
@@ -662,6 +679,7 @@ fn release(
             )
             .map_err(unavailable)?;
     }
+    record_job_change(transaction, &lease.job)?;
     Ok(written(transaction, &lease.job)?)
 }
 
@@ -670,7 +688,8 @@ fn release(
 /// job's fencing token is raised so its worker's next call is a lost lease.
 /// The result counts and the findings (which name files of the artifact) of
 /// every job of the artifact are deleted; the job headers stay, like the
-/// revision headers a purge keeps.
+/// revision headers a purge keeps. It appends no change row for the jobs it
+/// ends: the `purged` change covers them (decision 0055, rule 9).
 pub(super) fn revoke_for_purge(
     transaction: &Transaction<'_>,
     artifact: &ArtifactId,

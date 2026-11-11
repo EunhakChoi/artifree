@@ -208,7 +208,7 @@ export type ErrorCode =
  * still means the artifact changed: read it again.
  */
 export type ChangeKind =
-  'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered' | 'purged' | 'data_changed';
+  'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered' | 'purged' | 'data_changed' | 'job_changed';
 /**
  * Version of a source export manifest.
  */
@@ -1796,14 +1796,17 @@ export interface ConflictingFile {
 }
 /**
  * Data of a `change` event of `GET /v1/changes`: one commit that wrote a
- * revision or changed metadata, or one data write that changed the actor's
- * data space. Retries that replay a commit, failed commits, and updates that
- * changed nothing have none. It names what to read again and carries no
- * content, path, or value.
+ * revision or changed metadata, one data write that changed the actor's data
+ * space, or one job that was created or changed. Retries that replay a
+ * commit, failed commits, and updates that changed nothing have none. It
+ * names what to read again and carries no content, path, or value.
  *
  * `data_version` is present exactly when `change` is `data_changed`: the
  * published schema requires it for that kind and forbids it for every other
  * kind, and deserializing refuses both violations (decision 0040).
+ *
+ * `job_id` is present exactly when `change` is `job_changed`, with the same
+ * rule (decision 0055, rule 8).
  */
 export interface ArtifactChange {
   /**
@@ -1825,14 +1828,20 @@ export interface ArtifactChange {
    */
   data_version?: number | null;
   /**
+   * The job that changed, `job_` followed by 32 lowercase hex digits.
+   * Present exactly for `job_changed`.
+   */
+  job_id?: string | null;
+  /**
    * The metadata revision after the commit, or the current one for a data
-   * change.
+   * or job change.
    */
   metadata_revision: number;
   /**
    * The revision the commit created, or the current one for a metadata
-   * change (`metadata_updated`, `deleted`, `recovered`, or `purged`) or a
-   * data change (`data_changed`). Never a data version.
+   * change (`metadata_updated`, `deleted`, `recovered`, or `purged`), a
+   * data change (`data_changed`), or a job change (`job_changed`). Never a
+   * data version.
    */
   revision: number;
 }
@@ -2044,8 +2053,10 @@ export interface EnqueueJobResponse {
 /**
  * A persistent job. It pins the actor that enqueued it, one artifact, one
  * source revision, and a kind; none of these changes. Time fields are Unix
- * milliseconds. A client learns of progress by reading the job again: there
- * is no push for jobs, and the change feed does not carry them.
+ * milliseconds. A client learns of progress by reading the job again. A change
+ * to its state or cancel request appends a `job_changed` row to the owner's
+ * change feed, and that row carries no state: the job is read with
+ * `GET /v1/jobs/{id}`.
  */
 export interface Job {
   /**

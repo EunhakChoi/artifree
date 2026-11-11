@@ -246,7 +246,9 @@ stored listing ([decision 0030](decisions/0030-persistent-jobs-and-worker.md)).
 ([decision 0055](decisions/0055-operating-background-work.md)); on a server
 started with `--no-worker`, or a one-shot session, a job stays `queued` until
 an operator runs `artifree-server worker run`. `get_job` is how an
-agent learns the outcome (job changes are not pushed). A finished job has
+agent learns the outcome: MCP reads a job on request. (Job changes are in the
+HTTP change feed as `job_changed`, which the TypeScript client's `followJob`
+and `artifree job show --wait` use.) A finished job has
 `state: "succeeded"` with a `verdict` of `ok` or `mismatch` (a mismatch is a
 result, not a failure; up to 50 findings with artifact-relative paths, never
 file content), `failed` with a `failure` code, or `cancelled`. The job runs

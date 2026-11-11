@@ -10,6 +10,7 @@ use std::fmt;
 
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
+use artifree_domain::job::JobId;
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
 use artifree_domain::{AppDataVersion, ArtifactKind, MetadataRevision, SourceRevision};
 
@@ -430,6 +431,11 @@ pub enum ChangeKind {
     /// A data write changed the space of the actor whose feed holds the row
     /// (decision 0040). The artifact's own source and metadata did not change.
     DataChanged,
+    /// A transaction created the job that the row names, or changed its state
+    /// or `cancel_requested` (decision 0055, rule 7). The row is in the feed of
+    /// the actor that owns the job. The artifact's source and metadata did not
+    /// change.
+    JobChanged,
 }
 
 /// One commit as recorded in the change feed.
@@ -442,14 +448,17 @@ pub struct ChangeRecord {
     /// What the commit did.
     pub kind: ChangeKind,
     /// The source revision the commit created, or that was current when the
-    /// metadata or the data changed.
+    /// metadata, the data, or a job changed.
     pub revision: SourceRevision,
     /// The metadata revision after the commit, or the one that was current
-    /// when the data changed.
+    /// when the data or a job changed.
     pub metadata_revision: MetadataRevision,
     /// The version the write left the data space at: present exactly for
     /// [`ChangeKind::DataChanged`], never in `revision`.
     pub data_version: Option<AppDataVersion>,
+    /// The job that a [`ChangeKind::JobChanged`] row names: present exactly for
+    /// that kind (decision 0055, rule 8).
+    pub job_id: Option<JobId>,
     /// Commit time.
     pub committed_at: UnixMillis,
 }

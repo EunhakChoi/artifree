@@ -18,6 +18,13 @@ Nothing below is an observation of the original product.
 > the container image does the same, and the surfaces say so. The rest of this
 > record, including "job changes are not in the change feed" (decision 17),
 > still holds until R01bb.
+>
+> **Amended 2026-11-11 by 0055, slice R01bb.** Decision 13: the worker prints
+> `{"event":"claimed","job":...}` after each claim commits. Decision 17: job
+> changes are in the change feed as `job_changed` with `job_id` (schema 13,
+> contract 0.27.0), and a client can follow a job instead of polling; MCP
+> still reads a job on request. "The web workspace has no job panel" holds
+> until R01bc.
 
 ## Context
 

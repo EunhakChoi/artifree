@@ -160,7 +160,38 @@
     },
     "ArtifactChange": {
       "additionalProperties": false,
-      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata, or one data write that changed the actor's\ndata space. Retries that replay a commit, failed commits, and updates that\nchanged nothing have none. It names what to read again and carries no\ncontent, path, or value.\n\n`data_version` is present exactly when `change` is `data_changed`: the\npublished schema requires it for that kind and forbids it for every other\nkind, and deserializing refuses both violations (decision 0040).",
+      "dependentSchemas": {
+        "change": {
+          "else": {
+            "not": {
+              "required": [
+                "job_id"
+              ]
+            }
+          },
+          "if": {
+            "properties": {
+              "change": {
+                "const": "job_changed"
+              }
+            },
+            "required": [
+              "change"
+            ]
+          },
+          "then": {
+            "properties": {
+              "job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ]
+          }
+        }
+      },
+      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata, one data write that changed the actor's data\nspace, or one job that was created or changed. Retries that replay a\ncommit, failed commits, and updates that changed nothing have none. It\nnames what to read again and carries no content, path, or value.\n\n`data_version` is present exactly when `change` is `data_changed`: the\npublished schema requires it for that kind and forbids it for every other\nkind, and deserializing refuses both violations (decision 0040).\n\n`job_id` is present exactly when `change` is `job_changed`, with the same\nrule (decision 0055, rule 8).",
       "else": {
         "not": {
           "required": [
@@ -206,14 +237,22 @@
             "null"
           ]
         },
+        "job_id": {
+          "description": "The job that changed, `job_` followed by 32 lowercase hex digits.\nPresent exactly for `job_changed`.",
+          "pattern": "^job_[0-9a-f]{32}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "metadata_revision": {
-          "description": "The metadata revision after the commit, or the current one for a data\nchange.",
+          "description": "The metadata revision after the commit, or the current one for a data\nor job change.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "revision": {
-          "description": "The revision the commit created, or the current one for a metadata\nchange (`metadata_updated`, `deleted`, `recovered`, or `purged`) or a\ndata change (`data_changed`). Never a data version.",
+          "description": "The revision the commit created, or the current one for a metadata\nchange (`metadata_updated`, `deleted`, `recovered`, or `purged`), a\ndata change (`data_changed`), or a job change (`job_changed`). Never a\ndata version.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -476,6 +515,11 @@
         {
           "const": "data_changed",
           "description": "A write changed the data space of the actor whose stream carries this\nchange. The event names the space's new `data_version`, and no path or\nvalue; read the data again. The artifact's source and metadata did not\nchange.",
+          "type": "string"
+        },
+        {
+          "const": "job_changed",
+          "description": "A job of the artifact was created, or its state or `cancel_requested`\nchanged (decision 0055). The event names the job in `job_id` and carries\nno state: read the job again with `GET /v1/jobs/{id}`. The artifact's\nsource and metadata did not change.",
           "type": "string"
         }
       ]
@@ -1509,7 +1553,7 @@
     },
     "Job": {
       "additionalProperties": false,
-      "description": "A persistent job. It pins the actor that enqueued it, one artifact, one\nsource revision, and a kind; none of these changes. Time fields are Unix\nmilliseconds. A client learns of progress by reading the job again: there\nis no push for jobs, and the change feed does not carry them.",
+      "description": "A persistent job. It pins the actor that enqueued it, one artifact, one\nsource revision, and a kind; none of these changes. Time fields are Unix\nmilliseconds. A client learns of progress by reading the job again. A change\nto its state or cancel request appends a `job_changed` row to the owner's\nchange feed, and that row carries no state: the job is read with\n`GET /v1/jobs/{id}`.",
       "properties": {
         "artifact_id": {
           "description": "The artifact whose revision the job verifies.",

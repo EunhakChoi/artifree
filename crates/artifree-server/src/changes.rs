@@ -366,6 +366,7 @@ impl Producer {
                 ChangeKind::Recovered => WireKind::Recovered,
                 ChangeKind::Purged => WireKind::Purged,
                 ChangeKind::DataChanged => WireKind::DataChanged,
+                ChangeKind::JobChanged => WireKind::JobChanged,
                 // A kind added later is a revision to clients of this
                 // contract: they read the artifact again.
                 _ => WireKind::Revised,
@@ -376,6 +377,10 @@ impl Producer {
             // kind with one (a CHECK of the table), so a copy of the field
             // cannot put a data version on another kind.
             data_version: record.data_version.map(|version| version.0),
+            // Present exactly for `job_changed`: the store records no other kind
+            // with a job (a CHECK of the table). The change carries no job state
+            // (decision 0055, rule 8).
+            job_id: record.job_id.as_ref().map(|id| id.as_str().to_owned()),
             committed_at_ms: record.committed_at.0,
         }
     }

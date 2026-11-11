@@ -1,7 +1,7 @@
 # 0055: Operating background work
 
-Date: 2026-11-11. Status: **accepted in part**. R01ba (rules 1 to 6) is
-implemented; the other slices are proposed (see the slice table).
+Date: 2026-11-11. Status: **accepted in part**. R01ba (rules 1 to 6) and
+R01bb (rules 7 to 12) are implemented; the other slices are proposed (see the slice table).
 Roadmap: R01b. Builds on [0006](0006-change-feed.md),
 [0007](0007-live-web-workspace.md),
 [0030](0030-persistent-jobs-and-worker.md),
@@ -316,7 +316,7 @@ next_run_at_ms, run, last_started_at_ms, last_ended_at_ms, last_outcome)`.
 | Slice | Scope                                                           | Rules            | Contract | Status      |
 | ----- | --------------------------------------------------------------- | ---------------- | -------- | ----------- |
 | R01ba | The supervised worker and `GET /v1/background`                  | 1 to 6, 21, 24   | 0.26.0   | implemented |
-| R01bb | `job_changed` in the store, the server, the contract and client | 7 to 12, 22, 24  | 0.27.0   | proposed    |
+| R01bb | `job_changed` in the store, the server, the contract and client | 7 to 12, 22, 24  | 0.27.0   | implemented |
 | R01bc | The web Jobs tab                                                | 13 to 16, 23, 24 | none     | proposed    |
 | O05b  | The first scheduled task, with the table and the timer          | 17 to 20, 25     | its own  | proposed    |
 
@@ -369,7 +369,7 @@ next_run_at_ms, run, last_started_at_ms, last_ended_at_ms, last_outcome)`.
   one more pair for each shutdown that gives it back. The feed is not
   trimmed today, so it grows with the number of jobs; a retention rule for
   the feed is not decided here.
-- A client older than contract 0.26.0 reports `job_changed` as an unknown
+- A client older than contract 0.27.0 reports `job_changed` as an unknown
   kind and goes on, as it does for any kind it does not know.
 - `GET /v1/background` knows that a worker process exists, not that it
   works. A worker that hangs reads as `running` and its jobs wait for a

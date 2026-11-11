@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -467,6 +467,43 @@ DROP TABLE changes;
 ALTER TABLE changes_v11 RENAME TO changes;
 ";
 
+/// Added in schema version 13 (decision 0055, rule 7): the change kind
+/// `job_changed` and the job it names. The change table is rebuilt for its
+/// checked kinds; every row keeps its global sequence, its actor and position
+/// in that actor's feed, its data version and its other columns, and gets no
+/// job. `job_id` is present exactly for the new kind.
+const JOB_CHANGE_SCHEMA: &str = "
+CREATE TABLE changes_v13 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged',
+         'data_changed', 'job_changed')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    data_version INTEGER,
+    job_id TEXT,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision),
+    FOREIGN KEY (job_id) REFERENCES jobs (id),
+    CHECK ((kind = 'data_changed') = (data_version IS NOT NULL)),
+    CHECK (data_version IS NULL OR data_version >= 1),
+    CHECK ((kind = 'job_changed') = (job_id IS NOT NULL))
+) STRICT;
+INSERT INTO changes_v13 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, data_version, committed_at)
+    SELECT sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+        data_version, committed_at
+    FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v13 RENAME TO changes;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -567,6 +604,9 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
         transaction
             .execute_batch(ASSET_SCHEMA)
             .map_err(unavailable)?;
+    }
+    if version < 13 {
+        rebuild_changes(&transaction, JOB_CHANGE_SCHEMA, 13)?;
     }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)

@@ -118,14 +118,26 @@ enum Verified {
     LeaseLost,
 }
 
+/// What a claim of [`run_next_observed`] reports, in this order: the jobs it
+/// ended, then the job it took.
+#[derive(Debug, Clone, Copy)]
+pub enum ClaimEvent<'a> {
+    /// A job the claim ended because nobody can run it any more.
+    Settled(&'a JobRecord),
+    /// The job the claim took. Its claim has committed and it has not run yet.
+    Claimed(&'a JobId),
+}
+
 /// Claims the oldest due job and runs it to an end the store records, or
 /// returns [`Step::Idle`].
 ///
 /// A claim can also end jobs that nobody can run any more: an expired lease
 /// with a cancel requested, or on its last attempt. Each such job is passed to
-/// `on_settled` as the claim returns, before any job is run, so the process
-/// around the worker can report every job that reached an end (the result is
-/// not lost if the run that follows fails).
+/// `on_claim` as [`ClaimEvent::Settled`] as the claim returns, before any job
+/// is run, so the process around the worker can report every job that reached
+/// an end (the result is not lost if the run that follows fails). The job
+/// the claim takes is passed as [`ClaimEvent::Claimed`] once its claim has
+/// committed and before it runs.
 ///
 /// # Errors
 ///
@@ -133,13 +145,13 @@ enum Verified {
 /// result. The job then keeps its lease until it expires, and a later claim
 /// runs it again: a result is never written twice, but a verification can run
 /// more than once.
-pub fn run_next<S: ArtifactStore + JobStore>(
+pub fn run_next_observed<S: ArtifactStore + JobStore>(
     store: &S,
     clock: &dyn Clock,
     worker: &WorkerId,
     config: &WorkerConfig,
     pace: &dyn Pace,
-    on_settled: &mut dyn FnMut(&JobRecord),
+    on_claim: &mut dyn FnMut(ClaimEvent<'_>),
 ) -> Result<Step, JobStoreError> {
     let claim = store.claim_job(JobClaim {
         worker,
@@ -147,12 +159,13 @@ pub fn run_next<S: ArtifactStore + JobStore>(
         lease_ms: config.lease_ms,
     })?;
     for record in &claim.settled {
-        on_settled(record);
+        on_claim(ClaimEvent::Settled(record));
     }
     let Some(claimed) = claim.claimed else {
         return Ok(Step::Idle);
     };
     let (job, lease) = (claimed.job, claimed.lease);
+    on_claim(ClaimEvent::Claimed(&job.id));
     let ended = match verify(store, clock, &lease, &job, config, pace) {
         Ok(Verified::Done(report)) => store.complete_job(&lease, &report, clock.now()),
         Ok(Verified::Cancelled) => store.confirm_cancel(&lease, clock.now()),
@@ -179,6 +192,31 @@ pub fn run_next<S: ArtifactStore + JobStore>(
         Err(JobStoreError::LeaseLost) => Ok(Step::LeaseLost(lease.job)),
         Err(error) => Err(error),
     }
+}
+
+/// Claims the oldest due job and runs it to an end the store records, or
+/// returns [`Step::Idle`].
+///
+/// Each job that a claim ends without running is passed to `on_settled` as the
+/// claim returns, before any job is run. [`run_next_observed`] reports the same
+/// jobs and also the job it claims.
+///
+/// # Errors
+///
+/// The same as [`run_next_observed`].
+pub fn run_next<S: ArtifactStore + JobStore>(
+    store: &S,
+    clock: &dyn Clock,
+    worker: &WorkerId,
+    config: &WorkerConfig,
+    pace: &dyn Pace,
+    on_settled: &mut dyn FnMut(&JobRecord),
+) -> Result<Step, JobStoreError> {
+    run_next_observed(store, clock, worker, config, pace, &mut |event| {
+        if let ClaimEvent::Settled(record) = event {
+            on_settled(record);
+        }
+    })
 }
 
 fn add_ms(time: UnixMillis, ms: u64) -> UnixMillis {
