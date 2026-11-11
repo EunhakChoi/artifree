@@ -63,7 +63,13 @@ export async function checkAssets({
   const seed = (title) =>
     api(server, 'POST', '/v1/artifacts', {
       title,
-      files: [{ path: 'index.html', encoding: 'utf8', content: '<p>a</p>' }],
+      files: [
+        {
+          path: 'index.html',
+          encoding: 'utf8',
+          content: '<p>a</p>',
+        },
+      ],
     });
   const { artifact } = await seed('Assets demo');
   const { artifact: full } = await seed('Assets full');
@@ -90,6 +96,9 @@ export async function checkAssets({
     tab.on('console', (message) => {
       if (message.type() !== 'error' && message.type() !== 'warning') return;
       const text = message.text();
+      // What a preview's own page logs is the artifact's, not the workspace's:
+      // Firefox warns of quirks mode for a fixture page with no doctype.
+      if (message.location().url.startsWith(server.content_origin)) return;
       const fromApi = message.location().url.startsWith(`${origin}/v1/`);
       // The refusals this check provokes, and the answers it cuts.
       if (fromApi && /status of (409|422) /.test(text))

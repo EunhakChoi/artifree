@@ -1,10 +1,12 @@
 # 0053: A runtime frame's access to its application data
 
-> Browser engines: Firefox is suspended in CI until the planned feature set is
-> complete. A Firefox acceptance below is met in Chromium and reported as pending
-> re-verification ([quality](../quality.md#browser-engines)).
+> Browser engines: Firefox was suspended in CI from 2026-11-08 to 2026-11-11.
+> A Firefox acceptance of this record that was met in Chromium only in that time
+> was re-run by O08: the whole smoke suite passes in Firefox, which is back in
+> CI ([quality](../quality.md#browser-engines)). An acceptance of a part that is
+> not implemented has run in neither engine.
 
-Date: 2026-11-11. Status: **implemented** in Chromium, Firefox pending re-verification: R14a
+Date: 2026-11-11. Status: **implemented** (Firefox re-verified by O08): R14a
 (`data.read` and `data.get`), R14b (`data.write`, `data.set`, `data.update`
 and `data.remove`) and R14c (the change hint and `data.onChange`).
 Amends rule 6 of [0040](0040-data-changes-and-member-listing.md) (rule 17).

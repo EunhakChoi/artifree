@@ -18,12 +18,12 @@ failure and important rejection/retry/recovery behavior. Separate synthetic or
 mocked results from real systems. For guard mutations, name the intended failing
 assertion and restored baseline. Explain missing/inapplicable checks below. -->
 
-| Command or scenario                        | Outcome / evidence |
-| ------------------------------------------ | ------------------ |
-| `npm run check`                            |                    |
-| `npm run build`                            |                    |
-| Chromium smoke, for UI/HTML changes        |                    |
-| Firefox pending, if an acceptance names it |                    |
+| Command or scenario                 | Outcome / evidence |
+| ----------------------------------- | ------------------ |
+| `npm run check`                     |                    |
+| `npm run build`                     |                    |
+| Chromium smoke, for UI/HTML changes |                    |
+| Firefox smoke, for UI/HTML changes  |                    |
 
 ## Limitations
 

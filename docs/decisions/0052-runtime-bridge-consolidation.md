@@ -1,8 +1,10 @@
 # 0052: Consolidating the runtime bridge without changing its behavior
 
-> Browser engines: Firefox is suspended in CI until the planned feature set is
-> complete. A Firefox acceptance below is met in Chromium and reported as pending
-> re-verification ([quality](../quality.md#browser-engines)).
+> Browser engines: Firefox was suspended in CI from 2026-11-08 to 2026-11-11.
+> A Firefox acceptance of this record that was met in Chromium only in that time
+> was re-run by O08: the whole smoke suite passes in Firefox, which is back in
+> CI ([quality](../quality.md#browser-engines)). An acceptance of a part that is
+> not implemented has run in neither engine.
 
 Date: 2026-11-10. Status: **implemented** (R13a to R13e, rules 5 to 11). What
 it achieved and what it did not is under "Result".

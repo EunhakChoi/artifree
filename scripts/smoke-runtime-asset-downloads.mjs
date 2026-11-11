@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect, firefox } from '@playwright/test';
 import {
   accessibilityViolations,
   summarizeViolations,
@@ -24,8 +24,8 @@ import { api, raw } from './smoke-workspace.mjs';
  * saves the file under the offered name, and the bytes are equal. A declined
  * save fetches and saves nothing.
  *
- * Chromium only. Firefox is suspended in CI (docs/quality.md, "Browser
- * engines"), so this file has no Firefox path. Run this check alone with
+ * The suite (scripts/smoke.mjs) and this file run alone both use the engine
+ * that ARTIFREE_BROWSER names, Chromium by default. Run this check alone with
  * `npm run build`, then `node scripts/smoke-runtime-asset-downloads.mjs`.
  */
 
@@ -401,16 +401,18 @@ async function runAlone() {
     web = await serveStatic(resolve(root, 'apps/web/dist'), 0, {
       apiUrl: server.api_url,
     });
-    browser = await chromium.launch();
+    // The engine the whole suite uses (scripts/smoke.mjs), chosen the same way.
+    const engines = { chromium, firefox };
+    const name = process.env.ARTIFREE_BROWSER ?? 'chromium';
+    assert.ok(Object.hasOwn(engines, name), `Unsupported browser: ${name}`);
+    browser = await engines[name].launch();
     const result = await checkRuntimeAssetDownloads({
       browser,
       origin: web.origin,
       server,
       checkAccessibility: runAccessibility,
     });
-    console.log(
-      JSON.stringify({ status: 'passed', browser: 'chromium', ...result }),
-    );
+    console.log(JSON.stringify({ status: 'passed', browser: name, ...result }));
   } finally {
     await browser?.close();
     await web?.close();

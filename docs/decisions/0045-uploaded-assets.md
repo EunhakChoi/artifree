@@ -1,10 +1,12 @@
 # 0045: Uploaded assets scoped to a user and artifact
 
-> Browser engines: Firefox is suspended in CI until the planned feature set is
-> complete. A Firefox acceptance below is met in Chromium and reported as pending
-> re-verification ([quality](../quality.md#browser-engines)).
+> Browser engines: Firefox was suspended in CI from 2026-11-08 to 2026-11-11.
+> A Firefox acceptance of this record that was met in Chromium only in that time
+> was re-run by O08: the whole smoke suite passes in Firefox, which is back in
+> CI ([quality](../quality.md#browser-engines)). An acceptance of a part that is
+> not implemented has run in neither engine.
 
-Date: 2026-11-06. Status: implemented for R09a–R09d in Chromium, with Firefox re-verification pending and the JPEG subset named here; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control (Firefox re-verification pending); the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant (Chromium; Firefox re-verification pending); R09d2 lets a runtime frame upload and delete its artifact's assets under a separate `assets.write` grant (Chromium; Firefox re-verification pending); R09d3 lets a runtime frame ask the user to save one of its artifact's uploaded assets to their device under a separate `assets.download` grant (Chromium; Firefox re-verification pending), which completes R09d apart from that Firefox re-verification**.
+Date: 2026-11-06. Status: implemented for R09a–R09d (Firefox re-verified by O08), with the JPEG subset named here; **R09a admits PNG and the named sequential JPEG subset under complete validation (progressive and other JPEG variants are refused as `invalid_asset`; the remaining follow-ups are recorded in the R09a image validation notes); R09b1 supplies read-only client calls, R09b2 the bounded upload/delete client calls, the duplicate `copy_assets` extension is implemented and R09c supplies the management assets panel and the duplicate dialog's copy control; the MCP asset tools (R09b3) and the CLI asset commands (R09b4) are implemented; R09d1 lets a runtime frame list and read its artifact's uploaded assets under a separate `assets.read` grant; R09d2 lets a runtime frame upload and delete its artifact's assets under a separate `assets.write` grant; R09d3 lets a runtime frame ask the user to save one of its artifact's uploaded assets to their device under a separate `assets.download` grant, which completes R09d**.
 The current HTTP/storage slice accepts UTF-8 plain text/CSV, complete static
 PNG and complete JPEG of the sequential subset recorded in the R09a image
 validation notes at the end of this record. Other JPEG variants are refused as
@@ -662,8 +664,8 @@ asset_limit_exceeded` with the same generic message as uploads; it does not
 
 ## R09c: management assets panel and copy control
 
-Status: **implemented in Chromium; Firefox acceptance is pending
-re-verification** ([quality](../quality.md#browser-engines)). The management
+Status: **implemented**; its Firefox acceptance was re-run by O08
+([quality](../quality.md#browser-engines)). The management
 web has an Assets tab per artifact with usage, upload, list, attachment
 download, delete, conflict handling and unknown-outcome retry, and the
 duplicate dialog has the explicit copy control of rule 11.
@@ -874,8 +876,8 @@ and is not a new decision. The PNG notes come first, the JPEG notes after them.
 ## R09d1: runtime `assets.read` (implementation notes)
 
 Rule 12's read half is implemented here; `assets.write` is implemented in R09d2
-and `assets.download` in R09d3 (notes below). Chromium is verified; Firefox
-re-verification is pending.
+and `assets.download` in R09d3 (notes below). Verified in Chromium, and in
+Firefox by O08.
 
 - **Capability.** `assets.read` has its own declaration, support, consent and
   connection grant, independent of every `source.*` capability. A grant of one
@@ -928,8 +930,8 @@ re-verification is pending.
 ## R09d2: runtime `assets.write` (implementation notes)
 
 Rule 12's write half is implemented: a frame can upload and delete assets of its
-own artifact. `assets.download` is implemented in R09d3 (notes below). Chromium is verified; Firefox
-re-verification is pending. No numbered rule changed.
+own artifact. `assets.download` is implemented in R09d3 (notes below). Verified in Chromium,
+and in Firefox by O08. No numbered rule changed.
 
 - **Capability.** `assets.write` has its own declaration, support, consent and
   connection grant. It neither implies nor is implied by `assets.read` or any
@@ -988,8 +990,8 @@ re-verification is pending. No numbered rule changed.
 
 Rule 12's download half is implemented: a frame can ask the user to save one of
 its artifact's uploaded assets to the device, and the user decides each time.
-This completes R09d. Chromium is verified; Firefox re-verification is pending
-(R09d1, R09d2 and R09d3). No numbered rule changed.
+This completes R09d. Verified in Chromium, and in Firefox by O08 (R09d1, R09d2
+and R09d3). No numbered rule changed.
 
 - **Capability.** `assets.download` has its own declaration, support, consent and
   connection grant. It neither implies nor is implied by `assets.read`,
