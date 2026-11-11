@@ -22,23 +22,47 @@ what GitHub's hosted runners offer (2026-11-11). It installed Bubblewrap
 from the image's package source and ran one trivial trusted command with it;
 it ran no untrusted payload.
 
-| Fact                                         | `ubuntu-24.04`                                   | `ubuntu-22.04`         |
-| -------------------------------------------- | ------------------------------------------------ | ---------------------- |
-| Kernel                                       | 7.0 (azure)                                      | 6.8 (azure)            |
-| Bubblewrap                                   | not installed; the package is 0.9.0              | not installed; 0.6.1   |
-| Unprivileged user namespaces                 | refused by AppArmor (`bwrap` and `unshare` fail) | allowed (`bwrap` runs) |
-| `kernel.core_pattern`                        | a pipe to `systemd-coredump`                     | the same               |
-| cgroup v2 with `cgroup.kill`                 | yes                                              | yes                    |
-| A user scope with memory and task limits     | works (`systemd-run --user --scope`)             | not measured           |
-| A unit with `Delegate=yes` run as the runner | owned by the runner, five controllers            | not measured           |
-| Moving a process into a subtree made by root | refused                                          | not measured           |
-| `sudo`                                       | yes                                              | yes                    |
-| `prlimit`, `setpriv`, `capsh`                | installed                                        | not measured           |
+| Fact                                         | `ubuntu-24.04`                         | `ubuntu-22.04`         |
+| -------------------------------------------- | -------------------------------------- | ---------------------- |
+| Kernel                                       | 7.0 (azure)                            | 6.8 (azure)            |
+| Bubblewrap                                   | not installed; the package is 0.9.0    | not installed; 0.6.1   |
+| Unprivileged user namespaces                 | restricted by AppArmor (`bwrap` fails) | allowed (`bwrap` runs) |
+| `kernel.core_pattern`                        | a pipe to `systemd-coredump`           | the same               |
+| cgroup v2 with `cgroup.kill`                 | yes                                    | yes                    |
+| A user scope with memory and task limits     | works (`systemd-run --user --scope`)   | not measured           |
+| A unit with `Delegate=yes` run as the runner | owned by the runner, five controllers  | not measured           |
+| Moving a process into a subtree made by root | refused                                | not measured           |
+| `sudo`                                       | yes                                    | yes                    |
+| `prlimit`, `setpriv`, `capsh`                | installed                              | not measured           |
 
 The contributor host used for this repository (WSL2, kernel 6.18, Bubblewrap
 0.9.0) also routes cores to a pipe. Under 0042, rule 5, it is an unsupported
 host, and so is an unprepared hosted runner. Neither may run a payload to
 obtain evidence.
+
+A second temporary job (2026-11-12, deleted likewise) tried the parts of this
+plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
+`sleep`:
+
+- With an AppArmor profile naming a copy of the launcher at a fixed path, that
+  copy made its namespaces; the system's own copy still failed, and removing
+  the profile made the copy fail again. On the unprepared host a user
+  namespace can be made but holds no capabilities, which is why the launcher
+  fails there.
+- In a unit started with `Delegate=yes` as the runner's account, enabling
+  controllers for children failed while the unit's command sat in the group
+  and worked once it had moved itself into a child group. Memory, swap, task
+  and CPU limits written to a sibling group read back as written. Making a
+  group outside the unit was refused. A unit without delegation was owned by
+  root.
+- A waiting process that was moved into the sibling group and then replaced
+  itself with the launcher left the launcher, its init and the command all in
+  that group. `cgroup.kill` emptied it, and the group could be removed.
+- Inside the launcher a further user namespace could be made unless the
+  launcher was told to disable them. The scratch's size bound held; its inode
+  count was not bound.
+- Delegating only the memory controller did not hide the other controllers
+  from the unit.
 
 ### What follows from it
 
@@ -141,7 +165,7 @@ obtain evidence.
    requirements. The job runs in three parts:
    1. Install Bubblewrap at a pinned package version and assemble the tool
       root at its fixed path.
-   2. On the host as found (cores routed to a pipe, user namespaces refused),
+   2. On the host as found (cores routed to a pipe, user namespaces restricted),
       run the admission tests and require the refusal, with no payload
       started.
    3. Prepare the rest: allow the tool root's launcher, by its path, to create
@@ -205,10 +229,9 @@ obtain evidence.
     documentation of the launcher and the two crates, not from a working
     launch. These points are assumptions that the named slice must prove on
     the runner, and amend this record if they fail:
-    - R02aa: that an AppArmor profile naming the tool root's launcher is
-      enough for it to make user namespaces on `ubuntu-24.04` (rule 9), and
-      that a unit whose own command is the test program leaves the delegated
-      group free to enable controllers (rule 8).
+    - R02aa: that the provider's own code does what the second job did with
+      shell commands (rules 8 and 9), and how the job withholds one controller
+      for rule 10, since delegating a subset did not.
     - R02ab: how the readiness report and the release travel between the
       provider and the bootstrap without first-party `unsafe` (rule 5). The
       standard library hands a child three streams. The candidates are the
