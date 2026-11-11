@@ -1,24 +1,30 @@
 import type { ArtifreeClient } from '@artifree/client';
 import type { RuntimeView } from '@artifree/contracts';
 import type { DataChanges } from './data-changes';
-import { createDataHintSender, type DataHint } from './data-hint';
+import {
+  VIEW_ADOPTED_EVENT,
+  createDataHintSender,
+  type DataHint,
+} from './data-hint';
 import {
   DATA_WRITE_BURST,
   DATA_WRITE_PER_MINUTE,
   TokenBucket,
 } from './frame-budget';
-import { FrameRpc } from './frame-rpc';
+import { type AdoptionReason, FrameRpc } from './frame-rpc';
 import { OfferDesk } from './offer-desk';
 import { pageSaver } from './save-blob';
 
 export { DownloadPrompt } from './download-prompt';
+export type { AdoptionReason } from './frame-rpc';
 
 /**
  * What a runtime frame's calls need on the workspace side (decision 0032):
  * the rpc, its budget, the prompt desk and the saver. Only a view that
  * declares and is offered runtime capabilities needs them, so the component
  * loads this module on demand (a dynamic import), and a plain preview never
- * downloads or runs any of it.
+ * downloads or runs any of it. A connected frame can also adopt a new
+ * generation of its view (decision 0054).
  */
 
 /** The desk that serializes the download prompts of one frame. */
@@ -108,5 +114,243 @@ export function followDataHints(options: {
   return () => {
     unsubscribe();
     hint.close();
+  };
+}
+
+/**
+ * The change hint of a frame whose view can be adopted: one sender for the
+ * frame's life, so "only versions higher than the last one sent" (decision
+ * 0053, rule 17) holds across an adoption and a version waiting in its window
+ * is not lost. Whether a hint may go out is judged against the view the frame
+ * is bound to at that moment, when the change arrives and again when it is
+ * sent (decision 0054, rule 13).
+ */
+function followLiveHints(options: {
+  readonly current: () => { view: RuntimeView; deadline: number };
+  readonly artifactId: string;
+  readonly dataChanges: DataChanges;
+  readonly send: (message: Record<string, unknown>) => void;
+}): () => void {
+  const { current, artifactId, dataChanges, send } = options;
+  const allowed = (): RuntimeView | undefined => {
+    const { view, deadline } = current();
+    return view.granted.includes('data.read') && performance.now() < deadline
+      ? view
+      : undefined;
+  };
+  // The head the waiting version was offered at: a view that pins another
+  // head by the time it is sent gets no hint (decision 0053, rule 17).
+  let offeredAt: number | undefined;
+  const hint = createDataHint((message) => {
+    const view = allowed();
+    if (view !== undefined && view.head_revision === offeredAt) send(message);
+  });
+  const unsubscribe = dataChanges.subscribe(
+    artifactId,
+    (dataVersion, revision) => {
+      if (allowed()?.head_revision !== revision) return;
+      offeredAt = revision;
+      hint.offer(dataVersion);
+    },
+  );
+  return () => {
+    unsubscribe();
+    hint.close();
+  };
+}
+
+/** The longest delay a browser timer accepts, in milliseconds. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * A view the server adopted, and the end of its lease on the
+ * `performance.now()` clock.
+ */
+export interface AdoptedView {
+  readonly view: RuntimeView;
+  readonly deadline: number;
+}
+
+/**
+ * One connected frame whose view the workspace can adopt (decision 0054,
+ * rules 9, 10 and 13). Nothing in the workspace adopts a frame yet (R10c).
+ */
+export interface ConnectedFrame {
+  /** Handles one message from the frame. It never throws. */
+  readonly handle: (message: unknown) => void;
+  /** The view the frame's calls are bound to now. */
+  readonly view: () => RuntimeView;
+  /**
+   * Holds the frame's calls. Resolves once the calls on their way have ended
+   * or been abandoned (rule 9).
+   */
+  readonly pause: (reason: AdoptionReason) => Promise<void>;
+  /**
+   * Ends a pause without an adoption: held calls go out under the current
+   * view (rule 8). Throws while an adoption is on its way.
+   */
+  readonly resume: () => void;
+  /**
+   * The grant's outcome is unknown: calls are answered `unavailable` at once
+   * until the next pause, resume or adoption (rule 8).
+   */
+  readonly refuse: () => void;
+  /**
+   * Pauses for `reason` and asks the server once to adopt the view, pinned to
+   * `revision`, as `generation`. On success the frame is told, the change hint
+   * follows the new view, held calls go out under it, and the new view is
+   * returned. If the frame ended meanwhile, nothing is sent and the caller ends
+   * the returned view. A refusal or failure rejects with the client's error and
+   * leaves the frame paused: the caller asks again or calls `fail`. A call
+   * made while another adoption is on its way, or after the frame ended,
+   * rejects without asking the server.
+   */
+  readonly adopt: (options: {
+    readonly reason: AdoptionReason;
+    readonly revision: number;
+    readonly generation: number;
+    readonly signal?: AbortSignal | undefined;
+  }) => Promise<AdoptedView>;
+  /**
+   * The adoption failed: held calls are answered `expired`, the hints stop and
+   * the calls end. The caller restarts the frame (rules 9 and 11).
+   */
+  readonly fail: () => void;
+  /** Ends every call and the hints: the frame is gone. */
+  readonly close: () => void;
+}
+
+/**
+ * Connects one frame: its rpc, and its change hints, which follow the view the
+ * frame is bound to (decision 0054). The caller ends the frame with `fail` or
+ * `close`.
+ */
+export function connectFrame(options: {
+  readonly client: ArtifreeClient;
+  readonly view: RuntimeView;
+  readonly desk: OfferDesk;
+  readonly dataChanges: DataChanges;
+  /** Local monotonic deadline, conservatively measured from dispatch. */
+  readonly deadline: number;
+  readonly send: (
+    message: Record<string, unknown>,
+    transfer: Transferable[],
+  ) => void;
+}): ConnectedFrame {
+  const { client, desk, dataChanges, send } = options;
+  const rpc = createRpc({
+    client,
+    view: options.view,
+    desk,
+    deadline: options.deadline,
+    send,
+  });
+  const stopHints = followLiveHints({
+    current: () => ({ view: rpc.view, deadline: rpc.deadline }),
+    artifactId: options.view.artifact_id,
+    dataChanges,
+    send: (message) => {
+      send(message, []);
+    },
+  });
+  let ended = false;
+  const end = (): void => {
+    ended = true;
+    stopHints();
+  };
+  let adopting = false;
+  /** Settles when the adoption on its way ends, however it ends. */
+  let adoption: Promise<void> = Promise.resolve();
+  const adoptOnce = async ({
+    reason,
+    revision,
+    generation,
+    signal,
+  }: {
+    readonly reason: AdoptionReason;
+    readonly revision: number;
+    readonly generation: number;
+    readonly signal?: AbortSignal | undefined;
+  }): Promise<AdoptedView> => {
+    await rpc.pause(reason);
+    // The frame may have ended while its calls were waited for.
+    if (ended || rpc.closed) throw new Error('The frame has ended.');
+    const old = rpc.view;
+    // The server starts the lease after the last dispatch, so measuring from
+    // it never runs past the server's end.
+    let dispatchedAt = performance.now();
+    const view = await client.createRuntimeView(
+      old.artifact_id,
+      revision,
+      old.view_id,
+      generation,
+      {
+        adopt: { generation: old.generation },
+        onDispatch: () => {
+          dispatchedAt = performance.now();
+        },
+        ...(signal === undefined ? {} : { signal }),
+      },
+    );
+    const deadline = dispatchedAt + view.lease_ms;
+    // The frame was ended meanwhile: nothing is sent, and the caller ends
+    // the new generation.
+    if (ended || rpc.closed) return { view, deadline };
+    // Rounded down. The frame starts its clock when the message arrives, so
+    // its deadline can run past this one by the message's transit time.
+    const leaseMs = Math.min(
+      MAX_TIMER_MS,
+      Math.max(1, Math.floor(deadline - performance.now())),
+    );
+    // Sent before any held call is answered, so the frame's deadline moves
+    // first.
+    send({ type: 'event', event: VIEW_ADOPTED_EVENT, reason, leaseMs }, []);
+    rpc.adopt(view, deadline);
+    return { view, deadline };
+  };
+  return {
+    handle: (message) => {
+      rpc.handle(message);
+    },
+    view: () => rpc.view,
+    pause: async (reason) => {
+      // A pause asked for while an adoption is on its way begins after it,
+      // under the generation it made: the adoption would otherwise end it.
+      if (adopting) await adoption;
+      await rpc.pause(reason);
+    },
+    resume: () => {
+      if (adopting) throw new Error('An adoption is on its way.');
+      rpc.resume();
+    },
+    refuse: () => {
+      if (adopting) throw new Error('An adoption is on its way.');
+      rpc.refuse();
+    },
+    adopt: async (request) => {
+      // One adoption at a time, and none for a frame that is gone: a second
+      // request would name a generation the first is replacing.
+      if (ended) throw new Error('The frame has ended.');
+      if (adopting) throw new Error('An adoption is already on its way.');
+      adopting = true;
+      const attempt = adoptOnce(request);
+      adoption = attempt.then(
+        () => undefined,
+        () => undefined,
+      );
+      try {
+        return await attempt;
+      } finally {
+        adopting = false;
+      }
+    },
+    fail: () => {
+      end();
+      rpc.fail();
+    },
+    close: () => {
+      end();
+      rpc.close();
+    },
   };
 }

@@ -85,6 +85,7 @@ export const ASSET_CALLS = [
   defineCall({
     type: 'assets.upload',
     keys: ['type', 'id', 'retryId', 'baseAssetVersion', 'contentType', 'bytes'],
+    write: true,
     parse(message: Message) {
       const { retryId, baseAssetVersion, contentType, bytes } = message;
       if (
@@ -129,6 +130,7 @@ export const ASSET_CALLS = [
   defineCall({
     type: 'assets.delete',
     keys: ['type', 'id', 'retryId', 'baseAssetVersion', 'assetId'],
+    write: true,
     parse(message: Message) {
       const { retryId, baseAssetVersion, assetId } = message;
       if (
@@ -181,10 +183,14 @@ export const ASSET_CALLS = [
           fileName: offer.fileName,
           bytes: offer.size,
         }),
-        fetch: (offer) =>
-          client.runtimeCall(view, (source, frame) =>
-            source.fetchRuntimeAssetDownload(frame, view, offer, signal),
-          ),
+        // Read at fetch time: a prompt kept through a lease adoption downloads
+        // under the new generation (decision 0054, rule 13).
+        fetch: (offer) => {
+          const current = deps.view;
+          return client.runtimeCall(current, (source, frame) =>
+            source.fetchRuntimeAssetDownload(frame, current, offer, signal),
+          );
+        },
         saveAs: (offer) => ({
           fileName: offer.fileName,
           type: 'application/octet-stream',

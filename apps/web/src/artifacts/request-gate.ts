@@ -1,5 +1,6 @@
 import {
   FRAME_ROUTE_TAILS,
+  isAdoptionRequest,
   notifyRequestDispatched,
   parseRetryAfter,
 } from '@artifree/client';
@@ -44,16 +45,23 @@ const REVISION_ROUTE = new RegExp(
  * calls (the client's frame route tails), which the workspace sends on its
  * behalf, are `frame` requests. Everything
  * else, including closing a runtime view, writes. `url` may carry the server's
- * path prefix.
+ * path prefix. An adoption of a runtime view (decision 0054, rule 8) is a
+ * write: `adoption` says the client marked the request as one, and it changes
+ * only a bare `runtime-views` POST.
  */
-export function requestKind(method: string, url: string): RequestKind {
+export function requestKind(
+  method: string,
+  url: string,
+  adoption = false,
+): RequestKind {
   const { pathname } = new URL(url, 'http://gate.invalid');
   const verb = method.toUpperCase();
   if (verb === 'GET') return CHANGE_FEED.test(pathname) ? 'stream' : 'read';
   if (verb !== 'POST') return 'write';
   const match = REVISION_ROUTE.exec(pathname);
   if (match === null) return 'write';
-  return match[1] === undefined ? 'frame' : 'read';
+  if (match[1] === undefined) return 'frame';
+  return adoption && match[1] === 'runtime-views' ? 'write' : 'read';
 }
 
 interface Waiter {
@@ -72,6 +80,7 @@ interface Waiter {
  * - The stream is sent once no delay is pending; the caller decides when
  *   to open it.
  * - Writes are sent at once: the user started each one and sees its result.
+ *   An adoption of a runtime view is a write too (decision 0054, rule 8).
  * - A frame's calls are sent at once too, outside the one-read lane, and a
  *   `429` that one earns holds back nobody else's reads: the server counts
  *   them in a budget of their own (decision 0032), so a frame that floods
@@ -108,8 +117,17 @@ export class RequestGate {
   /** A `fetch` for the API client: every request goes through the gate. */
   readonly fetch: typeof fetch = async (input, init) => {
     const request = describe(input, init);
-    const kind = requestKind(request.method, request.url);
-    if (kind === 'write') return this.#observe(await this.#send(input, init));
+    const kind = requestKind(
+      request.method,
+      request.url,
+      isAdoptionRequest(init),
+    );
+    if (kind === 'write') {
+      // An adoption's caller times its lease from this moment; other writes
+      // carry no observer.
+      notifyRequestDispatched(init);
+      return this.#observe(await this.#send(input, init));
+    }
     if (kind === 'frame') return this.#send(input, init);
     if (kind === 'stream') {
       await this.#afterDelay(request.signal);

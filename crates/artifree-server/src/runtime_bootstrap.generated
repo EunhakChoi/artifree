@@ -317,6 +317,19 @@ var __ArtifreeBootstrap = (() => {
   function count(value) {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   }
+  var ADOPTION_REASONS = [
+    "permissions",
+    "saved",
+    "head",
+    "lease"
+  ];
+  function adoptionReason(value) {
+    return typeof value === "string" && ADOPTION_REASONS.includes(value);
+  }
+  var MAX_TIMER_MS = 2147483647;
+  function leaseLength(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= MAX_TIMER_MS;
+  }
   function sha256(value) {
     return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
   }
@@ -527,7 +540,7 @@ var __ArtifreeBootstrap = (() => {
     if (window.artifree !== void 0)
       throw new Error("The Artifree runtime was already installed.");
     const channel = new MessageChannel();
-    const deadline = performance.now() + config.lease_ms;
+    let deadline = performance.now() + config.lease_ms;
     const waiting = /* @__PURE__ */ new Map();
     let next = 0;
     let closed = false;
@@ -543,18 +556,47 @@ var __ArtifreeBootstrap = (() => {
         }
       }
     };
+    const adoptListeners = [];
+    const notifyAdopt = (reason) => {
+      const adoption = Object.freeze({ reason });
+      for (const entry of adoptListeners.slice()) {
+        if (!adoptListeners.includes(entry)) continue;
+        try {
+          entry.listener(adoption);
+        } catch (error) {
+          console.error("An Artifree view adoption listener failed.", error);
+        }
+      }
+    };
     const settle = (id) => {
       const pending = waiting.get(id);
       if (pending === void 0) return void 0;
       waiting.delete(id);
-      clearTimeout(pending.timeout);
+      clearTimeout(pending.timer);
       return pending;
+    };
+    const arm = (pending) => {
+      pending.timer = window.setTimeout(
+        pending.expire,
+        Math.max(0, Math.min(pending.until, deadline) - performance.now())
+      );
+    };
+    const adopted = (reason, leaseMs) => {
+      if (closed) return;
+      deadline = performance.now() + leaseMs;
+      for (const pending of waiting.values()) {
+        clearTimeout(pending.timer);
+        arm(pending);
+      }
+      notifyAdopt(reason);
     };
     channel.port1.onmessage = (event) => {
       if (!record(event.data)) return;
       if (event.data.type === "event" && event.data.id === void 0) {
         if (event.data.event === "data.changed" && count(event.data.dataVersion)) {
           notifyChange(event.data.dataVersion);
+        } else if (event.data.event === "view.adopted" && adoptionReason(event.data.reason) && leaseLength(event.data.leaseMs)) {
+          adopted(event.data.reason, event.data.leaseMs);
         }
         return;
       }
@@ -596,7 +638,7 @@ var __ArtifreeBootstrap = (() => {
         closed = true;
         channel.port1.close();
         for (const pending of waiting.values()) {
-          clearTimeout(pending.timeout);
+          clearTimeout(pending.timer);
           pending.reject(new RuntimeRequestFailure("expired"));
         }
         waiting.clear();
@@ -622,8 +664,14 @@ var __ArtifreeBootstrap = (() => {
         return Promise.reject(new RuntimeRequestFailure("unavailable"));
       const id = ++next;
       return new Promise((resolve, reject) => {
-        const timeout = window.setTimeout(
-          () => {
+        const pending = {
+          parse,
+          resolve,
+          reject,
+          refusal: options.refusal,
+          until: performance.now() + options.timeout,
+          timer: 0,
+          expire: () => {
             if (settle(id) === void 0) return;
             try {
               channel.port1.postMessage({ type: "cancel", id });
@@ -634,16 +682,10 @@ var __ArtifreeBootstrap = (() => {
                 performance.now() >= deadline ? "expired" : "unavailable"
               )
             );
-          },
-          Math.min(options.timeout, Math.max(0, deadline - performance.now()))
-        );
-        waiting.set(id, {
-          parse,
-          resolve,
-          reject,
-          timeout,
-          refusal: options.refusal
-        });
+          }
+        };
+        waiting.set(id, pending);
+        arm(pending);
         try {
           channel.port1.postMessage({ ...message, id }, options.transfer ?? []);
         } catch {
@@ -917,6 +959,19 @@ var __ArtifreeBootstrap = (() => {
         };
       }
     });
+    const view = Object.freeze({
+      onAdopt(listener) {
+        if (typeof listener !== "function") {
+          throw new TypeError("A view adoption listener must be a function.");
+        }
+        const entry = { listener };
+        adoptListeners.push(entry);
+        return () => {
+          const index = adoptListeners.indexOf(entry);
+          if (index !== -1) adoptListeners.splice(index, 1);
+        };
+      }
+    });
     window.artifree = Object.freeze({
       currentMetadata() {
         return call({ type: "metadata" }, (reply) => metadata(reply.metadata), {
@@ -926,7 +981,8 @@ var __ArtifreeBootstrap = (() => {
       },
       source,
       assets,
-      data
+      data,
+      view
     });
   }
   return __toCommonJS(bootstrap_exports);

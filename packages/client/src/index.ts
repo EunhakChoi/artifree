@@ -3,6 +3,7 @@ export {
   ArtifreeClient,
   JsonText,
   encodeFile,
+  isAdoptionRequest,
   newIdempotencyKey,
   newRandomId,
   notifyRequestDispatched,
