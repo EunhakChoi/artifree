@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { RotateCwIcon } from 'lucide-react';
 import type { ArtifreeClient } from '@artifree/client';
 import type { Artifact, Revision } from '@artifree/contracts';
@@ -19,6 +19,7 @@ import {
   NativeSelectOption,
 } from '@/components/ui/native-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import type { ArtifactChanges } from './artifact-changes';
 import { AssetPanel } from './asset-panel';
 import { AssetOutcome } from './asset-writes-view';
 import { refusedFloor, useWriteGate } from './conditional-write';
@@ -27,17 +28,24 @@ import { DuplicateDialog } from './duplicate-dialog';
 import { DataPanel } from './data-panel';
 import { ExportButton } from './export-button';
 import { HistoryPanel, useRestore } from './history-panel';
+import type { JobsDriver } from './jobs-driver';
 import { MetadataActions } from './metadata-actions';
 import type { PageDrafts } from './page-drafts';
 import { RecoverNotice } from './trash-list';
 import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
-import type { TrashState, Version } from './use-live-workspace';
+import type { FeedState, TrashState, Version } from './use-live-workspace';
 import { PreviewFrame } from './preview-frame';
 import { SourcePanel } from './source-editor';
 import { SourceRecovery } from './source-recovery';
 import { useAssetWrites } from './use-asset-writes';
 import { useRequest } from './use-request';
+
+// The Jobs tab is its own chunk, loaded when the tab opens, not with the page
+// (decision 0055, rule 15).
+const JobsPanel = lazy(() =>
+  import('./jobs-panel').then((module) => ({ default: module.JobsPanel })),
+);
 
 /** An artifact's metadata and history, with when they were read. */
 interface Loaded {
@@ -58,11 +66,21 @@ interface ArtifactDetailProps {
    * 0053, rule 16).
    */
   dataChanges: DataChanges;
+  /**
+   * Every change of the feed, per artifact, which the Jobs tab follows
+   * (decision 0055, rule 15).
+   */
+  artifactChanges: ArtifactChanges;
   artifactId: string;
   /** The page's feed epoch; a new one reads everything again. */
   epoch: number;
   /** How often the server's data may have been replaced so far. */
   resets: number;
+  /**
+   * Whether commits made elsewhere reach this page; the Jobs tab reads every
+   * 15 seconds while they do not.
+   */
+  feed: FeedState;
   /** The newest version the page knows this artifact has, if any. */
   known: Version | undefined;
   /** Changes of a kind the client does not know; each reads again. */
@@ -107,9 +125,11 @@ interface ArtifactDetailProps {
 export function ArtifactDetail({
   client,
   dataChanges,
+  artifactChanges,
   artifactId,
   epoch,
   resets,
+  feed,
   known,
   unknownChanges,
   onSaved,
@@ -199,6 +219,11 @@ export function ArtifactDetail({
     onAssetsPendingChange(assetsPending);
   }, [assetsPending, onAssetsPendingChange]);
   useEffect(() => () => onAssetsPendingChange(false), [onAssetsPendingChange]);
+  // The Jobs tab's driver is kept here, above the tab, so a press keeps its
+  // state and request key while the tab is away (decision 0055, rule 14).
+  const [jobsDriver, setJobsDriver] = useState<JobsDriver | undefined>(
+    undefined,
+  );
   // A revision chosen for the preview, kept across tabs; none follows the
   // latest. It belongs to the read it was chosen from.
   const [chosen, setChosen] = useChoice<number>(shown?.resets ?? resets);
@@ -330,6 +355,7 @@ export function ArtifactDetail({
               <TabsTrigger value="history">History</TabsTrigger>
               <TabsTrigger value="data">Data</TabsTrigger>
               <TabsTrigger value="assets">Assets</TabsTrigger>
+              <TabsTrigger value="jobs">Jobs</TabsTrigger>
             </TabsList>
             {/* The views that read the artifact are not mounted in the
                 trash; they mount afresh once it is recovered. */}
@@ -398,6 +424,35 @@ export function ArtifactDetail({
                   />
                 )}
               </div>
+            </TabsContent>
+            <TabsContent value="jobs" className="mt-4">
+              {inTrash ? (
+                <InTrash what="read or ask for its jobs" />
+              ) : (
+                // The panel shows the stale text itself. Its driver is held
+                // above the tab, so a press whose answer was lost keeps its
+                // request key for the retry, also after the tab is left
+                // (decision 0055, rule 14).
+                <Suspense
+                  fallback={
+                    <output className="text-sm text-muted-foreground">
+                      Loading jobs…
+                    </output>
+                  }
+                >
+                  <JobsPanel
+                    client={client}
+                    artifactId={artifactId}
+                    driver={jobsDriver}
+                    onDriver={setJobsDriver}
+                    revision={previewed}
+                    changes={artifactChanges}
+                    connected={feed === 'live'}
+                    resets={resets}
+                    stale={stale}
+                  />
+                </Suspense>
+              )}
             </TabsContent>
             <TabsContent value="source" keepMounted className="mt-4">
               <SourceRecovery

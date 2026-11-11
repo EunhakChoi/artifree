@@ -517,9 +517,11 @@ function WorkspaceBody({
                 key={selectedId}
                 client={client}
                 dataChanges={live.dataChanges}
+                artifactChanges={live.artifactChanges}
                 artifactId={selectedId}
                 epoch={epoch}
                 resets={resets}
+                feed={live.feed}
                 known={live.known[selectedId]}
                 unknownChanges={live.unknown[selectedId] ?? 0}
                 onSaved={saved}

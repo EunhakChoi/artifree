@@ -9,6 +9,7 @@ import {
 import { cursorOf } from '@artifree/client';
 import type { ArtifreeClient, ChangeFeedEvent } from '@artifree/client';
 import type { Artifact } from '@artifree/contracts';
+import { ArtifactChangeHub, type ArtifactChanges } from './artifact-changes';
 import { DataChangeHub, type DataChanges } from './data-changes';
 import { usePageVisible } from './page-visibility';
 
@@ -262,6 +263,12 @@ export interface LiveWorkspace extends Knowledge {
    * to its frame (decision 0053, rule 16). The page's own state ignores them.
    */
   readonly dataChanges: DataChanges;
+  /**
+   * Every change of the feed, per artifact, for a view that follows one
+   * artifact, such as the Jobs tab (decision 0055, rule 15). The page's own
+   * state is not changed by it.
+   */
+  readonly artifactChanges: ArtifactChanges;
 }
 
 /**
@@ -278,11 +285,13 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
   // once it has applied every event dispatched so far.
   const epochNow = useRef(START.epoch);
   const [dataChanges] = useState(() => new DataChangeHub());
+  const [artifactChanges] = useState(() => new ArtifactChangeHub());
   const feed = useChangeFeed(client, visible, {
     onEvent: (event) => {
       epochNow.current = epochAfter(epochNow.current, event);
       learn({ type: 'event', event });
       dataChanges.follow(event);
+      artifactChanges.follow(event);
     },
     onTrouble: () => learn({ type: 'read anyway' }),
   });
@@ -317,6 +326,7 @@ export function useLiveWorkspace(client: ArtifreeClient): LiveWorkspace {
     learnInTrash,
     isCurrent,
     dataChanges,
+    artifactChanges,
   };
 }
 

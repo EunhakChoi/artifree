@@ -13,6 +13,7 @@ import { buildServer, startServer } from './lib/server-process.mjs';
 import { forwardToApi } from './lib/static-web.mjs';
 import { parallelShards } from './smoke-parallel.mjs';
 import { checkAssets } from './smoke-assets.mjs';
+import { checkJobs } from './smoke-jobs.mjs';
 import { checkDrafts } from './smoke-drafts.mjs';
 import {
   checkDraftsWithoutLocks,
@@ -287,6 +288,14 @@ try {
       server: api,
       checkAccessibility,
     });
+    const jobs = await checkJobs({
+      browser,
+      origin,
+      server: api,
+      serverBinary,
+      dataDir,
+      checkAccessibility,
+    });
     const trash = await checkTrash({
       browser,
       origin,
@@ -556,6 +565,7 @@ try {
       duplicate,
       export: exported,
       assets,
+      jobs,
       trash,
       editor,
       drafts,

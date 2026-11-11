@@ -1,7 +1,7 @@
 # 0055: Operating background work
 
-Date: 2026-11-11. Status: **accepted in part**. R01ba (rules 1 to 6) and
-R01bb (rules 7 to 12) are implemented; the other slices are proposed (see the slice table).
+Date: 2026-11-11. Status: **accepted in part**. R01ba (rules 1 to 6),
+R01bb (rules 7 to 12) and R01bc (rules 13 to 16) are implemented; the schedule (rules 17 to 20) is proposed (see the slice table).
 Roadmap: R01b. Builds on [0006](0006-change-feed.md),
 [0007](0007-live-web-workspace.md),
 [0030](0030-persistent-jobs-and-worker.md),
@@ -317,7 +317,7 @@ next_run_at_ms, run, last_started_at_ms, last_ended_at_ms, last_outcome)`.
 | ----- | --------------------------------------------------------------- | ---------------- | -------- | ----------- |
 | R01ba | The supervised worker and `GET /v1/background`                  | 1 to 6, 21, 24   | 0.26.0   | implemented |
 | R01bb | `job_changed` in the store, the server, the contract and client | 7 to 12, 22, 24  | 0.27.0   | implemented |
-| R01bc | The web Jobs tab                                                | 13 to 16, 23, 24 | none     | proposed    |
+| R01bc | The web Jobs tab                                                | 13 to 16, 23, 24 | none     | implemented |
 | O05b  | The first scheduled task, with the table and the timer          | 17 to 20, 25     | its own  | proposed    |
 
 ## Alternatives considered

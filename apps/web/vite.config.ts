@@ -32,6 +32,19 @@ function checkDefaultServer(): Plugin {
 export default defineConfig({
   plugins: [checkDefaultServer(), react(), tailwindcss()],
   base: '/',
+  build: {
+    rolldownOptions: {
+      output: {
+        // Every module the page imports at start stays in the entry chunk.
+        // Without this group, a module that the entry and an on-demand chunk
+        // both import can be moved to a chunk of its own that `index.html`
+        // preloads: one more request on every load (decisions 0033 and 0052
+        // met it; the Jobs tab of decision 0055 met it for the client's
+        // errors and for React). On-demand chunks import from the entry.
+        codeSplitting: { groups: [{ name: 'index', tags: ['$initial'] }] },
+      },
+    },
+  },
   server: { proxy },
   preview: { proxy },
   resolve: {

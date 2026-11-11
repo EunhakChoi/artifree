@@ -337,8 +337,8 @@ migration.
 - **Background work is only partly owned by the server process.** A
   persistent server starts and restarts one worker child and reports it
   (`GET /v1/background`, decision 0055, R01ba), and job changes are in the
-  change feed (`job_changed`, R01bb); the web has no job view yet (R01bc), and
-  no scheduler exists. Builds, the execution supervisor
+  change feed (`job_changed`, R01bb), and the web shows an artifact's jobs in
+  a Jobs tab (R01bc); no scheduler exists. Builds, the execution supervisor
   and automatic purge need the same scheduler, clock and supervision (R01b).
 - **Application logic in the server crate.** The runtime sessions, policy,
   source and asset modules, preview tickets and handoffs are state machines
