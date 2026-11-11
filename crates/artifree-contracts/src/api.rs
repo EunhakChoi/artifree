@@ -1143,6 +1143,38 @@ pub struct HandoffActionRequest {
     pub workspace_session_id: String,
 }
 
+/// Reads a field that may be absent but, when present, must hold a value:
+/// `null` is an error instead of `None`.
+fn not_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// The live generation whose frame an adoption keeps (decision 0054, rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptRuntimeView {
+    /// The generation of the same view that the new generation replaces. Its
+    /// document, heap and message port stay; only its binding is replaced.
+    pub generation: u64,
+}
+
+/// How a runtime frame treats a change of its view (decision 0054, rule 1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeLifecycle {
+    /// Every change of the view reloads the frame: an absent manifest field,
+    /// an entry without a manifest, or `"restart"`.
+    #[default]
+    Restart,
+    /// The manifest of the pinned revision says `"adopt"`: the view may be
+    /// adopted by a later generation instead of reloaded.
+    Adopt,
+}
+
 /// Requests a preview view whose frame can read its artifact metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1153,6 +1185,17 @@ pub struct CreateRuntimeViewRequest {
     pub view_id: String,
     /// A positive, increasing generation within this view.
     pub generation: u64,
+    /// Present to adopt the live frame of an older generation of this view
+    /// instead of loading a new document (decision 0054, rule 3). Absent for
+    /// a new view; clients that omit it send no field. `null` is refused: read
+    /// as absent it would replace the live frame the request meant to keep.
+    #[serde(
+        default,
+        deserialize_with = "not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "AdoptRuntimeView")]
+    pub adopt: Option<AdoptRuntimeView>,
 }
 
 /// A short-lived runtime view bound to one actor, artifact, and revision.
@@ -1175,6 +1218,9 @@ pub struct RuntimeView {
     /// Supported SDK pin, or null for an ordinary preview. Always present.
     #[schemars(required, extend("type" = ["string", "null"]))]
     pub sdk: Option<String>,
+    /// `adopt` when the pinned revision's manifest opts in to adoption,
+    /// otherwise `restart` (decision 0054, rule 1). The server always sends it.
+    pub lifecycle: RuntimeLifecycle,
     /// Capabilities declared by this pinned revision.
     pub declared: Vec<String>,
     /// Capabilities supported by this server for the entry's SDK pin.

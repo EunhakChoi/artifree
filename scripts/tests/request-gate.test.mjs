@@ -504,6 +504,7 @@ test('A runtime view reports actual dispatch after a hidden-page wait', async ()
         revision: 1,
         head_revision: 1,
         sdk: 'artifree.app.v1',
+        lifecycle: 'restart',
         declared: ['metadata.read'],
         supported: ['metadata.read'],
         granted: [],

@@ -165,6 +165,10 @@ export type CopiedPart = 'files' | 'data' | 'assets';
  */
 export type HandoffState = 'staged' | 'queued' | 'offered' | 'blocked' | 'acknowledged' | 'cancelled' | 'expired';
 /**
+ * How a runtime frame treats a change of its view (decision 0054, rule 1).
+ */
+export type RuntimeLifecycle = 'restart' | 'adopt';
+/**
  * What a runtime download offers the user.
  */
 export type RuntimeDownloadKind = 'file' | 'archive';
@@ -866,6 +870,7 @@ export interface HandoffSelection {
  * Requests a preview view whose frame can read its artifact metadata.
  */
 export interface CreateRuntimeViewRequest {
+  adopt?: AdoptRuntimeView;
   /**
    * A positive, increasing generation within this view.
    */
@@ -878,6 +883,16 @@ export interface CreateRuntimeViewRequest {
    * A random 32-digit lowercase hexadecimal identifier for this view.
    */
   view_id: string;
+}
+/**
+ * The live generation whose frame an adoption keeps (decision 0054, rule 3).
+ */
+export interface AdoptRuntimeView {
+  /**
+   * The generation of the same view that the new generation replaces. Its
+   * document, heap and message port stay; only its binding is replaced.
+   */
+  generation: number;
 }
 /**
  * A short-lived runtime view bound to one actor, artifact, and revision.
@@ -924,6 +939,7 @@ export interface RuntimeView {
    * elapsed local time, not compare the server's Unix timestamp to theirs.
    */
   lease_ms: number;
+  lifecycle: RuntimeLifecycle;
   /**
    * The pinned source revision shown in the frame.
    */

@@ -4,7 +4,10 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-11. Status: **proposed**; no code.
+Date: 2026-11-11. Status: **partly implemented**. R10a (the manifest field,
+the contract and adoption on the server) is implemented; R10b and R10c are
+proposed, so no workspace adopts a frame yet and every frame is still
+reloaded.
 Roadmap: R10. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md), [0032](0032-runtime-source-read-and-download.md),
 [0033](0033-runtime-source-write.md), [0045](0045-uploaded-assets.md),
@@ -248,11 +251,22 @@ product is claimed for them.
 
 ### Slices
 
-| Slice | Scope                                                                 | Rules                 |
-| ----- | --------------------------------------------------------------------- | --------------------- |
-| R10a  | The manifest field, the contract, and adoption on the server          | 1, 3 to 7, 15, 16, 18 |
-| R10b  | The client's request, the host's pause and replacement, the SDK event | 9, 10, 13, 14, 17, 18 |
-| R10c  | The workspace's adoption for each cause, the notices, the smoke       | 2, 8, 11, 12, 17, 18  |
+| Slice | Scope                                                                 | Rules                 | Status      |
+| ----- | --------------------------------------------------------------------- | --------------------- | ----------- |
+| R10a  | The manifest field, the contract, and adoption on the server          | 1, 3 to 7, 15, 16, 18 | implemented |
+| R10b  | The client's request, the host's pause and replacement, the SDK event | 9, 10, 13, 14, 17, 18 | proposed    |
+| R10c  | The workspace's adoption for each cause, the notices, the smoke       | 2, 8, 11, 12, 17, 18  | proposed    |
+
+Notes from R10a, which change no rule:
+
+- The request's own checks come before rule 4, as for a new view: an
+  artifact or a revision that does not exist answers `404`, and a malformed
+  body `400`. Rule 4's `409` is the answer for a request that names existing
+  things and may not adopt.
+- The server records a written revision only for a write of the view's
+  current generation whose base is the revision the view pins.
+- The contract is 0.25.0: `adopt` is optional in the request, and the view
+  always carries `lifecycle`.
 
 ## Alternatives considered
 

@@ -219,6 +219,7 @@ async fn granted_view(
             session_id: session.clone(),
             view_id: "a".repeat(32),
             generation: 1,
+            adopt: None,
         },
     )
     .await

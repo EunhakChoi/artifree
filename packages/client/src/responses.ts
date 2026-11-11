@@ -561,6 +561,7 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     revision,
     head_revision,
     sdk,
+    lifecycle,
     declared,
     supported,
     granted,
@@ -583,6 +584,7 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     head_revision < revision ||
     !(sdk === null || typeof sdk === 'string') ||
     (enabled ? sdk !== 'artifree.app.v1' : sdk !== null) ||
+    (lifecycle !== 'restart' && lifecycle !== 'adopt') ||
     !Array.isArray(declared) ||
     !declared.every((name: unknown) => typeof name === 'string') ||
     !Array.isArray(supported) ||
@@ -621,6 +623,7 @@ export function parseRuntimeView(value: unknown): RuntimeView | undefined {
     revision,
     head_revision,
     sdk,
+    lifecycle,
     declared,
     supported,
     granted,

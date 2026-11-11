@@ -2,10 +2,10 @@
 //!
 //! Artifact files are served from a separate origin than the API and web UI,
 //! under an unguessable short-lived ticket bound to an actor, artifact, and
-//! revision. Every request rechecks the actor's current access through the
-//! application core. Responses carry a CSP `sandbox` without
-//! `allow-same-origin`, so content runs in an opaque origin even when opened
-//! directly, and may load only files of its own package.
+//! the revision whose files it serves. Every request rechecks the actor's
+//! current access through the application core. Responses carry a CSP
+//! `sandbox` without `allow-same-origin`, so content runs in an opaque origin
+//! even when opened directly, and may load only files of its own package.
 //!
 //! This isolates content from the workspace, not from the network: loads and
 //! connections are limited to the content origin, but a script can still
@@ -32,7 +32,7 @@ use serde::Serialize;
 
 use crate::auth::hex;
 use crate::http::AppState;
-use crate::runtime_policy::Capability;
+use crate::runtime_policy::{Capability, Lifecycle};
 use crate::runtime_sessions::{GrantDenied, GrantScope, RuntimeSession};
 
 /// Upper bound on live tickets, view generations, and pending creations of
@@ -66,6 +66,20 @@ pub(crate) struct RuntimeTicketRequest {
     pub(crate) head_revision: SourceRevision,
     pub(crate) view_id: String,
     pub(crate) generation: u64,
+    /// How the page declares its lifecycle, read from the revision it pins
+    /// (decision 0054, rule 1).
+    pub(crate) lifecycle: Lifecycle,
+    /// The live generation this request advances in place, or `None` for a
+    /// new view (decision 0054, rule 3).
+    pub(crate) adopt: Option<Adoption>,
+}
+
+/// The live generation an adoption replaces (decision 0054, rule 4).
+#[derive(Debug, Clone)]
+pub(crate) struct Adoption {
+    pub(crate) generation: u64,
+    /// The connection of the request; it must be the old view's connection.
+    pub(crate) session: Arc<RuntimeSession>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +87,8 @@ struct Ticket {
     actor: ActorId,
     token_id: Option<TokenId>,
     artifact: ArtifactId,
+    /// The document revision: the one whose files this ticket serves. A
+    /// runtime view keeps it for its whole life (decision 0054, rule 5).
     revision: SourceRevision,
     expires: Instant,
     runtime: Option<RuntimeTicket>,
@@ -84,6 +100,14 @@ struct RuntimeTicket {
     generation: u64,
     initialization: String,
     head_revision: SourceRevision,
+    /// The revision the frame's calls are bound to and judged against. It
+    /// equals the document revision until an adoption advances it (decision
+    /// 0054, rule 5).
+    pinned: SourceRevision,
+    /// The revision a committed save of this view created from `pinned`. It
+    /// outlives an adoption that does not use it (decision 0054, rule 4).
+    written: Option<SourceRevision>,
+    lifecycle: Lifecycle,
     authority: Option<RuntimeAuthority>,
     revoked: bool,
     document_served: bool,
@@ -122,6 +146,9 @@ pub(crate) enum RuntimeDenied {
 pub(crate) enum RuntimeIssueError {
     /// An equal or newer generation already owns the view.
     Stale,
+    /// An adoption's conditions do not hold (decision 0054, rule 4). Nothing
+    /// changed.
+    NotAdoptable,
     /// The ticket registry or randomness is unavailable.
     Unavailable,
 }
@@ -155,6 +182,22 @@ struct TicketRegistry {
     pending: HashMap<(ActorId, String), usize>,
 }
 
+/// What an adoption writes into the view it advances.
+struct Advance<'a> {
+    actor: &'a ActorId,
+    /// The token of the adopting request: the lease it renews ends with it.
+    token_id: &'a Option<TokenId>,
+    artifact: &'a ArtifactId,
+    view_id: &'a str,
+    revision: SourceRevision,
+    head_revision: SourceRevision,
+    generation: u64,
+    lifecycle: Lifecycle,
+    initialization: &'a str,
+    expires: Instant,
+    now: Instant,
+}
+
 impl TicketRegistry {
     fn prune(&mut self, now: Instant) {
         self.live.retain(|_, ticket| ticket.expires > now);
@@ -184,6 +227,96 @@ impl TicketRegistry {
             .keys()
             .filter(|(owner, _)| owner == actor)
             .count()
+    }
+
+    /// Checks that a new generation of `actor`'s view may be issued, and
+    /// returns the expiry of the fence it raises. A refusal changes nothing.
+    fn admit(
+        &self,
+        actor: &ActorId,
+        view_id: &str,
+        generation: u64,
+        expires: Instant,
+    ) -> Result<Instant, RuntimeIssueError> {
+        let key = (actor.clone(), view_id.to_owned());
+        if self
+            .generations
+            .get(&key)
+            .is_some_and(|previous| previous.number >= generation)
+        {
+            return Err(RuntimeIssueError::Stale);
+        }
+        if self.generations_of(actor) >= MAX_LIVE_TICKETS && !self.generations.contains_key(&key) {
+            return Err(RuntimeIssueError::Unavailable);
+        }
+        // A close can acquire the lock after this request computed its
+        // expiry. Never shorten the earlier fence when a newer view wins.
+        let fence_expires = self
+            .generations
+            .get(&key)
+            .map_or(expires, |previous| previous.expires.max(expires));
+        if self.live.values().any(|ticket| {
+            same_view(ticket, actor, view_id)
+                && ticket
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|view| view.generation >= generation)
+        }) {
+            return Err(RuntimeIssueError::Stale);
+        }
+        Ok(fence_expires)
+    }
+
+    /// Advances the named live generation in place and returns its ticket
+    /// secret. Refuses without changing anything unless every condition of
+    /// decision 0054, rule 4 holds, and then keeps the same ticket (rule 5).
+    fn adopt(
+        &mut self,
+        adoption: &Adoption,
+        advance: &Advance<'_>,
+    ) -> Result<String, RuntimeIssueError> {
+        let adoptable = |ticket: &Ticket| {
+            ticket.expires > advance.now
+                && &ticket.actor == advance.actor
+                && &ticket.artifact == advance.artifact
+                && ticket.runtime.as_ref().is_some_and(|view| {
+                    view.view_id == advance.view_id
+                        && view.generation == adoption.generation
+                        && adoption.generation < advance.generation
+                        && !view.revoked
+                        && view.document_served
+                        && view.bootstrap_served
+                        && view
+                            .authority
+                            .as_ref()
+                            .is_some_and(|held| Arc::ptr_eq(&held.session, &adoption.session))
+                        && view.lifecycle == Lifecycle::Adopt
+                        && advance.lifecycle == Lifecycle::Adopt
+                        && (view.pinned == advance.revision
+                            || view.written == Some(advance.revision))
+                })
+        };
+        let (secret, ticket) = self
+            .live
+            .iter_mut()
+            .find(|(_, ticket)| adoptable(ticket))
+            .ok_or(RuntimeIssueError::NotAdoptable)?;
+        let secret = secret.clone();
+        let view = ticket
+            .runtime
+            .as_mut()
+            .ok_or(RuntimeIssueError::NotAdoptable)?;
+        ticket.token_id.clone_from(advance.token_id);
+        ticket.expires = advance.expires;
+        view.generation = advance.generation;
+        advance.initialization.clone_into(&mut view.initialization);
+        view.head_revision = advance.head_revision;
+        view.authority = None;
+        if view.pinned != advance.revision {
+            view.pinned = advance.revision;
+            view.written = None;
+        }
+        Ok(secret)
     }
 }
 
@@ -308,7 +441,9 @@ impl PreviewTickets {
         Some(RuntimeCreation { tickets: self, key })
     }
 
-    /// Replaces an older generation of the same actor's view atomically.
+    /// Replaces an older generation of the same actor's view atomically, or
+    /// advances the live generation named by `request.adopt` in place
+    /// (decision 0054, rules 4 and 5).
     pub(crate) fn issue_runtime(
         &self,
         request: RuntimeTicketRequest,
@@ -321,8 +456,15 @@ impl PreviewTickets {
             head_revision,
             view_id,
             generation,
+            lifecycle,
+            adopt,
         } = request;
-        let secret = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
+        // An adoption keeps the ticket's secret, so it draws none.
+        let secret = if adopt.is_some() {
+            None
+        } else {
+            Some(random_secret().ok_or(RuntimeIssueError::Unavailable)?)
+        };
         let initialization = random_secret().ok_or(RuntimeIssueError::Unavailable)?;
         let (lease_ms, now, expires, expires_at_ms) = runtime_expiries(self.ttl)?;
         let mut registry = self
@@ -330,45 +472,65 @@ impl PreviewTickets {
             .lock()
             .map_err(|_| RuntimeIssueError::Unavailable)?;
         registry.prune(now);
+        let fence_expires = registry.admit(&actor, &view_id, generation, expires)?;
         let key = (actor.clone(), view_id.clone());
-        if registry
-            .generations
-            .get(&key)
-            .is_some_and(|previous| previous.number >= generation)
-        {
-            return Err(RuntimeIssueError::Stale);
-        }
-        if registry.generations_of(&actor) >= MAX_LIVE_TICKETS
-            && !registry.generations.contains_key(&key)
-        {
-            return Err(RuntimeIssueError::Unavailable);
-        }
-        // A close can acquire the lock after this request computed its
-        // expiry. Never shorten the earlier fence when a newer view wins.
-        let fence_expires = registry
-            .generations
-            .get(&key)
-            .map_or(expires, |previous| previous.expires.max(expires));
-        let same_view = |ticket: &Ticket| {
-            ticket.actor == actor
-                && ticket
-                    .runtime
-                    .as_ref()
-                    .is_some_and(|view| view.view_id == view_id)
+        let kept = if let Some(adoption) = adopt {
+            registry.adopt(
+                &adoption,
+                &Advance {
+                    actor: &actor,
+                    token_id: &token_id,
+                    artifact: &artifact,
+                    view_id: &view_id,
+                    revision,
+                    head_revision,
+                    generation,
+                    lifecycle,
+                    initialization: &initialization,
+                    expires,
+                    now,
+                },
+            )?
+        } else {
+            let secret = secret.ok_or(RuntimeIssueError::Unavailable)?;
+            if registry.live_of(&actor) >= MAX_LIVE_TICKETS
+                && !registry
+                    .live
+                    .values()
+                    .any(|ticket| same_view(ticket, &actor, &view_id))
+            {
+                return Err(RuntimeIssueError::Unavailable);
+            }
+            registry
+                .live
+                .retain(|_, ticket| !same_view(ticket, &actor, &view_id));
+            registry.live.insert(
+                secret.clone(),
+                Ticket {
+                    actor,
+                    token_id,
+                    artifact,
+                    revision,
+                    expires,
+                    runtime: Some(RuntimeTicket {
+                        view_id,
+                        generation,
+                        initialization: initialization.clone(),
+                        head_revision,
+                        pinned: revision,
+                        written: None,
+                        lifecycle,
+                        authority: None,
+                        revoked: false,
+                        document_served: false,
+                        bootstrap_served: false,
+                    }),
+                },
+            );
+            secret
         };
-        if registry.live.values().any(|ticket| {
-            same_view(ticket)
-                && ticket
-                    .runtime
-                    .as_ref()
-                    .is_some_and(|view| view.generation >= generation)
-        }) {
-            return Err(RuntimeIssueError::Stale);
-        }
-        if registry.live_of(&actor) >= MAX_LIVE_TICKETS && !registry.live.values().any(same_view) {
-            return Err(RuntimeIssueError::Unavailable);
-        }
-        registry.live.retain(|_, ticket| !same_view(ticket));
+        // The fence is raised only once the view is issued or adopted, so a
+        // refused request leaves it as it was.
         registry.generations.insert(
             key,
             Generation {
@@ -376,29 +538,9 @@ impl PreviewTickets {
                 expires: fence_expires,
             },
         );
-        registry.live.insert(
-            secret.clone(),
-            Ticket {
-                actor,
-                token_id,
-                artifact,
-                revision,
-                expires,
-                runtime: Some(RuntimeTicket {
-                    view_id,
-                    generation,
-                    initialization: initialization.clone(),
-                    head_revision,
-                    authority: None,
-                    revoked: false,
-                    document_served: false,
-                    bootstrap_served: false,
-                }),
-            },
-        );
         Ok(IssuedRuntimeTicket {
             preview: IssuedTicket {
-                secret,
+                secret: kept,
                 expires_at_ms,
             },
             initialization,
@@ -424,6 +566,8 @@ impl PreviewTickets {
             head_revision,
             view_id,
             generation,
+            lifecycle: Lifecycle::Restart,
+            adopt: None,
         })
     }
 
@@ -460,7 +604,7 @@ impl PreviewTickets {
             (ticket.expires > Instant::now()
                 && &ticket.actor == actor
                 && &ticket.artifact == artifact
-                && ticket.revision == revision
+                && view.pinned == revision
                 && view.view_id == view_id
                 && view.generation == generation
                 && !view.revoked
@@ -499,6 +643,32 @@ impl PreviewTickets {
             Ok(()) => Ok(head),
             Err(GrantDenied::Closed) => Err(RuntimeDenied::Binding),
             Err(GrantDenied::NotGranted) => Err(RuntimeDenied::Capability),
+        }
+    }
+
+    /// Records the revision a committed `source.write` of this view created
+    /// from the revision it pins (decision 0054, rule 4). The view must still
+    /// match `key` and pin its base; otherwise nothing is recorded, so a frame
+    /// is never moved onto a revision it did not write.
+    pub(crate) fn record_written(&self, key: &ViewKey<'_>, written: SourceRevision) {
+        let Ok(mut registry) = self.registry.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        let live = registry.live.values_mut().find(|ticket| {
+            ticket.expires > now
+                && &ticket.actor == key.actor
+                && &ticket.artifact == key.artifact
+                && ticket.runtime.as_ref().is_some_and(|view| {
+                    view.view_id == key.view_id
+                        && view.generation == key.generation
+                        && !view.revoked
+                        && view.pinned == key.revision
+                        && secret_matches(&view.initialization, key.initialization)
+                })
+        });
+        if let Some(view) = live.and_then(|ticket| ticket.runtime.as_mut()) {
+            view.written = Some(written);
         }
     }
 
@@ -600,6 +770,16 @@ impl PreviewTickets {
             })
             .cloned()
     }
+}
+
+/// Whether `ticket` is a runtime view of `actor` named `view_id`, in any
+/// generation.
+fn same_view(ticket: &Ticket, actor: &ActorId, view_id: &str) -> bool {
+    &ticket.actor == actor
+        && ticket
+            .runtime
+            .as_ref()
+            .is_some_and(|view| view.view_id == view_id)
 }
 
 fn random_secret() -> Option<String> {
@@ -1428,3 +1608,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod adoption_tests;
