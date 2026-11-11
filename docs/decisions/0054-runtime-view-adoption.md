@@ -4,17 +4,15 @@
 > complete. A Firefox acceptance below is met in Chromium and reported as pending
 > re-verification ([quality](../quality.md#browser-engines)).
 
-Date: 2026-11-11. Status: **partly implemented**. R10a (the manifest field,
-the contract and adoption on the server) and R10b (the client's request, the
-host's pause and replacement of its view, the SDK event) are implemented;
-R10c is proposed, so no workspace adopts a frame yet and every frame is still
-reloaded.
+Date: 2026-11-11. Status: **implemented** (R10a, R10b and R10c). The
+workspace adopts the frame of a page that opted in; every other page is
+reloaded as before.
 Roadmap: R10. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md), [0032](0032-runtime-source-read-and-download.md),
 [0033](0033-runtime-source-write.md), [0045](0045-uploaded-assets.md),
 [0051](0051-roadmap-and-architecture-review.md),
 [0052](0052-runtime-bridge-consolidation.md) and
-[0053](0053-runtime-app-data.md). When its slices merge it amends the
+[0053](0053-runtime-app-data.md). It amends the
 "not implemented" notes of 0032 and 0033 that name R10, and rule 8 of 0033
 where that rule says the workspace follows a save "in a new view" (rule 12
 below), and the request queue of [0007](0007-live-web-workspace.md), which
@@ -256,7 +254,7 @@ product is claimed for them.
 | ----- | --------------------------------------------------------------------- | --------------------- | ----------- |
 | R10a  | The manifest field, the contract, and adoption on the server          | 1, 3 to 7, 15, 16, 18 | implemented |
 | R10b  | The client's request, the host's pause and replacement, the SDK event | 9, 10, 13, 14, 17, 18 | implemented |
-| R10c  | The workspace's adoption for each cause, the notices, the smoke       | 2, 8, 11, 12, 17, 18  | proposed    |
+| R10c  | The workspace's adoption for each cause, the notices, the smoke       | 2, 8, 11, 12, 17, 18  | implemented |
 
 Notes from R10a, which change no rule:
 
@@ -292,6 +290,53 @@ Notes from R10b, which change no rule:
 - The SDK's own timeout of a call keeps running while the call is held. A
   call held longer than that (10 seconds for a read) is reported
   `unavailable` by the SDK and is not sent when the pause ends.
+
+Notes from R10c, which change no rule:
+
+- One driver per connected frame decides its adoptions, one at a time. When
+  several causes are pending, one adoption serves them all, because every
+  generation carries the current head, grant and lease; its reason is the
+  first of `saved`, `permissions`, `head`, `lease` that is pending.
+- The 10 second bound starts at the first request, after the pause has
+  waited for the calls on their way. A `503` is repeated after 500 ms with a
+  new, higher generation while time remains; every other failure ends the
+  adoption at once.
+- For the lease the driver looks every 250 ms, from a fifth of the lease
+  remaining, for a moment with no call on its way. A lease that ended first
+  ends the frame, and the new view is made when the page is next shown.
+- A head that moves is adopted for a preview of a chosen revision as well as
+  for one that follows the latest. On the artifact page "Load revision N"
+  then makes the preview follow the latest revision. The saved preview of
+  the source panel shows a fixed revision: its notice reports the newer
+  revision without the offer, and the panel's own "Load latest" loads it.
+- Rule 12's notice says that refreshing loads the saved revision only for a
+  preview that follows the latest revision. Refreshing a preview of a chosen
+  revision loads that revision again, so there the notice says to show the
+  latest revision instead.
+- A save that commits while the frame's calls are answered `unavailable`
+  (rule 8, an unresolved permission change) begins no pause; its adoption
+  runs when the grant is settled.
+- A page that navigated itself ends as before: its view is closed. If the
+  frame had been adopted, the preview no longer matches the view it was made
+  with, so a new view is made at once; otherwise on the next refresh or
+  change.
+- A permission change is sent for the generation whose grant the user was
+  shown. A choice made before an adoption replaced that generation is not
+  sent; the user is told to review the permissions and choose again.
+- The "A newer revision exists" notice is for a head that moved after the
+  document was loaded, and its offer appears once the workspace itself knows
+  that revision.
+- A lease that ends while a permission change is unresolved ends the frame,
+  as any lease that ended first does.
+- An adoption request that ended without the server's answer has its
+  generation closed, since the server may have made it.
+- The notices ship in the on-demand chunk of the permission controls and
+  are shown by the preview, not by the frame component: a second on-demand
+  chunk importing the button would have moved it into a chunk the page
+  loads at start. The entry bundle grows by about 0.8 KB, the preview's own
+  handling of a held frame; the driver is in the host's on-demand chunk.
+- The editing warning no longer says that the preview is out of date after
+  a save, which is untrue for a page that opted in.
 
 ## Alternatives considered
 

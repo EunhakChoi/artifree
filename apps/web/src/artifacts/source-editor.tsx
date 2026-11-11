@@ -603,6 +603,8 @@ export function SourcePanel({
               revision={made}
               epoch={baseEpoch}
               stale={replaced}
+              following={false}
+              latest={Math.max(made, latestKnown)}
               title={`Saved preview of ${artifact.title}, revision ${made}`}
               className="h-96 w-full rounded-lg border"
             />

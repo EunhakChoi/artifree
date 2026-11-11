@@ -4,6 +4,7 @@ import { lazy, Suspense, useRef, useState, useSyncExternalStore } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import type { DataChanges } from './data-changes';
+import type { LiveFrame } from './runtime-frame';
 import { describeFailure, useRequest } from './use-request';
 
 // The runtime permission controls, and the frame component with the
@@ -17,6 +18,11 @@ const PREPARING = (
 const RuntimePermissions = lazy(() =>
   import('./runtime-permissions').then((module) => ({
     default: module.RuntimePermissions,
+  })),
+);
+const AdoptionNotice = lazy(() =>
+  import('./runtime-permissions').then((module) => ({
+    default: module.AdoptionNotice,
   })),
 );
 const RuntimeFrame = lazy(() =>
@@ -38,8 +44,28 @@ interface PreviewFrameProps {
    * nothing is prepared for it then, and nothing prepared meanwhile shown.
    */
   stale: boolean;
+  /** Whether no revision is chosen: the preview follows the latest one. */
+  following: boolean;
+  /** The latest revision the workspace knows, whichever one is shown. */
+  latest: number;
+  /**
+   * Makes the preview follow the latest revision. A caller with no such
+   * choice leaves it out, and a newer revision that a chosen one cannot load
+   * is then only reported, not offered.
+   */
+  onShowLatest?: (() => void) | undefined;
   title: string;
   className?: string;
+}
+
+/** A frame that opted in and connected, and what its view was created with. */
+interface HeldFrame {
+  readonly frame: LiveFrame;
+  readonly revision: number;
+  readonly grant: number;
+  readonly epoch: number;
+  readonly connection: number;
+  readonly attempt: number;
 }
 
 /** A pinned revision, prepared as a preview and shown in its sandbox. */
@@ -50,12 +76,16 @@ export function PreviewFrame({
   revision,
   epoch,
   stale,
+  following,
+  latest,
+  onShowLatest,
   title,
   className,
 }: PreviewFrameProps) {
   const [viewId] = useState(newRandomId);
   const [grantError, setGrantError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
+  const [live, setLive] = useState<HeldFrame>();
   useSyncExternalStore(
     client.subscribeRuntimeGrants,
     client.runtimeGrantSnapshot,
@@ -63,11 +93,22 @@ export function PreviewFrame({
   );
   const grantRevision = client.runtimeGrantRevision(artifactId, revision);
   const connectionRevision = client.runtimeConnectionRevision();
+  // A frame that opted in and connected its port keeps its view across a
+  // change of the revision shown and of its grant: the workspace adopts it
+  // instead (decision 0054, rule 8). A new epoch, connection or attempt still
+  // makes a new view (rule 11).
+  const held =
+    live !== undefined &&
+    live.epoch === epoch &&
+    live.connection === connectionRevision &&
+    live.attempt === attempt
+      ? live
+      : undefined;
   const generation = useRef(0);
   const preview = useRequest(
     stale
       ? undefined
-      : `${artifactId}:${revision}:${epoch}:${connectionRevision}:${grantRevision}:${attempt}`,
+      : `${artifactId}:${held?.revision ?? revision}:${epoch}:${connectionRevision}:${held?.grant ?? grantRevision}:${attempt}`,
     async (signal) => {
       // A scheduler can hold reads while the page is hidden or rate-limited.
       // Time the lease from the actual attempt, not from entering that queue.
@@ -98,7 +139,13 @@ export function PreviewFrame({
           },
         },
       );
-      return { view, deadline: dispatchedAt + view.lease_ms, close };
+      return {
+        view,
+        deadline: dispatchedAt + view.lease_ms,
+        close,
+        revision,
+        grant: grantRevision,
+      };
     },
   );
   if (preview.status === 'loading')
@@ -127,12 +174,23 @@ export function PreviewFrame({
         </AlertDescription>
       </Alert>
     );
-  const view = preview.value.view;
+  const value = preview.value;
+  const restart = (): void => {
+    setLive(undefined);
+    setAttempt((current) => current + 1);
+  };
+  const view = held?.frame.view ?? value.view;
   const grantStatus = client.runtimeGrantStatus(view);
   async function changeGrant(capabilities: string[]): Promise<void> {
     setGrantError(undefined);
     try {
-      await client.setRuntimeGrant(view, capabilities);
+      // A live frame that opted in is paused before the change is sent and
+      // adopted after it (decision 0054, rule 8).
+      if (held === undefined) {
+        await client.setRuntimeGrant(view, capabilities);
+      } else {
+        await held.frame.changePermissions(capabilities, view);
+      }
     } catch (error: unknown) {
       setGrantError(
         `Permission change was not confirmed: ${describeFailure(error)}`,
@@ -164,17 +222,55 @@ export function PreviewFrame({
       >
         Refresh preview
       </Button>
-      {grantStatus === 'settled' ? (
+      {held?.frame.adopted === true ? (
+        <Suspense fallback={null}>
+          <AdoptionNotice
+            documentRevision={value.view.revision}
+            loadedHead={value.view.head_revision}
+            view={held.frame.view}
+            following={following}
+            // Offered once the workspace itself knows the revision the notice
+            // names: loading it sooner would show an older one.
+            onLoadNewer={
+              latest < held.frame.view.head_revision
+                ? undefined
+                : following
+                  ? restart
+                  : onShowLatest
+            }
+          />
+        </Suspense>
+      ) : null}
+      {grantStatus === 'settled' || held !== undefined ? (
         <Suspense fallback={PREPARING}>
           <RuntimeFrame
-            key={`${preview.value.view.view_id}:${preview.value.view.generation}`}
+            key={`${value.view.view_id}:${value.view.generation}`}
             client={client}
             dataChanges={dataChanges}
-            view={preview.value.view}
-            deadline={preview.value.deadline}
-            onClose={preview.value.close}
+            view={value.view}
+            deadline={value.deadline}
+            onClose={value.close}
             title={title}
             className={className}
+            following={following}
+            shownRevision={revision}
+            latestRevision={latest}
+            nextGeneration={() => ++generation.current}
+            onLive={(frame) =>
+              setLive(
+                frame === undefined
+                  ? undefined
+                  : {
+                      frame,
+                      revision: value.revision,
+                      grant: value.grant,
+                      epoch,
+                      connection: connectionRevision,
+                      attempt,
+                    },
+              )
+            }
+            onRestart={restart}
           />
         </Suspense>
       ) : (

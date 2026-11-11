@@ -1,6 +1,11 @@
 import type { RuntimeView } from '@artifree/contracts';
 import { Button } from '@/components/ui/button';
 
+// The adoption notice ships in this on-demand chunk: a second on-demand chunk
+// that imports the button would move it to a chunk the page loads at start
+// (decision 0054, rule 18).
+export { AdoptionNotice } from './adoption-notice';
+
 /**
  * The capabilities a preview can be granted, each with its own control: a
  * grant of one never implies another (decisions 0020, 0032, 0033, 0045 and
@@ -29,7 +34,7 @@ const CAPABILITY_CONTROLS = [
     // Shown beside the control, because this grant is the user's only
     // confirmation of what the app then does by itself (decision 0033).
     warning:
-      'Allowing this lets the app change files of this artifact. A save creates a new revision without asking you again; earlier revisions stay and can be restored. After a save this preview is out of date, and you must allow editing again for the next one.',
+      'Allowing this lets the app change files of this artifact. A save creates a new revision without asking you again; earlier revisions stay and can be restored. After a save you must allow editing again for the next one.',
   },
   {
     name: 'assets.read',

@@ -33,6 +33,8 @@ interface Pending {
   readonly controller: AbortController;
   /** A write is waited for until its request ends (rule 9). */
   readonly write: boolean;
+  /** A `source.write`: a head change waits for it (decision 0054, rule 8). */
+  readonly sourceWrite: boolean;
   /** The generation it is served under; undefined while it is held. */
   generation: number | undefined;
   /** Waiting for the user's answer to a prompt: not on its way (rule 9). */
@@ -293,6 +295,25 @@ export class FrameRpc {
     return this.#pending.size;
   }
 
+  /**
+   * Calls sent to the server that have not ended, not counting held calls or
+   * a call waiting for the user's answer, which is not on its way (decision
+   * 0054, rules 8 and 9).
+   */
+  get onItsWay(): number {
+    let count = 0;
+    for (const entry of this.#pending.values())
+      if (entry.generation !== undefined && !entry.prompting) count += 1;
+    return count;
+  }
+
+  /** Whether a `source.write` of the frame has not ended, held or sent. */
+  get sourceWriting(): boolean {
+    for (const entry of this.#pending.values())
+      if (entry.sourceWrite) return true;
+    return false;
+  }
+
   /** The view the calls are served under; an adoption replaces it. */
   get view(): RuntimeView {
     return this.#view;
@@ -348,6 +369,17 @@ export class FrameRpc {
   }
 
   /**
+   * Holds the calls of a save that committed (decision 0054, rule 8). While the
+   * grant is unresolved the refusal stays instead: the calls keep being
+   * answered `unavailable`, and the saved adoption pauses the frame once the
+   * grant settles.
+   */
+  async pauseForSave(): Promise<void> {
+    if (this.#mode === 'refusing') return;
+    await this.pause('saved');
+  }
+
+  /**
    * Ends a pause without an adoption: the held calls go out under the current
    * view (decision 0054, rule 8).
    */
@@ -360,8 +392,8 @@ export class FrameRpc {
 
   /**
    * The grant's outcome is not known: held calls are answered `unavailable`,
-   * and so are later ones, until the next pause, resume or adoption (decision
-   * 0054, rule 8).
+   * and so are later ones, until the next `pause`, `resume` or adoption
+   * (decision 0054, rule 8). `pauseForSave` leaves it as it is.
    */
   refuse(): void {
     if (this.#closed) return;
@@ -447,6 +479,7 @@ export class FrameRpc {
     const entry: Pending = {
       controller: new AbortController(),
       write: parsed.write,
+      sourceWrite: call.type === 'source.write',
       generation: undefined,
       prompting: false,
       wakes: [],
@@ -477,6 +510,7 @@ export class FrameRpc {
       ask: (offer, signal) => this.#ask(id, entry, offer, signal),
       save: this.#deps.save,
       takeDataWrite: this.#deps.takeDataWrite,
+      saved: this.#deps.saved,
     };
     // A serve that throws before it returns a promise fails the call like a
     // rejection, so the pending slot is always released below.
