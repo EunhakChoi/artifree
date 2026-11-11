@@ -291,8 +291,9 @@ default-src 'none'`, and `Cache-Control: no-store`.
 - **Not implemented:** writing source from a frame, editing permission, viewer
   roles (R11b); data access from frames (the bridge still has no data
   capability, R06 stays server-side); subscriptions and queries (R07);
-  uploaded assets (R09); replacing a view in place (R10: a grant change or a
-  new head still reloads the frame); an outbox and crash recovery (R08);
+  uploaded assets (R09); replacing a view in place (R10, proposed in
+  [0054](0054-runtime-view-adoption.md): a grant change or a new head still
+  reloads the frame); an outbox and crash recovery (R08);
   rooms and presence (R12); a frame identity or per-frame permissions beyond
   the connection (S01).
 - **The sandbox is not network isolation.** A frame can still navigate itself
