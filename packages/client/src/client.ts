@@ -68,6 +68,7 @@ import type * as RuntimeSource from './runtime-source.js';
 import { FRAME_ROUTES, frameBody, frameRoute } from './runtime-frame.js';
 import type { FrameTransport } from './runtime-frame.js';
 import type { FollowDataOptions } from './follow-data.js';
+import type { FollowJobOptions } from './follow-job.js';
 import type {
   RuntimeDownloadTarget,
   RuntimeSourcePartBytes,
@@ -1033,6 +1034,51 @@ export class ArtifreeClient {
   }
 
   /**
+   * Resolves with the job once it has ended (`succeeded`, `failed` or
+   * `cancelled`), following the change feed (decision 0055, rule 11). It
+   * opens the feed before its first read. Rejects with `not_found` when a
+   * read answers 404, also once the job's artifact went to the trash or was
+   * purged, and with the signal's reason when `options.signal` aborts. It
+   * also rejects with the error of a read or of the feed that a retry cannot
+   * mend (for example `401`, or a feed answer that is not valid). A read
+   * that fails for a while is read again 15 seconds later, whatever wait the
+   * server asked for, and a read that never answers holds the wait until the
+   * signal aborts.
+   */
+  async followJob(id: string, options: FollowJobOptions): Promise<Job> {
+    const { signal } = options;
+    signal.throwIfAborted();
+    // Loaded on use, so the web entry bundle does not grow. Loading may take
+    // time (the browser fetches a chunk), and cancellation must not wait for it.
+    let onAbort = () => {};
+    const aborted = new Promise<undefined>((resolve) => {
+      onAbort = () => resolve(undefined);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    let module: typeof import('./follow-job.js') | undefined;
+    try {
+      module = await Promise.race([import('./follow-job.js'), aborted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+    signal.throwIfAborted();
+    if (module === undefined) throw new Error('followJob was not loaded.');
+    const { followJob } = module;
+    return followJob(
+      {
+        clock: this.clock,
+        open: (after, signal) =>
+          this.openChanges(
+            after === undefined ? { signal } : { after, signal },
+          ),
+        read: (signal) => this.getJob(id, { signal }),
+      },
+      id,
+      options,
+    );
+  }
+
+  /**
    * Replaces the value at `request.path`, making the objects above it that
    * are missing, if the data is still at `request.base_data_version`. The
    * value can be `null`, which a merge patch cannot store. At the root it
@@ -1120,8 +1166,8 @@ export class ArtifreeClient {
    * artifact: a worker process re-reads every file of that revision and
    * compares its digest and size with the stored listing. This only queues
    * it; the server's own worker runs it unless the server was started with
-   * --no-worker or as a one-shot session (see {@link getBackground}), and
-   * nothing is pushed when it ends. Read the job again with {@link getJob}. A
+   * --no-worker or as a one-shot session (see {@link getBackground}). Read the
+   * job with {@link getJob}, or wait for its end with {@link followJob}. A
    * retry with the same key and request resolves with the job as it is now
    * and `replayed: true`; the same key with another request rejects with
    * `request_key_reused`. Rejects with `not_found` for an artifact that is

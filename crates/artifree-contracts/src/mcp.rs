@@ -749,7 +749,9 @@ fn job_tools() -> [ToolDefinition; 4] {
                  stored listing. The job is pinned to that revision. It runs in the Artifree worker \
                  process, which must be running for the job to progress; this tool only queues it. \
                  It runs trusted verification code only and does not run artifact code. Read the \
-                 outcome with get_job: there is no push. At most 16 jobs may wait or run at once. \
+                 outcome with get_job, which reads the job on request; this server does \
+                 not push. Job changes reach the owner's change feed as job_changed \
+                 rows. At most 16 jobs may wait or run at once. \
                  {KEY_RULE}"
             ),
             ToolEffect::Job,

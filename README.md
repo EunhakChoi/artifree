@@ -140,7 +140,9 @@ an operator runs `artifree-server worker run --data-dir <dir>` (`--once` stops
 when nothing is due). A job runs trusted server code, with no sandbox, and it uses no network; it is
 not the isolated execution that builds of React sources or model calls will
 need. Cancelling stops work and never rolls anything back. Job changes are
-not in the change feed and the web workspace has no job view; poll `job show`.
+in the change feed (`job_changed`): `artifree job show <job> --wait` and the
+TypeScript client's `followJob` wait for a job to end. The web workspace has
+no job view yet.
 
 ### Application data
 

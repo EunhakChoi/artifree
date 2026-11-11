@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use artifree_core::jobs::Clock;
-use artifree_core::worker::{self, Pace, Step, WorkerConfig};
+use artifree_core::worker::{self, ClaimEvent, Pace, Step, WorkerConfig};
 use artifree_domain::job::WorkerId;
 use artifree_ports::job_store::{JobRecord, JobStoreError};
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
@@ -67,6 +67,9 @@ pub enum WorkerEvent<'a> {
         /// The name this worker gave itself.
         worker: &'a WorkerId,
     },
+    /// A claim of this job committed; the job has not run yet (decision 0055,
+    /// rule 10).
+    Claimed(&'a artifree_domain::job::JobId),
     /// A job was claimed and left in the state of the record.
     Job(&'a JobRecord),
     /// A job was given back because the process is stopping.
@@ -136,8 +139,11 @@ pub fn run(
         if shutdown.load(Ordering::Acquire) {
             return Ok(Stopped::Signal);
         }
-        let mut settled = |record: &JobRecord| on_event(&WorkerEvent::Job(record));
-        match worker::run_next(&store, clock, &worker, &config, &pace, &mut settled) {
+        let mut observed = |event: ClaimEvent<'_>| match event {
+            ClaimEvent::Settled(record) => on_event(&WorkerEvent::Job(record)),
+            ClaimEvent::Claimed(job) => on_event(&WorkerEvent::Claimed(job)),
+        };
+        match worker::run_next_observed(&store, clock, &worker, &config, &pace, &mut observed) {
             Ok(Step::Idle) => {
                 failures = 0;
                 if options.once {

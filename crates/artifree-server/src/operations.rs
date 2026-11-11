@@ -1537,6 +1537,11 @@ pub(crate) async fn enqueue_job(
     let receipt = state
         .run(move |artifacts| artifacts.enqueue_job(&actor, &key, &id, revision, kind, now))
         .await?;
+    if receipt.delivery == Delivery::Committed {
+        // The commit may append a `job_changed` row to the owner's feed
+        // (decision 0055, rule 7); wake the streams as a commit does.
+        state.feed().committed();
+    }
     Ok(EnqueueJobResponse {
         job: job_dto(&receipt.job),
         replayed: receipt.delivery == Delivery::Replayed,
@@ -1593,6 +1598,11 @@ pub(crate) async fn cancel_job(
     let receipt = state
         .run(move |artifacts| artifacts.cancel_job(&actor, &key, &id, now))
         .await?;
+    if receipt.delivery == Delivery::Committed {
+        // The commit may append a `job_changed` row to the owner's feed
+        // (decision 0055, rule 7); wake the streams as a commit does.
+        state.feed().committed();
+    }
     Ok(CancelJobResponse {
         job: job_dto(&receipt.job),
         replayed: receipt.delivery == Delivery::Replayed,

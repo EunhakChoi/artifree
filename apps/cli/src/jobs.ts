@@ -7,7 +7,7 @@ import { resolveConnection } from './profiles.js';
 
 export const JOB_HELP = `Usage:
   artifree job enqueue <artifact-id> --revision <n> [--idempotency-key <key>]
-  artifree job show <job-id>
+  artifree job show <job-id> [--wait]
   artifree job list [--artifact <id>] [--limit <n>] [--page-token <token>]
   artifree job cancel <job-id> [--idempotency-key <key>]
 
@@ -22,8 +22,9 @@ enqueue queues a verification job for one revision of an artifact: a worker
 re-reads every file of that revision and compares each SHA-256 digest and size
 with the stored listing. It only queues the job. The server's own worker runs it
 (artifree-server serve starts one unless started with --no-worker or as a
-one-shot session), and nothing tells you when it ends: run show again. A job
-that succeeded with verdict mismatch found a difference; the job itself worked.
+one-shot session). show --wait prints the job once it has ended; show without
+--wait prints it as it is now. A job that succeeded with verdict mismatch found
+a difference; the job itself worked.
 The job lists at most 50 mismatched package paths and the full mismatch_count.
 Jobs run trusted verification code only; they do not run the artifact's code and
 are not a sandbox.
@@ -148,12 +149,18 @@ async function enqueue(args: string[]): Promise<void> {
 async function show(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
-    options: { ...connectionOptions },
+    options: { ...connectionOptions, wait: { type: 'boolean' } },
     allowPositionals: true,
     strict: true,
   });
   const id = one(positionals, 'job-id');
-  print(await (await connect(values)).getJob(id));
+  const client = await connect(values);
+  // Ctrl+C ends the process, so the wait never needs to be aborted here.
+  print(
+    values.wait === true
+      ? await client.followJob(id, { signal: new AbortController().signal })
+      : await client.getJob(id),
+  );
 }
 
 async function list(args: string[]): Promise<void> {

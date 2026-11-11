@@ -608,8 +608,10 @@ pub struct JobResult {
 
 /// A persistent job. It pins the actor that enqueued it, one artifact, one
 /// source revision, and a kind; none of these changes. Time fields are Unix
-/// milliseconds. A client learns of progress by reading the job again: there
-/// is no push for jobs, and the change feed does not carry them.
+/// milliseconds. A client learns of progress by reading the job again. A change
+/// to its state or cancel request appends a `job_changed` row to the owner's
+/// change feed, and that row carries no state: the job is read with
+/// `GET /v1/jobs/{id}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
@@ -1984,6 +1986,11 @@ pub enum ChangeKind {
     /// value; read the data again. The artifact's source and metadata did not
     /// change.
     DataChanged,
+    /// A job of the artifact was created, or its state or `cancel_requested`
+    /// changed (decision 0055). The event names the job in `job_id` and carries
+    /// no state: read the job again with `GET /v1/jobs/{id}`. The artifact's
+    /// source and metadata did not change.
+    JobChanged,
 }
 
 /// Summary information for an access token.
@@ -2096,17 +2103,20 @@ pub struct UserList {
 }
 
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
-/// revision or changed metadata, or one data write that changed the actor's
-/// data space. Retries that replay a commit, failed commits, and updates that
-/// changed nothing have none. It names what to read again and carries no
-/// content, path, or value.
+/// revision or changed metadata, one data write that changed the actor's data
+/// space, or one job that was created or changed. Retries that replay a
+/// commit, failed commits, and updates that changed nothing have none. It
+/// names what to read again and carries no content, path, or value.
 ///
 /// `data_version` is present exactly when `change` is `data_changed`: the
 /// published schema requires it for that kind and forbids it for every other
 /// kind, and deserializing refuses both violations (decision 0040).
+///
+/// `job_id` is present exactly when `change` is `job_changed`, with the same
+/// rule (decision 0055, rule 8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(transform = data_version_only_for_data_changes)]
+#[schemars(transform = kind_dependent_members)]
 pub struct ArtifactChange {
     /// Opaque feed position of this change, also the event's `id`.
     pub cursor: String,
@@ -2115,17 +2125,23 @@ pub struct ArtifactChange {
     /// What the commit did.
     pub change: ChangeKind,
     /// The revision the commit created, or the current one for a metadata
-    /// change (`metadata_updated`, `deleted`, `recovered`, or `purged`) or a
-    /// data change (`data_changed`). Never a data version.
+    /// change (`metadata_updated`, `deleted`, `recovered`, or `purged`), a
+    /// data change (`data_changed`), or a job change (`job_changed`). Never a
+    /// data version.
     pub revision: u64,
     /// The metadata revision after the commit, or the current one for a data
-    /// change.
+    /// or job change.
     pub metadata_revision: u64,
     /// The version the write left the data space at, a positive number.
     /// Present exactly for `data_changed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 9_007_199_254_740_991_u64))]
     pub data_version: Option<u64>,
+    /// The job that changed, `job_` followed by 32 lowercase hex digits.
+    /// Present exactly for `job_changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^job_[0-9a-f]{32}$"))]
+    pub job_id: Option<String>,
     /// Commit time in Unix milliseconds.
     pub committed_at_ms: i64,
 }
@@ -2133,10 +2149,11 @@ pub struct ArtifactChange {
 /// The largest whole number a JSON number states exactly.
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Adds the kind-dependent rule to the schema of [`ArtifactChange`]: a data
-/// version for `data_changed`, none for any other kind. `null` is no data
-/// version in either branch.
-fn data_version_only_for_data_changes(schema: &mut schemars::Schema) {
+/// Adds the kind-dependent rules to the schema of [`ArtifactChange`]: a data
+/// version for `data_changed` and a `job_id` for `job_changed`, and neither
+/// member for any other kind. `null` is neither a data version nor a job
+/// identifier, in either branch of either rule.
+fn kind_dependent_members(schema: &mut schemars::Schema) {
     schema.insert(
         "if".to_owned(),
         serde_json::json!({
@@ -2155,12 +2172,30 @@ fn data_version_only_for_data_changes(schema: &mut schemars::Schema) {
         "else".to_owned(),
         serde_json::json!({ "not": { "required": ["data_version"] } }),
     );
+    // A second kind rule cannot use the root `if`, which the data rule holds.
+    // `change` is always required, so this subschema always applies.
+    schema.insert(
+        "dependentSchemas".to_owned(),
+        serde_json::json!({
+            "change": {
+                "if": {
+                    "properties": { "change": { "const": "job_changed" } },
+                    "required": ["change"]
+                },
+                "then": {
+                    "properties": { "job_id": { "type": "string" } },
+                    "required": ["job_id"]
+                },
+                "else": { "not": { "required": ["job_id"] } }
+            }
+        }),
+    );
 }
 
-/// The fields of an [`ArtifactChange`] as they arrive, before the rule that
-/// ties `data_version` to the kind is checked. The data version keeps the
-/// difference between absent and `null`, and `null` is refused like any other
-/// value that is no data version.
+/// The fields of an [`ArtifactChange`] as they arrive, before the rules that
+/// tie `data_version` and `job_id` to the kind are checked. Each of the two
+/// keeps the difference between absent and `null`, and `null` is refused like
+/// any other value that is not of its kind.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactChangeFields {
@@ -2171,6 +2206,8 @@ struct ArtifactChangeFields {
     metadata_revision: u64,
     #[serde(default)]
     data_version: DataVersionMember,
+    #[serde(default)]
+    job_id: JobIdMember,
     committed_at_ms: i64,
 }
 
@@ -2193,8 +2230,40 @@ impl<'de> Deserialize<'de> for DataVersionMember {
     }
 }
 
+/// A `job_id` member as it arrived: not there, `null`, or a string.
+#[derive(Debug, Default, Clone)]
+enum JobIdMember {
+    #[default]
+    Absent,
+    Null,
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for JobIdMember {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<String>::deserialize(deserializer).map(|text| text.map_or(Self::Null, Self::Text))
+    }
+}
+
+/// Whether `text` is a job identifier: `job_` followed by 32 lowercase hex
+/// digits. `artifree-domain` checks the same shape, but this crate does not
+/// depend on it.
+fn is_job_id(text: &str) -> bool {
+    let Some(hex) = text.strip_prefix("job_") else {
+        return false;
+    };
+    hex.len() == 32 && hex.bytes().all(is_lower_hex_digit)
+}
+
+fn is_lower_hex_digit(byte: u8) -> bool {
+    matches!(byte, b'0'..=b'9' | b'a'..=b'f')
+}
+
 // Written by hand because the derive would publish the schema of the fields
-// type, which has none of the documentation or the kind-dependent rule.
+// type, which has none of the documentation or the kind-dependent rules.
 impl<'de> Deserialize<'de> for ArtifactChange {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -2224,6 +2293,16 @@ impl TryFrom<ArtifactChangeFields> for ArtifactChange {
                 return Err("only a data_changed change carries a data_version");
             }
         };
+        let job_id = match (fields.change, fields.job_id) {
+            (ChangeKind::JobChanged, JobIdMember::Text(id)) if is_job_id(&id) => Some(id),
+            (ChangeKind::JobChanged, _) => {
+                return Err(
+                    "a job_changed change needs a job_id: job_ followed by 32 lowercase hex digits",
+                );
+            }
+            (_, JobIdMember::Absent) => None,
+            (_, _) => return Err("only a job_changed change carries a job_id"),
+        };
         Ok(Self {
             cursor: fields.cursor,
             artifact_id: fields.artifact_id,
@@ -2231,6 +2310,7 @@ impl TryFrom<ArtifactChangeFields> for ArtifactChange {
             revision: fields.revision,
             metadata_revision: fields.metadata_revision,
             data_version,
+            job_id,
             committed_at_ms: fields.committed_at_ms,
         })
     }

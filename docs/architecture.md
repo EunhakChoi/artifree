@@ -219,7 +219,7 @@ admission policy. Reads are authenticated scoped attachments with
 no-store/nosniff; there is no public URL, and a frame reaches assets only through
 the runtime view routes above. The client calls, the MCP tools, the CLI
 commands, the web panel and the duplicate asset copy exist. The [content policy](asset-validation.md) records these limits.
-SQLite schema 12 keeps immutable bytes, independent versions, receipts and
+SQLite schema 13 keeps immutable bytes, independent versions, receipts and
 logical quotas in the same database as source files. Source and asset
 associations both protect shared blobs from purge and cleanup.
 
@@ -336,8 +336,9 @@ migration.
   left to S02s.
 - **Background work is only partly owned by the server process.** A
   persistent server starts and restarts one worker child and reports it
-  (`GET /v1/background`, decision 0055, R01ba); job changes are not in the
-  change feed yet (R01bb), and no scheduler exists. Builds, the execution supervisor
+  (`GET /v1/background`, decision 0055, R01ba), and job changes are in the
+  change feed (`job_changed`, R01bb); the web has no job view yet (R01bc), and
+  no scheduler exists. Builds, the execution supervisor
   and automatic purge need the same scheduler, clock and supervision (R01b).
 - **Application logic in the server crate.** The runtime sessions, policy,
   source and asset modules, preview tickets and handoffs are state machines

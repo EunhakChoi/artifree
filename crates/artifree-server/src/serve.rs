@@ -237,7 +237,9 @@ async fn serve_listeners(
 
 /// Starts the worker of a persistent server when `options.worker` is set, as the
 /// supervised child of this executable (decision 0055, rule 1). The supervisor
-/// writes the status that `state` reports and stamps exits with its clock.
+/// writes the status that `state` reports and stamps exits with its clock. Each
+/// line of the worker's output that parses wakes the change streams of `state`
+/// (decision 0055, rule 10).
 fn start_worker(
     options: &ServeOptions,
     state: &AppState,
@@ -246,12 +248,14 @@ fn start_worker(
 ) -> Option<JoinHandle<()>> {
     options.worker.then(|| {
         let settings = state.settings();
-        supervisor::start(
+        let feed_state = state.clone();
+        supervisor::start_with_wake(
             ProcessLauncher::new(options.data_dir.clone()),
             settings.worker_status.clone(),
             std::sync::Arc::clone(&settings.clock),
             draining,
             stop,
+            std::sync::Arc::new(move || feed_state.feed().committed()),
         )
     })
 }

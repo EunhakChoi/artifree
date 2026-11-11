@@ -72,7 +72,7 @@ export async function checkDataRecovery(
     assert.equal(lines.length, 1);
     const report = JSON.parse(lines[0]);
     assert.equal(report.event, event);
-    assert.equal(report.schema_version, 12);
+    assert.equal(report.schema_version, 13);
   }
   // Read one complete SSE event, then close the stream before stopping its server.
   async function position(cursor) {

@@ -41,6 +41,7 @@ worker that is killed leaves its job running until the lease expires; another
 worker then runs it again, and a result is written at most once.
 
 stdout is JSON lines: {\"event\":\"ready\",\"worker\":...}, one
+{\"event\":\"claimed\",\"job\":...} after each claim commits, one
 {\"event\":\"job\",\"job\":...,\"state\":...,\"attempts\":...} per job ended or
 given back, {\"event\":\"lease_lost\",\"job\":...} when a lease was lost, and
 {\"event\":\"stopped\",\"reason\":\"drained\"|\"signal\"} last. Diagnostics go to
@@ -296,6 +297,9 @@ fn event_line(event: &WorkerEvent<'_>) -> serde_json::Value {
         WorkerEvent::Ready { worker } => {
             serde_json::json!({"event": "ready", "worker": worker.as_str()})
         }
+        WorkerEvent::Claimed(job) => {
+            serde_json::json!({"event": "claimed", "job": job.as_str()})
+        }
         WorkerEvent::Job(record) | WorkerEvent::Released(record) => serde_json::json!({
             "event": "job",
             "job": record.id.as_str(),
@@ -366,6 +370,19 @@ mod tests {
         assert_eq!(parse(&args(&["--help"])), Ok(Parsed::Help));
         assert_eq!(parse(&args(&["run", "-h"])), Ok(Parsed::Help));
         assert!(parse(&args(&["run", "--help", "--once"])).is_err());
+    }
+
+    #[test]
+    fn help_names_each_stdout_event_of_a_job() {
+        // Decision 0055, rule 10: a parent reads these stdout lines, and the
+        // help is their reference, so it names each of them.
+        for event in ["ready", "claimed", "job", "lease_lost", "stopped"] {
+            let needle = format!("{{\"event\":\"{event}\"");
+            assert!(
+                WORKER_HELP.contains(needle.as_str()),
+                "the help does not name the {event} line: {needle}"
+            );
+        }
     }
 
     #[test]

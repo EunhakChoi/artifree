@@ -5122,7 +5122,7 @@
       "title": "Create preview"
     },
     {
-      "description": "Queue a background job that re-reads every file of one revision of an artifact from storage, recomputes each SHA-256 digest and size, and compares them with the stored listing. The job is pinned to that revision. It runs in the Artifree worker process, which must be running for the job to progress; this tool only queues it. It runs trusted verification code only and does not run artifact code. Read the outcome with get_job: there is no push. At most 16 jobs may wait or run at once. idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
+      "description": "Queue a background job that re-reads every file of one revision of an artifact from storage, recomputes each SHA-256 digest and size, and compares them with the stored listing. The job is pinned to that revision. It runs in the Artifree worker process, which must be running for the job to progress; this tool only queues it. It runs trusted verification code only and does not run artifact code. Read the outcome with get_job, which reads the job on request; this server does not push. Job changes reach the owner's change feed as job_changed rows. At most 16 jobs may wait or run at once. idempotency_key is required: use a new unique value (for example a UUID) for each intended change and resend the same value only to retry that change.",
       "effect": "job",
       "inputSchema": {
         "additionalProperties": false,
@@ -5679,7 +5679,7 @@
         "anyOf": [
           {
             "additionalProperties": false,
-            "description": "A persistent job. It pins the actor that enqueued it, one artifact, one\nsource revision, and a kind; none of these changes. Time fields are Unix\nmilliseconds. A client learns of progress by reading the job again: there\nis no push for jobs, and the change feed does not carry them.",
+            "description": "A persistent job. It pins the actor that enqueued it, one artifact, one\nsource revision, and a kind; none of these changes. Time fields are Unix\nmilliseconds. A client learns of progress by reading the job again. A change\nto its state or cancel request appends a `job_changed` row to the owner's\nchange feed, and that row carries no state: the job is read with\n`GET /v1/jobs/{id}`.",
             "properties": {
               "artifact_id": {
                 "description": "The artifact whose revision the job verifies.",
@@ -6198,7 +6198,7 @@
                 "description": "Jobs of artifacts that are not in the trash, newest first.",
                 "items": {
                   "additionalProperties": false,
-                  "description": "A persistent job. It pins the actor that enqueued it, one artifact, one\nsource revision, and a kind; none of these changes. Time fields are Unix\nmilliseconds. A client learns of progress by reading the job again: there\nis no push for jobs, and the change feed does not carry them.",
+                  "description": "A persistent job. It pins the actor that enqueued it, one artifact, one\nsource revision, and a kind; none of these changes. Time fields are Unix\nmilliseconds. A client learns of progress by reading the job again. A change\nto its state or cancel request appends a `job_changed` row to the owner's\nchange feed, and that row carries no state: the job is read with\n`GET /v1/jobs/{id}`.",
                   "properties": {
                     "artifact_id": {
                       "description": "The artifact whose revision the job verifies.",

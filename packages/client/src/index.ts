@@ -24,6 +24,7 @@ export type {
 export { cursorOf } from './change-feed.js';
 export type { Clock } from './transport.js';
 export type { DataEvent, FollowDataOptions } from './follow-data.js';
+export type { FollowJobOptions } from './follow-job.js';
 export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
 export { getAsset, listAssets, readAsset } from './assets.js';

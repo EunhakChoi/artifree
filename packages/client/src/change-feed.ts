@@ -15,10 +15,17 @@ import {
  * contract after this client; the artifact changed either way.
  * `data_version` is the version a data write left the space at, a safe
  * integer of at least 1: present exactly when `change` is `'data_changed'`.
+ * `job_id` names the job that changed, `job_` and 32 lowercase hex digits:
+ * present exactly when `change` is `'job_changed'`. Read the job with
+ * `getJob`; the change carries no state.
  */
-export type FeedChange = Omit<ArtifactChange, 'change' | 'data_version'> & {
+export type FeedChange = Omit<
+  ArtifactChange,
+  'change' | 'data_version' | 'job_id'
+> & {
   readonly change: ChangeKind | 'unknown';
   readonly data_version?: number;
+  readonly job_id?: string;
 };
 
 /**

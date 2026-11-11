@@ -189,8 +189,17 @@ impl WorkerChild for ProcessChild {
     }
 }
 
+/// Called for each line of the worker's standard output that parsed (decision
+/// 0055, rule 10). The server wakes its change-feed streams with it, which then
+/// read storage at once. A dropped line calls nothing: it costs only the wait.
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
 /// Starts one worker now and supervises it in a task on the Tokio runtime until
 /// `stop` is set.
+///
+/// It wakes nothing when the worker prints a line. [`start_with_wake`] is the
+/// variant that wakes the server's change streams for each parsed line (decision
+/// 0055, rule 10).
 ///
 /// The first start happens before this returns, so a worker that could start
 /// exists when the caller reports the server as ready. After a stop, the task
@@ -215,8 +224,43 @@ pub fn start<L: Launcher>(
     draining: StopLatch,
     stop: StopLatch,
 ) -> JoinHandle<()> {
+    start_with_wake(launcher, status, clock, draining, stop, Arc::new(|| {}))
+}
+
+/// Starts one worker now and supervises it in a task on the Tokio runtime until
+/// `stop` is set.
+///
+/// The first start happens before this returns, so a worker that could start
+/// exists when the caller reports the server as ready. After a stop, the task
+/// closes the worker's standard input, waits for it for at most `STOP_GRACE`,
+/// kills it if it is still running, and ends.
+///
+/// `draining` is the server's own stop request, which comes before `stop`: the
+/// server first stops its listeners and only then asks the worker to stop (rule
+/// 2). A worker that exits in between is not started again, because a signal
+/// sent to the whole process group (Ctrl+C in a terminal) reaches the worker
+/// too, and a new worker would take a job only to give it back.
+///
+/// `wake` runs on the task that reads the worker's standard output, once for each
+/// line that parses (decision 0055, rule 10), so it must not block.
+///
+/// # Panics
+///
+/// Panics when no Tokio runtime is running on the calling thread, because the
+/// supervising task is spawned there.
+#[must_use]
+pub fn start_with_wake<L: Launcher>(
+    launcher: L,
+    status: WorkerStatusHandle,
+    clock: Arc<dyn Clock>,
+    draining: StopLatch,
+    stop: StopLatch,
+    wake: Wake,
+) -> JoinHandle<()> {
     let first = launch(&launcher, &status, clock.as_ref());
-    tokio::spawn(supervise(launcher, first, status, clock, draining, stop))
+    tokio::spawn(supervise(
+        launcher, first, status, clock, draining, stop, wake,
+    ))
 }
 
 /// Starts one worker and records the result: `running` when it started, or a
@@ -243,7 +287,7 @@ fn launch<L: Launcher>(
     }
 }
 
-/// The loop behind [`start`]. It starts the worker again after every exit or failed
+/// The loop behind [`start_with_wake`]. It starts the worker again after every exit or failed
 /// start that the server did not ask for, and stops the worker when `stop` is set.
 async fn supervise<L: Launcher>(
     launcher: L,
@@ -252,6 +296,7 @@ async fn supervise<L: Launcher>(
     clock: Arc<dyn Clock>,
     draining: StopLatch,
     stop: StopLatch,
+    wake: Wake,
 ) {
     let mut delay = FIRST_DELAY;
     loop {
@@ -259,14 +304,18 @@ async fn supervise<L: Launcher>(
             let started = Instant::now();
             if let Some(stdout) = child.take_stdout() {
                 let reader_status = status.clone();
+                let reader_wake = Arc::clone(&wake);
                 // Nothing waits for the reader: it ends when the worker's standard
                 // output ends.
                 drop(tokio::spawn(async move {
                     worker_lines::read_lines(stdout, |line| {
-                        // Parsed lines are not used yet (decision 0055, rule 10).
                         if matches!(line, WorkerLine::Dropped) {
                             reader_status
                                 .update(|s| s.dropped_lines = s.dropped_lines.saturating_add(1));
+                        } else {
+                            // Any parsed line may follow a commit: the feed reads
+                            // storage again (decision 0055, rule 10).
+                            reader_wake();
                         }
                     })
                     .await;
@@ -309,7 +358,9 @@ async fn supervise<L: Launcher>(
             // The server is stopping: nothing is started any more.
             () = draining.wait() => true,
         };
-        if stopped {
+        // The delay can end in the same poll in which a stop arrives, and the
+        // select may then report the delay: the latches decide, not the order.
+        if stopped || stop.is_set() || draining.is_set() {
             break;
         }
         delay = (delay * 2).min(MAX_DELAY);
