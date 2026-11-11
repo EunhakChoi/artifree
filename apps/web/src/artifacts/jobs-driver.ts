@@ -23,6 +23,7 @@ import {
   JOB_POLL_MS,
   afterFailure,
   appendPage,
+  isEnded,
   mergeFirstPage,
   nextBackgroundRead,
   nextOverdueAt,
@@ -302,10 +303,14 @@ export class JobsDriver {
 
   /**
    * Asks for a verification of `revision` under a new request key (rule 14).
-   * Ignored while the last press of "Verify revision N" is sending.
+   * Ignored while the last press of "Verify revision N" is sending or its
+   * outcome is unknown.
    */
   verify(revision: number): void {
-    if (this.view.verify.status === 'sending') return;
+    const status = this.view.verify.status;
+    // A press whose outcome is unknown is retried or forgotten first: a new
+    // press would drop its key and could make a second job.
+    if (status === 'sending' || status === 'unknown') return;
     this.send(pressVerify(revision, this.newKey));
   }
 
@@ -549,10 +554,17 @@ export class JobsDriver {
       this.pending.first = true;
       return;
     }
-    this.update({
-      rows: mergeFirstPage(this.view.rows, list),
-      readError: undefined,
-    });
+    const rows = mergeFirstPage(this.view.rows, list);
+    // The page just read is current. A kept row beyond it may have changed
+    // while the tab was away or the feed was down, so each one that has not
+    // ended is read again; the limit on open jobs keeps these few.
+    const fresh = new Set(list.jobs.map((job) => job.id));
+    for (const job of rows.jobs) {
+      if (!fresh.has(job.id) && !isEnded(job.state)) {
+        this.pending.jobs.add(job.id);
+      }
+    }
+    this.update({ rows, readError: undefined });
   }
 
   /** Reads one job again and replaces its row (rule 15). */

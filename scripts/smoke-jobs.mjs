@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { promisify } from 'node:util';
 import { chromium, expect, firefox } from '@playwright/test';
 import {
   accessibilityViolations,
@@ -177,7 +177,7 @@ async function checkVerdict(world) {
 async function checkDamaged(world) {
   const content = `<p>Damaged ${randomUUID()}</p>`;
   const artifact = await createArtifact(world.server, 'Jobs damaged', content);
-  damage(world.dataDir, artifact.id, content);
+  await damage(world.dataDir, artifact.id, content);
   const opened = await openJobs(world, artifact);
   try {
     await verify(opened.panel, 1);
@@ -616,28 +616,52 @@ async function jobsOf(server, artifactId) {
  * of other bytes, so its digest no longer matches its listing. The same update
  * as crates/artifree-server/tests/worker_jobs.rs.
  */
-function damage(dataDir, artifactId, content) {
+async function damage(dataDir, artifactId, content) {
   const altered = Buffer.from(content);
   altered[0] ^= 0x01;
   // The server's database file (crates/artifree-providers/src/storage.rs). Opening
   // a missing file would create an empty database, so it must exist already.
   const file = join(dataDir, 'artifree.sqlite3');
   assert.ok(existsSync(file), `No database at ${file}.`);
-  const database = new DatabaseSync(file);
-  try {
-    database.exec('PRAGMA busy_timeout = 5000');
-    const { changes } = database
-      .prepare(
-        `UPDATE blobs SET content = ?
-         WHERE digest = (SELECT digest FROM revision_files
-                         WHERE artifact_id = ? AND revision = 1 AND path = ?)`,
-      )
-      .run(altered, artifactId, 'index.html');
-    assert.equal(changes, 1, 'The damaged file is not in the database.');
-  } finally {
-    database.close();
-  }
+  // node:sqlite needs --experimental-sqlite on the oldest Node this
+  // repository supports (22.12) and takes the flag on later ones, so the
+  // write runs in a child that is given it.
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    [
+      '--experimental-sqlite',
+      '--no-warnings',
+      '--input-type=module',
+      '--eval',
+      DAMAGE_SCRIPT,
+      file,
+      altered.toString('base64'),
+      artifactId,
+    ],
+    { timeout: 30_000 },
+  );
+  assert.equal(stdout, '1', 'The damaged file is not in the database.');
 }
+
+/** Replaces the stored bytes of revision 1's index.html; prints the row count. */
+const DAMAGE_SCRIPT = `
+import { DatabaseSync } from 'node:sqlite';
+const [file, content, artifactId] = process.argv.slice(1);
+const database = new DatabaseSync(file);
+try {
+  database.exec('PRAGMA busy_timeout = 5000');
+  const { changes } = database
+    .prepare(
+      \`UPDATE blobs SET content = ?
+       WHERE digest = (SELECT digest FROM revision_files
+                       WHERE artifact_id = ? AND revision = 1 AND path = ?)\`,
+    )
+    .run(Buffer.from(content, 'base64'), artifactId, 'index.html');
+  process.stdout.write(String(changes));
+} finally {
+  database.close();
+}
+`;
 
 /**
  * Connects a new page of its own to the server and opens the artifact's Jobs
@@ -666,15 +690,21 @@ async function openJobs(world, artifact) {
     await expect(
       workspace.getByRole('heading', { name: artifact.title, exact: true }),
     ).toBeVisible({ timeout: WAIT_MS });
-    await workspace
-      .getByRole('tablist', { name: 'Artifact views' })
-      .getByRole('tab', { name: 'Jobs', exact: true })
-      .click();
     const panel = workspace.getByRole('tabpanel', {
       name: 'Jobs',
       exact: true,
     });
-    await expect(panel).toBeVisible({ timeout: WAIT_MS });
+    // The page may still be settling the search and the selection when the
+    // heading shows; a detail view mounted again after the click opens on
+    // Preview. One full Chromium run lost the click that way, so the tab is
+    // pressed until its panel shows.
+    await expect(async () => {
+      await workspace
+        .getByRole('tablist', { name: 'Artifact views' })
+        .getByRole('tab', { name: 'Jobs', exact: true })
+        .click();
+      await expect(panel).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: WAIT_MS });
     return { context, tab, panel, log };
   } catch (error) {
     await context.close();

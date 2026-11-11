@@ -127,7 +127,7 @@ export function JobsPanel({
           type="button"
           variant="outline"
           size="sm"
-          disabled={verify.status === 'sending'}
+          disabled={verify.status === 'sending' || verify.status === 'unknown'}
           onClick={() => driver.verify(revision)}
         >
           Verify revision {revision}

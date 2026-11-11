@@ -2310,7 +2310,7 @@ const notes = {
   },
   jobs: {
     purpose: "변경 알림, 긴 작업, 재시도와 연결 복구를 조정합니다.",
-    exists: "영속 job 하나(verify_revision, 신뢰하는 서버 코드의 무결성 검사)의 상태·lease·fence·재시도·취소와 별도 프로세스 worker(artifree-server worker run). 결과는 한 번만 기록하고 실행은 최소 한 번입니다. sandbox·자원 제한은 없고 영속 서버가 worker 하나를 띄우고 죽으면 다시 띄우며(--no-worker로 끔, GET /v1/background로 확인) job 변경은 변경 알림에 job_changed로 실립니다(웹 job 화면은 아직 없음).",
+    exists: "영속 job 하나(verify_revision, 신뢰하는 서버 코드의 무결성 검사)의 상태·lease·fence·재시도·취소와 별도 프로세스 worker(artifree-server worker run). 결과는 한 번만 기록하고 실행은 최소 한 번입니다. sandbox·자원 제한은 없고 영속 서버가 worker 하나를 띄우고 죽으면 다시 띄우며(--no-worker로 끔, GET /v1/background로 확인) job 변경은 변경 알림에 job_changed로 실립니다(웹은 artifact별 Jobs 탭에서 job을 보여 주고 검증을 요청하고 취소함).",
     next: "신뢰하지 않는 작업의 실행 제한(R02), 빌드(R03), 모델 호출(P01)을 이 큐 위에 각각 결정합니다."
   },
   handoff: {

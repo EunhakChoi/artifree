@@ -577,6 +577,33 @@ test('resync() keeps the loaded pages after the first one, and the next page is 
   });
 });
 
+// Fails when a reread of page one leaves a kept row as it was: a job on a
+// later page that ended while the tab was away would read "Running" for good.
+test('a reread of page one reads again each kept job beyond it that has not ended', async () => {
+  const { driver, fake } = await started({
+    listJobs: [
+      page([job(JOB_A, 'running', 300)], 'tok-2'),
+      page([job(JOB_C, 'running', 100), job(JOB_D, 'succeeded', 90)]),
+      page([job(JOB_A, 'running', 300)], 'tok-2'),
+    ],
+    getJob: [job(JOB_C, 'succeeded', 100)],
+    getBackground: [WORKER],
+  });
+  driver.loadMore();
+  await flush();
+  assert.deepEqual(inputsOf(fake, 'getJob'), []);
+  driver.resync();
+  await flush();
+  // JOB_A is on the page just read and JOB_D has ended: neither is read.
+  assert.deepEqual(inputsOf(fake, 'getJob'), [JOB_C]);
+  assert.deepEqual(driver.snapshot().rows.jobs, [
+    job(JOB_A, 'running', 300),
+    job(JOB_C, 'succeeded', 100),
+    job(JOB_D, 'succeeded', 90),
+  ]);
+  assert.equal(driver.snapshot().readError, undefined);
+});
+
 test('a reread past loaded jobs offers Load more, and Load more reads the jobs between', async () => {
   // Jobs a and b were created after the loaded job c; job d between b and c.
   const { driver, fake } = await started({

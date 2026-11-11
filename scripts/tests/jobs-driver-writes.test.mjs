@@ -190,6 +190,32 @@ function portsForPress(spec, writes) {
   });
 }
 
+// Fails when a new press replaces one whose outcome is unknown: the lost
+// press may have made a job, and a new key would make a second one.
+test('verify: a press while the outcome of the last one is unknown is ignored, and the retry keeps its key', async () => {
+  const spec = PRESSES.verify;
+  const writes = writePort(
+    fails(apiError(0, 'network_error')),
+    succeeds(spec.answer, true),
+  );
+  const driver = await startedDriver(portsForPress(spec, writes));
+
+  spec.press(driver);
+  await nextTurn();
+  assert.equal(spec.slot(driver).status, 'unknown');
+  spec.press(driver);
+  await nextTurn();
+  assert.equal(writes.calls.length, 1, 'the second press sent nothing');
+  assert.equal(spec.slot(driver).status, 'unknown');
+
+  spec.retry(driver);
+  await nextTurn();
+  assert.deepEqual(
+    writes.calls.map((call) => call.key),
+    ['k1', 'k1'],
+  );
+});
+
 for (const [kind, spec] of Object.entries(PRESSES)) {
   test(`${kind}: each press asks under a new request key`, async () => {
     // Rule 14 gives each press of "Verify revision N" a new request key. A
