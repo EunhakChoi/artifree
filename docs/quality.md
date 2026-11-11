@@ -40,20 +40,21 @@ remain enabled there. Application call sites retain all six rules.
 CI runs the browser jobs in Chromium and Firefox. A specification or roadmap
 acceptance that names "Chromium and Firefox" is met when both CI jobs pass.
 
-- Locally the author runs the Chromium smoke before pushing; CI is the Firefox
-  check. A change that touches engine-specific APIs (IndexedDB, Web Locks,
-  downloads, printing, console output) is also run locally with
-  `ARTIFREE_BROWSER=firefox`.
+- For a web UI or standalone HTML change the author runs the smoke in both
+  engines, as before the suspension (`ARTIFREE_BROWSER=firefox` selects
+  Firefox). Each runtime smoke file run alone honors the same variable.
 - The release workflow refuses a tag while `ci.yml` has no Firefox entry in
   its browser matrix (O03c).
-- Firefox was suspended in CI from R09c until the planned feature set (R13,
-  R14 and R10,
+- Firefox was suspended in CI from 2026-11-08 until the planned feature set
+  (R13, R14 and R10,
   [decision 0051](decisions/0051-roadmap-and-architecture-review.md)) was
   complete. Records written in that time met their Firefox acceptances in
   Chromium and reported Firefox as pending. O08 re-ran them all on 2026-11-11:
   the whole suite passes in Firefox. The one change needed was in a check, not
-  in the product: the asset check's fixture page had no doctype, and Firefox
-  logs a quirks-mode warning that the check counts as an unexpected message.
+  in the product: the asset check counted a warning logged by the preview's
+  own page (Firefox warns of quirks mode for a page with no doctype) as an
+  unexpected message of the workspace. It now sets the preview's messages
+  aside, as the other checks do.
 - Playwright's Firefox does not print to PDF, so the architecture PDF is
   checked in Chromium only.
 
@@ -313,7 +314,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   order, the 10 second bound and the repeat of a `503`, the lease moment, a
   lease that ends while the page is hidden, a refused and an unresolved
   permission change, a save that commits meanwhile) and its notices.
-  `scripts/smoke-runtime-adoption.mjs` runs Chromium against a real server:
+  `scripts/smoke-runtime-adoption.mjs` runs Chromium and Firefox against a real server:
   a page that opted in keeps a typed value across a permission change, its
   own save followed by a second save, and a save by another writer, and a
   page that did not opt in is reloaded.
@@ -420,7 +421,7 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   polling, acknowledgement, a missing source followed by another delivery,
   the created resource's Location, and retrying a confirmed send after source
   deletion. Rust tests check concurrent cancel and poll, a source lookup held
-  across logout, and send or cancellation while a source check fails. Chromium and Firefox exercises the source editor, trusted
+  across logout, and send or cancellation while a source check fails. Chromium and Firefox exercise the source editor, trusted
   user actions, an unconfirmed send retried with the same ID, cancellation,
   receipt-only status, and the dialog's accessibility. A closed connection
   while listing inboxes is replaced in Source; a close before stage requires
@@ -859,7 +860,7 @@ without recreating deleted bytes. R09a is complete only for the named JPEG subse
 (progressive and other variants are refused as `invalid_asset`). The
 TypeScript client has real-server tests (R09b2), the panel's frozen-attempt
 rules have Node tests (`scripts/tests/asset-attempt.test.mjs`) and the
-management assets panel has a real-server Chromium smoke
+management assets panel has a real-server smoke in Chromium and Firefox
 (`scripts/smoke-assets.mjs`, R09c) inside the full browser smoke and
 standalone through `scripts/test-assets-live.mjs`. It covers upload, attachment
 download with no inline rendering, local oversize, type and quota refusals,

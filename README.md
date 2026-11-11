@@ -479,7 +479,7 @@ content as a user (cleanup is administrator-only).
 ```sh
 npm run check
 npm run build
-npx --no-install playwright install chromium
+npx --no-install playwright install chromium firefox
 npm run test:smoke
 ```
 

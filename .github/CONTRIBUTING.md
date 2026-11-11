@@ -45,19 +45,19 @@ Run focused tests while developing, then the applicable full checks. See the
 are written and how heavy commands are isolated is in
 [testing practice](../docs/testing-practice.md).
 
-For web UI or standalone HTML changes, run the real-server smoke suite in
-Chromium; CI also runs it in Firefox
-(see [quality](../docs/quality.md#browser-engines)). If browser binaries are
-absent, install them through the locked local Playwright package:
+For web UI or standalone HTML changes, run the real-server smoke suite in both
+engines (see [quality](../docs/quality.md#browser-engines)). If browser binaries
+are absent, install them through the locked local Playwright package:
 
 ```sh
-npx --no-install playwright install chromium
+npx --no-install playwright install chromium firefox
 npm run test:smoke
+ARTIFREE_BROWSER=firefox npm run test:smoke
 ```
 
-To run Firefox locally, as a change to engine-specific APIs needs, install `firefox` the same way and set
-`ARTIFREE_BROWSER=firefox` (in PowerShell, `$env:ARTIFREE_BROWSER = 'firefox'`,
-then `Remove-Item Env:ARTIFREE_BROWSER` afterwards).
+In PowerShell, replace the last line with `$env:ARTIFREE_BROWSER = 'firefox'`
+followed by `npm run test:smoke`. Afterwards, use
+`Remove-Item Env:ARTIFREE_BROWSER` to return to the default engine.
 
 `npm run check` runs the Rust tests with cargo-nextest. Install the version named
 in `.config/nextest.toml` first, with `cargo install cargo-nextest --locked --version

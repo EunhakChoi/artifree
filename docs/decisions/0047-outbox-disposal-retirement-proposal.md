@@ -1,9 +1,10 @@
 # Outbox disposal and empty preparation-gate retirement
 
-> Browser engines: this record was written while Firefox was suspended in CI,
-> and its Firefox acceptances were first met in Chromium only. They were re-run
-> on 2026-11-11 (O08): the whole smoke suite passes in Firefox, which is back in
-> CI ([quality](../quality.md#browser-engines)).
+> Browser engines: Firefox was suspended in CI from 2026-11-08 to 2026-11-11.
+> A Firefox acceptance of this record that was met in Chromium only in that time
+> was re-run by O08: the whole smoke suite passes in Firefox, which is back in
+> CI ([quality](../quality.md#browser-engines)). An acceptance of a part that is
+> not implemented has run in neither engine.
 
 Status: **Accepted contract; partially implemented.** Acceptance took effect
 when this separate documentation-only approval change was reviewed and merged

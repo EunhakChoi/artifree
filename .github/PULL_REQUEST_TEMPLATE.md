@@ -23,7 +23,7 @@ assertion and restored baseline. Explain missing/inapplicable checks below. -->
 | `npm run check`                     |                    |
 | `npm run build`                     |                    |
 | Chromium smoke, for UI/HTML changes |                    |
-| Firefox smoke (CI, or local if run) |                    |
+| Firefox smoke, for UI/HTML changes  |                    |
 
 ## Limitations
 
