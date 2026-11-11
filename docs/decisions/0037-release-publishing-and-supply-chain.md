@@ -63,6 +63,13 @@ release has been verified. Those belong to the first release candidate (see
 
 ### 2. glibc floor
 
+> **Note of 2026-11-11 (R01ba, #181).** The server now starts a child
+> process ([0055](0055-operating-background-work.md)). Built on glibc 2.39 or
+> newer, the standard library's process spawning records a glibc 2.39
+> requirement, so `crates/artifree-server/build.rs` defines the two symbols
+> involved (`pidfd_spawnp`, `pidfd_getpid`) as absent and local at link time.
+> The floor, its check and the Debian 12 run below are unchanged.
+
 - **Policy:** the Linux x64 package supports glibc **2.34 or newer** on
   x86-64. The floor is the measured requirement of the binary (`objdump -T`
   showed 2.34 at O03a; the ELF reader below reports 2.34 for a release build made
