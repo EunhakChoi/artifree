@@ -205,7 +205,8 @@ export function followJob(
         .catch(rejectWith);
     };
 
-    // Whether the feed is connected. The poll runs exactly while it is not.
+    // Whether the feed has said `ready` on its current connection. The poll
+    // runs exactly while it has not.
     let connected = false;
     const armPoll = (): void => {
       if (settled) return;
@@ -219,6 +220,13 @@ export function followJob(
       // `ready` starts the feed and `reset` means changes may have been missed:
       // both call for a read. Only `change` names an artifact and a revision.
       if (event.type !== 'change') {
+        // The feed counts as connected from its `ready`, not from the accepted
+        // response: a proxy that holds the stream's first bytes must not stop
+        // the poll while nothing has been read.
+        if (event.type === 'ready') {
+          connected = true;
+          poll.cancel();
+        }
         readJob();
         return;
       }
@@ -240,10 +248,6 @@ export function followJob(
     const followOptions: FollowOptions = {
       signal: stop.signal,
       onEvent,
-      onConnect: () => {
-        connected = true;
-        poll.cancel();
-      },
       onDisconnect: () => {
         // A refused reconnect also reports a disconnect. Only the loss of a
         // connection starts the poll: arming it again on every refusal would

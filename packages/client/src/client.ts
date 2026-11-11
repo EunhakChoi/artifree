@@ -973,9 +973,9 @@ export class ArtifreeClient {
       onAbort = () => resolve(undefined);
       options.signal.addEventListener('abort', onAbort, { once: true });
     });
-    let module: typeof import('./follow-data.js') | undefined;
+    let module: typeof import('./followers.js') | undefined;
     try {
-      module = await Promise.race([import('./follow-data.js'), aborted]);
+      module = await Promise.race([import('./followers.js'), aborted]);
     } finally {
       options.signal.removeEventListener('abort', onAbort);
     }
@@ -1055,9 +1055,9 @@ export class ArtifreeClient {
       onAbort = () => resolve(undefined);
       signal.addEventListener('abort', onAbort, { once: true });
     });
-    let module: typeof import('./follow-job.js') | undefined;
+    let module: typeof import('./followers.js') | undefined;
     try {
-      module = await Promise.race([import('./follow-job.js'), aborted]);
+      module = await Promise.race([import('./followers.js'), aborted]);
     } finally {
       signal.removeEventListener('abort', onAbort);
     }

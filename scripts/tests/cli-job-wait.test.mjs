@@ -153,11 +153,14 @@ async function runJob(args, stub) {
 
 test('job show --wait prints only the ended job once the feed reports its change', async () => {
   const stub = await startStub({
+    // The first read is the plain one before the wait; the second follows
+    // `ready`; the third follows the change.
     replies: [
+      { status: 200, body: runningJob },
       { status: 200, body: runningJob },
       { status: 200, body: succeededJob },
     ],
-    changeAfterRead: 1,
+    changeAfterRead: 2,
   });
   try {
     const result = await runJob(['show', JOB_ID, '--wait'], stub);
@@ -165,10 +168,25 @@ test('job show --wait prints only the ended job once the feed reports its change
     assert.equal(result.stderr, '');
     assert.equal(result.stdout, `${JSON.stringify(succeededJob, null, 2)}\n`);
     assert.deepEqual(stub.requests, [
+      `GET /v1/jobs/${JOB_ID}`,
       'GET /v1/changes',
       `GET /v1/jobs/${JOB_ID}`,
       `GET /v1/jobs/${JOB_ID}`,
     ]);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('job show --wait prints a job that has already ended without opening the feed', async () => {
+  const stub = await startStub({
+    replies: [{ status: 200, body: succeededJob }],
+  });
+  try {
+    const result = await runJob(['show', JOB_ID, '--wait'], stub);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${JSON.stringify(succeededJob, null, 2)}\n`);
+    assert.deepEqual(stub.requests, [`GET /v1/jobs/${JOB_ID}`]);
   } finally {
     await stub.close();
   }
@@ -189,10 +207,8 @@ test('job show --wait exits with the API error when a job read answers 404', asy
     assert.equal(result.status, 1);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, 'error[not_found]: No such job.\n');
-    assert.deepEqual(stub.requests, [
-      'GET /v1/changes',
-      `GET /v1/jobs/${JOB_ID}`,
-    ]);
+    // The plain read fails before any wait begins: the feed is not opened.
+    assert.deepEqual(stub.requests, [`GET /v1/jobs/${JOB_ID}`]);
   } finally {
     await stub.close();
   }

@@ -369,7 +369,7 @@ next_run_at_ms, run, last_started_at_ms, last_ended_at_ms, last_outcome)`.
   one more pair for each shutdown that gives it back. The feed is not
   trimmed today, so it grows with the number of jobs; a retention rule for
   the feed is not decided here.
-- A client older than contract 0.26.0 reports `job_changed` as an unknown
+- A client older than contract 0.27.0 reports `job_changed` as an unknown
   kind and goes on, as it does for any kind it does not know.
 - `GET /v1/background` knows that a worker process exists, not that it
   works. A worker that hangs reads as `running` and its jobs wait for a

@@ -22,8 +22,11 @@ enqueue queues a verification job for one revision of an artifact: a worker
 re-reads every file of that revision and compares each SHA-256 digest and size
 with the stored listing. It only queues the job. The server's own worker runs it
 (artifree-server serve starts one unless started with --no-worker or as a
-one-shot session). show --wait prints the job once it has ended; show without
---wait prints it as it is now. A job that succeeded with verdict mismatch found
+one-shot session). show --wait prints the job once it has ended, however it
+ended: the exit status is 0 for a failed or cancelled job too, so read its
+state. It waits as long as the job does, also for a job no worker runs, and
+through a connection that is lost meanwhile; show without --wait prints the
+job as it is now. A job that succeeded with verdict mismatch found
 a difference; the job itself worked.
 The job lists at most 50 mismatched package paths and the full mismatch_count.
 Jobs run trusted verification code only; they do not run the artifact's code and
@@ -155,11 +158,18 @@ async function show(args: string[]): Promise<void> {
   });
   const id = one(positionals, 'job-id');
   const client = await connect(values);
+  // One plain read first, also with --wait: a server that cannot be reached,
+  // or a job that does not exist, fails at once instead of being waited for.
+  const job = await client.getJob(id);
+  const ended =
+    job.state === 'succeeded' ||
+    job.state === 'failed' ||
+    job.state === 'cancelled';
   // Ctrl+C ends the process, so the wait never needs to be aborted here.
   print(
-    values.wait === true
+    values.wait === true && !ended
       ? await client.followJob(id, { signal: new AbortController().signal })
-      : await client.getJob(id),
+      : job,
   );
 }
 

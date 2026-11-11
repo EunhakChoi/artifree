@@ -238,6 +238,41 @@ test('while the feed is connected and silent for 60 seconds, the job is read onc
   await rejection(done);
 });
 
+// Fails when the poll stops at the accepted response instead of at `ready`: a
+// proxy that holds the stream's first bytes would then leave the job unread.
+test('a feed that is accepted but never says ready still gets the job read at 15 and at 30 seconds', async () => {
+  const clock = new FakeClock();
+  const controller = new AbortController();
+  const counts = { opens: 0 };
+  const { at, read } = scriptedReads(clock, [jobIn('running')]);
+  // An accepted stream that yields nothing until its signal aborts.
+  const mute = async (_after, signal) => {
+    counts.opens += 1;
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () =>
+          new Promise((resolve) => {
+            signal.addEventListener(
+              'abort',
+              () => resolve({ done: true, value: undefined }),
+              { once: true },
+            );
+          }),
+      }),
+    };
+  };
+  const done = startFollowing({ clock, open: mute, read }, controller.signal);
+  await clock.advance(14_999);
+  assert.deepEqual(at, [], 'no read before 15 seconds');
+  await clock.advance(1);
+  assert.deepEqual(at, [15_000], 'a read at 15 seconds without ready');
+  await clock.advance(15_000);
+  assert.deepEqual(at, [15_000, 30_000], 'and again at 30 seconds');
+  assert.equal(counts.opens, 1, 'the feed stayed open');
+  controller.abort();
+  await rejection(done);
+});
+
 for (const [label, failure] of RETRYABLE_FAILURES) {
   // Fails when a retryable failure is not retried, or is retried at once.
   test(`a read that fails with ${label} is read again 15 seconds later`, async () => {
