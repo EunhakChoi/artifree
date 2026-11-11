@@ -1,4 +1,5 @@
 import type { RuntimeView } from '@artifree/contracts';
+import type { ADOPTION_REASONS } from './data-hint';
 import { FRAME_PENDING_CAP } from './frame-budget';
 import { ASSET_CALLS } from './frame-calls/assets';
 import {
@@ -19,7 +20,7 @@ import type { Offer, Outcome } from './offer-desk';
 export type { FailureCode, FrameReply } from './frame-calls/call';
 
 /** Why the workspace adopts a frame's view (decision 0054, rule 10). */
-export type AdoptionReason = 'permissions' | 'saved' | 'head' | 'lease';
+export type AdoptionReason = (typeof ADOPTION_REASONS)[number];
 
 /**
  * How long a pause waits for a call on its way that is not a write (decision
@@ -302,6 +303,11 @@ export class FrameRpc {
     return this.#deadline;
   }
 
+  /** Whether every call ended: by `close`, `fail`, or a port that failed. */
+  get closed(): boolean {
+    return this.#closed;
+  }
+
   /** Handles one message from the frame. It never throws. */
   handle(message: unknown): void {
     try {
@@ -366,6 +372,12 @@ export class FrameRpc {
     for (const { id, entry } of held)
       if (this.#pending.get(id) === entry)
         this.#abandon(id, entry, 'unavailable');
+    // A prompt is not kept either (rule 13 keeps one only through a lease
+    // adoption), and an answer that waited for the pause to end is let go:
+    // its call was just abandoned.
+    for (const [id, entry] of Array.from(this.#pending))
+      if (entry.prompting) this.#abandon(id, entry, 'unavailable');
+    this.#wakeOpened();
   }
 
   /**
@@ -390,7 +402,10 @@ export class FrameRpc {
    */
   fail(): void {
     if (this.#closed) return;
-    for (const id of this.#pending.keys()) this.#fail(id, 'expired');
+    // After the lease the frame is told nothing, as everywhere else.
+    if (this.#deps.now() < this.#deadline)
+      for (const id of Array.from(this.#pending.keys()))
+        this.#fail(id, 'expired');
     this.close();
   }
 
@@ -411,12 +426,17 @@ export class FrameRpc {
     if (!('serve' in parsed)) {
       this.#pending.get(parsed.id)?.controller.abort();
       this.#pending.delete(parsed.id);
+      // A held call that is cancelled is let go with what it carries, so the
+      // pending cap bounds what a pause retains.
+      this.#held = this.#held.filter((held) => held.id !== parsed.id);
       return;
     }
     const { call } = parsed;
     // After the lease the frame is told nothing: it keeps the same deadline
-    // and refuses on its own, and a late reply must not reach it.
-    if (this.#deps.now() >= this.#deadline) return;
+    // and refuses on its own, and a late reply must not reach it. During a
+    // pause the call is held all the same: the adoption on its way may move
+    // the lease, and `#release` judges the call against the lease it finds.
+    if (this.#mode !== 'paused' && this.#deps.now() >= this.#deadline) return;
     if (!this.#deps.take()) return this.#fail(call.id, 'rate_limited');
     // The grant's outcome is unknown (decision 0054, rule 8): answered at
     // once, never held.
@@ -497,7 +517,9 @@ export class FrameRpc {
     signal: AbortSignal,
   ): Promise<Outcome> {
     if (this.#mode !== 'open' && this.#reason !== 'lease') {
-      this.#abandon(id, entry, 'unavailable');
+      // A call that was cancelled or abandoned meanwhile was answered already.
+      if (!signal.aborted && this.#pending.get(id) === entry)
+        this.#abandon(id, entry, 'unavailable');
       return 'withdrawn';
     }
     entry.prompting = true;
@@ -549,8 +571,13 @@ export class FrameRpc {
   #abandon(id: number, entry: Pending, code: FailureCode): void {
     entry.controller.abort();
     if (this.#pending.get(id) === entry) this.#pending.delete(id);
-    this.#fail(id, code);
-    this.#wake(entry);
+    try {
+      // After the lease the frame is told nothing.
+      if (this.#deps.now() < this.#deadline) this.#fail(id, code);
+    } finally {
+      // A port that cannot send must not leave a pause waiting.
+      this.#wake(entry);
+    }
   }
 
   /**

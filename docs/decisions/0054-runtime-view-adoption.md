@@ -279,11 +279,19 @@ Notes from R10b, which change no rule:
   failure as separate operations. One adoption runs at a time, and none for
   a frame that has ended. The 10 second bound and the repeat of a `503` are
   the workspace's (R10c).
-- A held call takes its frame budget token when it is received. A call held
-  past the end of the lease is dropped as a call received after it is.
+- A held call is counted against the frame budgets when it is received, as
+  every call is (0032); nothing is charged again when it is sent. A call
+  held past the end of the lease it is released under is dropped, as a call
+  received after the lease is.
 - The lease the frame is told is rounded down from the workspace's own
-  deadline. A change hint waiting in its 250 ms window at an adoption is not
-  carried over; the hint may be missed by contract (0053, rule 16).
+  deadline.
+- One change hint sender serves the frame across adoptions, so a version
+  waiting in its 250 ms window is not lost and no version is told twice. It
+  is sent only if the generation current at that moment holds `data.read`
+  and pins the head (0053, rule 17; rule 13 above).
+- The SDK's own timeout of a call keeps running while the call is held. A
+  call held longer than that (10 seconds for a read) is reported
+  `unavailable` by the SDK and is not sent when the pause ends.
 
 ## Alternatives considered
 

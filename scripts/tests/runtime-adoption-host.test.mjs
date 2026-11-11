@@ -156,15 +156,20 @@ function countedHub() {
   };
 }
 
-/** A runtime view of ARTIFACT as the server issues it. */
-function runtimeView({ generation, granted, leaseMs = LEASE_MS }) {
+/** A runtime view of ARTIFACT as the server issues it, pinned to `head`. */
+function runtimeView({
+  generation,
+  granted,
+  leaseMs = LEASE_MS,
+  head = REVISION,
+}) {
   return {
     artifact_id: ARTIFACT,
     view_id: VIEW_ID,
     generation,
     granted,
-    head_revision: REVISION,
-    revision: REVISION,
+    head_revision: head,
+    revision: head,
     lease_ms: leaseMs,
     enabled: true,
     declared: ['data.read', 'data.write'],
@@ -346,7 +351,7 @@ const HINT_CASES = [
   {
     name: 'a view without data.read is sent no hint for the same change',
     granted: [],
-    listeners: 0,
+    listeners: 1,
     hints: [],
   },
 ];
@@ -366,7 +371,7 @@ for (const hintCase of HINT_CASES) {
     assert.equal(
       hub.listenerCount(ARTIFACT),
       hintCase.listeners,
-      'the old view has left the hub, and only the new view can listen',
+      'the frame keeps one hub listener for its life, whatever the new view holds',
     );
     const before = sent.length;
     hub.follow(dataChanged(5, REVISION));
@@ -380,6 +385,103 @@ for (const hintCase of HINT_CASES) {
     );
   });
 }
+
+/** When an adoption comes, in the cases below, into a change's window. */
+const ADOPT_AT_MS = 100;
+/**
+ * A change waiting in its window when an adoption starts, and the view the
+ * adoption brings: its grant and its head. The hint is sent only if the new
+ * view holds data.read and pins the change's head (decision 0054, rule 13).
+ */
+const WAITING_CASES = [
+  {
+    name: 'a new view that holds data.read is sent the waiting version once',
+    granted: ['data.read'],
+    head: REVISION,
+    hints: [changed(5)],
+  },
+  {
+    name: 'a new view without data.read is sent no hint for the waiting version',
+    granted: [],
+    head: REVISION,
+    hints: [],
+  },
+  {
+    name: 'a new view with data.read that pins another head is sent no hint for the waiting version',
+    granted: ['data.read'],
+    head: REVISION + 1,
+    hints: [],
+  },
+];
+for (const waitingCase of WAITING_CASES) {
+  test(`an adoption ${ADOPT_AT_MS} ms into the window of a change: ${waitingCase.name}`, async () => {
+    const { clock, client, frame, hub, sent } = connect();
+    hub.follow(dataChanged(5, REVISION));
+    clock.advance(ADOPT_AT_MS);
+    const adopting = frame.adopt({
+      reason: 'head',
+      revision: waitingCase.head,
+      generation: 2,
+    });
+    await until(() => client.adoptions.length === 1);
+    client.adoptions[0].resolve(
+      runtimeView({
+        generation: 2,
+        granted: waitingCase.granted,
+        head: waitingCase.head,
+      }),
+    );
+    await adopting;
+    const before = sent.length;
+    clock.advance(WINDOW_MS - ADOPT_AT_MS - 1);
+    assert.deepEqual(sent.slice(before), [], 'no hint is sent before 250 ms');
+    clock.advance(1);
+    assert.deepEqual(
+      sent.slice(before),
+      waitingCase.hints,
+      'the waiting version is sent at 250 ms only if the new view allows it',
+    );
+    clock.advance(WINDOW_MS);
+    assert.deepEqual(
+      sent.slice(before),
+      waitingCase.hints,
+      'the waiting version is not sent again',
+    );
+  });
+}
+
+test('a version already told before an adoption is not told again after it, and a higher one is', async () => {
+  const { clock, client, frame, hub, sent } = connect();
+  hub.follow(dataChanged(5, REVISION));
+  clock.advance(WINDOW_MS);
+  assert.deepEqual(sent, [changed(5)], 'version 5 is told before the adoption');
+  const adopting = frame.adopt({
+    reason: 'head',
+    revision: REVISION,
+    generation: 2,
+  });
+  await until(() => client.adoptions.length === 1);
+  client.adoptions[0].resolve(
+    runtimeView({ generation: 2, granted: ['data.read'] }),
+  );
+  await adopting;
+  const before = sent.length;
+  // The hub replays version 5 to the frame, which is now bound to a new view.
+  hub.follow(dataChanged(5, REVISION));
+  clock.advance(WINDOW_MS);
+  assert.deepEqual(
+    sent.slice(before),
+    [],
+    'the replayed version 5 is not told again',
+  );
+  hub.follow(dataChanged(6, REVISION));
+  clock.advance(WINDOW_MS);
+  assert.deepEqual(
+    sent.slice(before),
+    [changed(6)],
+    'the higher version 6 is told once',
+  );
+});
 
 test('a download prompt stays open through a lease adoption and downloads under the new generation', async () => {
   const { clock, client, desk, frame, saved, sent } = connect();
@@ -628,3 +730,111 @@ for (const end of ['close', 'fail']) {
     await rejection;
   });
 }
+
+test('an adoption that waits for a write which close() interrupts rejects without asking the server', async () => {
+  const { client, frame, sent } = connect();
+  const write = deferred();
+  client.runtimeCall = () => {
+    client.calls.push({ name: 'runtimeCall' });
+    return write.promise;
+  };
+  frame.handle(dataSet(1));
+  await until(() => client.calls.some((call) => call.name === 'runtimeCall'));
+  const adopting = frame.adopt({
+    reason: 'head',
+    revision: REVISION,
+    generation: 2,
+  });
+  // The rejection is attached before the count is read, as in the cases above.
+  const rejection = assert.rejects(adopting, {
+    name: 'Error',
+    message: 'The frame has ended.',
+  });
+  frame.close();
+  // The write ends only now: the adoption waits for it, then finds the frame
+  // ended.
+  write.resolve({
+    artifact_id: ARTIFACT,
+    path: PATH,
+    data_version: 2,
+    changed: true,
+    replayed: false,
+  });
+  await flush();
+  assert.equal(
+    adoptionRequests(client),
+    0,
+    'the server is not asked once the frame has ended',
+  );
+  await rejection;
+  assert.deepEqual(sent, [], 'the frame is told nothing');
+});
+
+test('resume() and refuse() throw while an adoption is on its way', async () => {
+  const { client, frame, sent } = connect();
+  const adopting = frame.adopt({
+    reason: 'head',
+    revision: REVISION,
+    generation: 2,
+  });
+  await until(() => client.adoptions.length === 1);
+  assert.throws(() => frame.resume(), {
+    name: 'Error',
+    message: 'An adoption is on its way.',
+  });
+  assert.throws(() => frame.refuse(), {
+    name: 'Error',
+    message: 'An adoption is on its way.',
+  });
+  client.adoptions[0].resolve(
+    runtimeView({ generation: 2, granted: ['data.read'] }),
+  );
+  await adopting;
+  assert.deepEqual(
+    sent,
+    [adopted('head', LEASE_MS)],
+    'the adoption completes as if the two calls had not been made',
+  );
+});
+
+test('a pause asked for during an adoption resolves after it and holds later calls under the new generation', async () => {
+  const { client, frame, sent } = connect();
+  const adopting = frame.adopt({
+    reason: 'head',
+    revision: REVISION,
+    generation: 2,
+  });
+  await until(() => client.adoptions.length === 1);
+  let paused = false;
+  const pausing = frame.pause('lease').then(() => {
+    paused = true;
+  });
+  await flush();
+  assert.equal(paused, false, 'the pause waits for the adoption on its way');
+  client.adoptions[0].resolve(
+    runtimeView({ generation: 2, granted: ['data.read'] }),
+  );
+  await adopting;
+  await pausing;
+  frame.handle({ type: 'metadata', id: 7 });
+  await flush();
+  assert.deepEqual(
+    client.calls.filter((call) => call.name === 'runtimeMetadata'),
+    [],
+    'a call received after the pause is held, not served',
+  );
+  frame.resume();
+  await until(() => sent.length === 2);
+  assert.deepEqual(
+    client.calls
+      .filter((call) => call.name === 'runtimeMetadata')
+      .map((call) => call.view.generation),
+    [2],
+    'the held call is served under generation 2 once the pause ends',
+  );
+  assert.deepEqual(
+    sent,
+    [adopted('head', LEASE_MS), { id: 7, ok: true, metadata: METADATA_REPLY }],
+    'the frame is told of the adoption, then receives the held call answer',
+  );
+});

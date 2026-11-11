@@ -117,6 +117,48 @@ export function followDataHints(options: {
   };
 }
 
+/**
+ * The change hint of a frame whose view can be adopted: one sender for the
+ * frame's life, so "only versions higher than the last one sent" (decision
+ * 0053, rule 17) holds across an adoption and a version waiting in its window
+ * is not lost. Whether a hint may go out is judged against the view the frame
+ * is bound to at that moment, when the change arrives and again when it is
+ * sent (decision 0054, rule 13).
+ */
+function followLiveHints(options: {
+  readonly current: () => { view: RuntimeView; deadline: number };
+  readonly artifactId: string;
+  readonly dataChanges: DataChanges;
+  readonly send: (message: Record<string, unknown>) => void;
+}): () => void {
+  const { current, artifactId, dataChanges, send } = options;
+  const allowed = (): RuntimeView | undefined => {
+    const { view, deadline } = current();
+    return view.granted.includes('data.read') && performance.now() < deadline
+      ? view
+      : undefined;
+  };
+  // The head the waiting version was offered at: a view that pins another
+  // head by the time it is sent gets no hint (decision 0053, rule 17).
+  let offeredAt: number | undefined;
+  const hint = createDataHint((message) => {
+    const view = allowed();
+    if (view !== undefined && view.head_revision === offeredAt) send(message);
+  });
+  const unsubscribe = dataChanges.subscribe(
+    artifactId,
+    (dataVersion, revision) => {
+      if (allowed()?.head_revision !== revision) return;
+      offeredAt = revision;
+      hint.offer(dataVersion);
+    },
+  );
+  return () => {
+    unsubscribe();
+    hint.close();
+  };
+}
+
 /** The longest delay a browser timer accepts, in milliseconds. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -145,7 +187,7 @@ export interface ConnectedFrame {
   readonly pause: (reason: AdoptionReason) => Promise<void>;
   /**
    * Ends a pause without an adoption: held calls go out under the current
-   * view (rule 8).
+   * view (rule 8). Throws while an adoption is on its way.
    */
   readonly resume: () => void;
   /**
@@ -203,22 +245,22 @@ export function connectFrame(options: {
     deadline: options.deadline,
     send,
   });
-  const follow = (view: RuntimeView, deadline: number): (() => void) =>
-    followDataHints({
-      view,
-      dataChanges,
-      deadline,
-      send: (message) => {
-        send(message, []);
-      },
-    });
-  let stopHints = follow(options.view, options.deadline);
+  const stopHints = followLiveHints({
+    current: () => ({ view: rpc.view, deadline: rpc.deadline }),
+    artifactId: options.view.artifact_id,
+    dataChanges,
+    send: (message) => {
+      send(message, []);
+    },
+  });
   let ended = false;
   const end = (): void => {
     ended = true;
     stopHints();
   };
   let adopting = false;
+  /** Settles when the adoption on its way ends, however it ends. */
+  let adoption: Promise<void> = Promise.resolve();
   const adoptOnce = async ({
     reason,
     revision,
@@ -231,6 +273,8 @@ export function connectFrame(options: {
     readonly signal?: AbortSignal | undefined;
   }): Promise<AdoptedView> => {
     await rpc.pause(reason);
+    // The frame may have ended while its calls were waited for.
+    if (ended || rpc.closed) throw new Error('The frame has ended.');
     const old = rpc.view;
     // The server starts the lease after the last dispatch, so measuring from
     // it never runs past the server's end.
@@ -251,19 +295,17 @@ export function connectFrame(options: {
     const deadline = dispatchedAt + view.lease_ms;
     // The frame was ended meanwhile: nothing is sent, and the caller ends
     // the new generation.
-    if (ended) return { view, deadline };
+    if (ended || rpc.closed) return { view, deadline };
     // Rounded down. The frame starts its clock when the message arrives, so
     // its deadline can run past this one by the message's transit time.
     const leaseMs = Math.min(
       MAX_TIMER_MS,
       Math.max(1, Math.floor(deadline - performance.now())),
     );
-    stopHints();
     // Sent before any held call is answered, so the frame's deadline moves
     // first.
     send({ type: 'event', event: VIEW_ADOPTED_EVENT, reason, leaseMs }, []);
     rpc.adopt(view, deadline);
-    stopHints = follow(view, deadline);
     return { view, deadline };
   };
   return {
@@ -271,11 +313,18 @@ export function connectFrame(options: {
       rpc.handle(message);
     },
     view: () => rpc.view,
-    pause: (reason) => rpc.pause(reason),
+    pause: async (reason) => {
+      // A pause asked for while an adoption is on its way begins after it,
+      // under the generation it made: the adoption would otherwise end it.
+      if (adopting) await adoption;
+      await rpc.pause(reason);
+    },
     resume: () => {
+      if (adopting) throw new Error('An adoption is on its way.');
       rpc.resume();
     },
     refuse: () => {
+      if (adopting) throw new Error('An adoption is on its way.');
       rpc.refuse();
     },
     adopt: async (request) => {
@@ -284,8 +333,13 @@ export function connectFrame(options: {
       if (ended) throw new Error('The frame has ended.');
       if (adopting) throw new Error('An adoption is already on its way.');
       adopting = true;
+      const attempt = adoptOnce(request);
+      adoption = attempt.then(
+        () => undefined,
+        () => undefined,
+      );
       try {
-        return await adoptOnce(request);
+        return await attempt;
       } finally {
         adopting = false;
       }

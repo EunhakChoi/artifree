@@ -19,6 +19,17 @@ export const FRAME_EVENTS: readonly string[] = Object.freeze([
   VIEW_ADOPTED_EVENT,
 ]);
 
+/**
+ * Why a view was adopted (decision 0054, rule 10). The SDK accepts exactly
+ * these; `runtime-bridge-layers.test.mjs` pairs the two lists.
+ */
+export const ADOPTION_REASONS = Object.freeze([
+  'permissions',
+  'saved',
+  'head',
+  'lease',
+] as const);
+
 /** The change hints of one view's connection. */
 export interface DataHint {
   /** Offers the version a data write left the space at. */

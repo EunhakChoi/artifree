@@ -11,22 +11,33 @@ import { build } from 'esbuild';
 // frame through handle(), as the port handler gives them. The client is a fake
 // that answers as the server does, and an answer can be held back, so that a
 // call stays on its way until the test opens the gate.
-const bundle = await build({
-  entryPoints: [
-    fileURLToPath(
-      new URL('../../apps/web/src/artifacts/runtime-host.ts', import.meta.url),
-    ),
-  ],
-  bundle: true,
-  format: 'esm',
-  platform: 'neutral',
-  // lucide-react has no exports map, so its module field is read as the
-  // browser build reads it. The neutral platform reads no field unless named.
-  mainFields: ['module', 'main'],
-  write: false,
-});
-const { connectFrame, createDesk } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
+/**
+ * A module of the web app, bundled as it ships and loaded. lucide-react has no
+ * exports map, so its module field is read as the browser build reads it. The
+ * neutral platform reads no field unless named.
+ */
+async function loadWebModule(relativePath) {
+  const bundle = await build({
+    entryPoints: [fileURLToPath(new URL(relativePath, import.meta.url))],
+    bundle: true,
+    format: 'esm',
+    platform: 'neutral',
+    mainFields: ['module', 'main'],
+    write: false,
+  });
+  return import(
+    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
+  );
+}
+
+const { connectFrame, createDesk } = await loadWebModule(
+  '../../apps/web/src/artifacts/runtime-host.ts',
+);
+// The desk of a download prompt. createDesk() reads window.setTimeout, which
+// Node does not have, so a case that opens a prompt builds the desk itself on
+// the clock the waits read.
+const { OfferDesk } = await loadWebModule(
+  '../../apps/web/src/artifacts/offer-desk.ts',
 );
 
 const ARTIFACT = `art_${'0'.repeat(32)}`;
@@ -63,6 +74,23 @@ const VIEW = {
 };
 /** The view the server answers an adoption with: the next generation. */
 const ADOPTED_VIEW = { ...VIEW, generation: 2, lifecycle: 'adopt' };
+/** The asset a download call names: 64 lowercase hexadecimal digits. */
+const ASSET = 'b'.repeat(64);
+/** The offer the server makes for ASSET, which the desk shows the user. */
+const DOWNLOAD_OFFER = {
+  assetId: ASSET,
+  fileName: 'photo.txt',
+  size: 5,
+  sha256: 'd'.repeat(64),
+};
+/** The desk's clock: the clock the waits read, and the global timer. */
+const DESK_CLOCK = {
+  now: () => performance.now(),
+  after: (ms, run) => {
+    const timer = setTimeout(run, ms);
+    return () => clearTimeout(timer);
+  },
+};
 
 /** What the server answers a read of PATH that holds a value. */
 const FOUND = {
@@ -110,6 +138,19 @@ const UPLOAD_RECEIPT = {
 const metadataCall = (id) => ({ type: 'metadata', id });
 /** The frame's read of PATH under call id `id`. */
 const dataGetCall = (id) => ({ type: 'data.get', id, path: PATH });
+/** The frame's download of ASSET under call id `id`. */
+const downloadCall = (id) => ({
+  type: 'assets.download',
+  id,
+  assetId: ASSET,
+});
+/** The frame's cancel of the call with id `id`. */
+const cancelCall = (id) => ({ type: 'cancel', id });
+/** The reply that answers the call with id `id` unavailable. */
+const unavailableReply = (id) => ({
+  message: { id, ok: false, code: 'unavailable' },
+  transfer: [],
+});
 /** The reply to a metadata call the server answered with METADATA. */
 const metadataReply = (id) => ({
   id,
@@ -320,6 +361,10 @@ function fakeClient({ calls, adoptions, gate, adoption }) {
       answer('writeSource', view, SOURCE_RECEIPT),
     uploadRuntimeAsset: async (_frame, view) =>
       answer('uploadRuntimeAsset', view, UPLOAD_RECEIPT),
+    offerRuntimeAssetDownload: async (_frame, view) =>
+      answer('offerRuntimeAssetDownload', view, DOWNLOAD_OFFER),
+    fetchRuntimeAssetDownload: async (_frame, view) =>
+      answer('fetchRuntimeAssetDownload', view, new Uint8Array(5)),
   };
   return {
     runtimeCall: (view, run) => run(source, FRAME),
@@ -344,10 +389,11 @@ function fakeClient({ calls, adoptions, gate, adoption }) {
 
 /**
  * A connected frame, connected as runtime-host.ts connects one, on the fake
- * client and a clock at zero. `sent` holds what the frame was told, `calls`
- * what reached the client, and `adoptions` the adoption requests made of it.
+ * client, a desk and a clock at zero. `sent` holds what the frame was told,
+ * `calls` what reached the client, and `adoptions` the adoption requests made
+ * of it.
  */
-function connect({ gate, adoption = ADOPTED_VIEW } = {}) {
+function connect({ gate, adoption = ADOPTED_VIEW, desk = createDesk() } = {}) {
   const clock = { ms: 0 };
   installClock(clock);
   mock.timers.enable({ apis: ['setTimeout'] });
@@ -357,7 +403,7 @@ function connect({ gate, adoption = ADOPTED_VIEW } = {}) {
   const frame = connectFrame({
     client: fakeClient({ calls, adoptions, gate, adoption }),
     view: VIEW,
-    desk: createDesk(),
+    desk,
     dataChanges: { subscribe: () => () => undefined },
     deadline: clock.ms + LEASE_MS,
     send: (message, transfer) => {
@@ -577,4 +623,154 @@ test('a failed adoption answers the held calls expired, serves none, and ignores
   await settle();
   assert.equal(sent.length, 1, 'a call after the failure is ignored');
   assert.deepEqual(calls, [], 'no client is called after the failure');
+});
+
+test('a cancel of a held call keeps the call from being served when the pause ends, and frees its id', async () => {
+  const { frame, sent, calls } = connect();
+  await pauseIdle(frame, 'permissions');
+  frame.handle(metadataCall(ID));
+  frame.handle(cancelCall(ID));
+  frame.resume();
+  await settle();
+  assert.deepEqual(
+    calls,
+    [],
+    'the cancelled call reaches no client when the pause ends',
+  );
+  assert.deepEqual(sent, [], 'the cancelled call is answered nothing');
+
+  frame.handle(metadataCall(ID));
+  await until(
+    () => sent.length === 1,
+    'the id of the cancelled call was not free to use again',
+  );
+  assert.deepEqual(
+    calls,
+    [{ name: 'runtimeMetadata', generation: 1 }],
+    'only the new call reaches the client',
+  );
+  assert.deepEqual(sent, [{ message: metadataReply(ID), transfer: [] }]);
+});
+
+test('a call that arrives after the lease ended is held through a pause, then served when an adoption moves the lease', async () => {
+  const { frame, sent, calls, clock } = connect();
+  await pauseIdle(frame, 'permissions');
+  advance(clock, LEASE_MS);
+  frame.handle(metadataCall(ID));
+  await settle();
+  assert.deepEqual(calls, [], 'the late call reaches no client while paused');
+  assert.deepEqual(sent, [], 'the late call is not answered while paused');
+
+  const adopting = track(
+    frame.adopt({ reason: 'permissions', revision: 1, generation: 2 }),
+  );
+  await until(() => adopting.done, 'the adoption did not settle');
+  await settle();
+  assert.equal(adopting.error, undefined, 'the adoption succeeds');
+  assert.deepEqual(
+    calls,
+    [{ name: 'runtimeMetadata', generation: 2 }],
+    'the held call goes out under generation 2',
+  );
+  assert.deepEqual(
+    sent,
+    [
+      { message: ADOPTED_EVENT, transfer: [] },
+      { message: metadataReply(ID), transfer: [] },
+    ],
+    'the frame is told of the adoption, then answered the held call',
+  );
+});
+
+test('refuse withdraws an open download prompt: the call is answered unavailable and its bytes are not fetched', async () => {
+  const desk = new OfferDesk(DESK_CLOCK);
+  const { frame, sent, calls } = connect({ desk });
+  frame.handle(downloadCall(ID));
+  await until(
+    () => desk.snapshot().offer !== undefined,
+    'the download prompt did not open',
+  );
+  assert.deepEqual(sent, [], 'an open prompt is answered nothing yet');
+
+  frame.refuse();
+  await settle();
+  assert.deepEqual(
+    sent,
+    [unavailableReply(ID)],
+    'refuse answers the prompted call unavailable',
+  );
+  assert.deepEqual(
+    calls,
+    [{ name: 'offerRuntimeAssetDownload', generation: 1 }],
+    'the bytes are never fetched',
+  );
+});
+
+test('past the lease an abandoned call and fail() send the frame nothing', async () => {
+  const gate = answerGate();
+  const { frame, sent, calls, clock } = connect({ gate });
+  frame.handle(metadataCall(ID));
+  // A write is waited for until its request ends, so it is still pending
+  // when fail() is called.
+  frame.handle({ ...WRITES[0].call(), id: ID + 1 });
+  await until(() => calls.length === 2, 'the calls never reached the client');
+  const paused = track(frame.pause('permissions'));
+
+  // The clock reaches the lease's end before the read's 5,000 ms wait ends,
+  // so the read is abandoned after the lease.
+  advance(clock, LEASE_MS);
+  await settle();
+  assert.equal(
+    paused.done,
+    false,
+    'the pause still waits for the write on its way',
+  );
+  assert.deepEqual(sent, [], 'the abandoned read is answered nothing');
+
+  frame.fail();
+  await settle();
+  assert.deepEqual(
+    sent,
+    [],
+    'fail() answers the pending write nothing after the lease',
+  );
+});
+
+test('a download the frame cancels after a pause abandoned it is not answered unavailable a second time', async () => {
+  const gate = answerGate();
+  const desk = new OfferDesk(DESK_CLOCK);
+  const { frame, sent, calls, clock } = connect({ gate, desk });
+  frame.handle(downloadCall(ID));
+  await until(
+    () => calls.length === 1,
+    'the download never reached the client',
+  );
+  const paused = track(frame.pause('permissions'));
+
+  advance(clock, 5_000);
+  await settle();
+  assert.equal(
+    paused.done,
+    true,
+    'the pause resolves once the call is abandoned at 5,000 ms',
+  );
+  assert.deepEqual(
+    sent,
+    [unavailableReply(ID)],
+    'the call on its way is answered unavailable once',
+  );
+
+  frame.handle(cancelCall(ID));
+  gate.open(DOWNLOAD_OFFER);
+  await settle();
+  assert.deepEqual(
+    sent,
+    [unavailableReply(ID)],
+    'the cancelled call is not answered again when its offer arrives',
+  );
+  assert.deepEqual(
+    calls,
+    [{ name: 'offerRuntimeAssetDownload', generation: 1 }],
+    'the bytes are never asked for',
+  );
 });

@@ -101,7 +101,7 @@ const hints = await build({
   platform: 'neutral',
   write: false,
 });
-const { FRAME_EVENTS, createDataHintSender } = await import(
+const { ADOPTION_REASONS, FRAME_EVENTS, createDataHintSender } = await import(
   `data:text/javascript;base64,${Buffer.from(hints.outputFiles[0].text).toString('base64')}`
 );
 
@@ -133,6 +133,28 @@ test('Each event the host can send is one the SDK handles, and the reverse', () 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, 'event');
   assert.deepEqual(absentFrom([sent[0].event], FRAME_EVENTS), []);
+});
+
+// The reasons of the SDK's ADOPTION_REASONS list: the strings in the array
+// literal that adoptionReason() checks a view.adopted reason against.
+function sdkAdoptionReasons() {
+  const start = bootstrap.indexOf(
+    'const ADOPTION_REASONS: readonly string[] = [',
+  );
+  assert.notEqual(start, -1, 'ADOPTION_REASONS is in bootstrap.ts');
+  const end = bootstrap.indexOf('];', start);
+  assert.notEqual(end, -1, 'ADOPTION_REASONS ends in bootstrap.ts');
+  const list = bootstrap.slice(start, end);
+  return [...list.matchAll(/'([a-z]+)'/g)].map(([, reason]) => reason);
+}
+
+test('Each adoption reason the host can send is one the SDK accepts, and the reverse', () => {
+  const accepted = sdkAdoptionReasons();
+  assert.deepEqual(absentFrom(ADOPTION_REASONS, accepted), []);
+  assert.deepEqual(absentFrom(accepted, ADOPTION_REASONS), []);
+  // Four in R10b: permissions, saved, head and lease (decision 0054, rule 10).
+  // The count keeps two empty lists from agreeing.
+  assert.equal(ADOPTION_REASONS.length, 4);
 });
 
 const policy = await readSource(
