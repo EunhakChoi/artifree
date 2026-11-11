@@ -62,6 +62,7 @@ const view = {
   revision: 3,
   head_revision: 3,
   sdk: 'artifree.app.v1',
+  lifecycle: 'restart',
   declared: ['assets.download'],
   supported: ['assets.download'],
   granted: ['assets.download'],

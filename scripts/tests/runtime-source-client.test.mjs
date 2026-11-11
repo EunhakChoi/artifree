@@ -36,6 +36,7 @@ const view = {
   revision: 3,
   head_revision: 3,
   sdk: 'artifree.app.v1',
+  lifecycle: 'restart',
   declared: ['source.read', 'source.download'],
   supported: ['metadata.read', 'source.download', 'source.read'],
   granted: ['source.read', 'source.download'],

@@ -48,6 +48,7 @@ const view = {
   revision: 3,
   head_revision: 3,
   sdk: 'artifree.app.v1',
+  lifecycle: 'restart',
   declared: ['data.read', 'data.write'],
   supported: ['data.read', 'data.write'],
   granted: ['data.read', 'data.write'],

@@ -470,6 +470,19 @@ pub(crate) async fn write(
     // The commit is durable whatever happens next: tell the change feed.
     if saved.receipt.delivery == Delivery::Committed {
         state.feed().committed();
+        // The view may later be adopted onto the revision it wrote (decision
+        // 0054, rule 4); a view that was replaced meanwhile records nothing.
+        state.previews().record_written(
+            &ViewKey {
+                actor: call.actor,
+                artifact: &granted.artifact,
+                revision: granted.revision,
+                view_id: call.view,
+                generation: call.generation,
+                initialization: call.initialization,
+            },
+            saved.receipt.revision.revision,
+        );
     }
     let receipt = saved.checked.map_err(|_mismatch| {
         // Never reached by a correct store; the revision exists, so say so

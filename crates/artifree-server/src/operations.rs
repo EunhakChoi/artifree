@@ -16,7 +16,7 @@ use artifree_contracts::api::{
     ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
     PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeLifecycle, RuntimeMetadata, RuntimeView,
     SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
     SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
@@ -62,7 +62,7 @@ use crate::changes::Feed;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
 use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey};
-use crate::runtime_policy::{Capability, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
+use crate::runtime_policy::{Capability, Lifecycle, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
 use crate::runtime_sessions::{GrantScope, SessionError};
 
 /// A failed operation: the HTTP status and the contract error body. MCP
@@ -1248,6 +1248,30 @@ pub(crate) async fn set_runtime_grant(
     Ok(RuntimeGrant { version })
 }
 
+fn not_adoptable() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        ErrorCode::InvalidRequest,
+        "the runtime view cannot be adopted",
+    )
+}
+
+fn runtime_issue_error(error: RuntimeIssueError) -> ApiError {
+    match error {
+        RuntimeIssueError::Stale => ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::InvalidRequest,
+            "a newer runtime view already exists",
+        ),
+        RuntimeIssueError::Unavailable => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "runtime views are temporarily unavailable",
+        ),
+        RuntimeIssueError::NotAdoptable => not_adoptable(),
+    }
+}
+
 pub(crate) async fn create_runtime_view(
     state: &AppState,
     actor: ActorId,
@@ -1259,6 +1283,9 @@ pub(crate) async fn create_runtime_view(
 ) -> Result<RuntimeView, ApiError> {
     validate_view(&request.view_id, request.generation)?;
     validate_view(&request.session_id, 1)?;
+    if let Some(adopt) = request.adopt {
+        validate_view(&request.view_id, adopt.generation)?;
+    }
     let session = state
         .runtime_sessions()
         .get(&actor, &request.session_id)
@@ -1275,9 +1302,24 @@ pub(crate) async fn create_runtime_view(
                 "runtime views are temporarily unavailable",
             )
         })?;
-    let (record, enabled, policy) = runtime_source(state, &actor, &id, revision).await?;
+    let (record, enabled, policy) = match runtime_source(state, &actor, &id, revision).await {
+        // Reading a revision answers 422 when its manifest is unusable (another
+        // SDK pin, a malformed field). An adoption of such a revision is refused,
+        // not malformed (decision 0054, rule 16).
+        Err(error)
+            if request.adopt.is_some() && error.status == StatusCode::UNPROCESSABLE_ENTITY =>
+        {
+            return Err(not_adoptable());
+        }
+        other => other?,
+    };
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
     let owner = actor.clone();
+    let lifecycle = policy.lifecycle();
+    let adoption = request.adopt.map(|adopt| preview::Adoption {
+        generation: adopt.generation,
+        session: session.clone(),
+    });
     let (ticket, grant_version, granted) = session
         .with_grant(&scope, |version, granted| {
             let ticket = state.previews().issue_runtime(RuntimeTicketRequest {
@@ -1288,6 +1330,8 @@ pub(crate) async fn create_runtime_view(
                 head_revision: record.current_revision,
                 view_id: request.view_id.clone(),
                 generation: request.generation,
+                lifecycle,
+                adopt: adoption,
             })?;
             let authority = RuntimeAuthority {
                 session: session.clone(),
@@ -1303,18 +1347,7 @@ pub(crate) async fn create_runtime_view(
             Ok((ticket, version, granted))
         })
         .map_err(session_error)?
-        .map_err(|error| match error {
-            RuntimeIssueError::Stale => ApiError::new(
-                StatusCode::CONFLICT,
-                ErrorCode::InvalidRequest,
-                "a newer runtime view already exists",
-            ),
-            RuntimeIssueError::Unavailable => ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                ErrorCode::Unavailable,
-                "runtime views are temporarily unavailable",
-            ),
-        })?;
+        .map_err(runtime_issue_error)?;
     // As for a preview link: confirmed after the registration (see `preview`).
     state.ensure_current(&owner, generation).await?;
     Ok(RuntimeView {
@@ -1325,6 +1358,10 @@ pub(crate) async fn create_runtime_view(
             ticket.preview.secret
         ),
         enabled,
+        lifecycle: match lifecycle {
+            Lifecycle::Adopt => RuntimeLifecycle::Adopt,
+            Lifecycle::Restart => RuntimeLifecycle::Restart,
+        },
         session_id: request.session_id,
         artifact_id: id.to_string(),
         revision: revision.0,

@@ -111,6 +111,7 @@ async fn initialized_view(
             session_id: session_id.clone(),
             view_id: "a".repeat(32),
             generation: 1,
+            adopt: None,
         },
     )
     .await
@@ -166,6 +167,7 @@ async fn issue_and_initialize(
             session_id: session.into(),
             view_id: "c".repeat(32),
             generation,
+            adopt: None,
         },
     )
     .await
@@ -273,6 +275,7 @@ async fn manifest_view(
             session_id: session.into(),
             view_id: "e".repeat(32),
             generation: revision,
+            adopt: None,
         },
     )
     .await
@@ -577,6 +580,7 @@ async fn source_view(
             session_id: session.clone(),
             view_id: "f".repeat(32),
             generation: 1,
+            adopt: None,
         },
     )
     .await
@@ -1615,6 +1619,7 @@ fn logout_fences_pending_grant_and_view_lookups() -> Result<(), Box<dyn Error>> 
                 session_id: session.clone(),
                 view_id: "c".repeat(32),
                 generation: 1,
+                adopt: None,
             },
         ));
         let mut grant = Box::pin(operations::set_runtime_grant(
@@ -1739,6 +1744,7 @@ fn close_while_creation_waits_for_storage_rejects_the_late_view() -> Result<(), 
                 session_id,
                 view_id: view_id.clone(),
                 generation: 2,
+                adopt: None,
             },
         ));
         let pending = poll_fn(|context| match request.as_mut().poll(context) {
@@ -2103,6 +2109,7 @@ fn a_request_that_authenticated_before_a_disable_leaves_nothing_registered()
                 session_id: session.clone(),
                 view_id: "a".repeat(32),
                 generation: 1,
+                adopt: None,
             },
         )
         .await;
@@ -2472,6 +2479,7 @@ fn a_request_that_authenticated_before_a_disable_and_an_enable_registers_nothing
             session_id: session.clone(),
             view_id: view_id.to_string().repeat(32),
             generation: 1,
+            adopt: None,
         };
         let view = operations::create_runtime_view(
             &state,
@@ -2579,6 +2587,7 @@ fn a_request_that_authenticated_after_a_disable_and_an_enable_registers_everythi
                 session_id: session,
                 view_id: "b".repeat(32),
                 generation: 1,
+                adopt: None,
             },
         )
         .await
@@ -2678,6 +2687,7 @@ fn a_view_create_pending_across_a_disable_and_an_enable_is_refused_and_leaves_no
                 session_id: session,
                 view_id: "c".repeat(32),
                 generation: 5,
+                adopt: None,
             },
         ));
         assert!(pends(&mut view).await, "the create must wait for storage");
@@ -2716,6 +2726,7 @@ fn a_view_create_pending_across_a_disable_and_an_enable_is_refused_and_leaves_no
                 session_id: session,
                 view_id: "c".repeat(32),
                 generation: 5,
+                adopt: None,
             },
         )
         .await

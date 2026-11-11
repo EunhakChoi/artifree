@@ -1,5 +1,21 @@
 {
   "$defs": {
+    "AdoptRuntimeView": {
+      "additionalProperties": false,
+      "description": "The live generation whose frame an adoption keeps (decision 0054, rule 3).",
+      "properties": {
+        "generation": {
+          "description": "The generation of the same view that the new generation replaces. Its\ndocument, heap and message port stay; only its binding is replaced.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation"
+      ],
+      "type": "object"
+    },
     "AgentSession": {
       "additionalProperties": false,
       "description": "A registered agent inbox visible to the workspace, without its secret.",
@@ -557,6 +573,17 @@
       "additionalProperties": false,
       "description": "Requests a preview view whose frame can read its artifact metadata.",
       "properties": {
+        "adopt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdoptRuntimeView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present to adopt the live frame of an older generation of this view\ninstead of loading a new document (decision 0054, rule 3). Absent for\na new view; clients that omit it send no field, never `null`."
+        },
         "generation": {
           "description": "A positive, increasing generation within this view.",
           "format": "uint64",
@@ -2940,6 +2967,21 @@
       ],
       "type": "object"
     },
+    "RuntimeLifecycle": {
+      "description": "How a runtime frame treats a change of its view (decision 0054, rule 1).",
+      "oneOf": [
+        {
+          "const": "restart",
+          "description": "Every change of the view reloads the frame: an absent manifest field,\nan entry without a manifest, or `\"restart\"`.",
+          "type": "string"
+        },
+        {
+          "const": "adopt",
+          "description": "The manifest of the pinned revision says `\"adopt\"`: the view may be\nadopted by a later generation instead of reloaded.",
+          "type": "string"
+        }
+      ]
+    },
     "RuntimeMetadata": {
       "additionalProperties": false,
       "description": "Current metadata that a runtime frame may read for its own artifact.",
@@ -3239,6 +3281,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "lifecycle": {
+          "$ref": "#/$defs/RuntimeLifecycle",
+          "description": "`adopt` when the pinned revision's manifest opts in to adoption,\notherwise `restart` (decision 0054, rule 1). The server always sends it."
+        },
         "revision": {
           "description": "The pinned source revision shown in the frame.",
           "format": "uint64",
@@ -3280,6 +3326,7 @@
         "revision",
         "head_revision",
         "sdk",
+        "lifecycle",
         "declared",
         "supported",
         "granted",

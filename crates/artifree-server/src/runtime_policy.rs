@@ -123,18 +123,48 @@ impl CapabilitySet {
     }
 }
 
+/// What a live frame does when its view changes (decision 0054, rule 1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub(crate) enum Lifecycle {
+    /// Every change of the view reloads the frame. The meaning of an absent
+    /// field and of an entry without a manifest.
+    #[default]
+    Restart,
+    /// The frame opted in to adoption: the workspace may replace its binding
+    /// and keep its document (decision 0054, rule 3).
+    Adopt,
+}
+
+// Read as a string first: the derived enum deserializer would also accept an
+// object such as `{"adopt": null}`, which rule 1 makes malformed.
+impl TryFrom<String> for Lifecycle {
+    type Error = &'static str;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        match name.as_str() {
+            "restart" => Ok(Self::Restart),
+            "adopt" => Ok(Self::Adopt),
+            _ => Err("unknown runtime lifecycle"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     sdk: String,
     #[serde(default)]
     capabilities: Vec<String>,
+    #[serde(default)]
+    lifecycle: Lifecycle,
 }
 
 /// A complete, validated declaration for one source revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimePolicy {
     declared: BTreeSet<String>,
+    lifecycle: Lifecycle,
 }
 
 impl RuntimePolicy {
@@ -143,11 +173,13 @@ impl RuntimePolicy {
         if !enabled {
             return Ok(Self {
                 declared: BTreeSet::new(),
+                lifecycle: Lifecycle::Restart,
             });
         }
         let Some(bytes) = bytes else {
             return Ok(Self {
                 declared: BTreeSet::from([METADATA_READ.to_owned()]),
+                lifecycle: Lifecycle::Restart,
             });
         };
         if bytes.len() > MAX_MANIFEST_BYTES {
@@ -161,17 +193,26 @@ impl RuntimePolicy {
         if manifest.capabilities.len() > MAX_CAPABILITIES {
             return Err("too many declared capabilities");
         }
+        let lifecycle = manifest.lifecycle;
         let mut declared = BTreeSet::new();
         for name in manifest.capabilities {
             if !valid_capability(&name) || !declared.insert(name) {
                 return Err("invalid or duplicate capability name");
             }
         }
-        Ok(Self { declared })
+        Ok(Self {
+            declared,
+            lifecycle,
+        })
     }
 
     pub(crate) fn declared(&self) -> Vec<String> {
         self.declared.iter().cloned().collect()
+    }
+
+    /// Whether the revision's manifest opts in to adoption (decision 0054, rule 1).
+    pub(crate) fn lifecycle(&self) -> Lifecycle {
+        self.lifecycle
     }
 
     pub(crate) fn supported() -> Vec<String> {
@@ -203,6 +244,9 @@ fn valid_capability(name: &str) -> bool {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
         })
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

@@ -215,6 +215,7 @@ test('A runtime view always states its SDK pin, including null for ordinary prev
     revision: 1,
     head_revision: 1,
     sdk: null,
+    lifecycle: 'restart',
     declared: [],
     supported: [],
     granted: [],
