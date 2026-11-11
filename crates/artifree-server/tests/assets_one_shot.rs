@@ -81,6 +81,7 @@ fn run_child(root: PathBuf) -> TestResult {
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
             allow_remote_mcp: false,
+            worker: false,
         },
         session_root: Some(root),
         ttl: Duration::from_secs(60),

@@ -28,8 +28,8 @@ Artifact commands talk to a running artifree-server; see artifree artifact --hel
 Asset commands talk to a running artifree-server; see artifree asset --help.
 Content commands talk to a running artifree-server; see artifree content --help.
 Data commands talk to a running artifree-server; see artifree data --help.
-Job commands talk to a running artifree-server; see artifree job --help. A job runs only while an
-artifree-server worker process runs on the same data directory.
+Job commands talk to a running artifree-server; see artifree job --help. The server runs
+jobs with its own worker unless it was started with --no-worker or as a one-shot session.
 Token commands talk to a running artifree-server; see artifree token --help.
 User commands talk to a running artifree-server; see artifree user --help.
 describe prints an inventory bundled at build time; it does not probe a server.

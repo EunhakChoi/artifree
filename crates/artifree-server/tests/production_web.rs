@@ -437,6 +437,7 @@ fn dummy_options(
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         allow_remote_mcp: false,
+        worker: false,
     })
 }
 

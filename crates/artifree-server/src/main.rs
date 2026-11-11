@@ -152,6 +152,7 @@ struct CliServeFlags {
     cli_allowed_hosts: Vec<String>,
     cli_allowed_origins: Vec<String>,
     cli_allow_remote_mcp: bool,
+    cli_no_worker: bool,
     explicit_frame_ancestors: Option<String>,
     preview_ttl: Duration,
     limits: RequestLimits,
@@ -174,6 +175,7 @@ fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
         cli_allowed_hosts: Vec::new(),
         cli_allowed_origins: Vec::new(),
         cli_allow_remote_mcp: false,
+        cli_no_worker: false,
         explicit_frame_ancestors: None,
         preview_ttl: serve::DEFAULT_PREVIEW_TTL,
         limits: RequestLimits::default(),
@@ -202,6 +204,7 @@ fn parse_serve_flags(arguments: &[String]) -> Result<CliServeFlags, String> {
             "--allowed-host" => flags.cli_allowed_hosts.push(value()?),
             "--allowed-origin" => flags.cli_allowed_origins.push(value()?),
             "--allow-remote-mcp" => flags.cli_allow_remote_mcp = true,
+            "--no-worker" => flags.cli_no_worker = true,
             "--frame-ancestors" => flags.explicit_frame_ancestors = Some(value()?),
             "--preview-ttl-seconds" => flags.preview_ttl = parse_preview_ttl(&value()?)?,
             "--request-burst" => flags.limits.burst = limit(flag, &value()?)?,
@@ -231,6 +234,31 @@ fn unrecognized_option(argument: &str) -> String {
         )
     } else {
         "Unknown arguments. An argument is not a serve option; see --help.".to_owned()
+    }
+}
+
+/// The lifetime and optional session root of a one-shot session.
+type OneShotChoice = (Duration, Option<PathBuf>);
+
+/// Chooses between a persistent data directory and a one-shot session, and
+/// returns the data directory with the one-shot settings when one applies.
+/// Nothing has been created yet, so every refusal here leaves nothing behind.
+fn storage_choice(
+    data_dir: Option<PathBuf>,
+    one_shot_ttl: Option<Duration>,
+    session_root: Option<PathBuf>,
+) -> Result<(PathBuf, Option<OneShotChoice>), String> {
+    match (data_dir, one_shot_ttl) {
+        (Some(_), Some(_)) => Err(
+            "--data-dir and --one-shot-ttl-seconds cannot be used together: a one-shot session makes its own temporary data directory."
+                .to_owned(),
+        ),
+        (Some(dir), None) if session_root.is_none() => Ok((dir, None)),
+        (None, Some(ttl)) => Ok((PathBuf::new(), Some((ttl, session_root)))),
+        (_, None) if session_root.is_some() => {
+            Err("--session-root needs --one-shot-ttl-seconds.".to_owned())
+        }
+        _ => Err("serve requires --data-dir <directory> or --one-shot-ttl-seconds <n>.".to_owned()),
     }
 }
 
@@ -285,6 +313,18 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeCommand, Str
         || env
             .text(serve_env::ALLOW_REMOTE_MCP)
             .is_some_and(|v| v == "true" || v == "1");
+    // Unlike the setting above, a value that is not understood here would start
+    // a worker the operator asked not to have, so it is refused.
+    let no_worker = match env.text(serve_env::NO_WORKER) {
+        None | Some("false" | "0") => flags.cli_no_worker,
+        Some("true" | "1") => true,
+        Some(_) => {
+            return Err(format!(
+                "{} must be 1, true, 0 or false",
+                serve_env::NO_WORKER
+            ));
+        }
+    };
 
     let frame_ancestors = resolve_frame_ancestors(
         env,
@@ -302,25 +342,8 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeCommand, Str
     let loopback_api_address =
         resolve_loopback_listen(env, flags.explicit_loopback_listen.as_deref())?;
 
-    // Nothing has been created yet, so every refusal here leaves nothing behind.
-    let (data_dir, one_shot) = match (flags.data_dir, flags.one_shot_ttl) {
-        (Some(_), Some(_)) => {
-            return Err(
-                "--data-dir and --one-shot-ttl-seconds cannot be used together: a one-shot session makes its own temporary data directory."
-                    .to_owned(),
-            );
-        }
-        (Some(dir), None) if flags.session_root.is_none() => (dir, None),
-        (None, Some(ttl)) => (PathBuf::new(), Some((ttl, flags.session_root))),
-        (_, None) if flags.session_root.is_some() => {
-            return Err("--session-root needs --one-shot-ttl-seconds.".to_owned());
-        }
-        _ => {
-            return Err(
-                "serve requires --data-dir <directory> or --one-shot-ttl-seconds <n>.".to_owned(),
-            );
-        }
-    };
+    let (data_dir, one_shot) =
+        storage_choice(flags.data_dir, flags.one_shot_ttl, flags.session_root)?;
     let serve = ServeOptions {
         data_dir,
         web_dir: explicit_web_dir,
@@ -337,6 +360,7 @@ fn parse_serve(arguments: &[String], env: &ServeEnv) -> Result<ServeCommand, Str
         preview_ttl: flags.preview_ttl,
         limits: flags.limits,
         change_streams: flags.change_streams,
+        worker: one_shot.is_none() && !no_worker,
     };
     Ok(match one_shot {
         Some((ttl, session_root)) => ServeCommand::OneShot(OneShotOptions {
@@ -600,13 +624,16 @@ Usage:
   artifree-server serve --one-shot-ttl-seconds <n> [--session-root <dir>] [options]
   artifree-server backup --data-dir <dir> --output <file>
   artifree-server restore --input <file> --data-dir <dir>
-  artifree-server worker run --data-dir <dir> [--once]
+  artifree-server worker run --data-dir <dir> [--once | --supervised]
   artifree-server --describe | --version | --help
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or
 SIGTERM. When both listeners are ready it prints one JSON line on stdout:
 {{\"event\":\"ready\",\"api_url\":...,\"content_origin\":...,\"token_file\":...,\"mode\":...,\"data_dir\":...}}
 Clients authenticate with the bearer token stored in token_file.
+A persistent serve also starts its own worker (worker run --supervised)
+before it is ready, restarts it when it exits, and stops it when the
+server stops; GET /v1/background reports it.
 
 Options:
   --data-dir <dir>              SQLite database and access token (required).
@@ -639,6 +666,7 @@ Options:
   --allow-remote-mcp            Permit remote authenticated MCP connections. Without
                                 it /mcp admits only a known loopback client: connect
                                 local agents directly, not through a trusted proxy.
+  --no-worker                   Start no worker; jobs then stay queued (or ARTIFREE_NO_WORKER=1)
   --frame-ancestors <sources>   CSP frame-ancestors [default: {ancestors}]
                                 (or ARTIFREE_FRAME_ANCESTORS)
   --preview-ttl-seconds <n>     Preview link lifetime, 1-86400 [default: 900]
@@ -666,7 +694,8 @@ directory from such a file. Each prints one JSON line on success; see
 
 worker run runs the persistent jobs of a data directory in a separate process
 (decision 0030) until the queue is empty with --once, or until Ctrl+C or
-SIGTERM. It prints JSON lines; see `worker --help`.
+SIGTERM, or with --supervised until its standard input ends. A persistent serve
+starts one by itself. It prints JSON lines; see `worker --help`.
 
 --describe emits the build-time module inventory as JSON; it does not probe a
 running server.",
@@ -1177,6 +1206,26 @@ mod tests {
         // An empty or false-looking value does not enable remote MCP.
         let off = parse_with(&ServeEnv::default().with(ALLOW_REMOTE_MCP, "yes"), &[])?;
         assert!(!off.allow_remote_mcp);
+        Ok(())
+    }
+
+    #[test]
+    fn a_no_worker_value_that_is_not_understood_is_refused() -> Result<(), String> {
+        use serve_env::NO_WORKER;
+        for off in ["1", "true"] {
+            assert!(!parse_with(&ServeEnv::default().with(NO_WORKER, off), &[])?.worker);
+        }
+        for on in ["0", "false"] {
+            assert!(parse_with(&ServeEnv::default().with(NO_WORKER, on), &[])?.worker);
+            // The flag still wins over a value that asks for nothing.
+            let flagged = parse_with(&ServeEnv::default().with(NO_WORKER, on), &["--no-worker"])?;
+            assert!(!flagged.worker);
+        }
+        // Starting a worker the operator tried to turn off would be the wrong guess.
+        for unknown in ["TRUE", "yes", "2"] {
+            let refused = parse_with(&ServeEnv::default().with(NO_WORKER, unknown), &[]);
+            assert!(refused.is_err_and(|error| error.contains(NO_WORKER)));
+        }
         Ok(())
     }
 

@@ -83,6 +83,8 @@ fn run_child(data_dir: &Path) -> TestResult {
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         allow_remote_mcp: false,
+        // The child re-runs this test binary; a worker would run the harness.
+        worker: false,
     };
     let signal = std::env::var(CHILD_SIGNAL)?;
     serve::run(options, |_| {

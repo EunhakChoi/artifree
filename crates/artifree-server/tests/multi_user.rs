@@ -1266,9 +1266,10 @@ async fn send_case(
 
 /// Routes that name no artifact. Each has its own caller-scoped or
 /// administrative authorization tests.
-const NOT_ARTIFACT_SCOPED: [&str; 13] = [
+const NOT_ARTIFACT_SCOPED: [&str; 14] = [
     "/mcp",
     "/v1/artifacts",
+    "/v1/background",
     "/v1/changes",
     "/v1/data-outbox/binding",
     "/v1/content/unreferenced",

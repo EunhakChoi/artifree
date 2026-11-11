@@ -22,12 +22,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactList, CancelJobRequest, CancelJobResponse,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataOutboxBinding,
-    DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest, EditFilesRequest,
-    EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff, HandoffActionRequest,
-    Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest, PurgeArtifactResponse,
-    ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
+    AgentSessionList, AppData, Artifact, ArtifactList, BackgroundStatus, CancelJobRequest,
+    CancelJobResponse, CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers,
+    DataOutboxBinding, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
+    EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff,
+    HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest,
+    PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
     RuntimeConnection, RuntimeGrant, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
@@ -66,6 +66,7 @@ use crate::preview::{self, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
 use crate::runtime_sessions::RuntimeSessions;
+use crate::supervisor::WorkerStatusHandle;
 use crate::tokens;
 use crate::users;
 use crate::web::WebAssets;
@@ -117,6 +118,9 @@ pub struct Settings {
     pub allow_remote_mcp: bool,
     /// The clock that stamps jobs (decision 0030). Tests replace it.
     pub clock: Arc<dyn Clock>,
+    /// What `GET /v1/background` reports (decision 0055, rule 5). The default
+    /// reports mode `none`; a persistent server with a worker replaces it.
+    pub worker_status: WorkerStatusHandle,
 }
 
 impl Default for Settings {
@@ -136,6 +140,7 @@ impl Default for Settings {
             allowed_origins: Vec::new(),
             allow_remote_mcp: false,
             clock: Arc::new(SystemClock),
+            worker_status: WorkerStatusHandle::default(),
         }
     }
 }
@@ -529,6 +534,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .merge(assets::routes())
         .route("/v1/artifacts/{id}/data/members", get(read_data_members))
         .route("/v1/data-outbox/binding", get(read_outbox_binding))
+        .route("/v1/background", get(show_background))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(show_job))
         .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))
@@ -1608,6 +1614,17 @@ async fn show_job(
 ) -> Result<Json<Job>, ApiError> {
     let Path(id) = path?;
     Ok(Json(operations::show_job(&state, actor, &id).await?))
+}
+
+/// Any accepted token may read it (decision 0055, rule 5): it describes the
+/// server, not a user.
+async fn show_background(
+    State(state): State<AppState>,
+    Authenticated(_): Authenticated,
+) -> Json<BackgroundStatus> {
+    Json(BackgroundStatus {
+        worker: state.settings().worker_status.current(),
+    })
 }
 
 /// Asks to stop a job. The body must be `{}`.

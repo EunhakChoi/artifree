@@ -24,16 +24,16 @@ Nothing is compiled or downloaded while building. Only Linux x64 is supported (p
 `docker run`; on an ARM host the pinned multi-arch base would otherwise resolve
 to arm64 and the x86-64 binary would not run): no ARM image, no Alpine/musl, no Windows container.
 
-| Item        | Value                                                                                                                       |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
-| User        | `10001:10001`, no login shell, no home                                                                                      |
-| Data        | volume `/data` (database and `access-token`), mode 700, owned by the user                                                   |
-| Ports       | `7410` API and web workspace; `7411` preview content, a separate origin                                                     |
-| Command     | `artifree-server serve --data-dir /data --web-dir /app/web --api-listen 0.0.0.0:7410 --content-listen 0.0.0.0:7411`         |
-| Your flags  | everything after the image name is appended; server environment variables (`ARTIFREE_*`) work as usual, see below           |
-| Healthcheck | `GET /healthz` on `127.0.0.1:7410` inside the container, using the shell already in the image                               |
-| Not inside  | Node.js (the bundled CLI in `/app/cli` cannot run there), curl, any package manager step                                    |
-| No worker   | The image runs `serve` only. Jobs (decision 0030) stay queued; the image starts no worker, and running one is untested here |
+| Item        | Value                                                                                                                        |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| User        | `10001:10001`, no login shell, no home                                                                                       |
+| Data        | volume `/data` (database and `access-token`), mode 700, owned by the user                                                    |
+| Ports       | `7410` API and web workspace; `7411` preview content, a separate origin                                                      |
+| Command     | `artifree-server serve --data-dir /data --web-dir /app/web --api-listen 0.0.0.0:7410 --content-listen 0.0.0.0:7411`          |
+| Your flags  | everything after the image name is appended; server environment variables (`ARTIFREE_*`) work as usual, see below            |
+| Healthcheck | `GET /healthz` on `127.0.0.1:7410` inside the container, using the shell already in the image                                |
+| Not inside  | Node.js (the bundled CLI in `/app/cli` cannot run there), curl, any package manager step                                     |
+| Worker      | `serve` starts and restarts one worker process for jobs (decision 0055); `--no-worker` or `ARTIFREE_NO_WORKER=1` starts none |
 
 ## Build
 
@@ -89,14 +89,15 @@ docker exec artifree cat /data/access-token      # paste into http://127.0.0.1:7
 Every setting the container needs can be passed with `docker run --env` (or an
 env file) instead of arguments after the image name:
 
-| Variable                                                                         | Same as              | Notes                                                                             |
-| -------------------------------------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------- |
-| `ARTIFREE_CONTENT_ORIGIN`                                                        | `--content-origin`   | Public preview origin. Required in practice (see above).                          |
-| `ARTIFREE_FRAME_ANCESTORS`                                                       | `--frame-ancestors`  | Space-separated CSP sources allowed to embed previews. Replaces the default list. |
-| `ARTIFREE_API_ORIGIN`                                                            | `--api-origin`       | Public API and web origin behind a proxy.                                         |
-| `ARTIFREE_ALLOWED_HOSTS`, `ARTIFREE_ALLOWED_ORIGINS`, `ARTIFREE_TRUSTED_PROXIES` | the repeated flags   | Comma-separated. Added to anything the flags give.                                |
-| `ARTIFREE_ALLOW_REMOTE_MCP`                                                      | `--allow-remote-mcp` | `true` or `1`. Read the MCP section first.                                        |
-| `ARTIFREE_LAN`, `ARTIFREE_LOOPBACK_LISTEN`, `ARTIFREE_WEB_DIR`                   | the matching flags   | The image's fixed `--web-dir` and listen flags win over them.                     |
+| Variable                                                                         | Same as              | Notes                                                                                     |
+| -------------------------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------- |
+| `ARTIFREE_CONTENT_ORIGIN`                                                        | `--content-origin`   | Public preview origin. Required in practice (see above).                                  |
+| `ARTIFREE_FRAME_ANCESTORS`                                                       | `--frame-ancestors`  | Space-separated CSP sources allowed to embed previews. Replaces the default list.         |
+| `ARTIFREE_API_ORIGIN`                                                            | `--api-origin`       | Public API and web origin behind a proxy.                                                 |
+| `ARTIFREE_ALLOWED_HOSTS`, `ARTIFREE_ALLOWED_ORIGINS`, `ARTIFREE_TRUSTED_PROXIES` | the repeated flags   | Comma-separated. Added to anything the flags give.                                        |
+| `ARTIFREE_ALLOW_REMOTE_MCP`                                                      | `--allow-remote-mcp` | `true` or `1`. Read the MCP section first.                                                |
+| `ARTIFREE_NO_WORKER`                                                             | `--no-worker`        | `true` or `1`: no worker, jobs stay queued. Another value than `false` or `0` is refused. |
+| `ARTIFREE_LAN`, `ARTIFREE_LOOPBACK_LISTEN`, `ARTIFREE_WEB_DIR`                   | the matching flags   | The image's fixed `--web-dir` and listen flags win over them.                             |
 
 ```sh
 docker run -d --name artifree --platform linux/amd64 --read-only \
@@ -178,7 +179,8 @@ the `Release archive` job, then `scripts/verify-container.mjs`:
   Docker reports it healthy, confirms the process runs as uid 10001;
 - from the host, through the published ports: health, the packaged web page,
   create and save with the packaged CLI, a preview on the separate origin with
-  the sandbox CSP;
+  the sandbox CSP, and a
+  verification job that the image's own worker ends as `succeeded`;
 - confirms `/mcp` is refused from the published port;
 - stops with SIGTERM and requires exit status 0, starts a new container on the
   same volume, and finds revision 2;

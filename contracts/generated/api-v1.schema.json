@@ -402,6 +402,20 @@
       ],
       "type": "object"
     },
+    "BackgroundStatus": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/background` (decision 0055, rule 5). It describes the\nserver and carries nothing of any user: no worker output, no path, and no\nprocess identifier.",
+      "properties": {
+        "worker": {
+          "$ref": "#/$defs/WorkerStatus",
+          "description": "The worker the server starts and watches."
+        }
+      },
+      "required": [
+        "worker"
+      ],
+      "type": "object"
+    },
     "CancelJobRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/jobs/{id}/cancel`, with an `Idempotency-Key` header. It\nhas no fields.",
@@ -3827,6 +3841,125 @@
         "users"
       ],
       "type": "object"
+    },
+    "WorkerExit": {
+      "additionalProperties": false,
+      "description": "An exit of the server's worker, or a start that failed.",
+      "properties": {
+        "at_ms": {
+          "description": "When it happened, Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/$defs/WorkerExitOutcome",
+          "description": "How it ended."
+        }
+      },
+      "required": [
+        "at_ms",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "WorkerExitOutcome": {
+      "description": "How an exit of the server's worker ended, or why no process started.",
+      "oneOf": [
+        {
+          "const": "clean",
+          "description": "Status 0.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Any other status, or ended by a signal.",
+          "type": "string"
+        },
+        {
+          "const": "not_started",
+          "description": "The process could not be started.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkerMode": {
+      "description": "How the server runs its worker.",
+      "oneOf": [
+        {
+          "const": "supervised",
+          "description": "The server starts a worker.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No worker (`--no-worker`, or a one-shot server).",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkerState": {
+      "description": "What the server's worker is doing now.",
+      "oneOf": [
+        {
+          "const": "running",
+          "description": "A worker process exists.",
+          "type": "string"
+        },
+        {
+          "const": "restarting",
+          "description": "Between an exit or a failed start and the next start.",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "Mode `none`, or shutting down.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkerStatus": {
+      "additionalProperties": false,
+      "description": "The server's own worker.",
+      "properties": {
+        "dropped_lines": {
+          "description": "Lines of the worker's standard output that could not be parsed or were\nlonger than 64 KiB.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerExit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last exit or failed start; absent before any."
+        },
+        "mode": {
+          "$ref": "#/$defs/WorkerMode",
+          "description": "`supervised` or `none`."
+        },
+        "restarts": {
+          "description": "The start attempts after the first since the server started; a failed\nstart is an attempt.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkerState",
+          "description": "`running` says that the process exists, not that it makes progress."
+        }
+      },
+      "required": [
+        "mode",
+        "state",
+        "restarts",
+        "dropped_lines"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://artifree.invalid/schemas/api-v1.json",
@@ -4062,6 +4195,9 @@
     },
     {
       "$ref": "#/$defs/JobList"
+    },
+    {
+      "$ref": "#/$defs/BackgroundStatus"
     },
     {
       "$ref": "#/$defs/AppData"

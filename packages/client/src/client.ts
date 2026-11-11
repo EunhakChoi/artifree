@@ -3,6 +3,7 @@ import type {
   AppData,
   Artifact,
   ArtifactList,
+  BackgroundStatus,
   CommitResponse,
   CreateArtifactRequest,
   CreateTokenRequest,
@@ -77,6 +78,7 @@ import {
   parseAppData,
   parseArtifact,
   parseArtifactList,
+  parseBackground,
   parseCommit,
   parseCreateToken,
   parseCancelJob,
@@ -1117,13 +1119,14 @@ export class ArtifreeClient {
    * Queues a verification job (decision 0030) for `request.revision` of the
    * artifact: a worker process re-reads every file of that revision and
    * compares its digest and size with the stored listing. This only queues
-   * it; no worker runs by itself, and nothing is pushed when it ends. Read
-   * the job again with {@link getJob}. A retry with the same key and request
-   * resolves with the job as it is now and `replayed: true`; the same key
-   * with another request rejects with `request_key_reused`. Rejects with
-   * `not_found` for an artifact that is missing, in the trash, purged, or
-   * someone else's, and for a revision that does not exist, and with
-   * `too_many_jobs` while 16 jobs wait or run.
+   * it; the server's own worker runs it unless the server was started with
+   * --no-worker or as a one-shot session (see {@link getBackground}), and
+   * nothing is pushed when it ends. Read the job again with {@link getJob}. A
+   * retry with the same key and request resolves with the job as it is now
+   * and `replayed: true`; the same key with another request rejects with
+   * `request_key_reused`. Rejects with `not_found` for an artifact that is
+   * missing, in the trash, purged, or someone else's, and for a revision that
+   * does not exist, and with `too_many_jobs` while 16 jobs wait or run.
    */
   async enqueueJob(
     artifactId: string,
@@ -1141,6 +1144,18 @@ export class ArtifreeClient {
   /** One job. Rejects with `not_found` unless it is yours and its artifact is neither in the trash nor purged. */
   async getJob(id: string, options: ReadOptions = {}): Promise<Job> {
     return this.json('GET', `/v1/jobs/${encodeURIComponent(id)}`, parseJob, {
+      signal: options.signal,
+    });
+  }
+
+  /**
+   * The server's own worker (decision 0055): whether the server starts one,
+   * whether it runs now, its restarts, its last exit and the dropped output
+   * lines. Any token the server accepts may read it. It is not in the change
+   * feed: read it when jobs are shown and again when a job stays `queued`.
+   */
+  async getBackground(options: ReadOptions = {}): Promise<BackgroundStatus> {
+    return this.json('GET', '/v1/background', parseBackground, {
       signal: options.signal,
     });
   }

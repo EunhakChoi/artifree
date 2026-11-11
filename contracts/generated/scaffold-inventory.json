@@ -1,7 +1,7 @@
 {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.25.0",
+  "contract_version": "0.26.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -42,7 +42,7 @@
       "language": "Rust",
       "path": "crates/artifree-server",
       "status": "implemented",
-      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset reading, writing and download are implemented; publish planned), and a sandboxed preview origin."
+      "summary": "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, the worker's status (GET /v1/background), application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset reading, writing and download are implemented; publish planned), and a sandboxed preview origin."
     },
     {
       "id": "domain",
@@ -87,7 +87,7 @@
       "language": "Rust",
       "path": "crates/artifree-core/src/jobs.rs",
       "status": "implemented",
-      "summary": "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes are not in the change feed."
+      "summary": "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes are not in the change feed."
     },
     {
       "id": "handoff",

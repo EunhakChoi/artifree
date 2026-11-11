@@ -26,10 +26,13 @@ pub const ALLOWED_HOSTS: &str = "ARTIFREE_ALLOWED_HOSTS";
 pub const ALLOWED_ORIGINS: &str = "ARTIFREE_ALLOWED_ORIGINS";
 /// `ARTIFREE_ALLOW_REMOTE_MCP`: `true` or `1` permits remote MCP.
 pub const ALLOW_REMOTE_MCP: &str = "ARTIFREE_ALLOW_REMOTE_MCP";
+/// `ARTIFREE_NO_WORKER`: `true` or `1` starts no worker (decision 0055);
+/// `false`, `0` or empty changes nothing, and any other value is refused.
+pub const NO_WORKER: &str = "ARTIFREE_NO_WORKER";
 /// `ARTIFREE_FRAME_ANCESTORS`: CSP `frame-ancestors` source list.
 pub const FRAME_ANCESTORS: &str = "ARTIFREE_FRAME_ANCESTORS";
 
-const NAMES: [&str; 10] = [
+const NAMES: [&str; 11] = [
     WEB_DIR,
     LAN,
     LOOPBACK_LISTEN,
@@ -40,6 +43,7 @@ const NAMES: [&str; 10] = [
     ALLOWED_ORIGINS,
     ALLOW_REMOTE_MCP,
     FRAME_ANCESTORS,
+    NO_WORKER,
 ];
 
 /// A setting's text together with the name of the flag or variable that

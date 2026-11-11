@@ -20,6 +20,7 @@ import { glibcFromLddOutput } from './lib/elf-glibc.mjs';
 import { GLIBC_VERIFIED_RUNTIME } from './lib/release-layout.mjs';
 import {
   exerciseNewService,
+  expectJobRuns,
   expectSavedRevision,
 } from './lib/service-check.mjs';
 import { extract, verifyChecksum, verifyManifest } from './verify-release.mjs';
@@ -28,12 +29,13 @@ import { extract, verifyChecksum, verifyManifest } from './verify-release.mjs';
  * Builds the container image from an unpacked linux-x64 release package and
  * exercises it like the clean-install check does (decisions 0025 and 0026):
  * image metadata, health, the packaged web page, create/save/preview with the
- * packaged CLI against the published ports, a read-only root filesystem,
- * graceful stop, restart on the same named volume, MCP staying loopback-only
- * through a published port, and three refused configurations. The server is
- * configured by environment variables, the way a container normally is
- * (decision 0028). Requires Docker and Node; throws on the first failure and
- * removes what it created.
+ * packaged CLI against the published ports, a verification that the server's
+ * own worker ends (decision 0055), a read-only root filesystem, graceful stop,
+ * restart on the same named volume, MCP staying loopback-only through a
+ * published port, and three refused configurations. The server is configured
+ * by environment variables, the way a container normally is (decision 0028).
+ * Requires Docker and Node; throws on the first failure and removes what it
+ * created.
  */
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -299,6 +301,14 @@ export async function verifyContainer(archive) {
       });
       artifactId = exercised.artifactId;
       summary.revision = exercised.revision;
+      // The worker that this image's serve starts runs the verification
+      // (decision 0055, acceptance 21).
+      await expectJobRuns({
+        packageDir,
+        cliEnv,
+        artifactId: exercised.artifactId,
+        revision: exercised.revision,
+      });
       assert.ok(
         exercised.previewUrl.startsWith(`http://127.0.0.1:${contentPort}/`),
         `The preview must be on the separate origin: ${exercised.previewUrl}`,

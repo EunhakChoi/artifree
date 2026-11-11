@@ -11,6 +11,14 @@ source-pinned job and its failure, cancel, and recovery behavior as
 constraints, and names the queue and the worker as Artifree's own decisions.
 Nothing below is an observation of the original product.
 
+> **Amended 2026-11-11 by [0055](0055-operating-background-work.md), slice
+> R01ba.** Decision 13: `worker run` gains `--supervised` (the end of standard
+> input is a stop request; refused with `--once`). Decision 14: a persistent
+> `serve` now starts and restarts one worker unless started with `--no-worker`,
+> the container image does the same, and the surfaces say so. The rest of this
+> record, including "job changes are not in the change feed" (decision 17),
+> still holds until R01bb.
+
 ## Context
 
 Until now nothing ran in the background. Roadmap R01 asks for one real job

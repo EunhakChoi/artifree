@@ -24,6 +24,8 @@ creates one. Run it as the user that runs the server.
 Options:
   --data-dir <dir>     Data directory of the server (required)
   --once               Stop when no job is due instead of waiting for more
+  --supervised         For a parent process: the end of standard input is a
+                       stop request, handled like SIGTERM; not with --once
   --poll-ms <n>        Milliseconds between looks at an empty queue
                        (10-60000, default 1000)
   --lease-secs <n>     Seconds a lease lasts without a renewal; it is renewed
@@ -31,10 +33,12 @@ Options:
   --hold-file <path>   Testing only: after each claim, wait until this file
                        exists before reading the job's files
 
-On SIGINT or SIGTERM (Ctrl-C on Windows) the worker gives the job it holds
-back to the queue at its next checkpoint, without using an attempt, and exits
-0. A worker that is killed leaves its job running until the lease expires;
-another worker then runs it again, and a result is written at most once.
+On SIGINT or SIGTERM (Ctrl-C on Windows) the worker gives the job it holds back
+to the queue at its next checkpoint, without using an attempt, and exits 0. With
+--supervised the end of standard input (a closed or empty input, or the end of a
+terminal's input) stops it the same way, and the stopped reason is \"signal\". A
+worker that is killed leaves its job running until the lease expires; another
+worker then runs it again, and a result is written at most once.
 
 stdout is JSON lines: {\"event\":\"ready\",\"worker\":...}, one
 {\"event\":\"job\",\"job\":...,\"state\":...,\"attempts\":...} per job ended or
@@ -49,7 +53,13 @@ pub enum Parsed {
     /// Print the help text.
     Help,
     /// Run with these options.
-    Run(WorkerOptions),
+    Run {
+        /// The worker's options.
+        options: WorkerOptions,
+        /// `--supervised`: the end of standard input is a stop request
+        /// (decision 0055, rule 2).
+        supervised: bool,
+    },
 }
 
 const POLL_MS: std::ops::RangeInclusive<u64> = 10..=60_000;
@@ -82,6 +92,7 @@ pub fn parse(arguments: &[OsString]) -> Result<Parsed, String> {
     let mut data_dir: Option<PathBuf> = None;
     let mut hold_file: Option<PathBuf> = None;
     let mut once = false;
+    let mut supervised = false;
     let mut poll_ms: Option<u64> = None;
     let mut lease_secs: Option<u64> = None;
     let mut remaining = rest.iter();
@@ -89,6 +100,12 @@ pub fn parse(arguments: &[OsString]) -> Result<Parsed, String> {
         if argument == "--once" {
             if std::mem::replace(&mut once, true) {
                 return Err(twice("--once"));
+            }
+            continue;
+        }
+        if argument == "--supervised" {
+            if std::mem::replace(&mut supervised, true) {
+                return Err(twice("--supervised"));
             }
             continue;
         }
@@ -118,13 +135,21 @@ pub fn parse(arguments: &[OsString]) -> Result<Parsed, String> {
     }
     let data_dir = data_dir
         .ok_or_else(|| "Unknown arguments. --data-dir is required; use --help.".to_owned())?;
-    Ok(Parsed::Run(WorkerOptions {
-        data_dir,
-        once,
-        poll: Duration::from_millis(poll_ms.unwrap_or(1_000)),
-        lease: Duration::from_secs(lease_secs.unwrap_or(30)),
-        hold_file,
-    }))
+    if supervised && once {
+        return Err(
+            "Unknown arguments. --supervised cannot be used with --once; use --help.".into(),
+        );
+    }
+    Ok(Parsed::Run {
+        options: WorkerOptions {
+            data_dir,
+            once,
+            poll: Duration::from_millis(poll_ms.unwrap_or(1_000)),
+            lease: Duration::from_secs(lease_secs.unwrap_or(30)),
+            hold_file,
+        },
+        supervised,
+    })
 }
 
 fn twice(flag: &str) -> String {
@@ -158,9 +183,12 @@ fn number(
 
 /// Runs `worker`. Prints help, or JSON lines until the worker stops.
 pub fn worker_command(arguments: &[OsString]) -> Result<(), String> {
-    let options = match parse(arguments)? {
+    let (options, supervised) = match parse(arguments)? {
         Parsed::Help => return print_line(WORKER_HELP),
-        Parsed::Run(options) => options,
+        Parsed::Run {
+            options,
+            supervised,
+        } => (options, supervised),
     };
     let shutdown = Arc::new(AtomicBool::new(false));
     // The runtime exists only to wait for signals; the loop is synchronous.
@@ -172,6 +200,10 @@ pub fn worker_command(arguments: &[OsString]) -> Result<(), String> {
     // Installed before the worker says it is ready, so a signal sent after
     // that line is always handled and never takes the default action.
     install_signal_handlers(&runtime, &shutdown)?;
+    if supervised {
+        // Armed before the worker says it is ready, like the signal handlers.
+        watch_stdin(&shutdown)?;
+    }
     let stopped = worker::run(&options, &SystemClock, &shutdown, &mut |event| {
         // A closed stdout must not stop a worker that holds a lease.
         drop(print_line(&event_line(event).to_string()));
@@ -233,6 +265,32 @@ fn install_signal_handlers(
     Ok(())
 }
 
+/// Sets `flag` at the end of standard input or on a read error, which is the
+/// stop request of a supervised worker (decision 0055, rule 2). The stop is
+/// handled as a signal is; the bytes read are discarded.
+fn watch_stdin(flag: &Arc<AtomicBool>) -> Result<(), String> {
+    use std::io::Read;
+    let flag = Arc::clone(flag);
+    std::thread::Builder::new()
+        .name("stdin-stop".into())
+        .spawn(move || {
+            let mut input = io::stdin().lock();
+            let mut sink = [0_u8; 256];
+            // Reads until the end or an error; an interrupted read is retried.
+            loop {
+                match input.read(&mut sink) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            flag.store(true, Ordering::Release);
+        })
+        .map(drop)
+        .map_err(|error| format!("cannot watch standard input: {error}"))
+}
+
 fn event_line(event: &WorkerEvent<'_>) -> serde_json::Value {
     match event {
         WorkerEvent::Ready { worker } => {
@@ -273,7 +331,7 @@ mod tests {
 
     fn run_options(list: &[&str]) -> Result<WorkerOptions, String> {
         match parse(&args(list))? {
-            Parsed::Run(options) => Ok(options),
+            Parsed::Run { options, .. } => Ok(options),
             Parsed::Help => Err("help".into()),
         }
     }

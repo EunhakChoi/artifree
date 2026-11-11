@@ -47,7 +47,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-server",
         ComponentStatus::Implemented,
-        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset reading, writing and download are implemented; publish planned), and a sandboxed preview origin.",
+        "Axum/Tokio HTTP API v1 with a committed change feed (SSE), MCP tools over Streamable HTTP at /mcp, persistent job routes, the worker's status (GET /v1/background), application data routes with opt-in transactional outbox binding, private UTF-8 text/CSV, static PNG and sequential JPEG asset HTTP routes used by the TypeScript client's asset list, read, upload and delete calls (runtime asset reading, writing and download are implemented; publish planned), and a sandboxed preview origin.",
     ),
     (
         "domain",
@@ -92,7 +92,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/jobs.rs",
         ComponentStatus::Implemented,
-        "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes are not in the change feed.",
+        "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes are not in the change feed.",
     ),
     (
         "handoff",
