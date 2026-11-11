@@ -524,6 +524,9 @@ function PreviewPanel({
         revision={revision}
         epoch={epoch}
         stale={stale}
+        following={kept === undefined}
+        latest={latest}
+        onShowLatest={() => onChoose(undefined)}
         title={`Preview of ${artifact.title}, revision ${revision}`}
         className="h-128 w-full rounded-lg border"
       />

@@ -117,6 +117,12 @@ export interface CallDeps {
    * false when the frame has used its burst of 10 and its 60 a minute.
    */
   readonly takeDataWrite: () => boolean;
+  /**
+   * Told the revision a `source.write` of the frame made, after the save
+   * committed and before its receipt is posted, so the workspace can begin
+   * the pause of an adoption with it (decision 0054, rule 8).
+   */
+  readonly saved?: ((revision: number) => void) | undefined;
 }
 
 /** A message from the frame, already known to be a plain object. */

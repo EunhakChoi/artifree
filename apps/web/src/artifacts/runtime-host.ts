@@ -17,6 +17,12 @@ import { pageSaver } from './save-blob';
 
 export { DownloadPrompt } from './download-prompt';
 export type { AdoptionReason } from './frame-rpc';
+export { createAdoptionDriver } from './adoption-driver';
+export type {
+  AdoptionDriver,
+  LiveState,
+  PreviewChoice,
+} from './adoption-driver';
 
 /**
  * What a runtime frame's calls need on the workspace side (decision 0032):
@@ -46,6 +52,11 @@ export function createRpc(options: {
     message: Record<string, unknown>,
     transfer: Transferable[],
   ) => void;
+  /**
+   * Told the revision of each save of the frame that committed (decision
+   * 0054, rule 8).
+   */
+  readonly saved?: ((revision: number) => void) | undefined;
 }): FrameRpc {
   const bucket = new TokenBucket(() => performance.now());
   const writes = new TokenBucket(
@@ -62,6 +73,7 @@ export function createRpc(options: {
     },
     take: () => bucket.take(),
     takeDataWrite: () => writes.take(),
+    saved: options.saved,
     now: () => performance.now(),
     deadline: options.deadline,
     send: options.send,
@@ -173,13 +185,21 @@ export interface AdoptedView {
 
 /**
  * One connected frame whose view the workspace can adopt (decision 0054,
- * rules 9, 10 and 13). Nothing in the workspace adopts a frame yet (R10c).
+ * rules 9, 10 and 13). The workspace's adoption driver (adoption-driver.ts)
+ * decides when.
  */
 export interface ConnectedFrame {
   /** Handles one message from the frame. It never throws. */
   readonly handle: (message: unknown) => void;
   /** The view the frame's calls are bound to now. */
   readonly view: () => RuntimeView;
+  /**
+   * Calls on their way to the server, not held and not waiting for the user
+   * (rule 9).
+   */
+  readonly onItsWay: () => number;
+  /** Whether a `source.write` of the frame has not ended (rule 8). */
+  readonly sourceWriting: () => boolean;
   /**
    * Holds the frame's calls. Resolves once the calls on their way have ended
    * or been abandoned (rule 9).
@@ -192,7 +212,8 @@ export interface ConnectedFrame {
   readonly resume: () => void;
   /**
    * The grant's outcome is unknown: calls are answered `unavailable` at once
-   * until the next pause, resume or adoption (rule 8).
+   * until the next pause, resume or adoption (rule 8). The pause of a save
+   * leaves that as it is.
    */
   readonly refuse: () => void;
   /**
@@ -236,14 +257,35 @@ export function connectFrame(options: {
     message: Record<string, unknown>,
     transfer: Transferable[],
   ) => void;
+  /**
+   * Told the revision of each save of the frame that committed. The pause
+   * for the `saved` adoption begins first, before the receipt is posted, so
+   * the frame's next call is held, unless the grant is unresolved and the
+   * frame is refused (decision 0054, rule 8). Without it a save pauses
+   * nothing. It must not throw: the save has committed, and a throw
+   * would turn its receipt into a failed reply.
+   */
+  readonly onSaved?: ((revision: number) => void) | undefined;
 }): ConnectedFrame {
   const { client, desk, dataChanges, send } = options;
+  const { onSaved } = options;
   const rpc = createRpc({
     client,
     view: options.view,
     desk,
     deadline: options.deadline,
     send,
+    saved:
+      onSaved === undefined
+        ? undefined
+        : (revision) => {
+            // The pause begins before the receipt is posted (rule 8). Nothing
+            // here awaits it.
+            void rpc.pauseForSave().catch((error: unknown) => {
+              console.error('Could not hold the calls after a save.', error);
+            });
+            onSaved(revision);
+          },
   });
   const stopHints = followLiveHints({
     current: () => ({ view: rpc.view, deadline: rpc.deadline }),
@@ -313,6 +355,8 @@ export function connectFrame(options: {
       rpc.handle(message);
     },
     view: () => rpc.view,
+    onItsWay: () => rpc.onItsWay,
+    sourceWriting: () => rpc.sourceWriting,
     pause: async (reason) => {
       // A pause asked for while an adoption is on its way begins after it,
       // under the generation it made: the adoption would otherwise end it.

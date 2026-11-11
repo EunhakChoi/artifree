@@ -307,6 +307,17 @@ rate_limited` with `Retry-After`; a refused create whose key later commits
   frame without the account token, a wrong initialization and a different
   opaque window are refused, an expired host message sends no RPC, and a
   successful response held across frame navigation is not delivered afterwards.
+- Runtime view adoption (decision 0054): server tests cover each refusal of
+  an adoption and the grant of an adopted generation; unit tests cover the
+  host's pause, the request queue's treatment of an adoption, the SDK's
+  deadline and listeners, and the workspace's driver (each cause and their
+  order, the 10 second bound and the repeat of a `503`, the lease moment, a
+  lease that ends while the page is hidden, a refused and an unresolved
+  permission change, a save that commits meanwhile) and its notices.
+  `scripts/smoke-runtime-adoption.mjs` runs Chromium against a real server:
+  a page that opted in keeps a typed value across a permission change, its
+  own save followed by a second save, and a save by another writer, and a
+  page that did not opt in is reloaded. Firefox pending re-verification.
 - Runtime grants: tests exercise declarations and SDK pins, unsupported and
   undeclared grants, a user choice before metadata access, compare-and-set
   conflicts, revocation and regrant, source head changes, session expiry and

@@ -433,8 +433,9 @@ export type ViewAdoptionListener = (adoption: ViewAdoption) => void;
 /**
  * The frame's view (decision 0054). A page whose manifest says
  * `"lifecycle": "adopt"` may keep running when the workspace replaces its
- * view. No workspace adopts a frame yet (decision 0054, R10c), so today a
- * listener is never called.
+ * view: after a permission change, the page's own save, a save by another
+ * writer, or before its lease ends. A page that does not opt in is reloaded
+ * instead, and its listener is never called.
  */
 export interface ViewRuntime {
   /**

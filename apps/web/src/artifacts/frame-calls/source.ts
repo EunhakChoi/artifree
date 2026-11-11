@@ -148,6 +148,9 @@ export const SOURCE_CALLS = [
       const receipt = await client.runtimeCall(view, (source, frame) =>
         source.writeSource(frame, view, input, signal),
       );
+      // "The receipt is given to the frame at once and the pause begins with
+      // it" (decision 0054, rule 8): the host is told before the reply goes.
+      deps.saved?.(receipt.revision);
       return ok(call.id, {
         written: {
           path: receipt.path,

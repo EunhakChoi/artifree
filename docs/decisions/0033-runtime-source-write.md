@@ -116,6 +116,12 @@ revision_conflict` with `current_revision`; bytes equal to the file's
    ended editing session. The retry of the first save is still answered with
    its receipt while that view and connection live (decision 5), so a frame that
    lost the answer can recover it without making a second revision.
+
+   Amended 2026-11-11 by [0054](0054-runtime-view-adoption.md): for a page
+   whose manifest says `"lifecycle": "adopt"`, the workspace does not load a
+   new view after a save. It replaces the frame's view in place with a
+   generation that pins the saved revision and holds no grant (0054, rules 8
+   and 12). The consent rule is unchanged: the user must allow editing again.
    - **Rejected: re-scoping the grant to the new head after each save.** One
      click would then let a frame rewrite the artifact repeatedly and
      unobserved.
@@ -126,6 +132,7 @@ revision_conflict` with `current_revision`; bytes equal to the file's
      the cost of decision 1's wording, so it must stay exact.
    - **Rejected: a count or a time limit on one grant.** It adds a rule the user
      is not shown.
+
 9. **Who may write: the owner, and that is all there is.** Artifree has one
    actor; agent tokens act as it. There is no viewer or editor role, so
    "viewer saves are refused" cannot be enforced and **is not claimed**. What is
@@ -175,9 +182,7 @@ revision_conflict` with `current_revision`; bytes equal to the file's
   import a value from the client, because a module shared by two on-demand
   chunks would put its preload list in the main bundle. A test holds the host's
   retry rule and the client's to the same answers.
-- **Not implemented:** replacing a view in place after a save (R10, proposed in
-  [0054](0054-runtime-view-adoption.md): the workspace loads a new view and
-  the frame's state is lost); subscriptions to
+- **Not implemented:** subscriptions to
   changes (R07: a frame cannot learn of a commit except by its own receipt);
   frame identity or per-frame permissions beyond the connection (S01); viewer
   or editor roles (S02); deleting or renaming a file, saving several files in
