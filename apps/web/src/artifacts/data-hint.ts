@@ -7,12 +7,16 @@ export const DATA_HINT_INTERVAL_MS = 250;
 /** The event of a data change hint (decision 0053, rule 16). */
 export const DATA_CHANGED_EVENT = 'data.changed';
 
+/** The event that tells a frame its view was adopted (decision 0054, rule 10). */
+export const VIEW_ADOPTED_EVENT = 'view.adopted';
+
 /**
  * Every event the host can send a frame: the messages that are not replies.
  * The cross-layer test pairs this list with the events the SDK handles.
  */
 export const FRAME_EVENTS: readonly string[] = Object.freeze([
   DATA_CHANGED_EVENT,
+  VIEW_ADOPTED_EVENT,
 ]);
 
 /** The change hints of one view's connection. */

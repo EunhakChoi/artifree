@@ -24,6 +24,9 @@ import type {
   SourcePart,
   SourceReadRequest,
   SourceWriteRequest,
+  ViewAdoption,
+  ViewAdoptionListener,
+  ViewAdoptionReason,
   WriteReceipt,
 } from './index.js';
 import { isPackagePath } from './package-path.js';
@@ -130,6 +133,31 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function count(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** The reasons the workspace gives for an adoption (decision 0054, rule 10). */
+const ADOPTION_REASONS: readonly string[] = [
+  'permissions',
+  'saved',
+  'head',
+  'lease',
+];
+
+function adoptionReason(value: unknown): value is ViewAdoptionReason {
+  return typeof value === 'string' && ADOPTION_REASONS.includes(value);
+}
+
+/** The longest delay a browser timer accepts, in milliseconds. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** A lease length the SDK believes: a positive safe integer a timer accepts. */
+function leaseLength(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= MAX_TIMER_MS
+  );
 }
 
 function sha256(value: unknown): value is string {
@@ -608,7 +636,12 @@ interface Waiting {
   readonly parse: (reply: Record<string, unknown>) => unknown;
   readonly resolve: (value: never) => void;
   readonly reject: (reason: Error) => void;
-  readonly timeout: number;
+  /** The timer that ends the wait; re-armed when the deadline moves. */
+  timer: number;
+  /** When the call's own timeout ends, on the performance.now() clock. */
+  readonly until: number;
+  /** Ends the wait as timed out. */
+  readonly expire: () => void;
   /** Message of a refusal; metadata keeps its first wording. */
   readonly refusal: string | undefined;
 }
@@ -618,7 +651,7 @@ export function start(config: RuntimeInitialization): void {
   if (window.artifree !== undefined)
     throw new Error('The Artifree runtime was already installed.');
   const channel = new MessageChannel();
-  const deadline = performance.now() + config.lease_ms;
+  let deadline = performance.now() + config.lease_ms;
   const waiting = new Map<number, Waiting>();
   let next = 0;
   let closed = false;
@@ -639,25 +672,70 @@ export function start(config: RuntimeInitialization): void {
     }
   };
 
+  // Listeners of the view adoption (decision 0054, rule 10). Each entry is one
+  // registration, as for the change hint above.
+  const adoptListeners: Array<{ readonly listener: ViewAdoptionListener }> = [];
+  const notifyAdopt = (reason: ViewAdoptionReason): void => {
+    const adoption: ViewAdoption = Object.freeze({ reason });
+    for (const entry of adoptListeners.slice()) {
+      // A registration removed by an earlier listener is not called.
+      if (!adoptListeners.includes(entry)) continue;
+      try {
+        entry.listener(adoption);
+      } catch (error: unknown) {
+        // The error stays in this frame; nothing is sent to the host.
+        console.error('An Artifree view adoption listener failed.', error);
+      }
+    }
+  };
+
   const settle = (id: number): Waiting | undefined => {
     const pending = waiting.get(id);
     if (pending === undefined) return undefined;
     waiting.delete(id);
-    clearTimeout(pending.timeout);
+    clearTimeout(pending.timer);
     return pending;
+  };
+
+  // A wait ends at its own timeout or at the deadline, whichever is first.
+  const arm = (pending: Waiting): void => {
+    pending.timer = window.setTimeout(
+      pending.expire,
+      Math.max(0, Math.min(pending.until, deadline) - performance.now()),
+    );
+  };
+
+  // The workspace adopted this view (decision 0054, rule 10): the deadline
+  // moves for calls already waiting and for later ones.
+  const adopted = (reason: ViewAdoptionReason, leaseMs: number): void => {
+    if (closed) return;
+    deadline = performance.now() + leaseMs;
+    for (const pending of waiting.values()) {
+      clearTimeout(pending.timer);
+      arm(pending);
+    }
+    notifyAdopt(reason);
   };
 
   channel.port1.onmessage = (event: MessageEvent<unknown>) => {
     if (!record(event.data)) return;
     // A message with no call id is an event, not a reply (decision 0053,
     // rule 16). An event this SDK does not know is ignored, and so is a
-    // version that is not a safe non-negative integer.
+    // version that is not a safe non-negative integer. A view.adopted is
+    // ignored too when its reason is unknown or its leaseMs is not a positive
+    // safe integer within the timer range (decision 0054, rule 10).
     if (event.data.type === 'event' && event.data.id === undefined) {
       if (
         event.data.event === 'data.changed' &&
         count(event.data.dataVersion)
       ) {
         notifyChange(event.data.dataVersion);
+      } else if (
+        event.data.event === 'view.adopted' &&
+        adoptionReason(event.data.reason) &&
+        leaseLength(event.data.leaseMs)
+      ) {
+        adopted(event.data.reason, event.data.leaseMs);
       }
       return;
     }
@@ -700,7 +778,7 @@ export function start(config: RuntimeInitialization): void {
       closed = true;
       channel.port1.close();
       for (const pending of waiting.values()) {
-        clearTimeout(pending.timeout);
+        clearTimeout(pending.timer);
         pending.reject(new RuntimeRequestFailure('expired'));
       }
       waiting.clear();
@@ -739,8 +817,14 @@ export function start(config: RuntimeInitialization): void {
       return Promise.reject(new RuntimeRequestFailure('unavailable'));
     const id = ++next;
     return new Promise<T>((resolve, reject) => {
-      const timeout = window.setTimeout(
-        () => {
+      const pending: Waiting = {
+        parse,
+        resolve: resolve as (value: never) => void,
+        reject,
+        refusal: options.refusal,
+        until: performance.now() + options.timeout,
+        timer: 0,
+        expire: () => {
           if (settle(id) === undefined) return;
           try {
             channel.port1.postMessage({ type: 'cancel', id });
@@ -753,15 +837,9 @@ export function start(config: RuntimeInitialization): void {
             ),
           );
         },
-        Math.min(options.timeout, Math.max(0, deadline - performance.now())),
-      );
-      waiting.set(id, {
-        parse,
-        resolve: resolve as (value: never) => void,
-        reject,
-        timeout,
-        refusal: options.refusal,
-      });
+      };
+      waiting.set(id, pending);
+      arm(pending);
       try {
         channel.port1.postMessage({ ...message, id }, options.transfer ?? []);
       } catch {
@@ -1127,6 +1205,21 @@ export function start(config: RuntimeInitialization): void {
     },
   });
 
+  const view = Object.freeze({
+    onAdopt(listener: ViewAdoptionListener): () => void {
+      if (typeof listener !== 'function') {
+        throw new TypeError('A view adoption listener must be a function.');
+      }
+      // Registering sends nothing to the host (decision 0054, rule 10).
+      const entry = { listener };
+      adoptListeners.push(entry);
+      return () => {
+        const index = adoptListeners.indexOf(entry);
+        if (index !== -1) adoptListeners.splice(index, 1);
+      };
+    },
+  });
+
   window.artifree = Object.freeze({
     currentMetadata(): Promise<RuntimeMetadata> {
       return call({ type: 'metadata' }, (reply) => metadata(reply.metadata), {
@@ -1137,5 +1230,6 @@ export function start(config: RuntimeInitialization): void {
     source,
     assets,
     data,
+    view,
   });
 }

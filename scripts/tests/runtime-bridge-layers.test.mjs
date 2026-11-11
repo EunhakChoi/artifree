@@ -112,8 +112,10 @@ test('Each event the host can send is one the SDK handles, and the reverse', () 
   ].map(([, event]) => event);
   assert.deepEqual(absentFrom(FRAME_EVENTS, handled), []);
   assert.deepEqual(absentFrom(handled, FRAME_EVENTS), []);
-  // data.changed of R14c. The count keeps two empty lists from agreeing.
-  assert.equal(FRAME_EVENTS.length, 1);
+  // data.changed of R14c and view.adopted of R10b (decision 0054, rule 14).
+  // The count keeps two empty lists from agreeing.
+  assert.equal(FRAME_EVENTS.length, 2);
+  assert.ok(FRAME_EVENTS.includes('view.adopted'));
 
   // The hint the host sends names one of those events. The schedule runs its
   // callback at once, so the single offer is sent without waiting.

@@ -142,11 +142,22 @@ export interface RuntimeViewOptions extends ReadOptions {
    * supports dispatch notifications. Without one, it is not called.
    */
   readonly onDispatch?: () => void;
+  /**
+   * The live generation this request replaces, for the same view. The new
+   * generation keeps the frame's document, heap and message port and only
+   * replaces its binding (decision 0054, rule 3). The request is marked so a
+   * scheduler sends it as a write (rule 8); the mark is not sent over HTTP.
+   */
+  readonly adopt?: { readonly generation: number };
 }
 
 // Symbol.for keeps the notification shared when a scheduler and client are
 // bundled separately. It is local to the request and is not sent over HTTP.
 const REQUEST_DISPATCH = Symbol.for('artifree.request-dispatch.v1');
+
+// Marks an adoption for a cooperating scheduler (decision 0054, rule 8). Like
+// REQUEST_DISPATCH it is local to the request and is not sent over HTTP.
+const REQUEST_ADOPTION = Symbol.for('artifree.request-adoption.v1');
 
 /** Notifies a request's observer just before a scheduler sends an attempt. */
 export function notifyRequestDispatched(init: RequestInit | undefined): void {
@@ -155,8 +166,16 @@ export function notifyRequestDispatched(init: RequestInit | undefined): void {
   if (typeof callback === 'function') callback();
 }
 
+/** Whether a request adopts a runtime view, which a scheduler sends as a write. */
+export function isAdoptionRequest(init: RequestInit | undefined): boolean {
+  const adoption: unknown =
+    init === undefined ? undefined : Reflect.get(init, REQUEST_ADOPTION);
+  return adoption === true;
+}
+
 interface DispatchRequestInit extends RequestInit {
   [REQUEST_DISPATCH]?: () => void;
+  [REQUEST_ADOPTION]?: true;
 }
 
 /** Which bytes of a file {@link ArtifreeClient.readFilePart} reads. */
@@ -462,6 +481,11 @@ interface SendOptions {
   readonly cache?: RequestCache;
   readonly signal?: AbortSignal | undefined;
   readonly onDispatch?: (() => void) | undefined;
+  /**
+   * Marks the request as a view adoption for the scheduler (decision 0054,
+   * rule 8).
+   */
+  readonly adoption?: boolean;
   /**
    * Reads the body of a failed response within the transport's bounds (a
    * size limit, a stall limit, the signal) instead of whole.
@@ -1568,19 +1592,34 @@ export class ArtifreeClient {
     options: RuntimeViewOptions = {},
   ): Promise<RuntimeView> {
     if (this.runtimeClosing) throw new RuntimeConnectionReplacedError();
+    const adopt = options.adopt;
+    if (
+      adopt !== undefined &&
+      (!Number.isSafeInteger(adopt.generation) ||
+        adopt.generation < 1 ||
+        adopt.generation >= generation)
+    )
+      throw new RangeError(
+        'An adopted generation must be a positive safe integer below the new generation.',
+      );
     const request = (session: string): Promise<RuntimeView> =>
       this.json(
         'POST',
         `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/runtime-views`,
         parseRuntimeView,
         {
-          body: {
-            session_id: session,
-            view_id: viewId,
-            generation,
-          },
+          body:
+            adopt === undefined
+              ? { session_id: session, view_id: viewId, generation }
+              : {
+                  session_id: session,
+                  view_id: viewId,
+                  generation,
+                  adopt: { generation: adopt.generation },
+                },
           signal: options.signal,
           onDispatch: options.onDispatch,
+          adoption: adopt !== undefined,
         },
       );
     let session = this.runtimeSessionId;
@@ -1588,7 +1627,9 @@ export class ArtifreeClient {
     try {
       view = await request(session);
     } catch (error: unknown) {
-      if (!sessionExpired(error)) throw error;
+      // An adoption is never moved to a new connection: reopening would end
+      // the view it adopts (decision 0054, rule 11).
+      if (adopt !== undefined || !sessionExpired(error)) throw error;
       await this.recoverRuntimeSession(session);
       options.signal?.throwIfAborted();
       session = this.runtimeSessionId;
@@ -1601,7 +1642,8 @@ export class ArtifreeClient {
       view.artifact_id !== id ||
       view.revision !== revision ||
       view.view_id !== viewId ||
-      view.generation !== generation
+      view.generation !== generation ||
+      (adopt !== undefined && view.lifecycle !== 'adopt')
     )
       throw new ArtifreeApiError(
         'The server returned a runtime view for different inputs.',
@@ -1987,6 +2029,7 @@ export class ArtifreeClient {
       cache,
       signal,
       onDispatch,
+      adoption,
       boundedErrorBody,
       errorBodyLimit,
       redirect,
@@ -2001,6 +2044,7 @@ export class ArtifreeClient {
     if (cache !== undefined) init.cache = cache;
     if (signal !== undefined) init.signal = signal;
     if (onDispatch !== undefined) init[REQUEST_DISPATCH] = onDispatch;
+    if (adoption === true) init[REQUEST_ADOPTION] = true;
     if (mutation !== undefined) {
       headers['content-type'] = 'application/json';
       headers['idempotency-key'] = mutation.idempotencyKey;

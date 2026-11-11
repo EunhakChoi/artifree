@@ -141,6 +141,11 @@ export interface CallDescriptor<T extends string, F extends object> {
   /** The keys a message of this type carries, and no others. */
   readonly keys: readonly string[];
   /**
+   * The call changes something at the server. An adoption waits for it until
+   * its request ends (decision 0054, rule 9).
+   */
+  readonly write?: true;
+  /**
    * The bounded fields beyond `type` and `id`, or undefined when a value is
    * wrong. The keys and the id were checked before.
    */
@@ -156,6 +161,8 @@ export interface CallDescriptor<T extends string, F extends object> {
 /** A parsed call and what serves it. */
 export interface ParsedCall<C> {
   readonly call: C;
+  /** The descriptor's `write`, as a boolean. */
+  readonly write: boolean;
   readonly serve: (
     deps: CallDeps,
     signal: AbortSignal,
@@ -187,6 +194,7 @@ export function defineCall<T extends string, F extends object>(
       const call: Call<T, F> = { ...fields, type: descriptor.type, id };
       return {
         call,
+        write: descriptor.write === true,
         serve: (deps, signal) => descriptor.serve(call, deps, signal),
       };
     },

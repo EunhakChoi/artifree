@@ -137,6 +137,7 @@ export const DATA_CALLS = [
   defineCall({
     type: 'data.set',
     keys: ['type', 'id', 'path', 'value', 'baseDataVersion', 'retryId'],
+    write: true,
     parse(message: Message) {
       const { value } = message;
       const fields = parseWriteFields(message);
@@ -167,6 +168,7 @@ export const DATA_CALLS = [
   defineCall({
     type: 'data.update',
     keys: ['type', 'id', 'path', 'patch', 'baseDataVersion', 'retryId'],
+    write: true,
     parse(message: Message) {
       const { patch } = message;
       const fields = parseWriteFields(message);
@@ -195,6 +197,7 @@ export const DATA_CALLS = [
   defineCall({
     type: 'data.remove',
     keys: ['type', 'id', 'path', 'baseDataVersion', 'retryId'],
+    write: true,
     parse: parseWriteFields,
     async serve(call, deps, signal) {
       if (!deps.takeDataWrite())

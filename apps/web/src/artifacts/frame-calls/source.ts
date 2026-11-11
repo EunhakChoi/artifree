@@ -101,7 +101,10 @@ export const SOURCE_CALLS = [
           fileName: offer.file_name,
           size: offer.size,
         }),
-        fetch: (offer) => client.runtimeSourceDownload(view, offer, { signal }),
+        // Read at fetch time: a prompt kept through a lease adoption downloads
+        // under the new generation (decision 0054, rule 13).
+        fetch: (offer) =>
+          client.runtimeSourceDownload(deps.view, offer, { signal }),
         saveAs: (offer) => ({
           fileName: offer.file_name,
           type:
@@ -120,6 +123,7 @@ export const SOURCE_CALLS = [
   defineCall({
     type: 'source.write',
     keys: ['type', 'id', 'retryId', 'path', 'bytes'],
+    write: true,
     parse(message: Message) {
       const { retryId, path, bytes } = message;
       if (

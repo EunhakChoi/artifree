@@ -419,6 +419,37 @@ export interface DataRuntime {
   onChange(listener: DataChangeListener): () => void;
 }
 
+/** Why the workspace adopted this frame's view (decision 0054, rule 10). */
+export type ViewAdoptionReason = 'permissions' | 'saved' | 'head' | 'lease';
+
+/** What a view adoption listener is told (decision 0054, rule 10). */
+export interface ViewAdoption {
+  readonly reason: ViewAdoptionReason;
+}
+
+/** A listener registered with `view.onAdopt`. */
+export type ViewAdoptionListener = (adoption: ViewAdoption) => void;
+
+/**
+ * The frame's view (decision 0054). A page whose manifest says
+ * `"lifecycle": "adopt"` may keep running when the workspace replaces its
+ * view. No workspace adopts a frame yet (decision 0054, R10c), so today a
+ * listener is never called.
+ */
+export interface ViewRuntime {
+  /**
+   * Registers `listener` to be told when the workspace adopted this frame's
+   * view: the page keeps its document and its state, and its calls go on
+   * under the new view, whose lease starts again. Each registration is called
+   * with one argument, `{ reason }`; the same function registered twice is
+   * called twice, and a listener that throws does not stop the others.
+   * Registering sends nothing and needs no grant. The frame is not told which
+   * permissions it holds; it learns that by calling. Returns a function that
+   * removes this registration.
+   */
+  onAdopt(listener: ViewAdoptionListener): () => void;
+}
+
 /** What an opted-in frame can do, each operation subject to its own grant. */
 export interface ArtifactRuntime {
   /** Reads current metadata through the workspace's bound runtime view. */
@@ -428,6 +459,8 @@ export interface ArtifactRuntime {
   readonly assets: AssetsRuntime;
   /** Application data saved for this artifact (decision 0053). */
   readonly data: DataRuntime;
+  /** The frame's view and its adoption (decision 0054). */
+  readonly view: ViewRuntime;
 }
 
 declare global {

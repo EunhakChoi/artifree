@@ -5,8 +5,9 @@
 > re-verification ([quality](../quality.md#browser-engines)).
 
 Date: 2026-11-11. Status: **partly implemented**. R10a (the manifest field,
-the contract and adoption on the server) is implemented; R10b and R10c are
-proposed, so no workspace adopts a frame yet and every frame is still
+the contract and adoption on the server) and R10b (the client's request, the
+host's pause and replacement of its view, the SDK event) are implemented;
+R10c is proposed, so no workspace adopts a frame yet and every frame is still
 reloaded.
 Roadmap: R10. Builds on [0019](0019-runtime-metadata-bridge.md),
 [0020](0020-runtime-grants.md), [0032](0032-runtime-source-read-and-download.md),
@@ -254,7 +255,7 @@ product is claimed for them.
 | Slice | Scope                                                                 | Rules                 | Status      |
 | ----- | --------------------------------------------------------------------- | --------------------- | ----------- |
 | R10a  | The manifest field, the contract, and adoption on the server          | 1, 3 to 7, 15, 16, 18 | implemented |
-| R10b  | The client's request, the host's pause and replacement, the SDK event | 9, 10, 13, 14, 17, 18 | proposed    |
+| R10b  | The client's request, the host's pause and replacement, the SDK event | 9, 10, 13, 14, 17, 18 | implemented |
 | R10c  | The workspace's adoption for each cause, the notices, the smoke       | 2, 8, 11, 12, 17, 18  | proposed    |
 
 Notes from R10a, which change no rule:
@@ -267,6 +268,22 @@ Notes from R10a, which change no rule:
   current generation whose base is the revision the view pins.
 - The contract is 0.25.0: `adopt` is optional in the request, and the view
   always carries `lifecycle`.
+
+Notes from R10b, which change no rule:
+
+- The client marks an adoption request for the request queue with a
+  request-local mark, as it marks a dispatch observer; nothing is added to
+  the URL, the headers or the body beyond `adopt`.
+- The host offers the pause, its release without an adoption, the mode in
+  which calls are answered `unavailable` at once, the adoption and its
+  failure as separate operations. One adoption runs at a time, and none for
+  a frame that has ended. The 10 second bound and the repeat of a `503` are
+  the workspace's (R10c).
+- A held call takes its frame budget token when it is received. A call held
+  past the end of the lease is dropped as a call received after it is.
+- The lease the frame is told is rounded down from the workspace's own
+  deadline. A change hint waiting in its 250 ms window at an adoption is not
+  carried over; the hint may be missed by contract (0053, rule 16).
 
 ## Alternatives considered
 
