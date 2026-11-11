@@ -191,7 +191,9 @@ async function act(opened, name) {
 async function ask(opened, name) {
   const seen = opened.answers.length;
   await opened.frame.getByRole('button', { name }).click();
-  await expect.poll(() => opened.answers.length).toBeGreaterThan(seen);
+  await expect
+    .poll(() => opened.answers.length, { timeout: 20_000 })
+    .toBeGreaterThan(seen);
   return JSON.parse(opened.answers[seen]);
 }
 

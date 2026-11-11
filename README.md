@@ -141,8 +141,10 @@ when nothing is due). A job runs trusted server code, with no sandbox, and it us
 not the isolated execution that builds of React sources or model calls will
 need. Cancelling stops work and never rolls anything back. Job changes are
 in the change feed (`job_changed`): `artifree job show <job> --wait` and the
-TypeScript client's `followJob` wait for a job to end. The web workspace has
-no job view yet.
+TypeScript client's `followJob` wait for a job to end. In the web workspace
+an artifact's Jobs tab lists its jobs, asks for a verification of the
+revision shown, cancels a job, follows each change without a reload, and
+says so when no worker is running.
 
 ### Application data
 

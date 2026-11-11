@@ -25,6 +25,12 @@ Nothing below is an observation of the original product.
 > contract 0.27.0), and a client can follow a job instead of polling; MCP
 > still reads a job on request. "The web workspace has no job panel" holds
 > until R01bc.
+>
+> **Amended 2026-11-12 by 0055, slice R01bc.** Decision 17 and the limits: the
+> web workspace has a Jobs tab per artifact (0055, rules 13 to 16). It lists
+> the artifact's jobs, asks for a verification of the revision shown, cancels
+> a job, and follows `job_changed`. A list of all jobs across artifacts and
+> the jobs of an artifact in the trash are still not shown.
 
 ## Context
 
