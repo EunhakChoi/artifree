@@ -57,6 +57,7 @@ function noticeFor(props) {
   return renderToStaticMarkup(
     createElement(AdoptionNotice, {
       documentRevision: 2,
+      loadedHead: 2,
       view: { revision: 2, head_revision: 3 },
       ...props,
     }),
@@ -85,6 +86,7 @@ function savedNoticeFor(following) {
   return renderToStaticMarkup(
     createElement(AdoptionNotice, {
       documentRevision: 2,
+      loadedHead: 2,
       view: { revision: 3, head_revision: 3 },
       following,
     }),
@@ -102,4 +104,16 @@ test('a preview of a chosen revision is not told that refreshing loads its save'
   assert.match(markup, /Preview kept running across a save/);
   assert.doesNotMatch(markup, /Refresh the preview/);
   assert.match(markup, /Show the latest revision to load the saved one\./);
+});
+
+test('a revision that was already newer when this one was chosen is not reported', () => {
+  const markup = renderToStaticMarkup(
+    createElement(AdoptionNotice, {
+      documentRevision: 2,
+      loadedHead: 5,
+      view: { revision: 2, head_revision: 5 },
+      following: false,
+    }),
+  );
+  assert.equal(markup, '');
 });

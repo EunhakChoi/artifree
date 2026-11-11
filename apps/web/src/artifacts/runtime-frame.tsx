@@ -21,7 +21,10 @@ export interface LiveFrame {
   /** Whether the frame was adopted at least once. */
   readonly adopted: boolean;
   /** Pauses the frame, sends the change and adopts it (rule 8). */
-  readonly changePermissions: (capabilities: string[]) => Promise<void>;
+  readonly changePermissions: (
+    capabilities: string[],
+    shown: RuntimeView,
+  ) => Promise<void>;
 }
 
 interface RuntimeFrameProps {
@@ -99,6 +102,7 @@ export function RuntimeFrame({
   const [hostFailed, setHostFailed] = useState(false);
   const desk = useMemo(() => host?.createDesk(), [host]);
   const driverRef = useRef<RuntimeHost.AdoptionDriver | undefined>(undefined);
+  const adoptedOnce = useRef(false);
 
   useEffect(() => {
     if (!view.enabled) return undefined;
@@ -251,6 +255,7 @@ export function RuntimeFrame({
           },
           onChange: (state) => {
             if (!active) return;
+            adoptedOnce.current = true;
             latest.current.onLive({
               view: state.view,
               adopted: true,
@@ -331,8 +336,13 @@ export function RuntimeFrame({
         onLoad={() => {
           loads.current += 1;
           if (view.enabled && loads.current > 1) {
+            // A frame that was adopted no longer matches the view the preview
+            // was made with, so a new one is made at once (decision 0054).
+            const adopted =
+              driverRef.current !== undefined && adoptedOnce.current;
             close.current();
             onClose();
+            if (adopted) onRestart();
           }
         }}
       />

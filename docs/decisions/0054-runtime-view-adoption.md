@@ -316,8 +316,20 @@ Notes from R10c, which change no rule:
 - A save that commits while the frame's calls are answered `unavailable`
   (rule 8, an unresolved permission change) begins no pause; its adoption
   runs when the grant is settled.
-- A page that navigated itself ends as before: its view is closed and a new
-  one is made on the next refresh or change.
+- A page that navigated itself ends as before: its view is closed. If the
+  frame had been adopted, the preview no longer matches the view it was made
+  with, so a new view is made at once; otherwise on the next refresh or
+  change.
+- A permission change is sent for the generation whose grant the user was
+  shown. A choice made before an adoption replaced that generation is not
+  sent; the user is told to review the permissions and choose again.
+- The "A newer revision exists" notice is for a head that moved after the
+  document was loaded, and its offer appears once the workspace itself knows
+  that revision.
+- A lease that ends while a permission change is unresolved ends the frame,
+  as any lease that ended first does.
+- An adoption request that ended without the server's answer has its
+  generation closed, since the server may have made it.
 - The notices ship in the on-demand chunk of the permission controls and
   are shown by the preview, not by the frame component: a second on-demand
   chunk importing the button would have moved it into a chunk the page

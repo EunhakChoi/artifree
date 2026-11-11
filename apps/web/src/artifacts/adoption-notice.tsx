@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button';
 interface AdoptionNoticeProps {
   /** The revision the frame's document was loaded from (decision 0054, rule 5). */
   readonly documentRevision: number;
+  /** The head when the frame's document was loaded. */
+  readonly loadedHead: number;
   /** The generation the frame is bound to now. */
   readonly view: RuntimeView;
   /**
@@ -22,6 +24,7 @@ interface AdoptionNoticeProps {
 /** What the workspace says beside a preview it adopted (decision 0054, rules 8 and 12). */
 export function AdoptionNotice({
   documentRevision,
+  loadedHead,
   view,
   following,
   onLoadNewer,
@@ -29,7 +32,10 @@ export function AdoptionNotice({
   // Only the frame's own save moves the pinned revision away from the
   // document's (decision 0054, rule 5), so this is the save it reports.
   const kept = view.revision !== documentRevision;
-  const newer = view.head_revision > view.revision;
+  // A revision that was already newer when the user chose this one is no
+  // news: only a head that moved since, past what the frame pins, is told.
+  const newer =
+    view.head_revision > view.revision && view.head_revision > loadedHead;
   if (!kept && !newer) return null;
   return (
     <div className="flex flex-col gap-3">

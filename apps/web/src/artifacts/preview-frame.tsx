@@ -189,7 +189,7 @@ export function PreviewFrame({
       if (held === undefined) {
         await client.setRuntimeGrant(view, capabilities);
       } else {
-        await held.frame.changePermissions(capabilities);
+        await held.frame.changePermissions(capabilities, view);
       }
     } catch (error: unknown) {
       setGrantError(
@@ -226,9 +226,18 @@ export function PreviewFrame({
         <Suspense fallback={null}>
           <AdoptionNotice
             documentRevision={value.view.revision}
+            loadedHead={value.view.head_revision}
             view={held.frame.view}
             following={following}
-            onLoadNewer={following ? restart : onShowLatest}
+            // Offered once the workspace itself knows the revision the notice
+            // names: loading it sooner would show an older one.
+            onLoadNewer={
+              latest < held.frame.view.head_revision
+                ? undefined
+                : following
+                  ? restart
+                  : onShowLatest
+            }
           />
         </Suspense>
       ) : null}

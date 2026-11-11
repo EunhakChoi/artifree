@@ -119,11 +119,16 @@ export interface AdoptionDriverOptions {
 /** Drives one live frame after it was created. */
 export interface AdoptionDriver {
   /**
-   * Pauses the frame, sends the grant change and adopts the new grant. Rejects
-   * with the change's error when the change is refused, and when the preview
-   * has ended.
+   * Pauses the frame, sends the grant change and adopts the new grant. `shown`
+   * is the view whose grant the user was shown when choosing `capabilities`.
+   * Rejects with the change's error when the change is refused, when the
+   * preview has ended, and, sending nothing, when the frame was adopted since
+   * `shown`: that choice was made for another grant.
    */
-  readonly changePermissions: (capabilities: string[]) => Promise<void>;
+  readonly changePermissions: (
+    capabilities: string[],
+    shown: RuntimeView,
+  ) => Promise<void>;
   /** The frame's own save committed at `revision` (rule 8). */
   readonly saved: (revision: number) => void;
   /** The user chose a revision, or Latest. A change of mode or revision restarts the frame (rule 11). */
@@ -141,19 +146,28 @@ function continueChain(): void {
 }
 
 /**
- * Recognizes the client's ArtifreeApiError with status 503 by its shape, so the
- * driver needs no value import from the client.
+ * The status of the client's ArtifreeApiError, recognized by its shape so the
+ * driver needs no value import from the client. Undefined for anything else.
  */
-function isUnavailable(error: unknown): boolean {
+function answerStatus(error: unknown): number | undefined {
   if (typeof error !== 'object' || error === null) {
-    return false;
+    return undefined;
   }
-  return (
-    'name' in error &&
+  return 'name' in error &&
     error.name === 'ArtifreeApiError' &&
     'status' in error &&
-    error.status === 503
-  );
+    typeof error.status === 'number'
+    ? error.status
+    : undefined;
+}
+
+/** Whether the server answered the request with an error: it made nothing. */
+function isAnswer(error: unknown): boolean {
+  return answerStatus(error) !== undefined;
+}
+
+function isUnavailable(error: unknown): boolean {
+  return answerStatus(error) === 503;
 }
 
 /**
@@ -191,6 +205,7 @@ export function createAdoptionDriver(
   let controller: AbortController | undefined;
   let cancelLease: (() => void) | undefined;
   let cancelPoll: (() => void) | undefined;
+  let cancelLapse: (() => void) | undefined;
   let queued = false;
   let chain: Promise<void> = Promise.resolve();
 
@@ -249,6 +264,7 @@ export function createAdoptionDriver(
     ended = true;
     cancelLease?.();
     cancelPoll?.();
+    cancelLapse?.();
     unsubscribe();
     unwatchVisibility();
   }
@@ -305,6 +321,17 @@ export function createAdoptionDriver(
         frame.refuse();
         refusing = true;
       }
+      // Nothing renews the lease meanwhile, so its end is looked at again: a
+      // frame whose lease ended cannot be adopted and is restarted.
+      if (leaseDue && cancelLapse === undefined) {
+        cancelLapse = schedule(
+          () => {
+            cancelLapse = undefined;
+            enqueue();
+          },
+          Math.min(MAX_TIMER_MS, Math.max(0, deadline - now())),
+        );
+      }
       return;
     }
     if (savedRevision !== undefined) {
@@ -355,8 +382,9 @@ export function createAdoptionDriver(
           signal,
         });
       } catch (error: unknown) {
-        // An abandoned request can still finish at the server.
-        if (ended || signal.aborted) {
+        // An abandoned request, and one that ended without the server's
+        // answer, can still finish at the server.
+        if (ended || signal.aborted || !isAnswer(error)) {
           closeGeneration(generation);
         }
         if (
@@ -389,6 +417,9 @@ export function createAdoptionDriver(
     const cause: AdoptionReason =
       savedRevision === undefined ? reason : 'saved';
     const target = savedRevision ?? revision;
+    // Read before the request: a grant change that lands while it is on its
+    // way is not in the generation it makes, and must be adopted afterwards.
+    const grantRequested = grants.revision(frame.view().artifact_id, target);
     const abort = new AbortController();
     controller = abort;
     const started = now();
@@ -423,10 +454,7 @@ export function createAdoptionDriver(
       }
       refusing = false;
       leaseDue = false;
-      grantSeen = grants.revision(
-        adopted.view.artifact_id,
-        adopted.view.revision,
-      );
+      grantSeen = grantRequested;
       knownHead = Math.max(knownHead, adopted.view.head_revision);
       armLease();
       onChange({ view: adopted.view, deadline, documentRevision });
@@ -439,13 +467,25 @@ export function createAdoptionDriver(
 
   /**
    * Pauses the frame, sends the grant change and adopts the new grant. Rejects
-   * with the change's error when the change is refused, and when the preview
-   * has ended.
+   * with the change's error when the change is refused, when the preview has
+   * ended, and when the frame was adopted since the user was shown `shown`.
    */
-  function changePermissions(capabilities: string[]): Promise<void> {
+  function changePermissions(
+    capabilities: string[],
+    shown: RuntimeView,
+  ): Promise<void> {
     const task = chain.then(async () => {
       if (ended) {
         throw new Error('The preview has ended.');
+      }
+      // The list was chosen against the grant of `shown`. An adoption that ran
+      // while this waited replaced that grant, and a save or a head change left
+      // the new generation with none (rule 6): sending the list would allow
+      // again what the user was not asked about.
+      if (frame.view().generation !== shown.generation) {
+        throw new Error(
+          'The permissions shown were replaced. Review them and choose again.',
+        );
       }
       await frame.pause('permissions');
       if (ended) {

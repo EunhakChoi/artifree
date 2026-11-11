@@ -356,7 +356,7 @@ describe('a permission change', () => {
     // A later moment, so that the renewed deadline differs from the first one.
     await world.clock.advance(1_000);
 
-    await world.driver.changePermissions(CAPABILITIES);
+    await world.driver.changePermissions(CAPABILITIES, world.frame.current);
 
     assert.deepEqual(world.log, [
       'pause:permissions',
@@ -384,7 +384,7 @@ describe('a permission change', () => {
     world.grants.answerSet = () => Promise.reject(refusal);
 
     await assert.rejects(
-      world.driver.changePermissions(CAPABILITIES),
+      world.driver.changePermissions(CAPABILITIES, world.frame.current),
       (error) => error === refusal,
     );
 
@@ -401,7 +401,10 @@ describe('a permission change', () => {
     const write = deferred();
     world.frame.writeOnItsWay = write.promise;
 
-    const change = world.driver.changePermissions(CAPABILITIES);
+    const change = world.driver.changePermissions(
+      CAPABILITIES,
+      world.frame.current,
+    );
     await settle();
     // The write commits during that wait, so its saved adoption is queued behind the change.
     world.driver.saved(SAVED_REVISION);
@@ -425,7 +428,7 @@ describe('a permission change', () => {
     };
 
     await assert.rejects(
-      world.driver.changePermissions(CAPABILITIES),
+      world.driver.changePermissions(CAPABILITIES, world.frame.current),
       (error) => error === failure,
     );
     assert.deepEqual(world.log, ['pause:permissions', 'set', 'refuse']);
@@ -632,7 +635,10 @@ describe('the 10 second bound of an adoption', () => {
     const world = await setUp();
     world.frame.answers.push(unavailable, unavailable);
 
-    const change = world.driver.changePermissions(CAPABILITIES);
+    const change = world.driver.changePermissions(
+      CAPABILITIES,
+      world.frame.current,
+    );
     await settle();
     await world.clock.advance(2 * REPEAT_MS);
     await change;
@@ -672,7 +678,10 @@ describe('the 10 second bound of an adoption', () => {
     const world = await setUp();
     world.frame.fallback = unavailable;
 
-    const change = world.driver.changePermissions(CAPABILITIES);
+    const change = world.driver.changePermissions(
+      CAPABILITIES,
+      world.frame.current,
+    );
     await settle();
     await world.clock.advance(BOUND_MS);
     await change;
@@ -709,7 +718,10 @@ describe('the 10 second bound of an adoption', () => {
         );
       });
 
-    const change = world.driver.changePermissions(CAPABILITIES);
+    const change = world.driver.changePermissions(
+      CAPABILITIES,
+      world.frame.current,
+    );
     await settle();
     await world.clock.advance(BOUND_MS - POLL_MS);
     assert.deepEqual(aborts, []);
@@ -733,17 +745,19 @@ describe('the 10 second bound of an adoption', () => {
     { kind: 'a conflict (409)', error: () => apiError(409) },
     { kind: 'a server failure (500)', error: () => apiError(500) },
     {
+      // No answer came, so the server may have made the generation: it is closed.
       kind: 'a network failure',
       error: () => new TypeError('The network request failed.'),
+      closes: ['close:1'],
     },
   ];
-  for (const { kind, error } of refusals) {
+  for (const { kind, error, closes = [] } of refusals) {
     test(`an adoption refused by ${kind} fails at once and is not repeated`, async () => {
       const world = await setUp();
       const refusal = error();
       world.frame.fallback = () => Promise.reject(refusal);
 
-      await world.driver.changePermissions(CAPABILITIES);
+      await world.driver.changePermissions(CAPABILITIES, world.frame.current);
 
       assert.deepEqual(attemptsOf(world.frame.requests), [
         { reason: 'permissions', revision: REVISION, generation: 1, at: 0 },
@@ -752,10 +766,91 @@ describe('the 10 second bound of an adoption', () => {
         'pause:permissions',
         'set',
         'adopt:permissions',
+        ...closes,
         'fail',
         'restart',
       ]);
       assert.deepEqual(world.restarts, [0]);
     });
   }
+});
+
+describe('a change chosen against a grant that was replaced', () => {
+  test('a change chosen before an adoption is refused after it, and no grant is sent', async () => {
+    const world = await setUp();
+    const shown = world.frame.current;
+    // The frame's own save is adopted first: its generation holds no grant.
+    world.driver.saved(SAVED_REVISION);
+    await settle();
+    assert.equal(world.frame.current.generation, 1);
+
+    await assert.rejects(
+      world.driver.changePermissions(CAPABILITIES, shown),
+      /permissions shown were replaced/,
+    );
+    assert.deepEqual(world.grants.sets, []);
+    assert.deepEqual(world.log, ['pause:saved', 'adopt:saved']);
+  });
+
+  test('a change chosen while an adoption is on its way is refused once it lands', async () => {
+    const world = await setUp();
+    const shown = world.frame.current;
+    const landing = deferred();
+    world.frame.answers.push((request) =>
+      landing.promise.then(() => ({
+        view: viewOf(request.generation, request.revision),
+        deadline: world.clock.now() + LEASE_MS,
+      })),
+    );
+    world.driver.saved(SAVED_REVISION);
+    await settle();
+    const change = world.driver.changePermissions(CAPABILITIES, shown);
+    landing.resolve();
+
+    await assert.rejects(change, /permissions shown were replaced/);
+    assert.deepEqual(world.grants.sets, []);
+  });
+});
+
+describe('a grant changed by another preview while an adoption is on its way', () => {
+  test('is adopted afterwards, since the generation made meanwhile does not hold it', async () => {
+    const world = await setUp();
+    const landing = deferred();
+    world.frame.answers.push((request) =>
+      landing.promise.then(() => ({
+        view: viewOf(request.generation, request.revision),
+        deadline: world.clock.now() + LEASE_MS,
+      })),
+    );
+    world.grants.change(REVISION);
+    await settle();
+    assert.equal(world.frame.requests.length, 1);
+    // A second change lands while the first adoption's request is on its way.
+    world.grants.change(REVISION);
+    landing.resolve();
+    await settle();
+
+    assert.deepEqual(attemptsOf(world.frame.requests), [
+      { reason: 'permissions', revision: REVISION, generation: 1, at: 0 },
+      { reason: 'permissions', revision: REVISION, generation: 2, at: 0 },
+    ]);
+  });
+});
+
+describe('a lease that ends while the grant is unresolved', () => {
+  test('restarts the frame at the end of the lease, and adopts nothing', async () => {
+    const world = await setUp();
+    world.grants.status = 'unknown';
+    world.grants.notify();
+    await settle();
+    assert.deepEqual(world.log, ['refuse']);
+
+    await world.clock.advance(DEADLINE - 250);
+    assert.deepEqual(world.restarts, []);
+    await world.clock.advance(250);
+
+    assert.deepEqual(world.frame.requests, []);
+    assert.deepEqual(world.log, ['refuse', 'fail', 'restart']);
+    assert.deepEqual(world.restarts, [DEADLINE]);
+  });
 });
