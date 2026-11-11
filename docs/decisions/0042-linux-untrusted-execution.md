@@ -8,9 +8,14 @@
 
 Date: 2026-11-06. Status: **proposed boundary; partial read-only inspection
 implemented, no untrusted execution**. Roadmap: R02.
-Builds on [0030](0030-persistent-jobs-and-worker.md),
-[0036](0036-multi-user-identity.md), and
-[0003](0003-local-html-artifact-slice.md).
+
+> Builds on [0030](0030-persistent-jobs-and-worker.md),
+> [0036](0036-multi-user-identity.md), and
+> [0003](0003-local-html-artifact-slice.md).
+
+> **Note, 2026-11-12.** [0056](0056-linux-provider-delivery.md) decides how
+> R02a is built and delivered (the provider's parts, the job its acceptance
+> runs in, eight slices). It changes no rule of this record.
 
 ## Context and evidence
 
