@@ -447,8 +447,8 @@ fn run_group(
     let mut control = start_stub(plan, roots, session)?;
     place_stub(group, group_path, session)?;
     let (readiness, start) = release(plan, roots, &mut control, group_path, own_pid_namespace)?;
+    // `await_exit` records the exit in the session itself, on every path that reaped the stub.
     let (exit, wall_time) = await_exit(plan, session, start)?;
-    session.exit = Some(exit);
     // Decision 0042 rule 6: after the launcher and init teardown a normal exit also requires an
     // empty group. `populated` is not used: measured on 2026-11-12, it stays 1 for a few
     // milliseconds after ordinary exits while the listing is already empty. `settle` kills
@@ -717,6 +717,9 @@ fn final_verdict(outcome: &Outcome) -> Result<(), AttemptFailure> {
         return Err(AttemptFailure::DeadlineExceeded);
     }
     let Some(usage) = outcome.usage else {
+        // Without the counters a run cannot be told from an out-of-memory kill. A launch that
+        // failed before or at its start keeps its own reason, which needs no counter.
+        outcome.phase?;
         return Err(AttemptFailure::Unobserved);
     };
     if usage.oom_kills > 0 {

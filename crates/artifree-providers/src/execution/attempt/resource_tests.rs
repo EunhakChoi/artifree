@@ -62,7 +62,7 @@ fn clean_outcome() -> Outcome {
 #[test]
 fn verdict_precedence_of_run_faults() {
     let exec_failed = AttemptFailure::NotStarted(NotStartedReason::ExecFailed);
-    let cases: [(&str, Outcome, Result<(), AttemptFailure>); 5] = [
+    let cases: [(&str, Outcome, Result<(), AttemptFailure>); 6] = [
         ("a clean run", clean_outcome(), Ok(())),
         (
             "cleanup not observed",
@@ -101,7 +101,19 @@ fn verdict_precedence_of_run_faults() {
             Err(AttemptFailure::DeadlineExceeded),
         ),
         (
-            "counters that cannot be read",
+            "counters that cannot be read after a run",
+            Outcome {
+                cleanup_observed: true,
+                output_exceeded: false,
+                phase: Ok(()),
+                usage: None,
+                survivors: SurvivorListing::Occupied,
+                captures_read: false,
+            },
+            Err(AttemptFailure::Unobserved),
+        ),
+        (
+            "a start that failed keeps its reason without counters",
             Outcome {
                 cleanup_observed: true,
                 output_exceeded: false,
@@ -110,7 +122,7 @@ fn verdict_precedence_of_run_faults() {
                 survivors: SurvivorListing::Occupied,
                 captures_read: false,
             },
-            Err(AttemptFailure::Unobserved),
+            Err(exec_failed),
         ),
     ];
     for (name, outcome, expected) in cases {
@@ -576,6 +588,10 @@ fn job_cpu_spinners_share_one_cpu() -> Result<(), Box<dyn Error>> {
     assert_no_attempt_groups()
 }
 
+/// The survivors branch of the verdict is not reached here: the launcher's init takes its PID
+/// namespace with it, so the group's list was empty at the observed exit in every measured run.
+/// That branch is covered by the verdict and listing tables above. What this test shows is that
+/// nothing outlives the attempt, through `settle`'s kill and the `/proc` scan of `timed_launch`.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_background_processes_do_not_outlive_a_normal_exit() -> Result<(), Box<dyn Error>> {

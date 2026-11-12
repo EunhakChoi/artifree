@@ -84,7 +84,7 @@ const CORE_FILE_SIZE: &str = "Max core file size";
 /// The measured filter table: the 39 unconditional entries, typed out from the probe's facts
 /// so that the test does not read the table back and agree with it by construction.
 #[cfg(target_arch = "x86_64")]
-const MEASURED: [(&str, i64); 39] = [
+const MEASURED: [(&str, i64); 40] = [
     ("read", 0),
     ("write", 1),
     ("close", 3),
@@ -115,6 +115,8 @@ const MEASURED: [(&str, i64); 39] = [
     ("sched_getaffinity", 204),
     ("getdents64", 217),
     ("set_tid_address", 218),
+    // Not measured: the vDSO answered it on the runner. Kept for hosts where it does not.
+    ("clock_gettime", 228),
     ("clock_nanosleep", 230),
     ("exit_group", 231),
     ("openat", 257),

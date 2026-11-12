@@ -31,7 +31,7 @@ pub(super) struct PolicyError;
 /// The names serve review and the table test; the numbers are what the filter uses. `clone3` is
 /// listed too, so that the refusal's `ENOSYS` is its result and not a kill (see `clone3_refusal`).
 #[cfg(target_arch = "x86_64")]
-pub(super) const ALLOWED: [(&str, i64); 39] = [
+pub(super) const ALLOWED: [(&str, i64); 40] = [
     ("read", 0),
     ("write", 1),
     ("close", 3),
@@ -64,6 +64,9 @@ pub(super) const ALLOWED: [(&str, i64); 39] = [
     ("sched_getaffinity", 204),
     ("getdents64", 217),
     ("set_tid_address", 218),
+    // Read-only clock; the vDSO usually answers it, but a host whose clock source the vDSO
+    // cannot use makes it a real system call (the PR #190 review).
+    ("clock_gettime", 228),
     ("clock_nanosleep", 230),
     ("exit_group", 231),
     ("openat", 257),
