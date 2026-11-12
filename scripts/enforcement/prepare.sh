@@ -43,6 +43,10 @@ usage: prepare.sh VERB [ARGUMENT]
   manifest-back       move MANIFEST back
   payload-break       replace the payload by a text file and rewrite the manifest
   payload-restore     restore the payload and rewrite the manifest
+  scenario NAME       write NAME to etc/scenario and rewrite the manifest
+                      (exit threads processes memory scratch-bytes scratch-inodes
+                      flood hang cpu survivors survivors-hang)
+  kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
 EOF
   exit 2
 }
@@ -54,9 +58,10 @@ fail() {
 
 # Assembles the tool root: the bubblewrap launcher, the fixture and the payload, the shared
 # libraries each of them needs, the licence of each Debian package that owns a copied file,
-# and the manifest last (decision 0056 rule 6). The sandbox binds the tool root's lib and
-# lib64 as /lib and /lib64 and nothing else, so a library that ldd reports under /usr/lib
-# (usrmerged hosts such as ubuntu-24.04) is copied to the path it has inside the sandbox.
+# the scenario file that starts as `exit`, and the manifest last (decision 0056 rule 6). The
+# sandbox binds the tool root's lib and lib64 as /lib and /lib64 and nothing else, so a
+# library that ldd reports under /usr/lib (usrmerged hosts such as ubuntu-24.04) is copied to
+# the path it has inside the sandbox.
 install_tool_root() {
   local fixture=$1 payload=$2
   [[ -f "$fixture" && -x "$fixture" ]] || fail "the fixture is not an executable file: $fixture"
@@ -65,7 +70,7 @@ install_tool_root() {
   apt-get update
   apt-get install -y --no-install-recommends "bubblewrap=$BUBBLEWRAP_VERSION"
   rm -rf -- "$ROOT"
-  install -d -o root -g root -m 0755 "$ROOT/bin" "$ROOT/lib" "$ROOT/lib64" "$ROOT/licenses"
+  install -d -o root -g root -m 0755 "$ROOT/bin" "$ROOT/lib" "$ROOT/lib64" "$ROOT/licenses" "$ROOT/etc"
   # A copy, not a link: the AppArmor profile names the launcher by this path.
   install -o root -g root -m 0755 /usr/bin/bwrap "$ROOT/bin/bwrap"
   install_licence /usr/bin/bwrap
@@ -73,6 +78,7 @@ install_tool_root() {
   copy_libraries "$fixture"
   install -o root -g root -m 0755 "$payload" "$ROOT/bin/artifree-execution-payload"
   copy_libraries "$payload"
+  write_root_text 0644 "$ROOT/etc/scenario" exit
   write_manifest
 }
 
@@ -307,15 +313,44 @@ nomem_slice_off() {
   systemctl daemon-reload
 }
 
+is_scenario() {
+  case "$1" in
+    exit | threads | processes | memory | scratch-bytes | scratch-inodes | flood | hang | \
+      cpu | survivors | survivors-hang) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Writes NAME to the scenario file the payload reads, then rewrites the manifest so that the
+# provider still admits the tool root (decision 0056 rule 6). The name is checked by the caller.
+set_scenario() {
+  local name=$1
+  [[ -d "$ROOT/etc" ]] || fail "the tool root has no etc directory; run install first"
+  write_root_text 0644 "$ROOT/etc/scenario" "$name"
+  write_manifest
+}
+
+# Prints the last 20 kernel log lines about seccomp violations (audit type 1326) or the OOM
+# killer. It changes nothing and is for diagnosis only.
+kernel_log() {
+  dmesg | { grep -E 'type=1326|oom' || true; } | tail -n 20
+}
+
 main() {
   local verb=${1:-}
   case "$verb" in
     install) (( $# == 3 )) || usage ;;
+    scenario)
+      if (( $# != 2 )) || ! is_scenario "$2"; then
+        usage
+      fi
+      ;;
     save-routing | routing-file | routing-pipe | profile-on | profile-off | \
       launcher-away | launcher-back | fixture-away | fixture-back | \
       nomem-slice-on | nomem-slice-off | tool-modify | tool-restore | \
       tool-extra-on | tool-extra-off | tool-missing-on | tool-missing-off | \
-      manifest-away | manifest-back | payload-break | payload-restore) (( $# == 1 )) || usage ;;
+      manifest-away | manifest-back | payload-break | payload-restore | \
+      kernel-log) (( $# == 1 )) || usage ;;
     *) usage ;;
   esac
   if (( EUID != 0 )); then
@@ -344,6 +379,8 @@ main() {
     manifest-back) move_from_saved "$ROOT/MANIFEST" "$SAVED_DIR/MANIFEST" ;;
     payload-break) payload_break ;;
     payload-restore) payload_restore ;;
+    scenario) set_scenario "$2" ;;
+    kernel-log) kernel_log ;;
   esac
 }
 

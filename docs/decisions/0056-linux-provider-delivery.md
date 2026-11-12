@@ -1,8 +1,9 @@
 # 0056: Delivering the Linux execution provider
 
 Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
-enforcement job) and R02ab (the first launch, of a fixture that only exits and
-only from the job's tests) are implemented**.
+enforcement job), R02ab (the first launch, only from the job's tests) and
+R02ac (resources and cleanup under that launch, with the scratch amended
+below) are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -222,6 +223,42 @@ how; where the two could be read differently, 0042 holds.
 > payloads can hang and flood), survivors after a normal exit (R02ac), and
 > the refusal of leaked descriptors with a real leak (R02ae). The allowlist
 > is the fixture's and gets its public mapping in R02ad.
+
+> **Note, 2026-11-13 (R02ac).** The launch now has the shape of the
+> amendment of 2026-11-12: the launcher makes the scratch's mount point,
+> remounts the root and `/dev` read-only and grants the two capabilities;
+> the bootstrap mounts the scratch in its own mount namespace (`nosuid`,
+> `nodev`, `noexec`, mode 700, 128 MiB, 4,096 inodes) before the limits; and
+> the provider reads the bootstrap's mount table before the release, beside
+> the facts it read before. The payload fixture now takes one scenario from a
+> file of the tool root, which the job's preparation sets and the manifest
+> covers. In the job, under that launch: threads and processes stop at the
+> task limit; a memory hog is killed with its whole group and reported as
+> out of memory; the scratch takes 128 MiB and 4,095 files and nothing
+> outside it is writable; a log flood ends at the output budget; a hang ends
+> at the wall deadline after the release; four spinning threads are
+> throttled to one CPU; and a double-forked child in its own session, a
+> background writer and a child that ignores `SIGTERM` leave no process
+> behind after a normal exit or the deadline. Each test also reads `/proc`
+> after the launch, while the job's unit still runs, so the absence of
+> survivors does not rest on systemd ending the unit.
+>
+> What the slice settled: the filter is two programs. The first answers
+> `clone3` with `ENOSYS`, so the C library falls back to `clone`, whose
+> flags a filter can read; the allowlist, installed last because installing
+> needs calls it refuses, admits `clone` only without namespace flags.
+> When the stub's exit is observed the group's member list was empty in
+> every measured run, because the launcher's init takes its PID namespace
+> with it; a non-empty list then counts as survivors and fails the attempt,
+> but `populated` is not used, since it stays set for some milliseconds
+> after an ordinary exit. The task limit and the CPU quota are reported as
+> counters of the evidence, not as failures: a payload that meets the task
+> limit sees `EAGAIN` and may still finish, and throttling slows it. Every
+> outcome carries the group's counters when the group was emptied. Limits:
+> the payload syscalls added to the allowlist are what the fixture's
+> scenarios measured on the runner, and the public mapping stays R02ad's; the
+> three new facilities are not probed at admission, as the amendment says;
+> the persisted quarantine stays R02ah's.
 
 ## Context
 

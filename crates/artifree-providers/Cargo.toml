@@ -14,8 +14,13 @@ sha2.workspace = true
 
 # Linux targets only (decision 0056 rules 1 and 7).
 [target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
 rustix.workspace = true
 seccompiler.workspace = true
+
+# The payload example of the enforcement job only; no library code uses it.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+signal-hook.workspace = true
 
 [lints]
 workspace = true

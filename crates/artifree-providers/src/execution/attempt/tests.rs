@@ -8,7 +8,8 @@
 //! group, so the job script runs them one at a time.
 
 use super::super::cgroup::SUPERVISOR_GROUP;
-use super::super::readiness::{LimitFacts, LimitPair, StatusFacts};
+use super::super::readiness::{LimitFacts, LimitPair, ScratchMount, StatusFacts};
+use super::super::usage::GroupUsage;
 use super::*;
 
 use std::env;
@@ -17,7 +18,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 
-/// The attempt's argument list for the root `/opt/t`, exactly as the launch passes it.
+/// The attempt's argument list for the root `/opt/t`, exactly as the launch passes it. The launcher makes the scratch's mount point and remounts `/` and `/dev` read-only; the bootstrap mounts the scratch.
 const ATTEMPT_ARGUMENTS: &[&str] = &[
     "--unshare-user",
     "--unshare-pid",
@@ -42,10 +43,16 @@ const ATTEMPT_ARGUMENTS: &[&str] = &[
     "/proc",
     "--dev",
     "/dev",
-    "--size",
-    "134217728",
-    "--tmpfs",
+    "--cap-add",
+    "CAP_SYS_ADMIN",
+    "--cap-add",
+    "CAP_SETPCAP",
+    "--dir",
     "/tmp",
+    "--remount-ro",
+    "/",
+    "--remount-ro",
+    "/dev",
     "--chdir",
     "/",
     "/tools/bin/artifree-execution-fixture",
@@ -53,8 +60,10 @@ const ATTEMPT_ARGUMENTS: &[&str] = &[
     "artifree-fixture-inspection-v1",
 ];
 
-/// The namespace check's argument list for the root `/opt/t`: the attempt's list with the
-/// 1 MiB scratch and the `namespaces` mode in place of the bootstrap.
+/// The admission's namespace check's argument list for the root `/opt/t`, unchanged since R02aa:
+/// the shared namespace and bind options, its own 1 MiB scratch, no capabilities and no
+/// read-only remounts (0056, amendment of 2026-11-12, rule 2), and the `namespaces` mode in place
+/// of the bootstrap.
 const CHECK_ARGUMENTS: &[&str] = &[
     "--unshare-user",
     "--unshare-pid",
@@ -119,16 +128,16 @@ fn sample_report() -> HostReport {
 }
 
 #[test]
-fn attempt_arguments_are_the_check_list_with_the_attempt_scratch_and_bootstrap() {
+fn attempt_arguments_add_the_capabilities_and_leave_the_scratch_to_the_bootstrap() {
     let arguments = text_arguments(&launcher::attempt_arguments(Path::new("/opt/t")));
     assert_eq!(
         arguments, ATTEMPT_ARGUMENTS,
-        "the attempt must use the 128 MiB scratch and the fixture's bootstrap mode"
+        "the attempt must make the scratch's mount point, add the two capabilities, remount / and /dev read-only, and then run the fixture's bootstrap mode"
     );
 }
 
 #[test]
-fn namespace_check_arguments_differ_only_in_the_scratch_and_the_mode() {
+fn namespace_check_arguments_keep_their_own_scratch_and_mode() {
     let arguments = text_arguments(&launcher::launcher_arguments(Path::new("/opt/t")));
     assert_eq!(
         arguments, CHECK_ARGUMENTS,
@@ -174,9 +183,8 @@ fn running_verdict_boundaries_and_output_precedence() {
     }
 }
 
-#[test]
-fn evidence_renders_its_keys_and_never_the_captured_bytes() {
-    let evidence = AttemptEvidence {
+fn sample_evidence() -> AttemptEvidence {
+    AttemptEvidence {
         group: PathBuf::from("/sys/fs/cgroup/test/attempt-1-0"),
         limits: vec![
             ("memory.max", "1073741824".to_owned()),
@@ -187,13 +195,23 @@ fn evidence_renders_its_keys_and_never_the_captured_bytes() {
         stderr: b"stderr-secret".to_vec(),
         wall_time: Duration::from_millis(1234),
         peak_memory_bytes: Some(4_194_304),
+        usage: GroupUsage {
+            memory_peak_bytes: Some(4_194_304),
+            oom_kills: 0,
+            oom_group_kills: 0,
+            task_refusals: 0,
+            tasks_peak: None,
+            cpu_usage_usec: 1500,
+            cpu_periods: 3,
+            cpu_throttled_periods: 0,
+        },
         readiness: GroupObservation {
             members: 2,
             bootstrap_pid: 4242,
             status: StatusFacts {
                 no_new_privs: 1,
                 seccomp: 2,
-                seccomp_filters: 1,
+                seccomp_filters: 2,
                 cap_inh: 0,
                 cap_prm: 0,
                 cap_eff: 0,
@@ -210,10 +228,23 @@ fn evidence_renders_its_keys_and_never_the_captured_bytes() {
                     hard: Some(0),
                 },
             },
+            scratch: ScratchMount {
+                is_tmpfs: true,
+                read_only: false,
+                no_suid_dev_exec: true,
+                size_kib: Some(131_072),
+                inodes: Some(4_096),
+                mode: Some(0o700),
+            },
         },
         filter_sha256: EMPTY_SHA256.to_owned(),
         report: sample_report(),
-    };
+    }
+}
+
+#[test]
+fn evidence_renders_its_keys_and_never_the_captured_bytes() {
+    let evidence = sample_evidence();
     let rendered = evidence.to_string();
     let lines: Vec<&str> = rendered.lines().collect();
     let expected_lines = [
@@ -224,14 +255,19 @@ fn evidence_renders_its_keys_and_never_the_captured_bytes() {
         "stdout_bytes=11",
         "stderr_bytes=13",
         "attempt_peak_memory_bytes=4194304",
+        "attempt_usage.memory_peak_bytes=4194304",
+        "attempt_usage.tasks_peak=unavailable",
+        "attempt_usage.cpu_usage_usec=1500",
         "readiness.members=2",
         "readiness.bootstrap_pid=4242",
         "readiness.no_new_privs=1",
         "readiness.seccomp=2",
-        "readiness.seccomp_filters=1",
+        "readiness.seccomp_filters=2",
         "readiness.cap_eff=0000000000000000",
         "readiness.open_files=256 256",
         "readiness.core_bytes=0 0",
+        "readiness.scratch_size=131072k",
+        "readiness.scratch_inodes=4096",
         "filter_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     ];
     for expected in expected_lines {
@@ -264,14 +300,14 @@ fn evidence_renders_its_keys_and_never_the_captured_bytes() {
 
 /// A directory that a job test passes to `launch` as its execution directory. It is created
 /// with mode 0o700 and removed when the test ends.
-struct ExecutionDir {
+pub(super) struct ExecutionDir {
     path: PathBuf,
 }
 
 impl ExecutionDir {
     /// Creates `artifree-attempt-<pid>-<label>` under the system temporary directory. A leftover
     /// with the same name is removed first.
-    fn new(label: &str) -> Result<Self, Box<dyn Error>> {
+    pub(super) fn new(label: &str) -> Result<Self, Box<dyn Error>> {
         let path = env::temp_dir().join(format!("artifree-attempt-{}-{label}", process::id()));
         // A leftover with the same name is cleared first; its absence is expected.
         let cleared = fs::remove_dir_all(&path).or_else(|error| {
@@ -286,7 +322,7 @@ impl ExecutionDir {
         Ok(Self { path })
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -331,7 +367,7 @@ fn attempt_groups() -> Result<Vec<PathBuf>, Box<dyn Error>> {
 }
 
 /// Asserts that no attempt group remains in the delegated group.
-fn assert_no_attempt_groups() -> Result<(), Box<dyn Error>> {
+pub(super) fn assert_no_attempt_groups() -> Result<(), Box<dyn Error>> {
     let groups = attempt_groups()?;
     assert!(
         groups.is_empty(),
@@ -342,8 +378,8 @@ fn assert_no_attempt_groups() -> Result<(), Box<dyn Error>> {
 
 /// The refusal of an attempt that must not run. An attempt that ran is an error here, reported
 /// by its exit status only, so that no captured output is printed.
-fn refusal_of(
-    outcome: Result<AttemptEvidence, AttemptFailure>,
+pub(super) fn refusal_of(
+    outcome: Result<AttemptEvidence, AttemptRefusal>,
 ) -> Result<AttemptFailure, Box<dyn Error>> {
     match outcome {
         Ok(evidence) => Err(format!(
@@ -351,7 +387,7 @@ fn refusal_of(
             evidence.exit
         )
         .into()),
-        Err(failure) => Ok(failure),
+        Err(refusal) => Ok(refusal.failure),
     }
 }
 
@@ -379,8 +415,8 @@ fn assert_not_started(
 fn job_fixture_attempt_runs_in_its_group_and_exits() -> Result<(), Box<dyn Error>> {
     let dir = ExecutionDir::new("fixture")?;
     let outcome = launch(&AttemptPlan::fixture(), dir.path());
-    let evidence =
-        outcome.map_err(|failure| format!("the fixture attempt was not run: {failure:?}"))?;
+    let evidence = outcome
+        .map_err(|refusal| format!("the fixture attempt was not run: {:?}", refusal.failure))?;
     // Written before any assertion, so that a failed run still leaves its report behind.
     if let Some(report) = env::var_os("ARTIFREE_ATTEMPT_REPORT") {
         fs::write(report, evidence.to_string())?;
@@ -410,8 +446,18 @@ fn job_fixture_attempt_runs_in_its_group_and_exits() -> Result<(), Box<dyn Error
         "the bootstrap must run in seccomp filter mode"
     );
     assert_eq!(
-        status.seccomp_filters, 1,
-        "exactly one seccomp filter must be installed"
+        status.seccomp_filters, 2,
+        "exactly two seccomp programs must be installed"
+    );
+    assert_eq!(
+        observed.scratch.size_kib,
+        Some(131_072),
+        "the scratch must be a tmpfs of 131072 KiB"
+    );
+    assert_eq!(
+        observed.scratch.inodes,
+        Some(4_096),
+        "the scratch must hold 4096 inodes"
     );
     let capability_sets = [
         ("CapInh", status.cap_inh),
@@ -486,7 +532,7 @@ fn job_wrong_release_byte_starts_no_payload() -> Result<(), Box<dyn Error>> {
         ..AttemptPlan::fixture()
     };
     let evidence = launch(&plan, dir.path())
-        .map_err(|failure| format!("the attempt did not reach its exit: {failure:?}"))?;
+        .map_err(|refusal| format!("the attempt did not reach its exit: {:?}", refusal.failure))?;
     assert_eq!(
         evidence.exit.code(),
         Some(70),

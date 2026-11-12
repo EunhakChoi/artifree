@@ -7,8 +7,8 @@
 > not implemented has run in neither engine.
 
 Date: 2026-11-06. Status: **proposed boundary; partial read-only inspection,
-host admission and a first launch of a fixture that only exits implemented;
-no untrusted execution outside the enforcement job's tests**. Roadmap: R02.
+host admission and launches of a test fixture under resource limits
+implemented; no untrusted execution outside the enforcement job's tests**. Roadmap: R02.
 
 > Builds on [0030](0030-persistent-jobs-and-worker.md),
 > [0036](0036-multi-user-identity.md), and
@@ -31,6 +31,16 @@ no untrusted execution outside the enforcement job's tests**. Roadmap: R02.
 > matrix this proves, for host admission, a modified, extra or missing tool
 > file; the rows for resources, files, network, cleanup under hostile
 > descendants, recovery, output and the crash acceptance stay open.
+
+> **Note, 2026-11-13 (R02ac).** 0056's third slice, after an amendment to
+> its rules 2, 3 and 7, runs the fixture's resource and cleanup scenarios on
+> the prepared runner: one bounded writable filesystem (rule 4), the task,
+> memory, CPU, output and wall limits of rule 5, and no survivors after a
+> normal exit or the deadline (rule 6). Of rule 8's matrix this proves the
+> Resources row except the descriptor ceiling (R02ad), and the Cleanup row
+> for normal exit and timeout; cancel, OOM cleanup records, supervisor
+> death, lease loss and quarantine across processes stay open, as do the
+> other rows.
 
 ## Context and evidence
 

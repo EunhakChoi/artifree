@@ -30,8 +30,13 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 getrandom = "0.4"
 # Decision 0056 rule 7: the Linux execution provider's system calls, through safe
 # interfaces only, pinned, with the features reduced to what the bootstrap uses.
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "process", "thread", "stdio"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "process", "thread", "stdio", "mount"] }
 seccompiler = { version = "=0.5.0", default-features = false }
+# `unshare` alone: rustix offers it only as an unsafe function (0056, amendment of 2026-11-12).
+nix = { version = "=0.30.1", default-features = false, features = ["sched"] }
+# Test-support payload only (a dev-dependency of the provider): the safe way to keep a
+# process alive through SIGTERM for the cleanup acceptance of decision 0042 rule 8.
+signal-hook = { version = "=0.3.18", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "macros", "sync", "time", "fs", "io-util", "process"] }
 base64 = "0.23"
