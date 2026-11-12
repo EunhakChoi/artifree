@@ -64,32 +64,85 @@ how; where the two could be read differently, 0042 holds.
 >   and was refused past either; a removed file made room for one more.
 > - `CAP_SETPCAP` beside it let the bootstrap empty its bounding set; with
 >   `CAP_SYS_ADMIN` alone the capability stayed in the bounding set.
-> - `rustix` offers `unshare` only as an unsafe function. `nix` offers it as
->   a safe one.
+> - `rustix` and `nix` both offer the mount call and `unshare` through safe
+>   functions. `rustix` has deprecated its safe `unshare` in favour of an
+>   unsafe one, because some of its flags (sharing of the descriptor table
+>   among them) can break what safe code assumes; using the deprecated form
+>   would mean silencing a lint, which this repository does not do. `nix`
+>   offers the call as a safe function without that marker.
 >
-> So the bootstrap applies both bounds of the scratch, and four rules are
+> So the bootstrap applies both bounds of the scratch, and these rules are
 > reworded below:
 >
 > - **Rule 2.** The launcher no longer mounts the scratch. It makes the mount
 >   point, remounts the sandbox's root and `/dev` read-only, and hands the
->   bootstrap two capabilities inside the sandbox's user namespace,
->   `CAP_SYS_ADMIN` and `CAP_SETPCAP`. They are capabilities over the
->   sandbox's own namespaces and none over the host.
-> - **Rule 3.** Before anything else of its order the bootstrap makes its own
->   mount namespace, mounts the scratch there with the size and the inode
->   count of 0042, rule 5, and reads both back from its mount table. The
->   privilege drop that follows removes the two capabilities from every set,
->   the bounding set included, and the provider's check before the release
->   (rule 5) already requires all sets empty. The payload therefore runs
->   without them and cannot change a mount.
-> - **Rule 7.** A third dependency, `nix`, for `unshare` alone, under the same
->   conditions as the other two.
-> - **Rule 17.** The R02ac point is settled as above.
+>   bootstrap two capabilities, `CAP_SYS_ADMIN` and `CAP_SETPCAP`. They are
+>   held in the innermost user namespace, the one the launcher enters to
+>   disable further ones. As measured, that namespace does not own the
+>   launcher's mount namespace, so they reach what the bootstrap makes under
+>   it, its own mount namespace, and nothing of the host. The mounts the
+>   bootstrap's namespace inherits, the two read-only remounts among them,
+>   belong to the outer namespace, and the bootstrap could not remount one
+>   when it tried. This changes the attempt's argument list only. The trusted
+>   namespace check of the admission keeps its own list, and the admission
+>   does not probe the three new facilities (the capabilities beside the
+>   disabled user namespaces, `unshare`, the mount). A host that passes
+>   admission and refuses one of them fails every attempt in the bootstrap,
+>   before readiness and before any payload instruction, without a refusal
+>   that names the facility. That is a known limit, like the worker under its
+>   own filter in the R02ab note; such a host is not a supported one.
+> - **Rule 3.** After it has checked its profile identity, taken the control
+>   channel and refused leaked descriptors (the steps of the R02ab note, which
+>   need no capability), and before the limits, the bootstrap makes its own
+>   mount namespace and mounts the scratch there: one tmpfs, `nosuid`, `nodev`
+>   and, for the fixture profile, `noexec` (0042, rule 4; the fixture runs
+>   nothing from the scratch), owner-only, with the size and the inode count
+>   of 0042, rule 5. It reads the flags and both bounds back from its mount
+>   table, with the root and `/dev` read-only. The privilege drop that
+>   follows removes the two capabilities from every set, the bounding set
+>   included. The payload therefore runs without them and cannot change a
+>   mount. Between its start and that drop the bootstrap holds
+>   `CAP_SYS_ADMIN`; in that time it reads its one argument, the control
+>   channel and its own `/proc` entries, and nothing the payload supplies.
+> - **Rule 5.** The provider does not take the bootstrap's word for the
+>   scratch either: before the release it reads the bootstrap's mount table
+>   itself and requires the same flags, bounds and read-only mounts, beside
+>   the empty capability sets it already requires.
+> - **Rule 7.** A third dependency, `nix`, with its `sched` feature alone, for
+>   `unshare` with the one flag that makes a mount namespace, called in the
+>   bootstrap while it is a single thread. That flag is not among those that
+>   make the call hazardous. The call is safe by that restriction, which the
+>   code must keep; the choice of crate only spares a silenced lint.
+> - **Rule 14.** The R02ac row names the amended launch and its checks, and
+>   0042, rule 4 in its last column.
+> - **Rule 17.** The R02ac point is settled as above. A new R02af point is
+>   added: the scratch lives in a mount namespace whose every member is in
+>   the attempt's group, and 0042, rules 6 and 7 collect only once that group
+>   is empty. How a keeper outside the group holds the mount until then is not
+>   measured. The launcher's own tmpfs had the same property, so this
+>   amendment does not create the question, but it does not answer it. A
+>   handle opened through the bootstrap's `/proc` entry before the release is
+>   a candidate and no more. If R02af finds no way to hold it without
+>   first-party `unsafe` or a race against the kill, rules 2 and 3 are amended
+>   again; 0042, rule 7 holds either way.
+>
+> What stays writable after the two remounts, as measured: the scratch, the
+> private `/proc` (the kernel's per-process files) and the launcher's
+> `/dev/pts`. Whether either of the last two can reach beyond the attempt is
+> R02ae's to prove or to close; R02ac proves that file creation fails in `/`,
+> `/dev`, `/dev/shm`, the tool root and the library binds.
+>
+> Until R02ac is merged the code is R02ab's. Its launch does not meet the
+> part of 0042, rule 4 that asks for one bounded writable filesystem: the
+> root and `/dev` are writable there and the scratch has no inode bound. Its
+> payload only exits and writes no file, and it runs in the job alone.
 >
 > What this does not change: 0042; the order of the remaining bootstrap steps;
 > the rule that no payload instruction runs before the limits, the privilege
-> drop and the filter; the ban on first-party `unsafe`. Until R02ac is merged
-> the code is R02ab's, whose payload only exits and writes no file.
+> drop and the filter; the ban on first-party `unsafe`. The provider cannot
+> see or unmount the scratch from the host's mount table; that no mount of an
+> attempt is left (0042, rule 6) follows from the empty group, since the
+> mount namespace ends with its last member.
 
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
@@ -251,14 +304,15 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    the mount point of the scratch, a private `/proc` and a minimal `/dev`,
    the sandbox's root and `/dev` remounted read-only, further user namespaces
    disabled inside, and the two capabilities the bootstrap needs for the
-   scratch (`CAP_SYS_ADMIN` and `CAP_SETPCAP`, inside the sandbox's user
-   namespace only). The launcher keeps its own reaping init
+   scratch (`CAP_SYS_ADMIN` and `CAP_SETPCAP`, held in the innermost user
+   namespace, which owns none of the launcher's mounts). The launcher keeps its own reaping init
    as the first process of the PID namespace; the payload is never that
    process. Nothing a request carries reaches the argument list.
 3. **A trusted bootstrap runs inside the namespaces before the payload.** It is
    the launcher's direct child, under the launcher's init. In this order it:
    makes its own mount namespace, mounts the scratch there as one tmpfs with
-   the size and the inode count of 0042, rule 5, and reads both back;
+   the flags of 0042, rule 4 and the size and the inode count of 0042, rule 5,
+   and reads them back from its mount table;
    sets the soft and hard resource limits of 0042, rule 5 (descriptors, core
    size) and reads them back; drops what the launcher left of capabilities,
    the two of rule 2 among them and the bounding set included, and
@@ -285,7 +339,8 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    stub `exec` the launcher, so the launcher, its init, the bootstrap and the
    payload are born inside the group (0042, rule 6). The bootstrap reports
    readiness when every step of rule 3 is done, and execs the payload only
-   after the provider's release. An attempt that never reported, or whose
+   after the provider's release, which the provider gives only after it has
+   read the bootstrap's state itself, its mount table included. An attempt that never reported, or whose
    `exec` failed, counts as not started and as failed, never as a run.
 6. **The tool root.** One directory per version holds the launcher, the
    bootstrap with the loader and libraries it needs to start, the payload's
@@ -366,16 +421,16 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
     proves and which stay open. No slice runs a payload without the limits,
     the privilege drop and a default-deny filter of rule 3.
 
-| Slice | What it adds                                                                                                                                                                                                                                                                                                                                                                          | 0042                  |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload. | 1, 5 (routing), 8     |
-| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                           | 3 (tools), 4, 5, 6, 8 |
-| R02ac | Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer.                                                                                                                                                                                       | 5, 6, 8               |
-| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks.                                                                                                                                                                                      | 4, 8                  |
-| R02ae | Files, descriptors and network: host canaries, leaked descriptors, real listeners with counters.                                                                                                                                                                                                                                                                                      | 4, 8                  |
-| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                     | 3 (input), 7, 8       |
-| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                          | 5 (cores), 8          |
-| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                            | 6, 8                  |
+| Slice | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0042                  |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload.                                                                                                                                                          | 1, 5 (routing), 8     |
+| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                                                                                                                                                                                    | 3 (tools), 4, 5, 6, 8 |
+| R02ac | The launch as amended on 2026-11-12 (read-only root and `/dev`, the scratch mounted and bounded by the bootstrap and read back by the provider), with its checks: file creation outside the scratch fails, and a launch without a read-only remount, without the inode count or without the provider's read of the mount table fails its test. Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer. | 4 (scratch), 5, 6, 8  |
+| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks.                                                                                                                                                                                                                                                                                                                                               | 4, 8                  |
+| R02ae | Files, descriptors and network: host canaries, leaked descriptors, real listeners with counters.                                                                                                                                                                                                                                                                                                                                                                                                                                               | 4, 8                  |
+| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                                                                                                                                                                              | 3 (input), 7, 8       |
+| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                                                                                                                                                                                   | 5 (cores), 8          |
+| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                     | 6, 8                  |
 
 15. **What R02a leaves to R02b.** R02ab to R02ag launch without the ownership
     record of 0042, rule 6; R02ah adds it. Everything that needs the job store
@@ -424,6 +479,14 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 - **A first-party `unsafe` block around the few system calls.** Rejected: the
   repository forbids it, and a reviewed crate with a safe interface gives the
   same calls.
+- **Bounding the scratch without a third dependency.** Three ways were
+  weighed after the measurement of 2026-11-12. `rustix`'s safe `unshare` is
+  deprecated, and using it means silencing a lint. Its unsafe form is a
+  first-party `unsafe` block, which rule 7 excludes. Leaving out the
+  launcher's switch that disables further user namespaces would let the
+  bootstrap mount without `unshare`, since it would then own the mount
+  namespace, and would leave the filter as the only thing between a payload
+  and a new user namespace; the switch stays.
 - **Shell utilities instead of a bootstrap** (`prlimit`, `setpriv`, a shell to
   pass descriptors). Rejected: each is another program in the tool root to pin
   and to trust, a shell is exactly what 0042 keeps out of the launch path, and
@@ -454,7 +517,7 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
   one would have been too large to review.
 - The enforcement job makes CI longer and depends on the hosted image; rule 9
   turns a silent change of that image into a failure.
-- Two dependencies enter the provider and the server binary and must be
+- Three dependencies enter the provider and the server binary and must be
   reviewed when they are bumped.
 - A host is supported only when an operator prepared it. The product still
   asks for no privilege at run time, but the preparation is real work that the
