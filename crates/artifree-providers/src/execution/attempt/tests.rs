@@ -502,15 +502,28 @@ fn job_wrong_release_byte_starts_no_payload() -> Result<(), Box<dyn Error>> {
 }
 
 /// The stub takes the fixture profile's identity and nothing else (0056 rule 3): another
-/// identity starts no launcher, so no readiness is ever reported.
+/// identity starts no launcher. The stub then exits at once, so the provider either cannot
+/// place it in the group any more or places it and never reads a readiness record. Both count
+/// as not started; which one it is depends on timing and is not asserted.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_unknown_identity_starts_no_launcher() -> Result<(), Box<dyn Error>> {
+    let dir = ExecutionDir::new("unknown-identity")?;
     let plan = AttemptPlan {
         stub_arguments: &["stub", "another-profile"],
         ..AttemptPlan::fixture()
     };
-    assert_not_started("unknown-identity", &plan, NotStartedReason::NoReadiness)
+    let failure = refusal_of(launch(&plan, dir.path()))?;
+    assert!(
+        matches!(
+            failure,
+            AttemptFailure::NotStarted(
+                NotStartedReason::StubNotPlaced | NotStartedReason::NoReadiness
+            )
+        ),
+        "a stub with another identity must count as not started, got {failure:?}"
+    );
+    assert_no_attempt_groups()
 }
 
 #[test]
