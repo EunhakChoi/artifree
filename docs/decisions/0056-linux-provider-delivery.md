@@ -247,11 +247,17 @@ how; where the two could be read differently, 0042 holds.
 > `clone3` with `ENOSYS`, so the C library falls back to `clone`, whose
 > flags a filter can read; the allowlist, installed last because installing
 > needs calls it refuses, admits `clone` only without namespace flags.
-> When the stub's exit is observed the group's member list was empty in
-> every measured run, because the launcher's init takes its PID namespace
-> with it; a non-empty list then counts as survivors and fails the attempt,
-> but `populated` is not used, since it stays set for some milliseconds
-> after an ordinary exit. The task limit and the CPU quota are reported as
+> The launcher's init takes its PID namespace with it, but the launcher can
+> exit before the kernel has ended the rest of that namespace: in every
+> measured run of the slice the group's member list was empty when the
+> stub's exit was observed, and then, on the first run on `main`, a process
+> bomb's children were still listed. So the provider reads the list again
+> until it is empty, for a grace of two seconds from its first read and
+> never past the wall deadline; a list that is still non-empty then counts as survivors and fails the attempt.
+> `populated` is not used, since it stays set for some milliseconds after an
+> ordinary exit. The grace is a margin, not a signal that the teardown has
+> ended: a teardown slower than two seconds would fail a correct attempt as
+> survivors, a known limit. The task limit and the CPU quota are reported as
 > counters of the evidence, not as failures: a payload that meets the task
 > limit sees `EAGAIN` and may still finish, and throttling slows it. Every
 > outcome carries the group's counters when the group was emptied. Limits:
