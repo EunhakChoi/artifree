@@ -1,12 +1,51 @@
-//! Partial, read-only inspection for proposed untrusted execution (decision 0042).
+//! Host inspection for proposed untrusted execution (decisions 0042 and 0056).
 //!
-//! This module cannot launch a process or admit a host. Even a matching routing
-//! observation ends in a typed refusal: containment and reviewed tools are absent.
+//! Implemented: the read-only core-routing inspection and, on Linux only, a host
+//! admission that checks facilities in a fixed order, runs one trusted namespace
+//! check through the tool root's launcher and one trusted probe child in a probe
+//! cgroup. It runs no payload. Every caller outside the tests receives a refusal,
+//! at best `IncompleteEnforcement` (0056 rule 16): tool identity (manifest),
+//! seccomp, the bootstrap and payload launch are not implemented, and no host is
+//! called supported.
+//!
+//! Admission order; the first missing facility is reported (0056 rule 10):
+//! 1. Linux (`UnsupportedOperatingSystem`).
+//! 2. Kernel facilities: a readable kernel release (`UnsupportedKernel`), the
+//!    process's cgroup v2 group from the `0::` line of `/proc/self/cgroup`
+//!    (`CgroupV2Unavailable`), and `cgroup.kill` in that group (`MissingKillSupport`).
+//! 3. Core routing (the routing refusals above).
+//! 4. Tool root files: the launcher, then the fixture (`MissingLauncher`, `MissingFixture`).
+//! 5. Delegation: the group, its `cgroup.procs` and `cgroup.subtree_control` are
+//!    owned by the provider's account (`UndelegatedCgroup`).
+//! 6. Controllers memory, pids, cpu, in that order (`MissingController`).
+//! 7. The provider is the group's only process (`OccupiedCgroup`). The provider
+//!    then moves into the child group `supervisor` and writes `+memory +pids +cpu`
+//!    to the group's `cgroup.subtree_control`; `EBUSY` there is facility 7, any
+//!    other write failure facility 5, a controller missing on read-back facility 6.
+//! 8. Seven namespaces made by the launcher (`NamespacesUnavailable`).
+//! 9. Probe limits written and read back exactly (`LimitNotEnforced`), then the
+//!    probe child started (`ProbeNotStarted`) and placed in its group
+//!    (`ProbeNotPlaced`).
+//! 10. Probe group killed, seen empty within five seconds and its child reaped
+//!     (`CleanupNotObserved`); the group is then removed. A failed attempt leaves
+//!     its probe group in place (0042, rule 6).
 
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+mod admission;
+#[cfg(target_os = "linux")]
+mod cgroup;
+#[cfg(target_os = "linux")]
+mod launcher;
+#[cfg(target_os = "linux")]
+mod probe_group;
+mod report;
+
+pub use report::HostReport;
 
 const CORE_PATTERN: &str = "/proc/sys/kernel/core_pattern";
 const MAX_PATTERN_BYTES: u64 = 4096;
@@ -32,6 +71,32 @@ pub enum AdmissionRefusal {
     StaleObservation,
     /// A caller supplied a profile or manifest other than the fixed policy.
     UnknownProfile,
+    /// The kernel release could not be read through the supervisor's proc view.
+    UnsupportedKernel,
+    /// No cgroup v2 group for this process was found under `/sys/fs/cgroup`.
+    CgroupV2Unavailable,
+    /// The provider's cgroup has no `cgroup.kill` file.
+    MissingKillSupport,
+    /// The tool root's launcher is missing or not a regular executable file.
+    MissingLauncher,
+    /// The tool root's fixture is missing or not a regular executable file.
+    MissingFixture,
+    /// The provider's cgroup is not delegated to the provider's own account.
+    UndelegatedCgroup,
+    /// A required controller is not available to the provider's cgroup.
+    MissingController(Controller),
+    /// Another process shares the provider's cgroup.
+    OccupiedCgroup,
+    /// The launcher did not make every one of the seven namespaces.
+    NamespacesUnavailable,
+    /// A probe limit could not be written or did not read back exactly.
+    LimitNotEnforced,
+    /// The trusted probe child could not be started.
+    ProbeNotStarted,
+    /// The trusted probe child could not be placed in its group.
+    ProbeNotPlaced,
+    /// The probe group was not seen empty, reaped and removed before the deadline.
+    CleanupNotObserved,
     /// Tool packaging, enforcement and dedicated-host acceptance are incomplete.
     IncompleteEnforcement,
 }
@@ -49,6 +114,21 @@ impl fmt::Display for AdmissionRefusal {
             Self::CoreRoutingChanged => "host core routing changed",
             Self::StaleObservation => "host observation is stale",
             Self::UnknownProfile => "execution profile identity is unknown",
+            Self::UnsupportedKernel => "host kernel release could not be read",
+            Self::CgroupV2Unavailable => "no cgroup v2 group was found for the provider",
+            Self::MissingKillSupport => "the provider's cgroup has no kill support",
+            Self::MissingLauncher => "the tool root's launcher is missing",
+            Self::MissingFixture => "the tool root's fixture is missing",
+            Self::UndelegatedCgroup => "the provider's cgroup is not delegated to it",
+            Self::MissingController(Controller::Memory) => "the memory controller is not delegated",
+            Self::MissingController(Controller::Pids) => "the pids controller is not delegated",
+            Self::MissingController(Controller::Cpu) => "the cpu controller is not delegated",
+            Self::OccupiedCgroup => "another process occupies the provider's cgroup",
+            Self::NamespacesUnavailable => "the launcher could not make every namespace",
+            Self::LimitNotEnforced => "a probe limit did not read back exactly",
+            Self::ProbeNotStarted => "the probe process could not be started",
+            Self::ProbeNotPlaced => "the probe process could not be placed in its cgroup",
+            Self::CleanupNotObserved => "the probe group was not seen empty",
             Self::IncompleteEnforcement => "untrusted execution enforcement is not implemented",
         };
         formatter.write_str(message)
@@ -56,6 +136,32 @@ impl fmt::Display for AdmissionRefusal {
 }
 
 impl std::error::Error for AdmissionRefusal {}
+
+/// A cgroup v2 controller the admission requires, in checking order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Controller {
+    /// The `memory` controller.
+    Memory,
+    /// The `pids` controller.
+    Pids,
+    /// The `cpu` controller.
+    Cpu,
+}
+
+impl Controller {
+    /// Every required controller in the fixed checking order.
+    pub const REQUIRED: [Self; 3] = [Self::Memory, Self::Pids, Self::Cpu];
+
+    /// The kernel's name for this controller.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Pids => "pids",
+            Self::Cpu => "cpu",
+        }
+    }
+}
 
 /// Immutable identity of the first proposed fixture policy, not an executable.
 ///
@@ -182,6 +288,61 @@ impl RoutingObservation {
     }
 }
 
+/// The answer of one host admission run, which is always a refusal (decision 0056 rule 16).
+///
+/// When every implemented facility passed, the refusal is `IncompleteEnforcement` and the
+/// report holds the evidence. It never permits a launch.
+#[derive(Debug)]
+pub struct AdmissionOutcome {
+    refusal: AdmissionRefusal,
+    report: Option<HostReport>,
+}
+
+impl AdmissionOutcome {
+    /// The refusal; `IncompleteEnforcement` when every implemented facility passed.
+    #[must_use]
+    pub fn refusal(&self) -> AdmissionRefusal {
+        self.refusal
+    }
+
+    /// Evidence recorded only when every implemented facility passed.
+    #[must_use]
+    pub fn report(&self) -> Option<&HostReport> {
+        self.report.as_ref()
+    }
+}
+
+/// Checks this host's facilities in the documented order and runs the trusted probes.
+///
+/// On Linux it runs the tool root's launcher and fixture (no payload), moves the calling
+/// process into its group's `supervisor` child, and writes only below the provider's own
+/// delegated cgroup. Call it only from the supervisor's own view. Other systems are
+/// refused before any proc path is read.
+#[must_use]
+pub fn inspect_host(profile: InspectionProfile) -> AdmissionOutcome {
+    #[cfg(target_os = "linux")]
+    {
+        match admission::admit(profile, &admission::production_roots()) {
+            Ok(report) => AdmissionOutcome {
+                refusal: AdmissionRefusal::IncompleteEnforcement,
+                report: Some(report),
+            },
+            Err(refusal) => AdmissionOutcome {
+                refusal,
+                report: None,
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = profile;
+        AdmissionOutcome {
+            refusal: AdmissionRefusal::UnsupportedOperatingSystem,
+            report: None,
+        }
+    }
+}
+
 fn read_pattern(reader: io::Result<impl Read>) -> Result<Vec<u8>, AdmissionRefusal> {
     let mut reader = reader.map_err(|_| AdmissionRefusal::UnreadableCoreRouting)?;
     let mut bytes = Vec::new();
@@ -216,6 +377,32 @@ fn validate_pattern(bytes: &[u8]) -> Result<(), AdmissionRefusal> {
         return Err(AdmissionRefusal::UnknownCoreRouting);
     }
     Ok(())
+}
+
+/// Read at most `limit` bytes of a small kernel file; a longer file is `InvalidData`.
+#[cfg(target_os = "linux")]
+fn read_bounded(path: &std::path::Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if !u64::try_from(bytes.len()).is_ok_and(|length| length <= limit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file exceeds its bound",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Write a value to an existing cgroup control file; never creates the file.
+#[cfg(target_os = "linux")]
+fn write_control(path: &std::path::Path, value: &str) -> io::Result<()> {
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .write_all(value.as_bytes())
 }
 
 #[cfg(test)]
