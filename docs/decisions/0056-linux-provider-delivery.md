@@ -13,6 +13,34 @@ so that R02a can be delivered in slices that each prove something on a real
 kernel. It changes no rule of 0042. Where 0042 says "must" this record says
 how; where the two could be read differently, 0042 holds.
 
+> **Amendment, 2026-11-12.** The R02aa row of rule 14 read "every refusal of
+> rule 10 but the tool root's, which R02ab adds with the manifest": it kept
+> the other refusals in R02aa and left all of the tool root's to R02ab. That
+> was written with the manifest in mind and reads wider than intended.
+> R02aa's admission starts two programs of the tool root: the launcher, and
+> the test-support program of rule 4 in two trusted modes that only print its
+> own namespaces or wait on its input. Neither mode is the payload of rules 3
+> and 14, and R02aa still runs no payload. Because its checks need both
+> files, R02aa refuses a tool root in which the launcher or that program is
+> missing or is not a regular executable file, names which one, and the job
+> takes each away in turn (rule 10). Four limits apply:
+>
+> - This check comes before the manifest of rule 6 and does not replace it.
+>   The refusal of a tool root in which any file differs from its recorded
+>   length and digest, and of one that lacks any other file, stays R02ab's.
+> - When R02ab adds the manifest's refusal it places it after this check in
+>   the documented order, so a missing launcher or program keeps the refusal
+>   that names it.
+> - The test-support program is required only of the tool root that R02a's
+>   harness assembles. What an operator's tool root must hold is decided with
+>   its packaging (rule 6: R03's), and rule 4 still keeps that program out of
+>   every release archive.
+> - A pass of this check says that two files exist. It is no evidence of a
+>   tool's identity, and R02aa proves nothing of 0042's row for a modified
+>   launcher, tool or policy.
+>
+> The row is reworded below to say so.
+
 ## Context
 
 ### What was measured
@@ -202,16 +230,16 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
     proves and which stay open. No slice runs a payload without the limits,
     the privilege drop and a default-deny filter of rule 3.
 
-| Slice | What it adds                                                                                                                                                                                                                                                                                  | 0042                  |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10 but the tool root's, which R02ab adds with the manifest. No payload. | 1, 5 (routing), 8     |
-| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.   | 3 (tools), 4, 5, 6, 8 |
-| R02ac | Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer.                                                                                               | 5, 6, 8               |
-| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks.                                                                                              | 4, 8                  |
-| R02ae | Files, descriptors and network: host canaries, leaked descriptors, real listeners with counters.                                                                                                                                                                                              | 4, 8                  |
-| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                             | 3 (input), 7, 8       |
-| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                  | 5 (cores), 8          |
-| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                    | 6, 8                  |
+| Slice | What it adds                                                                                                                                                                                                                                                                                                                                                                          | 0042                  |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload. | 1, 5 (routing), 8     |
+| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                           | 3 (tools), 4, 5, 6, 8 |
+| R02ac | Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer.                                                                                                                                                                                       | 5, 6, 8               |
+| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks.                                                                                                                                                                                      | 4, 8                  |
+| R02ae | Files, descriptors and network: host canaries, leaked descriptors, real listeners with counters.                                                                                                                                                                                                                                                                                      | 4, 8                  |
+| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                     | 3 (input), 7, 8       |
+| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                          | 5 (cores), 8          |
+| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                            | 6, 8                  |
 
 15. **What R02a leaves to R02b.** R02ab to R02ag launch without the ownership
     record of 0042, rule 6; R02ah adds it. Everything that needs the job store
