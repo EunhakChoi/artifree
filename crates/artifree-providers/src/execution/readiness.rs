@@ -1,23 +1,53 @@
 //! What proves an attempt ready: the bootstrap's own final check and the provider's
 //! independent observation read the same proc text with the same functions (decisions
 //! 0042 rule 6, 0056 rules 3 and 5).
+//!
+//! The checks cover the bootstrap's status, its limits, its seccomp filter count and its mount
+//! table. The mount table holds the scratch tmpfs with its bounds and the read-only root and
+//! `/dev` (the amendment of 2026-11-12, rule 3). The bootstrap reads its own table back, and the
+//! provider reads the same table of the bootstrap's process independently.
 
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
-/// The largest `/proc` status or limits text that a check reads, in bytes.
+/// The largest `/proc` status, limits or mount table text that a check reads, in bytes.
 pub(super) const PROC_FILE_BYTES: usize = 16_384;
 
 /// The seccomp mode that means a filter is installed (`SECCOMP_MODE_FILTER`).
 const SECCOMP_MODE_FILTER: u64 = 2;
+/// The number of seccomp filters that an attempt installs (decision 0042 rule 5): the clone3
+/// refusal, then the allowlist.
+pub(super) const SECCOMP_FILTER_COUNT: u64 = 2;
 /// The open-file limit that the bootstrap sets, soft and hard (0042 rule 5), and that the
 /// readiness check requires.
 pub(super) const OPEN_FILES_LIMIT: u64 = 256;
 /// The core dump limit that the bootstrap sets, soft and hard (0042 rule 5), and that the
 /// readiness check requires.
 pub(super) const CORE_FILE_LIMIT: u64 = 0;
+/// The mount point of the attempt's scratch, a tmpfs of its own (decision 0042 rule 5).
+pub(super) const SCRATCH: &str = "/tmp";
+/// The size bound of the scratch tmpfs in bytes: 128 MiB (decision 0042 rule 5).
+pub(super) const SCRATCH_SIZE_BYTES: u64 = 134_217_728;
+/// The inode bound of the scratch tmpfs: at most 4,096 inodes (decision 0042 rule 5).
+pub(super) const SCRATCH_INODES: u64 = 4_096;
+/// The permission bits of the scratch's root directory: the payload's own account only (the
+/// amendment of 2026-11-12, rule 3).
+pub(super) const SCRATCH_MODE: u32 = 0o700;
+/// The size bound in the kernel's `size=<n>k` form, which `mountinfo` prints in kibibytes.
+const SCRATCH_SIZE_KIB: u64 = SCRATCH_SIZE_BYTES / 1024;
+/// The mount point of the sandbox's root, which must be read-only (the amendment of 2026-11-12).
+const ROOT_MOUNT: &str = "/";
+/// The mount point of the sandbox's device tree, which must be read-only (the amendment of
+/// 2026-11-12).
+const DEV_MOUNT: &str = "/dev";
+
+// Field names of the mount checks. `mountinfo` names a failure of the text itself.
+const FIELD_SCRATCH: &str = "scratch";
+const FIELD_ROOT: &str = "root";
+const FIELD_DEV: &str = "dev";
+const FIELD_MOUNTINFO: &str = "mountinfo";
 
 // Keys of `/proc/<pid>/status`, matched exactly.
 const NO_NEW_PRIVS: &str = "NoNewPrivs";
@@ -96,8 +126,8 @@ pub(super) fn parse_status(text: &str) -> Result<StatusFacts, ReadinessFailure> 
 }
 
 /// Checks the bootstrap's measured status (0042 rule 8, 0056 rule 3): `NoNewPrivs` 1, filter
-/// mode for `Seccomp`, one filter, and empty effective, permitted, inheritable, bounding and
-/// ambient sets.
+/// mode for `Seccomp`, two filters (the clone3 refusal and the allowlist), and empty effective,
+/// permitted, inheritable, bounding and ambient sets.
 ///
 /// # Errors
 /// Returns `Unexpected` for the first wrong key, in the field order of `StatusFacts`.
@@ -106,7 +136,7 @@ pub(super) fn confirm_status(facts: &StatusFacts) -> Result<(), ReadinessFailure
     let checks: [(&str, u64, u64); 8] = [
         (NO_NEW_PRIVS, facts.no_new_privs, 1),
         (SECCOMP, facts.seccomp, SECCOMP_MODE_FILTER),
-        (SECCOMP_FILTERS, facts.seccomp_filters, 1),
+        (SECCOMP_FILTERS, facts.seccomp_filters, SECCOMP_FILTER_COUNT),
         (CAP_INH, facts.cap_inh, 0),
         (CAP_PRM, facts.cap_prm, 0),
         (CAP_EFF, facts.cap_eff, 0),
@@ -163,6 +193,157 @@ pub(super) fn confirm_limits(facts: &LimitFacts) -> Result<(), ReadinessFailure>
         return Err(ReadinessFailure::Unexpected(CORE_FILE_SIZE));
     }
     Ok(())
+}
+
+/// The facts that the mount checks read from one `mountinfo` line. The scratch fields are read
+/// for the scratch mount; for the root and `/dev`, only `read_only` is read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ScratchMount {
+    /// Whether the filesystem type is `tmpfs`.
+    pub(super) is_tmpfs: bool,
+    /// Whether the mount options include `ro`.
+    pub(super) read_only: bool,
+    /// Whether the mount options include `nosuid`, `nodev` and `noexec` (decision 0042 rule 4).
+    pub(super) no_suid_dev_exec: bool,
+    /// The `size=` bound in KiB from the super options, or `None` when it has another form.
+    pub(super) size_kib: Option<u64>,
+    /// The `nr_inodes=` bound from the super options, or `None` when it is not a number.
+    pub(super) inodes: Option<u64>,
+    /// The `mode=` permission bits from the super options, read as octal, or `None` when they
+    /// are absent or not octal.
+    pub(super) mode: Option<u32>,
+}
+
+/// The facts of the last `mountinfo` line for each mount point that the checks read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MountFacts {
+    /// The scratch mount's facts, or `None` when no line has the scratch's mount point.
+    pub(super) scratch: Option<ScratchMount>,
+    /// Whether the root is read-only, or `None` when no line has its mount point.
+    pub(super) root_read_only: Option<bool>,
+    /// Whether `/dev` is read-only, or `None` when no line has its mount point.
+    pub(super) dev_read_only: Option<bool>,
+}
+
+/// One `mountinfo` line: its mount point and the facts that the checks read from it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MountLine<'a> {
+    mount_point: &'a str,
+    facts: ScratchMount,
+}
+
+/// Reads the mount points that the checks need from `/proc/<pid>/mountinfo` text.
+///
+/// Each line has the mount point in its fifth field and the mount options in its sixth. Optional
+/// fields follow, up to a lone `-`, and then the filesystem type, the source and the super
+/// options. A later line covers an earlier one with the same mount point, so the last line for
+/// each mount point decides. Empty lines are skipped.
+///
+/// # Errors
+/// Returns `Malformed` for the `mountinfo` field when the text fills `PROC_FILE_BYTES`, or when
+/// any line lacks the fields above. A mount point without a line is `None`, not an error.
+pub(super) fn parse_mounts(text: &str) -> Result<MountFacts, ReadinessFailure> {
+    if text.len() >= PROC_FILE_BYTES {
+        return Err(ReadinessFailure::Malformed(FIELD_MOUNTINFO));
+    }
+    let mut lines: Vec<MountLine<'_>> = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        lines.push(mount_line(line)?);
+    }
+    Ok(MountFacts {
+        scratch: last_mount(&lines, SCRATCH).map(|line| line.facts),
+        root_read_only: last_mount(&lines, ROOT_MOUNT).map(|line| line.facts.read_only),
+        dev_read_only: last_mount(&lines, DEV_MOUNT).map(|line| line.facts.read_only),
+    })
+}
+
+/// Checks the mount table that the bootstrap set up (the amendment of 2026-11-12, rules 2 and
+/// 3): a scratch tmpfs with `nosuid`, `nodev` and `noexec` (decision 0042 rule 4) that is not
+/// read-only, owner-only, with the size and inode bounds of decision 0042 rule 5, and a read-only
+/// root and `/dev`.
+///
+/// # Errors
+/// Returns `Missing` for a mount point without a line, and `Unexpected` for the first mount that
+/// differs, checked in the order scratch, root, `/dev`.
+pub(super) fn confirm_mounts(facts: &MountFacts) -> Result<(), ReadinessFailure> {
+    let scratch = facts
+        .scratch
+        .ok_or(ReadinessFailure::Missing(FIELD_SCRATCH))?;
+    let scratch_as_required = scratch.is_tmpfs
+        && !scratch.read_only
+        && scratch.no_suid_dev_exec
+        && scratch.size_kib == Some(SCRATCH_SIZE_KIB)
+        && scratch.inodes == Some(SCRATCH_INODES)
+        && scratch.mode == Some(SCRATCH_MODE);
+    if !scratch_as_required {
+        return Err(ReadinessFailure::Unexpected(FIELD_SCRATCH));
+    }
+    confirm_read_only(facts.root_read_only, FIELD_ROOT)?;
+    confirm_read_only(facts.dev_read_only, FIELD_DEV)
+}
+
+/// Requires a mount point's read-only flag to be set; a missing line and a writable mount are
+/// refused under the field's name.
+fn confirm_read_only(read_only: Option<bool>, field: &'static str) -> Result<(), ReadinessFailure> {
+    match read_only {
+        None => Err(ReadinessFailure::Missing(field)),
+        Some(false) => Err(ReadinessFailure::Unexpected(field)),
+        Some(true) => Ok(()),
+    }
+}
+
+/// Reads one `mountinfo` line into its mount point and facts.
+///
+/// # Errors
+/// Returns `Malformed` for the `mountinfo` field when the line has no mount point or options, no
+/// lone `-` after them, or not exactly a filesystem type, a source and super options after it.
+fn mount_line(line: &str) -> Result<MountLine<'_>, ReadinessFailure> {
+    let malformed = ReadinessFailure::Malformed(FIELD_MOUNTINFO);
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let (Some(&mount_point), Some(&options)) = (fields.get(4), fields.get(5)) else {
+        return Err(malformed);
+    };
+    let optional = fields.get(6..).ok_or(malformed)?;
+    let separator = optional
+        .iter()
+        .position(|field| *field == "-")
+        .ok_or(malformed)?;
+    let Some(&[fs_type, _source, super_options]) = optional.get(separator + 1..) else {
+        return Err(malformed);
+    };
+
+    let has_option = |token: &str| options.split(',').any(|option| option == token);
+    let facts = ScratchMount {
+        is_tmpfs: fs_type == "tmpfs",
+        read_only: has_option("ro"),
+        no_suid_dev_exec: has_option("nosuid") && has_option("nodev") && has_option("noexec"),
+        size_kib: last_option(super_options, "size=")
+            .and_then(|value| value.strip_suffix('k'))
+            .and_then(|digits| decimal_value(digits, FIELD_MOUNTINFO).ok()),
+        inodes: last_option(super_options, "nr_inodes=")
+            .and_then(|value| decimal_value(value, FIELD_MOUNTINFO).ok()),
+        mode: last_option(super_options, "mode=")
+            .and_then(|digits| u32::from_str_radix(digits, 8).ok()),
+    };
+    Ok(MountLine { mount_point, facts })
+}
+
+/// The value after the last comma-separated option that starts with `prefix`, such as `size=`.
+/// The last one counts, as a later mount option overrides an earlier one.
+fn last_option<'a>(options: &'a str, prefix: &str) -> Option<&'a str> {
+    options
+        .split(',')
+        .filter_map(|option| option.strip_prefix(prefix))
+        .next_back()
+}
+
+/// The last `mountinfo` line whose mount point is `mount_point`.
+fn last_mount<'a>(lines: &[MountLine<'a>], mount_point: &str) -> Option<MountLine<'a>> {
+    lines
+        .iter()
+        .rev()
+        .find(|line| line.mount_point == mount_point)
+        .copied()
 }
 
 /// The trimmed value of the one status line whose key is exactly `key`.
@@ -268,7 +449,7 @@ pub(super) enum ObservationFailure {
     SameNamespace,
     /// A member's `0::` line does not name the attempt group.
     OutsideGroup,
-    /// The bootstrap's status or limits fail the measured check.
+    /// The bootstrap's status, limits or mount table fails the measured check.
     Field(ReadinessFailure),
 }
 
@@ -284,6 +465,8 @@ pub(super) struct GroupObservation {
     pub(super) status: StatusFacts,
     /// The bootstrap's limits, which passed `confirm_limits`.
     pub(super) limits: LimitFacts,
+    /// The bootstrap's scratch mount, which passed `confirm_mounts`.
+    pub(super) scratch: ScratchMount,
 }
 
 /// Observes an attempt group before release, independently of the bootstrap's own check
@@ -294,7 +477,7 @@ pub(super) struct GroupObservation {
 ///
 /// # Errors
 /// Returns the first failed check, in this order: the membership list, every member's status,
-/// the bootstrap's limits, its pid namespace, and every member's cgroup.
+/// the bootstrap's limits, its mount table, its pid namespace, and every member's cgroup.
 #[cfg(test)]
 pub(super) fn observe_group(
     group: &Path,
@@ -332,6 +515,15 @@ pub(super) fn observe_group(
     let limits = parse_limits(&limits_text).map_err(ObservationFailure::Field)?;
     confirm_limits(&limits).map_err(ObservationFailure::Field)?;
 
+    let mountinfo_text = read_proc_text(&member_file(proc_root, bootstrap_pid, "mountinfo"))?;
+    let mounts = parse_mounts(&mountinfo_text).map_err(ObservationFailure::Field)?;
+    confirm_mounts(&mounts).map_err(ObservationFailure::Field)?;
+    let Some(scratch) = mounts.scratch else {
+        return Err(ObservationFailure::Field(ReadinessFailure::Missing(
+            FIELD_SCRATCH,
+        )));
+    };
+
     let namespace = fs::read_link(member_file(proc_root, bootstrap_pid, "ns/pid"))
         .map_err(|_| ObservationFailure::Unreadable)?;
     if namespace.as_path() == own_pid_namespace {
@@ -352,6 +544,7 @@ pub(super) fn observe_group(
         bootstrap_pid,
         status: bootstrap_status,
         limits,
+        scratch,
     })
 }
 
@@ -368,3 +561,6 @@ fn read_proc_text(path: &Path) -> Result<String, ObservationFailure> {
     let bytes = super::read_bounded(path, limit).map_err(|_| ObservationFailure::Unreadable)?;
     String::from_utf8(bytes).map_err(|_| ObservationFailure::Unreadable)
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,4 +1,4 @@
-//! The trusted namespace check and the attempt's fixed argument list through the tool root's launcher (decisions 0042 rule 1, 0056 rule 2). Runs no payload.
+//! The trusted namespace check and the attempt's fixed argument list through the tool root's launcher (decisions 0042 rule 1, 0056 rule 2 with its amendment of 2026-11-12). The check and the attempt share one namespace and bind prefix; the attempt's scratch is mounted by its bootstrap rather than by the launcher. Runs no payload.
 
 use std::ffi::OsString;
 use std::fs;
@@ -19,6 +19,8 @@ pub(super) const TOOL_ROOT: &str = "/opt/artifree/tools/v1";
 pub(super) const LAUNCHER: &str = "bin/bwrap";
 /// The fixture inside the tool root, run inside the launcher for the namespace check and as the probe child.
 pub(super) const FIXTURE_FILE: &str = "bin/artifree-execution-fixture";
+/// The fixture's path inside the sandbox, where the tool root is bound as `/tools`.
+const FIXTURE_COMMAND: &str = "/tools/bin/artifree-execution-fixture";
 /// The seven namespaces compared with the supervisor's own (0042 rule 1).
 pub(super) const NAMESPACES: [&str; 7] = ["user", "pid", "net", "mnt", "ipc", "uts", "cgroup"];
 /// Bound on the fixture's namespace report (this slice's choice; not an attempt bound).
@@ -35,8 +37,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const OUTPUT_GRACE: Duration = Duration::from_secs(1);
 /// The namespace check's scratch tmpfs size in bytes (R02aa's choice; not an attempt bound).
 const CHECK_SCRATCH_BYTES: &str = "1048576";
-/// The attempt's scratch tmpfs size in bytes: decision 0042 rule 5, "One 128 MiB tmpfs" for scratch and output.
-const ATTEMPT_SCRATCH_BYTES: &str = "134217728";
 
 /// Checks that the tool root holds a regular, executable launcher and then a regular, executable fixture.
 ///
@@ -61,30 +61,12 @@ fn is_regular_executable(path: &Path) -> bool {
     })
 }
 
-/// The fixed argument list for the namespace check, in launch order.
+/// The shared prefix of the namespace check and the attempt, in launch order: every namespace unshared, the tool root bound read-only, and a private `/proc` and `/dev`.
 ///
 /// Each namespace has its own explicit `--unshare-*` flag. `--unshare-all` is not used because its user and cgroup entries are `-try` forms that skip a namespace silently when the kernel refuses it; the namespace comparison would refuse a skipped namespace too, but an explicit flag makes the launcher fail instead of continuing without that namespace. `--disable-userns` stops a further user namespace, which was measured to be possible without it. The root is bound read-only as `/tools`, and its `lib` and `lib64` directories are bound as `/lib` and `/lib64`.
 #[must_use]
-pub(super) fn launcher_arguments(root: &Path) -> Vec<OsString> {
-    fixed_arguments(root, CHECK_SCRATCH_BYTES, &["namespaces"])
-}
-
-/// The attempt's fixed argument list, in launch order (0056 rule 2): the namespace check's list with the 128 MiB scratch tmpfs, ending in the fixture's `bootstrap` mode with the fixture profile's identity.
-///
-/// Nothing a request carries reaches this list. The scratch's inode bound is R02ac's (0056 rule 17).
-#[must_use]
-pub(super) fn attempt_arguments(root: &Path) -> Vec<OsString> {
-    fixed_arguments(
-        root,
-        ATTEMPT_SCRATCH_BYTES,
-        &["bootstrap", InspectionProfile::fixture().identity()],
-    )
-}
-
-/// Builds the launcher's fixed argument list for `root` with `scratch_bytes` as the tmpfs size, followed by the inner fixture command and `fixture_arguments`. Both the namespace check and the attempt use this one list, so they cannot drift apart.
-#[must_use]
-fn fixed_arguments(root: &Path, scratch_bytes: &str, fixture_arguments: &[&str]) -> Vec<OsString> {
-    let mut arguments: Vec<OsString> = vec![
+fn sandbox_arguments(root: &Path) -> Vec<OsString> {
+    vec![
         "--unshare-user".into(),
         "--unshare-pid".into(),
         "--unshare-net".into(),
@@ -108,19 +90,61 @@ fn fixed_arguments(root: &Path, scratch_bytes: &str, fixture_arguments: &[&str])
         "/proc".into(),
         "--dev".into(),
         "/dev".into(),
-        "--size".into(),
-        scratch_bytes.into(),
-        "--tmpfs".into(),
-        "/tmp".into(),
-        "--chdir".into(),
-        "/".into(),
-        "/tools/bin/artifree-execution-fixture".into(),
-    ];
+    ]
+}
+
+/// The fixed argument list for the namespace check, in launch order: the shared prefix, then the check's 1 MiB scratch tmpfs at `/tmp` and the fixture's `namespaces` mode.
+///
+/// The check still mounts its scratch through the launcher. Only the attempt moves the scratch into its bootstrap (0056 rule 2 with its amendment of 2026-11-12), so the check keeps its own `--size` and `--tmpfs` pair.
+#[must_use]
+pub(super) fn launcher_arguments(root: &Path) -> Vec<OsString> {
+    let mut arguments = sandbox_arguments(root);
     arguments.extend(
-        fixture_arguments
-            .iter()
-            .map(|argument| OsString::from(*argument)),
+        [
+            "--size",
+            CHECK_SCRATCH_BYTES,
+            "--tmpfs",
+            "/tmp",
+            "--chdir",
+            "/",
+            FIXTURE_COMMAND,
+            "namespaces",
+        ]
+        .map(OsString::from),
     );
+    arguments
+}
+
+/// The attempt's fixed argument list, in launch order (0056 rule 2 with its amendment of 2026-11-12): the shared prefix, the two capabilities, the scratch's mount point, the read-only remounts, then the fixture's `bootstrap` mode with the fixture profile's identity.
+///
+/// The launcher no longer mounts the scratch. It makes the mount point, remounts the sandbox's root and `/dev` read-only, and hands the bootstrap two capabilities inside the sandbox's user namespace, `CAP_SYS_ADMIN` and `CAP_SETPCAP`. The bootstrap mounts the scratch in its own mount namespace with the size and inode bounds of 0042 rule 5, and it removes both capabilities from every set, the bounding set included, before the seccomp filter (0056 rule 3). The capabilities are over the sandbox's own namespaces only: they belong to the user namespace that `--unshare-user` creates, which owns the other namespaces of the sandbox, and they grant nothing over the host.
+///
+/// The `--remount-ro` options come after every bind, `--proc`, `--dev` and `--dir` option, because a mount point created after a read-only remount would land on a read-only tree and fail.
+///
+/// Nothing a request carries reaches this list, and the scratch's size and inode bounds are set by the bootstrap, not here.
+#[must_use]
+pub(super) fn attempt_arguments(root: &Path) -> Vec<OsString> {
+    let mut arguments = sandbox_arguments(root);
+    arguments.extend(
+        [
+            "--cap-add",
+            "CAP_SYS_ADMIN",
+            "--cap-add",
+            "CAP_SETPCAP",
+            "--dir",
+            "/tmp",
+            "--remount-ro",
+            "/",
+            "--remount-ro",
+            "/dev",
+            "--chdir",
+            "/",
+            FIXTURE_COMMAND,
+            "bootstrap",
+        ]
+        .map(OsString::from),
+    );
+    arguments.push(InspectionProfile::fixture().identity().into());
     arguments
 }
 
@@ -309,5 +333,7 @@ pub(super) fn launcher_version(root: &Path) -> Option<String> {
     printable.then(|| version.to_owned())
 }
 
+#[cfg(test)]
+mod attempt_tests;
 #[cfg(test)]
 mod tests;

@@ -17,7 +17,10 @@ use super::super::readiness::{
     confirm_status, observe_group, parse_limits, parse_status,
 };
 #[cfg(target_arch = "x86_64")]
-use super::{ALLOWED, PolicyError, QUERY_ONLY, compile, fixture_filter, policy_sha256};
+use super::{
+    ALLOWED, CLONE, PolicyError, QUERY_ONLY, allowlist, allowlist_rules, compile, fixture_filters,
+    policy_sha256,
+};
 
 /// The measured bootstrap's `/proc/<pid>/status`, as the kernel printed it in the probe (0056
 /// rule 5). Every value that the checks read is here.
@@ -41,7 +44,7 @@ const MEASURED_STATUS: &[&str] = &[
     "Threads:\t1",
     "NoNewPrivs:\t1",
     "Seccomp:\t2",
-    "Seccomp_filters:\t1",
+    "Seccomp_filters:\t2",
     "CapInh:\t0000000000000000",
     "CapPrm:\t0000000000000000",
     "CapEff:\t0000000000000000",
@@ -60,14 +63,28 @@ const MEASURED_LIMITS: &[&str] = &[
     "Max file locks            unlimited            unlimited            locks",
 ];
 
+/// The measured bootstrap's `/proc/<pid>/mountinfo` lines (the amendment of 2026-11-12). The
+/// mount points, options and filesystems are the kernel's values from the runner; the ids and the
+/// root of each line are illustrative.
+const MEASURED_MOUNTINFO: &[&str] = &[
+    "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64",
+    "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1292 1290 8:1 /opt/artifree/tools/v1/lib /lib ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1293 1290 8:1 /opt/artifree/tools/v1/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
+    "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64",
+    "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=600,ptmxmode=666",
+    "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=131072k,nr_inodes=4096,mode=700,uid=1001,gid=1001,inode64",
+];
+
 /// The limits line keys, as the kernel prints them at the start of a line.
 const OPEN_FILES: &str = "Max open files";
 const CORE_FILE_SIZE: &str = "Max core file size";
 
-/// The measured filter table: the 27 unconditional entries, typed out from the probe's facts
+/// The measured filter table: the 39 unconditional entries, typed out from the probe's facts
 /// so that the test does not read the table back and agree with it by construction.
 #[cfg(target_arch = "x86_64")]
-const MEASURED: [(&str, i64); 27] = [
+const MEASURED: [(&str, i64); 39] = [
     ("read", 0),
     ("write", 1),
     ("close", 3),
@@ -79,37 +96,47 @@ const MEASURED: [(&str, i64); 27] = [
     ("brk", 12),
     ("rt_sigaction", 13),
     ("rt_sigprocmask", 14),
+    ("rt_sigreturn", 15),
     ("pread64", 17),
     ("access", 21),
+    ("madvise", 28),
     ("execve", 59),
     ("exit", 60),
+    ("wait4", 61),
+    ("kill", 62),
+    ("fcntl", 72),
+    ("mkdir", 83),
+    ("unlink", 87),
+    ("setsid", 112),
     ("sigaltstack", 131),
     ("arch_prctl", 158),
     ("gettid", 186),
     ("futex", 202),
     ("sched_getaffinity", 204),
+    ("getdents64", 217),
     ("set_tid_address", 218),
+    ("clock_nanosleep", 230),
     ("exit_group", 231),
     ("openat", 257),
     ("newfstatat", 262),
     ("set_robust_list", 273),
     ("getrandom", 318),
+    ("statx", 332),
     ("rseq", 334),
+    ("clone3", 435),
 ];
 
-/// Calls that the filter must never allow, with their `x86_64` numbers.
+/// Calls that the filter must never allow, with their `x86_64` numbers. `clone` is not here
+/// because the allowlist admits it without namespace flags (see `allowlist_rules`).
 #[cfg(target_arch = "x86_64")]
-const DANGEROUS: [(&str, i64); 11] = [
+const DANGEROUS: [(&str, i64); 8] = [
     ("setrlimit", 160),
     ("ptrace", 101),
-    ("clone", 56),
-    ("clone3", 435),
     ("unshare", 272),
     ("setns", 308),
     ("mount", 165),
     ("bpf", 321),
     ("socket", 41),
-    ("fcntl", 72),
     ("sync", 162),
 ];
 
@@ -129,7 +156,7 @@ fn table_is_sorted_unique_and_complete() {
         ALLOWED.len(),
         "every table name must be unique"
     );
-    // The array type fixes the length at 27; equality with the measured entries pins them.
+    // The array type fixes the length at 39; equality with the measured entries pins them.
     assert_eq!(
         ALLOWED, MEASURED,
         "the table must hold exactly the measured entries"
@@ -138,6 +165,10 @@ fn table_is_sorted_unique_and_complete() {
     assert!(
         !ALLOWED.contains(&QUERY_ONLY),
         "prlimit64 must not be allowed unconditionally"
+    );
+    assert!(
+        !ALLOWED.contains(&CLONE),
+        "clone must not be allowed unconditionally"
     );
 }
 
@@ -159,11 +190,13 @@ fn dangerous_calls_are_absent() {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn filter_compiles_and_has_a_stable_digest() -> Result<(), PolicyError> {
-    let program = fixture_filter()?;
-    assert!(
-        !program.is_empty(),
-        "the fixture filter must compile to instructions"
-    );
+    let programs = fixture_filters()?;
+    for program in &programs {
+        assert!(
+            !program.is_empty(),
+            "each fixture filter must compile to instructions"
+        );
+    }
     let digest = policy_sha256()?;
     assert_eq!(
         digest.len(),
@@ -187,16 +220,13 @@ fn filter_compiles_and_has_a_stable_digest() -> Result<(), PolicyError> {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn prlimit64_is_allowed_only_as_a_query() -> Result<(), PolicyError> {
-    // The same table with prlimit64 allowed for every argument: it must differ from the
-    // fixture filter, which allows only the query.
-    let mut unconditional: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
-    for (_, number) in ALLOWED {
-        unconditional.insert(number, Vec::new());
-    }
+    // The allowlist's rules with prlimit64 allowed for every argument: it must differ from the
+    // fixture allowlist, which allows only the query.
+    let mut unconditional = allowlist_rules()?;
     unconditional.insert(QUERY_ONLY.1, Vec::new());
     let always_allowed = compile(unconditional)?;
     assert_ne!(
-        fixture_filter()?,
+        allowlist()?,
         always_allowed,
         "prlimit64 must be allowed only when its new-limit argument is null"
     );
@@ -225,7 +255,7 @@ fn job_syscall_table_matches_the_kernel_headers() -> io::Result<()> {
     let expected: Vec<(&str, i64)> = ALLOWED
         .iter()
         .copied()
-        .chain([QUERY_ONLY])
+        .chain([QUERY_ONLY, CLONE])
         .chain(DANGEROUS)
         .collect();
     let mut mismatches: Vec<String> = Vec::new();
@@ -250,6 +280,15 @@ fn measured_status_lines() -> Vec<String> {
 /// The measured limits as owned lines, so that a row can change one of them.
 fn measured_limit_lines() -> Vec<String> {
     MEASURED_LIMITS.iter().copied().map(str::to_owned).collect()
+}
+
+/// The measured mount table as owned lines, so that a row can change one of them.
+fn measured_mountinfo_lines() -> Vec<String> {
+    MEASURED_MOUNTINFO
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Joins lines into a text in which every line ends with a newline; no lines give no text.
@@ -386,6 +425,11 @@ fn each_wrong_status_field_is_refused_by_name() {
             |lines: &mut Vec<String>| set_status(lines, "CapEff", "zzzz"),
             Err(ReadinessFailure::Malformed("CapEff")),
         ),
+        (
+            "Seccomp_filters 1",
+            |lines: &mut Vec<String>| set_status(lines, "Seccomp_filters", "1"),
+            Err(ReadinessFailure::Unexpected("Seccomp_filters")),
+        ),
     ];
     let mut failures: Vec<String> = Vec::new();
     for (name, edit, expected) in cases {
@@ -494,7 +538,7 @@ fn status_and_limits_of_the_measured_bootstrap_pass() {
         Ok(StatusFacts {
             no_new_privs: 1,
             seccomp: 2,
-            seccomp_filters: 1,
+            seccomp_filters: 2,
             cap_inh: 0,
             cap_prm: 0,
             cap_eff: 0,
@@ -586,6 +630,7 @@ impl TempHost {
             fs::create_dir_all(dir.join("ns"))?;
             fs::write(dir.join("status"), join_lines(&member.status))?;
             fs::write(dir.join("limits"), join_lines(&member.limits))?;
+            fs::write(dir.join("mountinfo"), join_lines(&member.mountinfo))?;
             fs::write(dir.join("cgroup"), &member.cgroup)?;
             symlink(&member.namespace, dir.join("ns").join("pid"))?;
         }
@@ -605,6 +650,7 @@ struct Member {
     pid: u32,
     status: Vec<String>,
     limits: Vec<String>,
+    mountinfo: Vec<String>,
     namespace: String,
     cgroup: String,
 }
@@ -620,6 +666,7 @@ impl Member {
             pid,
             status,
             limits: measured_limit_lines(),
+            mountinfo: measured_mountinfo_lines(),
             namespace: OWN_NAMESPACE.to_owned(),
             cgroup: GROUP_LINE.to_owned(),
         }
@@ -631,6 +678,7 @@ impl Member {
             pid,
             status: measured_status_lines(),
             limits: measured_limit_lines(),
+            mountinfo: measured_mountinfo_lines(),
             namespace: BOOTSTRAP_NAMESPACE.to_owned(),
             cgroup: GROUP_LINE.to_owned(),
         }
@@ -682,7 +730,7 @@ type ObservationRow = (
 );
 
 /// The observation rows, each one a change of the measured host with its expected result.
-fn observation_rows() -> [ObservationRow; 10] {
+fn observation_rows() -> [ObservationRow; 11] {
     [
         ("measured group", |_: &mut HostTree| {}, Ok((3, 12))),
         (
@@ -759,6 +807,21 @@ fn observation_rows() -> [ObservationRow; 10] {
             },
             Err(ObservationFailure::Field(ReadinessFailure::Unexpected(
                 OPEN_FILES,
+            ))),
+        ),
+        (
+            "bootstrap scratch with 8192 inodes",
+            |tree: &mut HostTree| {
+                tree.edit_member(12, |member| {
+                    for line in &mut member.mountinfo {
+                        if line.contains(" /tmp ") {
+                            *line = line.replace("nr_inodes=4096", "nr_inodes=8192");
+                        }
+                    }
+                });
+            },
+            Err(ObservationFailure::Field(ReadinessFailure::Unexpected(
+                "scratch",
             ))),
         ),
     ]

@@ -2,7 +2,14 @@
 //! decision 0042 rules 5 and 6).
 //!
 //! Compiled only into the test build (0056 rule 16). Nothing here is visible outside
-//! `execution`, and the payload of this slice only exits (0056 rule 14, R02ab).
+//! `execution`.
+//!
+//! R02ac (0056 rule 14) added the resource part of the group phase. The scratch bounds are read
+//! back from the bootstrap's mount table (`readiness`), and the stub runs behind the two seccomp
+//! programs of `policy`. The group's counters are read once the group is seen empty (`usage`).
+//! After the stub's exit the group's listing decides survivors, and the verdict is typed:
+//! `OutOfMemory` and `Survivors` are decided in the order that `final_verdict` documents. The
+//! payload scenarios that exercise these limits run only in the enforcement job (`run.sh`).
 
 use std::fmt;
 use std::fs;
@@ -23,6 +30,7 @@ use super::lock::{AdmissionLock, LockRefusal};
 use super::probe_group::{self, ProbeGroup};
 use super::readiness::{self, GroupObservation};
 use super::report::HostReport;
+use super::usage::{self, GroupUsage};
 use super::{AdmissionRefusal, FIXTURE, InspectionProfile, launcher, policy, read_bounded};
 
 /// The combined stdout and stderr budget of one attempt, in bytes (decision 0042 rule 5).
@@ -112,10 +120,34 @@ pub(super) enum AttemptFailure {
     Unobserved,
     /// The stub was still running at the wall deadline.
     DeadlineExceeded,
+    /// The group's memory limit killed it (`memory.events` `oom_kill` above zero).
+    OutOfMemory,
+    /// A process was still in the attempt group when the stub's normal exit was observed
+    /// (decision 0042 rule 6).
+    Survivors,
     /// The stub's output went past the combined budget.
     OutputLimitExceeded,
     /// The group, the stub or a reader was not observed gone, so the attempt is quarantined.
     CleanupNotObserved,
+}
+
+/// Why a launch produced no evidence of a run, with the group's counters when they were read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct AttemptRefusal {
+    /// The reason that the launch produced no evidence.
+    pub(super) failure: AttemptFailure,
+    /// The group's counters. Present whenever the group was created, emptied and read, so that a
+    /// refused attempt still shows what it used.
+    pub(super) usage: Option<GroupUsage>,
+}
+
+/// A refusal of a launch that has no group counters: the failure came before the group was
+/// created, or the group was not read.
+fn without_usage(failure: AttemptFailure) -> AttemptRefusal {
+    AttemptRefusal {
+        failure,
+        usage: None,
+    }
 }
 
 /// Evidence of one launch that ran to an observed exit.
@@ -135,6 +167,8 @@ pub(super) struct AttemptEvidence {
     pub(super) wall_time: Duration,
     /// The attempt group's peak memory in bytes, when the kernel offers it.
     pub(super) peak_memory_bytes: Option<u64>,
+    /// The attempt group's counters, read after it was seen empty.
+    pub(super) usage: GroupUsage,
     /// What the provider saw in the group before it released the bootstrap.
     pub(super) readiness: GroupObservation,
     /// SHA-256 of the seccomp program, in lowercase hexadecimal.
@@ -161,6 +195,7 @@ impl fmt::Display for AttemptEvidence {
             Some(bytes) => writeln!(formatter, "attempt_peak_memory_bytes={bytes}")?,
             None => writeln!(formatter, "attempt_peak_memory_bytes=unavailable")?,
         }
+        write!(formatter, "{}", self.usage)?;
         let observed = &self.readiness;
         let status = observed.status;
         let limits = observed.limits;
@@ -194,6 +229,14 @@ impl fmt::Display for AttemptEvidence {
             limit_word(limits.core_bytes.soft),
             limit_word(limits.core_bytes.hard)
         )?;
+        match observed.scratch.size_kib {
+            Some(kib) => writeln!(formatter, "readiness.scratch_size={kib}k")?,
+            None => writeln!(formatter, "readiness.scratch_size=unavailable")?,
+        }
+        match observed.scratch.inodes {
+            Some(inodes) => writeln!(formatter, "readiness.scratch_inodes={inodes}")?,
+            None => writeln!(formatter, "readiness.scratch_inodes=unavailable")?,
+        }
         writeln!(formatter, "filter_sha256={}", self.filter_sha256)?;
         write!(formatter, "{}", self.report)
     }
@@ -207,6 +250,44 @@ fn limit_word(value: Option<u64>) -> String {
 /// A reader thread's result: the bytes it kept, or the read error that ended it.
 type Capture = JoinHandle<io::Result<Vec<u8>>>;
 
+/// What the group's `cgroup.procs` listing held when the stub's normal exit was observed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SurvivorListing {
+    /// No exit was observed before a deadline or a failure, so no listing was read.
+    #[default]
+    NotChecked,
+    /// The listing holds no pid: the group is empty.
+    Empty,
+    /// The listing holds at least one pid.
+    Occupied,
+    /// The listing could not be read, was over its bound, was not UTF-8, or had a line that is
+    /// not a pid.
+    Unreadable,
+}
+
+/// Classifies a `cgroup.procs` listing read after the stub's exit. Every non-empty line must be a
+/// pid, so a listing that is not understood is never taken for an empty group.
+fn survivor_listing(listing: io::Result<Vec<u8>>) -> SurvivorListing {
+    let Ok(bytes) = listing else {
+        return SurvivorListing::Unreadable;
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return SurvivorListing::Unreadable;
+    };
+    let mut occupied = false;
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        if line.parse::<u32>().is_err() {
+            return SurvivorListing::Unreadable;
+        }
+        occupied = true;
+    }
+    if occupied {
+        SurvivorListing::Occupied
+    } else {
+        SurvivorListing::Empty
+    }
+}
+
 /// What one launch holds while its group exists. `settle` ends every part of it.
 #[derive(Debug, Default)]
 struct Session {
@@ -214,6 +295,8 @@ struct Session {
     child: Option<Child>,
     /// The stub's exit status, once the poll observed it.
     exit: Option<ExitStatus>,
+    /// The group's listing at the stub's exit, read before the group is killed.
+    survivors: SurvivorListing,
     /// The stdout reader, once it has been started.
     stdout: Option<Capture>,
     /// The stderr reader, once it has been started.
@@ -240,43 +323,55 @@ struct Passed {
 /// What the cleanup of the group yielded.
 #[derive(Debug)]
 struct Settled {
-    /// The group's peak memory, read before it was removed.
-    peak_memory_bytes: Option<u64>,
-    /// The captured standard output, or the read error that ended it.
-    stdout: io::Result<Vec<u8>>,
-    /// The captured standard error, or the read error that ended it.
-    stderr: io::Result<Vec<u8>>,
+    /// Whether the group was seen empty, the stub reaped, both readers finished and the group
+    /// removed. Only then is the cleanup observed; otherwise the attempt is quarantined.
+    cleanup_observed: bool,
+    /// The group's counters, read after it was seen empty and before it was removed.
+    usage: Option<GroupUsage>,
+    /// The captured standard output, or the read error that ended it. `None` when the reader
+    /// did not finish in time.
+    stdout: Option<io::Result<Vec<u8>>>,
+    /// The captured standard error, with the same meaning as `stdout`.
+    stderr: Option<io::Result<Vec<u8>>>,
 }
 
 /// Runs one attempt: the admission lock, the quarantine check, the whole host admission, then
 /// the attempt group. The group is always ended and removed, or the attempt is quarantined
-/// (decision 0042 rule 6).
+/// (decision 0042 rule 6). A refusal carries the group's counters whenever the group was
+/// created, emptied and read.
 ///
 /// `execution_dir` holds the admission lock only. The group is created beside the admission's
 /// `supervisor` child, never in `execution_dir`.
 pub(super) fn launch(
     plan: &AttemptPlan,
     execution_dir: &Path,
-) -> Result<AttemptEvidence, AttemptFailure> {
+) -> Result<AttemptEvidence, AttemptRefusal> {
     // The stub and the bootstrap use the fixed tool root, so the roots that are verified here
     // must be the same ones: no caller chooses them.
     let roots = &admission::production_roots();
     // Held until this function returns, so that no second launch can start meanwhile.
-    let _lock = AdmissionLock::acquire(execution_dir).map_err(lock_failure)?;
+    let _lock = AdmissionLock::acquire(execution_dir)
+        .map_err(|refusal| without_usage(lock_failure(refusal)))?;
     if QUARANTINED.load(Ordering::SeqCst) {
-        return Err(AttemptFailure::Quarantined);
+        return Err(without_usage(AttemptFailure::Quarantined));
     }
     let (report, delegated) = admission::admit_for_attempt(InspectionProfile::fixture(), roots)
-        .map_err(AttemptFailure::Refused)?;
-    let filter_sha256 = policy::policy_sha256().map_err(|_| AttemptFailure::PolicyUnavailable)?;
-    let own_pid_namespace = fs::read_link(roots.proc_self.join("ns").join("pid"))
-        .map_err(|_| AttemptFailure::Refused(AdmissionRefusal::NamespacesUnavailable))?;
+        .map_err(|failure| without_usage(AttemptFailure::Refused(failure)))?;
+    let filter_sha256 =
+        policy::policy_sha256().map_err(|_| without_usage(AttemptFailure::PolicyUnavailable))?;
+    let own_pid_namespace =
+        fs::read_link(roots.proc_self.join("ns").join("pid")).map_err(|_| {
+            without_usage(AttemptFailure::Refused(
+                AdmissionRefusal::NamespacesUnavailable,
+            ))
+        })?;
     let name = format!(
         "attempt-{}-{}",
         process::id(),
         ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let group = probe_group::create_probe(&delegated, &name).map_err(AttemptFailure::Refused)?;
+    let group = probe_group::create_probe(&delegated, &name)
+        .map_err(|failure| without_usage(AttemptFailure::Refused(failure)))?;
     let group_path = delegated.join(&name);
 
     // From here on every path ends the group in `settle`, whatever the group phase returned.
@@ -289,13 +384,26 @@ pub(super) fn launch(
         &own_pid_namespace,
         &mut session,
     );
-    let settled = settle(group, &mut session)?;
-    let passed = phase?;
-    let stdout = settled.stdout.map_err(|_| AttemptFailure::Unobserved)?;
-    let stderr = settled.stderr.map_err(|_| AttemptFailure::Unobserved)?;
-    if session.exceeded.load(Ordering::SeqCst) {
-        return Err(AttemptFailure::OutputLimitExceeded);
-    }
+    let settled = settle(group, &group_path, &mut session);
+    let usage = settled.usage;
+    let refused = |failure: AttemptFailure| AttemptRefusal { failure, usage };
+    let outcome = Outcome {
+        cleanup_observed: settled.cleanup_observed,
+        output_exceeded: session.exceeded.load(Ordering::SeqCst),
+        phase: phase.as_ref().map(|_| ()).map_err(|failure| *failure),
+        usage,
+        survivors: session.survivors,
+        captures_read: matches!(
+            (&settled.stdout, &settled.stderr),
+            (Some(Ok(_)), Some(Ok(_)))
+        ),
+    };
+    final_verdict(&outcome).map_err(refused)?;
+    let (Ok(passed), Some(Ok(stdout)), Some(Ok(stderr)), Some(counters)) =
+        (phase, settled.stdout, settled.stderr, usage)
+    else {
+        return Err(refused(AttemptFailure::Unobserved));
+    };
     Ok(AttemptEvidence {
         group: group_path,
         limits: passed.limits,
@@ -303,7 +411,8 @@ pub(super) fn launch(
         stdout,
         stderr,
         wall_time: passed.wall_time,
-        peak_memory_bytes: settled.peak_memory_bytes,
+        peak_memory_bytes: counters.memory_peak_bytes,
+        usage: counters,
         readiness: passed.readiness,
         filter_sha256,
         report,
@@ -318,11 +427,10 @@ fn lock_failure(refusal: LockRefusal) -> AttemptFailure {
     }
 }
 
-/// Records that a cleanup was not observed, so that later launches in this process are refused,
-/// and names that failure.
-fn quarantine() -> AttemptFailure {
+/// Records that a cleanup was not observed, so that later launches in this process are refused
+/// (decision 0042 rule 6). The attempt's verdict then names `CleanupNotObserved`.
+fn quarantine() {
     QUARANTINED.store(true, Ordering::SeqCst);
-    AttemptFailure::CleanupNotObserved
 }
 
 /// The group phase: limits, the stub, its placement, the readiness check and release, the wait
@@ -341,6 +449,14 @@ fn run_group(
     let (readiness, start) = release(plan, roots, &mut control, group_path, own_pid_namespace)?;
     let (exit, wall_time) = await_exit(plan, session, start)?;
     session.exit = Some(exit);
+    // Decision 0042 rule 6: after the launcher and init teardown a normal exit also requires an
+    // empty group. `populated` is not used: measured on 2026-11-12, it stays 1 for a few
+    // milliseconds after ordinary exits while the listing is already empty. `settle` kills
+    // survivors as it kills every group.
+    session.survivors = survivor_listing(read_bounded(
+        &group_path.join("cgroup.procs"),
+        LISTING_BYTES,
+    ));
     confirm_started(&mut control)?;
     Ok(Passed {
         limits,
@@ -522,6 +638,9 @@ fn await_exit(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // The stub is reaped now, so `settle` must know it whatever the verdict below:
+                // a kill of a reaped child is not a failed cleanup.
+                session.exit = Some(status);
                 // An exit that is first seen at or after the deadline is past it too: the
                 // deadline is absolute, whatever the polling interval.
                 let elapsed = start.elapsed();
@@ -535,8 +654,6 @@ fn await_exit(
             Ok(None) => {}
             Err(_) => return Err(AttemptFailure::Unobserved),
         }
-        // The wall deadline after release cannot be proven with a payload that only exits;
-        // R02ac's hang proves it.
         running_verdict(
             start.elapsed(),
             plan.wall_deadline,
@@ -558,6 +675,66 @@ fn running_verdict(
     }
     if elapsed >= wall_deadline {
         return Err(AttemptFailure::DeadlineExceeded);
+    }
+    Ok(())
+}
+
+/// What the parts of one attempt measured, as plain values, for the one final decision.
+#[derive(Clone, Copy, Debug)]
+struct Outcome {
+    /// Whether the group, the stub, both readers and the group's removal were all observed.
+    cleanup_observed: bool,
+    /// Whether the output budget was exceeded.
+    output_exceeded: bool,
+    /// The group phase's result: `Ok` for a run that exited, or the failure that ended the phase.
+    phase: Result<(), AttemptFailure>,
+    /// The group's counters, when they were read.
+    usage: Option<GroupUsage>,
+    /// What the group's listing held when the stub's exit was observed.
+    survivors: SurvivorListing,
+    /// Whether both captured streams were read to their end.
+    captures_read: bool,
+}
+
+/// The final verdict of one attempt. The first matching rule decides: cleanup not observed
+/// (the group is quarantined), output budget exceeded, wall deadline exceeded, out of memory,
+/// survivors, the not-started reasons of the control channel (`ExecFailed`, `ExecUnconfirmed`),
+/// success.
+///
+/// An attempt that the group's OOM killed is `OutOfMemory`, although its stub exited by signal 9
+/// and its control channel read end of stream: the counters decide, not the exit status. Counters
+/// that cannot be read are `Unobserved` before the OOM rule, because that rule cannot be decided
+/// without them. A survivor listing that cannot be read is `Unobserved` at the survivors rule, for
+/// the same reason: an unread listing must never count as an empty group.
+fn final_verdict(outcome: &Outcome) -> Result<(), AttemptFailure> {
+    if !outcome.cleanup_observed {
+        return Err(AttemptFailure::CleanupNotObserved);
+    }
+    if outcome.output_exceeded {
+        return Err(AttemptFailure::OutputLimitExceeded);
+    }
+    if outcome.phase == Err(AttemptFailure::DeadlineExceeded) {
+        return Err(AttemptFailure::DeadlineExceeded);
+    }
+    let Some(usage) = outcome.usage else {
+        return Err(AttemptFailure::Unobserved);
+    };
+    if usage.oom_kills > 0 {
+        return Err(AttemptFailure::OutOfMemory);
+    }
+    match outcome.survivors {
+        SurvivorListing::Occupied => return Err(AttemptFailure::Survivors),
+        SurvivorListing::Unreadable => return Err(AttemptFailure::Unobserved),
+        // A listing is read whenever the stub's exit was observed, so a run that ended well
+        // without one was not observed.
+        SurvivorListing::NotChecked if outcome.phase.is_ok() => {
+            return Err(AttemptFailure::Unobserved);
+        }
+        SurvivorListing::NotChecked | SurvivorListing::Empty => {}
+    }
+    outcome.phase?;
+    if !outcome.captures_read {
+        return Err(AttemptFailure::Unobserved);
     }
     Ok(())
 }
@@ -586,9 +763,11 @@ fn confirm_started(control: &mut UnixStream) -> Result<(), AttemptFailure> {
 
 /// Ends every part of the attempt after any outcome of the group phase (decision 0042 rule 6):
 /// kills the group and waits until it is empty, reaps the stub, joins both readers and reads
-/// the peak. The group is removed only when every part was observed. Otherwise the attempt is
-/// quarantined and the group stays in place.
-fn settle(group: ProbeGroup, session: &mut Session) -> Result<Settled, AttemptFailure> {
+/// the group's counters. The group is removed only when every part was observed, the removal
+/// included. Otherwise the attempt is quarantined and the group stays in place. A counter read
+/// that fails leaves `usage` empty; the verdict then refuses the attempt, and the group is
+/// still removed.
+fn settle(group: ProbeGroup, group_path: &Path, session: &mut Session) -> Settled {
     // One deadline for the whole cleanup (0042 rule 6: five seconds), not one per part.
     let deadline = Instant::now().checked_add(probe_group::CLEANUP_DEADLINE);
     let remaining = || {
@@ -602,23 +781,25 @@ fn settle(group: ProbeGroup, session: &mut Session) -> Result<Settled, AttemptFa
     let reaped = reap_child(session.child.as_mut(), session.exit.is_some(), remaining());
     let stdout = join_reader(session.stdout.take(), remaining());
     let stderr = join_reader(session.stderr.take(), remaining());
-    let peak_memory_bytes = if emptied {
-        probe_group::read_peak(&group)
+    // Read after the group was seen empty and before it is removed.
+    let usage = if emptied {
+        usage::read_usage(group_path).ok()
     } else {
         None
     };
-    let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
-        return Err(quarantine());
-    };
-    if !emptied || !reaped {
-        return Err(quarantine());
+    let readers_finished = stdout.is_some() && stderr.is_some();
+    // The removal comes last, so a removed group was observed in every earlier part too.
+    let cleanup_observed =
+        emptied && reaped && readers_finished && probe_group::remove_probe(group).is_ok();
+    if !cleanup_observed {
+        quarantine();
     }
-    probe_group::remove_probe(group).map_err(|_| quarantine())?;
-    Ok(Settled {
-        peak_memory_bytes,
+    Settled {
+        cleanup_observed,
+        usage,
         stdout,
         stderr,
-    })
+    }
 }
 
 /// Kills the stub if it may still run, then waits for it for at most `within`, with at least
@@ -651,5 +832,7 @@ fn join_reader(reader: Option<Capture>, within: Duration) -> Option<io::Result<V
     reader.join().ok()
 }
 
+#[cfg(test)]
+mod resource_tests;
 #[cfg(test)]
 mod tests;

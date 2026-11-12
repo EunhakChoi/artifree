@@ -38,6 +38,7 @@ const rustEdges = {
     'rusqlite',
     // Decision 0056 rule 7: the Linux execution provider's system calls, through
     // safe interfaces and for Linux targets only.
+    'nix',
     'rustix',
     'seccompiler',
     'sha2',
@@ -64,8 +65,11 @@ const rustEdges = {
 // Edges allowed only as dev-dependencies, so test tooling cannot become part
 // of a shipped binary unreviewed. rusqlite lets server tests plant the
 // leftover content that a healthy server never produces, to prove the
-// cleanup route removes it (decision 0029).
+// cleanup route removes it (decision 0029). signal-hook lets the provider's
+// test-support payload stay alive through SIGTERM without first-party unsafe
+// code, for the cleanup acceptance of decision 0042 rule 8.
 const rustDevEdges = {
+  'artifree-providers': ['signal-hook'],
   'artifree-server': ['rusqlite', 'tower'],
 };
 

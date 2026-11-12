@@ -33,8 +33,9 @@ SOFTWARE.
 
 Other npm and Cargo dependencies retain their respective upstream licenses.
 On Linux the execution provider links `rustix` (Apache-2.0 WITH LLVM-exception
-OR Apache-2.0 OR MIT) and `seccompiler` (Apache-2.0 OR BSD-3-Clause) for its
-system calls (decision 0056, rule 7).
+OR Apache-2.0 OR MIT), `seccompiler` (Apache-2.0 OR BSD-3-Clause) and `nix`
+(MIT) for its system calls (decision 0056, rule 7). Its test-support payload,
+which is in no release archive, uses `signal-hook` (Apache-2.0 OR MIT).
 The committed lockfiles identify their versions. Each release archive carries
 the license, copying, and notice files of the Rust crates linked into the server
 and of the npm packages that may be bundled into the web workspace and the

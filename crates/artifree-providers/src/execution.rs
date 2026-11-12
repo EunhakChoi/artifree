@@ -6,8 +6,9 @@
 //! trusted probe child in a probe cgroup. Every caller outside the tests receives a refusal,
 //! at best `IncompleteEnforcement` (0056 rule 16), and no host is called supported.
 //! `run_stub` and `run_bootstrap` exist for the test-support program only (0056 rule 4).
-//! The first launch (0056 rule 14, R02ab) is compiled only into this crate's tests and its
-//! payload only exits: no caller outside them can start an attempt.
+//! The launch (0056 rule 14, R02ab and R02ac) is compiled only into this crate's tests, and its
+//! test payload runs the fixed resource and cleanup scenarios of R02ac; no caller outside them
+//! can start an attempt.
 //!
 //! Admission order; the first missing facility is reported (0056 rule 10):
 //! 1. Linux (`UnsupportedOperatingSystem`).
@@ -61,6 +62,10 @@ mod probe_group;
 #[cfg(target_os = "linux")]
 mod readiness;
 mod report;
+// The attempt group's counters serve only the launch, which exists only in the test build
+// (0056 rule 16).
+#[cfg(all(test, target_os = "linux"))]
+mod usage;
 
 #[cfg(target_os = "linux")]
 pub use bootstrap::{BootstrapFailure, run_bootstrap, run_stub};

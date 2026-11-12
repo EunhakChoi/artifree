@@ -62,17 +62,40 @@ run_unit() {
   require_one_passed "$OUT/$label.log"
 }
 
+# run_scenario BINARY SCENARIO LABEL TEST sets the payload scenario, runs one job test in a
+# delegated unit, and then requires that no payload process is left on the host. systemd kills
+# what is left of a unit when the unit stops, so this check shows only that nothing escaped the
+# unit. The evidence that the launch itself left nothing is the job test's own: it lists the
+# attempt groups and scans /proc after the launch returns, while the unit still runs.
+run_scenario() {
+  local binary=$1 scenario=$2 label=$3 name=$4 left status=0
+  sudo "$PREPARE" scenario "$scenario"
+  run_unit "$binary" "$label" "execution::attempt::resource_tests::$name" -p Delegate=yes
+  # pgrep exits 1 when nothing matches; any other status is a failure of the check itself.
+  left="$(pgrep -a -f artifree-execution-payload)" || status=$?
+  case "$status" in
+    0)
+      printf '%s\n' "$left" >&2
+      fail "a payload process outlived $name"
+      ;;
+    1) ;;
+    *) fail "the payload process check failed with status $status" ;;
+  esac
+}
+
 # This script changes the host's crash routing, its AppArmor profiles and /opt. It is for
 # the job's disposable runner only (decision 0056 rule 12).
 [[ ${GITHUB_ACTIONS:-} == true ]] \
   || fail "this script prepares a disposable CI runner; it does not run on any other host"
 
 # After a failed step the conditions it removed are put back, so the host is not left with
-# the job's routing, its profile, or a changed, extra, missing or moved tool file. Each
-# restore may fail on its own.
+# the job's routing, its profile, a changed, extra, missing or moved tool file, or a payload
+# scenario other than exit. Each restore may fail on its own. The kernel log lines about the
+# failure are printed first, for diagnosis.
 restore_host() {
   local status=$?
   if ((status != 0)); then
+    sudo "$PREPARE" kernel-log || true
     sudo "$PREPARE" launcher-back 2> /dev/null || true
     sudo "$PREPARE" fixture-back 2> /dev/null || true
     sudo "$PREPARE" nomem-slice-off 2> /dev/null || true
@@ -81,6 +104,7 @@ restore_host() {
     sudo "$PREPARE" tool-missing-off 2> /dev/null || true
     sudo "$PREPARE" manifest-back 2> /dev/null || true
     sudo "$PREPARE" payload-restore 2> /dev/null || true
+    sudo "$PREPARE" scenario exit 2> /dev/null || true
     sudo "$PREPARE" profile-off 2> /dev/null || true
     sudo "$PREPARE" routing-pipe 2> /dev/null || true
   fi
@@ -207,6 +231,19 @@ sudo "$PREPARE" tool-missing-off
 sudo "$PREPARE" manifest-away
 run_unit "$test_binary" missing-manifest job_missing_manifest_is_refused -p Delegate=yes
 sudo "$PREPARE" manifest-back
+
+say "part 6: resources and cleanup under the launch"
+run_scenario "$lib_binary" threads resource-threads job_thread_bomb_stops_at_the_task_limit
+run_scenario "$lib_binary" processes resource-processes job_process_bomb_stops_at_the_task_limit
+run_scenario "$lib_binary" memory resource-memory job_memory_hog_is_killed_with_its_group
+run_scenario "$lib_binary" scratch-bytes resource-scratch-bytes job_scratch_bytes_are_bounded_and_nothing_else_is_writable
+run_scenario "$lib_binary" scratch-inodes resource-scratch-inodes job_scratch_inodes_are_bounded
+run_scenario "$lib_binary" flood resource-flood job_log_flood_stops_at_the_output_budget
+run_scenario "$lib_binary" hang resource-hang job_hang_is_killed_at_the_wall_deadline
+run_scenario "$lib_binary" cpu resource-cpu job_cpu_spinners_share_one_cpu
+run_scenario "$lib_binary" survivors resource-survivors job_background_processes_do_not_outlive_a_normal_exit
+run_scenario "$lib_binary" survivors-hang resource-survivors-hang job_background_processes_do_not_outlive_the_deadline
+sudo "$PREPARE" scenario exit
 
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe
