@@ -89,7 +89,10 @@ routing_file() {
 routing_pipe() {
   [[ -f "$SAVED_ROUTING" ]] || fail "no saved core_pattern at $SAVED_ROUTING; run save-routing first"
   cat -- "$SAVED_ROUTING" > "$CORE_PATTERN"
-  cmp -s -- "$SAVED_ROUTING" "$CORE_PATTERN" || fail "kernel.core_pattern does not match the saved value"
+  # Compared as text: a proc file reports size 0, and cmp calls two regular files of
+  # different sizes different without reading them.
+  [[ "$(cat -- "$CORE_PATTERN")" == "$(cat -- "$SAVED_ROUTING")" ]] \
+    || fail "kernel.core_pattern does not match the saved value"
 }
 
 profile_on() {
