@@ -3,8 +3,8 @@
 Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
 enforcement job), R02ab (the first launch, only from the job's tests) and
 R02ac (resources and cleanup under that launch, with the scratch amended
-below) are implemented; R02ad (the syscall mapping) is planned in the
-amendment of 2026-11-13**.
+below) and R02ad (the syscall mapping, as amended on 2026-11-13; its x32
+class fails acceptance on the reviewed kernel) are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -413,6 +413,31 @@ how; where the two could be read differently, 0042 holds.
 > scenarios measured on the runner, and the public mapping stays R02ad's; the
 > three new facilities are not probed at admission, as the amendment says;
 > the persisted quarantine stays R02ah's.
+
+> **Note, 2026-11-13 (R02ad).** The public mapping exists as
+> `docs/linux-syscall-mapping.md`, kept in step with the probe table by a
+> unit test. The test-support program generates 94 probe programs, which the
+> job's preparation installs under `probes/` in the tool root and the
+> manifest covers. In the job: one launch of the scenario `probes` runs every
+> probe after a `fork` and an `exec`, and the test requires exactly the
+> expected seccomp records in the kernel log window, with the four allowed
+> controls succeeding and leaving none; the `clone3` probe as the payload
+> exits with `ENOSYS`, and the same probe outside the sandbox gets `EINVAL`;
+> a thread started after `exec` and a `prlimit64` on the payload's own child
+> are refused with their records; a lower and a restore of the soft
+> descriptor limit is refused; descriptors stop at 256 in the payload and in
+> a child after `exec`; and `/proc` shows the boundary in every task. The
+> preparation sets the two kernel-log settings, requires that no audit
+> daemon runs, and records both in the run's environment. The settings are
+> not restored, because the runner is disposable.
+>
+> One correction to the amendment: the thread's and the descendant's
+> refusals do not run in the probes' launch. The filter kills the payload
+> on each, so each has a launch and a test of its own, with the same
+> attribution rule. As the amendment says, the x32 class fails this
+> kernel's acceptance and stays an owner decision. The mutations ran on a
+> temporary branch, never in the product; the mapping records their
+> results.
 
 ## Context
 

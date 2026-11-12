@@ -42,6 +42,16 @@ implemented; no untrusted execution outside the enforcement job's tests**. Roadm
 > death, lease loss and quarantine across processes stay open, as do the
 > other rows.
 
+> **Note, 2026-11-13 (R02ad).** 0056's fourth slice publishes the mapping
+> that rule 4 and the acceptance section ask for,
+> `docs/linux-syscall-mapping.md`: each restricted class, its probes, the
+> kernel record that attributes each refusal to the filter, its control and
+> its mutation, with the descriptor ceiling's checks. The x32 class fails
+> acceptance on the reviewed kernel, which has no x32 entry point and so no
+> control; R02 is not complete there until a kernel with x32 provides one
+> or this decision is amended. The real-leak case of an inherited
+> descriptor stays R02ae's.
+
 ## Context and evidence
 
 The existing worker runs only trusted `verify_revision` code and opens SQLite

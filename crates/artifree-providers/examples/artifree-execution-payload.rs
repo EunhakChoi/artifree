@@ -8,15 +8,20 @@
 //! with status 0.
 //!
 //! On Linux the scenarios are `threads`, `processes`, `memory`,
-//! `scratch-bytes`, `scratch-inodes`, `flood`, `hang`, `cpu`, `survivors` and
-//! `survivors-hang`. Each prints fixed lines to stdout, flushed, that the job
-//! tests parse. A scenario that cannot do its work prints the reason to stderr
-//! and exits with status 3. An unknown scenario word exits with status 2.
+//! `scratch-bytes`, `scratch-inodes`, `flood`, `hang`, `cpu`, `survivors`,
+//! `survivors-hang`, `probes`, `clone3`, `thread-refusal`,
+//! `descendant-refusal`, `lower`, `descriptors` and `watch`. Each prints fixed
+//! lines to stdout, flushed, that the job tests parse. A scenario that cannot
+//! do its work prints the reason to stderr and exits with status 3. An unknown
+//! scenario word exits with status 2. Status 4 means that a call the filter
+//! must refuse returned. The `clone3` scenario replaces the payload with the
+//! probe `ns_clone3`, so its status is the probe's.
 //!
 //! The scenarios start this binary again with one child role as its only
-//! argument: `hold`, `middle`, `detached` or `ignore`. Any other argument list
-//! exits with status 2. Other systems keep the R02ab behaviour only, because
-//! the Linux-only dependencies are not built there.
+//! argument: `hold`, `middle`, `detached`, `ignore`, `descriptors-child` or
+//! `hold-briefly`. Any other argument list exits with status 2. Other systems
+//! keep the R02ab behaviour only, because the Linux-only dependencies are not
+//! built there.
 
 use std::env;
 use std::io::{self, Write};
@@ -56,11 +61,14 @@ fn main() -> ExitCode {
 /// The Linux scenarios and child roles. Their names, paths and limits are the contract the job tests parse.
 #[cfg(target_os = "linux")]
 mod linux {
+    use nix::sched::{self, CloneFlags};
     use rustix::process;
     use std::ffi::{OsStr, OsString};
     use std::fmt::Display;
     use std::fs::{self, File, OpenOptions};
     use std::io::{self, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::path::Path;
     use std::process::{Command, ExitCode};
     use std::sync::Arc;
@@ -97,6 +105,18 @@ mod linux {
     const WRITER_FILE: &str = "/tmp/w";
     const IGNORE_READY: &str = "/tmp/ignore-ready";
     const IGNORE_GOT: &str = "/tmp/ignore-got";
+    /// The directory of the generated probe programs. The operator's `prepare.sh` writes it before the launch.
+    const PROBES_DIR: &str = "/tools/probes";
+    /// The probe that the `clone3` scenario replaces the payload with.
+    const CLONE3_PROBE: &str = "/tools/probes/ns_clone3";
+    /// The soft descriptor limit that the `lower` scenario sets before it restores the limit.
+    const LOWER_SOFT: u64 = 128;
+    /// The device that the descriptor scenarios open again and again.
+    const DEVICE_NULL: &str = "/dev/null";
+    /// The bound on each descriptor loop, so that a broken ceiling still ends the scenario. Reaching it prints `error=none`.
+    const DESCRIPTOR_LIMIT: usize = 4096;
+    /// How long the `watch` scenario keeps its thread and its child alive.
+    const BRIEF_HOLD: Duration = Duration::from_secs(2);
 
     /// Runs the payload for its arguments. None selects the scenario, one selects a child role, and any other count exits with status 2.
     pub(super) fn run(arguments: &[OsString]) -> ExitCode {
@@ -138,6 +158,13 @@ mod linux {
             "cpu" => finish(cpu()),
             "survivors" => finish(survivors()),
             "survivors-hang" => finish(survivors_hang()),
+            "probes" => finish(probes()),
+            "clone3" => clone3(),
+            "thread-refusal" => finish_status(thread_refusal()),
+            "descendant-refusal" => finish_status(descendant_refusal()),
+            "lower" => finish_status(lower()),
+            "descriptors" => finish(descriptors()),
+            "watch" => finish(watch()),
             other => report(&format!("unknown scenario {other}"), 2),
         }
     }
@@ -149,6 +176,11 @@ mod linux {
             Some("middle") => finish(middle()),
             Some("detached") => finish(detached()),
             Some("ignore") => finish(ignore()),
+            Some("descriptors-child") => finish(descriptor_report("descriptors-child")),
+            Some("hold-briefly") => {
+                thread::sleep(BRIEF_HOLD);
+                ExitCode::SUCCESS
+            }
             _ => ExitCode::from(2),
         }
     }
@@ -157,6 +189,14 @@ mod linux {
     fn finish(result: io::Result<()>) -> ExitCode {
         match result {
             Ok(()) => ExitCode::SUCCESS,
+            Err(error) => report(&error, 3),
+        }
+    }
+
+    /// Returns the scenario's own status on success, or reports the error and returns status 3.
+    fn finish_status(result: io::Result<ExitCode>) -> ExitCode {
+        match result {
+            Ok(code) => code,
             Err(error) => report(&error, 3),
         }
     }
@@ -198,10 +238,52 @@ mod linux {
         (made, None)
     }
 
+    /// Calls `attempt` until it fails or has succeeded `limit` times, and keeps every success. Returns the successes and the error that stopped the loop, if there was one.
+    fn keep_until_refused<T>(
+        limit: usize,
+        mut attempt: impl FnMut() -> io::Result<T>,
+    ) -> (Vec<T>, Option<io::Error>) {
+        let mut kept: Vec<T> = Vec::new();
+        while kept.len() < limit {
+            match attempt() {
+                Ok(value) => kept.push(value),
+                Err(error) => return (kept, Some(error)),
+            }
+        }
+        (kept, None)
+    }
+
     /// Names the error kind that stopped a loop, or `none` when the loop reached its own limit.
     fn refusal_text(refusal: Option<io::ErrorKind>) -> String {
         match refusal {
             Some(kind) => format!("{kind:?}"),
+            None => String::from("none"),
+        }
+    }
+
+    /// Names an exit code or a signal number: the number, or `none` when there is none.
+    fn number_word(value: Option<i32>) -> String {
+        match value {
+            Some(number) => number.to_string(),
+            None => String::from("none"),
+        }
+    }
+
+    /// Names a descriptor limit: the number, or `unlimited` when the limit has no value.
+    fn limit_word(value: Option<u64>) -> String {
+        match value {
+            Some(number) => number.to_string(),
+            None => String::from("unlimited"),
+        }
+    }
+
+    /// Names the error that stopped a loop: its raw OS error number when it has one, else its kind, or `none` when the loop reached its bound without an error.
+    fn error_word(error: Option<&io::Error>) -> String {
+        match error {
+            Some(error) => match error.raw_os_error() {
+                Some(number) => number.to_string(),
+                None => format!("{:?}", error.kind()),
+            },
             None => String::from("none"),
         }
     }
@@ -370,6 +452,169 @@ mod linux {
     fn survivors_hang() -> io::Result<()> {
         survivors()?;
         sleep_forever()
+    }
+
+    /// Starts each file in `/tools/probes` as a child, in file-name order, with inherited stdio and an empty environment. Prints one line per probe, then a count.
+    fn probes() -> io::Result<()> {
+        let mut names: Vec<OsString> = Vec::new();
+        for entry in fs::read_dir(PROBES_DIR)? {
+            names.push(entry?.file_name());
+        }
+        names.sort();
+        for name in &names {
+            // `status` keeps the stdio inherited: captured pipes need pipe2, which the filter refuses.
+            let status = Command::new(Path::new(PROBES_DIR).join(name))
+                .env_clear()
+                .status()?;
+            say(&format!(
+                "probe name={} code={} signal={}",
+                name.to_string_lossy(),
+                number_word(status.code()),
+                number_word(status.signal())
+            ))?;
+        }
+        say(&format!("probes done count={}", names.len()))
+    }
+
+    /// Replaces this process with the `ns_clone3` probe, so that the probe's exit status is the payload's. Returns only when the exec fails.
+    fn clone3() -> ExitCode {
+        let error = Command::new(CLONE3_PROBE).env_clear().exec();
+        report(&error, 3)
+    }
+
+    /// Starts a thread that makes a call the filter must refuse, then waits for it. The filter kills the whole process, so a returned call is a failure and the status is 4.
+    fn thread_refusal() -> io::Result<ExitCode> {
+        let handle = Builder::new().spawn(unshare_in_thread)?;
+        let joined = handle
+            .join()
+            .map_err(|_| io::Error::other("the refusing thread panicked"))?;
+        let text = joined?;
+        drop(say(&format!("thread-refusal returned {text}")));
+        Ok(ExitCode::from(4))
+    }
+
+    /// The body of the refusing thread: it announces itself, then calls `unshare` with `CLONE_NEWNS`, which the filter refuses.
+    fn unshare_in_thread() -> io::Result<String> {
+        say("thread-refusal started")?;
+        Ok(format!("{:?}", sched::unshare(CloneFlags::CLONE_NEWNS)))
+    }
+
+    /// Starts a `hold` child and sets its descriptor limit. The filter kills the process for that call, so a returned call is a failure and the status is 4.
+    fn descendant_refusal() -> io::Result<ExitCode> {
+        let mut child = Command::new(SELF).arg("hold").spawn()?;
+        say(&format!("descendant pid={}", child.id()))?;
+        let result = process::prlimit(
+            Some(process::Pid::from_child(&child)),
+            process::Resource::Nofile,
+            process::Rlimit {
+                current: Some(128),
+                maximum: Some(256),
+            },
+        );
+        say(&format!("descendant-refusal returned {result:?}"))?;
+        // Reached only when the filter did not kill the payload: stop and reap the child before reporting the failure.
+        child.kill()?;
+        child.wait()?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// Lowers the soft descriptor limit within the hard limit, then restores it. Under the filter the lowering is refused by a kill, since rustix's `setrlimit` makes a `prlimit64` call (syscall 302). This is the setter guard's lower-and-restore case. A returned call is a failure and the status is 4.
+    fn lower() -> io::Result<ExitCode> {
+        let before = process::getrlimit(process::Resource::Nofile);
+        say(&format!(
+            "lower before soft={} hard={}",
+            limit_word(before.current),
+            limit_word(before.maximum)
+        ))?;
+        let set = process::setrlimit(
+            process::Resource::Nofile,
+            process::Rlimit {
+                current: Some(LOWER_SOFT),
+                maximum: before.maximum,
+            },
+        );
+        say(&format!("lower set {set:?}"))?;
+        let restored = process::setrlimit(process::Resource::Nofile, before);
+        say(&format!("lower restored {restored:?}"))?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// Returns the numbers of the open descriptors in ascending order, joined with commas. The list may contain the descriptor of the `/proc/self/fd` directory being read, which is normally 3.
+    fn open_descriptors() -> io::Result<String> {
+        let mut numbers: Vec<u32> = Vec::new();
+        for entry in fs::read_dir("/proc/self/fd")? {
+            let name = entry?.file_name();
+            let text = name.to_str().ok_or_else(|| {
+                io::Error::other(format!(
+                    "a descriptor name is not text: {}",
+                    name.to_string_lossy()
+                ))
+            })?;
+            let number: u32 = text.parse().map_err(io::Error::other)?;
+            numbers.push(number);
+        }
+        numbers.sort_unstable();
+        let texts: Vec<String> = numbers.iter().map(u32::to_string).collect();
+        Ok(texts.join(","))
+    }
+
+    /// Prints the three descriptor lines of `prefix`: the limits with the open numbers, the opens up to the ceiling, and the duplications of half of those files. Every file is dropped when this returns.
+    fn descriptor_report(prefix: &str) -> io::Result<()> {
+        let nofile = process::getrlimit(process::Resource::Nofile);
+        let core_limit = process::getrlimit(process::Resource::Core);
+        let open = open_descriptors()?;
+        say(&format!(
+            "{prefix} limits soft={} hard={} core-soft={} core-hard={} open={open}",
+            limit_word(nofile.current),
+            limit_word(nofile.maximum),
+            limit_word(core_limit.current),
+            limit_word(core_limit.maximum),
+        ))?;
+        let (mut files, open_refusal) =
+            keep_until_refused(DESCRIPTOR_LIMIT, || File::open(DEVICE_NULL));
+        say(&format!(
+            "{prefix} opened={} highest={} error={}",
+            files.len(),
+            number_word(files.iter().map(AsRawFd::as_raw_fd).max()),
+            error_word(open_refusal.as_ref())
+        ))?;
+        // The ceiling is reached with the files still open, so half of them are dropped to leave descriptors for the duplications.
+        files.truncate(files.len() / 2);
+        let first = files
+            .first()
+            .ok_or_else(|| io::Error::other("no descriptor was opened"))?;
+        let (clones, duplicate_refusal) =
+            keep_until_refused(DESCRIPTOR_LIMIT, || first.try_clone());
+        say(&format!(
+            "{prefix} duplicated={} highest={} error={}",
+            clones.len(),
+            number_word(clones.iter().map(AsRawFd::as_raw_fd).max()),
+            error_word(duplicate_refusal.as_ref())
+        ))
+    }
+
+    /// Runs the descriptor report in this process, then runs the `descriptors-child` role, which starts with the same limits. The child's stdout is inherited.
+    fn descriptors() -> io::Result<()> {
+        descriptor_report("descriptors")?;
+        let status = Command::new(SELF).arg("descriptors-child").status()?;
+        say(&format!(
+            "descriptors child code={}",
+            number_word(status.code())
+        ))
+    }
+
+    /// Keeps a thread and a `hold-briefly` child alive for `BRIEF_HOLD`, so that the job test can read every task of the group while both run.
+    fn watch() -> io::Result<()> {
+        let sleeper = Builder::new().spawn(|| thread::sleep(BRIEF_HOLD))?;
+        let mut child = Command::new(SELF).arg("hold-briefly").spawn()?;
+        // The child is waited for before the announcement's error is reported, so no path leaves it unreaped.
+        let announced = say(&format!("watch child={}", child.id()));
+        child.wait()?;
+        announced?;
+        sleeper
+            .join()
+            .map_err(|_| io::Error::other("the sleeping thread panicked"))?;
+        say("watch done")
     }
 
     /// Starts the `detached` role without waiting for it, so that the child outlives this role.

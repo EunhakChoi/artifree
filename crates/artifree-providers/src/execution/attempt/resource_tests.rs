@@ -370,7 +370,7 @@ fn an_unreadable_listing_ends_the_wait() {
 
 /// Runs one launch of `plan` in a new execution directory and returns its outcome with the time
 /// that it took. The launch must return within `RESPONSIVE_WITHIN`.
-fn timed_launch(
+pub(super) fn timed_launch(
     label: &str,
     plan: &AttemptPlan,
 ) -> Result<(Result<AttemptEvidence, AttemptRefusal>, Duration), Box<dyn Error>> {
@@ -389,6 +389,10 @@ fn timed_launch(
 /// The names that the kernel gives the processes of an attempt in `/proc/<pid>/comm`: the
 /// launcher, and the fixture and payload programs, whose names the kernel cuts to 15 bytes.
 const ATTEMPT_PROCESS_NAMES: [&str; 2] = ["bwrap", "artifree-execut"];
+/// The prefix of every program path inside the sandbox. A process whose first argument starts
+/// with it was started inside an attempt: the payload, a child role or a generated probe, whose
+/// `comm` is its own file name and matches no entry of `ATTEMPT_PROCESS_NAMES`.
+const SANDBOX_PROGRAM_PREFIX: &str = "/tools/";
 
 /// Requires that no process of an attempt is left on the host once the launch returned
 /// (decision 0042 rule 6). It reads `/proc` while the job's unit still runs, so it does not
@@ -409,7 +413,13 @@ fn assert_no_attempt_processes(label: &str) -> Result<(), Box<dyn Error>> {
             continue;
         };
         let comm = comm.trim_end();
-        if ATTEMPT_PROCESS_NAMES.contains(&comm) {
+        let started_inside = fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+            cmdline
+                .split(|byte| *byte == 0)
+                .next()
+                .is_some_and(|program| program.starts_with(SANDBOX_PROGRAM_PREFIX.as_bytes()))
+        });
+        if ATTEMPT_PROCESS_NAMES.contains(&comm) || started_inside {
             left.push(format!("{pid} {comm}"));
         }
     }
@@ -421,7 +431,7 @@ fn assert_no_attempt_processes(label: &str) -> Result<(), Box<dyn Error>> {
 }
 
 /// The evidence of a launch that must run. A refusal is an error that names its failure.
-fn evidence_of(
+pub(super) fn evidence_of(
     outcome: Result<AttemptEvidence, AttemptRefusal>,
 ) -> Result<AttemptEvidence, Box<dyn Error>> {
     outcome.map_err(|refusal| format!("the attempt was refused: {:?}", refusal.failure).into())
@@ -443,19 +453,19 @@ fn refusal_with_usage(
 
 /// The captured standard output of an attempt, which must be UTF-8 for the payload lines to be
 /// read.
-fn stdout_text(evidence: &AttemptEvidence) -> Result<&str, Box<dyn Error>> {
+pub(super) fn stdout_text(evidence: &AttemptEvidence) -> Result<&str, Box<dyn Error>> {
     Ok(std::str::from_utf8(&evidence.stdout)?)
 }
 
 /// The first payload line whose first word is `word`.
-fn payload_line<'a>(text: &'a str, word: &str) -> Result<&'a str, Box<dyn Error>> {
+pub(super) fn payload_line<'a>(text: &'a str, word: &str) -> Result<&'a str, Box<dyn Error>> {
     text.lines()
         .find(|line| line.split_whitespace().next() == Some(word))
         .ok_or_else(|| format!("the payload printed no `{word}` line").into())
 }
 
 /// The value of the `key=value` field `key` in one payload line.
-fn field<'a>(line: &'a str, key: &str) -> Result<&'a str, Box<dyn Error>> {
+pub(super) fn field<'a>(line: &'a str, key: &str) -> Result<&'a str, Box<dyn Error>> {
     line.split_whitespace()
         .filter_map(|token| token.split_once('='))
         .find_map(|(name, value)| (name == key).then_some(value))
@@ -463,7 +473,7 @@ fn field<'a>(line: &'a str, key: &str) -> Result<&'a str, Box<dyn Error>> {
 }
 
 /// The value of a numeric `key=value` field in one payload line.
-fn field_number(line: &str, key: &str) -> Result<u64, Box<dyn Error>> {
+pub(super) fn field_number(line: &str, key: &str) -> Result<u64, Box<dyn Error>> {
     let number: u64 = field(line, key)?.parse()?;
     Ok(number)
 }

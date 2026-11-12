@@ -62,28 +62,36 @@ run_unit() {
   require_one_passed "$OUT/$label.log"
 }
 
-# run_scenario BINARY SCENARIO LABEL TEST sets the payload scenario, runs one job test in a
-# delegated unit, and then requires that no payload process is left on the host. systemd kills
-# what is left of a unit when the unit stops, so this check shows only that nothing escaped the
-# unit. The evidence that the launch itself left nothing is the job test's own: it lists the
-# attempt groups and scans /proc after the launch returns, while the unit still runs.
-run_scenario() {
-  local binary=$1 scenario=$2 label=$3 name=$4 left status=0
+# run_in_scenario BINARY MODULE SCENARIO LABEL TEST sets the payload scenario, runs one job test
+# of execution::attempt::MODULE in a delegated unit, and then requires that no payload or probe
+# process is left on the host. systemd kills what is left of a unit when the unit stops, so this
+# check shows only that nothing escaped the unit. The evidence that the launch itself left
+# nothing is the job test's own: it lists the attempt groups and scans /proc after the launch
+# returns, while the unit still runs.
+run_in_scenario() {
+  local binary=$1 module=$2 scenario=$3 label=$4 name=$5 left status=0
   sudo "$PREPARE" scenario "$scenario"
-  run_unit "$binary" "$label" "execution::attempt::resource_tests::$name" -p Delegate=yes
+  run_unit "$binary" "$label" "execution::attempt::$module::$name" -p Delegate=yes
   # pgrep exits 1 when nothing matches; any other status is a failure of the check itself.
-  left="$(pgrep -a -f artifree-execution-payload)" || status=$?
+  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/tools/v1/probes/')" || status=$?
   case "$status" in
     0)
       printf '%s\n' "$left" >&2
-      fail "a payload process outlived $name"
+      fail "a payload or probe process outlived $name"
       ;;
     1) ;;
-    *) fail "the payload process check failed with status $status" ;;
+    *) fail "the payload or probe process check failed with status $status" ;;
   esac
 }
 
-# This script changes the host's crash routing, its AppArmor profiles and /opt. It is for
+# run_scenario BINARY SCENARIO LABEL TEST runs one resource test (execution::attempt::
+# resource_tests) through run_in_scenario.
+run_scenario() {
+  run_in_scenario "$1" resource_tests "$2" "$3" "$4"
+}
+
+# This script changes the host's crash routing, its AppArmor profiles, /opt, and the kernel
+# log's access and rate limit (`kernel.dmesg_restrict`, `kernel.printk_ratelimit`). It is for
 # the job's disposable runner only (decision 0056 rule 12).
 [[ ${GITHUB_ACTIONS:-} == true ]] \
   || fail "this script prepares a disposable CI runner; it does not run on any other host"
@@ -166,6 +174,9 @@ run_direct "$test_binary" as-found job_unprepared_host_is_refused
 say "part 3: prepare the host, then run the matrix in a delegated unit"
 sudo "$PREPARE" profile-on
 sudo "$PREPARE" routing-file
+# The two kernel-log settings are recorded among the run's environment (rule 13). pipefail makes
+# a refusal by the preparation fail the run.
+sudo "$PREPARE" kernel-log-access | tee -a "$OUT/environment.txt"
 run_unit "$test_binary" prepared job_prepared_host_passes_every_facility -p Delegate=yes
 
 say "rule 10: remove each condition in turn and require the refusal that names it"
@@ -243,6 +254,19 @@ run_scenario "$lib_binary" hang resource-hang job_hang_is_killed_at_the_wall_dea
 run_scenario "$lib_binary" cpu resource-cpu job_cpu_spinners_share_one_cpu
 run_scenario "$lib_binary" survivors resource-survivors job_background_processes_do_not_outlive_a_normal_exit
 run_scenario "$lib_binary" survivors-hang resource-survivors-hang job_background_processes_do_not_outlive_the_deadline
+sudo "$PREPARE" scenario exit
+
+say "part 7: the syscall mapping and the descriptor ceiling"
+run_in_scenario "$lib_binary" mapping_tests probes mapping-probes job_probes_are_refused_with_their_records
+run_in_scenario "$lib_binary" mapping_tests clone3 mapping-clone3 job_clone3_is_refused_with_enosys
+# The harness also runs the clone3 control probe on the runner outside the sandbox; it is the
+# only probe that runs there (decision 0056 rule 9, as amended).
+run_in_scenario "$lib_binary" mapping_tests exit mapping-clone3-control job_clone3_control_outside_the_sandbox
+run_in_scenario "$lib_binary" mapping_tests thread-refusal mapping-thread-refusal job_a_thread_is_refused_with_its_record
+run_in_scenario "$lib_binary" mapping_tests descendant-refusal mapping-descendant-refusal job_a_descendants_limit_cannot_be_set
+run_in_scenario "$lib_binary" mapping_tests lower mapping-lower job_lowering_the_soft_limit_is_refused
+run_in_scenario "$lib_binary" mapping_tests descriptors mapping-descriptors job_descriptors_stop_at_the_ceiling
+run_in_scenario "$lib_binary" mapping_tests watch mapping-watch job_the_boundary_holds_in_every_task
 sudo "$PREPARE" scenario exit
 
 say "restore the routing and the profile"
