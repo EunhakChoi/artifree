@@ -210,14 +210,19 @@ how; where the two could be read differently, 0042 holds.
 >   missing record, a second one, or any other seccomp record (a kill of the
 >   payload fixture included) fails it. The record also shows that the probe
 >   reached the call: the filter decides at the kernel's entry.
-> - **`clone3`.** The first program answers it with `ENOSYS` and no record.
->   Its probe passes namespace flags in its argument structure and must exit
->   with exactly `ENOSYS`. That is evidence here, unlike the `ENOSYS` 0042
->   discounts, because the reviewed kernel implements `clone3`: the same
->   probe without a filter failed with `EINVAL`. Without the first program,
->   the allowlist admits `clone3` and the probe exits with `EINVAL`, so the
->   normal run's assertion fails. The mapping records this class's evidence
->   as an exit code against a measured control, weaker than a record.
+> - **`clone3`.** The first program answers it with `ENOSYS` and no record,
+>   so its observation differs. Its probe, with namespace flags in an
+>   argument structure the kernel rejects, runs in a launch of its own as the
+>   payload itself, and the provider reads the exit status that the launcher
+>   passes on: it must be exactly `ENOSYS`. Beside it, the job runs the same
+>   probe directly on the runner, outside any sandbox, where the kernel
+>   rejects the argument with `EINVAL` before creating anything; this is the
+>   in-job control that the kernel implements the call, so the `ENOSYS`
+>   inside is the filter's and not the one 0042 discounts. Without the first
+>   program, the allowlist admits `clone3` and the payload exits with
+>   `EINVAL`, so the normal run's assertion fails. The mapping records the
+>   class's evidence as these two exit statuses, both observed by trusted
+>   code.
 > - **Controls.** Allowed neighbours of the refused classes run in the same
 >   launch and must succeed without a record: `gettid`, a `prlimit64` query,
 >   `clone` without namespace flags (also from a forked child), and the
@@ -226,13 +231,15 @@ how; where the two could be read differently, 0042 holds.
 >   call of the class exists to control with; the record is the evidence and
 >   the unfiltered measurement above shows what the kernel itself would have
 >   done.
-> - **x32.** The reviewed kernel has no x32 entry point, so an x32 call is
->   neither a risk nor evidence on it. The mapping marks the class
->   unverified on this kernel, as 0042 asks when no control exists, and
->   claims nothing from the records. Rule 9 already refuses any other kernel
->   release, so a kernel with x32 is not reviewed until a slice proves the
->   class with a control. An allowlist entry compares the whole number, so a
->   number with the x32 bit never matches one.
+> - **x32.** The reviewed kernel has no x32 entry point, so no control can
+>   show the filter refusing an x32 call that would otherwise run. As 0042
+>   asks when a class has no control, the class fails this host's
+>   supported-profile acceptance: the mapping marks it failed, claims nothing
+>   from its records, and R02 is not complete on this kernel until a kernel
+>   built with x32 provides the control or 0042 is amended. That is an owner
+>   decision, open with the owner. Refusal is retained meanwhile, as every
+>   caller is refused until R02b anyway. An allowlist entry compares the whole
+>   number, so a number with the x32 bit never matches one.
 > - **Undoing the boundary.** The refused probes of `prctl` (clearing
 >   `no_new_privs`), `capset`, and `seccomp` are the payload's attempts to
 >   undo `no_new_privs`, the empty capability sets and the filter; the mapping
@@ -274,7 +281,9 @@ how; where the two could be read differently, 0042 holds.
 >   11 and 12). The records reach that log only while no audit daemon holds
 >   the kernel's audit channel, so the preparation requires that, records it
 >   with the two settings among the run's environment (rule 13), and fails
->   with a named reason otherwise. The product reads no kernel log.
+>   with a named reason otherwise. The job's harness also runs the `clone3`
+>   control probe on the runner outside the sandbox; it is the only probe
+>   that runs there. The product reads no kernel log.
 > - **Rule 14.** The R02ad row adds that the real-leak case of an inherited
 >   descriptor is R02ae's.
 > - **Rule 17.** An R02ad point: how a refusal is attributed to the filter,
