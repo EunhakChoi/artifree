@@ -3,7 +3,8 @@
 Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
 enforcement job), R02ab (the first launch, only from the job's tests) and
 R02ac (resources and cleanup under that launch, with the scratch amended
-below) are implemented**.
+below) are implemented; R02ad (the syscall mapping) is planned in the
+amendment of 2026-11-13**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -144,6 +145,104 @@ how; where the two could be read differently, 0042 holds.
 > see or unmount the scratch from the host's mount table; that no mount of an
 > attempt is left (0042, rule 6) follows from the empty group, since the
 > mount namespace ends with its last member.
+
+> **Amendment, 2026-11-13 (the syscall mapping).** 0042 asks R02a for a
+> public mapping from each system-call restriction of its rule 4 to the
+> policy entry, a payload probe, the expected denial, an independent
+> observation and a guard mutation, and for the descriptor ceiling with its
+> inheritance, setter and guard checks. Rule 17 did not say how R02ad
+> attributes a denial to the filter. Two temporary jobs (deleted, never
+> merged) measured it on `ubuntu-24.04` (kernel 7.0) before R02ad was
+> written, with generated probe programs and synthetic arguments only:
+>
+> - The kernel takes i386 entries (`int 0x80`) from a 64-bit process and has
+>   no x32 entry point (`CONFIG_X86_X32_ABI` is not set): without a filter an
+>   x32 number fails with `ENOSYS`.
+> - Each of 61 refused calls ended its probe with `SIGSYS` and left one kernel
+>   record of type 1326 naming the probe's program (`exe=`), `sig=31`, the
+>   architecture and the number as the filter saw them (`arch=40000003` for an
+>   i386 entry; the x32 bit inside the number). An allowed call left none, and
+>   so did `clone3`, which the first program answers with `ENOSYS`. All 61
+>   records arrived from one launch that started the probes one after another
+>   as children of the payload, once the job had lifted the kernel's message
+>   rate limit (ten messages in five seconds by default).
+> - The same probes without a filter: the kernel refused most for another
+>   reason (a missing capability, a bad address, the disabled user
+>   namespaces, `ENOSYS` for x32), while `ptrace(PTRACE_TRACEME)`,
+>   `process_vm_readv`, `kcmp` and an i386 `exit` succeeded, and `clone3`
+>   with an empty argument failed with `EINVAL`. An exit status or an error
+>   number therefore says nothing about the filter; the record does.
+> - Mutants of the filter: with the architecture check made to pass every
+>   architecture, the i386 `exit` ran and exited 0; without the namespace mask
+>   on `clone`, `CLONE_NEWUSER` and `CLONE_NEWNS` failed in the kernel with
+>   `ENOSPC` and `EPERM` instead of `SIGSYS`; with `prlimit64` allowed to set,
+>   a payload lowered its soft descriptor limit and restored it, while
+>   raising it failed with `EPERM`; with the bootstrap's ceiling at 512, the
+>   payload held descriptors up to 511.
+> - Under the ceiling of 256, a payload holding the three streams opened 253
+>   descriptors, the highest 255, and the next one failed with `EMFILE`;
+>   duplication stopped at the same ceiling, and a child after `exec` had the
+>   same limits. A descriptor at 400, opened before the limit was set, stayed
+>   open in the payload, as 0042 warns.
+> - Read from outside, through `/proc`, every task of the payload, its threads
+>   and its children after `exec` showed `NoNewPrivs` 1, seccomp mode 2 with
+>   two filters, five empty capability sets, and both limits.
+>
+> So R02ad works as follows; the rules stay as written except rule 9, below:
+>
+> - **Probe programs.** Each probe is a static x86-64 program of a few
+>   instructions, generated as bytes by the test-support program of rule 4,
+>   without an assembler and without first-party `unsafe`. It sets the
+>   arguments, enters the kernel once by `syscall` or by `int 0x80`, and exits
+>   with the call's error number. The probes are part of the fixture: the
+>   job's preparation writes them into the tool root, under its manifest
+>   (rule 6). In one launch the payload fixture starts each probe as a child
+>   and waits for it, so every probe also runs after a `fork` and an `exec`.
+> - **Attribution.** A refusal counts only when a kernel record names the
+>   probe's program, `sig=31`, and the expected architecture and number. The
+>   test requires exactly the expected records of the launch: a missing one,
+>   a second one or an unexpected one fails it. `clone3`, which the filter
+>   answers without a record, is attributed by its mutation and by the
+>   threads that keep working through the fallback to `clone`; the mapping
+>   says so.
+> - **Controls** run in the same launch: allowed calls (`gettid`, a
+>   `prlimit64` query, `clone` without namespace flags, in a forked child as
+>   well) succeed and leave no record.
+> - **x32.** The reviewed kernel has no x32 entry point, so no control can
+>   show what an x32 call would do. The record still attributes the refusal,
+>   and the mapping states that this kernel offers no positive control for
+>   the class. An allowlist entry compares the whole number, so a number
+>   with the x32 bit never matches one.
+> - **Mutations** are not built into the product. Each guard is broken by
+>   its own patch on a temporary branch: the architecture check, the
+>   namespace mask, the `clone3` program, the setter guard, the ceiling, the
+>   default action, and each refused call allowed alone. The named job test
+>   must then fail, and the results are recorded in the pull request and in
+>   the mapping.
+> - **The mapping** is a document of the repository,
+>   `docs/linux-syscall-mapping.md`. A unit test keeps it and the probe
+>   table in step: every class of 0042, rule 4, its probes, the record each
+>   probe expects, its control and its mutation.
+> - **Descriptors.** A scenario exhausts opens and duplications, then repeats
+>   in a child after `exec`, against the ceiling and both limits, read by the
+>   payload and from outside. The setters (`setrlimit`, `prlimit64` on itself
+>   and on a child, the i386 forms) are probes with records. A lower and a
+>   restore of the soft limit within the hard limit is the setter guard's
+>   case, because a refused raise would fail in the kernel anyway. A
+>   descriptor inherited above the ceiling is refused by the bootstrap's
+>   check of the R02ab note; its proof with a real leak stays R02ae's.
+> - **The boundary from outside.** While a scenario holds a thread and a
+>   child, the test reads `NoNewPrivs`, the seccomp mode and filter count,
+>   the capability sets and both limits of every task of the attempt's group
+>   from `/proc`.
+> - **Rule 9, part 3** also lets the runner's account read the kernel log
+>   (`kernel.dmesg_restrict` 0) and lifts the kernel's message rate limit
+>   (`kernel.printk_ratelimit` 0), on the job's disposable runner only (rules
+>   11 and 12). The product reads no kernel log.
+>
+> What this does not change: 0042; the filter, its two programs and its
+> entries; the launch; the ban on first-party `unsafe`; and rule 12, under
+> which no probe runs on a contributor's host.
 
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
