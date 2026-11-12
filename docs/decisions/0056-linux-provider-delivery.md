@@ -43,6 +43,54 @@ how; where the two could be read differently, 0042 holds.
 >
 > The row is reworded below to say so.
 
+> **Amendment, 2026-11-12 (the scratch).** Rule 17 left open which of the
+> launcher and the bootstrap applies the scratch's inode bound. A temporary
+> job (deleted, never merged) measured it on `ubuntu-24.04` before R02ac was
+> written, with a trusted program and synthetic files only:
+>
+> - Under the launch of R02ab a payload created 20,000 files in the scratch
+>   without a refusal. It could also create files in the root of the sandbox
+>   and under `/dev`: both are the launcher's own tmpfs mounts, writable and
+>   without a size. Only the memory limit of the group bounded them.
+> - With the launcher's two read-only remounts, of `/` and of `/dev`, those
+>   writes failed.
+> - A bootstrap that the launcher gave `CAP_SYS_ADMIN` could neither remount
+>   the scratch nor mount another one: the launcher disables further user
+>   namespaces by entering one more, so the bootstrap's capabilities belong
+>   to a namespace that does not own the mount namespace.
+> - After the bootstrap made a mount namespace of its own, it mounted a tmpfs
+>   with a size and an inode count on `/tmp`. The payload then created 4,095
+>   files (the root directory is the 4,096th inode) and 134,217,728 bytes
+>   and was refused past either; a removed file made room for one more.
+> - `CAP_SETPCAP` beside it let the bootstrap empty its bounding set; with
+>   `CAP_SYS_ADMIN` alone the capability stayed in the bounding set.
+> - `rustix` offers `unshare` only as an unsafe function. `nix` offers it as
+>   a safe one.
+>
+> So the bootstrap applies both bounds of the scratch, and four rules are
+> reworded below:
+>
+> - **Rule 2.** The launcher no longer mounts the scratch. It makes the mount
+>   point, remounts the sandbox's root and `/dev` read-only, and hands the
+>   bootstrap two capabilities inside the sandbox's user namespace,
+>   `CAP_SYS_ADMIN` and `CAP_SETPCAP`. They are capabilities over the
+>   sandbox's own namespaces and none over the host.
+> - **Rule 3.** Before anything else of its order the bootstrap makes its own
+>   mount namespace, mounts the scratch there with the size and the inode
+>   count of 0042, rule 5, and reads both back from its mount table. The
+>   privilege drop that follows removes the two capabilities from every set,
+>   the bounding set included, and the provider's check before the release
+>   (rule 5) already requires all sets empty. The payload therefore runs
+>   without them and cannot change a mount.
+> - **Rule 7.** A third dependency, `nix`, for `unshare` alone, under the same
+>   conditions as the other two.
+> - **Rule 17.** The R02ac point is settled as above.
+>
+> What this does not change: 0042; the order of the remaining bootstrap steps;
+> the rule that no payload instruction runs before the limits, the privilege
+> drop and the filter; the ban on first-party `unsafe`. Until R02ac is merged
+> the code is R02ab's, whose payload only exits and writes no file.
+
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
 > the second measurement did with shell commands, which settles the first
@@ -200,14 +248,20 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    `bwrap` of the tool root (rule 6) with a fixed argument list built from the
    profile: every namespace unshared, the parent-death kill, a new session, a
    cleared environment, read-only binds of the tool root and the staged input,
-   one size-bound tmpfs, a private `/proc` and a minimal `/dev`, and further
-   user namespaces disabled inside. The launcher keeps its own reaping init
+   the mount point of the scratch, a private `/proc` and a minimal `/dev`,
+   the sandbox's root and `/dev` remounted read-only, further user namespaces
+   disabled inside, and the two capabilities the bootstrap needs for the
+   scratch (`CAP_SYS_ADMIN` and `CAP_SETPCAP`, inside the sandbox's user
+   namespace only). The launcher keeps its own reaping init
    as the first process of the PID namespace; the payload is never that
    process. Nothing a request carries reaches the argument list.
 3. **A trusted bootstrap runs inside the namespaces before the payload.** It is
    the launcher's direct child, under the launcher's init. In this order it:
+   makes its own mount namespace, mounts the scratch there as one tmpfs with
+   the size and the inode count of 0042, rule 5, and reads both back;
    sets the soft and hard resource limits of 0042, rule 5 (descriptors, core
-   size) and reads them back; drops what the launcher left of capabilities and
+   size) and reads them back; drops what the launcher left of capabilities,
+   the two of rule 2 among them and the bounding set included, and
    sets `no_new_privs`; installs the seccomp filter of the profile; checks the
    limits and the filter once more; reports readiness and waits for the
    release of rule 5; and replaces itself with the payload by `exec`, without
@@ -242,10 +296,11 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    tool root is assembled by the test harness at a fixed path; packaging a
    tool root for operators is R03's, when a real runtime exists. Until then no
    host is called supported outside the enforcement job.
-7. **Two dependencies, for the system calls.** The bootstrap and the provider
-   use `rustix` (resource limits, `prctl`, capabilities, descriptor handling)
-   and `seccompiler` (compiling and installing the filter), both through their
-   safe interfaces and only on Linux targets. First-party code stays free of
+7. **Three dependencies, for the system calls.** The bootstrap and the provider
+   use `rustix` (resource limits, `prctl`, capabilities, descriptor handling,
+   mounting), `seccompiler` (compiling and installing the filter) and `nix`
+   (`unshare`, which `rustix` offers only as an unsafe function), all through
+   their safe interfaces and only on Linux targets. First-party code stays free of
    `unsafe`. Each is added in the slice that first needs it, pinned, with its
    licence in the notices, its features reduced to what is used, and a note of
    the review. If a needed call has no safe interface in them, the slice stops
@@ -355,7 +410,11 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
       interface (rule 7).
     - R02ac: which of the launcher and the bootstrap applies the scratch's
       inode bound (0042, rule 5: 4,096 inodes); the launcher's tmpfs option
-      takes a size only.
+      takes a size only. Settled by the amendment of 2026-11-12 (the scratch):
+      the bootstrap, in a mount namespace of its own.
+    - R02af: how the keeper of 0042, rule 7 holds the scratch until
+      collection ends, now that the mount is made inside the sandbox and
+      lives in the bootstrap's mount namespace.
     - R02ag: that the coredump behaviour 0042 cites for kernel 6.18 holds for
       the kernel of the runner, read from that kernel's source before the
       slice relies on it.
