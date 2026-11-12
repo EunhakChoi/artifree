@@ -25,6 +25,11 @@ const OTHER_PID: u32 = 4242;
 const DEADLINE: Duration = Duration::from_secs(3);
 /// Numbers the scratch directories of this process, so that no two tests share a name.
 static SCRATCH_COUNTER: AtomicU32 = AtomicU32::new(0);
+/// The manifest of the baseline tool root: two empty files, sorted by bytes.
+const FAKE_MANIFEST: &str = concat!(
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 bin/artifree-execution-fixture\n",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 bin/bwrap\n",
+);
 
 /// A temporary directory for one test's files, removed when the value is dropped.
 #[derive(Debug)]
@@ -150,6 +155,7 @@ impl FakeHost {
         fs::create_dir(tool_root.join("bin"))?;
         write_with_mode(&tool_root.join(launcher::LAUNCHER), 0o755)?;
         write_with_mode(&tool_root.join(launcher::FIXTURE_FILE), 0o755)?;
+        fs::write(tool_root.join("MANIFEST"), FAKE_MANIFEST)?;
         Ok(Self {
             proc_self,
             osrelease,

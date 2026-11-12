@@ -127,6 +127,8 @@ fn sample_report() -> HostReport {
         launcher_version: Some("bubblewrap 0.9.0".to_owned()),
         launcher_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
             .to_owned(),
+        tool_manifest_sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            .to_owned(),
         policy_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             .to_owned(),
         core_routing: "|/usr/lib/systemd/systemd-coredump".to_owned(),
@@ -492,7 +494,7 @@ fn report_render_lists_every_key_once_in_order() {
             "architecture=x86_64",
             "launcher_version=bubblewrap 0.9.0",
             "launcher_sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            "tool_identity=unverified (no manifest in this slice)",
+            "tool_manifest_sha256=2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
             "policy_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "core_routing=|/usr/lib/systemd/systemd-coredump",
             "delegated_controllers=cpu io memory pids",

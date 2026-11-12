@@ -1,8 +1,8 @@
 //! Fixed-order Linux host admission (decision 0056 rules 8 and 10). Runs no payload.
 //!
 //! Each facility runs once, in the order the parent module documents, and the first
-//! refusal is returned. Only the standard library and the report helpers, which hash the
-//! launcher and the policy, are used here.
+//! refusal is returned. Only the standard library, the manifest check and the report helpers,
+//! which hash the launcher and the policy, are used here.
 
 use std::env;
 use std::ffi::OsStr;
@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use super::report::{HostReport, sha256_file_hex, sha256_hex};
 use super::{
-    AdmissionRefusal, InspectionProfile, RoutingObservation, cgroup, launcher, probe_group,
-    read_bounded,
+    AdmissionRefusal, InspectionProfile, RoutingObservation, cgroup, launcher, manifest,
+    probe_group, read_bounded,
 };
 
 /// The signal number that `cgroup.kill` delivers; a killed probe child must exit by it.
@@ -80,6 +80,22 @@ pub(super) fn admit(
     })
 }
 
+/// Runs the whole admission like `admit` and also returns the delegated group the provider
+/// entered from. An attempt's group is made beside its `supervisor` child (0056 rule 8). Only
+/// the test-build launch calls it.
+#[cfg(test)]
+pub(super) fn admit_for_attempt(
+    profile: InspectionProfile,
+    roots: &AdmissionRoots<'_>,
+) -> Result<(HostReport, PathBuf), AdmissionRefusal> {
+    let mut entered = ENTERED.lock().unwrap_or_else(PoisonError::into_inner);
+    let report = admit_with(profile, roots, process::id(), &mut entered, || {
+        cgroup::own_uid(roots.proc_self)
+    })?;
+    let delegated = entered.clone().ok_or(AdmissionRefusal::UndelegatedCgroup)?;
+    Ok((report, delegated))
+}
+
 /// Runs facilities 2 to 10 in the documented order and returns the first refusal.
 ///
 /// The pid and the uid come in as values, so tests can run the whole order against
@@ -109,6 +125,9 @@ pub(super) fn admit_with(
         RoutingObservation::from_reader(fs::File::open(roots.core_pattern), Instant::now())?;
     // Facility 4.
     launcher::check_tool_files(roots.tool_root)?;
+    // Facility 4, after the two named files so that a missing one keeps the refusal that names
+    // it (0056 amendment): every file against the manifest.
+    let tool_manifest = manifest::verify(roots.tool_root)?;
     // Facilities 5 and 6 check the delegated group, facility 7 the group holding this process.
     let delegated = delegated_group(&discovered, entered.as_deref()).to_path_buf();
     let delegated = delegated.as_path();
@@ -128,6 +147,7 @@ pub(super) fn admit_with(
         architecture: env::consts::ARCH,
         launcher_version: launcher::launcher_version(roots.tool_root),
         launcher_sha256,
+        tool_manifest_sha256: tool_manifest.sha256().to_owned(),
         policy_sha256: sha256_hex(profile.manifest()),
         core_routing: String::from_utf8_lossy(&routing.pattern)
             .trim_end()
@@ -251,7 +271,10 @@ fn reap_within(child: &mut Child, deadline: Duration) -> Result<(), AdmissionRef
 
 /// Polls `child` until it exits, for at most `deadline`. Any other outcome is
 /// `CleanupNotObserved`.
-fn wait_within(child: &mut Child, deadline: Duration) -> Result<ExitStatus, AdmissionRefusal> {
+pub(super) fn wait_within(
+    child: &mut Child,
+    deadline: Duration,
+) -> Result<ExitStatus, AdmissionRefusal> {
     let started = Instant::now();
     loop {
         match child.try_wait() {

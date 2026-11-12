@@ -1,12 +1,13 @@
 //! Host inspection for proposed untrusted execution (decisions 0042 and 0056).
 //!
 //! Implemented: the read-only core-routing inspection and, on Linux only, a host
-//! admission that checks facilities in a fixed order, runs one trusted namespace
-//! check through the tool root's launcher and one trusted probe child in a probe
-//! cgroup. It runs no payload. Every caller outside the tests receives a refusal,
-//! at best `IncompleteEnforcement` (0056 rule 16): tool identity (manifest),
-//! seccomp, the bootstrap and payload launch are not implemented, and no host is
-//! called supported.
+//! admission that checks facilities in a fixed order, verifies the tool root against its
+//! manifest, runs one trusted namespace check through the tool root's launcher and one
+//! trusted probe child in a probe cgroup. Every caller outside the tests receives a refusal,
+//! at best `IncompleteEnforcement` (0056 rule 16), and no host is called supported.
+//! `run_stub` and `run_bootstrap` exist for the test-support program only (0056 rule 4).
+//! The first launch (0056 rule 14, R02ab) is compiled only into this crate's tests and its
+//! payload only exits: no caller outside them can start an attempt.
 //!
 //! Admission order; the first missing facility is reported (0056 rule 10):
 //! 1. Linux (`UnsupportedOperatingSystem`).
@@ -14,7 +15,8 @@
 //!    process's cgroup v2 group from the `0::` line of `/proc/self/cgroup`
 //!    (`CgroupV2Unavailable`), and `cgroup.kill` in that group (`MissingKillSupport`).
 //! 3. Core routing (the routing refusals above).
-//! 4. Tool root files: the launcher, then the fixture (`MissingLauncher`, `MissingFixture`).
+//! 4. Tool root: the launcher, then the fixture (`MissingLauncher`, `MissingFixture`), then every
+//!    file against the root's `MANIFEST` (`MissingToolManifest`, `ToolRootMismatch`).
 //! 5. Delegation: the group, its `cgroup.procs` and `cgroup.subtree_control` are
 //!    owned by the provider's account (`UndelegatedCgroup`).
 //! 6. Controllers memory, pids, cpu, in that order (`MissingController`).
@@ -37,14 +39,31 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 mod admission;
+// The launch has no caller outside the tests (0056 rule 16, 0042 rule 8), so it exists only
+// in the test build.
+#[cfg(all(test, target_os = "linux"))]
+mod attempt;
+#[cfg(target_os = "linux")]
+mod bootstrap;
 #[cfg(target_os = "linux")]
 mod cgroup;
 #[cfg(target_os = "linux")]
 mod launcher;
+// The admission lock serves only the launch, which exists only in the test build (0056 rule 16).
+#[cfg(all(test, target_os = "linux"))]
+mod lock;
+#[cfg(target_os = "linux")]
+mod manifest;
+#[cfg(target_os = "linux")]
+mod policy;
 #[cfg(target_os = "linux")]
 mod probe_group;
+#[cfg(target_os = "linux")]
+mod readiness;
 mod report;
 
+#[cfg(target_os = "linux")]
+pub use bootstrap::{BootstrapFailure, run_bootstrap, run_stub};
 pub use report::HostReport;
 
 const CORE_PATTERN: &str = "/proc/sys/kernel/core_pattern";
@@ -81,6 +100,10 @@ pub enum AdmissionRefusal {
     MissingLauncher,
     /// The tool root's fixture is missing or not a regular executable file.
     MissingFixture,
+    /// The tool root has no manifest that could be read and parsed (decision 0056 rule 6).
+    MissingToolManifest,
+    /// A tool root file differs from its manifest, or the root holds a file the manifest does not list or lacks one it lists (0056 rule 6).
+    ToolRootMismatch,
     /// The provider's cgroup is not delegated to the provider's own account.
     UndelegatedCgroup,
     /// A required controller is not available to the provider's cgroup.
@@ -119,6 +142,8 @@ impl fmt::Display for AdmissionRefusal {
             Self::MissingKillSupport => "the provider's cgroup has no kill support",
             Self::MissingLauncher => "the tool root's launcher is missing",
             Self::MissingFixture => "the tool root's fixture is missing",
+            Self::MissingToolManifest => "the tool root has no readable manifest",
+            Self::ToolRootMismatch => "the tool root does not match its manifest",
             Self::UndelegatedCgroup => "the provider's cgroup is not delegated to it",
             Self::MissingController(Controller::Memory) => "the memory controller is not delegated",
             Self::MissingController(Controller::Pids) => "the pids controller is not delegated",

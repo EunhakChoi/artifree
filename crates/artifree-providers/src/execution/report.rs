@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 /// Evidence one Linux admission run measured (decision 0056 rule 13).
 ///
 /// The report records what was measured and nothing more. It is never a
-/// launch permission, it does not verify tool identity (no manifest exists in
-/// this slice), and it does not claim that the host is supported.
+/// launch permission, it records the digest of the tool root's manifest that
+/// the admission verified, and it does not claim that the host is supported.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostReport {
     /// Kernel release the run was measured on.
@@ -26,6 +26,9 @@ pub struct HostReport {
     pub(super) launcher_version: Option<String>,
     /// SHA-256 of the launcher file, in lowercase hexadecimal.
     pub(super) launcher_sha256: String,
+    /// SHA-256 of the tool root's manifest that admission verified, in lowercase
+    /// hexadecimal.
+    pub(super) tool_manifest_sha256: String,
     /// SHA-256 of the inspection profile manifest, in lowercase hexadecimal.
     pub(super) policy_sha256: String,
     /// Core routing as read from the host, verbatim.
@@ -51,7 +54,8 @@ impl fmt::Display for HostReport {
         writeln!(formatter, "launcher_sha256={}", self.launcher_sha256)?;
         writeln!(
             formatter,
-            "tool_identity=unverified (no manifest in this slice)"
+            "tool_manifest_sha256={}",
+            self.tool_manifest_sha256
         )?;
         writeln!(formatter, "policy_sha256={}", self.policy_sha256)?;
         writeln!(formatter, "core_routing={}", self.core_routing)?;

@@ -8,6 +8,7 @@ set -euo pipefail
 readonly ROOT=/opt/artifree/tools/v1
 readonly OUT=target/enforcement
 readonly FIXTURE=target/debug/examples/artifree-execution-fixture
+readonly PAYLOAD=target/debug/examples/artifree-execution-payload
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 readonly SCRIPT_DIR
@@ -30,19 +31,19 @@ require_one_passed() {
     || fail "$1 did not record exactly one passed test"
 }
 
-# run_direct LABEL TEST runs one ignored test as the runner, without privilege.
+# run_direct BINARY LABEL TEST runs one ignored test as the runner, without privilege.
 run_direct() {
-  local label=$1 name=$2
-  "$test_binary" --ignored --exact "$name" --test-threads=1 2>&1 | tee "$OUT/$label.log"
+  local binary=$1 label=$2 name=$3
+  "$binary" --ignored --exact "$name" --test-threads=1 2>&1 | tee "$OUT/$label.log"
   require_one_passed "$OUT/$label.log"
 }
 
-# run_unit LABEL TEST [systemd-run option...] [-- wrapper...] runs one ignored test in a
-# transient unit as the runner's account. The wrapper, when given, is the unit's command
+# run_unit BINARY LABEL TEST [systemd-run option...] [-- wrapper...] runs one ignored test in
+# a transient unit as the runner's account. The wrapper, when given, is the unit's command
 # before the test binary.
 run_unit() {
-  local label=$1 name=$2
-  shift 2
+  local binary=$1 label=$2 name=$3
+  shift 3
   local -a unit_options=() wrapper=()
   while (($# > 0)) && [[ $1 != -- ]]; do
     unit_options+=("$1")
@@ -55,8 +56,9 @@ run_unit() {
   sudo systemd-run --quiet --wait --pipe --collect --service-type=exec \
     --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
     --setenv="ARTIFREE_ENFORCEMENT_REPORT=$PWD/$OUT/host-report.txt" \
+    --setenv="ARTIFREE_ATTEMPT_REPORT=$PWD/$OUT/attempt-report.txt" \
     "${unit_options[@]}" -- "${wrapper[@]}" \
-    "$test_binary" --ignored --exact "$name" --test-threads=1 2>&1 | tee "$OUT/$label.log"
+    "$binary" --ignored --exact "$name" --test-threads=1 2>&1 | tee "$OUT/$label.log"
   require_one_passed "$OUT/$label.log"
 }
 
@@ -66,13 +68,19 @@ run_unit() {
   || fail "this script prepares a disposable CI runner; it does not run on any other host"
 
 # After a failed step the conditions it removed are put back, so the host is not left with
-# the job's routing, its profile or a moved tool. Each restore may fail on its own.
+# the job's routing, its profile, or a changed, extra, missing or moved tool file. Each
+# restore may fail on its own.
 restore_host() {
   local status=$?
   if ((status != 0)); then
     sudo "$PREPARE" launcher-back 2> /dev/null || true
     sudo "$PREPARE" fixture-back 2> /dev/null || true
     sudo "$PREPARE" nomem-slice-off 2> /dev/null || true
+    sudo "$PREPARE" tool-restore 2> /dev/null || true
+    sudo "$PREPARE" tool-extra-off 2> /dev/null || true
+    sudo "$PREPARE" tool-missing-off 2> /dev/null || true
+    sudo "$PREPARE" manifest-back 2> /dev/null || true
+    sudo "$PREPARE" payload-restore 2> /dev/null || true
     sudo "$PREPARE" profile-off 2> /dev/null || true
     sudo "$PREPARE" routing-pipe 2> /dev/null || true
   fi
@@ -94,9 +102,11 @@ case "$release" in
   *) fail "kernel $release is not the reviewed 7.0 release" ;;
 esac
 
-say "build the fixture and find the enforcement test binary"
+say "build the test-support programs and find the test binaries"
 cargo build -p artifree-providers --example artifree-execution-fixture --locked
 [[ -f "$FIXTURE" && -x "$FIXTURE" ]] || fail "the fixture was not built: $FIXTURE"
+cargo build -p artifree-providers --example artifree-execution-payload --locked
+[[ -f "$PAYLOAD" && -x "$PAYLOAD" ]] || fail "the payload was not built: $PAYLOAD"
 metadata="$(cargo test -p artifree-providers --test enforcement --no-run --locked --message-format=json)"
 test_binaries="$(printf '%s\n' "$metadata" \
   | jq -r 'select(.reason == "compiler-artifact" and .target.name == "enforcement" and .executable != null) | .executable')"
@@ -106,54 +116,95 @@ case "$test_binaries" in
 esac
 test_binary=$test_binaries
 [[ -x "$test_binary" ]] || fail "the enforcement test binary is not executable: $test_binary"
+lib_metadata="$(cargo test -p artifree-providers --lib --no-run --locked --message-format=json)"
+lib_binaries="$(printf '%s\n' "$lib_metadata" \
+  | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | index("lib")) != null and .executable != null) | .executable')"
+case "$lib_binaries" in
+  "") fail "cargo reported no library test binary" ;;
+  *$'\n'*) fail "cargo reported more than one library test binary" ;;
+esac
+lib_binary=$lib_binaries
+[[ -x "$lib_binary" ]] || fail "the library test binary is not executable: $lib_binary"
 
 say "part 1: install the pinned launcher and assemble the tool root"
-sudo "$PREPARE" install "$FIXTURE"
+sudo "$PREPARE" install "$FIXTURE" "$PAYLOAD"
 {
   printf 'bubblewrap package: %s\n' "$(dpkg-query -W -f "\${Version}" bubblewrap)"
   printf 'launcher version: %s\n' "$("$ROOT/bin/bwrap" --version)"
   printf 'launcher sha256: %s\n' "$(sha256sum -- "$ROOT/bin/bwrap")"
+  printf 'tool manifest sha256: %s\n' "$(sha256sum -- "$ROOT/MANIFEST")"
 } >> "$OUT/environment.txt"
 
 say "part 2: the host as found, before any preparation"
 sudo "$PREPARE" save-routing
-run_direct as-found job_unprepared_host_is_refused
+run_direct "$test_binary" as-found job_unprepared_host_is_refused
 
 say "part 3: prepare the host, then run the matrix in a delegated unit"
 sudo "$PREPARE" profile-on
 sudo "$PREPARE" routing-file
-run_unit prepared job_prepared_host_passes_every_facility -p Delegate=yes
+run_unit "$test_binary" prepared job_prepared_host_passes_every_facility -p Delegate=yes
 
 say "rule 10: remove each condition in turn and require the refusal that names it"
 sudo "$PREPARE" routing-pipe
-run_unit removed-routing job_pipe_routing_is_refused -p Delegate=yes
+run_unit "$test_binary" removed-routing job_pipe_routing_is_refused -p Delegate=yes
 sudo "$PREPARE" routing-file
 
 sudo "$PREPARE" profile-off
-run_unit removed-profile job_missing_profile_is_refused -p Delegate=yes
+run_unit "$test_binary" removed-profile job_missing_profile_is_refused -p Delegate=yes
 sudo "$PREPARE" profile-on
 
 # The memory controller is removed through a runtime slice, so that the unit's own cgroup
 # lacks it.
 sudo "$PREPARE" nomem-slice-on
-run_unit removed-controller job_missing_controller_is_refused -p Delegate=yes \
+run_unit "$test_binary" removed-controller job_missing_controller_is_refused -p Delegate=yes \
   -p Slice=artifree-enforcement-nomem.slice
 sudo "$PREPARE" nomem-slice-off
 
-run_unit removed-delegation job_undelegated_group_is_refused
+run_unit "$test_binary" removed-delegation job_undelegated_group_is_refused
 
 # The wrapper shell occupies the delegated group and then execs the test binary, so the
 # provider's own launch path is not involved.
-run_unit occupied-group job_occupied_group_is_refused -p Delegate=yes \
+run_unit "$test_binary" occupied-group job_occupied_group_is_refused -p Delegate=yes \
   -- /bin/sh -c '/bin/sleep 600 & exec "$0" "$@"'
 
 sudo "$PREPARE" launcher-away
-run_unit removed-launcher job_missing_launcher_is_refused -p Delegate=yes
+run_unit "$test_binary" removed-launcher job_missing_launcher_is_refused -p Delegate=yes
 sudo "$PREPARE" launcher-back
 
 sudo "$PREPARE" fixture-away
-run_unit removed-fixture job_missing_fixture_is_refused -p Delegate=yes
+run_unit "$test_binary" removed-fixture job_missing_fixture_is_refused -p Delegate=yes
 sudo "$PREPARE" fixture-back
+
+say "part 4: the attempt, its admission lock and the syscall table"
+run_direct "$lib_binary" syscall-table execution::policy::tests::job_syscall_table_matches_the_kernel_headers
+run_unit "$lib_binary" attempt execution::attempt::tests::job_fixture_attempt_runs_in_its_group_and_exits -p Delegate=yes
+run_unit "$lib_binary" false-ready execution::attempt::tests::job_false_ready_is_never_released -p Delegate=yes
+run_unit "$lib_binary" stalled-start execution::attempt::tests::job_stalled_start_is_killed_at_the_readiness_deadline -p Delegate=yes
+
+# The payload is replaced by a text file, so only the exec of the payload can fail. The
+# manifest is rewritten for the replacement, so admission still passes.
+sudo "$PREPARE" payload-break
+run_unit "$lib_binary" exec-failure execution::attempt::tests::job_payload_exec_failure_counts_as_not_started -p Delegate=yes
+sudo "$PREPARE" payload-restore
+
+run_unit "$lib_binary" lock-busy execution::attempt::tests::job_second_attempt_is_refused_while_the_lock_is_held -p Delegate=yes
+
+say "part 5: each change to the tool root is refused by name, and is put back afterwards"
+sudo "$PREPARE" tool-modify
+run_unit "$test_binary" modified-tool job_modified_tool_is_refused -p Delegate=yes
+sudo "$PREPARE" tool-restore
+
+sudo "$PREPARE" tool-extra-on
+run_unit "$test_binary" extra-tool job_extra_tool_file_is_refused -p Delegate=yes
+sudo "$PREPARE" tool-extra-off
+
+sudo "$PREPARE" tool-missing-on
+run_unit "$test_binary" missing-tool job_missing_tool_file_is_refused -p Delegate=yes
+sudo "$PREPARE" tool-missing-off
+
+sudo "$PREPARE" manifest-away
+run_unit "$test_binary" missing-manifest job_missing_manifest_is_refused -p Delegate=yes
+sudo "$PREPARE" manifest-back
 
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe
