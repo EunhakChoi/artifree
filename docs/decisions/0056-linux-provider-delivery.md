@@ -13,19 +13,33 @@ so that R02a can be delivered in slices that each prove something on a real
 kernel. It changes no rule of 0042. Where 0042 says "must" this record says
 how; where the two could be read differently, 0042 holds.
 
-> **Amendment, 2026-11-12.** The R02aa row of rule 14 left "every refusal of
-> rule 10 but the tool root's" to R02ab. That was written with the manifest
-> in mind and reads wider than intended. R02aa's admission starts two
-> programs of the tool root: the launcher, and the test-support program of
-> rule 4 in two trusted modes that only print its own namespaces or wait on
-> its input. Neither mode is the payload of rules 3 and 14, and R02aa still
-> runs no payload. Because its checks need both files, R02aa refuses a tool
-> root in which the launcher or that program is missing or is not a regular
-> executable file, names which one, and the job takes each away in turn (rule
-> 10). This check comes before the manifest of rule 6 and does not replace
-> it: the refusal of a tool root in which any file differs from its recorded
-> length and digest, and of one that lacks any other file, stays R02ab's. The
-> row is reworded below to say so.
+> **Amendment, 2026-11-12.** The R02aa row of rule 14 read "every refusal of
+> rule 10 but the tool root's, which R02ab adds with the manifest": it kept
+> the other refusals in R02aa and left all of the tool root's to R02ab. That
+> was written with the manifest in mind and reads wider than intended.
+> R02aa's admission starts two programs of the tool root: the launcher, and
+> the test-support program of rule 4 in two trusted modes that only print its
+> own namespaces or wait on its input. Neither mode is the payload of rules 3
+> and 14, and R02aa still runs no payload. Because its checks need both
+> files, R02aa refuses a tool root in which the launcher or that program is
+> missing or is not a regular executable file, names which one, and the job
+> takes each away in turn (rule 10). Four limits apply:
+>
+> - This check comes before the manifest of rule 6 and does not replace it.
+>   The refusal of a tool root in which any file differs from its recorded
+>   length and digest, and of one that lacks any other file, stays R02ab's.
+> - When R02ab adds the manifest's refusal it places it after this check in
+>   the documented order, so a missing launcher or program keeps the refusal
+>   that names it.
+> - The test-support program is required only of the tool root that R02a's
+>   harness assembles. What an operator's tool root must hold is decided with
+>   its packaging (rule 6: R03's), and rule 4 still keeps that program out of
+>   every release archive.
+> - A pass of this check says that two files exist. It is no evidence of a
+>   tool's identity, and R02aa proves nothing of 0042's row for a modified
+>   launcher, tool or policy.
+>
+> The row is reworded below to say so.
 
 ## Context
 
