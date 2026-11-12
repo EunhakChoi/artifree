@@ -7,7 +7,7 @@
 > not implemented has run in neither engine.
 
 Date: 2026-11-06. Status: **proposed boundary; partial read-only inspection
-implemented, no untrusted execution**. Roadmap: R02.
+and host admission implemented, no untrusted execution**. Roadmap: R02.
 
 > Builds on [0030](0030-persistent-jobs-and-worker.md),
 > [0036](0036-multi-user-identity.md), and
@@ -15,7 +15,9 @@ implemented, no untrusted execution**. Roadmap: R02.
 
 > **Note, 2026-11-12.** [0056](0056-linux-provider-delivery.md) decides how
 > R02a is built and delivered (the provider's parts, the job its acceptance
-> runs in, eight slices). It changes no rule of this record.
+> runs in, eight slices). It changes no rule of this record. Its first slice
+> (R02aa) adds a host admission that runs no payload and still refuses every
+> caller; a job on a prepared `ubuntu-24.04` runner checks it.
 
 ## Context and evidence
 
