@@ -198,6 +198,7 @@ fn refusal_as(
         InspectionProfile::fixture(),
         &host.roots(),
         process::id(),
+        &mut None,
         worker_uid,
     )
     .err()
@@ -218,7 +219,13 @@ fn discover_own_group_finds_the_one_unified_line_and_refuses_the_rest() -> Resul
     let scratch = Scratch::new()?;
     let mount = scratch.dir("mount")?;
     let refused: Result<PathBuf, AdmissionRefusal> = Err(AdmissionRefusal::CgroupV2Unavailable);
-    let cases: [(&str, Result<PathBuf, AdmissionRefusal>); 7] = [
+    // A group of a unified hierarchy has `cgroup.controllers`; a path without it is not one.
+    let unified = mount.join("user.slice/a.service");
+    fs::create_dir_all(&unified)?;
+    fs::write(unified.join("cgroup.controllers"), "memory\n")?;
+    fs::create_dir_all(mount.join("user.slice/hybrid.service"))?;
+    let cases: [(&str, Result<PathBuf, AdmissionRefusal>); 8] = [
+        ("0::/user.slice/hybrid.service\n", refused.clone()),
         (
             "0::/user.slice/a.service\n",
             Ok(mount.join("user.slice/a.service")),
@@ -845,4 +852,25 @@ fn controllers_come_before_occupancy() -> Result<(), Box<dyn Error>> {
         );
     }
     Ok(())
+}
+
+#[test]
+fn only_a_group_this_process_entered_from_is_treated_as_delegated() {
+    let parent = Path::new("/sys/fs/cgroup/unit");
+    let child = parent.join("supervisor");
+    assert_eq!(
+        delegated_group(&child, Some(parent)),
+        parent,
+        "after a move the delegated group is the one entered from"
+    );
+    assert_eq!(
+        delegated_group(&child, None),
+        child.as_path(),
+        "a group merely named supervisor delegates from itself, never from its parent"
+    );
+    assert_eq!(
+        delegated_group(&child, Some(Path::new("/sys/fs/cgroup/other"))),
+        child.as_path(),
+        "an entry from another group does not make this parent the delegated group"
+    );
 }

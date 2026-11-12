@@ -60,6 +60,26 @@ run_unit() {
   require_one_passed "$OUT/$label.log"
 }
 
+# This script changes the host's crash routing, its AppArmor profiles and /opt. It is for
+# the job's disposable runner only (decision 0056 rule 12).
+[[ ${GITHUB_ACTIONS:-} == true ]] \
+  || fail "this script prepares a disposable CI runner; it does not run on any other host"
+
+# After a failed step the conditions it removed are put back, so the host is not left with
+# the job's routing, its profile or a moved tool. Each restore may fail on its own.
+restore_host() {
+  local status=$?
+  if ((status != 0)); then
+    sudo "$PREPARE" launcher-back 2> /dev/null || true
+    sudo "$PREPARE" fixture-back 2> /dev/null || true
+    sudo "$PREPARE" nomem-slice-off 2> /dev/null || true
+    sudo "$PREPARE" profile-off 2> /dev/null || true
+    sudo "$PREPARE" routing-pipe 2> /dev/null || true
+  fi
+  exit "$status"
+}
+trap restore_host EXIT
+
 mkdir -p -- "$OUT"
 
 # The environment is written before the kernel check, so a failed run still records the

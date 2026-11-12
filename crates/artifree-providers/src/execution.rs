@@ -316,7 +316,8 @@ impl AdmissionOutcome {
 ///
 /// On Linux it runs the tool root's launcher and fixture (no payload), moves the calling
 /// process into its group's `supervisor` child, and writes only below the provider's own
-/// delegated cgroup. Call it only from the supervisor's own view. Other systems are
+/// delegated cgroup. Calls in one process run one at a time. Call it only from the
+/// supervisor's own view. Other systems are
 /// refused before any proc path is read.
 #[must_use]
 pub fn inspect_host(profile: InspectionProfile) -> AdmissionOutcome {

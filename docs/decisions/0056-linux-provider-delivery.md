@@ -21,7 +21,11 @@ how; where the two could be read differently, 0042 holds.
 > by starting the unit in a transient slice with `DisableControllers=memory`;
 > the provider then refused naming that controller, which settles the second.
 > The tool root is `/opt/artifree/tools/v1`. The admission's fixed order of
-> refusals is documented in the module `execution`. Rules 2 to 7 and the
+> refusals is documented in the module `execution`. The deadlines and
+> bounds of the trusted namespace check (10 seconds, 4,096 bytes, a 1 MiB
+> scratch) are that slice's choices and bind no attempt. The job pins the
+> Bubblewrap package to one revision, so a superseded revision fails the job
+> until the pin is moved. Rules 2 to 7 and the
 > slices R02ab to R02ah are not implemented.
 
 ## Context

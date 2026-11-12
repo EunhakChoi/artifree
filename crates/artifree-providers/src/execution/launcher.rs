@@ -25,11 +25,13 @@ pub(super) const NAMESPACES: [&str; 7] = ["user", "pid", "net", "mnt", "ipc", "u
 pub(super) const MAX_OUTPUT_BYTES: u64 = 4096;
 /// Bound on the launcher's `--version` output.
 const VERSION_OUTPUT_BYTES: u64 = 256;
-/// Wall deadline for one trusted launcher run; expiry kills it.
+/// Wall deadline for one trusted launcher run; expiry kills it (this slice's choice; not an attempt bound).
 pub(super) const RUN_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a killed launcher may take to exit before the check gives up on it (this slice's choice).
+const REAP_DEADLINE: Duration = Duration::from_secs(5);
 /// How often the supervisor polls a running launcher.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// How long the output may take to arrive after the launcher has exited.
+/// How long the output may take to arrive after the launcher has exited (this slice's choice).
 const OUTPUT_GRACE: Duration = Duration::from_secs(1);
 
 /// Checks that the tool root holds a regular, executable launcher and then a regular, executable fixture.
@@ -177,10 +179,18 @@ pub(super) fn run_bounded(
     }
 }
 
-/// Kills a child that may still be running, then reaps it. A failed kill is returned without waiting, because waiting on a live child could block the check.
+/// Kills a child that may still be running, then reaps it within `REAP_DEADLINE`. A failed kill is returned without waiting, because waiting on a live child could block the check; a killed child that does not exit in time (a kernel wait that the signal cannot interrupt) is `RunFailure::Deadline`.
 fn kill_and_reap(child: &mut Child) -> Result<(), RunFailure> {
     child.kill().map_err(|_| RunFailure::Wait)?;
-    child.wait().map(drop).map_err(|_| RunFailure::Wait)
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if start.elapsed() < REAP_DEADLINE => thread::sleep(POLL_INTERVAL),
+            Ok(None) => return Err(RunFailure::Deadline),
+            Err(_) => return Err(RunFailure::Wait),
+        }
+    }
 }
 
 /// Reads the supervisor's seven namespace links under `proc_self_ns` (normally `/proc/self/ns`), in `NAMESPACES` order.

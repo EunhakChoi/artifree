@@ -8,9 +8,10 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,12 +58,24 @@ pub(super) fn production_roots() -> AdmissionRoots<'static> {
     }
 }
 
-/// Runs every facility against `roots`, with this process's own pid and uid.
+/// Serializes admission in this process (decision 0042 rule 6) and remembers the group this
+/// process delegated from once it has moved into that group's `supervisor` child.
+///
+/// A second admission must not guess the delegated group from a directory name: a worker
+/// started in a group that merely happens to be called `supervisor` would then write into
+/// its parent, outside its own subtree.
+static ENTERED: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Runs every facility against `roots`, with this process's own pid and uid, one admission
+/// at a time.
 pub(super) fn admit(
     profile: InspectionProfile,
     roots: &AdmissionRoots<'_>,
 ) -> Result<HostReport, AdmissionRefusal> {
-    admit_with(profile, roots, process::id(), || {
+    // A panic elsewhere cannot leave the remembered path half-written: it is replaced
+    // whole, so a poisoned lock still holds a valid value.
+    let mut entered = ENTERED.lock().unwrap_or_else(PoisonError::into_inner);
+    admit_with(profile, roots, process::id(), &mut entered, || {
         cgroup::own_uid(roots.proc_self)
     })
 }
@@ -71,11 +84,13 @@ pub(super) fn admit(
 ///
 /// The pid and the uid come in as values, so tests can run the whole order against
 /// temporary roots. Facility 7 checks the group that holds this process: the delegated
-/// group on a first call, or its `supervisor` child on a second one.
+/// group on a first call, or its `supervisor` child on a second one. `entered` holds the
+/// delegated group of an earlier successful move in this process and is set by this call's.
 pub(super) fn admit_with(
     profile: InspectionProfile,
     roots: &AdmissionRoots<'_>,
     own_pid: u32,
+    entered: &mut Option<PathBuf>,
     worker_uid: impl FnOnce() -> Result<u32, AdmissionRefusal>,
 ) -> Result<HostReport, AdmissionRefusal> {
     // Facility 2: the kernel release, the provider's group and its kill support.
@@ -95,11 +110,13 @@ pub(super) fn admit_with(
     // Facility 4.
     launcher::check_tool_files(roots.tool_root)?;
     // Facilities 5 and 6 check the delegated group, facility 7 the group holding this process.
-    let delegated = delegated_group(&discovered);
+    let delegated = delegated_group(&discovered, entered.as_deref()).to_path_buf();
+    let delegated = delegated.as_path();
     cgroup::check_delegation(delegated, worker_uid()?)?;
     let delegated_controllers = cgroup::check_controllers(delegated)?;
     cgroup::check_sole_occupant(&discovered, own_pid)?;
     cgroup::enter_supervisor(delegated, own_pid)?;
+    *entered = Some(delegated.to_path_buf());
     // Facility 8.
     launcher::check_namespaces(roots.tool_root, &roots.proc_self.join("ns"))?;
     // Facilities 9 and 10.
@@ -123,14 +140,14 @@ pub(super) fn admit_with(
 
 /// The group that facilities 5 and 6 check and that the probes run under.
 ///
-/// A process already in its group's `supervisor` child, as after an earlier call in the
-/// same process, delegates from the parent. Any other group delegates from itself.
+/// A process found in the `supervisor` child of the group it entered from, in an earlier
+/// call of this process, delegates from that group. Every other group delegates from
+/// itself, also one that is merely named `supervisor`.
 #[must_use]
-fn delegated_group(discovered: &Path) -> &Path {
-    if discovered.file_name() == Some(OsStr::new(cgroup::SUPERVISOR_GROUP)) {
-        discovered.parent().unwrap_or(discovered)
-    } else {
-        discovered
+pub(super) fn delegated_group<'a>(discovered: &'a Path, entered: Option<&'a Path>) -> &'a Path {
+    match entered {
+        Some(group) if discovered == group.join(OsStr::new(cgroup::SUPERVISOR_GROUP)) => group,
+        _ => discovered,
     }
 }
 

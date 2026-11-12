@@ -43,8 +43,13 @@ pub(super) fn discover_own_group(
         }
         group.push(segment);
     }
-    // The path is returned as found: a process already inside `supervisor` gets that path,
-    // and its caller treats the parent as the delegated group.
+    // A unified hierarchy has this file in every group. Without it the line names a group
+    // that is not under this mount, as on a hybrid host.
+    let controllers = fs::symlink_metadata(group.join("cgroup.controllers"));
+    if !controllers.is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Err(AdmissionRefusal::CgroupV2Unavailable);
+    }
+    // The path is returned as found: a process already inside `supervisor` gets that path.
     Ok(group)
 }
 
