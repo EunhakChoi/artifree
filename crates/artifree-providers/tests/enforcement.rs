@@ -1,4 +1,5 @@
-//! Linux enforcement checks for host admission (decision 0056 rules 9, 10, 12 and 13).
+//! Linux enforcement checks for host admission, including the tool root's manifest
+//! (decision 0056 rules 6, 9, 10, 12 and 13).
 //!
 //! `contributor_host_runs_no_payload_and_reports_a_refusal` runs on every Linux host. It
 //! reads only the core routing policy and starts no process. The `job_*` tests change the
@@ -89,10 +90,11 @@ fn check_report_rule_13(text: &str) -> Result<(), String> {
         )?;
     }
     require(
-        report_value(text, "tool_identity")?.starts_with("unverified"),
-        "the report must not claim a verified tool identity".to_owned(),
+        !text.lines().any(|line| line.starts_with("tool_identity=")),
+        "the report must carry no tool_identity line: the tool root is verified by its manifest"
+            .to_owned(),
     )?;
-    for key in ["launcher_sha256", "policy_sha256"] {
+    for key in ["launcher_sha256", "tool_manifest_sha256", "policy_sha256"] {
         let digest = report_value(text, key)?;
         require(
             is_sha256_hex(digest),
@@ -239,6 +241,39 @@ fn job_missing_launcher_is_refused() {
 #[ignore = "runs only in the Linux enforcement job (decision 0056 rule 12)"]
 fn job_missing_fixture_is_refused() {
     assert_refused_with(artifree_providers::execution::AdmissionRefusal::MissingFixture);
+}
+
+/// Rule 10: the job appends one byte to the tool root's payload, so its length and digest no
+/// longer match the manifest.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "runs only in the Linux enforcement job (decision 0056 rule 12)"]
+fn job_modified_tool_is_refused() {
+    assert_refused_with(artifree_providers::execution::AdmissionRefusal::ToolRootMismatch);
+}
+
+/// Rule 10: the job adds a file that the manifest does not list to the tool root.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "runs only in the Linux enforcement job (decision 0056 rule 12)"]
+fn job_extra_tool_file_is_refused() {
+    assert_refused_with(artifree_providers::execution::AdmissionRefusal::ToolRootMismatch);
+}
+
+/// Rule 10: the job moves one file that the manifest lists out of the tool root.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "runs only in the Linux enforcement job (decision 0056 rule 12)"]
+fn job_missing_tool_file_is_refused() {
+    assert_refused_with(artifree_providers::execution::AdmissionRefusal::ToolRootMismatch);
+}
+
+/// Rule 10: the job moves the tool root's manifest away.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "runs only in the Linux enforcement job (decision 0056 rule 12)"]
+fn job_missing_manifest_is_refused() {
+    assert_refused_with(artifree_providers::execution::AdmissionRefusal::MissingToolManifest);
 }
 
 /// Rule 9, part 3: the prepared host passes every implemented facility and then refuses.

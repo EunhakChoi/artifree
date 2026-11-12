@@ -329,10 +329,12 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: enforcement
-      - name: Build the enforcement test and the fixture
+      - name: Build the enforcement tests and the test-support programs
         run: |
           cargo test -p artifree-providers --test enforcement --no-run --locked
+          cargo test -p artifree-providers --lib --no-run --locked
           cargo build -p artifree-providers --example artifree-execution-fixture --locked
+          cargo build -p artifree-providers --example artifree-execution-payload --locked
       - name: Run the enforcement matrix
         run: scripts/enforcement/run.sh
       - name: Upload the host report

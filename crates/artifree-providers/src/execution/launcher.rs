@@ -1,4 +1,4 @@
-//! The trusted namespace check through the tool root's launcher (decisions 0042 rule 1, 0056 rule 2). Runs no payload.
+//! The trusted namespace check and the attempt's fixed argument list through the tool root's launcher (decisions 0042 rule 1, 0056 rule 2). Runs no payload.
 
 use std::ffi::OsString;
 use std::fs;
@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::AdmissionRefusal;
+use super::{AdmissionRefusal, InspectionProfile};
 
 /// One directory per version, operator-installed and not writable by the provider (0056 rule 6). Must equal `ROOT` in `scripts/enforcement/*.sh`.
 pub(super) const TOOL_ROOT: &str = "/opt/artifree/tools/v1";
@@ -33,6 +33,10 @@ const REAP_DEADLINE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// How long the output may take to arrive after the launcher has exited (this slice's choice).
 const OUTPUT_GRACE: Duration = Duration::from_secs(1);
+/// The namespace check's scratch tmpfs size in bytes (R02aa's choice; not an attempt bound).
+const CHECK_SCRATCH_BYTES: &str = "1048576";
+/// The attempt's scratch tmpfs size in bytes: decision 0042 rule 5, "One 128 MiB tmpfs" for scratch and output.
+const ATTEMPT_SCRATCH_BYTES: &str = "134217728";
 
 /// Checks that the tool root holds a regular, executable launcher and then a regular, executable fixture.
 ///
@@ -62,7 +66,25 @@ fn is_regular_executable(path: &Path) -> bool {
 /// Each namespace has its own explicit `--unshare-*` flag. `--unshare-all` is not used because its user and cgroup entries are `-try` forms that skip a namespace silently when the kernel refuses it; the namespace comparison would refuse a skipped namespace too, but an explicit flag makes the launcher fail instead of continuing without that namespace. `--disable-userns` stops a further user namespace, which was measured to be possible without it. The root is bound read-only as `/tools`, and its `lib` and `lib64` directories are bound as `/lib` and `/lib64`.
 #[must_use]
 pub(super) fn launcher_arguments(root: &Path) -> Vec<OsString> {
-    vec![
+    fixed_arguments(root, CHECK_SCRATCH_BYTES, &["namespaces"])
+}
+
+/// The attempt's fixed argument list, in launch order (0056 rule 2): the namespace check's list with the 128 MiB scratch tmpfs, ending in the fixture's `bootstrap` mode with the fixture profile's identity.
+///
+/// Nothing a request carries reaches this list. The scratch's inode bound is R02ac's (0056 rule 17).
+#[must_use]
+pub(super) fn attempt_arguments(root: &Path) -> Vec<OsString> {
+    fixed_arguments(
+        root,
+        ATTEMPT_SCRATCH_BYTES,
+        &["bootstrap", InspectionProfile::fixture().identity()],
+    )
+}
+
+/// Builds the launcher's fixed argument list for `root` with `scratch_bytes` as the tmpfs size, followed by the inner fixture command and `fixture_arguments`. Both the namespace check and the attempt use this one list, so they cannot drift apart.
+#[must_use]
+fn fixed_arguments(root: &Path, scratch_bytes: &str, fixture_arguments: &[&str]) -> Vec<OsString> {
+    let mut arguments: Vec<OsString> = vec![
         "--unshare-user".into(),
         "--unshare-pid".into(),
         "--unshare-net".into(),
@@ -87,14 +109,19 @@ pub(super) fn launcher_arguments(root: &Path) -> Vec<OsString> {
         "--dev".into(),
         "/dev".into(),
         "--size".into(),
-        "1048576".into(),
+        scratch_bytes.into(),
         "--tmpfs".into(),
         "/tmp".into(),
         "--chdir".into(),
         "/".into(),
         "/tools/bin/artifree-execution-fixture".into(),
-        "namespaces".into(),
-    ]
+    ];
+    arguments.extend(
+        fixture_arguments
+            .iter()
+            .map(|argument| OsString::from(*argument)),
+    );
+    arguments
 }
 
 /// Why a bounded run of a trusted command produced no usable output.

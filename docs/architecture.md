@@ -35,7 +35,7 @@ crates/
   artifree-domain/     identifiers, portable file packages, version counters; no dependencies
   artifree-core/       artifact, data and asset services, asset validation, rooms, jobs and worker logic; documents planned
   artifree-ports/      artifact, data, asset, job, token and user store contracts
-  artifree-providers/  SQLite stores, backup and restore, ZIP source archives, execution-host inspection and admission; models, tools, build, export planned
+  artifree-providers/  SQLite stores, backup and restore, ZIP source archives, execution-host inspection, admission and a first contained launch that only tests can start; models, tools, build, export planned
   artifree-contracts/  Serde/Schemars wire DTOs and JSON Schema exporter
   artifree-server/     composition root, Axum HTTP API, MCP endpoint, preview origin
 contracts/generated/  generated JSON Schemas (descriptor, API v1), MCP tool catalog, inventory snapshot
@@ -297,7 +297,7 @@ every slice. This table only points from an area to its records.
 
 Proposed and not implemented: untrusted execution
 ([0042](decisions/0042-linux-untrusted-execution.md) is a proposed boundary
-with read-only host inspection and a host admission that runs no payload), React builds, view replacement, a frame's
+with read-only host inspection, a host admission and a first launch of a fixture that only exits, reachable from tests alone), React builds, view replacement, a frame's
 access to rooms, model and connector providers, structured
 document types and conversions, roles and sharing, publishing, PostgreSQL and
 external object storage. The module inventory in

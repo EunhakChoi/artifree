@@ -6,8 +6,9 @@
 > CI ([quality](../quality.md#browser-engines)). An acceptance of a part that is
 > not implemented has run in neither engine.
 
-Date: 2026-11-06. Status: **proposed boundary; partial read-only inspection
-and host admission implemented, no untrusted execution**. Roadmap: R02.
+Date: 2026-11-06. Status: **proposed boundary; partial read-only inspection,
+host admission and a first launch of a fixture that only exits implemented;
+no untrusted execution outside the enforcement job's tests**. Roadmap: R02.
 
 > Builds on [0030](0030-persistent-jobs-and-worker.md),
 > [0036](0036-multi-user-identity.md), and
@@ -18,6 +19,18 @@ and host admission implemented, no untrusted execution**. Roadmap: R02.
 > runs in, eight slices). It changes no rule of this record. Its first slice
 > (R02aa) adds a host admission that runs no payload and still refuses every
 > caller; a job on a prepared `ubuntu-24.04` runner checks it.
+
+> **Note, 2026-11-12 (R02ab).** 0056's second slice launches the repository's
+> fixture, which writes one line and exits, on the prepared runner: inside
+> its own cgroup with the limits of rule 5, through the launcher, behind a
+> bootstrap that sets the descriptor and core limits, leaves no capability,
+> sets `no_new_privs` and installs a default-deny filter, and only after the
+> provider read those facts from the kernel itself. The tool root is checked
+> against a manifest of lengths and digests. Nothing outside the tests can
+> start it, and every caller still gets `IncompleteEnforcement`. Of rule 8's
+> matrix this proves, for host admission, a modified, extra or missing tool
+> file; the rows for resources, files, network, cleanup under hostile
+> descendants, recovery, output and the crash acceptance stay open.
 
 ## Context and evidence
 
