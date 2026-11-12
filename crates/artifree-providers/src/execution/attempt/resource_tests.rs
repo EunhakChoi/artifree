@@ -10,7 +10,7 @@ use super::super::usage::GroupUsage;
 use super::tests::{ExecutionDir, assert_no_attempt_groups, refusal_of};
 use super::{
     AttemptEvidence, AttemptFailure, AttemptPlan, AttemptRefusal, NotStartedReason, Outcome,
-    SurvivorListing, final_verdict, launch, survivor_listing,
+    SurvivorListing, await_empty_listing, final_verdict, launch, survivor_listing,
 };
 
 use std::error::Error;
@@ -267,6 +267,79 @@ fn survivor_listing_cases() {
             "{name}: the listing must classify as {expected:?}"
         );
     }
+}
+
+/// A group that is still being torn down when the stub's exit is observed is read again until it
+/// is empty: two occupied listings and then an empty one make no survivors.
+#[test]
+fn a_group_that_empties_within_the_grace_has_no_survivors() {
+    let mut listings =
+        vec![Ok(b"7\n8\n".to_vec()), Ok(b"8\n".to_vec()), Ok(Vec::new())].into_iter();
+    let mut reads = 0_u32;
+    let verdict = await_empty_listing(
+        || {
+            reads += 1;
+            listings
+                .next()
+                .unwrap_or_else(|| Err(io::Error::other("read past the listings")))
+        },
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        verdict,
+        SurvivorListing::Empty,
+        "the group emptied within the grace"
+    );
+    assert_eq!(
+        reads, 3,
+        "the listing must be read until it is empty and no further"
+    );
+}
+
+/// A listing that stays occupied after the grace is a survivor, and the wait ends.
+#[test]
+fn a_group_that_stays_occupied_has_survivors() {
+    let mut reads = 0_u32;
+    let started = Instant::now();
+    let verdict = await_empty_listing(
+        || {
+            reads += 1;
+            Ok(b"4242\n".to_vec())
+        },
+        Duration::from_millis(50),
+    );
+    assert_eq!(
+        verdict,
+        SurvivorListing::Occupied,
+        "the process outlived the grace"
+    );
+    assert!(
+        reads >= 2,
+        "the listing must be read again before the grace ends, read {reads} times"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the wait must end soon after the grace"
+    );
+}
+
+/// A listing that cannot be read ends the wait at once: an unreadable group is not waited on.
+#[test]
+fn an_unreadable_listing_ends_the_wait() {
+    let mut reads = 0_u32;
+    let verdict = await_empty_listing(
+        || {
+            reads += 1;
+            Err(io::Error::other("cgroup.procs cannot be read"))
+        },
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        verdict,
+        SurvivorListing::Unreadable,
+        "the listing could not be read"
+    );
+    assert_eq!(reads, 1, "an unreadable listing must not be read again");
 }
 
 // The job tests below need the prepared Linux enforcement runner. Each one runs by its exact name,

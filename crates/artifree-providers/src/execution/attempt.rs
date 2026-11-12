@@ -7,7 +7,8 @@
 //! R02ac (0056 rule 14) added the resource part of the group phase. The scratch bounds are read
 //! back from the bootstrap's mount table (`readiness`), and the stub runs behind the two seccomp
 //! programs of `policy`. The group's counters are read once the group is seen empty (`usage`).
-//! After the stub's exit the group's listing decides survivors, and the verdict is typed:
+//! After the stub's exit the group's listing decides survivors once the PID namespace's
+//! teardown has had `TEARDOWN_GRACE` to finish, and the verdict is typed:
 //! `OutOfMemory` and `Survivors` are decided in the order that `final_verdict` documents. The
 //! payload scenarios that exercise these limits run only in the enforcement job (`run.sh`).
 
@@ -47,6 +48,11 @@ const CONTROL_GRACE: Duration = Duration::from_secs(1);
 const CHUNK_BYTES: usize = 8192;
 /// The largest `cgroup.procs` listing that the launch reads when it places the stub.
 const LISTING_BYTES: u64 = 4096;
+/// How long the group may take to empty after the stub's exit. The launcher can exit before the
+/// kernel has ended the rest of its PID namespace: on the job's runner a process bomb's children
+/// were still listed when the stub's exit was observed (main, 2026-11-12). A process that is
+/// still listed after this wait is a survivor.
+const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 /// The stub's arguments: the fixture's `stub` mode with the fixture identity.
 const FIXTURE_STUB: &[&str] = &["stub", FIXTURE.identity];
 
@@ -288,6 +294,23 @@ fn survivor_listing(listing: io::Result<Vec<u8>>) -> SurvivorListing {
     }
 }
 
+/// Reads the group's listing until it is empty, unreadable, or still occupied once `grace` has
+/// passed since the first read. The listing is read at least once, and once more after the last
+/// pause, so a group that empties within `grace` is never reported as occupied.
+fn await_empty_listing(
+    mut read: impl FnMut() -> io::Result<Vec<u8>>,
+    grace: Duration,
+) -> SurvivorListing {
+    let started = Instant::now();
+    loop {
+        let listing = survivor_listing(read());
+        if listing != SurvivorListing::Occupied || started.elapsed() >= grace {
+            return listing;
+        }
+        thread::sleep(POLL);
+    }
+}
+
 /// What one launch holds while its group exists. `settle` ends every part of it.
 #[derive(Debug, Default)]
 struct Session {
@@ -453,10 +476,9 @@ fn run_group(
     // empty group. `populated` is not used: measured on 2026-11-12, it stays 1 for a few
     // milliseconds after ordinary exits while the listing is already empty. `settle` kills
     // survivors as it kills every group.
-    session.survivors = survivor_listing(read_bounded(
-        &group_path.join("cgroup.procs"),
-        LISTING_BYTES,
-    ));
+    let listing = group_path.join("cgroup.procs");
+    session.survivors =
+        await_empty_listing(|| read_bounded(&listing, LISTING_BYTES), TEARDOWN_GRACE);
     confirm_started(&mut control)?;
     Ok(Passed {
         limits,
