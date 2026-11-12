@@ -188,57 +188,97 @@ how; where the two could be read differently, 0042 holds.
 >   and its children after `exec` showed `NoNewPrivs` 1, seccomp mode 2 with
 >   two filters, five empty capability sets, and both limits.
 >
-> So R02ad works as follows; the rules stay as written except rule 9, below:
+> So R02ad works as follows. Rules 6, 9, 14 and 17 are reworded at the end;
+> the others stay as written.
 >
 > - **Probe programs.** Each probe is a static x86-64 program of a few
 >   instructions, generated as bytes by the test-support program of rule 4,
 >   without an assembler and without first-party `unsafe`. It sets the
 >   arguments, enters the kernel once by `syscall` or by `int 0x80`, and exits
->   with the call's error number. The probes are part of the fixture: the
->   job's preparation writes them into the tool root, under its manifest
->   (rule 6). In one launch the payload fixture starts each probe as a child
->   and waits for it, so every probe also runs after a `fork` and an `exec`.
+>   with the call's error number. The probes are part of the fixture (rule
+>   6). In one launch the payload fixture starts each probe as a child and
+>   waits for it, so every probe runs after a `fork` and an `exec`. Three
+>   refusals need the fixture itself rather than a probe, and run in the same
+>   launch with their own records: a refused call from a thread the payload
+>   started after its `exec` (inheritance by every payload thread, 0042), and
+>   a `prlimit64` that sets the limit of the payload's own child (an owned
+>   descendant).
 > - **Attribution.** A refusal counts only when a kernel record names the
->   probe's program, `sig=31`, and the expected architecture and number. The
->   test requires exactly the expected records of the launch: a missing one,
->   a second one or an unexpected one fails it. `clone3`, which the filter
->   answers without a record, is attributed by its mutation and by the
->   threads that keep working through the fallback to `clone`; the mapping
->   says so.
-> - **Controls** run in the same launch: allowed calls (`gettid`, a
->   `prlimit64` query, `clone` without namespace flags, in a forked child as
->   well) succeed and leave no record.
-> - **x32.** The reviewed kernel has no x32 entry point, so no control can
->   show what an x32 call would do. The record still attributes the refusal,
->   and the mapping states that this kernel offers no positive control for
->   the class. An allowlist entry compares the whole number, so a number
->   with the x32 bit never matches one.
-> - **Mutations** are not built into the product. Each guard is broken by
->   its own patch on a temporary branch: the architecture check, the
->   namespace mask, the `clone3` program, the setter guard, the ceiling, the
->   default action, and each refused call allowed alone. The named job test
->   must then fail, and the results are recorded in the pull request and in
->   the mapping.
+>   expected program, `sig=31`, and the expected architecture and number. The
+>   test reads the kernel log from its end before the launch and to its end
+>   after it, and requires exactly the expected records in that window: a
+>   missing record, a second one, or any other seccomp record (a kill of the
+>   payload fixture included) fails it. The record also shows that the probe
+>   reached the call: the filter decides at the kernel's entry.
+> - **`clone3`.** The first program answers it with `ENOSYS` and no record.
+>   Its probe passes namespace flags in its argument structure and must exit
+>   with exactly `ENOSYS`. That is evidence here, unlike the `ENOSYS` 0042
+>   discounts, because the reviewed kernel implements `clone3`: the same
+>   probe without a filter failed with `EINVAL`. Without the first program,
+>   the allowlist admits `clone3` and the probe exits with `EINVAL`, so the
+>   normal run's assertion fails. The mapping records this class's evidence
+>   as an exit code against a measured control, weaker than a record.
+> - **Controls.** Allowed neighbours of the refused classes run in the same
+>   launch and must succeed without a record: `gettid`, a `prlimit64` query,
+>   `clone` without namespace flags (also from a forked child), and the
+>   benign calls every scenario makes. Where a whole class is refused
+>   (modules, BPF, keyrings, clocks, the asynchronous interfaces), no allowed
+>   call of the class exists to control with; the record is the evidence and
+>   the unfiltered measurement above shows what the kernel itself would have
+>   done.
+> - **x32.** The reviewed kernel has no x32 entry point, so an x32 call is
+>   neither a risk nor evidence on it. The mapping marks the class
+>   unverified on this kernel, as 0042 asks when no control exists, and
+>   claims nothing from the records. Rule 9 already refuses any other kernel
+>   release, so a kernel with x32 is not reviewed until a slice proves the
+>   class with a control. An allowlist entry compares the whole number, so a
+>   number with the x32 bit never matches one.
+> - **Undoing the boundary.** The refused probes of `prctl` (clearing
+>   `no_new_privs`), `capset`, and `seccomp` are the payload's attempts to
+>   undo `no_new_privs`, the empty capability sets and the filter; the mapping
+>   names them as such.
+> - **Mutations** are not built into the product. On a temporary branch, the
+>   disposable copy of 0042, a script applies one patch at a time, runs the
+>   named job test and requires it to fail: the architecture check, the
+>   namespace mask, the `clone3` program, the setter guard, the default
+>   action, each refused call allowed alone, the ceiling's value raised to
+>   512, and the initial limit guard removed, so the payload inherits the
+>   runner's limit above 256 (the parent limit 0042 asks for). The script and
+>   its results are attached to the pull request and recorded in the
+>   mapping. The mutations are run again whenever the filter, the probe
+>   table or the bootstrap's limits change.
 > - **The mapping** is a document of the repository,
 >   `docs/linux-syscall-mapping.md`. A unit test keeps it and the probe
 >   table in step: every class of 0042, rule 4, its probes, the record each
 >   probe expects, its control and its mutation.
 > - **Descriptors.** A scenario exhausts opens and duplications, then repeats
 >   in a child after `exec`, against the ceiling and both limits, read by the
->   payload and from outside. The setters (`setrlimit`, `prlimit64` on itself
->   and on a child, the i386 forms) are probes with records. A lower and a
->   restore of the soft limit within the hard limit is the setter guard's
->   case, because a refused raise would fail in the kernel anyway. A
+>   payload and from outside. The native setters and the i386 forms are
+>   probes with records; the descendant's setter is the fixture's, above. A
+>   lower and a restore of the soft limit within the hard limit is the setter
+>   guard's case, because a refused raise would fail in the kernel anyway. A
 >   descriptor inherited above the ceiling is refused by the bootstrap's
 >   check of the R02ab note; its proof with a real leak stays R02ae's.
 > - **The boundary from outside.** While a scenario holds a thread and a
 >   child, the test reads `NoNewPrivs`, the seccomp mode and filter count,
 >   the capability sets and both limits of every task of the attempt's group
 >   from `/proc`.
+>
+> The rules, reworded:
+>
+> - **Rule 6.** The fixture's tool root also holds its generated probe
+>   programs, under the same manifest.
 > - **Rule 9, part 3** also lets the runner's account read the kernel log
 >   (`kernel.dmesg_restrict` 0) and lifts the kernel's message rate limit
 >   (`kernel.printk_ratelimit` 0), on the job's disposable runner only (rules
->   11 and 12). The product reads no kernel log.
+>   11 and 12). The records reach that log only while no audit daemon holds
+>   the kernel's audit channel, so the preparation requires that, records it
+>   with the two settings among the run's environment (rule 13), and fails
+>   with a named reason otherwise. The product reads no kernel log.
+> - **Rule 14.** The R02ad row adds that the real-leak case of an inherited
+>   descriptor is R02ae's.
+> - **Rule 17.** An R02ad point: how a refusal is attributed to the filter,
+>   settled by this amendment.
 >
 > What this does not change: 0042; the filter, its two programs and its
 > entries; the launch; the ban on first-party `unsafe`; and rule 12, under
@@ -484,7 +524,8 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    SHA-256 and the licences. The provider verifies the manifest before
    admission, refuses a root in which a file differs, and binds that directory
    read-only. In R02a the only payload is the repository's fixture and the
-   tool root is assembled by the test harness at a fixed path; packaging a
+   tool root is assembled by the test harness at a fixed path, with the
+   fixture's generated probe programs (the amendment of 2026-11-13); packaging a
    tool root for operators is R03's, when a real runtime exists. Until then no
    host is called supported outside the enforcement job.
 7. **Three dependencies, for the system calls.** The bootstrap and the provider
@@ -526,8 +567,10 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    3. Prepare the rest: allow the tool root's launcher, by its path, to create
       user namespaces through an AppArmor profile for that one program (the
       system-wide restriction stays on); set `kernel.core_pattern` to a plain
-      file name; then run the matrix inside a delegated unit as the runner's
-      account.
+      file name; let the runner's account read the kernel log and lift its
+      message rate limit, with no audit daemon holding the audit channel (the
+      amendment of 2026-11-13); then run the matrix inside a delegated unit as
+      the runner's account.
 10. **Refusals do not depend on the image.** After preparation the job also
     takes each condition away again, one at a time (the routing, the profile,
     a controller, the delegation, a file of the tool root), and requires the
@@ -562,7 +605,7 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 | R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload.                                                                                                                                                          | 1, 5 (routing), 8     |
 | R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                                                                                                                                                                                    | 3 (tools), 4, 5, 6, 8 |
 | R02ac | The launch as amended on 2026-11-12 (read-only root and `/dev`, the scratch mounted and bounded by the bootstrap and read back by the provider), with its checks: file creation outside the scratch fails, and a launch without a read-only remount, without the inode count or without the provider's read of the mount table fails its test. Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer. | 4 (scratch), 5, 6, 8  |
-| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks.                                                                                                                                                                                                                                                                                                                                               | 4, 8                  |
+| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks (the real-leak case of an inherited descriptor is R02ae's).                                                                                                                                                                                                                                                                                    | 4, 8                  |
 | R02ae | Files, descriptors and network: host canaries, leaked descriptors, real listeners with counters.                                                                                                                                                                                                                                                                                                                                                                                                                                               | 4, 8                  |
 | R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                                                                                                                                                                              | 3 (input), 7, 8       |
 | R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                                                                                                                                                                                   | 5 (cores), 8          |
@@ -603,6 +646,8 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
       inode bound (0042, rule 5: 4,096 inodes); the launcher's tmpfs option
       takes a size only. Settled by the amendment of 2026-11-12 (the scratch):
       the bootstrap, in a mount namespace of its own.
+    - R02ad: how a refusal is attributed to the filter rather than to the
+      kernel. Settled by the amendment of 2026-11-13 (the syscall mapping).
     - R02af: how the keeper of 0042, rule 7 holds the scratch until
       collection ends, now that the mount is made inside the sandbox and
       lives in the bootstrap's mount namespace.
