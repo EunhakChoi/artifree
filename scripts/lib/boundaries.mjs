@@ -36,6 +36,10 @@ const rustEdges = {
     'artifree-domain',
     'getrandom',
     'rusqlite',
+    // Decision 0056 rule 7: the Linux execution provider's system calls, through
+    // safe interfaces and for Linux targets only.
+    'rustix',
+    'seccompiler',
     'sha2',
   ],
   'artifree-contracts': ['serde', 'serde_json', 'schemars'],

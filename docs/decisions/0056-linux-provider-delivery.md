@@ -1,7 +1,8 @@
 # 0056: Delivering the Linux execution provider
 
 Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
-enforcement job) is implemented, and nothing runs a payload**.
+enforcement job) and R02ab (the first launch, of a fixture that only exits and
+only from the job's tests) are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -54,7 +55,59 @@ how; where the two could be read differently, 0042 holds.
 > scratch) are that slice's choices and bind no attempt. The job pins the
 > Bubblewrap package to one revision, so a superseded revision fails the job
 > until the pin is moved. Rules 2 to 7 and the
-> slices R02ab to R02ah are not implemented.
+> slices R02ab to R02ah were not implemented then; the next note covers R02ab.
+
+> **Note, 2026-11-12 (R02ab).** The first launch exists and runs in the job.
+> What the slice settled of rule 17, measured on the runner before it was
+> written and then by its own tests:
+>
+> - **Readiness and release (rule 5).** The provider gives the stub one end
+>   of a socket pair as its standard input; the stub, the launcher and the
+>   bootstrap inherit it. The bootstrap first moves it to a close-on-exec
+>   descriptor and points descriptor 0 at `/dev/null`, so the payload holds
+>   no copy and cannot reopen one through `/proc` (a socket cannot be opened
+>   there). The records are one byte to launch, a fixed 16-byte readiness
+>   record, one byte to release and one byte for a failed `exec`. This is the
+>   input-stream candidate of rule 17 carrying both directions; no further
+>   descriptor and no crate for passing one is used.
+> - **The provider does not take the bootstrap's word.** Before it releases,
+>   it reads the members of the attempt's group and requires exactly one in
+>   seccomp filter mode, with `no_new_privs`, one filter, empty capability
+>   sets, the two limits, another PID namespace than its own, and every
+>   member inside the group. A test-support mode that reports ready without
+>   any of it is not released.
+> - **A failed `exec`** is told by the byte the bootstrap writes when `exec`
+>   returns. A successful one is not told positively: the launcher and its
+>   init keep their copies of the stub's input, so no descriptor closes at
+>   the `exec` alone. A bootstrap that dies between the release and the
+>   `exec` leaves the same end of stream as a payload that ran; such an
+>   attempt ends by a signal or a non-zero status and is a failure either
+>   way.
+> - **Safe interfaces (rule 7).** `rustix` 1.1.6 (features `std`, `process`,
+>   `thread`, `stdio`) and `seccompiler` 0.5.0 offer every call of rule 3
+>   safely; both are pinned and declared for Linux targets only, under
+>   `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` and
+>   `Apache-2.0 OR BSD-3-Clause`. Syscall numbers are a first-party table for
+>   x86-64, compared in the job with the runner's kernel headers; another
+>   architecture has no filter and fails before the payload.
+> - **Two things the measurement found.** A debug build of the standard
+>   library calls `fcntl` when it drops a descriptor, which the filter does
+>   not allow: after the filter the bootstrap drops none, and the `exec`
+>   closes them. Descriptors the provider's process inherited without
+>   close-on-exec reach its children: the bootstrap refuses to go on when it
+>   holds any descriptor beyond the three streams and the control channel.
+>
+> The launch is compiled into the tests only, so no caller can reach it and
+> rule 16 holds unchanged. The tool root's manifest is `MANIFEST`, one line of
+> digest, length and path per file; it is checked at each admission and not
+> held against replacement afterwards. The admission lock lives in a private
+> directory of the worker's account that R02b will take from the deployment.
+> A cleanup that is not observed stops further attempts of that process only;
+> the persisted quarantine is R02ah's. Not proven here and left to the named
+> slices: the wall deadline after release and the output bound (R02ac, whose
+> payloads can hang and flood), survivors after a normal exit (R02ac), and
+> the refusal of leaked descriptors with a real leak (R02ae). The allowlist
+> is the fixture's and gets its public mapping in R02ad.
 
 ## Context
 
