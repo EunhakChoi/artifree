@@ -180,6 +180,8 @@ run_direct "$lib_binary" syscall-table execution::policy::tests::job_syscall_tab
 run_unit "$lib_binary" attempt execution::attempt::tests::job_fixture_attempt_runs_in_its_group_and_exits -p Delegate=yes
 run_unit "$lib_binary" false-ready execution::attempt::tests::job_false_ready_is_never_released -p Delegate=yes
 run_unit "$lib_binary" stalled-start execution::attempt::tests::job_stalled_start_is_killed_at_the_readiness_deadline -p Delegate=yes
+run_unit "$lib_binary" wrong-release execution::attempt::tests::job_wrong_release_byte_starts_no_payload -p Delegate=yes
+run_unit "$lib_binary" unknown-identity execution::attempt::tests::job_unknown_identity_starts_no_launcher -p Delegate=yes
 
 # The payload is replaced by a text file, so only the exec of the payload can fail. The
 # manifest is rewritten for the replacement, so admission still passes.

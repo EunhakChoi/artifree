@@ -34,7 +34,9 @@ impl AdmissionLock {
     ///
     /// Returns [`LockRefusal::Busy`] when another process holds the lock, and
     /// [`LockRefusal::Unusable`] when the directory is not a private directory of this account
-    /// or the lock file cannot be opened or locked for another reason.
+    /// or the lock file cannot be opened or locked for another reason. `Busy` can also be the
+    /// answer for a moment after this process released the lock: a child that another thread
+    /// forked meanwhile holds a copy of the locked descriptor until its `exec` closes it.
     pub(super) fn acquire(execution_dir: &Path) -> Result<Self, LockRefusal> {
         let uid = cgroup::own_uid(Path::new("/proc/self")).map_err(|_| LockRefusal::Unusable)?;
         let directory = fs::symlink_metadata(execution_dir).map_err(|_| LockRefusal::Unusable)?;

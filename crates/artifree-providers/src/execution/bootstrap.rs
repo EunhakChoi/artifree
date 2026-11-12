@@ -35,10 +35,6 @@ const NULL_DEVICE: &str = "/dev/null";
 const PROC_SELF_FD: &str = "/proc/self/fd";
 const PROC_STATUS: &str = "/proc/self/status";
 const PROC_LIMITS: &str = "/proc/self/limits";
-/// The open-file limit that the bootstrap sets, soft and hard (0042 rule 5). Readiness checks the same value.
-const OPEN_FILES_LIMIT: u64 = 256;
-/// The core dump limit that the bootstrap sets, soft and hard (0042 rule 5). Readiness checks the same value.
-const CORE_FILE_LIMIT: u64 = 0;
 
 /// Why the stub or the bootstrap stopped before any payload instruction ran (decision 0056 rules 3 and 5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,12 +191,12 @@ fn open_descriptor_numbers() -> Result<Vec<RawFd>, BootstrapFailure> {
 /// Step 4: sets the open-file and core-size limits and reads both back.
 fn set_limits() -> Result<(), BootstrapFailure> {
     let open_files = Rlimit {
-        current: Some(OPEN_FILES_LIMIT),
-        maximum: Some(OPEN_FILES_LIMIT),
+        current: Some(readiness::OPEN_FILES_LIMIT),
+        maximum: Some(readiness::OPEN_FILES_LIMIT),
     };
     let core_size = Rlimit {
-        current: Some(CORE_FILE_LIMIT),
-        maximum: Some(CORE_FILE_LIMIT),
+        current: Some(readiness::CORE_FILE_LIMIT),
+        maximum: Some(readiness::CORE_FILE_LIMIT),
     };
     process::setrlimit(Resource::Nofile, open_files).map_err(|_| BootstrapFailure::Limits)?;
     process::setrlimit(Resource::Core, core_size).map_err(|_| BootstrapFailure::Limits)?;

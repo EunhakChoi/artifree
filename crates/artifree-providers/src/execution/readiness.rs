@@ -12,10 +12,12 @@ pub(super) const PROC_FILE_BYTES: usize = 16_384;
 
 /// The seccomp mode that means a filter is installed (`SECCOMP_MODE_FILTER`).
 const SECCOMP_MODE_FILTER: u64 = 2;
-/// The open-file limit that the bootstrap sets, soft and hard.
-const OPEN_FILES_LIMIT: u64 = 256;
-/// The core dump limit that the bootstrap sets, soft and hard.
-const CORE_FILE_LIMIT: u64 = 0;
+/// The open-file limit that the bootstrap sets, soft and hard (0042 rule 5), and that the
+/// readiness check requires.
+pub(super) const OPEN_FILES_LIMIT: u64 = 256;
+/// The core dump limit that the bootstrap sets, soft and hard (0042 rule 5), and that the
+/// readiness check requires.
+pub(super) const CORE_FILE_LIMIT: u64 = 0;
 
 // Keys of `/proc/<pid>/status`, matched exactly.
 const NO_NEW_PRIVS: &str = "NoNewPrivs";

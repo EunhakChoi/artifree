@@ -35,8 +35,6 @@ const READINESS_DEADLINE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(10);
 /// How long the provider waits on the control socket once the stub has exited.
 const CONTROL_GRACE: Duration = Duration::from_secs(1);
-/// How long the provider waits for a reader thread once the stub has been reaped.
-const READER_GRACE: Duration = Duration::from_secs(1);
 /// The largest read that one pipe reader makes at a time.
 const CHUNK_BYTES: usize = 8192;
 /// The largest `cgroup.procs` listing that the launch reads when it places the stub.
@@ -58,6 +56,9 @@ pub(super) struct AttemptPlan {
     pub(super) wall_deadline: Duration,
     /// The readiness deadline, counted from the LAUNCH record on a monotonic clock.
     pub(super) readiness_deadline: Duration,
+    /// The bytes sent as the release. Only a test sends anything but RELEASE, to show that the
+    /// bootstrap starts no payload on another byte.
+    pub(super) release_record: &'static [u8],
 }
 
 impl AttemptPlan {
@@ -68,6 +69,7 @@ impl AttemptPlan {
             stub_arguments: FIXTURE_STUB,
             wall_deadline: WALL_DEADLINE,
             readiness_deadline: READINESS_DEADLINE,
+            release_record: &RELEASE,
         }
     }
 }
@@ -156,8 +158,8 @@ impl fmt::Display for AttemptEvidence {
         writeln!(formatter, "stdout_bytes={}", self.stdout.len())?;
         writeln!(formatter, "stderr_bytes={}", self.stderr.len())?;
         match self.peak_memory_bytes {
-            Some(bytes) => writeln!(formatter, "peak_memory_bytes={bytes}")?,
-            None => writeln!(formatter, "peak_memory_bytes=unavailable")?,
+            Some(bytes) => writeln!(formatter, "attempt_peak_memory_bytes={bytes}")?,
+            None => writeln!(formatter, "attempt_peak_memory_bytes=unavailable")?,
         }
         let observed = &self.readiness;
         let status = observed.status;
@@ -254,9 +256,11 @@ struct Settled {
 /// `supervisor` child, never in `execution_dir`.
 pub(super) fn launch(
     plan: &AttemptPlan,
-    roots: &AdmissionRoots<'_>,
     execution_dir: &Path,
 ) -> Result<AttemptEvidence, AttemptFailure> {
+    // The stub and the bootstrap use the fixed tool root, so the roots that are verified here
+    // must be the same ones: no caller chooses them.
+    let roots = &admission::production_roots();
     // Held until this function returns, so that no second launch can start meanwhile.
     let _lock = AdmissionLock::acquire(execution_dir).map_err(lock_failure)?;
     if QUARANTINED.load(Ordering::SeqCst) {
@@ -468,7 +472,7 @@ fn release(
     )
     .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::ReadinessNotConfirmed))?;
     control
-        .write_all(&RELEASE)
+        .write_all(plan.release_record)
         .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::ReleaseNotSent))?;
     Ok((observation, start))
 }
@@ -517,7 +521,17 @@ fn await_exit(
     let child = session.child.as_mut().ok_or(AttemptFailure::Unobserved)?;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok((status, start.elapsed())),
+            Ok(Some(status)) => {
+                // An exit that is first seen at or after the deadline is past it too: the
+                // deadline is absolute, whatever the polling interval.
+                let elapsed = start.elapsed();
+                running_verdict(
+                    elapsed,
+                    plan.wall_deadline,
+                    session.exceeded.load(Ordering::SeqCst),
+                )?;
+                return Ok((status, elapsed));
+            }
             Ok(None) => {}
             Err(_) => return Err(AttemptFailure::Unobserved),
         }
@@ -532,7 +546,7 @@ fn await_exit(
     }
 }
 
-/// The decision for one poll of a running stub: output past the budget first, then the wall
+/// The decision for one poll of the stub, running or just seen exited: output past the budget first, then the wall
 /// deadline.
 fn running_verdict(
     elapsed: Duration,
@@ -575,12 +589,19 @@ fn confirm_started(control: &mut UnixStream) -> Result<(), AttemptFailure> {
 /// the peak. The group is removed only when every part was observed. Otherwise the attempt is
 /// quarantined and the group stays in place.
 fn settle(group: ProbeGroup, session: &mut Session) -> Result<Settled, AttemptFailure> {
+    // One deadline for the whole cleanup (0042 rule 6: five seconds), not one per part.
+    let deadline = Instant::now().checked_add(probe_group::CLEANUP_DEADLINE);
+    let remaining = || {
+        deadline.map_or(Duration::ZERO, |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        })
+    };
     let emptied =
         probe_group::kill_and_await_empty(&group, probe_group::CLEANUP_DEADLINE, Instant::now)
             .is_ok();
-    let reaped = reap_child(session.child.as_mut(), session.exit.is_some());
-    let stdout = join_reader(session.stdout.take());
-    let stderr = join_reader(session.stderr.take());
+    let reaped = reap_child(session.child.as_mut(), session.exit.is_some(), remaining());
+    let stdout = join_reader(session.stdout.take(), remaining());
+    let stderr = join_reader(session.stderr.take(), remaining());
     let peak_memory_bytes = if emptied {
         probe_group::read_peak(&group)
     } else {
@@ -600,9 +621,10 @@ fn settle(group: ProbeGroup, session: &mut Session) -> Result<Settled, AttemptFa
     })
 }
 
-/// Kills the stub if it may still run, then waits for it within the cleanup deadline. Returns
-/// whether it was reaped. A kill error is ignored only when the exit is already known.
-fn reap_child(child: Option<&mut Child>, exited: bool) -> bool {
+/// Kills the stub if it may still run, then waits for it for at most `within`, with at least
+/// one look. Returns whether it was reaped. A kill error is ignored only when the exit is
+/// already known.
+fn reap_child(child: Option<&mut Child>, exited: bool, within: Duration) -> bool {
     let Some(child) = child else {
         return true;
     };
@@ -610,18 +632,18 @@ fn reap_child(child: Option<&mut Child>, exited: bool) -> bool {
     if killed.is_err() && !exited {
         return false;
     }
-    wait_within(child, probe_group::CLEANUP_DEADLINE).is_ok()
+    wait_within(child, within).is_ok()
 }
 
-/// Waits, for at most `READER_GRACE`, for one reader to finish and returns what it captured.
-/// `None` means that the reader did not finish or that it panicked.
-fn join_reader(reader: Option<Capture>) -> Option<io::Result<Vec<u8>>> {
+/// Waits, for at most `within`, for one reader to finish and returns what it captured. It
+/// looks at least once. `None` means that the reader did not finish or that it panicked.
+fn join_reader(reader: Option<Capture>, within: Duration) -> Option<io::Result<Vec<u8>>> {
     let Some(reader) = reader else {
         return Some(Ok(Vec::new()));
     };
     let started = Instant::now();
     while !reader.is_finished() {
-        if started.elapsed() >= READER_GRACE {
+        if started.elapsed() >= within {
             return None;
         }
         thread::sleep(POLL);

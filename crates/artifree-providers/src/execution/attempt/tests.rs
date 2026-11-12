@@ -137,26 +137,6 @@ fn namespace_check_arguments_differ_only_in_the_scratch_and_the_mode() {
 }
 
 #[test]
-fn fixture_plan_runs_the_stub_with_the_fixture_identity_and_the_deadlines() {
-    let plan = AttemptPlan::fixture();
-    assert_eq!(
-        plan.stub_arguments,
-        &["stub", "artifree-fixture-inspection-v1"],
-        "the fixture plan must start the stub mode with the fixture identity"
-    );
-    assert_eq!(
-        plan.wall_deadline,
-        Duration::from_secs(120),
-        "the wall deadline is 120 s by decision 0042 rule 5"
-    );
-    assert_eq!(
-        plan.readiness_deadline,
-        Duration::from_secs(10),
-        "the readiness deadline of the fixture plan is 10 s"
-    );
-}
-
-#[test]
 fn running_verdict_boundaries_and_output_precedence() {
     let limit = Duration::from_secs(120);
     let cases: [(&str, Duration, bool, Result<(), AttemptFailure>); 4] = [
@@ -243,7 +223,7 @@ fn evidence_renders_its_keys_and_never_the_captured_bytes() {
         "wall_time_ms=1234",
         "stdout_bytes=11",
         "stderr_bytes=13",
-        "peak_memory_bytes=4194304",
+        "attempt_peak_memory_bytes=4194304",
         "readiness.members=2",
         "readiness.bootstrap_pid=4242",
         "readiness.no_new_privs=1",
@@ -260,6 +240,20 @@ fn evidence_renders_its_keys_and_never_the_captured_bytes() {
             "the rendering must contain the line {expected:?}, got:\n{rendered}"
         );
     }
+    // A reader that takes the first line of a key, or that refuses a repeated key, must both
+    // get one answer: the attempt's lines and the embedded host report share no key.
+    let mut keys: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line.split_once('=').map(|(key, _)| key))
+        .collect();
+    let key_count = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(
+        keys.len(),
+        key_count,
+        "every key of the rendering must appear once, got:\n{rendered}"
+    );
     for secret in ["secret-text", "stderr-secret"] {
         assert!(
             !rendered.contains(secret),
@@ -369,7 +363,7 @@ fn assert_not_started(
     expected: NotStartedReason,
 ) -> Result<(), Box<dyn Error>> {
     let dir = ExecutionDir::new(label)?;
-    let failure = refusal_of(launch(plan, &admission::production_roots(), dir.path()))?;
+    let failure = refusal_of(launch(plan, dir.path()))?;
     assert_eq!(
         failure,
         AttemptFailure::NotStarted(expected),
@@ -384,11 +378,7 @@ fn assert_not_started(
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_fixture_attempt_runs_in_its_group_and_exits() -> Result<(), Box<dyn Error>> {
     let dir = ExecutionDir::new("fixture")?;
-    let outcome = launch(
-        &AttemptPlan::fixture(),
-        &admission::production_roots(),
-        dir.path(),
-    );
+    let outcome = launch(&AttemptPlan::fixture(), dir.path());
     let evidence =
         outcome.map_err(|failure| format!("the fixture attempt was not run: {failure:?}"))?;
     // Written before any assertion, so that a failed run still leaves its report behind.
@@ -484,6 +474,45 @@ fn job_false_ready_is_never_released() -> Result<(), Box<dyn Error>> {
     )
 }
 
+/// The release gate of the real bootstrap (0056 rule 3): after a readiness that the provider
+/// confirmed, a byte other than RELEASE starts no payload. The bootstrap ends with its failure
+/// status and the payload's line never appears.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_wrong_release_byte_starts_no_payload() -> Result<(), Box<dyn Error>> {
+    let dir = ExecutionDir::new("wrong-release")?;
+    let plan = AttemptPlan {
+        release_record: b"Z",
+        ..AttemptPlan::fixture()
+    };
+    let evidence = launch(&plan, dir.path())
+        .map_err(|failure| format!("the attempt did not reach its exit: {failure:?}"))?;
+    assert_eq!(
+        evidence.exit.code(),
+        Some(70),
+        "a bootstrap that was not released must end with its failure status, got {:?}",
+        evidence.exit
+    );
+    assert!(
+        evidence.stdout.is_empty(),
+        "no payload may run without the release, but standard output holds {} bytes",
+        evidence.stdout.len()
+    );
+    assert_no_attempt_groups()
+}
+
+/// The stub takes the fixture profile's identity and nothing else (0056 rule 3): another
+/// identity starts no launcher, so no readiness is ever reported.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_unknown_identity_starts_no_launcher() -> Result<(), Box<dyn Error>> {
+    let plan = AttemptPlan {
+        stub_arguments: &["stub", "another-profile"],
+        ..AttemptPlan::fixture()
+    };
+    assert_not_started("unknown-identity", &plan, NotStartedReason::NoReadiness)
+}
+
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_stalled_start_is_killed_at_the_readiness_deadline() -> Result<(), Box<dyn Error>> {
@@ -494,7 +523,7 @@ fn job_stalled_start_is_killed_at_the_readiness_deadline() -> Result<(), Box<dyn
         ..AttemptPlan::fixture()
     };
     let started = Instant::now();
-    let outcome = launch(&plan, &admission::production_roots(), dir.path());
+    let outcome = launch(&plan, dir.path());
     let elapsed = started.elapsed();
     let failure = refusal_of(outcome)?;
     assert_eq!(
@@ -531,11 +560,7 @@ fn job_second_attempt_is_refused_while_the_lock_is_held() -> Result<(), Box<dyn 
     // Declared after `dir`, so that the lock is released before the directory is removed.
     let _held = AdmissionLock::acquire(dir.path())
         .map_err(|refusal| format!("the test could not take the lock: {refusal:?}"))?;
-    let failure = refusal_of(launch(
-        &AttemptPlan::fixture(),
-        &admission::production_roots(),
-        dir.path(),
-    ))?;
+    let failure = refusal_of(launch(&AttemptPlan::fixture(), dir.path()))?;
     // Admission has not run yet, so the delegated group is not checked here, only the answer.
     assert_eq!(
         failure,

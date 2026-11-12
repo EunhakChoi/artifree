@@ -252,6 +252,22 @@ impl Unusable {
     }
 }
 
+/// Takes the lock after its holder let go of it. A test of another module that forks a child at
+/// that moment holds a copy of the locked descriptor until the child's `exec`, so `Busy` is
+/// retried for a short time; any other refusal, or `Busy` past the bound, fails.
+fn acquire_once_released(directory: &Path) -> TestResult {
+    let started = Instant::now();
+    loop {
+        match AdmissionLock::acquire(directory) {
+            Ok(_lock) => return Ok(()),
+            Err(LockRefusal::Busy) if started.elapsed() < Duration::from_secs(5) => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(refusal) => return Err(refused(refusal).into()),
+        }
+    }
+}
+
 #[test]
 fn second_acquire_in_one_process_is_busy() -> TestResult {
     let _serial = serialized();
@@ -268,8 +284,7 @@ fn second_acquire_in_one_process_is_busy() -> TestResult {
         "the lock file must be owner-only, got mode {mode:o}"
     );
     drop(first);
-    AdmissionLock::acquire(scratch.path()).map_err(refused)?;
-    Ok(())
+    acquire_once_released(scratch.path())
 }
 
 #[test]
@@ -289,8 +304,7 @@ fn lock_held_by_another_process_is_busy_until_it_is_killed() -> TestResult {
         Some(SIGKILL),
         "the helper must die by SIGKILL, got {status}"
     );
-    AdmissionLock::acquire(scratch.path()).map_err(refused)?;
-    Ok(())
+    acquire_once_released(scratch.path())
 }
 
 #[test]

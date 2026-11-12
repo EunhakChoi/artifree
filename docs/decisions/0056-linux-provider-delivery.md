@@ -98,10 +98,23 @@ how; where the two could be read differently, 0042 holds.
 >   holds any descriptor beyond the three streams and the control channel.
 >
 > The launch is compiled into the tests only, so no caller can reach it and
-> rule 16 holds unchanged. The tool root's manifest is `MANIFEST`, one line of
+> rule 16 holds unchanged. The two entry functions of the stub and the
+> bootstrap are public, because the test-support program calls them (rule 4);
+> they check nothing of the host and are of use only under the launch. The tool root's manifest is `MANIFEST`, one line of
 > digest, length and path per file; it is checked at each admission and not
 > held against replacement afterwards. The admission lock lives in a private
 > directory of the worker's account that R02b will take from the deployment.
+> The manifest lies in the root it describes and only its digest is recorded:
+> it tells a root that changed from the one an operator installed, and gives no
+> protection against whoever may write the root, whose ownership and modes are
+> not checked yet (rule 6 leaves packaging to R03). The readiness check asks
+> for exactly one filter, so a worker that itself runs under a seccomp filter
+> is refused at every attempt without a facility that names the reason; such
+> hosts stay unverified like containers (0042, rule 1). A start that fails
+> before readiness returns only its reason; what the launcher or the bootstrap
+> wrote to standard error is dropped. The standard library's `exec` retries a
+> file that is not a program through `/bin/sh`; the sandbox holds no shell, so
+> it fails as measured, and a slice that binds one must close this first.
 > A cleanup that is not observed stops further attempts of that process only;
 > the persisted quarantine is R02ah's. Not proven here and left to the named
 > slices: the wall deadline after release and the output bound (R02ac, whose
